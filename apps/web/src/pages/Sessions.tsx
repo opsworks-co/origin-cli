@@ -36,6 +36,10 @@ export default function Sessions() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Bulk selection
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkLoading, setBulkLoading] = useState(false);
+
   // Filters
   const [model, setModel] = useState('');
   const [status, setStatus] = useState('');
@@ -45,6 +49,7 @@ export default function Sessions() {
   const fetchSessions = useCallback(async () => {
     setLoading(true);
     setError('');
+    setSelectedIds(new Set());
     try {
       const res = await api.getSessions({ model, status, repoId, limit: LIMIT, offset });
       setSessions(res.sessions);
@@ -73,6 +78,45 @@ export default function Sessions() {
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
   const models = Array.from(new Set(sessions.map((s) => s.model).filter(Boolean)));
+
+  // Sessions eligible for bulk review (no existing review / pending)
+  const pendingSessions = sessions.filter(
+    (s) => !s.review?.status || s.review.status.toLowerCase() === 'pending'
+  );
+
+  const allPendingSelected =
+    pendingSessions.length > 0 && pendingSessions.every((s) => selectedIds.has(s.id));
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (allPendingSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(pendingSessions.map((s) => s.id)));
+    }
+  };
+
+  const handleBulkReview = async (reviewStatus: string) => {
+    if (selectedIds.size === 0) return;
+    setBulkLoading(true);
+    try {
+      await api.bulkReviewSessions(Array.from(selectedIds), reviewStatus);
+      setSelectedIds(new Set());
+      fetchSessions();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBulkLoading(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -105,8 +149,8 @@ export default function Sessions() {
           className="select text-sm"
         >
           <option value="">All statuses</option>
-          <option value="completed">Completed</option>
-          <option value="running">Running</option>
+          <option value="unreviewed">Unreviewed</option>
+          <option value="reviewed">Reviewed</option>
           <option value="approved">Approved</option>
           <option value="rejected">Rejected</option>
           <option value="flagged">Flagged</option>
@@ -135,12 +179,53 @@ export default function Sessions() {
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm">{error}</div>
       )}
 
+      {/* Bulk Action Bar */}
+      {selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 rounded-lg bg-indigo-900/30 border border-indigo-700 px-4 py-3">
+          <span className="text-sm text-indigo-300 font-medium">
+            {selectedIds.size} session{selectedIds.size !== 1 ? 's' : ''} selected
+          </span>
+          <div className="flex gap-2 ml-auto">
+            <button
+              onClick={() => handleBulkReview('approved')}
+              disabled={bulkLoading}
+              className="btn-primary text-xs py-1.5 px-3 bg-green-700 hover:bg-green-600"
+            >
+              {bulkLoading ? 'Processing...' : 'Approve Selected'}
+            </button>
+            <button
+              onClick={() => handleBulkReview('rejected')}
+              disabled={bulkLoading}
+              className="btn-primary text-xs py-1.5 px-3 bg-red-700 hover:bg-red-600"
+            >
+              {bulkLoading ? 'Processing...' : 'Reject Selected'}
+            </button>
+            <button
+              onClick={() => handleBulkReview('flagged')}
+              disabled={bulkLoading}
+              className="btn-primary text-xs py-1.5 px-3 bg-amber-700 hover:bg-amber-600"
+            >
+              {bulkLoading ? 'Processing...' : 'Flag Selected'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div className="card p-0 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
+                <th className="px-3 py-3 w-10">
+                  <input
+                    type="checkbox"
+                    checked={allPendingSelected}
+                    onChange={toggleSelectAll}
+                    className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500 cursor-pointer"
+                    title="Select all pending sessions"
+                  />
+                </th>
                 <th className="px-6 py-3 font-medium">Model</th>
                 <th className="px-6 py-3 font-medium">Repo</th>
                 <th className="px-6 py-3 font-medium">Commit</th>
@@ -155,13 +240,13 @@ export default function Sessions() {
             <tbody className="divide-y divide-gray-800/50">
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-12 text-center">
+                  <td colSpan={10} className="px-6 py-12 text-center">
                     <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-500 mx-auto" />
                   </td>
                 </tr>
               ) : sessions.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-12 text-center text-gray-500">
+                  <td colSpan={10} className="px-6 py-12 text-center text-gray-500">
                     No sessions found
                   </td>
                 </tr>
@@ -172,6 +257,18 @@ export default function Sessions() {
                     onClick={() => navigate(`/sessions/${s.id}`)}
                     className="hover:bg-gray-800/30 transition-colors cursor-pointer"
                   >
+                    <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
+                      {(!s.review?.status || s.review.status.toLowerCase() === 'pending') ? (
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(s.id)}
+                          onChange={() => toggleSelect(s.id)}
+                          className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500 cursor-pointer"
+                        />
+                      ) : (
+                        <span className="block w-4" />
+                      )}
+                    </td>
                     <td className="px-6 py-3">
                       <span className="badge-blue">{s.model}</span>
                     </td>

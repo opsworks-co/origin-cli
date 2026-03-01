@@ -26,6 +26,34 @@ export default function Agents() {
   const [formModel, setFormModel] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  const [deleting, setDeleting] = useState<Record<string, boolean>>({});
+  const [toggling, setToggling] = useState<Record<string, boolean>>({});
+
+  const handleDelete = async (id: string, name: string) => {
+    if (!confirm(`Are you sure you want to delete ${name}?`)) return;
+    setDeleting((prev) => ({ ...prev, [id]: true }));
+    try {
+      await api.deleteAgent(id);
+      fetchAgents();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setDeleting((prev) => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const handleToggleStatus = async (agent: Agent) => {
+    setToggling((prev) => ({ ...prev, [agent.id]: true }));
+    try {
+      await api.updateAgent(agent.id, { status: agent.status === 'active' ? 'INACTIVE' : 'ACTIVE' });
+      fetchAgents();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setToggling((prev) => ({ ...prev, [agent.id]: false }));
+    }
+  };
+
   const fetchAgents = () => {
     setLoading(true);
     api
@@ -138,6 +166,14 @@ export default function Agents() {
                     <span
                       className={`w-2.5 h-2.5 rounded-full ${isActive ? 'bg-green-500' : 'bg-gray-600'}`}
                     />
+                    <button
+                      onClick={() => handleToggleStatus(agent)}
+                      disabled={toggling[agent.id]}
+                      className="text-xs text-gray-400 hover:text-gray-200 transition-colors"
+                      title={isActive ? 'Deactivate agent' : 'Activate agent'}
+                    >
+                      {toggling[agent.id] ? '...' : isActive ? 'Active' : 'Inactive'}
+                    </button>
                     <h3 className="font-semibold text-gray-100">{agent.name}</h3>
                   </div>
                 </div>
@@ -158,6 +194,13 @@ export default function Agents() {
                     <p className="text-gray-200 font-medium">{timeAgo(agent.createdAt)}</p>
                   </div>
                 </div>
+                <button
+                  onClick={() => handleDelete(agent.id, agent.name)}
+                  disabled={deleting[agent.id]}
+                  className="text-xs text-red-400 hover:text-red-300 transition-colors mt-3"
+                >
+                  {deleting[agent.id] ? 'Deleting...' : 'Delete Agent'}
+                </button>
               </div>
             );
           })}

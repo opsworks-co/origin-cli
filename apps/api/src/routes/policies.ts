@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -22,8 +22,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST / — create policy
-router.post('/', async (req: AuthRequest, res: Response) => {
+// POST / — create policy (MEMBER+)
+router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
     const { name, description, type } = req.body;
 
@@ -57,8 +57,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// PUT /:id — update policy
-router.put('/:id', async (req: AuthRequest, res: Response) => {
+// PUT /:id — update policy (MEMBER+)
+router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const { name, description, type, active } = req.body;
@@ -81,6 +81,16 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       },
     });
 
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'POLICY_UPDATED',
+        resource: id,
+        metadata: JSON.stringify({ name, description, type, active }),
+      },
+    });
+
     res.json(policy);
   } catch (err) {
     console.error('Update policy error:', err);
@@ -88,8 +98,8 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// DELETE /:id — delete policy and its rules
-router.delete('/:id', async (req: AuthRequest, res: Response) => {
+// DELETE /:id — delete policy and its rules (ADMIN+)
+router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
 
@@ -122,8 +132,8 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /:id/rules — create rule for policy
-router.post('/:id/rules', async (req: AuthRequest, res: Response) => {
+// POST /:id/rules — create rule for policy (MEMBER+)
+router.post('/:id/rules', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const { agentId, condition, action, severity } = req.body;
@@ -153,6 +163,37 @@ router.post('/:id/rules', async (req: AuthRequest, res: Response) => {
     res.status(201).json(rule);
   } catch (err) {
     console.error('Create rule error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /:id/rules/:ruleId — delete a single rule (ADMIN+)
+router.delete('/:id/rules/:ruleId', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const ruleId = (req.params as any).ruleId as string;
+
+    const policy = await prisma.policy.findFirst({
+      where: { id, orgId: req.user!.orgId },
+    });
+
+    if (!policy) {
+      return res.status(404).json({ error: 'Policy not found' });
+    }
+
+    const rule = await prisma.policyRule.findFirst({
+      where: { id: ruleId, policyId: id },
+    });
+
+    if (!rule) {
+      return res.status(404).json({ error: 'Rule not found' });
+    }
+
+    await prisma.policyRule.delete({ where: { id: ruleId } });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete rule error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

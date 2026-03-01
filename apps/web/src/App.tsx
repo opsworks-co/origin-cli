@@ -8,11 +8,14 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
+import Repos from './pages/Repos';
+import RepoDetail from './pages/RepoDetail';
 import Agents from './pages/Agents';
 import Policies from './pages/Policies';
 import AuditLog from './pages/AuditLog';
 import Insights from './pages/Insights';
 import Settings from './pages/Settings';
+import Docs from './pages/Docs';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -47,6 +50,26 @@ export default function App() {
           <ProtectedRoute>
             <Layout>
               <Dashboard />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/repos"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Repos />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/repos/:id"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <RepoDetail />
             </Layout>
           </ProtectedRoute>
         }
@@ -107,6 +130,16 @@ export default function App() {
           <ProtectedRoute>
             <Layout>
               <Insights />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/docs"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Docs />
             </Layout>
           </ProtectedRoute>
         }

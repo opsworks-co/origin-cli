@@ -339,3 +339,36 @@ export function createApiKey(data: { name: string }) {
 export function getApiKeys() {
   return request<Array<{ id: string; name: string; keyPrefix: string; createdAt: string }>>('/api/auth/api-keys');
 }
+
+export function deleteApiKey(id: string) {
+  return request<void>(`/api/auth/api-keys/${id}`, { method: 'DELETE' });
+}
+
+// ---- Delete Operations -------------------------------------------------------
+
+export function deleteRepo(id: string) {
+  return request<void>(`/api/repos/${id}`, { method: 'DELETE' });
+}
+
+export function updateRepo(id: string, data: Partial<{ name: string; path: string; provider: string }>) {
+  return request<Repo>(`/api/repos/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteAgent(id: string) {
+  return request<void>(`/api/agents/${id}`, { method: 'DELETE' });
+}
+
+export function deletePolicyRule(policyId: string, ruleId: string) {
+  return request<void>(`/api/policies/${policyId}/rules/${ruleId}`, { method: 'DELETE' });
+}
+
+// ---- Bulk Operations ---------------------------------------------------------
+
+export function bulkReviewSessions(sessionIds: string[], status: string, note?: string) {
+  return Promise.all(
+    sessionIds.map((id) => reviewSession(id, status, note))
+  );
+}

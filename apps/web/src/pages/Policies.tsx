@@ -90,6 +90,15 @@ export default function Policies() {
     }
   };
 
+  const handleDeleteRule = async (policyId: string, ruleId: string) => {
+    try {
+      await api.deletePolicyRule(policyId, ruleId);
+      fetchPolicies();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
   const handleAddRule = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!ruleForPolicy) return;
@@ -265,6 +274,13 @@ export default function Policies() {
                                 (agent: {rule.agent.name})
                               </span>
                             )}
+                            <button
+                              onClick={() => handleDeleteRule(policy.id, rule.id)}
+                              className="ml-auto text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded px-1.5 py-0.5 text-xs font-bold transition-colors"
+                              title="Delete rule"
+                            >
+                              &times;
+                            </button>
                           </div>
                         ))}
                       </div>

@@ -75,6 +75,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where.review = null;
     } else if (status === 'flagged') {
       where.review = { status: 'FLAGGED' };
+    } else if (status === 'approved') {
+      where.review = { status: 'APPROVED' };
+    } else if (status === 'rejected') {
+      where.review = { status: 'REJECTED' };
     }
 
     const [sessions, total] = await Promise.all([

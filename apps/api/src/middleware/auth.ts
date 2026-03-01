@@ -21,3 +21,27 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
   next();
 }
+
+/**
+ * RBAC middleware — restricts route to specific roles.
+ * Roles hierarchy: OWNER > ADMIN > MEMBER > VIEWER
+ * Usage: router.post('/', requireAuth, requireRole('ADMIN'), handler)
+ */
+const ROLE_LEVELS: Record<string, number> = {
+  VIEWER: 0,
+  MEMBER: 1,
+  ADMIN: 2,
+  OWNER: 3,
+};
+
+export function requireRole(...roles: string[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const userRole = req.user.role.toUpperCase();
+    // Allow if user's role is in the list, or if user's level >= highest required level
+    const maxRequired = Math.max(...roles.map((r) => ROLE_LEVELS[r.toUpperCase()] ?? 0));
+    const userLevel = ROLE_LEVELS[userRole] ?? 0;
+    if (userLevel >= maxRequired) return next();
+    res.status(403).json({ error: 'Forbidden: insufficient permissions' });
+  };
+}

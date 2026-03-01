@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
+import * as api from '../api';
 
 interface ApiKey {
   id: string;
-  prefix: string;
+  name: string;
+  keyPrefix: string;
   createdAt: string;
 }
 
@@ -13,11 +15,14 @@ export default function Settings() {
   // Active tab
   const [activeTab, setActiveTab] = useState<'general' | 'agent-setup'>('general');
 
-  // API Keys (local state — would be fetched from API in production)
+  // API Keys
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  const [loadingKeys, setLoadingKeys] = useState(true);
   const [newKeyName, setNewKeyName] = useState('');
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [creatingKey, setCreatingKey] = useState(false);
+  const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
 
   // Team invite
   const [inviteEmail, setInviteEmail] = useState('');
@@ -25,25 +30,53 @@ export default function Settings() {
   const [inviting, setInviting] = useState(false);
   const [inviteSuccess, setInviteSuccess] = useState('');
 
+  // Fetch API keys on mount
+  useEffect(() => {
+    fetchApiKeys();
+  }, []);
+
+  const fetchApiKeys = async () => {
+    setLoadingKeys(true);
+    setKeyError(null);
+    try {
+      const keys = await api.getApiKeys();
+      setApiKeys(keys);
+    } catch (err: any) {
+      setKeyError(err.message || 'Failed to load API keys');
+    } finally {
+      setLoadingKeys(false);
+    }
+  };
+
   const handleCreateKey = async (e: React.FormEvent) => {
     e.preventDefault();
     setCreatingKey(true);
     setCreatedKey(null);
+    setKeyError(null);
     try {
-      // Simulate API call — in production this would hit /api/api-keys
-      await new Promise((r) => setTimeout(r, 500));
-      const fakeKey = `org_${Math.random().toString(36).slice(2, 10)}_${Math.random().toString(36).slice(2, 26)}`;
-      const prefix = fakeKey.slice(0, 12) + '...';
-      setApiKeys((prev) => [
-        ...prev,
-        { id: Math.random().toString(), prefix, createdAt: new Date().toISOString() },
-      ]);
-      setCreatedKey(fakeKey);
+      const result = await api.createApiKey({ name: newKeyName || 'Unnamed key' });
+      setCreatedKey(result.key);
       setNewKeyName('');
-    } catch {
-      // Handle error
+      // Refresh the list to include the new key
+      await fetchApiKeys();
+    } catch (err: any) {
+      setKeyError(err.message || 'Failed to create API key');
     } finally {
       setCreatingKey(false);
+    }
+  };
+
+  const handleDeleteKey = async (id: string) => {
+    setDeletingKeyId(id);
+    setKeyError(null);
+    try {
+      await api.deleteApiKey(id);
+      // Refresh the list after deletion
+      await fetchApiKeys();
+    } catch (err: any) {
+      setKeyError(err.message || 'Failed to delete API key');
+    } finally {
+      setDeletingKeyId(null);
     }
   };
 
@@ -52,7 +85,7 @@ export default function Settings() {
     setInviting(true);
     setInviteSuccess('');
     try {
-      // Simulate API call — in production this would hit /api/team/invite
+      // Placeholder — team invite API not yet implemented
       await new Promise((r) => setTimeout(r, 500));
       setInviteSuccess(`Invitation sent to ${inviteEmail}`);
       setInviteEmail('');
@@ -106,23 +139,50 @@ export default function Settings() {
               </p>
             </div>
 
+            {/* Error message */}
+            {keyError && (
+              <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-red-400 text-sm">
+                {keyError}
+              </div>
+            )}
+
+            {/* Loading state */}
+            {loadingKeys && (
+              <div className="text-sm text-gray-500">Loading API keys...</div>
+            )}
+
             {/* Existing keys */}
-            {apiKeys.length > 0 && (
+            {!loadingKeys && apiKeys.length > 0 && (
               <div className="space-y-2">
                 {apiKeys.map((key) => (
                   <div
                     key={key.id}
                     className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-3"
                   >
-                    <div>
-                      <code className="text-sm text-indigo-400">{key.prefix}</code>
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-sm text-gray-200">{key.name}</span>
+                      <code className="text-xs text-indigo-400">{key.keyPrefix}...</code>
                     </div>
-                    <span className="text-xs text-gray-500">
-                      Created {new Date(key.createdAt).toLocaleDateString()}
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-gray-500">
+                        Created {new Date(key.createdAt).toLocaleDateString()}
+                      </span>
+                      <button
+                        onClick={() => handleDeleteKey(key.id)}
+                        disabled={deletingKeyId === key.id}
+                        className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {deletingKeyId === key.id ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
+            )}
+
+            {/* Empty state */}
+            {!loadingKeys && apiKeys.length === 0 && !keyError && (
+              <div className="text-sm text-gray-500">No API keys yet. Create one below.</div>
             )}
 
             {/* Created key warning */}
@@ -156,6 +216,7 @@ export default function Settings() {
             <div>
               <h2 className="text-lg font-semibold">Team</h2>
               <p className="text-sm text-gray-500 mt-0.5">Invite team members to your organization</p>
+              <p className="text-xs text-amber-400 mt-1">Coming soon &mdash; team invites are not yet connected to the backend.</p>
             </div>
 
             {inviteSuccess && (

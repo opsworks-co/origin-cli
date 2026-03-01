@@ -4,11 +4,13 @@ import { useAuth } from '../context/AuthContext';
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: '\u25A3' },
+  { to: '/repos', label: 'Repositories', icon: '\uD83D\uDCC1' },
   { to: '/sessions', label: 'Sessions', icon: '\u25B6' },
   { to: '/agents', label: 'Agents', icon: '\uD83E\uDD16' },
   { to: '/policies', label: 'Policies', icon: '\uD83D\uDEE1' },
   { to: '/audit', label: 'Audit Log', icon: '\uD83D\uDCDC' },
   { to: '/insights', label: 'Insights', icon: '\uD83D\uDCCA' },
+  { to: '/docs', label: 'Docs', icon: '\uD83D\uDCD6' },
   { to: '/settings', label: 'Settings', icon: '\u2699' },
 ];
 

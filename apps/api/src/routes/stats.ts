@@ -129,11 +129,33 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
     const sessionsByDay = Object.entries(dayCounts).map(([date, count]) => ({ date, count }));
 
-    // AI authorship over time
-    const aiAuthorshipOverTime = sessionsByDay.map((d) => ({
-      date: d.date,
-      percent: d.count > 0 ? Math.min(100, Math.round(aiPercentage + (Math.random() * 10 - 5))) : Math.round(aiPercentage),
-    }));
+    // AI authorship over time — deterministic based on actual daily data
+    const totalCommitsByDay = await prisma.commit.findMany({
+      where: {
+        repoId: { in: repoIds },
+        committedAt: { gte: thirtyDaysAgo },
+      },
+      select: { committedAt: true },
+    });
+
+    const totalDayCounts: Record<string, number> = {};
+    for (const key of Object.keys(dayCounts)) {
+      totalDayCounts[key] = 0;
+    }
+    for (const c of totalCommitsByDay) {
+      const day = c.committedAt.toISOString().split('T')[0];
+      if (totalDayCounts[day] !== undefined) {
+        totalDayCounts[day]++;
+      }
+    }
+
+    const aiAuthorshipOverTime = sessionsByDay.map((d) => {
+      const totalForDay = totalDayCounts[d.date] || 0;
+      const percent = totalForDay > 0
+        ? Math.round((d.count / totalForDay) * 100)
+        : 0;
+      return { date: d.date, percent: Math.min(100, percent) };
+    });
 
     // Sessions by repo
     const commitRepos = await prisma.commit.findMany({
