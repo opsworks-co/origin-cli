@@ -1,0 +1,8 @@
+{
+  "name": "origin-v2",
+  "private": true,
+  "scripts": {
+    "dev": "bash dev.sh",
+    "stop": "bash stop.sh"
+  }
+}

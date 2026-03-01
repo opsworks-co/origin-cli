@@ -1,0 +1,156 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Org {
+  id        String     @id @default(uuid())
+  name      String
+  slug      String     @unique
+  createdAt DateTime   @default(now())
+  users     User[]
+  repos     Repo[]
+  agents    Agent[]
+  policies  Policy[]
+  auditLogs AuditLog[]
+  apiKeys   ApiKey[]
+}
+
+model User {
+  id           String         @id @default(uuid())
+  orgId        String
+  org          Org            @relation(fields: [orgId], references: [id])
+  email        String         @unique
+  name         String
+  passwordHash String
+  role         String         @default("MEMBER")
+  createdAt    DateTime       @default(now())
+  auditLogs    AuditLog[]
+  reviews      SessionReview[]
+}
+
+model ApiKey {
+  id        String   @id @default(uuid())
+  orgId     String
+  org       Org      @relation(fields: [orgId], references: [id])
+  name      String
+  keyHash   String
+  keyPrefix String
+  createdAt DateTime @default(now())
+}
+
+// ── Repos & Sessions ────────────────────────────────────────────
+
+model Repo {
+  id        String    @id @default(uuid())
+  orgId     String
+  org       Org       @relation(fields: [orgId], references: [id])
+  name      String
+  path      String
+  provider  String    @default("local")
+  syncedAt  DateTime?
+  createdAt DateTime  @default(now())
+  commits   Commit[]
+}
+
+model Commit {
+  id          String         @id @default(uuid())
+  repoId      String
+  repo        Repo           @relation(fields: [repoId], references: [id])
+  sha         String
+  message     String
+  author      String
+  committedAt DateTime
+  createdAt   DateTime       @default(now())
+  session     CodingSession?
+}
+
+model CodingSession {
+  id           String         @id @default(uuid())
+  commitId     String         @unique
+  commit       Commit         @relation(fields: [commitId], references: [id])
+  agentId      String?
+  agent        Agent?         @relation(fields: [agentId], references: [id])
+  model        String
+  prompt       String
+  transcript   String
+  filesChanged String
+  tokensUsed   Int            @default(0)
+  toolCalls    Int            @default(0)
+  durationMs   Int            @default(0)
+  linesAdded   Int            @default(0)
+  linesRemoved Int            @default(0)
+  costUsd      Float          @default(0)
+  createdAt    DateTime       @default(now())
+  review       SessionReview?
+}
+
+model SessionReview {
+  id        String        @id @default(uuid())
+  sessionId String        @unique
+  session   CodingSession @relation(fields: [sessionId], references: [id])
+  userId    String
+  user      User          @relation(fields: [userId], references: [id])
+  status    String        @default("APPROVED")
+  note      String?
+  createdAt DateTime      @default(now())
+}
+
+// ── Agents ──────────────────────────────────────────────────────
+
+model Agent {
+  id          String          @id @default(uuid())
+  orgId       String
+  org         Org             @relation(fields: [orgId], references: [id])
+  name        String
+  slug        String
+  description String?
+  model       String
+  status      String          @default("ACTIVE")
+  createdAt   DateTime        @default(now())
+  sessions    CodingSession[]
+  policyRules PolicyRule[]
+}
+
+// ── Policies ────────────────────────────────────────────────────
+
+model Policy {
+  id          String       @id @default(uuid())
+  orgId       String
+  org         Org          @relation(fields: [orgId], references: [id])
+  name        String
+  description String?
+  type        String
+  rules       PolicyRule[]
+  active      Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+}
+
+model PolicyRule {
+  id        String  @id @default(uuid())
+  policyId  String
+  policy    Policy  @relation(fields: [policyId], references: [id])
+  agentId   String?
+  agent     Agent?  @relation(fields: [agentId], references: [id])
+  condition String
+  action    String
+  severity  String  @default("MEDIUM")
+}
+
+// ── Audit Log ───────────────────────────────────────────────────
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  orgId     String
+  org       Org      @relation(fields: [orgId], references: [id])
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  resource  String?
+  metadata  String   @default("{}")
+  createdAt DateTime @default(now())
+}
