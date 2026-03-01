@@ -179,16 +179,18 @@ export default function Sessions() {
                     <td className="px-6 py-3 text-gray-300 max-w-[200px] truncate">
                       {s.commitMessage ?? '\u2014'}
                     </td>
-                    <td className="px-6 py-3 text-gray-400">{s.agentName ?? '\u2014'}</td>
-                    <td className="px-6 py-3 text-right text-gray-400">{s.filesChanged}</td>
+                    <td className="px-6 py-3 text-gray-400">{s.commitAuthor ?? '\u2014'}</td>
                     <td className="px-6 py-3 text-right text-gray-400">
-                      {((s.tokensIn + s.tokensOut) / 1000).toFixed(1)}k
+                      {(() => { try { return JSON.parse(s.filesChanged).length; } catch { return 0; } })()}
+                    </td>
+                    <td className="px-6 py-3 text-right text-gray-400">
+                      {(s.tokensUsed / 1000).toFixed(1)}k
                     </td>
                     <td className="px-6 py-3 text-right text-gray-300">
-                      ${s.cost.toFixed(2)}
+                      ${s.costUsd.toFixed(2)}
                     </td>
                     <td className="px-6 py-3">
-                      {statusBadge(s.review?.status ?? s.status)}
+                      {statusBadge(s.review?.status?.toLowerCase() ?? 'pending')}
                     </td>
                     <td className="px-6 py-3 text-right text-gray-500">
                       {timeAgo(s.createdAt)}

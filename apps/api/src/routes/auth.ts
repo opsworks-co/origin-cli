@@ -50,7 +50,7 @@ router.post('/register', async (req: AuthRequest, res: Response) => {
 
     res.status(201).json({
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: org.id },
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: org.id, orgName: org.name, orgSlug: org.slug },
     });
   } catch (err) {
     console.error('Register error:', err);
@@ -85,7 +85,7 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
 
     res.json({
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: user.orgId },
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: user.orgId, orgName: user.org.name, orgSlug: user.org.slug },
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -111,7 +111,8 @@ router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
       name: user.name,
       role: user.role,
       orgId: user.orgId,
-      org: user.org,
+      orgName: user.org.name,
+      orgSlug: user.org.slug,
     });
   } catch (err) {
     console.error('Me error:', err);

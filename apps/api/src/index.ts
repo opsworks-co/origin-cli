@@ -9,6 +9,8 @@ import agentRoutes from './routes/agents.js';
 import policyRoutes from './routes/policies.js';
 import auditRoutes from './routes/audit.js';
 import statsRoutes from './routes/stats.js';
+import machineRoutes from './routes/machines.js';
+import mcpRoutes from './routes/mcp.js';
 
 const app = express();
 
@@ -23,6 +25,8 @@ app.use('/api/agents', agentRoutes);
 app.use('/api/policies', policyRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/machines', machineRoutes);
+app.use('/api/mcp', mcpRoutes);
 
 const PORT = process.env.PORT || 4002;
 app.listen(PORT, () => {

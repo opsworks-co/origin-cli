@@ -18,6 +18,7 @@ model Org {
   policies  Policy[]
   auditLogs AuditLog[]
   apiKeys   ApiKey[]
+  machines  Machine[]
 }
 
 model User {
@@ -139,6 +140,19 @@ model PolicyRule {
   condition String
   action    String
   severity  String  @default("MEDIUM")
+}
+
+// ── Machines ────────────────────────────────────────────────────
+
+model Machine {
+  id            String   @id @default(uuid())
+  orgId         String
+  org           Org      @relation(fields: [orgId], references: [id])
+  hostname      String
+  machineId     String   @unique
+  detectedTools String   @default("[]") // JSON array
+  lastSeenAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
 }
 
 // ── Audit Log ───────────────────────────────────────────────────

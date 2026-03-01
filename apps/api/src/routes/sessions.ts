@@ -5,6 +5,41 @@ import { AuthRequest, requireAuth } from '../middleware/auth.js';
 const router = Router();
 router.use(requireAuth);
 
+function mapSession(s: any) {
+  return {
+    id: s.id,
+    commitId: s.commitId,
+    agentId: s.agentId,
+    agentName: s.agent?.name || null,
+    repoId: s.commit?.repoId || null,
+    repoName: s.commit?.repo?.name || null,
+    commitSha: s.commit?.sha || null,
+    commitMessage: s.commit?.message || null,
+    commitAuthor: s.commit?.author || null,
+    committedAt: s.commit?.committedAt || null,
+    model: s.model,
+    prompt: s.prompt,
+    transcript: s.transcript,
+    filesChanged: s.filesChanged,
+    tokensUsed: s.tokensUsed,
+    toolCalls: s.toolCalls,
+    durationMs: s.durationMs,
+    linesAdded: s.linesAdded,
+    linesRemoved: s.linesRemoved,
+    costUsd: s.costUsd,
+    createdAt: s.createdAt,
+    review: s.review
+      ? {
+          id: s.review.id,
+          status: s.review.status,
+          note: s.review.note,
+          reviewerName: s.review.user?.name || null,
+          createdAt: s.review.createdAt,
+        }
+      : null,
+  };
+}
+
 // GET / — list coding sessions for org
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
@@ -12,24 +47,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = parseInt(req.query.offset as string) || 0;
 
-    // Build where clause dynamically
     const where: any = {
       commit: {
         repo: { orgId },
       },
     };
 
-    // Filter by model
     if (req.query.model) {
       where.model = req.query.model as string;
     }
 
-    // Filter by agentId
     if (req.query.agentId) {
       where.agentId = req.query.agentId as string;
     }
 
-    // Filter by repoId
     if (req.query.repoId) {
       where.commit = {
         ...where.commit,
@@ -37,7 +68,6 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       };
     }
 
-    // Filter by review status
     const status = req.query.status as string;
     if (status === 'reviewed') {
       where.review = { isNot: null };
@@ -47,19 +77,25 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where.review = { status: 'FLAGGED' };
     }
 
-    const sessions = await prisma.codingSession.findMany({
-      where,
-      include: {
-        commit: { include: { repo: true } },
-        agent: true,
-        review: true,
-      },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-    });
+    const [sessions, total] = await Promise.all([
+      prisma.codingSession.findMany({
+        where,
+        include: {
+          commit: { include: { repo: true } },
+          agent: true,
+          review: { include: { user: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.codingSession.count({ where }),
+    ]);
 
-    res.json(sessions);
+    res.json({
+      sessions: sessions.map(mapSession),
+      total,
+    });
   } catch (err) {
     console.error('List sessions error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -87,7 +123,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    res.json(session);
+    res.json(mapSession(session));
   } catch (err) {
     console.error('Get session error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -104,7 +140,6 @@ router.post('/:id/review', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Missing required field: status' });
     }
 
-    // Verify session belongs to org
     const session = await prisma.codingSession.findFirst({
       where: {
         id,

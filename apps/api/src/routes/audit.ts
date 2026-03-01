@@ -22,15 +22,28 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where.userId = req.query.userId as string;
     }
 
-    const logs = await prisma.auditLog.findMany({
-      where,
-      include: { user: true },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-    });
+    const [logs, total] = await Promise.all([
+      prisma.auditLog.findMany({
+        where,
+        include: { user: true },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.auditLog.count({ where }),
+    ]);
 
-    res.json(logs);
+    const entries = logs.map((l) => ({
+      id: l.id,
+      userId: l.userId,
+      userName: l.user?.name || null,
+      action: l.action,
+      resource: l.resource,
+      metadata: l.metadata,
+      createdAt: l.createdAt,
+    }));
+
+    res.json({ entries, total });
   } catch (err) {
     console.error('List audit logs error:', err);
     res.status(500).json({ error: 'Internal server error' });

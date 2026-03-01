@@ -131,19 +131,18 @@ export default function AuditLog() {
                       <span className={`text-sm font-mono ${getActionColor(entry.action)}`}>
                         {entry.action}
                       </span>
-                      <span className="text-sm text-gray-500">
-                        {entry.resource}
-                        {entry.resourceId && (
-                          <span className="text-gray-600 ml-1">#{entry.resourceId.slice(0, 8)}</span>
-                        )}
-                      </span>
+                      {entry.resource && (
+                        <span className="text-sm text-gray-500">
+                          {entry.resource}
+                        </span>
+                      )}
                     </div>
 
                     {/* Metadata preview */}
-                    {entry.metadata && Object.keys(entry.metadata).length > 0 && (
+                    {entry.metadata && entry.metadata !== '{}' && entry.metadata !== 'null' && (
                       <div className="mt-1.5 text-xs text-gray-500 bg-gray-800/50 rounded px-2 py-1 font-mono inline-block max-w-full truncate">
-                        {JSON.stringify(entry.metadata).slice(0, 120)}
-                        {JSON.stringify(entry.metadata).length > 120 ? '...' : ''}
+                        {entry.metadata.slice(0, 120)}
+                        {entry.metadata.length > 120 ? '...' : ''}
                       </div>
                     )}
                   </div>

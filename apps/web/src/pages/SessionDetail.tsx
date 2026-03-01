@@ -90,7 +90,7 @@ export default function SessionDetail() {
           &larr; Sessions
         </button>
         <h1 className="text-2xl font-bold">Session Detail</h1>
-        {statusBadge(session.review?.status ?? session.status)}
+        {statusBadge(session.review?.status?.toLowerCase() ?? 'pending')}
       </div>
 
       {/* Split layout */}
@@ -144,16 +144,12 @@ export default function SessionDetail() {
             </h3>
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
-                <p className="text-gray-500">Tokens In</p>
-                <p className="text-gray-200 font-medium">{session.tokensIn.toLocaleString()}</p>
-              </div>
-              <div>
-                <p className="text-gray-500">Tokens Out</p>
-                <p className="text-gray-200 font-medium">{session.tokensOut.toLocaleString()}</p>
+                <p className="text-gray-500">Tokens Used</p>
+                <p className="text-gray-200 font-medium">{session.tokensUsed.toLocaleString()}</p>
               </div>
               <div>
                 <p className="text-gray-500">Cost</p>
-                <p className="text-gray-200 font-medium">${session.cost.toFixed(2)}</p>
+                <p className="text-gray-200 font-medium">${session.costUsd.toFixed(2)}</p>
               </div>
               <div>
                 <p className="text-gray-500">Duration</p>
@@ -165,7 +161,9 @@ export default function SessionDetail() {
               </div>
               <div>
                 <p className="text-gray-500">Files Changed</p>
-                <p className="text-gray-200 font-medium">{session.filesChanged}</p>
+                <p className="text-gray-200 font-medium">
+                  {(() => { try { return JSON.parse(session.filesChanged).length; } catch { return 0; } })()}
+                </p>
               </div>
               <div>
                 <p className="text-gray-500">Lines Added</p>
@@ -213,7 +211,7 @@ export default function SessionDetail() {
               </h3>
             </div>
             <div className="flex-1 overflow-y-auto">
-              <SessionReplay transcript={session.transcript ?? []} />
+              <SessionReplay transcript={(() => { try { return JSON.parse(session.transcript); } catch { return []; } })()} />
             </div>
           </div>
         </div>

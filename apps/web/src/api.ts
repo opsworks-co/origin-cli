@@ -26,7 +26,6 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
     throw new Error(msg);
   }
 
-  // 204 No Content
   if (res.status === 204) return undefined as unknown as T;
   return res.json() as Promise<T>;
 }
@@ -77,29 +76,18 @@ export function getMe() {
 export interface Repo {
   id: string;
   name: string;
+  path: string;
   provider: string;
-  remoteUrl: string;
-  defaultBranch: string;
+  syncedAt: string | null;
   createdAt: string;
-}
-
-export interface Commit {
-  id: string;
-  sha: string;
-  message: string;
-  author: string;
-  filesChanged: number;
-  linesAdded: number;
-  linesRemoved: number;
-  aiAuthored: boolean;
-  createdAt: string;
+  _count?: { commits: number };
 }
 
 export function getRepos() {
   return request<Repo[]>('/api/repos');
 }
 
-export function createRepo(data: { name: string; remoteUrl: string; provider?: string }) {
+export function createRepo(data: { name: string; path: string; provider?: string }) {
   return request<Repo>('/api/repos', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -107,44 +95,45 @@ export function createRepo(data: { name: string; remoteUrl: string; provider?: s
 }
 
 export function syncRepo(id: string) {
-  return request<{ message: string }>(`/api/repos/${id}/sync`, { method: 'POST' });
+  return request<{ synced: number; total: number }>(`/api/repos/${id}/sync`, { method: 'POST' });
 }
 
 export function getRepoCommits(id: string) {
-  return request<Commit[]>(`/api/repos/${id}/commits`);
+  return request<any[]>(`/api/repos/${id}/commits`);
 }
 
 // ---- Sessions ------------------------------------------------------------
 
 export interface Session {
   id: string;
-  agentId: string;
-  agentName?: string;
-  repoId?: string;
-  repoName?: string;
+  commitId: string;
+  agentId: string | null;
+  agentName: string | null;
+  repoId: string | null;
+  repoName: string | null;
+  commitSha: string | null;
+  commitMessage: string | null;
+  commitAuthor: string | null;
+  committedAt: string | null;
   model: string;
-  status: string;
-  tokensIn: number;
-  tokensOut: number;
-  cost: number;
-  filesChanged: number;
+  prompt: string;
+  transcript: string;
+  filesChanged: string;
+  tokensUsed: number;
+  toolCalls: number;
+  durationMs: number;
   linesAdded: number;
   linesRemoved: number;
-  toolCalls: number;
-  commitSha?: string;
-  commitMessage?: string;
-  durationMs: number;
-  transcript: { role: string; content: string }[];
-  review?: SessionReview;
+  costUsd: number;
   createdAt: string;
-  endedAt?: string;
+  review: SessionReview | null;
 }
 
 export interface SessionReview {
   id: string;
   status: string;
-  note?: string;
-  reviewerName?: string;
+  note: string | null;
+  reviewerName: string | null;
   createdAt: string;
 }
 
@@ -173,7 +162,7 @@ export function getSession(id: string) {
 }
 
 export function reviewSession(id: string, status: string, note?: string) {
-  return request<SessionReview>(`/api/sessions/${id}/review`, {
+  return request<any>(`/api/sessions/${id}/review`, {
     method: 'POST',
     body: JSON.stringify({ status, note }),
   });
@@ -184,20 +173,20 @@ export function reviewSession(id: string, status: string, note?: string) {
 export interface Agent {
   id: string;
   name: string;
+  slug: string;
+  description: string | null;
   model: string;
-  provider: string;
-  apiKeyPrefix?: string;
-  totalSessions: number;
-  totalCost: number;
-  lastActiveAt?: string;
+  status: string;
   createdAt: string;
+  _count?: { sessions: number };
+  sessions?: any[];
 }
 
 export function getAgents() {
   return request<Agent[]>('/api/agents');
 }
 
-export function createAgent(data: { name: string; model: string; provider?: string }) {
+export function createAgent(data: { name: string; slug: string; model: string; description?: string }) {
   return request<Agent>('/api/agents', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -208,9 +197,9 @@ export function getAgent(id: string) {
   return request<Agent>(`/api/agents/${id}`);
 }
 
-export function updateAgent(id: string, data: Partial<Agent>) {
+export function updateAgent(id: string, data: Partial<{ name: string; description: string; model: string; status: string }>) {
   return request<Agent>(`/api/agents/${id}`, {
-    method: 'PATCH',
+    method: 'PUT',
     body: JSON.stringify(data),
   });
 }
@@ -219,16 +208,19 @@ export function updateAgent(id: string, data: Partial<Agent>) {
 
 export interface PolicyRule {
   id: string;
-  field: string;
-  operator: string;
-  value: string;
+  policyId: string;
+  agentId: string | null;
+  condition: string;
+  action: string;
+  severity: string;
+  agent?: { name: string } | null;
 }
 
 export interface Policy {
   id: string;
   name: string;
   type: string;
-  description?: string;
+  description: string | null;
   active: boolean;
   rules: PolicyRule[];
   createdAt: string;
@@ -245,9 +237,9 @@ export function createPolicy(data: { name: string; type: string; description?: s
   });
 }
 
-export function updatePolicy(id: string, data: Partial<Policy>) {
+export function updatePolicy(id: string, data: Partial<{ name: string; description: string; type: string; active: boolean }>) {
   return request<Policy>(`/api/policies/${id}`, {
-    method: 'PATCH',
+    method: 'PUT',
     body: JSON.stringify(data),
   });
 }
@@ -256,7 +248,7 @@ export function deletePolicy(id: string) {
   return request<void>(`/api/policies/${id}`, { method: 'DELETE' });
 }
 
-export function createPolicyRule(policyId: string, data: { field: string; operator: string; value: string }) {
+export function createPolicyRule(policyId: string, data: { condition: string; action: string; severity?: string; agentId?: string }) {
   return request<PolicyRule>(`/api/policies/${policyId}/rules`, {
     method: 'POST',
     body: JSON.stringify(data),
@@ -267,12 +259,11 @@ export function createPolicyRule(policyId: string, data: { field: string; operat
 
 export interface AuditEntry {
   id: string;
-  userId: string;
-  userName?: string;
+  userId: string | null;
+  userName: string | null;
   action: string;
-  resource: string;
-  resourceId?: string;
-  metadata?: Record<string, unknown>;
+  resource: string | null;
+  metadata: string;
   createdAt: string;
 }
 
@@ -296,18 +287,55 @@ export function getAuditLogs(params?: AuditParams) {
 // ---- Stats / Insights ----------------------------------------------------
 
 export interface Stats {
+  totalSessions: number;
   activeAgents: number;
   sessionsThisWeek: number;
-  unreviewed: number;
-  policyViolations: number;
+  aiPercentage: number;
+  tokensUsed: number;
+  costUsd: number;
   estimatedCostThisMonth: number;
   linesWrittenThisMonth: number;
-  costByModel: { model: string; cost: number }[];
+  unreviewed: number;
+  modelBreakdown: Record<string, number>;
+  costByModel: { model: string; cost: number; count: number }[];
+  sessionsByDay: { date: string; count: number }[];
   sessionsByRepo: { repo: string; count: number }[];
   aiAuthorshipOverTime: { date: string; percent: number }[];
+  topAgents: { id: string; name: string; model: string; count: number }[];
   topEngineers: { name: string; sessions: number }[];
+  policyViolations: number;
+  linesAdded: number;
+  linesRemoved: number;
 }
 
 export function getStats() {
   return request<Stats>('/api/stats');
+}
+
+// ---- Machines ---------------------------------------------------------------
+
+export interface Machine {
+  id: string;
+  hostname: string;
+  machineId: string;
+  detectedTools: string; // JSON array
+  lastSeenAt: string;
+  createdAt: string;
+}
+
+export function getMachines() {
+  return request<Machine[]>('/api/machines');
+}
+
+// ---- API Key Management -----------------------------------------------------
+
+export function createApiKey(data: { name: string }) {
+  return request<{ id: string; key: string; keyPrefix: string }>('/api/auth/api-keys', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function getApiKeys() {
+  return request<Array<{ id: string; name: string; keyPrefix: string; createdAt: string }>>('/api/auth/api-keys');
 }

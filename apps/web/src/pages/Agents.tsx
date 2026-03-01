@@ -22,8 +22,8 @@ export default function Agents() {
   // Add agent form
   const [showForm, setShowForm] = useState(false);
   const [formName, setFormName] = useState('');
+  const [formSlug, setFormSlug] = useState('');
   const [formModel, setFormModel] = useState('');
-  const [formProvider, setFormProvider] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const fetchAgents = () => {
@@ -43,10 +43,10 @@ export default function Agents() {
     e.preventDefault();
     setSubmitting(true);
     try {
-      await api.createAgent({ name: formName, model: formModel, provider: formProvider || undefined });
+      await api.createAgent({ name: formName, slug: formSlug, model: formModel });
       setFormName('');
+      setFormSlug('');
       setFormModel('');
-      setFormProvider('');
       setShowForm(false);
       fetchAgents();
     } catch (err: any) {
@@ -96,6 +96,16 @@ export default function Agents() {
               />
             </div>
             <div>
+              <label className="block text-sm text-gray-400 mb-1">Slug</label>
+              <input
+                required
+                value={formSlug}
+                onChange={(e) => setFormSlug(e.target.value)}
+                className="input"
+                placeholder="my-claude-agent"
+              />
+            </div>
+            <div>
               <label className="block text-sm text-gray-400 mb-1">Model</label>
               <input
                 required
@@ -103,15 +113,6 @@ export default function Agents() {
                 onChange={(e) => setFormModel(e.target.value)}
                 className="input"
                 placeholder="claude-sonnet-4-20250514"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Provider</label>
-              <input
-                value={formProvider}
-                onChange={(e) => setFormProvider(e.target.value)}
-                className="input"
-                placeholder="anthropic"
               />
             </div>
           </div>
@@ -129,9 +130,7 @@ export default function Agents() {
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {agents.map((agent) => {
-            const isActive =
-              agent.lastActiveAt &&
-              Date.now() - new Date(agent.lastActiveAt).getTime() < 1000 * 60 * 60;
+            const isActive = agent.status === 'active';
             return (
               <div key={agent.id} className="card hover:border-gray-700 transition-colors">
                 <div className="flex items-start justify-between mb-3">
@@ -148,15 +147,15 @@ export default function Agents() {
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <p className="text-gray-500">Sessions</p>
-                    <p className="text-gray-200 font-medium">{agent.totalSessions}</p>
+                    <p className="text-gray-200 font-medium">{agent._count?.sessions ?? 0}</p>
                   </div>
                   <div>
-                    <p className="text-gray-500">Total Cost</p>
-                    <p className="text-gray-200 font-medium">${agent.totalCost.toFixed(2)}</p>
+                    <p className="text-gray-500">Status</p>
+                    <p className="text-gray-200 font-medium capitalize">{agent.status}</p>
                   </div>
                   <div className="col-span-2">
-                    <p className="text-gray-500">Last Active</p>
-                    <p className="text-gray-200 font-medium">{timeAgo(agent.lastActiveAt)}</p>
+                    <p className="text-gray-500">Created</p>
+                    <p className="text-gray-200 font-medium">{timeAgo(agent.createdAt)}</p>
                   </div>
                 </div>
               </div>

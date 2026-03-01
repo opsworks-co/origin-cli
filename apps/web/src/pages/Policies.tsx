@@ -9,6 +9,16 @@ const TYPE_BADGE: Record<string, string> = {
   COST_LIMIT: 'badge-purple',
 };
 
+function parseCondition(conditionJson: string): string {
+  try {
+    const parsed = JSON.parse(conditionJson);
+    if (typeof parsed === 'string') return parsed;
+    return JSON.stringify(parsed, null, 0);
+  } catch {
+    return conditionJson;
+  }
+}
+
 export default function Policies() {
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -24,9 +34,9 @@ export default function Policies() {
 
   // Add rule form
   const [ruleForPolicy, setRuleForPolicy] = useState<string | null>(null);
-  const [ruleField, setRuleField] = useState('');
-  const [ruleOp, setRuleOp] = useState('equals');
-  const [ruleValue, setRuleValue] = useState('');
+  const [ruleCondition, setRuleCondition] = useState('');
+  const [ruleAction, setRuleAction] = useState('block');
+  const [ruleSeverity, setRuleSeverity] = useState('medium');
 
   const fetchPolicies = () => {
     setLoading(true);
@@ -86,14 +96,14 @@ export default function Policies() {
     setSubmitting(true);
     try {
       await api.createPolicyRule(ruleForPolicy, {
-        field: ruleField,
-        operator: ruleOp,
-        value: ruleValue,
+        condition: ruleCondition,
+        action: ruleAction,
+        severity: ruleSeverity,
       });
       setRuleForPolicy(null);
-      setRuleField('');
-      setRuleOp('equals');
-      setRuleValue('');
+      setRuleCondition('');
+      setRuleAction('block');
+      setRuleSeverity('medium');
       fetchPolicies();
     } catch (err: any) {
       setError(err.message);
@@ -201,6 +211,12 @@ export default function Policies() {
                     )}
                   </div>
                   <div className="flex items-center gap-3 flex-shrink-0">
+                    {policy.active && (
+                      <span className="inline-flex items-center gap-1.5 text-xs text-green-400">
+                        <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                        Enforced via MCP
+                      </span>
+                    )}
                     <span className="text-xs text-gray-500">
                       {policy.rules?.length ?? 0} rule{(policy.rules?.length ?? 0) !== 1 ? 's' : ''}
                     </span>
@@ -231,11 +247,24 @@ export default function Policies() {
                         {policy.rules.map((rule) => (
                           <div
                             key={rule.id}
-                            className="flex items-center gap-2 text-sm bg-gray-800/50 rounded-lg px-3 py-2"
+                            className="flex items-center gap-2 text-sm bg-gray-800/50 rounded-lg px-3 py-2 flex-wrap"
                           >
-                            <code className="text-indigo-400">{rule.field}</code>
-                            <span className="text-gray-500">{rule.operator}</span>
-                            <code className="text-amber-400">{rule.value}</code>
+                            <span className="text-gray-500">if</span>
+                            <code className="text-indigo-400">{parseCondition(rule.condition)}</code>
+                            <span className="text-gray-500">then</span>
+                            <code className="text-amber-400">{rule.action}</code>
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${
+                              rule.severity === 'high' ? 'bg-red-900/30 text-red-400' :
+                              rule.severity === 'medium' ? 'bg-amber-900/30 text-amber-400' :
+                              'bg-gray-800 text-gray-400'
+                            }`}>
+                              {rule.severity}
+                            </span>
+                            {rule.agent && (
+                              <span className="text-xs text-gray-500">
+                                (agent: {rule.agent.name})
+                              </span>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -248,31 +277,30 @@ export default function Policies() {
                       <form onSubmit={handleAddRule} className="flex flex-wrap gap-2 mt-2">
                         <input
                           required
-                          value={ruleField}
-                          onChange={(e) => setRuleField(e.target.value)}
-                          className="input w-32 text-sm"
-                          placeholder="Field"
+                          value={ruleCondition}
+                          onChange={(e) => setRuleCondition(e.target.value)}
+                          className="input flex-1 min-w-[200px] text-sm"
+                          placeholder='Condition (e.g. {"field":"path","op":"contains","value":".env"})'
                         />
                         <select
-                          value={ruleOp}
-                          onChange={(e) => setRuleOp(e.target.value)}
+                          value={ruleAction}
+                          onChange={(e) => setRuleAction(e.target.value)}
                           className="select text-sm"
                         >
-                          <option value="equals">equals</option>
-                          <option value="not_equals">not_equals</option>
-                          <option value="contains">contains</option>
-                          <option value="not_contains">not_contains</option>
-                          <option value="greater_than">greater_than</option>
-                          <option value="less_than">less_than</option>
-                          <option value="matches">matches</option>
+                          <option value="block">block</option>
+                          <option value="warn">warn</option>
+                          <option value="require_review">require_review</option>
+                          <option value="notify">notify</option>
                         </select>
-                        <input
-                          required
-                          value={ruleValue}
-                          onChange={(e) => setRuleValue(e.target.value)}
-                          className="input w-40 text-sm"
-                          placeholder="Value"
-                        />
+                        <select
+                          value={ruleSeverity}
+                          onChange={(e) => setRuleSeverity(e.target.value)}
+                          className="select text-sm"
+                        >
+                          <option value="low">low</option>
+                          <option value="medium">medium</option>
+                          <option value="high">high</option>
+                        </select>
                         <button type="submit" disabled={submitting} className="btn-primary text-sm py-1.5">
                           Add
                         </button>
