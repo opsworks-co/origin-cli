@@ -41,4 +41,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "cd /app/apps/api && npx prisma db push --skip-generate && node dist/index.js"]
+CMD ["sh", "-c", "cd /app/apps/api && ./node_modules/.bin/prisma db push --skip-generate && node dist/index.js"]
