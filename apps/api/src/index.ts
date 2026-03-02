@@ -1,6 +1,10 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { authMiddleware } from './middleware/auth.js';
 import authRoutes from './routes/auth.js';
 import repoRoutes from './routes/repos.js';
@@ -30,7 +34,16 @@ app.use('/api/machines', machineRoutes);
 app.use('/api/mcp', mcpRoutes);
 app.use('/api/settings', settingsRoutes);
 
+// Serve React app in production
+const webDist = path.join(__dirname, '../../web/dist');
+app.use(express.static(webDist));
+app.get('*', (req, res) => {
+  if (!req.path.startsWith('/api')) {
+    res.sendFile(path.join(webDist, 'index.html'));
+  }
+});
+
 const PORT = process.env.PORT || 4002;
 app.listen(PORT, () => {
-  console.log(`Origin v2 API running on http://localhost:${PORT}`);
+  console.log(`Origin v2 running on http://localhost:${PORT}`);
 });
