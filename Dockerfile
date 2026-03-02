@@ -11,7 +11,7 @@ COPY packages/mcp-server/package.json ./packages/mcp-server/
 RUN pnpm install --frozen-lockfile
 COPY apps/api ./apps/api
 COPY packages ./packages
-RUN cd apps/api && npx prisma generate && pnpm build
+RUN cd apps/api && npx prisma generate && pnpm run build
 
 # Build Web
 FROM base AS web-builder
