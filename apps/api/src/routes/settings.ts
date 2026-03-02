@@ -52,8 +52,9 @@ router.post('/api-keys', async (req: AuthRequest, res: Response) => {
 // DELETE /api/settings/api-keys/:id
 router.delete('/api-keys/:id', async (req: AuthRequest, res: Response) => {
   try {
+    const id = req.params.id as string;
     await prisma.apiKey.deleteMany({
-      where: { id: req.params.id, orgId: req.user!.orgId },
+      where: { id, orgId: req.user!.orgId },
     });
     res.json({ ok: true });
   } catch (err) {

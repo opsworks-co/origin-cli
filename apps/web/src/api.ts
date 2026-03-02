@@ -330,18 +330,18 @@ export function getMachines() {
 // ---- API Key Management -----------------------------------------------------
 
 export function createApiKey(data: { name: string }) {
-  return request<{ id: string; key: string; keyPrefix: string }>('/api/auth/api-keys', {
+  return request<{ id: string; key: string; keyPrefix: string }>('/api/settings/api-keys', {
     method: 'POST',
     body: JSON.stringify(data),
   });
 }
 
 export function getApiKeys() {
-  return request<Array<{ id: string; name: string; keyPrefix: string; createdAt: string }>>('/api/auth/api-keys');
+  return request<Array<{ id: string; name: string; keyPrefix: string; createdAt: string }>>('/api/settings/api-keys');
 }
 
 export function deleteApiKey(id: string) {
-  return request<void>(`/api/auth/api-keys/${id}`, { method: 'DELETE' });
+  return request<void>(`/api/settings/api-keys/${id}`, { method: 'DELETE' });
 }
 
 // ---- Delete Operations -------------------------------------------------------
