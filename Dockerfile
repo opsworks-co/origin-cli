@@ -28,6 +28,8 @@ RUN pnpm --filter web build
 FROM node:22-alpine
 WORKDIR /app
 
+# Copy everything from api builder including root node_modules (has prisma binary)
+COPY --from=api-builder /app/node_modules ./node_modules
 COPY --from=api-builder /app/apps/api/dist ./apps/api/dist
 COPY --from=api-builder /app/apps/api/prisma ./apps/api/prisma
 COPY --from=api-builder /app/apps/api/node_modules ./apps/api/node_modules
@@ -41,4 +43,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "cd /app/apps/api && ./node_modules/.bin/prisma db push --skip-generate && node dist/index.js"]
+CMD ["sh", "-c", "cd /app/apps/api && node_modules/.bin/prisma db push --skip-generate 2>/dev/null || /app/node_modules/.bin/prisma db push --skip-generate && node dist/index.js"]
