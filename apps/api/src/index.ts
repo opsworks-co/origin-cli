@@ -11,10 +11,11 @@ import auditRoutes from './routes/audit.js';
 import statsRoutes from './routes/stats.js';
 import machineRoutes from './routes/machines.js';
 import mcpRoutes from './routes/mcp.js';
+import settingsRoutes from './routes/settings.js';
 
 const app = express();
 
-app.use(cors({ origin: ['http://localhost:5176', 'http://127.0.0.1:5176'] }));
+app.use(cors({ origin: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(authMiddleware);
 
@@ -27,6 +28,7 @@ app.use('/api/audit', auditRoutes);
 app.use('/api/stats', statsRoutes);
 app.use('/api/machines', machineRoutes);
 app.use('/api/mcp', mcpRoutes);
+app.use('/api/settings', settingsRoutes);
 
 const PORT = process.env.PORT || 4002;
 app.listen(PORT, () => {
