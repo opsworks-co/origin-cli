@@ -3,8 +3,22 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Run DB migrations on startup
+try {
+  execSync('npx prisma db push --skip-generate', {
+    cwd: path.join(__dirname, '../'),
+    stdio: 'pipe',
+    env: { ...process.env }
+  });
+  console.log('✅ Database ready');
+} catch (e) {
+  console.log('⚠️  DB push skipped:', (e as Error).message?.slice(0, 100));
+}
+
 import { authMiddleware } from './middleware/auth.js';
 import authRoutes from './routes/auth.js';
 import repoRoutes from './routes/repos.js';

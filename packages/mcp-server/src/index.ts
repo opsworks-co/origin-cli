@@ -8,7 +8,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, loadAgentConfig } from './config.js';
-import { fetchPolicies, startSession, endSession, reportViolation } from './api.js';
+import { fetchPolicies, startSession, endSession, reportViolation, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs } from './api.js';
 
 interface PolicyData {
   id: string;
@@ -182,6 +182,77 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['sessionId', 'tool', 'args', 'result'],
       },
     },
+    {
+      name: 'list_sessions',
+      description: 'List recent AI coding sessions with optional filters',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          status: { type: 'string', enum: ['unreviewed', 'reviewed', 'approved', 'rejected', 'flagged'], description: 'Filter by review status' },
+          model: { type: 'string', description: 'Filter by AI model' },
+          limit: { type: 'number', description: 'Max results (default 20)' },
+        },
+      },
+    },
+    {
+      name: 'get_session',
+      description: 'Get full details of a specific coding session including transcript, files changed, and review status',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          session_id: { type: 'string', description: 'Session ID' },
+        },
+        required: ['session_id'],
+      },
+    },
+    {
+      name: 'review_session',
+      description: 'Approve, reject, or flag a coding session',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          session_id: { type: 'string', description: 'Session ID to review' },
+          status: { type: 'string', enum: ['APPROVED', 'REJECTED', 'FLAGGED'], description: 'Review status' },
+          note: { type: 'string', description: 'Optional review note' },
+        },
+        required: ['session_id', 'status'],
+      },
+    },
+    {
+      name: 'list_agents',
+      description: 'List all registered AI coding agents in the organization',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
+    {
+      name: 'list_repos',
+      description: 'List all connected code repositories',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
+    {
+      name: 'get_stats',
+      description: 'Get dashboard statistics: sessions this week, active agents, costs, AI authorship %, unreviewed count',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
+    {
+      name: 'get_audit_log',
+      description: 'View recent audit log entries for the organization',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          action: { type: 'string', description: 'Filter by action type (e.g. AGENT_CREATED, POLICY_UPDATED)' },
+          limit: { type: 'number', description: 'Max entries (default 30)' },
+        },
+      },
+    },
   ],
 }));
 
@@ -241,6 +312,78 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'log_tool_call': {
       console.error(`[origin-mcp] Tool call logged: ${args?.tool} in session ${args?.sessionId}`);
       return { content: [{ type: 'text', text: JSON.stringify({ logged: true }) }] };
+    }
+
+    case 'list_sessions': {
+      try {
+        const params: Record<string, string> = {};
+        if (args?.status) params.status = args.status as string;
+        if (args?.model) params.model = args.model as string;
+        if (args?.limit) params.limit = String(args.limit);
+        else params.limit = '20';
+        const result = await listSessions(params);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'get_session': {
+      try {
+        const result = await getSession(args?.session_id as string);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'review_session': {
+      try {
+        const result = await reviewSession(args?.session_id as string, args?.status as string, args?.note as string | undefined);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'list_agents': {
+      try {
+        const result = await listAgents();
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'list_repos': {
+      try {
+        const result = await listRepos();
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'get_stats': {
+      try {
+        const result = await getStats();
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'get_audit_log': {
+      try {
+        const params: Record<string, string> = {};
+        if (args?.action) params.action = args.action as string;
+        if (args?.limit) params.limit = String(args.limit);
+        else params.limit = '30';
+        const result = await listAuditLogs(params);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
     }
 
     default:

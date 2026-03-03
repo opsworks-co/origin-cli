@@ -1,6 +1,6 @@
 # MCP Server
 
-The Origin MCP server runs inside Claude Code and Cursor. It loads your organization's policies, checks file access in real time, reports violations, and tracks sessions — all without interrupting your workflow.
+The Origin MCP server runs inside Claude Code and Cursor. It gives AI agents full access to governance policies, session tracking, and platform data — all without leaving the coding environment.
 
 ---
 
@@ -11,6 +11,8 @@ The Origin MCP server runs inside Claude Code and Cursor. It loads your organiza
 3. **Checks file access** before the agent reads or writes restricted paths
 4. **Reports violations** back to Origin in real time
 5. **Tracks sessions** — start, end, cost, tool calls
+6. **Queries platform data** — sessions, agents, repos, stats, audit logs
+7. **Reviews sessions** — approve, reject, or flag directly from the agent
 
 ---
 
@@ -19,7 +21,7 @@ The Origin MCP server runs inside Claude Code and Cursor. It loads your organiza
 ### Prerequisites
 
 - Origin running locally or hosted
-- An API key from **Settings → API Keys → Create New**
+- An API key from **Settings > API Keys > Create New**
 - Node.js 18+
 
 ### Build the MCP server
@@ -96,9 +98,11 @@ Current session metadata: sessionId, machineId, user, startTime.
 
 ## MCP Tools
 
-Tools the AI agent calls during a session:
+The MCP server exposes 12 tools across two categories:
 
-### `check_file_access(filepath, action)`
+### Governance Tools (5)
+
+#### `check_file_access(filepath, action)`
 
 Check if a file can be accessed before reading or writing.
 
@@ -107,44 +111,106 @@ Check if a file can be accessed before reading or writing.
 
 Returns:
 ```json
-{
-  "allowed": true,
-  "requiresReview": false,
-  "policy": null
-}
+{ "allowed": true, "requiresReview": false, "policy": null }
 ```
 
 Or if blocked:
 ```json
-{
-  "allowed": false,
-  "requiresReview": false,
-  "policy": "Protect payments module"
-}
+{ "allowed": false, "requiresReview": false, "policy": "Protect payments module" }
 ```
 
-### `report_violation(policyId, description, filepath)`
+#### `report_violation(policy_id, description, filepath)`
 
-Called when the agent detects it's about to violate a policy.
+Report a policy violation to Origin.
 
-### `start_session(prompt, model, repoPath)`
+#### `start_session(prompt, model, repoPath)`
 
-Called at session start. Returns a `sessionId` used for tracking.
+Start a new coding session. Returns a `sessionId` for tracking.
 
-### `end_session(sessionId, summary)`
+#### `end_session(sessionId, summary)`
 
-Called when the session ends. Sends final stats to Origin.
+End the current session. Sends final stats to Origin.
 
-### `log_tool_call(sessionId, tool, args, result)`
+#### `log_tool_call(sessionId, tool, args, result)`
 
-Optional. Logs individual tool calls for full audit trail.
+Log individual tool calls for the audit trail.
+
+---
+
+### Platform Tools (7)
+
+#### `list_sessions(status?, model?, limit?)`
+
+List recent AI coding sessions with optional filters.
+
+- `status` — `"unreviewed"` | `"reviewed"` | `"approved"` | `"rejected"` | `"flagged"`
+- `model` — Filter by AI model name
+- `limit` — Max results (default: 20)
+
+Returns session list with commit info, review status, cost, and tokens.
+
+#### `get_session(session_id)`
+
+Get full details of a specific session including transcript, files changed, commit info, agent info, and review status.
+
+#### `review_session(session_id, status, note?)`
+
+Approve, reject, or flag a coding session.
+
+- `status` — `"APPROVED"` | `"REJECTED"` | `"FLAGGED"`
+- `note` — Optional review note
+
+#### `list_agents()`
+
+List all registered AI coding agents with their model, status, and session count.
+
+#### `list_repos()`
+
+List all connected code repositories with commit counts and sync status.
+
+#### `get_stats()`
+
+Get dashboard statistics including:
+- Sessions this week, active agents
+- AI authorship percentage
+- Token usage and costs
+- Unreviewed sessions count
+- Policy violations
+- Cost breakdown by model
+- Top agents and engineers
+
+#### `get_audit_log(action?, limit?)`
+
+View recent audit log entries.
+
+- `action` — Filter by type (e.g. `"AGENT_CREATED"`, `"POLICY_UPDATED"`)
+- `limit` — Max entries (default: 30)
+
+---
+
+## All Tools Reference
+
+| Tool | Category | Description |
+|------|----------|-------------|
+| `check_file_access` | Governance | Check file path against policies |
+| `report_violation` | Governance | Report a policy violation |
+| `start_session` | Governance | Start session tracking |
+| `end_session` | Governance | End session tracking |
+| `log_tool_call` | Governance | Log tool call for audit |
+| `list_sessions` | Platform | List coding sessions |
+| `get_session` | Platform | Get session details |
+| `review_session` | Platform | Approve/reject/flag session |
+| `list_agents` | Platform | List registered agents |
+| `list_repos` | Platform | List repositories |
+| `get_stats` | Platform | Dashboard statistics |
+| `get_audit_log` | Platform | View audit log |
 
 ---
 
 ## Getting Your API Key
 
-1. Open Origin → **Settings**
-2. Under **API Keys** → enter a name → **Create New**
+1. Open Origin > **Settings**
+2. Under **API Keys** > enter a name > **Create New**
 3. Copy the key shown (it's only displayed once)
 4. Add to your MCP server config as `ORIGIN_API_KEY`
 
@@ -159,9 +225,9 @@ Optional. Logs individual tool calls for full audit trail.
 
 **Policies not loading**
 - Verify `ORIGIN_API_URL` points to your running Origin instance
-- Verify `ORIGIN_API_KEY` is valid (check Settings → API Keys)
+- Verify `ORIGIN_API_KEY` is valid (check Settings > API Keys)
 - Check Origin API is running: `curl http://localhost:4002/api/mcp/policies -H "x-api-key: YOUR_KEY"`
 
 **Violations not showing in dashboard**
 - Check the machine is registered: `origin status`
-- Verify the session started correctly (check Origin → Sessions)
+- Verify the session started correctly (check Origin > Sessions)

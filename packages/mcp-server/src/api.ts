@@ -35,3 +35,41 @@ export async function endSession(data: { sessionId: string; summary: string; tok
 export async function reportViolation(data: { machineId: string; policyId: string; description: string; filepath: string }) {
   return originRequest('/api/mcp/violations', { method: 'POST', body: JSON.stringify(data) });
 }
+
+// Sessions
+export async function listSessions(params?: Record<string, string>) {
+  const q = params ? '?' + new URLSearchParams(params).toString() : '';
+  return originRequest(`/api/sessions${q}`);
+}
+
+export async function getSession(id: string) {
+  return originRequest(`/api/sessions/${id}`);
+}
+
+export async function reviewSession(id: string, status: string, note?: string) {
+  return originRequest(`/api/sessions/${id}/review`, {
+    method: 'POST',
+    body: JSON.stringify({ status, note }),
+  });
+}
+
+// Agents
+export async function listAgents() {
+  return originRequest('/api/agents');
+}
+
+// Repos
+export async function listRepos() {
+  return originRequest('/api/repos');
+}
+
+// Stats
+export async function getStats() {
+  return originRequest('/api/stats');
+}
+
+// Audit
+export async function listAuditLogs(params?: Record<string, string>) {
+  const q = params ? '?' + new URLSearchParams(params).toString() : '';
+  return originRequest(`/api/audit${q}`);
+}

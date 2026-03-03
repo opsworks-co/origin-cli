@@ -57,10 +57,10 @@ const CAPABILITIES = [
   {
     category: 'For Developers',
     items: [
-      'CLI tool for machine registration and sync',
-      'MCP server for Claude Code and Cursor',
+      'CLI with 15 commands — sessions, agents, repos, policies, stats',
+      'MCP server with 12 tools for Claude Code and Cursor',
       'Automatic session tracking with zero config',
-      'Review and approve AI sessions from the dashboard',
+      'Review, approve, or flag AI sessions from CLI or dashboard',
     ],
   },
 ];
@@ -226,33 +226,34 @@ export default function Landing() {
         </div>
         <div className="grid md:grid-cols-2 gap-8">
           <div className="card">
-            <h3 className="text-lg font-semibold mb-3">MCP Integration</h3>
+            <h3 className="text-lg font-semibold mb-3">MCP Server &mdash; 12 Tools</h3>
             <p className="text-sm text-gray-400 mb-4">
-              Add Origin as an MCP server in Claude Code or Cursor. Policies are enforced
-              in real-time as agents write code.
+              Full platform access from inside Claude Code and Cursor. Policy enforcement,
+              session tracking, reviews, stats, and audit &mdash; all via MCP tools.
             </p>
-            <pre className="bg-gray-800 rounded-lg px-4 py-3 text-sm font-mono text-gray-300 overflow-x-auto">
-{`{
-  "mcpServers": {
-    "origin": {
-      "command": "origin",
-      "args": ["mcp", "serve"]
-    }
-  }
-}`}
+            <pre className="bg-gray-800 rounded-lg px-4 py-3 text-xs font-mono text-gray-300 overflow-x-auto leading-relaxed">
+{`check_file_access   → enforce policies
+start/end_session   → track sessions
+report_violation    → compliance logging
+list_sessions       → browse sessions
+review_session      → approve/reject/flag
+get_stats           → dashboard stats
+list_agents/repos   → view platform data
+get_audit_log       → audit trail`}
             </pre>
           </div>
           <div className="card">
-            <h3 className="text-lg font-semibold mb-3">CLI Tool</h3>
+            <h3 className="text-lg font-semibold mb-3">CLI &mdash; 15 Commands</h3>
             <p className="text-sm text-gray-400 mb-4">
-              Install the Origin CLI to register machines, sync repos, and manage your
-              configuration from the terminal.
+              Full command-line management. Sessions, agents, repos, policies,
+              reviews, stats, and audit &mdash; all from your terminal.
             </p>
-            <pre className="bg-gray-800 rounded-lg px-4 py-3 text-sm font-mono text-gray-300 overflow-x-auto">
-{`$ npm install -g @origin/cli
-$ origin login
-$ origin init
-$ origin sync`}
+            <pre className="bg-gray-800 rounded-lg px-4 py-3 text-xs font-mono text-gray-300 overflow-x-auto leading-relaxed">
+{`$ origin login && origin init
+$ origin sessions --status unreviewed
+$ origin review abc123 --approve
+$ origin agents && origin repos
+$ origin stats && origin audit`}
             </pre>
           </div>
         </div>
