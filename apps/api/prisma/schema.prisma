@@ -34,6 +34,7 @@ model User {
   auditLogs     AuditLog[]
   reviews       SessionReview[]
   notifications Notification[]
+  sessions      CodingSession[]
 }
 
 model ApiKey {
@@ -79,6 +80,8 @@ model CodingSession {
   commit       Commit         @relation(fields: [commitId], references: [id])
   agentId      String?
   agent        Agent?         @relation(fields: [agentId], references: [id])
+  userId       String?
+  user         User?          @relation(fields: [userId], references: [id])
   model        String
   prompt       String
   transcript   String

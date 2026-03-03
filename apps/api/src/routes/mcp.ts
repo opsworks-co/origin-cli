@@ -118,6 +118,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         prompt,
         transcript: '',
         filesChanged: '[]',
+        userId: (req as any).user?.id || null,
       },
     });
 

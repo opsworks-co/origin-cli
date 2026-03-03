@@ -92,3 +92,8 @@ export async function listNotifications(params?: Record<string, string>) {
 export async function getUnreadCount() {
   return originRequest('/api/notifications/unread-count');
 }
+
+// Users / Team
+export async function listUsers() {
+  return originRequest('/api/users');
+}

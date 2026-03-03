@@ -460,3 +460,70 @@ export function createRepoWebhook(repoId: string) {
 export function deleteRepoWebhook(repoId: string, webhookId: string) {
   return request<void>(`/api/repos/${repoId}/webhooks/${webhookId}`, { method: 'DELETE' });
 }
+
+// ---- Team / Users ------------------------------------------------------------
+
+export interface TeamMember {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  createdAt: string;
+  sessions: number;
+  reviews: number;
+  totalCost: number;
+  linesAdded: number;
+  lastActive: string;
+}
+
+export interface UserDetail {
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+    createdAt: string;
+    stats: {
+      sessions: number;
+      reviews: number;
+      totalCost: number;
+      linesAdded: number;
+      linesRemoved: number;
+      tokensUsed: number;
+    };
+  };
+  sessions: Array<{
+    id: string;
+    model: string;
+    repoName: string | null;
+    commitMessage: string | null;
+    costUsd: number;
+    tokensUsed: number;
+    linesAdded: number;
+    createdAt: string;
+    review: { status: string; note: string | null } | null;
+  }>;
+  reviews: Array<{
+    id: string;
+    sessionId: string;
+    status: string;
+    note: string | null;
+    repoName: string | null;
+    commitMessage: string | null;
+    createdAt: string;
+  }>;
+  audit: Array<{
+    id: string;
+    action: string;
+    resource: string | null;
+    createdAt: string;
+  }>;
+}
+
+export function getUsers() {
+  return request<{ users: TeamMember[] }>('/api/users');
+}
+
+export function getUser(id: string) {
+  return request<UserDetail>(`/api/users/${id}`);
+}

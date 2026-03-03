@@ -32,6 +32,7 @@ import mcpRoutes from './routes/mcp.js';
 import settingsRoutes from './routes/settings.js';
 import notificationRoutes from './routes/notifications.js';
 import webhookRoutes from './routes/webhooks.js';
+import userRoutes from './routes/users.js';
 
 const app = express();
 
@@ -51,6 +52,7 @@ app.use('/api/mcp', mcpRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/users', userRoutes);
 
 // Serve React app in production
 const webDist = path.join(__dirname, '../../web/dist');

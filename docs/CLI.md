@@ -255,6 +255,32 @@ Shows: unread indicator (●), title, message, and timestamp.
 
 ---
 
+## Team Commands
+
+### `origin team`
+
+List all team members in your organization with activity stats.
+
+```bash
+origin team
+```
+
+Shows: name, email, role, session count, review count, total cost.
+
+---
+
+### `origin user <id>`
+
+View a specific user's profile and recent activity.
+
+```bash
+origin user abc123
+```
+
+Shows: profile, role, stats (sessions, reviews, cost, lines written), and recent sessions.
+
+---
+
 ## Monitoring Commands
 
 ### `origin stats`
@@ -332,5 +358,7 @@ Delete this file to log out.
 | `origin policy:versions <id>` | View policy version history |
 | `origin agent:versions <id>` | View agent version history |
 | `origin notifications` | View notifications |
+| `origin team` | List team members |
+| `origin user <id>` | View user detail |
 | `origin stats` | View dashboard statistics |
 | `origin audit` | View audit log |

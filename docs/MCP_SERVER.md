@@ -98,7 +98,7 @@ Current session metadata: sessionId, machineId, user, startTime.
 
 ## MCP Tools
 
-The MCP server exposes 15 tools across two categories:
+The MCP server exposes 16 tools across two categories:
 
 ### Governance Tools (5)
 
@@ -137,7 +137,7 @@ Log individual tool calls for the audit trail.
 
 ---
 
-### Platform Tools (10)
+### Platform Tools (11)
 
 #### `list_sessions(status?, model?, limit?)`
 
@@ -207,6 +207,10 @@ View notifications for the current user.
 
 Returns notification list with type, title, message, read status, and timestamp.
 
+#### `list_users()`
+
+List all team members in the organization with activity stats including session count, review count, total cost, and last active date.
+
 ---
 
 ## All Tools Reference
@@ -228,6 +232,7 @@ Returns notification list with type, title, message, read status, and timestamp.
 | `get_policy_versions` | Platform | View policy version history |
 | `get_agent_versions` | Platform | View agent version history |
 | `list_notifications` | Platform | View user notifications |
+| `list_users` | Platform | List team members with stats |
 
 ---
 

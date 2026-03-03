@@ -8,7 +8,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, loadAgentConfig } from './config.js';
-import { fetchPolicies, startSession, endSession, reportViolation, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount } from './api.js';
+import { fetchPolicies, startSession, endSession, reportViolation, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount, listUsers } from './api.js';
 
 interface PolicyData {
   id: string;
@@ -286,6 +286,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: 'list_users',
+      description: 'List all team members in the organization with activity stats',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
   ],
 }));
 
@@ -444,6 +452,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args?.limit) params.limit = String(args.limit);
         else params.limit = '20';
         const result = await listNotifications(params);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'list_users': {
+      try {
+        const result = await listUsers();
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       } catch (err: any) {
         return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };

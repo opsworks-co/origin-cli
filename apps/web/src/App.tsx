@@ -19,6 +19,8 @@ import Docs from './pages/Docs';
 import PolicyDetail from './pages/PolicyDetail';
 import AgentDetail from './pages/AgentDetail';
 import Notifications from './pages/Notifications';
+import Team from './pages/Team';
+import UserDetail from './pages/UserDetail';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -143,6 +145,26 @@ export default function App() {
           <ProtectedRoute>
             <Layout>
               <Notifications />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/team"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Team />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/team/:id"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <UserDetail />
             </Layout>
           </ProtectedRoute>
         }

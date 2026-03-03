@@ -12,6 +12,9 @@ function mapSession(s: any) {
     commitId: s.commitId,
     agentId: s.agentId,
     agentName: s.agent?.name || null,
+    userId: s.userId || null,
+    userName: s.user?.name || null,
+    userEmail: s.user?.email || null,
     repoId: s.commit?.repoId || null,
     repoName: s.commit?.repo?.name || null,
     commitSha: s.commit?.sha || null,
@@ -88,6 +91,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         include: {
           commit: { include: { repo: true } },
           agent: true,
+          user: true,
           review: { include: { user: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -120,6 +124,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       include: {
         commit: { include: { repo: true } },
         agent: true,
+        user: true,
         review: { include: { user: true } },
       },
     });

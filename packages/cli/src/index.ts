@@ -140,4 +140,44 @@ program.command('notifications')
     } catch (e: any) { console.error(chalk.red(e.message)); }
   });
 
+// Team / Users
+program.command('team')
+  .description('List team members')
+  .action(async () => {
+    const chalk = (await import('chalk')).default;
+    const { api } = await import('./api.js');
+    try {
+      const data = await api.getUsers();
+      if (!data.users?.length) {
+        console.log(chalk.gray('No team members.'));
+        return;
+      }
+      for (const u of data.users) {
+        const role = u.role === 'OWNER' ? chalk.magenta(u.role) : u.role === 'ADMIN' ? chalk.yellow(u.role) : chalk.blue(u.role);
+        console.log(`  ${chalk.bold(u.name)} ${chalk.gray(`<${u.email}>`)} ${role} — ${u.sessions} sessions, ${u.reviews} reviews, $${u.totalCost.toFixed(2)}`);
+      }
+    } catch (e: any) { console.error(chalk.red(e.message)); }
+  });
+
+program.command('user <id>')
+  .description('View user detail')
+  .action(async (id: string) => {
+    const chalk = (await import('chalk')).default;
+    const { api } = await import('./api.js');
+    try {
+      const data = await api.getUser(id);
+      const u = data.user;
+      console.log(`\n  ${chalk.bold(u.name)} ${chalk.gray(`<${u.email}>`)}`);
+      console.log(`  Role: ${u.role}  Member since: ${new Date(u.createdAt).toLocaleDateString()}`);
+      console.log(`\n  Sessions: ${u.stats.sessions}  Reviews: ${u.stats.reviews}  Cost: $${u.stats.totalCost.toFixed(2)}  Lines: +${u.stats.linesAdded}`);
+      if (data.sessions?.length) {
+        console.log(chalk.gray('\n  Recent Sessions:'));
+        for (const s of data.sessions.slice(0, 5)) {
+          const status = s.review?.status || 'pending';
+          console.log(`    ${chalk.blue(s.model)} ${s.repoName || '—'} $${s.costUsd.toFixed(2)} ${chalk.gray(status)} ${chalk.gray(new Date(s.createdAt).toLocaleString())}`);
+        }
+      }
+    } catch (e: any) { console.error(chalk.red(e.message)); }
+  });
+
 program.parse();

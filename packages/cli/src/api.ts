@@ -75,4 +75,8 @@ export const api = {
   },
   getUnreadCount: () => request('/api/notifications/unread-count'),
   markAllRead: () => request('/api/notifications/read-all', { method: 'PUT' }),
+
+  // Users / Team
+  getUsers: () => request('/api/users'),
+  getUser: (id: string) => request(`/api/users/${id}`),
 };
