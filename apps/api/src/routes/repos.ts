@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { syncCheckpoints } from '../services/checkpoint.js';
+import { generateWebhookSecret } from '../services/webhook.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -211,6 +212,101 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
     res.json(commits);
   } catch (err) {
     console.error('List commits error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/webhooks — create webhook for repo
+router.post('/:id/webhooks', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+
+    // Check if webhook already exists
+    const existing = await prisma.webhook.findFirst({ where: { repoId: id } });
+    if (existing) {
+      return res.status(409).json({ error: 'Webhook already exists for this repo' });
+    }
+
+    const secret = generateWebhookSecret();
+    const webhook = await prisma.webhook.create({
+      data: { repoId: id, secret },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'WEBHOOK_CREATED',
+        resource: id,
+        metadata: JSON.stringify({ repoName: repo.name }),
+      },
+    });
+
+    // Return the secret only on creation (it won't be shown again)
+    res.status(201).json({
+      id: webhook.id,
+      repoId: webhook.repoId,
+      active: webhook.active,
+      secret,
+      webhookUrl: `/api/webhooks/github/${id}`,
+      createdAt: webhook.createdAt,
+    });
+  } catch (err) {
+    console.error('Create webhook error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:id/webhooks — list webhooks for repo
+router.get('/:id/webhooks', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+
+    const webhooks = await prisma.webhook.findMany({
+      where: { repoId: id },
+      select: { id: true, repoId: true, active: true, events: true, createdAt: true, updatedAt: true },
+    });
+
+    res.json(webhooks.map(w => ({
+      ...w,
+      webhookUrl: `/api/webhooks/github/${id}`,
+    })));
+  } catch (err) {
+    console.error('List webhooks error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /:id/webhooks/:webhookId — delete a webhook
+router.delete('/:id/webhooks/:webhookId', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const webhookId = (req.params as any).webhookId as string;
+
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+
+    const webhook = await prisma.webhook.findFirst({ where: { id: webhookId, repoId: id } });
+    if (!webhook) return res.status(404).json({ error: 'Webhook not found' });
+
+    await prisma.webhook.delete({ where: { id: webhookId } });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'WEBHOOK_DELETED',
+        resource: id,
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete webhook error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

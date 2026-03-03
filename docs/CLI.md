@@ -211,6 +211,50 @@ Shows: policy name, type, description, rules, enforcement status.
 
 ---
 
+### `origin policy:versions <id>`
+
+View version history for a specific policy.
+
+```bash
+origin policy:versions abc123
+```
+
+Shows: version number, change type (CREATED, UPDATED, RULE_ADDED, etc.), and timestamp.
+
+---
+
+### `origin agent:versions <id>`
+
+View version history for a specific agent.
+
+```bash
+origin agent:versions abc123
+```
+
+Shows: version number, change type, and timestamp.
+
+---
+
+## Notification Commands
+
+### `origin notifications`
+
+View your notifications.
+
+```bash
+origin notifications
+origin notifications --unread
+origin notifications -l 50
+```
+
+Options:
+- `--unread` — Show only unread notifications
+- `-l, --limit <n>` — Max results (default: 20)
+
+Shows: unread indicator (●), title, message, and timestamp.
+
+---
+
 ## Monitoring Commands
 
 ### `origin stats`
@@ -285,5 +329,8 @@ Delete this file to log out.
 | `origin agents` | List agents |
 | `origin agent:create` | Create a new agent |
 | `origin policies` | List active policies |
+| `origin policy:versions <id>` | View policy version history |
+| `origin agent:versions <id>` | View agent version history |
+| `origin notifications` | View notifications |
 | `origin stats` | View dashboard statistics |
 | `origin audit` | View audit log |

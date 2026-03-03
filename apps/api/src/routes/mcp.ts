@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
+import { notifyOrgAdmins } from '../services/notifications.js';
 
 const router = Router();
 
@@ -223,6 +224,16 @@ router.post('/violations', async (req: McpRequest, res: Response) => {
         metadata: JSON.stringify({ policyId, description, filepath, machineId }),
       },
     });
+
+    // Notify admins of policy violation
+    await notifyOrgAdmins(
+      orgId,
+      'POLICY_VIOLATION',
+      'Policy Violation Detected',
+      `${description}${filepath ? ` — ${filepath}` : ''}`,
+      '/audit',
+      { policyId, description, filepath, machineId }
+    );
 
     res.json({ logged: true });
   } catch (err) {

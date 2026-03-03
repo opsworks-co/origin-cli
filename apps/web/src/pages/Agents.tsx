@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Agent } from '../api';
 
@@ -174,7 +175,7 @@ export default function Agents() {
                     >
                       {toggling[agent.id] ? '...' : isActive ? 'Active' : 'Inactive'}
                     </button>
-                    <h3 className="font-semibold text-gray-100">{agent.name}</h3>
+                    <h3 className="font-semibold text-gray-100"><Link to={`/agents/${agent.id}`} className="hover:text-indigo-400 transition-colors">{agent.name}</Link></h3>
                   </div>
                 </div>
                 <div className="mb-3">

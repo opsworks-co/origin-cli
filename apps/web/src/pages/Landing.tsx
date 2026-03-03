@@ -125,11 +125,11 @@ export default function Landing() {
             AI Agent Governance Platform
           </div>
           <h1 className="text-4xl sm:text-5xl md:text-6xl font-bold text-gray-100 leading-tight tracking-tight">
-            Know exactly what your{' '}
+            Your AI agents build fast.
+            <br />
             <span className="bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-              AI agents
-            </span>{' '}
-            are writing.
+              Origin keeps them in check.
+            </span>
           </h1>
           <p className="mt-6 text-lg md:text-xl text-gray-400 max-w-2xl mx-auto leading-relaxed">
             Origin gives CTOs and CSOs full visibility into every AI coding session

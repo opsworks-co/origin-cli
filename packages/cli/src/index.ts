@@ -81,4 +81,63 @@ program.command('audit')
 
 program.command('stats').description('View dashboard statistics').action(statsCommand);
 
+// Versioning
+program.command('policy:versions <id>')
+  .description('View version history for a policy')
+  .action(async (id: string) => {
+    const chalk = (await import('chalk')).default;
+    const { api } = await import('./api.js');
+    try {
+      const data = await api.getPolicyVersions(id);
+      if (!data.versions?.length) {
+        console.log(chalk.gray('No version history.'));
+        return;
+      }
+      for (const v of data.versions) {
+        console.log(`${chalk.bold(`v${v.version}`)} ${chalk.gray(v.changeType)} — ${chalk.gray(new Date(v.createdAt).toLocaleString())}`);
+      }
+    } catch (e: any) { console.error(chalk.red(e.message)); }
+  });
+
+program.command('agent:versions <id>')
+  .description('View version history for an agent')
+  .action(async (id: string) => {
+    const chalk = (await import('chalk')).default;
+    const { api } = await import('./api.js');
+    try {
+      const data = await api.getAgentVersions(id);
+      if (!data.versions?.length) {
+        console.log(chalk.gray('No version history.'));
+        return;
+      }
+      for (const v of data.versions) {
+        console.log(`${chalk.bold(`v${v.version}`)} ${chalk.gray(v.changeType)} — ${chalk.gray(new Date(v.createdAt).toLocaleString())}`);
+      }
+    } catch (e: any) { console.error(chalk.red(e.message)); }
+  });
+
+// Notifications
+program.command('notifications')
+  .description('View notifications')
+  .option('--unread', 'Show unread only')
+  .option('-l, --limit <n>', 'Max results', '20')
+  .action(async (opts: any) => {
+    const chalk = (await import('chalk')).default;
+    const { api } = await import('./api.js');
+    try {
+      const params: Record<string, string> = { limit: opts.limit };
+      if (opts.unread) params.unread = 'true';
+      const data = await api.getNotifications(params);
+      if (!data.notifications?.length) {
+        console.log(chalk.gray('No notifications.'));
+        return;
+      }
+      for (const n of data.notifications) {
+        const unread = n.read ? ' ' : chalk.blue('●');
+        console.log(`${unread} ${chalk.bold(n.title)} — ${n.message} ${chalk.gray(new Date(n.createdAt).toLocaleString())}`);
+      }
+      console.log(chalk.gray(`\n${data.total} total`));
+    } catch (e: any) { console.error(chalk.red(e.message)); }
+  });
+
 program.parse();

@@ -30,6 +30,8 @@ import statsRoutes from './routes/stats.js';
 import machineRoutes from './routes/machines.js';
 import mcpRoutes from './routes/mcp.js';
 import settingsRoutes from './routes/settings.js';
+import notificationRoutes from './routes/notifications.js';
+import webhookRoutes from './routes/webhooks.js';
 
 const app = express();
 
@@ -47,6 +49,8 @@ app.use('/api/stats', statsRoutes);
 app.use('/api/machines', machineRoutes);
 app.use('/api/mcp', mcpRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/webhooks', webhookRoutes);
 
 // Serve React app in production
 const webDist = path.join(__dirname, '../../web/dist');

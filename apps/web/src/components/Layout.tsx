@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import NotificationBell from './NotificationBell';
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: '\u25A3' },
@@ -81,6 +82,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <p className="text-sm font-medium text-gray-100 truncate">{user?.name}</p>
               <p className="text-xs text-gray-500 truncate">{user?.orgName}</p>
             </div>
+            <NotificationBell />
           </div>
           <button
             onClick={handleLogout}

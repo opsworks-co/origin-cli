@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { createPolicyVersion } from '../services/versioning.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -39,6 +40,8 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
         type,
       },
     });
+
+    await createPolicyVersion(policy.id, req.user!.id, 'CREATED');
 
     await prisma.auditLog.create({
       data: {
@@ -80,6 +83,8 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
         ...(active !== undefined && { active }),
       },
     });
+
+    await createPolicyVersion(id, req.user!.id, 'UPDATED');
 
     await prisma.auditLog.create({
       data: {
@@ -160,6 +165,8 @@ router.post('/:id/rules', requireRole('MEMBER'), async (req: AuthRequest, res: R
       },
     });
 
+    await createPolicyVersion(id, req.user!.id, 'RULE_ADDED');
+
     res.status(201).json(rule);
   } catch (err) {
     console.error('Create rule error:', err);
@@ -191,9 +198,36 @@ router.delete('/:id/rules/:ruleId', requireRole('ADMIN'), async (req: AuthReques
 
     await prisma.policyRule.delete({ where: { id: ruleId } });
 
+    await createPolicyVersion(id, req.user!.id, 'RULE_REMOVED');
+
     res.json({ success: true });
   } catch (err) {
     console.error('Delete rule error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:id/versions — list versions for a policy
+router.get('/:id/versions', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const policy = await prisma.policy.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!policy) return res.status(404).json({ error: 'Policy not found' });
+
+    const versions = await prisma.policyVersion.findMany({
+      where: { policyId: id },
+      orderBy: { version: 'desc' },
+    });
+
+    res.json({
+      versions: versions.map(v => ({
+        ...v,
+        snapshot: JSON.parse(v.snapshot),
+      })),
+      total: versions.length,
+    });
+  } catch (err) {
+    console.error('List policy versions error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -63,4 +63,16 @@ export const api = {
 
   // Stats
   getStats: () => request('/api/stats'),
+
+  // Versioning
+  getPolicyVersions: (id: string) => request(`/api/policies/${id}/versions`),
+  getAgentVersions: (id: string) => request(`/api/agents/${id}/versions`),
+
+  // Notifications
+  getNotifications: (params?: Record<string, string>) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/api/notifications${q ? `?${q}` : ''}`);
+  },
+  getUnreadCount: () => request('/api/notifications/unread-count'),
+  markAllRead: () => request('/api/notifications/read-all', { method: 'PUT' }),
 };

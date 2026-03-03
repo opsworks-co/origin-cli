@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { createAgentVersion } from '../services/versioning.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -38,6 +39,8 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
         model,
       },
     });
+
+    await createAgentVersion(agent.id, req.user!.id, 'CREATED');
 
     await prisma.auditLog.create({
       data: {
@@ -107,6 +110,8 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
       },
     });
 
+    await createAgentVersion(id, req.user!.id, status !== undefined ? 'STATUS_CHANGED' : 'UPDATED');
+
     await prisma.auditLog.create({
       data: {
         orgId: req.user!.orgId,
@@ -165,6 +170,31 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     res.json({ success: true });
   } catch (err) {
     console.error('Delete agent error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:id/versions — list versions for an agent
+router.get('/:id/versions', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const agent = await prisma.agent.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+    const versions = await prisma.agentVersion.findMany({
+      where: { agentId: id },
+      orderBy: { version: 'desc' },
+    });
+
+    res.json({
+      versions: versions.map(v => ({
+        ...v,
+        snapshot: JSON.parse(v.snapshot),
+      })),
+      total: versions.length,
+    });
+  } catch (err) {
+    console.error('List agent versions error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

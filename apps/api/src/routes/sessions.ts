@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { notifyOrgAdmins, notifyOrgMembers } from '../services/notifications.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -179,6 +180,27 @@ router.post('/:id/review', async (req: AuthRequest, res: Response) => {
         metadata: JSON.stringify({ sessionId: id, status }),
       },
     });
+
+    // Notify based on review status
+    if (status === 'FLAGGED') {
+      await notifyOrgAdmins(
+        req.user!.orgId,
+        'SESSION_FLAGGED',
+        'Session Flagged',
+        `A coding session has been flagged for review`,
+        `/sessions/${id}`,
+        { sessionId: id, status }
+      );
+    } else {
+      await notifyOrgAdmins(
+        req.user!.orgId,
+        'REVIEW_COMPLETED',
+        'Review Completed',
+        `A coding session has been ${status.toLowerCase()}`,
+        `/sessions/${id}`,
+        { sessionId: id, status }
+      );
+    }
 
     res.json(review);
   } catch (err) {

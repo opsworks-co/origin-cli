@@ -73,3 +73,22 @@ export async function listAuditLogs(params?: Record<string, string>) {
   const q = params ? '?' + new URLSearchParams(params).toString() : '';
   return originRequest(`/api/audit${q}`);
 }
+
+// Versioning
+export async function getPolicyVersions(id: string) {
+  return originRequest(`/api/policies/${id}/versions`);
+}
+
+export async function getAgentVersions(id: string) {
+  return originRequest(`/api/agents/${id}/versions`);
+}
+
+// Notifications
+export async function listNotifications(params?: Record<string, string>) {
+  const q = params ? '?' + new URLSearchParams(params).toString() : '';
+  return originRequest(`/api/notifications${q}`);
+}
+
+export async function getUnreadCount() {
+  return originRequest('/api/notifications/unread-count');
+}

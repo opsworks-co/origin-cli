@@ -3,6 +3,10 @@
   "private": true,
   "scripts": {
     "dev": "bash dev.sh",
-    "stop": "bash stop.sh"
+    "stop": "bash stop.sh",
+    "test": "vitest run --workspace vitest.workspace.ts"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   }
 }

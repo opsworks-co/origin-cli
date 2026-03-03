@@ -8,7 +8,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, loadAgentConfig } from './config.js';
-import { fetchPolicies, startSession, endSession, reportViolation, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs } from './api.js';
+import { fetchPolicies, startSession, endSession, reportViolation, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount } from './api.js';
 
 interface PolicyData {
   id: string;
@@ -253,6 +253,39 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: 'get_policy_versions',
+      description: 'View version history for a policy',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          policy_id: { type: 'string', description: 'Policy ID' },
+        },
+        required: ['policy_id'],
+      },
+    },
+    {
+      name: 'get_agent_versions',
+      description: 'View version history for an agent',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          agent_id: { type: 'string', description: 'Agent ID' },
+        },
+        required: ['agent_id'],
+      },
+    },
+    {
+      name: 'list_notifications',
+      description: 'View notifications for the current user',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          unread: { type: 'boolean', description: 'Only show unread notifications' },
+          limit: { type: 'number', description: 'Max results (default 20)' },
+        },
+      },
+    },
   ],
 }));
 
@@ -380,6 +413,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args?.limit) params.limit = String(args.limit);
         else params.limit = '30';
         const result = await listAuditLogs(params);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'get_policy_versions': {
+      try {
+        const result = await getPolicyVersions(args?.policy_id as string);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'get_agent_versions': {
+      try {
+        const result = await getAgentVersions(args?.agent_id as string);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'list_notifications': {
+      try {
+        const params: Record<string, string> = {};
+        if (args?.unread) params.unread = 'true';
+        if (args?.limit) params.limit = String(args.limit);
+        else params.limit = '20';
+        const result = await listNotifications(params);
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       } catch (err: any) {
         return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };

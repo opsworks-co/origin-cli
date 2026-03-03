@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Repo } from '../api';
+import WebhookSettings from '../components/WebhookSettings';
 
 interface Commit {
   id: string;
@@ -239,6 +240,13 @@ export default function RepoDetail() {
           </button>
         ))}
       </div>
+
+      {/* Webhooks Section */}
+      {repo.provider === 'github' && (
+        <div className="card">
+          <WebhookSettings repoId={id!} />
+        </div>
+      )}
 
       {/* Commits List */}
       <div className="card p-0 overflow-hidden">

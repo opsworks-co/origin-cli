@@ -98,7 +98,7 @@ Current session metadata: sessionId, machineId, user, startTime.
 
 ## MCP Tools
 
-The MCP server exposes 12 tools across two categories:
+The MCP server exposes 15 tools across two categories:
 
 ### Governance Tools (5)
 
@@ -137,7 +137,7 @@ Log individual tool calls for the audit trail.
 
 ---
 
-### Platform Tools (7)
+### Platform Tools (10)
 
 #### `list_sessions(status?, model?, limit?)`
 
@@ -186,6 +186,27 @@ View recent audit log entries.
 - `action` — Filter by type (e.g. `"AGENT_CREATED"`, `"POLICY_UPDATED"`)
 - `limit` — Max entries (default: 30)
 
+#### `get_policy_versions(policy_id)`
+
+View version history for a specific policy. Returns all versions with change type, snapshot, and timestamp.
+
+- `policy_id` — Policy ID (required)
+
+#### `get_agent_versions(agent_id)`
+
+View version history for a specific agent. Returns all versions with change type, snapshot, and timestamp.
+
+- `agent_id` — Agent ID (required)
+
+#### `list_notifications(unread?, limit?)`
+
+View notifications for the current user.
+
+- `unread` — Only show unread notifications (boolean)
+- `limit` — Max results (default: 20)
+
+Returns notification list with type, title, message, read status, and timestamp.
+
 ---
 
 ## All Tools Reference
@@ -204,6 +225,9 @@ View recent audit log entries.
 | `list_repos` | Platform | List repositories |
 | `get_stats` | Platform | Dashboard statistics |
 | `get_audit_log` | Platform | View audit log |
+| `get_policy_versions` | Platform | View policy version history |
+| `get_agent_versions` | Platform | View agent version history |
+| `list_notifications` | Platform | View user notifications |
 
 ---
 

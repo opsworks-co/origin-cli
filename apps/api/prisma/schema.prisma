@@ -8,30 +8,32 @@ datasource db {
 }
 
 model Org {
-  id        String     @id @default(uuid())
-  name      String
-  slug      String     @unique
-  createdAt DateTime   @default(now())
-  users     User[]
-  repos     Repo[]
-  agents    Agent[]
-  policies  Policy[]
-  auditLogs AuditLog[]
-  apiKeys   ApiKey[]
-  machines  Machine[]
+  id            String         @id @default(uuid())
+  name          String
+  slug          String         @unique
+  createdAt     DateTime       @default(now())
+  users         User[]
+  repos         Repo[]
+  agents        Agent[]
+  policies      Policy[]
+  auditLogs     AuditLog[]
+  apiKeys       ApiKey[]
+  machines      Machine[]
+  notifications Notification[]
 }
 
 model User {
-  id           String         @id @default(uuid())
-  orgId        String
-  org          Org            @relation(fields: [orgId], references: [id])
-  email        String         @unique
-  name         String
-  passwordHash String
-  role         String         @default("MEMBER")
-  createdAt    DateTime       @default(now())
-  auditLogs    AuditLog[]
-  reviews      SessionReview[]
+  id            String         @id @default(uuid())
+  orgId         String
+  org           Org            @relation(fields: [orgId], references: [id])
+  email         String         @unique
+  name          String
+  passwordHash  String
+  role          String         @default("MEMBER")
+  createdAt     DateTime       @default(now())
+  auditLogs     AuditLog[]
+  reviews       SessionReview[]
+  notifications Notification[]
 }
 
 model ApiKey {
@@ -56,6 +58,7 @@ model Repo {
   syncedAt  DateTime?
   createdAt DateTime  @default(now())
   commits   Commit[]
+  webhooks  Webhook[]
 }
 
 model Commit {
@@ -115,6 +118,7 @@ model Agent {
   createdAt   DateTime        @default(now())
   sessions    CodingSession[]
   policyRules PolicyRule[]
+  versions    AgentVersion[]
 }
 
 // ── Policies ────────────────────────────────────────────────────
@@ -129,6 +133,7 @@ model Policy {
   rules       PolicyRule[]
   active      Boolean      @default(true)
   createdAt   DateTime     @default(now())
+  versions    PolicyVersion[]
 }
 
 model PolicyRule {
@@ -167,4 +172,61 @@ model AuditLog {
   resource  String?
   metadata  String   @default("{}")
   createdAt DateTime @default(now())
+}
+
+// ── Versioning ──────────────────────────────────────────────────
+
+model PolicyVersion {
+  id         String   @id @default(uuid())
+  policyId   String
+  policy     Policy   @relation(fields: [policyId], references: [id])
+  version    Int
+  snapshot   String   // JSON blob of full policy + rules state
+  changedBy  String?
+  changeType String   // CREATED, UPDATED, RULE_ADDED, RULE_REMOVED, ACTIVATED, DEACTIVATED
+  createdAt  DateTime @default(now())
+}
+
+model AgentVersion {
+  id         String   @id @default(uuid())
+  agentId    String
+  agent      Agent    @relation(fields: [agentId], references: [id])
+  version    Int
+  snapshot   String   // JSON blob of full agent state
+  changedBy  String?
+  changeType String   // CREATED, UPDATED, STATUS_CHANGED
+  createdAt  DateTime @default(now())
+}
+
+// ── Webhooks ────────────────────────────────────────────────────
+
+model Webhook {
+  id        String   @id @default(uuid())
+  repoId    String
+  repo      Repo     @relation(fields: [repoId], references: [id])
+  secret    String
+  active    Boolean  @default(true)
+  events    String   @default("[\"push\"]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ── Notifications ────────────────────────────────────────────────
+
+model Notification {
+  id          String    @id @default(uuid())
+  orgId       String
+  org         Org       @relation(fields: [orgId], references: [id])
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  type        String    // SESSION_FLAGGED, POLICY_VIOLATION, REVIEW_NEEDED, REVIEW_COMPLETED
+  title       String
+  message     String
+  link        String?
+  read        Boolean   @default(false)
+  readAt      DateTime?
+  metadata    String    @default("{}")
+  emailSent   Boolean   @default(false)
+  emailSentAt DateTime?
+  createdAt   DateTime  @default(now())
 }

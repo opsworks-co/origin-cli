@@ -372,3 +372,91 @@ export function bulkReviewSessions(sessionIds: string[], status: string, note?: 
     sessionIds.map((id) => reviewSession(id, status, note))
   );
 }
+
+// ---- Versioning --------------------------------------------------------------
+
+export interface PolicyVersion {
+  id: string;
+  policyId: string;
+  version: number;
+  snapshot: any;
+  changedBy: string | null;
+  changeType: string;
+  createdAt: string;
+}
+
+export interface AgentVersion {
+  id: string;
+  agentId: string;
+  version: number;
+  snapshot: any;
+  changedBy: string | null;
+  changeType: string;
+  createdAt: string;
+}
+
+export function getPolicyVersions(policyId: string) {
+  return request<{ versions: PolicyVersion[]; total: number }>(`/api/policies/${policyId}/versions`);
+}
+
+export function getAgentVersions(agentId: string) {
+  return request<{ versions: AgentVersion[]; total: number }>(`/api/agents/${agentId}/versions`);
+}
+
+// ---- Notifications -----------------------------------------------------------
+
+export interface Notification {
+  id: string;
+  type: string;
+  title: string;
+  message: string;
+  link: string | null;
+  read: boolean;
+  readAt: string | null;
+  metadata: any;
+  createdAt: string;
+}
+
+export function getNotifications(params?: { unread?: boolean; limit?: number; offset?: number }) {
+  const q = new URLSearchParams();
+  if (params?.unread) q.set('unread', 'true');
+  if (params?.limit) q.set('limit', String(params.limit));
+  if (params?.offset) q.set('offset', String(params.offset));
+  const qs = q.toString();
+  return request<{ notifications: Notification[]; total: number }>(`/api/notifications${qs ? `?${qs}` : ''}`);
+}
+
+export function getUnreadCount() {
+  return request<{ count: number }>('/api/notifications/unread-count');
+}
+
+export function markNotificationRead(id: string) {
+  return request<Notification>(`/api/notifications/${id}/read`, { method: 'PUT' });
+}
+
+export function markAllNotificationsRead() {
+  return request<{ success: boolean }>('/api/notifications/read-all', { method: 'PUT' });
+}
+
+// ---- Webhooks ----------------------------------------------------------------
+
+export interface Webhook {
+  id: string;
+  repoId: string;
+  active: boolean;
+  webhookUrl: string;
+  events?: string;
+  createdAt: string;
+}
+
+export function getRepoWebhooks(repoId: string) {
+  return request<Webhook[]>(`/api/repos/${repoId}/webhooks`);
+}
+
+export function createRepoWebhook(repoId: string) {
+  return request<Webhook & { secret: string }>(`/api/repos/${repoId}/webhooks`, { method: 'POST' });
+}
+
+export function deleteRepoWebhook(repoId: string, webhookId: string) {
+  return request<void>(`/api/repos/${repoId}/webhooks/${webhookId}`, { method: 'DELETE' });
+}

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Policy } from '../api';
 
@@ -210,7 +211,7 @@ export default function Policies() {
                   </span>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-gray-100">{policy.name}</span>
+                      <Link to={`/policies/${policy.id}`} className="font-semibold text-gray-100 hover:text-indigo-400 transition-colors">{policy.name}</Link>
                       <span className={TYPE_BADGE[policy.type] ?? 'badge-gray'}>
                         {policy.type.replace(/_/g, ' ')}
                       </span>
