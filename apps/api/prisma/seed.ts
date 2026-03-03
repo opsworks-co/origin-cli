@@ -434,20 +434,35 @@ async function main() {
   });
   console.log(`  Created org: ${org.name} (${org.slug})`);
 
-  // ── 2. User ─────────────────────────────────────────────────────
-  const userId = uuid();
+  // ── 2. Users ────────────────────────────────────────────────────
   const passwordHash = await bcrypt.hash("password123", 10);
-  const user = await prisma.user.create({
-    data: {
-      id: userId,
-      orgId: org.id,
-      email: "artem@origin.dev",
-      name: "Artem Dolobanko",
-      passwordHash,
-      role: "OWNER",
-    },
-  });
-  console.log(`  Created user: ${user.email} (${user.role})`);
+
+  const userDefs = [
+    { name: "Artem Dolobanko", email: "artem@origin.dev", role: "OWNER" },
+    { name: "Sarah Chen", email: "sarah@origin.dev", role: "ADMIN" },
+    { name: "Marcus Johnson", email: "marcus@origin.dev", role: "MEMBER" },
+    { name: "Elena Rodriguez", email: "elena@origin.dev", role: "MEMBER" },
+    { name: "David Kim", email: "david@origin.dev", role: "VIEWER" },
+  ];
+
+  const userIds: string[] = [];
+  for (const def of userDefs) {
+    const id = uuid();
+    userIds.push(id);
+    await prisma.user.create({
+      data: {
+        id,
+        orgId: org.id,
+        email: def.email,
+        name: def.name,
+        passwordHash,
+        role: def.role,
+      },
+    });
+  }
+  const userId = userIds[0]; // Artem — primary user
+  const user = { id: userId, email: userDefs[0].email, role: userDefs[0].role };
+  console.log(`  Created ${userDefs.length} users`);
 
   // ── 3. Repos ────────────────────────────────────────────────────
   const repoOriginId = uuid();
@@ -561,11 +576,16 @@ async function main() {
       },
     });
 
+    // Assign sessions across team members (skip VIEWER)
+    const activeUserIds = userIds.slice(0, 4); // Artem, Sarah, Marcus, Elena
+    const sessionUserId = activeUserIds[i % activeUserIds.length];
+
     await prisma.codingSession.create({
       data: {
         id: sessionId,
         commitId,
         agentId,
+        userId: sessionUserId,
         model: def.model,
         prompt: def.prompt,
         transcript: JSON.stringify(def.transcript),

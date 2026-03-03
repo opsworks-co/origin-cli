@@ -57,7 +57,7 @@ app.use('/api/users', userRoutes);
 // Serve React app in production
 const webDist = path.join(__dirname, '../../web/dist');
 app.use(express.static(webDist));
-app.get('*', (req, res) => {
+app.get('{*path}', (req, res) => {
   if (!req.path.startsWith('/api')) {
     res.sendFile(path.join(webDist, 'index.html'));
   }
