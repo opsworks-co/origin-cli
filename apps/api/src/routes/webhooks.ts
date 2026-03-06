@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
-import { verifyGitHubSignature, processGitHubPush } from '../services/webhook.js';
+import { verifyGitHubSignature, processGitHubPush, processGitHubPR } from '../services/webhook.js';
 
 const router = Router();
 
@@ -35,33 +35,58 @@ router.post('/github/:repoId', async (req: Request, res: Response) => {
       return res.json({ message: 'pong' });
     }
 
-    // Only process push events
-    if (event !== 'push') {
-      return res.json({ message: `Event '${event}' ignored` });
-    }
-
     const payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    const result = await processGitHubPush(repoId, payload);
 
     // Get repo for audit log
     const repo = await prisma.repo.findUnique({ where: { id: repoId } });
 
-    await prisma.auditLog.create({
-      data: {
-        orgId: repo?.orgId || '',
-        action: 'WEBHOOK_RECEIVED',
-        resource: repoId,
-        metadata: JSON.stringify({
-          event,
-          ref: payload.ref,
-          commitsCreated: result.created,
-          commitsSkipped: result.skipped,
-          repository: payload.repository?.full_name,
-        }),
-      },
-    });
+    // ── Handle push events ──
+    if (event === 'push') {
+      const result = await processGitHubPush(repoId, payload);
 
-    res.json({ success: true, ...result });
+      await prisma.auditLog.create({
+        data: {
+          orgId: repo?.orgId || '',
+          action: 'WEBHOOK_RECEIVED',
+          resource: repoId,
+          metadata: JSON.stringify({
+            event,
+            ref: payload.ref,
+            commitsCreated: result.created,
+            commitsSkipped: result.skipped,
+            repository: payload.repository?.full_name,
+          }),
+        },
+      });
+
+      return res.json({ success: true, ...result });
+    }
+
+    // ── Handle pull_request events ──
+    if (event === 'pull_request') {
+      const result = await processGitHubPR(repoId, payload);
+
+      await prisma.auditLog.create({
+        data: {
+          orgId: repo?.orgId || '',
+          action: 'WEBHOOK_PR_RECEIVED',
+          resource: repoId,
+          metadata: JSON.stringify({
+            event,
+            action: result.action,
+            prNumber: result.number,
+            state: result.state,
+            commitShas: result.commitShas,
+            repository: payload.repository?.full_name,
+          }),
+        },
+      });
+
+      return res.json({ success: true, ...result });
+    }
+
+    // Ignore other events
+    res.json({ message: `Event '${event}' ignored` });
   } catch (err) {
     console.error('Webhook error:', err);
     res.status(500).json({ error: 'Internal server error' });

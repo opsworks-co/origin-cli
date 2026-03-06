@@ -42,9 +42,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       },
     });
 
-    // AI percentage
+    // AI percentage — count commits with session OR heuristic detection
+    const aiCommitCount = await prisma.commit.count({
+      where: {
+        repoId: { in: repoIds },
+        OR: [
+          { session: { isNot: null } },
+          { aiToolDetected: { not: null } },
+        ],
+      },
+    });
     const aiPercentage = totalCommits > 0
-      ? parseFloat(((totalSessions / totalCommits) * 100).toFixed(1))
+      ? parseFloat(((aiCommitCount / totalCommits) * 100).toFixed(1))
       : 0;
 
     // Aggregates
@@ -103,37 +112,75 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       modelBreakdown[group.model] = group._count;
     }
 
-    // Sessions by day (last 30 days)
+    // Date range filter (defaults to last 30 days)
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const rangeFrom = req.query.from
+      ? new Date(req.query.from as string)
+      : thirtyDaysAgo;
+    const rangeTo = req.query.to
+      ? new Date(req.query.to as string)
+      : new Date();
 
     const recentSessions = await prisma.codingSession.findMany({
       where: {
         commit: { repoId: { in: repoIds } },
-        createdAt: { gte: thirtyDaysAgo },
+        createdAt: { gte: rangeFrom, lte: rangeTo },
       },
-      select: { createdAt: true },
+      select: { createdAt: true, costUsd: true, tokensUsed: true, durationMs: true, linesAdded: true, linesRemoved: true },
     });
 
     const dayCounts: Record<string, number> = {};
-    for (let i = 29; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      dayCounts[d.toISOString().split('T')[0]] = 0;
+    const dayCosts: Record<string, number> = {};
+    const dayTokens: Record<string, number> = {};
+    const dayLinesAdded: Record<string, number> = {};
+    const dayLinesRemoved: Record<string, number> = {};
+    const dayMs = 24 * 60 * 60 * 1000;
+    for (let t = rangeFrom.getTime(); t <= rangeTo.getTime(); t += dayMs) {
+      const key = new Date(t).toISOString().split('T')[0];
+      dayCounts[key] = 0;
+      dayCosts[key] = 0;
+      dayTokens[key] = 0;
+      dayLinesAdded[key] = 0;
+      dayLinesRemoved[key] = 0;
     }
+    const hourCounts = new Array(24).fill(0);
     for (const s of recentSessions) {
       const day = s.createdAt.toISOString().split('T')[0];
       if (dayCounts[day] !== undefined) {
         dayCounts[day]++;
+        dayCosts[day] += s.costUsd;
+        dayTokens[day] += s.tokensUsed;
+        dayLinesAdded[day] += s.linesAdded;
+        dayLinesRemoved[day] += s.linesRemoved;
       }
+      hourCounts[s.createdAt.getHours()]++;
     }
     const sessionsByDay = Object.entries(dayCounts).map(([date, count]) => ({ date, count }));
+    const costByDay = Object.entries(dayCosts).map(([date, cost]) => ({ date, cost: parseFloat(cost.toFixed(2)) }));
+    const tokensByDay = Object.entries(dayTokens).map(([date, tokens]) => ({ date, tokens }));
+
+    // Duration buckets
+    const durationBuckets = [
+      { bucket: '<1m', count: 0 },
+      { bucket: '1-5m', count: 0 },
+      { bucket: '5-15m', count: 0 },
+      { bucket: '15m+', count: 0 },
+    ];
+    for (const s of recentSessions) {
+      const mins = s.durationMs / 60000;
+      if (mins < 1) durationBuckets[0].count++;
+      else if (mins < 5) durationBuckets[1].count++;
+      else if (mins < 15) durationBuckets[2].count++;
+      else durationBuckets[3].count++;
+    }
 
     // AI authorship over time — deterministic based on actual daily data
     const totalCommitsByDay = await prisma.commit.findMany({
       where: {
         repoId: { in: repoIds },
-        committedAt: { gte: thirtyDaysAgo },
+        committedAt: { gte: rangeFrom, lte: rangeTo },
       },
       select: { committedAt: true },
     });
@@ -227,6 +274,159 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       },
     });
 
+    // ── New enriched fields ──────────────────────────────────────
+
+    // Top contributors (from User model)
+    const contributorAggs = await prisma.codingSession.groupBy({
+      by: ['userId'],
+      where: {
+        commit: { repoId: { in: repoIds } },
+        userId: { not: null },
+      },
+      _count: true,
+      _sum: { costUsd: true, linesAdded: true },
+      orderBy: { _count: { userId: 'desc' } },
+      take: 5,
+    });
+
+    const contributorUserIds = contributorAggs
+      .filter((g) => g.userId !== null)
+      .map((g) => g.userId as string);
+
+    const contributorDetails = await prisma.user.findMany({
+      where: { id: { in: contributorUserIds } },
+      select: { id: true, name: true },
+    });
+    const contributorMap = new Map(contributorDetails.map((u) => [u.id, u.name]));
+
+    const topContributors = contributorAggs
+      .filter((g) => g.userId !== null)
+      .map((g) => ({
+        id: g.userId,
+        name: contributorMap.get(g.userId as string) || 'Unknown',
+        sessions: g._count,
+        cost: parseFloat((g._sum.costUsd || 0).toFixed(2)),
+        lines: g._sum.linesAdded || 0,
+      }));
+
+    // Quality metrics
+    const reviewStatusCounts = await prisma.sessionReview.groupBy({
+      by: ['status'],
+      where: {
+        session: { commit: { repoId: { in: repoIds } } },
+      },
+      _count: true,
+    });
+
+    const qualityMetrics: Record<string, number> = {
+      approved: 0,
+      rejected: 0,
+      flagged: 0,
+      pending: unreviewed,
+    };
+    for (const g of reviewStatusCounts) {
+      const key = g.status.toLowerCase();
+      if (key in qualityMetrics && key !== 'pending') {
+        qualityMetrics[key] = g._count;
+      }
+    }
+
+    // Violations by policy type
+    const violationEntries = await prisma.auditLog.findMany({
+      where: { orgId, action: { contains: 'VIOLATION' } },
+      select: { metadata: true },
+    });
+
+    const violationTypeCounts: Record<string, number> = {};
+    for (const v of violationEntries) {
+      try {
+        const meta = JSON.parse(v.metadata);
+        const type = meta.policyType || 'UNKNOWN';
+        violationTypeCounts[type] = (violationTypeCounts[type] || 0) + 1;
+      } catch {}
+    }
+    const violationsByType = Object.entries(violationTypeCounts).map(([type, count]) => ({ type, count }));
+
+    // Session averages
+    const sessionAvgs = await prisma.codingSession.aggregate({
+      where: { commit: { repoId: { in: repoIds } } },
+      _avg: { costUsd: true, durationMs: true, tokensUsed: true },
+    });
+
+    const avgSessionCost = parseFloat((sessionAvgs._avg.costUsd || 0).toFixed(4));
+    const avgSessionDuration = Math.round(sessionAvgs._avg.durationMs || 0);
+    const avgSessionTokens = Math.round(sessionAvgs._avg.tokensUsed || 0);
+
+    // Cost by user
+    const costByUserAggs = await prisma.codingSession.groupBy({
+      by: ['userId'],
+      where: {
+        commit: { repoId: { in: repoIds } },
+        userId: { not: null },
+      },
+      _sum: { costUsd: true },
+    });
+
+    const orgUsers = await prisma.user.findMany({
+      where: { orgId },
+      select: { id: true, name: true },
+    });
+    const orgUserMap = new Map(orgUsers.map((u) => [u.id, u.name]));
+
+    const costByUser = costByUserAggs
+      .filter((g) => g.userId !== null)
+      .map((g) => ({
+        userId: g.userId,
+        name: orgUserMap.get(g.userId as string) || 'Unknown',
+        cost: parseFloat((g._sum.costUsd || 0).toFixed(2)),
+      }));
+
+    // ── New: Cost by repo ────────────────────────────────────────
+    const costByRepoAggs = await prisma.codingSession.findMany({
+      where: {
+        commit: { repoId: { in: repoIds } },
+        createdAt: { gte: rangeFrom, lte: rangeTo },
+      },
+      select: { costUsd: true, commit: { select: { repoId: true } } },
+    });
+
+    const costByRepoMap: Record<string, { cost: number; sessions: number }> = {};
+    for (const s of costByRepoAggs) {
+      const rid = s.commit.repoId;
+      if (!costByRepoMap[rid]) costByRepoMap[rid] = { cost: 0, sessions: 0 };
+      costByRepoMap[rid].cost += s.costUsd;
+      costByRepoMap[rid].sessions++;
+    }
+    const costByRepo = Object.entries(costByRepoMap).map(([repoId, data]) => ({
+      repo: repoMap.get(repoId) || 'Unknown',
+      cost: parseFloat(data.cost.toFixed(2)),
+      sessions: data.sessions,
+    }));
+
+    // ── New: Lines by day ────────────────────────────────────────
+    const linesByDay = Object.entries(dayLinesAdded).map(([date]) => ({
+      date,
+      added: dayLinesAdded[date],
+      removed: dayLinesRemoved[date],
+    }));
+
+    // ── New: Sessions by hour ────────────────────────────────────
+    const sessionsByHour = hourCounts.map((count: number, hour: number) => ({ hour, count }));
+
+    // ── New: Secret findings by type ─────────────────────────────
+    const secretsByType = await prisma.secretFinding.groupBy({
+      by: ['type'],
+      where: {
+        session: {
+          commit: { repoId: { in: repoIds } },
+          createdAt: { gte: rangeFrom, lte: rangeTo },
+        },
+      },
+      _count: true,
+    });
+
+    const totalSecretFindings = secretsByType.reduce((s, g) => s + g._count, 0);
+
     res.json({
       totalSessions,
       activeAgents,
@@ -247,6 +447,23 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       policyViolations,
       linesAdded,
       linesRemoved,
+      // Enriched fields
+      costByDay,
+      tokensByDay,
+      durationBuckets,
+      topContributors,
+      qualityMetrics,
+      violationsByType,
+      avgSessionCost,
+      avgSessionDuration,
+      avgSessionTokens,
+      costByUser,
+      // New analytics fields
+      costByRepo,
+      linesByDay,
+      sessionsByHour,
+      secretsByType: secretsByType.map((g) => ({ type: g.type, count: g._count })),
+      totalSecretFindings,
     });
   } catch (err) {
     console.error('Stats error:', err);

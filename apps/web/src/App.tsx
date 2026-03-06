@@ -2,9 +2,11 @@ import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
+import PublicLayout from './components/PublicLayout';
 import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import Pricing from './pages/Pricing';
 import Dashboard from './pages/Dashboard';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
@@ -21,6 +23,9 @@ import AgentDetail from './pages/AgentDetail';
 import Notifications from './pages/Notifications';
 import Team from './pages/Team';
 import UserDetail from './pages/UserDetail';
+import Reports from './pages/Reports';
+import MachineDetail from './pages/MachineDetail';
+import AcceptInvite from './pages/AcceptInvite';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -43,10 +48,13 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <Routes>
-      {/* Public routes */}
-      <Route path="/" element={<Landing />} />
+      {/* Public routes — wrapped in PublicLayout */}
+      <Route path="/" element={<PublicLayout><Landing /></PublicLayout>} />
+      <Route path="/docs" element={<PublicLayout><Docs /></PublicLayout>} />
+      <Route path="/pricing" element={<PublicLayout><Pricing /></PublicLayout>} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/invite/:token" element={<AcceptInvite />} />
 
       {/* Protected routes — wrapped in Layout */}
       <Route
@@ -190,11 +198,21 @@ export default function App() {
         }
       />
       <Route
-        path="/docs"
+        path="/reports"
         element={
           <ProtectedRoute>
             <Layout>
-              <Docs />
+              <Reports />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/machines/:id"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <MachineDetail />
             </Layout>
           </ProtectedRoute>
         }

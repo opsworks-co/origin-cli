@@ -31,7 +31,15 @@ export const api = {
   getRepos: () => request('/api/repos'),
   getMe: () => request('/api/auth/me'),
 
-  // Sessions
+  // Session lifecycle (MCP API — used by hooks)
+  startSession: (data: any) =>
+    request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) }),
+  updateSession: (id: string, data: any) =>
+    request(`/api/mcp/session/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  endSession: (data: any) =>
+    request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(data) }),
+
+  // Sessions (web API)
   getSessions: (params?: Record<string, string>) => {
     const q = new URLSearchParams(params).toString();
     return request(`/api/sessions${q ? `?${q}` : ''}`);

@@ -11,7 +11,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const agents = await prisma.agent.findMany({
       where: { orgId: req.user!.orgId },
-      include: { _count: { select: { sessions: true } } },
+      include: {
+        _count: { select: { sessions: true, versions: true } },
+      },
       orderBy: { createdAt: 'desc' },
     });
     res.json(agents);
@@ -24,7 +26,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 // POST / — create agent (MEMBER+)
 router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
-    const { name, slug, description, model } = req.body;
+    const { name, slug, description, model, systemPrompt, allowedTools, maxCostPerSession, maxTokensPerSession, permissions } = req.body;
 
     if (!name || !slug || !model) {
       return res.status(400).json({ error: 'Missing required fields: name, slug, model' });
@@ -37,6 +39,11 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
         slug,
         description: description || null,
         model,
+        systemPrompt: systemPrompt || null,
+        allowedTools: allowedTools ? JSON.stringify(allowedTools) : '[]',
+        maxCostPerSession: maxCostPerSession ?? null,
+        maxTokensPerSession: maxTokensPerSession ?? null,
+        permissions: permissions ? JSON.stringify(permissions) : '{}',
       },
     });
 
@@ -59,7 +66,7 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
   }
 });
 
-// GET /:id — single agent with recent sessions
+// GET /:id — single agent with recent sessions and version count
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
@@ -72,6 +79,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
           orderBy: { createdAt: 'desc' },
           include: { commit: true },
         },
+        _count: { select: { versions: true } },
       },
     });
 
@@ -90,7 +98,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { name, description, model, status } = req.body;
+    const { name, description, model, status, systemPrompt, allowedTools, maxCostPerSession, maxTokensPerSession, permissions } = req.body;
 
     const existing = await prisma.agent.findFirst({
       where: { id, orgId: req.user!.orgId },
@@ -100,6 +108,18 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
       return res.status(404).json({ error: 'Agent not found' });
     }
 
+    // Determine change type
+    let changeType = 'UPDATED';
+    if (status !== undefined && status !== existing.status) {
+      changeType = 'STATUS_CHANGED';
+    } else if (systemPrompt !== undefined && systemPrompt !== existing.systemPrompt) {
+      changeType = 'PROMPT_CHANGED';
+    } else if (model !== undefined && model !== existing.model) {
+      changeType = 'MODEL_CHANGED';
+    } else if (permissions !== undefined || allowedTools !== undefined) {
+      changeType = 'PERMISSIONS_CHANGED';
+    }
+
     const agent = await prisma.agent.update({
       where: { id },
       data: {
@@ -107,10 +127,15 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
         ...(description !== undefined && { description }),
         ...(model !== undefined && { model }),
         ...(status !== undefined && { status }),
+        ...(systemPrompt !== undefined && { systemPrompt: systemPrompt || null }),
+        ...(allowedTools !== undefined && { allowedTools: JSON.stringify(allowedTools) }),
+        ...(maxCostPerSession !== undefined && { maxCostPerSession }),
+        ...(maxTokensPerSession !== undefined && { maxTokensPerSession }),
+        ...(permissions !== undefined && { permissions: JSON.stringify(permissions) }),
       },
     });
 
-    await createAgentVersion(id, req.user!.id, status !== undefined ? 'STATUS_CHANGED' : 'UPDATED');
+    await createAgentVersion(id, req.user!.id, changeType);
 
     await prisma.auditLog.create({
       data: {
@@ -118,13 +143,73 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
         userId: req.user!.id,
         action: 'AGENT_UPDATED',
         resource: id,
-        metadata: JSON.stringify({ name, description, model, status }),
+        metadata: JSON.stringify({ changeType, name, description, model, status }),
       },
     });
 
     res.json(agent);
   } catch (err) {
     console.error('Update agent error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/restore/:versionId — restore agent to a previous version (ADMIN+)
+router.post('/:id/restore/:versionId', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const versionId = req.params.versionId as string;
+
+    const existing = await prisma.agent.findFirst({
+      where: { id, orgId: req.user!.orgId },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    const version = await prisma.agentVersion.findFirst({
+      where: { id: versionId, agentId: id },
+    });
+
+    if (!version) {
+      return res.status(404).json({ error: 'Version not found' });
+    }
+
+    const snapshot = JSON.parse(version.snapshot);
+
+    // Restore agent fields from snapshot
+    const agent = await prisma.agent.update({
+      where: { id },
+      data: {
+        name: snapshot.name ?? existing.name,
+        description: snapshot.description ?? existing.description,
+        model: snapshot.model ?? existing.model,
+        status: snapshot.status ?? existing.status,
+        systemPrompt: snapshot.systemPrompt ?? null,
+        allowedTools: snapshot.allowedTools ? JSON.stringify(snapshot.allowedTools) : existing.allowedTools,
+        maxCostPerSession: snapshot.maxCostPerSession ?? null,
+        maxTokensPerSession: snapshot.maxTokensPerSession ?? null,
+        permissions: snapshot.permissions ? JSON.stringify(snapshot.permissions) : existing.permissions,
+      },
+    });
+
+    // Create a new version for this restore action
+    await createAgentVersion(id, req.user!.id, 'RESTORED');
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'AGENT_RESTORED',
+        resource: id,
+        metadata: JSON.stringify({ restoredToVersion: version.version, versionId }),
+      },
+    });
+
+    res.json(agent);
+  } catch (err) {
+    console.error('Restore agent error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

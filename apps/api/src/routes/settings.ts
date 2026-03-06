@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { getBudgetConfig, saveBudgetConfig, getMonthlySpend, getDailySpend, getSpendByModel, getSpendByUser } from '../services/budget.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -57,6 +58,70 @@ router.delete('/api-keys/:id', async (req: AuthRequest, res: Response) => {
       where: { id, orgId: req.user!.orgId },
     });
     res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Budget / Cost Controls ──────────────────────────────────────────────────
+
+// GET /api/settings/budget — get budget config + current spend
+router.get('/budget', async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const [config, spent, dailySpend, spendByModel, spendByUser] = await Promise.all([
+      getBudgetConfig(orgId),
+      getMonthlySpend(orgId),
+      getDailySpend(orgId),
+      getSpendByModel(orgId),
+      getSpendByUser(orgId),
+    ]);
+
+    const percentage = config.monthlyLimit > 0 ? (spent / config.monthlyLimit) * 100 : 0;
+
+    res.json({
+      config,
+      currentSpend: {
+        monthly: spent,
+        percentage,
+        dailySpend,
+        byModel: spendByModel,
+        byUser: spendByUser,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/settings/budget — update budget config
+router.put('/budget', async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user!.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const { monthlyLimit, alertThresholds, blockOnExceed } = req.body;
+    const config = await saveBudgetConfig(req.user!.orgId, {
+      ...(monthlyLimit !== undefined && { monthlyLimit }),
+      ...(alertThresholds !== undefined && { alertThresholds }),
+      ...(blockOnExceed !== undefined && { blockOnExceed }),
+      alertedAt: [], // Reset alerts when config changes
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'BUDGET_UPDATED',
+        resource: 'budget',
+        metadata: JSON.stringify({ monthlyLimit, alertThresholds, blockOnExceed }),
+      },
+    });
+
+    res.json(config);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });

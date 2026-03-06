@@ -12,6 +12,9 @@ import { agentsCommand, agentCreateCommand } from './commands/agents.js';
 import { reposCommand, repoAddCommand } from './commands/repos.js';
 import { auditCommand } from './commands/audit.js';
 import { statsCommand } from './commands/stats.js';
+import { enableCommand } from './commands/enable.js';
+import { disableCommand } from './commands/disable.js';
+import { hooksCommand } from './commands/hooks.js';
 
 const program = new Command();
 
@@ -23,8 +26,19 @@ program
 // Setup
 program.command('login').description('Login to Origin').action(loginCommand);
 program.command('init').description('Register this machine as an agent host').action(initCommand);
+program.command('enable')
+  .description('Install Origin hooks for session tracking in this repo')
+  .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini). Auto-detects if omitted.')
+  .action(enableCommand);
+program.command('disable').description('Remove Origin hooks from this repo').action(disableCommand);
 program.command('status').description('Show current status').action(statusCommand);
 program.command('whoami').description('Show current user and org info').action(whoamiCommand);
+
+// Internal hook handlers (called by agent hooks, not by users directly)
+const hooks = program.command('hooks').description('Internal hook handlers (used by AI agents)');
+hooks.command('claude-code <event>').description('Handle Claude Code hook event').action((event) => hooksCommand(event, 'claude-code'));
+hooks.command('cursor <event>').description('Handle Cursor hook event').action((event) => hooksCommand(event, 'cursor'));
+hooks.command('gemini <event>').description('Handle Gemini CLI hook event').action((event) => hooksCommand(event, 'gemini'));
 
 // Sessions
 const sessions = program.command('sessions').description('List coding sessions');

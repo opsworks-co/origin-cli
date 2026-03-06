@@ -1,6 +1,5 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
 
 const FEATURES = [
   {
@@ -57,7 +56,7 @@ const CAPABILITIES = [
   {
     category: 'For Developers',
     items: [
-      'CLI with 15 commands — sessions, agents, repos, policies, stats',
+      'CLI with 15 commands \u2014 sessions, agents, repos, policies, stats',
       'MCP server with 12 tools for Claude Code and Cursor',
       'Automatic session tracking with zero config',
       'Review, approve, or flag AI sessions from CLI or dashboard',
@@ -74,44 +73,8 @@ const TOOLS = [
 ];
 
 export default function Landing() {
-  const { user } = useAuth();
-
   return (
-    <div className="min-h-screen bg-gray-950">
-      {/* Nav */}
-      <nav className="border-b border-gray-800/50 sticky top-0 bg-gray-950/90 backdrop-blur-sm z-50">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
-              O
-            </div>
-            <span className="text-lg font-semibold">Origin</span>
-          </div>
-          <div className="hidden sm:flex items-center gap-8 text-sm text-gray-400">
-            <a href="#features" className="hover:text-gray-100 transition-colors">Features</a>
-            <a href="#use-cases" className="hover:text-gray-100 transition-colors">Use Cases</a>
-            <a href="#integrations" className="hover:text-gray-100 transition-colors">Integrations</a>
-            <a href="#setup" className="hover:text-gray-100 transition-colors">Setup</a>
-          </div>
-          <div className="flex items-center gap-4">
-            {user ? (
-              <Link to="/dashboard" className="btn-primary">
-                Go to Dashboard
-              </Link>
-            ) : (
-              <>
-                <Link to="/login" className="text-sm text-gray-400 hover:text-gray-100 transition-colors">
-                  Sign in
-                </Link>
-                <Link to="/register" className="btn-primary text-sm">
-                  Get started
-                </Link>
-              </>
-            )}
-          </div>
-        </div>
-      </nav>
-
+    <>
       {/* Hero */}
       <section className="relative overflow-hidden">
         {/* Gradient orbs */}
@@ -232,14 +195,14 @@ export default function Landing() {
               session tracking, reviews, stats, and audit &mdash; all via MCP tools.
             </p>
             <pre className="bg-gray-800 rounded-lg px-4 py-3 text-xs font-mono text-gray-300 overflow-x-auto leading-relaxed">
-{`check_file_access   → enforce policies
-start/end_session   → track sessions
-report_violation    → compliance logging
-list_sessions       → browse sessions
-review_session      → approve/reject/flag
-get_stats           → dashboard stats
-list_agents/repos   → view platform data
-get_audit_log       → audit trail`}
+{`check_file_access   \u2192 enforce policies
+start/end_session   \u2192 track sessions
+report_violation    \u2192 compliance logging
+list_sessions       \u2192 browse sessions
+review_session      \u2192 approve/reject/flag
+get_stats           \u2192 dashboard stats
+list_agents/repos   \u2192 view platform data
+get_audit_log       \u2192 audit trail`}
             </pre>
           </div>
           <div className="card">
@@ -293,25 +256,6 @@ $ origin stats && origin audit`}
           </Link>
         </div>
       </section>
-
-      {/* Footer */}
-      <footer className="border-t border-gray-800/50">
-        <div className="max-w-6xl mx-auto px-6 py-8">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded bg-indigo-600 flex items-center justify-center text-white font-bold text-xs">
-                O
-              </div>
-              <span className="font-semibold text-sm">Origin</span>
-              <span className="text-xs text-gray-600">v2</span>
-            </div>
-            <div className="flex items-center gap-6 text-xs text-gray-600">
-              <span>AI Agent Governance Platform</span>
-              <span>&copy; {new Date().getFullYear()} Origin</span>
-            </div>
-          </div>
-        </div>
-      </footer>
-    </div>
+    </>
   );
 }

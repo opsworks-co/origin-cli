@@ -15,11 +15,13 @@ model Org {
   users         User[]
   repos         Repo[]
   agents        Agent[]
+  integrations  IntegrationConfig[]
   policies      Policy[]
   auditLogs     AuditLog[]
   apiKeys       ApiKey[]
   machines      Machine[]
   notifications Notification[]
+  invitations   Invitation[]
 }
 
 model User {
@@ -35,6 +37,20 @@ model User {
   reviews       SessionReview[]
   notifications Notification[]
   sessions      CodingSession[]
+}
+
+model Invitation {
+  id        String    @id @default(uuid())
+  orgId     String
+  org       Org       @relation(fields: [orgId], references: [id])
+  email     String?
+  role      String    @default("MEMBER")
+  token     String    @unique
+  createdBy String
+  expiresAt DateTime
+  usedAt    DateTime?
+  usedBy    String?
+  createdAt DateTime  @default(now())
 }
 
 model ApiKey {
@@ -58,20 +74,24 @@ model Repo {
   provider  String    @default("local")
   syncedAt  DateTime?
   createdAt DateTime  @default(now())
-  commits   Commit[]
-  webhooks  Webhook[]
+  commits      Commit[]
+  webhooks     Webhook[]
+  pullRequests PullRequest[]
+  policyRules  PolicyRule[]
 }
 
 model Commit {
-  id          String         @id @default(uuid())
-  repoId      String
-  repo        Repo           @relation(fields: [repoId], references: [id])
-  sha         String
-  message     String
-  author      String
-  committedAt DateTime
-  createdAt   DateTime       @default(now())
-  session     CodingSession?
+  id                String         @id @default(uuid())
+  repoId            String
+  repo              Repo           @relation(fields: [repoId], references: [id])
+  sha               String
+  message           String
+  author            String
+  aiToolDetected    String?        // Detected AI tool: "claude-code", "copilot", "cursor", "aider", "gemini"
+  aiDetectionMethod String?        // How: "session", "co-author-trailer", "author-pattern", "commit-message"
+  committedAt       DateTime
+  createdAt         DateTime       @default(now())
+  session           CodingSession?
 }
 
 model CodingSession {
@@ -87,13 +107,44 @@ model CodingSession {
   transcript   String
   filesChanged String
   tokensUsed   Int            @default(0)
+  inputTokens  Int            @default(0)
+  outputTokens Int            @default(0)
   toolCalls    Int            @default(0)
   durationMs   Int            @default(0)
   linesAdded   Int            @default(0)
   linesRemoved Int            @default(0)
   costUsd      Float          @default(0)
+  agentSystemPrompt String?                    // Snapshot of agent system prompt active during session
   createdAt    DateTime       @default(now())
   review       SessionReview?
+  sessionDiff    SessionDiff?
+  promptChanges  PromptChange[]
+  secretFindings SecretFinding[]
+}
+
+model SessionDiff {
+  id            String        @id @default(uuid())
+  sessionId     String        @unique
+  session       CodingSession @relation(fields: [sessionId], references: [id])
+  headBefore    String        // HEAD SHA when session started
+  headAfter     String        // HEAD SHA when session ended
+  commitShas    String        @default("[]") // JSON array of real commit SHAs
+  diff          String        // Full unified diff
+  diffTruncated Boolean       @default(false)
+  linesAdded    Int           @default(0)
+  linesRemoved  Int           @default(0)
+  createdAt     DateTime      @default(now())
+}
+
+model PromptChange {
+  id           String        @id @default(uuid())
+  sessionId    String
+  session      CodingSession @relation(fields: [sessionId], references: [id])
+  promptIndex  Int           // 0-based index in session
+  promptText   String        // Truncated to 1000 chars
+  filesChanged String        // JSON array of file paths
+  diff         String        @default("") // Unified diff of edits from this prompt
+  createdAt    DateTime      @default(now())
 }
 
 model SessionReview {
@@ -110,18 +161,24 @@ model SessionReview {
 // ── Agents ──────────────────────────────────────────────────────
 
 model Agent {
-  id          String          @id @default(uuid())
-  orgId       String
-  org         Org             @relation(fields: [orgId], references: [id])
-  name        String
-  slug        String
-  description String?
-  model       String
-  status      String          @default("ACTIVE")
-  createdAt   DateTime        @default(now())
-  sessions    CodingSession[]
-  policyRules PolicyRule[]
-  versions    AgentVersion[]
+  id                String          @id @default(uuid())
+  orgId             String
+  org               Org             @relation(fields: [orgId], references: [id])
+  name              String
+  slug              String
+  description       String?
+  model             String
+  status            String          @default("ACTIVE")
+  systemPrompt      String?         // Custom system instructions for this agent
+  allowedTools      String          @default("[]")  // JSON array of allowed tool names
+  maxCostPerSession Float?          // Max cost in USD per session for this agent
+  maxTokensPerSession Int?          // Max tokens per session
+  permissions       String          @default("{}") // JSON: { "filePatterns": ["**/*.ts"], "blockedPaths": ["**/.env"] }
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @default(now()) @updatedAt
+  sessions          CodingSession[]
+  policyRules       PolicyRule[]
+  versions          AgentVersion[]
 }
 
 // ── Policies ────────────────────────────────────────────────────
@@ -140,27 +197,32 @@ model Policy {
 }
 
 model PolicyRule {
-  id        String  @id @default(uuid())
+  id        String   @id @default(uuid())
   policyId  String
-  policy    Policy  @relation(fields: [policyId], references: [id])
+  policy    Policy   @relation(fields: [policyId], references: [id])
   agentId   String?
-  agent     Agent?  @relation(fields: [agentId], references: [id])
+  agent     Agent?   @relation(fields: [agentId], references: [id])
+  machineId String?
+  machine   Machine? @relation(fields: [machineId], references: [id])
+  repoId    String?
+  repo      Repo?    @relation(fields: [repoId], references: [id])
   condition String
   action    String
-  severity  String  @default("MEDIUM")
+  severity  String   @default("MEDIUM")
 }
 
 // ── Machines ────────────────────────────────────────────────────
 
 model Machine {
-  id            String   @id @default(uuid())
+  id            String       @id @default(uuid())
   orgId         String
-  org           Org      @relation(fields: [orgId], references: [id])
+  org           Org          @relation(fields: [orgId], references: [id])
   hostname      String
-  machineId     String   @unique
-  detectedTools String   @default("[]") // JSON array
-  lastSeenAt    DateTime @default(now())
-  createdAt     DateTime @default(now())
+  machineId     String       @unique
+  detectedTools String       @default("[]") // JSON array
+  lastSeenAt    DateTime     @default(now())
+  createdAt     DateTime     @default(now())
+  policyRules   PolicyRule[]
 }
 
 // ── Audit Log ───────────────────────────────────────────────────
@@ -204,12 +266,47 @@ model AgentVersion {
 // ── Webhooks ────────────────────────────────────────────────────
 
 model Webhook {
+  id              String   @id @default(uuid())
+  repoId          String
+  repo            Repo     @relation(fields: [repoId], references: [id])
+  secret          String
+  active          Boolean  @default(true)
+  events          String   @default("[\"push\",\"pull_request\"]")
+  githubWebhookId Int?     // GitHub's webhook ID (for auto-cleanup on delete)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ── Pull Requests ─────────────────────────────────────────────────
+
+model PullRequest {
+  id          String   @id @default(uuid())
+  repoId      String
+  repo        Repo     @relation(fields: [repoId], references: [id])
+  number      Int
+  title       String
+  url         String
+  state       String   @default("open")
+  author      String
+  baseBranch  String
+  headBranch  String
+  commitShas  String   @default("[]")
+  checkStatus String?
+  commentId   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ── Integrations ──────────────────────────────────────────────────
+
+model IntegrationConfig {
   id        String   @id @default(uuid())
-  repoId    String
-  repo      Repo     @relation(fields: [repoId], references: [id])
-  secret    String
-  active    Boolean  @default(true)
-  events    String   @default("[\"push\"]")
+  orgId     String
+  org       Org      @relation(fields: [orgId], references: [id])
+  provider  String
+  token     String
+  baseUrl   String   @default("")
+  settings  String   @default("{}")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -232,4 +329,19 @@ model Notification {
   emailSent   Boolean   @default(false)
   emailSentAt DateTime?
   createdAt   DateTime  @default(now())
+}
+
+// ── Secret/PII Scanning ──────────────────────────────────────────
+
+model SecretFinding {
+  id          String        @id @default(uuid())
+  sessionId   String
+  session     CodingSession @relation(fields: [sessionId], references: [id])
+  type        String        // API_KEY, AWS_SECRET, PRIVATE_KEY, PASSWORD, PII_EMAIL, CONNECTION_STRING, JWT_TOKEN, GENERIC_SECRET
+  severity    String        // low, medium, high, critical
+  filePath    String
+  lineNumber  Int           @default(0)
+  match       String        // Redacted snippet
+  ruleName    String        // Which regex rule matched
+  createdAt   DateTime      @default(now())
 }

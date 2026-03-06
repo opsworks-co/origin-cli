@@ -8,6 +8,8 @@ import {
   fetchEntireCheckpoints,
   fetchFileContent,
 } from './github.js';
+import { getIntegrationConfig } from './github-integration.js';
+import { detectAITool } from './ai-commit-detector.js';
 
 interface Checkpoint {
   commitSha: string;
@@ -26,115 +28,9 @@ interface Checkpoint {
   costUsd?: number;
 }
 
-const AI_MODELS = ['claude-code', 'cursor', 'gemini-cli', 'aider', 'copilot'];
-const SAMPLE_PROMPTS = [
-  'Add user authentication with JWT tokens',
-  'Fix the broken pagination on the users list',
-  'Refactor the database layer to use connection pooling',
-  'Add unit tests for the payment processing module',
-  'Implement dark mode toggle in settings',
-  'Fix memory leak in WebSocket handler',
-  'Add CSV export functionality to reports',
-  'Optimize the search query performance',
-  'Add input validation to all API endpoints',
-  'Implement rate limiting middleware',
-];
-
-function generateFakeTranscript(prompt: string, _model: string, files: string[]): Array<{ role: string; content: string }> {
-  return [
-    { role: 'human', content: prompt },
-    { role: 'assistant', content: `I'll help you with that. Let me analyze the codebase first.\n\nLooking at the relevant files: ${files.join(', ')}` },
-    { role: 'human', content: 'Go ahead and implement it.' },
-    { role: 'assistant', content: `I've made the following changes:\n\n${files.map((f) => `- Modified \`${f}\` — updated the implementation`).join('\n')}\n\nThe changes include proper error handling and follow the existing code patterns. Want me to add tests for this?` },
-    { role: 'human', content: 'Looks good, thanks!' },
-  ];
-}
-
-function generateFakeFiles(): string[] {
-  const allFiles = [
-    'src/index.ts', 'src/app.ts', 'src/config.ts',
-    'src/routes/auth.ts', 'src/routes/users.ts', 'src/routes/api.ts',
-    'src/models/user.ts', 'src/models/session.ts',
-    'src/middleware/auth.ts', 'src/middleware/validate.ts',
-    'src/utils/helpers.ts', 'src/utils/logger.ts',
-    'tests/auth.test.ts', 'tests/users.test.ts',
-    'package.json', 'README.md',
-  ];
-  const count = Math.floor(Math.random() * 5) + 1;
-  const shuffled = [...allFiles].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, count);
-}
-
-type SessionCreate = {
-  model: string;
-  prompt: string;
-  transcript: string;
-  filesChanged: string;
-  tokensUsed: number;
-  toolCalls: number;
-  durationMs: number;
-  linesAdded: number;
-  linesRemoved: number;
-  costUsd: number;
-};
-
-type CommitCreate = {
-  repoId: string;
-  sha: string;
-  message: string;
-  author: string;
-  committedAt: Date;
-  session?: { create: SessionCreate };
-};
-
-function buildSimulatedCommit(
-  repoId: string,
-  sha: string,
-  message: string,
-  author: string,
-  date: Date
-): CommitCreate {
-  const isAI = Math.random() > 0.4;
-  const model = AI_MODELS[Math.floor(Math.random() * AI_MODELS.length)];
-  const prompt = SAMPLE_PROMPTS[Math.floor(Math.random() * SAMPLE_PROMPTS.length)];
-  const files = generateFakeFiles();
-  const transcript = generateFakeTranscript(prompt, model, files);
-  const linesAdded = Math.floor(Math.random() * 500) + 10;
-  const linesRemoved = Math.floor(Math.random() * 200) + 5;
-  const tokensUsed = Math.floor(Math.random() * 50000) + 5000;
-  const costUsd = parseFloat((tokensUsed * 0.000015).toFixed(4));
-
-  const data: CommitCreate = {
-    repoId,
-    sha,
-    message,
-    author,
-    committedAt: date,
-  };
-
-  if (isAI) {
-    data.session = {
-      create: {
-        model,
-        prompt,
-        transcript: JSON.stringify(transcript),
-        filesChanged: JSON.stringify(files),
-        tokensUsed,
-        toolCalls: Math.floor(Math.random() * 30) + 1,
-        durationMs: Math.floor(Math.random() * 300000) + 10000,
-        linesAdded,
-        linesRemoved,
-        costUsd,
-      },
-    };
-  }
-
-  return data;
-}
-
 // ─── Main entry point ──────────────────────────────────────────────────────
 
-export async function syncCheckpoints(repo: { id: string; path: string; provider: string }) {
+export async function syncCheckpoints(repo: { id: string; path: string; provider: string; orgId: string }) {
   if (repo.provider === 'github') {
     return syncGitHubRepo(repo);
   }
@@ -143,7 +39,7 @@ export async function syncCheckpoints(repo: { id: string; path: string; provider
 
 // ─── GitHub sync ───────────────────────────────────────────────────────────
 
-async function syncGitHubRepo(repo: { id: string; path: string }) {
+async function syncGitHubRepo(repo: { id: string; path: string; orgId: string }) {
   const parsed = parseGitHubUrl(repo.path);
   if (!parsed) {
     console.error(`Invalid GitHub URL: ${repo.path}`);
@@ -153,14 +49,13 @@ async function syncGitHubRepo(repo: { id: string; path: string }) {
   const { owner, repo: repoName } = parsed;
   console.log(`Syncing GitHub repo: ${owner}/${repoName}`);
 
-  // 1. Check for .entire/ checkpoints
+  // 1. Check for .entire/ checkpoints (real session data from Entire CLI)
   const entireFiles = await fetchEntireCheckpoints(owner, repoName);
-
   if (entireFiles.length > 0) {
     return syncGitHubEntireDir(repo, entireFiles);
   }
 
-  // 2. Fall back to commit history with simulated sessions
+  // 2. Fetch real commit history (no fake sessions)
   return syncGitHubCommits(repo, owner, repoName);
 }
 
@@ -186,6 +81,8 @@ async function syncGitHubEntireDir(
           sha: checkpoint.commitSha,
           message: checkpoint.message,
           author: checkpoint.author,
+          aiToolDetected: checkpoint.model,
+          aiDetectionMethod: 'session',
           committedAt: new Date(checkpoint.committedAt),
           session: {
             create: {
@@ -212,13 +109,38 @@ async function syncGitHubEntireDir(
 }
 
 async function syncGitHubCommits(
-  repo: { id: string },
+  repo: { id: string; orgId: string },
   owner: string,
   repoName: string
 ) {
+  // Try using the org's GitHub token first for private repos
   let commits;
   try {
-    commits = await fetchGitHubCommits(owner, repoName, 50);
+    const integration = await getIntegrationConfig(repo.orgId, 'github');
+    if (integration?.token) {
+      // Use the org's token to fetch commits (works for private repos)
+      const res = await fetch(
+        `${integration.apiBaseUrl || 'https://api.github.com'}/repos/${owner}/${repoName}/commits?per_page=50`,
+        {
+          headers: {
+            Accept: 'application/vnd.github.v3+json',
+            Authorization: `Bearer ${integration.token}`,
+            'User-Agent': 'Origin-App',
+          },
+        }
+      );
+      if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
+      const data = await res.json();
+      commits = data.map((c: any) => ({
+        sha: c.sha,
+        message: c.commit?.message || '',
+        author: c.commit?.author?.name || 'unknown',
+        date: c.commit?.author?.date || new Date().toISOString(),
+      }));
+    } else {
+      // Fallback to public API (no token)
+      commits = await fetchGitHubCommits(owner, repoName, 50);
+    }
   } catch (err) {
     console.error(`Failed to fetch commits from GitHub:`, err);
     return { synced: 0, total: 0 };
@@ -231,15 +153,19 @@ async function syncGitHubCommits(
     });
     if (existing) continue;
 
-    const data = buildSimulatedCommit(
-      repo.id,
-      entry.sha,
-      entry.message,
-      entry.author,
-      new Date(entry.date)
-    );
-
-    await prisma.commit.create({ data });
+    // Create commit record with AI detection
+    const detection = detectAITool(entry.message, entry.author);
+    await prisma.commit.create({
+      data: {
+        repoId: repo.id,
+        sha: entry.sha,
+        message: entry.message,
+        author: entry.author,
+        aiToolDetected: detection.aiToolDetected,
+        aiDetectionMethod: detection.aiDetectionMethod,
+        committedAt: new Date(entry.date),
+      },
+    });
     synced++;
   }
 
@@ -249,6 +175,12 @@ async function syncGitHubCommits(
 // ─── Local sync ────────────────────────────────────────────────────────────
 
 async function syncLocalRepo(repo: { id: string; path: string }) {
+  // Check if the local path exists before attempting sync
+  if (!fs.existsSync(repo.path)) {
+    console.warn(`Local repo path does not exist: ${repo.path} — skipping sync`);
+    return { synced: 0, total: 0 };
+  }
+
   const entireDir = path.join(repo.path, '.entire');
   const hasEntire = fs.existsSync(entireDir);
 
@@ -278,6 +210,8 @@ async function syncFromEntireDir(repo: { id: string; path: string }, entireDir: 
           sha: checkpoint.commitSha,
           message: checkpoint.message,
           author: checkpoint.author,
+          aiToolDetected: checkpoint.model,
+          aiDetectionMethod: 'session',
           committedAt: new Date(checkpoint.committedAt),
           session: {
             create: {
@@ -319,15 +253,24 @@ async function syncFromGitLog(repo: { id: string; path: string }) {
     });
     if (existing) continue;
 
-    const data = buildSimulatedCommit(
-      repo.id,
-      entry.hash,
-      entry.message,
-      entry.author_name,
-      new Date(entry.date)
-    );
+    // Concatenate first line + body for full message (simple-git splits them)
+    const fullMessage = (entry as any).body
+      ? `${entry.message}\n\n${(entry as any).body}`
+      : entry.message;
 
-    await prisma.commit.create({ data });
+    // Create commit record with AI detection
+    const detection = detectAITool(fullMessage, entry.author_name);
+    await prisma.commit.create({
+      data: {
+        repoId: repo.id,
+        sha: entry.hash,
+        message: fullMessage,
+        author: entry.author_name,
+        aiToolDetected: detection.aiToolDetected,
+        aiDetectionMethod: detection.aiDetectionMethod,
+        committedAt: new Date(entry.date),
+      },
+    });
     synced++;
   }
 

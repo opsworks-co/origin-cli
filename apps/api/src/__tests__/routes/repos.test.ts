@@ -7,6 +7,19 @@ vi.mock('../../services/checkpoint.js', () => ({
   syncCheckpoints: vi.fn().mockResolvedValue({ synced: 5, total: 10 }),
 }));
 
+// Mock github-integration service
+vi.mock('../../services/github-integration.js', () => ({
+  getIntegrationConfig: vi.fn().mockResolvedValue(null),
+  listGitHubRepos: vi.fn().mockResolvedValue({ success: true, repos: [] }),
+  createGitHubWebhook: vi.fn().mockResolvedValue({ success: true, hookId: 123 }),
+  deleteGitHubWebhook: vi.fn().mockResolvedValue({ success: true }),
+  parseRepoFullName: vi.fn((path: string) => {
+    const cleaned = path.replace(/^https?:\/\//, '').replace(/^github\.com\//, '');
+    const parts = cleaned.split('/');
+    return parts.length >= 2 ? { owner: parts[0], repo: parts[1] } : null;
+  }),
+}));
+
 // Import route AFTER mocks
 import repoRouter from '../../routes/repos.js';
 
@@ -132,7 +145,10 @@ describe('Repos Routes', () => {
 
   describe('DELETE /api/repos/:id', () => {
     it('deletes repo with cascade delete of commits and sessions', async () => {
-      mockPrisma.repo.findFirst.mockResolvedValue({ id: 'r1', orgId: 'org-1', name: 'to-delete' });
+      mockPrisma.repo.findFirst.mockResolvedValue({ id: 'r1', orgId: 'org-1', name: 'to-delete', path: 'github.com/org/repo' });
+      mockPrisma.webhook.findMany.mockResolvedValue([]);
+      mockPrisma.webhook.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.pullRequest.deleteMany.mockResolvedValue({ count: 0 });
       mockPrisma.commit.findMany.mockResolvedValue([{ id: 'c1' }, { id: 'c2' }]);
       mockPrisma.sessionReview.deleteMany.mockResolvedValue({ count: 1 });
       mockPrisma.codingSession.deleteMany.mockResolvedValue({ count: 2 });
@@ -153,7 +169,10 @@ describe('Repos Routes', () => {
     });
 
     it('handles repo with no commits gracefully', async () => {
-      mockPrisma.repo.findFirst.mockResolvedValue({ id: 'r1', orgId: 'org-1', name: 'empty-repo' });
+      mockPrisma.repo.findFirst.mockResolvedValue({ id: 'r1', orgId: 'org-1', name: 'empty-repo', path: 'local/repo' });
+      mockPrisma.webhook.findMany.mockResolvedValue([]);
+      mockPrisma.webhook.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.pullRequest.deleteMany.mockResolvedValue({ count: 0 });
       mockPrisma.commit.findMany.mockResolvedValue([]);
       mockPrisma.repo.delete.mockResolvedValue({});
       mockPrisma.auditLog.create.mockResolvedValue({});
@@ -167,7 +186,10 @@ describe('Repos Routes', () => {
     });
 
     it('cascade deletes reviews, sessions, then commits', async () => {
-      mockPrisma.repo.findFirst.mockResolvedValue({ id: 'r1', orgId: 'org-1', name: 'cascade' });
+      mockPrisma.repo.findFirst.mockResolvedValue({ id: 'r1', orgId: 'org-1', name: 'cascade', path: 'github.com/org/repo' });
+      mockPrisma.webhook.findMany.mockResolvedValue([]);
+      mockPrisma.webhook.deleteMany.mockResolvedValue({ count: 0 });
+      mockPrisma.pullRequest.deleteMany.mockResolvedValue({ count: 0 });
       mockPrisma.commit.findMany.mockResolvedValue([{ id: 'c1' }]);
       mockPrisma.sessionReview.deleteMany.mockResolvedValue({ count: 0 });
       mockPrisma.codingSession.deleteMany.mockResolvedValue({ count: 1 });

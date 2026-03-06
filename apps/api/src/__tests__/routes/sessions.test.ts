@@ -104,6 +104,7 @@ describe('Sessions Routes', () => {
     it('returns a single session with mapped fields', async () => {
       const session = createMockSession();
       mockPrisma.codingSession.findFirst.mockResolvedValue(session);
+      mockPrisma.pullRequest.findMany.mockResolvedValue([]);
 
       const res = await request(app).get('/api/sessions/s1');
       expect(res.status).toBe(200);

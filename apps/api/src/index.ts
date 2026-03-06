@@ -20,6 +20,7 @@ try {
 }
 
 import { authMiddleware } from './middleware/auth.js';
+import { startAutoSync } from './services/auto-sync.js';
 import authRoutes from './routes/auth.js';
 import repoRoutes from './routes/repos.js';
 import sessionRoutes from './routes/sessions.js';
@@ -32,7 +33,11 @@ import mcpRoutes from './routes/mcp.js';
 import settingsRoutes from './routes/settings.js';
 import notificationRoutes from './routes/notifications.js';
 import webhookRoutes from './routes/webhooks.js';
+import integrationRoutes from './routes/integrations.js';
 import userRoutes from './routes/users.js';
+import chatRoutes from './routes/chat.js';
+import scanningRoutes from './routes/scanning.js';
+import reportRoutes from './routes/reports.js';
 
 const app = express();
 
@@ -52,7 +57,11 @@ app.use('/api/mcp', mcpRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/integrations', integrationRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/chat', chatRoutes);
+app.use('/api/scanning', scanningRoutes);
+app.use('/api/reports', reportRoutes);
 
 // Serve React app in production
 const webDist = path.join(__dirname, '../../web/dist');
@@ -66,4 +75,5 @@ app.get('{*path}', (req, res) => {
 const PORT = process.env.PORT || 4002;
 app.listen(PORT, () => {
   console.log(`Origin v2 running on http://localhost:${PORT}`);
+  startAutoSync();
 });

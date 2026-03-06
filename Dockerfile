@@ -35,6 +35,8 @@ COPY --from=api-builder /app/apps/api/prisma ./apps/api/prisma
 COPY --from=api-builder /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=api-builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=web-builder /app/apps/web/dist ./apps/web/dist
+COPY docker-start.sh ./docker-start.sh
+RUN chmod +x docker-start.sh
 
 RUN mkdir -p /data
 
@@ -43,4 +45,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["node", "apps/api/dist/index.js"]
+CMD ["./docker-start.sh"]

@@ -1,0 +1,570 @@
+import { prisma } from '../db.js';
+
+// ── GitHub API helpers ────────────────────────────────────────────
+
+const GITHUB_API = 'https://api.github.com';
+
+function githubHeaders(token: string) {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github.v3+json',
+    'Content-Type': 'application/json',
+    'User-Agent': 'Origin-AI-Governance/1.0',
+  };
+}
+
+/**
+ * Parse "github.com/owner/repo", "https://github.com/owner/repo",
+ * or "owner/repo" into { owner, repo }.
+ */
+export function parseRepoFullName(repoPath: string): { owner: string; repo: string } | null {
+  // Strip protocol + domain
+  let cleaned = repoPath.replace(/^https?:\/\//, '').replace(/^github\.com\//, '');
+  // Remove trailing .git
+  cleaned = cleaned.replace(/\.git$/, '');
+  // Remove leading/trailing slashes
+  cleaned = cleaned.replace(/^\/+|\/+$/g, '');
+
+  const parts = cleaned.split('/');
+  if (parts.length >= 2) {
+    return { owner: parts[0], repo: parts[1] };
+  }
+  return null;
+}
+
+// ── Commit Status ─────────────────────────────────────────────────
+
+export type StatusState = 'pending' | 'success' | 'failure' | 'error';
+
+export async function postCommitStatus(
+  token: string,
+  owner: string,
+  repo: string,
+  sha: string,
+  state: StatusState,
+  description: string,
+  targetUrl?: string,
+  baseUrl: string = GITHUB_API,
+) {
+  const url = `${baseUrl}/repos/${owner}/${repo}/statuses/${sha}`;
+  const body: Record<string, string> = {
+    state,
+    description,
+    context: 'origin/ai-governance',
+  };
+  if (targetUrl) body.target_url = targetUrl;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: githubHeaders(token),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`GitHub status API error (${res.status}):`, err);
+      return { success: false, error: err };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.error('Failed to post commit status:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// ── PR Comments ───────────────────────────────────────────────────
+
+export async function postPRComment(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  body: string,
+  baseUrl: string = GITHUB_API,
+): Promise<{ success: boolean; commentId?: string; error?: string }> {
+  const url = `${baseUrl}/repos/${owner}/${repo}/issues/${prNumber}/comments`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: githubHeaders(token),
+      body: JSON.stringify({ body }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`GitHub comment API error (${res.status}):`, err);
+      return { success: false, error: err };
+    }
+    const data = (await res.json()) as { id: number };
+    return { success: true, commentId: String(data.id) };
+  } catch (err: any) {
+    console.error('Failed to post PR comment:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+export async function updatePRComment(
+  token: string,
+  owner: string,
+  repo: string,
+  commentId: string,
+  body: string,
+  baseUrl: string = GITHUB_API,
+): Promise<{ success: boolean; error?: string }> {
+  const url = `${baseUrl}/repos/${owner}/${repo}/issues/comments/${commentId}`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'PATCH',
+      headers: githubHeaders(token),
+      body: JSON.stringify({ body }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`GitHub update comment error (${res.status}):`, err);
+      return { success: false, error: err };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.error('Failed to update PR comment:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// ── Test Connection ───────────────────────────────────────────────
+
+export async function testGitHubConnection(
+  token: string,
+  baseUrl: string = GITHUB_API,
+): Promise<{ success: boolean; login?: string; error?: string }> {
+  try {
+    const res = await fetch(`${baseUrl}/user`, {
+      headers: githubHeaders(token),
+    });
+    if (!res.ok) {
+      return { success: false, error: `HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as { login: string };
+    return { success: true, login: data.login };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+// ── List Repos (Auto-Discovery) ──────────────────────────────────
+
+export interface GitHubRepoInfo {
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  url: string;
+  defaultBranch: string;
+}
+
+/**
+ * List all repos accessible by the token (includes private repos).
+ * Paginates through all pages automatically.
+ */
+export async function listGitHubRepos(
+  token: string,
+  baseUrl: string = GITHUB_API,
+): Promise<{ success: boolean; repos?: GitHubRepoInfo[]; error?: string }> {
+  const allRepos: GitHubRepoInfo[] = [];
+  let url: string | null = `${baseUrl}/user/repos?per_page=100&sort=updated&type=all`;
+
+  try {
+    while (url) {
+      const currentUrl: string = url;
+      const res: Response = await fetch(currentUrl, {
+        headers: githubHeaders(token),
+      });
+
+      if (!res.ok) {
+        const err = await res.text();
+        console.error(`GitHub list repos error (${res.status}):`, err);
+        return { success: false, error: `HTTP ${res.status}` };
+      }
+
+      const data = (await res.json()) as Array<{
+        owner: { login: string };
+        name: string;
+        full_name: string;
+        private: boolean;
+        html_url: string;
+        default_branch: string;
+      }>;
+
+      for (const r of data) {
+        allRepos.push({
+          owner: r.owner.login,
+          name: r.name,
+          fullName: r.full_name,
+          private: r.private,
+          url: r.html_url,
+          defaultBranch: r.default_branch,
+        });
+      }
+
+      // Parse Link header for pagination
+      const linkHeader: string | null = res.headers.get('link');
+      url = null;
+      if (linkHeader) {
+        const nextMatch: RegExpMatchArray | null = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+        if (nextMatch) {
+          url = nextMatch[1];
+        }
+      }
+    }
+
+    return { success: true, repos: allRepos };
+  } catch (err: any) {
+    console.error('Failed to list GitHub repos:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// ── Create Webhook on GitHub ─────────────────────────────────────
+
+/**
+ * Creates a webhook on a GitHub repo via the API.
+ * Requires token with `admin:repo_hook` or `repo` scope.
+ */
+export async function createGitHubWebhook(
+  token: string,
+  owner: string,
+  repo: string,
+  webhookUrl: string,
+  secret: string,
+  baseUrl: string = GITHUB_API,
+): Promise<{ success: boolean; hookId?: number; error?: string }> {
+  const url = `${baseUrl}/repos/${owner}/${repo}/hooks`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: githubHeaders(token),
+      body: JSON.stringify({
+        name: 'web',
+        active: true,
+        events: ['push', 'pull_request'],
+        config: {
+          url: webhookUrl,
+          content_type: 'application/json',
+          secret,
+          insecure_ssl: '0',
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`GitHub create webhook error (${res.status}):`, err);
+      return { success: false, error: `HTTP ${res.status}: ${err}` };
+    }
+
+    const data = (await res.json()) as { id: number };
+    return { success: true, hookId: data.id };
+  } catch (err: any) {
+    console.error('Failed to create GitHub webhook:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// ── Delete Webhook on GitHub ─────────────────────────────────────
+
+/**
+ * Deletes a webhook from a GitHub repo via the API.
+ */
+export async function deleteGitHubWebhook(
+  token: string,
+  owner: string,
+  repo: string,
+  hookId: number,
+  baseUrl: string = GITHUB_API,
+): Promise<{ success: boolean; error?: string }> {
+  const url = `${baseUrl}/repos/${owner}/${repo}/hooks/${hookId}`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: githubHeaders(token),
+    });
+
+    if (!res.ok && res.status !== 404) {
+      const err = await res.text();
+      console.error(`GitHub delete webhook error (${res.status}):`, err);
+      return { success: false, error: `HTTP ${res.status}: ${err}` };
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Failed to delete GitHub webhook:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// ── Integration Config ────────────────────────────────────────────
+
+export interface IntegrationSettings {
+  postChecks: boolean;
+  postComments: boolean;
+  checkOnReview: boolean;
+}
+
+const DEFAULT_SETTINGS: IntegrationSettings = {
+  postChecks: true,
+  postComments: true,
+  checkOnReview: true,
+};
+
+export async function getIntegrationConfig(orgId: string, provider: string = 'github') {
+  const config = await prisma.integrationConfig.findFirst({
+    where: { orgId, provider },
+  });
+  if (!config) return null;
+
+  let settings: IntegrationSettings;
+  try {
+    settings = { ...DEFAULT_SETTINGS, ...JSON.parse(config.settings) };
+  } catch {
+    settings = DEFAULT_SETTINGS;
+  }
+
+  return {
+    ...config,
+    parsedSettings: settings,
+    apiBaseUrl: config.baseUrl || GITHUB_API,
+  };
+}
+
+// ── Session Summary Comment Builder ───────────────────────────────
+
+interface SessionForComment {
+  id: string;
+  agentName: string | null;
+  model: string;
+  costUsd: number;
+  tokensUsed: number;
+  linesAdded: number;
+  linesRemoved: number;
+  reviewStatus: string | null;
+}
+
+function statusEmoji(status: string | null): string {
+  switch (status?.toUpperCase()) {
+    case 'APPROVED': return '✅';
+    case 'REJECTED': return '❌';
+    case 'FLAGGED': return '⚠️';
+    default: return '⏳';
+  }
+}
+
+function statusLabel(status: string | null): string {
+  switch (status?.toUpperCase()) {
+    case 'APPROVED': return 'Approved';
+    case 'REJECTED': return 'Rejected';
+    case 'FLAGGED': return 'Flagged';
+    default: return 'Pending Review';
+  }
+}
+
+export function buildSessionSummaryComment(
+  sessions: SessionForComment[],
+  originBaseUrl: string,
+): string {
+  if (sessions.length === 0) {
+    return [
+      '## 🔍 Origin — AI Governance Report',
+      '',
+      'No AI coding sessions linked to this pull request.',
+      '',
+      `📊 [View Dashboard](${originBaseUrl}/dashboard)`,
+    ].join('\n');
+  }
+
+  const rows = sessions.map((s) => {
+    const agent = s.agentName || '—';
+    const cost = `$${s.costUsd.toFixed(2)}`;
+    const tokens = s.tokensUsed >= 1000 ? `${(s.tokensUsed / 1000).toFixed(1)}k` : String(s.tokensUsed);
+    const status = `${statusEmoji(s.reviewStatus)} ${statusLabel(s.reviewStatus)}`;
+    const link = `[View](${originBaseUrl}/sessions/${s.id})`;
+    return `| ${link} | ${agent} | ${s.model} | ${cost} | ${tokens} | ${status} |`;
+  });
+
+  const totalCost = sessions.reduce((sum, s) => sum + s.costUsd, 0);
+  const totalLines = sessions.reduce((sum, s) => sum + s.linesAdded, 0);
+  const allApproved = sessions.every((s) => s.reviewStatus?.toUpperCase() === 'APPROVED');
+  const anyRejected = sessions.some((s) => s.reviewStatus?.toUpperCase() === 'REJECTED');
+  const anyFlagged = sessions.some((s) => s.reviewStatus?.toUpperCase() === 'FLAGGED');
+
+  let overallStatus = '⏳ Pending review';
+  if (allApproved) overallStatus = '✅ All sessions approved';
+  else if (anyRejected) overallStatus = '❌ Session(s) rejected';
+  else if (anyFlagged) overallStatus = '⚠️ Session(s) flagged';
+
+  return [
+    '## 🔍 Origin — AI Governance Report',
+    '',
+    '| Session | Agent | Model | Cost | Tokens | Status |',
+    '|---------|-------|-------|------|--------|--------|',
+    ...rows,
+    '',
+    `**Summary:** ${sessions.length} AI session${sessions.length > 1 ? 's' : ''} linked to this PR · $${totalCost.toFixed(2)} total cost · +${totalLines.toLocaleString()} lines added`,
+    '',
+    `**Overall:** ${overallStatus}`,
+    '',
+    `📊 [View in Origin](${originBaseUrl}/dashboard)`,
+    '',
+    '---',
+    '*Powered by [Origin](https://github.com/dolobanko/origin-v2) — AI Coding Agent Governance*',
+  ].join('\n');
+}
+
+// ── Compute Check Status from Sessions ────────────────────────────
+
+export function computeCheckStatus(sessions: SessionForComment[]): {
+  state: StatusState;
+  description: string;
+} {
+  if (sessions.length === 0) {
+    return { state: 'success', description: 'No AI sessions linked to this PR' };
+  }
+
+  const anyRejected = sessions.some((s) => s.reviewStatus?.toUpperCase() === 'REJECTED');
+  const anyFlagged = sessions.some((s) => s.reviewStatus?.toUpperCase() === 'FLAGGED');
+  const allApproved = sessions.every((s) => s.reviewStatus?.toUpperCase() === 'APPROVED');
+  const pending = sessions.filter((s) => !s.reviewStatus).length;
+
+  if (anyRejected) {
+    return { state: 'failure', description: `${sessions.length} AI session(s) — rejected` };
+  }
+  if (anyFlagged) {
+    return { state: 'failure', description: `${sessions.length} AI session(s) — flagged for review` };
+  }
+  if (allApproved) {
+    return { state: 'success', description: `${sessions.length} AI session(s) — all approved` };
+  }
+  return {
+    state: 'pending',
+    description: `${sessions.length} AI session(s) — ${pending} awaiting review`,
+  };
+}
+
+// ── Get Sessions for a PR ─────────────────────────────────────────
+
+export async function getSessionsForPR(repoId: string, commitShas: string[]): Promise<SessionForComment[]> {
+  if (commitShas.length === 0) return [];
+
+  const commits = await prisma.commit.findMany({
+    where: {
+      repoId,
+      sha: { in: commitShas },
+    },
+    include: {
+      session: {
+        include: {
+          agent: true,
+          review: true,
+        },
+      },
+    },
+  });
+
+  return commits
+    .filter((c) => c.session)
+    .map((c) => ({
+      id: c.session!.id,
+      agentName: c.session!.agent?.name || null,
+      model: c.session!.model,
+      costUsd: c.session!.costUsd,
+      tokensUsed: c.session!.tokensUsed,
+      linesAdded: c.session!.linesAdded,
+      linesRemoved: c.session!.linesRemoved,
+      reviewStatus: c.session!.review?.status || null,
+    }));
+}
+
+// ── Post Status + Comment for a PR ────────────────────────────────
+
+export async function updatePRGitHubStatus(
+  orgId: string,
+  repoId: string,
+  prNumber: number,
+  headSha: string,
+  originBaseUrl: string,
+) {
+  const integration = await getIntegrationConfig(orgId);
+  if (!integration) return;
+
+  const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+  if (!repo) return;
+
+  const parsed = parseRepoFullName(repo.path);
+  if (!parsed) return;
+
+  const pr = await prisma.pullRequest.findFirst({
+    where: { repoId, number: prNumber },
+  });
+  if (!pr) return;
+
+  let commitShas: string[];
+  try {
+    commitShas = JSON.parse(pr.commitShas);
+  } catch {
+    commitShas = [];
+  }
+
+  const sessions = await getSessionsForPR(repoId, commitShas);
+
+  // Post status check
+  if (integration.parsedSettings.postChecks) {
+    const { state, description } = computeCheckStatus(sessions);
+    await postCommitStatus(
+      integration.token,
+      parsed.owner,
+      parsed.repo,
+      headSha,
+      state,
+      description,
+      `${originBaseUrl}/sessions`,
+      integration.apiBaseUrl,
+    );
+
+    await prisma.pullRequest.update({
+      where: { id: pr.id },
+      data: { checkStatus: state },
+    });
+  }
+
+  // Post or update comment
+  if (integration.parsedSettings.postComments) {
+    const commentBody = buildSessionSummaryComment(sessions, originBaseUrl);
+
+    if (pr.commentId) {
+      await updatePRComment(
+        integration.token,
+        parsed.owner,
+        parsed.repo,
+        pr.commentId,
+        commentBody,
+        integration.apiBaseUrl,
+      );
+    } else {
+      const result = await postPRComment(
+        integration.token,
+        parsed.owner,
+        parsed.repo,
+        prNumber,
+        commentBody,
+        integration.apiBaseUrl,
+      );
+      if (result.commentId) {
+        await prisma.pullRequest.update({
+          where: { id: pr.id },
+          data: { commentId: result.commentId },
+        });
+      }
+    }
+  }
+}

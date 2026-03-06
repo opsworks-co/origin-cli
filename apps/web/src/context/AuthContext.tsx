@@ -8,10 +8,11 @@ interface AuthState {
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string, orgName: string, orgSlug: string) => Promise<void>;
+  setSession: (token: string, user: User) => void;
   logout: () => void;
 }
 
-const AuthContext = createContext<AuthState | undefined>(undefined);
+export const AuthContext = createContext<AuthState | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -61,13 +62,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  const setSession = useCallback((token: string, userData: User) => {
+    localStorage.setItem('origin_token', token);
+    setUser(userData);
+  }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem('origin_token');
     setUser(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, error, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, error, login, register, setSession, logout }}>
       {children}
     </AuthContext.Provider>
   );

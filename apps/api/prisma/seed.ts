@@ -397,6 +397,71 @@ const SESSION_DEFS: {
       },
     ],
   },
+  // ── Extra sessions for more data volume ─────────────────────────
+  {
+    model: "claude-code",
+    prompt: "Migrate database schema to v3 with new indexes",
+    filesChanged: [
+      "prisma/schema.prisma",
+      "prisma/migrations/003_indexes.sql",
+      "src/db.ts",
+    ],
+    transcript: [
+      { role: "human", content: "We need to add composite indexes for the session queries that are running slow." },
+      { role: "assistant", content: "I'll add indexes on (orgId, createdAt) and (userId, model) for the CodingSession table, plus a unique index on (repoId, sha) for commits." },
+    ],
+  },
+  {
+    model: "cursor",
+    prompt: "Add dark mode support to settings page",
+    filesChanged: [
+      "src/pages/Settings.tsx",
+      "src/context/ThemeContext.tsx",
+      "src/styles/theme.css",
+    ],
+    transcript: [
+      { role: "human", content: "Users want a dark mode toggle in settings." },
+      { role: "assistant", content: "I'll create a ThemeContext provider that persists the preference to localStorage, and update the Settings page with a toggle switch." },
+    ],
+  },
+  {
+    model: "copilot",
+    prompt: "Optimize SQL queries for dashboard aggregation",
+    filesChanged: [
+      "src/routes/stats.ts",
+      "src/utils/query-builder.ts",
+    ],
+    transcript: [
+      { role: "human", content: "The dashboard takes 3 seconds to load. Can you optimize the stats queries?" },
+      { role: "assistant", content: "The bottleneck is N+1 queries in the session-by-repo aggregation. I'll batch them into a single groupBy and add a 30-second cache layer." },
+    ],
+  },
+  {
+    model: "claude-code",
+    prompt: "Implement webhook retry logic with exponential backoff",
+    filesChanged: [
+      "src/webhooks/retry.ts",
+      "src/webhooks/queue.ts",
+      "src/webhooks/types.ts",
+    ],
+    transcript: [
+      { role: "human", content: "Webhooks fail silently when the target is down. We need retry logic." },
+      { role: "assistant", content: "I'll implement exponential backoff with jitter: retries at 1s, 4s, 16s, 64s, then give up. Failed deliveries are logged to the audit trail." },
+    ],
+  },
+  {
+    model: "gemini-cli",
+    prompt: "Add Prometheus metrics endpoint for monitoring",
+    filesChanged: [
+      "src/metrics/prometheus.ts",
+      "src/middleware/metrics.ts",
+      "src/index.ts",
+    ],
+    transcript: [
+      { role: "human", content: "We need a /metrics endpoint for Prometheus scraping." },
+      { role: "assistant", content: "I'll use prom-client to expose request duration histograms, active connections gauge, and session count counters at GET /metrics." },
+    ],
+  },
 ];
 
 const REVIEW_STATUSES = ["APPROVED", "REJECTED", "FLAGGED"] as const;
@@ -409,10 +474,15 @@ async function main() {
   console.log("Clearing existing data...");
 
   // Delete in reverse dependency order
+  await prisma.notification.deleteMany();
+  await prisma.machine.deleteMany();
+  await prisma.pullRequest.deleteMany();
+  await prisma.integrationConfig.deleteMany();
   await prisma.auditLog.deleteMany();
   await prisma.sessionReview.deleteMany();
   await prisma.codingSession.deleteMany();
   await prisma.commit.deleteMany();
+  await prisma.webhook.deleteMany();
   await prisma.policyRule.deleteMany();
   await prisma.policy.deleteMany();
   await prisma.apiKey.deleteMany();
@@ -535,7 +605,7 @@ async function main() {
   ]);
   console.log(`  Created ${agents.length} agents`);
 
-  // ── 5. Coding sessions (15) ─────────────────────────────────────
+  // ── 5. Coding sessions (20) ─────────────────────────────────────
   const sessionIds: string[] = [];
   const commitIds: string[] = [];
 
@@ -547,17 +617,24 @@ async function main() {
     copilot: null,
   };
 
+  // Active users (skip VIEWER David Kim)
+  const activeUserIds = userIds.slice(0, 4); // Artem, Sarah, Marcus, Elena
+
   for (let i = 0; i < SESSION_DEFS.length; i++) {
     const def = SESSION_DEFS[i];
     const commitId = uuid();
     const sessionId = uuid();
     const repoId = repoIds[i % repoIds.length];
-    const sessionDate = daysAgo(randInt(0, 13));
+    const sessionDate = daysAgo(randInt(0, 28)); // Full 28-day spread
 
     // Determine agent assignment: models with agents get them ~70% of the time
     const possibleAgent = agentMap[def.model];
     const agentId =
       possibleAgent && Math.random() > 0.3 ? possibleAgent : null;
+
+    // Assign sessions across team members
+    const sessionUserId = activeUserIds[i % activeUserIds.length];
+    const userDef = userDefs[userIds.indexOf(sessionUserId)];
 
     const sha = [...Array(40)]
       .map(() => Math.floor(Math.random() * 16).toString(16))
@@ -571,14 +648,36 @@ async function main() {
         message: def.prompt.toLowerCase().startsWith("fix")
           ? `fix: ${def.prompt.toLowerCase()}`
           : `feat: ${def.prompt.toLowerCase()}`,
-        author: "Artem Dolobanko <artem@origin.dev>",
+        author: `${userDef.name} <${userDef.email}>`,
+        aiToolDetected: def.model,
+        aiDetectionMethod: 'session',
         committedAt: sessionDate,
       },
     });
 
-    // Assign sessions across team members (skip VIEWER)
-    const activeUserIds = userIds.slice(0, 4); // Artem, Sarah, Marcus, Elena
-    const sessionUserId = activeUserIds[i % activeUserIds.length];
+    // Bimodal cost: 70% cheap, 25% moderate, 5% expensive
+    let costUsd: number;
+    const costRoll = Math.random();
+    if (costRoll < 0.7) {
+      costUsd = randFloat(0.01, 0.50);
+    } else if (costRoll < 0.95) {
+      costUsd = randFloat(0.50, 3.00);
+    } else {
+      costUsd = randFloat(5.00, 12.00);
+    }
+
+    // Varied durations: some very short, some very long
+    let durationMs: number;
+    const durRoll = Math.random();
+    if (durRoll < 0.3) {
+      durationMs = randInt(5000, 60000); // <1 min
+    } else if (durRoll < 0.7) {
+      durationMs = randInt(60000, 300000); // 1-5 min
+    } else if (durRoll < 0.9) {
+      durationMs = randInt(300000, 900000); // 5-15 min
+    } else {
+      durationMs = randInt(900000, 3600000); // 15-60 min
+    }
 
     await prisma.codingSession.create({
       data: {
@@ -592,10 +691,10 @@ async function main() {
         filesChanged: JSON.stringify(def.filesChanged),
         tokensUsed: randInt(5000, 80000),
         toolCalls: randInt(1, 40),
-        durationMs: randInt(10000, 600000),
+        durationMs,
         linesAdded: randInt(10, 500),
         linesRemoved: randInt(5, 200),
-        costUsd: randFloat(0.01, 2.5),
+        costUsd,
         createdAt: sessionDate,
       },
     });
@@ -603,12 +702,15 @@ async function main() {
     sessionIds.push(sessionId);
     commitIds.push(commitId);
   }
-  console.log(`  Created 15 coding sessions with commits`);
+  console.log(`  Created ${SESSION_DEFS.length} coding sessions with commits`);
 
   // ── 5b. Reviews (some sessions reviewed) ────────────────────────
-  // Review roughly 9 of 15 sessions
-  const reviewedIndices = [0, 1, 2, 4, 6, 7, 9, 12, 13];
-  for (const idx of reviewedIndices) {
+  // Review roughly 12 of 20 sessions — spread reviewers across users
+  const reviewedIndices = [0, 1, 2, 4, 6, 7, 9, 11, 12, 13, 15, 17];
+  const reviewerIds = [userIds[0], userIds[1], userIds[0], userIds[1], userIds[0], userIds[2],
+                       userIds[0], userIds[1], userIds[0], userIds[2], userIds[1], userIds[0]];
+  for (let r = 0; r < reviewedIndices.length; r++) {
+    const idx = reviewedIndices[r];
     const status = pick([...REVIEW_STATUSES]);
     const notes: Record<string, string> = {
       APPROVED: "Looks good, clean implementation.",
@@ -620,7 +722,7 @@ async function main() {
       data: {
         id: uuid(),
         sessionId: sessionIds[idx],
-        userId: user.id,
+        userId: reviewerIds[r],
         status,
         note: notes[status],
       },
@@ -715,6 +817,7 @@ async function main() {
     resource: string;
     metadata: string;
     createdAt: Date;
+    userId?: string;
   }[] = [];
 
   // REPO_SYNCED events
@@ -732,7 +835,8 @@ async function main() {
   }
 
   // SESSION_REVIEWED events (for reviewed sessions)
-  for (const idx of reviewedIndices) {
+  for (let r = 0; r < reviewedIndices.length; r++) {
+    const idx = reviewedIndices[r];
     auditEntries.push({
       action: "SESSION_REVIEWED",
       resource: `session:${sessionIds[idx]}`,
@@ -741,6 +845,7 @@ async function main() {
         prompt: SESSION_DEFS[idx].prompt,
       }),
       createdAt: daysAgo(randInt(0, 7)),
+      userId: reviewerIds[r],
     });
   }
 
@@ -770,7 +875,7 @@ async function main() {
     });
   }
 
-  // ── 8. Policy violation audit entries ───────────────────────────
+  // ── 8. Policy violation audit entries (5 total) ─────────────────
   auditEntries.push({
     action: "POLICY_VIOLATION",
     resource: `session:${sessionIds[5]}`,
@@ -803,13 +908,56 @@ async function main() {
     createdAt: daysAgo(1),
   });
 
+  auditEntries.push({
+    action: "POLICY_VIOLATION",
+    resource: `session:${sessionIds[3]}`,
+    metadata: JSON.stringify({
+      policyName: "Approved models only",
+      policyType: "MODEL_ALLOWLIST",
+      severity: "MEDIUM",
+      sessionModel: SESSION_DEFS[3].model,
+      action: "BLOCK",
+      message: "Session used a model not on the approved list",
+    }),
+    createdAt: daysAgo(5),
+  });
+
+  auditEntries.push({
+    action: "POLICY_VIOLATION",
+    resource: `session:${sessionIds[18]}`,
+    metadata: JSON.stringify({
+      policyName: "Session cost limit",
+      policyType: "COST_LIMIT",
+      severity: "LOW",
+      costUsd: 7.50,
+      threshold: 5.00,
+      action: "WARN",
+      message: "Session exceeded $5.00 cost threshold",
+    }),
+    createdAt: daysAgo(2),
+  });
+
+  auditEntries.push({
+    action: "POLICY_VIOLATION",
+    resource: `session:${sessionIds[14]}`,
+    metadata: JSON.stringify({
+      policyName: "Review infrastructure",
+      policyType: "REQUIRE_REVIEW",
+      severity: "HIGH",
+      violatingFile: "infra/terraform/main.tf",
+      action: "REQUIRE_REVIEW",
+      message: "Infrastructure change requires human review",
+    }),
+    createdAt: daysAgo(4),
+  });
+
   // Write all audit log entries
   for (const entry of auditEntries) {
     await prisma.auditLog.create({
       data: {
         id: uuid(),
         orgId: org.id,
-        userId: user.id,
+        userId: entry.userId || user.id,
         action: entry.action,
         resource: entry.resource,
         metadata: entry.metadata,
@@ -818,6 +966,207 @@ async function main() {
     });
   }
   console.log(`  Created ${auditEntries.length} audit log entries`);
+
+  // ── 9. Machines ─────────────────────────────────────────────────
+  const machineDefs = [
+    { hostname: "artem-mbp.local", tools: ["claude-code", "cursor", "git", "node", "docker"] },
+    { hostname: "sarah-workstation", tools: ["cursor", "git", "python", "terraform"] },
+    { hostname: "ci-runner-01", tools: ["claude-code", "git", "docker", "kubectl"] },
+    { hostname: "marcus-laptop.local", tools: ["copilot", "git", "node", "vscode"] },
+  ];
+
+  for (const def of machineDefs) {
+    await prisma.machine.create({
+      data: {
+        id: uuid(),
+        orgId: org.id,
+        hostname: def.hostname,
+        machineId: crypto.randomUUID(),
+        detectedTools: JSON.stringify(def.tools),
+        lastSeenAt: daysAgo(randInt(0, 3)),
+      },
+    });
+  }
+  console.log(`  Created ${machineDefs.length} machines`);
+
+  // ── 10. Notifications ───────────────────────────────────────────
+  const notificationDefs = [
+    { userId: userIds[0], type: "SESSION_FLAGGED", title: "Session Flagged for Review", message: "A coding session modifying payments module was flagged by policy enforcement.", link: `/sessions/${sessionIds[5]}`, read: false },
+    { userId: userIds[0], type: "POLICY_VIOLATION", title: "Policy Violation Detected", message: "\"No env changes\" policy was violated by a copilot session modifying .env.production.", link: `/audit`, read: false },
+    { userId: userIds[1], type: "REVIEW_NEEDED", title: "3 Sessions Awaiting Review", message: "There are 3 unreviewed coding sessions from the last 24 hours.", link: `/sessions?status=unreviewed`, read: false },
+    { userId: userIds[0], type: "REVIEW_COMPLETED", title: "Review Completed", message: "Sarah Chen approved the JWT authentication session.", link: `/sessions/${sessionIds[0]}`, read: true },
+    { userId: userIds[0], type: "POLICY_VIOLATION", title: "Cost Limit Exceeded", message: "A claude-code session exceeded the $5.00 cost threshold at $7.50.", link: `/sessions/${sessionIds[18]}`, read: false },
+    { userId: userIds[2], type: "REVIEW_NEEDED", title: "New Session to Review", message: "Elena Rodriguez submitted a session for the provenant repo.", link: `/sessions/${sessionIds[14]}`, read: true },
+  ];
+
+  for (const def of notificationDefs) {
+    await prisma.notification.create({
+      data: {
+        id: uuid(),
+        orgId: org.id,
+        userId: def.userId,
+        type: def.type,
+        title: def.title,
+        message: def.message,
+        link: def.link,
+        read: def.read,
+        readAt: def.read ? daysAgo(randInt(0, 2)) : null,
+        createdAt: daysAgo(randInt(0, 5)),
+      },
+    });
+  }
+  console.log(`  Created ${notificationDefs.length} notifications`);
+
+  // ── 11. Integration Config (GitHub) ──────────────────────────────
+  await prisma.integrationConfig.create({
+    data: {
+      id: uuid(),
+      orgId: org.id,
+      provider: "github",
+      token: "ghp_demo_token_for_testing",
+      baseUrl: "",
+      settings: JSON.stringify({
+        postChecks: true,
+        postComments: true,
+        checkOnReview: true,
+      }),
+    },
+  });
+  console.log("  Created 1 integration config (GitHub)");
+
+  // ── 12. Pull Requests ────────────────────────────────────────────
+  // Collect commit SHAs for the GitHub repos to link to PRs
+  const wtCommits = await prisma.commit.findMany({
+    where: { repoId: repoWorkTrustId },
+    select: { sha: true },
+    take: 3,
+  });
+  const pvCommits = await prisma.commit.findMany({
+    where: { repoId: repoProvenantId },
+    select: { sha: true },
+    take: 2,
+  });
+
+  const prDefs = [
+    {
+      repoId: repoWorkTrustId,
+      number: 42,
+      title: "feat: add JWT authentication system",
+      url: "https://github.com/dolobanko/WorkTrust/pull/42",
+      state: "merged",
+      author: "artem-dolobanko",
+      baseBranch: "main",
+      headBranch: "feature/jwt-auth",
+      commitShas: wtCommits.map((c) => c.sha),
+      checkStatus: "success",
+    },
+    {
+      repoId: repoWorkTrustId,
+      number: 45,
+      title: "fix: pagination bug in sessions endpoint",
+      url: "https://github.com/dolobanko/WorkTrust/pull/45",
+      state: "open",
+      author: "sarah-chen",
+      baseBranch: "main",
+      headBranch: "fix/pagination",
+      commitShas: wtCommits.slice(0, 1).map((c) => c.sha),
+      checkStatus: "pending",
+    },
+    {
+      repoId: repoProvenantId,
+      number: 18,
+      title: "feat: implement RBAC with custom roles",
+      url: "https://github.com/dolobanko/provenant/pull/18",
+      state: "open",
+      author: "marcus-johnson",
+      baseBranch: "main",
+      headBranch: "feature/rbac",
+      commitShas: pvCommits.map((c) => c.sha),
+      checkStatus: "failure",
+    },
+  ];
+
+  for (const pr of prDefs) {
+    await prisma.pullRequest.create({
+      data: {
+        id: uuid(),
+        repoId: pr.repoId,
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        state: pr.state,
+        author: pr.author,
+        baseBranch: pr.baseBranch,
+        headBranch: pr.headBranch,
+        commitShas: JSON.stringify(pr.commitShas),
+        checkStatus: pr.checkStatus,
+      },
+    });
+  }
+  console.log(`  Created ${prDefs.length} pull requests`);
+
+  // ── Heuristically-detected AI commits (no sessions) ──────────────────────
+  // These demonstrate the AI detection feature detecting commits via git metadata
+  const heuristicCommits = [
+    {
+      repoId: repoProvenantId,
+      message: 'refactor: clean up error handling in auth module\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>',
+      author: 'Artem Dolobanko',
+      aiToolDetected: 'claude-code',
+      aiDetectionMethod: 'co-author-trailer',
+      daysAgo: 2,
+    },
+    {
+      repoId: repoProvenantId,
+      message: 'feat: add retry logic for API calls\n\nCo-Authored-By: GitHub Copilot <noreply@github.com>',
+      author: 'Sarah Chen',
+      aiToolDetected: 'copilot',
+      aiDetectionMethod: 'co-author-trailer',
+      daysAgo: 3,
+    },
+    {
+      repoId: repoOriginId,
+      message: 'fix: resolve race condition in session tracking\n\nCo-Authored-By: Claude <noreply@anthropic.com>',
+      author: 'Artem Dolobanko',
+      aiToolDetected: 'claude-code',
+      aiDetectionMethod: 'co-author-trailer',
+      daysAgo: 1,
+    },
+    {
+      repoId: repoWorkTrustId,
+      message: 'docs: update API reference with new endpoints',
+      author: 'Sarah Chen',
+      aiToolDetected: null,
+      aiDetectionMethod: null,
+      daysAgo: 4,
+    },
+    {
+      repoId: repoOriginId,
+      message: 'chore: update dependencies and lock file',
+      author: 'Marcus Rivera',
+      aiToolDetected: null,
+      aiDetectionMethod: null,
+      daysAgo: 5,
+    },
+  ];
+
+  for (const hc of heuristicCommits) {
+    const d = new Date();
+    d.setDate(d.getDate() - hc.daysAgo);
+    const sha = [...Array(40)].map(() => Math.floor(Math.random() * 16).toString(16)).join('');
+    await prisma.commit.create({
+      data: {
+        repoId: hc.repoId,
+        sha,
+        message: hc.message,
+        author: hc.author,
+        aiToolDetected: hc.aiToolDetected,
+        aiDetectionMethod: hc.aiDetectionMethod,
+        committedAt: d,
+      },
+    });
+  }
+  console.log(`  Created ${heuristicCommits.length} heuristic-detection demo commits`);
 
   console.log("\nSeed completed successfully.");
 }

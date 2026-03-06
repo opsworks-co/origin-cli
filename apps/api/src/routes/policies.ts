@@ -12,7 +12,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const policies = await prisma.policy.findMany({
       where: { orgId: req.user!.orgId },
       include: {
-        rules: { include: { agent: true } },
+        rules: {
+          include: {
+            agent: { select: { name: true } },
+            machine: { select: { hostname: true } },
+            repo: { select: { name: true } },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -141,7 +147,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 router.post('/:id/rules', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { agentId, condition, action, severity } = req.body;
+    const { agentId, machineId, repoId, condition, action, severity } = req.body;
 
     if (!condition || !action) {
       return res.status(400).json({ error: 'Missing required fields: condition, action' });
@@ -155,13 +161,30 @@ router.post('/:id/rules', requireRole('MEMBER'), async (req: AuthRequest, res: R
       return res.status(404).json({ error: 'Policy not found' });
     }
 
+    // Validate scope IDs belong to the same org
+    if (machineId) {
+      const machine = await prisma.machine.findFirst({ where: { id: machineId, orgId: req.user!.orgId } });
+      if (!machine) return res.status(400).json({ error: 'Machine not found in your organization' });
+    }
+    if (repoId) {
+      const repo = await prisma.repo.findFirst({ where: { id: repoId, orgId: req.user!.orgId } });
+      if (!repo) return res.status(400).json({ error: 'Repo not found in your organization' });
+    }
+
     const rule = await prisma.policyRule.create({
       data: {
         policyId: id,
         agentId: agentId || null,
+        machineId: machineId || null,
+        repoId: repoId || null,
         condition,
         action,
         severity: severity || 'MEDIUM',
+      },
+      include: {
+        agent: { select: { name: true } },
+        machine: { select: { hostname: true } },
+        repo: { select: { name: true } },
       },
     });
 

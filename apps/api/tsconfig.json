@@ -10,5 +10,6 @@
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*", "prisma/**/*"]
+  "include": ["src/**/*"],
+  "exclude": ["src/__tests__/**/*"]
 }

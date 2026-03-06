@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import NotificationBell from './NotificationBell';
+import ChatWidget from './ChatWidget';
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: '\u25A3' },
@@ -12,7 +13,7 @@ const NAV_ITEMS = [
   { to: '/team', label: 'Team', icon: '\uD83D\uDC65' },
   { to: '/audit', label: 'Audit Log', icon: '\uD83D\uDCDC' },
   { to: '/insights', label: 'Insights', icon: '\uD83D\uDCCA' },
-  { to: '/docs', label: 'Docs', icon: '\uD83D\uDCD6' },
+  { to: '/reports', label: 'Reports', icon: '\uD83D\uDCCB' },
   { to: '/settings', label: 'Settings', icon: '\u2699' },
 ];
 
@@ -113,6 +114,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-4 md:p-6 lg:p-8">{children}</main>
       </div>
+
+      {/* AI Assistant */}
+      <ChatWidget
+        endpoint="/api/chat/assistant"
+        title="Origin Assistant"
+        placeholder="Ask about your sessions, policies, costs..."
+        requireAuth
+        welcomeMessage="Hi! I'm your Origin AI assistant. I can help with policies, sessions, cost analysis, and more. What would you like to know?"
+      />
     </div>
   );
 }

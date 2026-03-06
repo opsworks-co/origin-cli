@@ -1,9 +1,12 @@
 import { Router, Response } from 'express';
+import crypto from 'crypto';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
+
+const VALID_ROLES = ['VIEWER', 'MEMBER', 'ADMIN', 'OWNER'];
 
 // GET / — list org members with activity stats
 router.get('/', async (req: AuthRequest, res: Response) => {
@@ -174,6 +177,212 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     });
   } catch (err) {
     console.error('Get user error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Team Management ─────────────────────────────────────────
+
+// PATCH /:id/role — update member role
+router.patch('/:id/role', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const targetId = req.params.id as string;
+    const { role } = req.body;
+
+    if (!role || !VALID_ROLES.includes(role.toUpperCase())) {
+      return res.status(400).json({ error: 'Invalid role. Must be VIEWER, MEMBER, ADMIN, or OWNER' });
+    }
+
+    // Can't change own role
+    if (targetId === req.user!.id) {
+      return res.status(400).json({ error: 'Cannot change your own role' });
+    }
+
+    const target = await prisma.user.findFirst({ where: { id: targetId, orgId } });
+    if (!target) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Can't demote the last OWNER
+    if (target.role === 'OWNER' && role.toUpperCase() !== 'OWNER') {
+      const ownerCount = await prisma.user.count({ where: { orgId, role: 'OWNER' } });
+      if (ownerCount <= 1) {
+        return res.status(400).json({ error: 'Cannot demote the last owner' });
+      }
+    }
+
+    await prisma.user.update({
+      where: { id: targetId },
+      data: { role: role.toUpperCase() },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        userId: req.user!.id,
+        action: 'MEMBER_ROLE_CHANGED',
+        resource: targetId,
+        metadata: JSON.stringify({ from: target.role, to: role.toUpperCase(), targetEmail: target.email }),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Update role error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /:id — remove member
+router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const targetId = req.params.id as string;
+
+    if (targetId === req.user!.id) {
+      return res.status(400).json({ error: 'Cannot remove yourself' });
+    }
+
+    const target = await prisma.user.findFirst({ where: { id: targetId, orgId } });
+    if (!target) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (target.role === 'OWNER') {
+      const ownerCount = await prisma.user.count({ where: { orgId, role: 'OWNER' } });
+      if (ownerCount <= 1) {
+        return res.status(400).json({ error: 'Cannot remove the last owner' });
+      }
+    }
+
+    await prisma.user.delete({ where: { id: targetId } });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        userId: req.user!.id,
+        action: 'MEMBER_REMOVED',
+        resource: targetId,
+        metadata: JSON.stringify({ email: target.email, name: target.name, role: target.role }),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Remove member error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Invitations ─────────────────────────────────────────────
+
+// POST /invite — create invitation link
+router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const { email, role } = req.body;
+    const inviteRole = (role || 'MEMBER').toUpperCase();
+
+    if (!VALID_ROLES.includes(inviteRole)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    // Don't allow inviting as OWNER
+    if (inviteRole === 'OWNER') {
+      return res.status(400).json({ error: 'Cannot invite as owner. Invite as admin and promote later.' });
+    }
+
+    // Check if email already exists in org
+    if (email) {
+      const existing = await prisma.user.findFirst({ where: { email, orgId } });
+      if (existing) {
+        return res.status(409).json({ error: 'User with this email is already a member' });
+      }
+    }
+
+    const token = crypto.randomBytes(16).toString('hex');
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+    const invitation = await prisma.invitation.create({
+      data: {
+        orgId,
+        email: email || null,
+        role: inviteRole,
+        token,
+        createdBy: req.user!.id,
+        expiresAt,
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        userId: req.user!.id,
+        action: 'INVITATION_CREATED',
+        resource: invitation.id,
+        metadata: JSON.stringify({ email, role: inviteRole }),
+      },
+    });
+
+    res.status(201).json({
+      id: invitation.id,
+      token,
+      role: inviteRole,
+      email: email || null,
+      expiresAt,
+    });
+  } catch (err) {
+    console.error('Create invite error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /invites — list pending invitations
+router.get('/invites', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const invites = await prisma.invitation.findMany({
+      where: {
+        orgId: req.user!.orgId,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    res.json({
+      invites: invites.map((i) => ({
+        id: i.id,
+        token: i.token,
+        email: i.email,
+        role: i.role,
+        createdAt: i.createdAt,
+        expiresAt: i.expiresAt,
+      })),
+    });
+  } catch (err) {
+    console.error('List invites error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /invites/:id — cancel invitation
+router.delete('/invites/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const invite = await prisma.invitation.findFirst({
+      where: { id, orgId: req.user!.orgId, usedAt: null },
+    });
+
+    if (!invite) {
+      return res.status(404).json({ error: 'Invitation not found' });
+    }
+
+    await prisma.invitation.delete({ where: { id } });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Cancel invite error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

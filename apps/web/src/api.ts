@@ -80,7 +80,7 @@ export interface Repo {
   provider: string;
   syncedAt: string | null;
   createdAt: string;
-  _count?: { commits: number };
+  _count?: { commits: number; sessions?: number };
 }
 
 export function getRepos() {
@@ -98,17 +98,94 @@ export function syncRepo(id: string) {
   return request<{ synced: number; total: number }>(`/api/repos/${id}/sync`, { method: 'POST' });
 }
 
+export function rescanRepoCommits(id: string) {
+  return request<{ total: number; updated: number; githubMessages: number }>(`/api/repos/${id}/rescan`, { method: 'POST' });
+}
+
 export function getRepoCommits(id: string) {
   return request<any[]>(`/api/repos/${id}/commits`);
 }
 
+export interface CommitDiff {
+  sha: string;
+  message: string;
+  author: string;
+  date: string;
+  stats: { additions: number; deletions: number; total: number };
+  files: Array<{
+    filename: string;
+    status: string;
+    additions: number;
+    deletions: number;
+    changes: number;
+    patch: string;
+    previousFilename: string | null;
+  }>;
+  htmlUrl: string | null;
+}
+
+export function getCommitDiff(repoId: string, sha: string) {
+  return request<CommitDiff>(`/api/repos/${repoId}/commits/${sha}/diff`);
+}
+
+// ---- GitHub Auto-Discovery -----------------------------------------------
+
+export interface GitHubDiscoveredRepo {
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  url: string;
+  defaultBranch: string;
+  alreadyImported: boolean;
+  originRepoId?: string;
+}
+
+export interface ImportResult {
+  fullName: string;
+  success: boolean;
+  repoId?: string;
+  error?: string;
+}
+
+export function discoverGitHubRepos() {
+  return request<{ repos: GitHubDiscoveredRepo[] }>('/api/repos/github/discover');
+}
+
+export function importGitHubRepos(repos: Array<{ fullName: string; name?: string }>) {
+  return request<{ results: ImportResult[] }>('/api/repos/github/import', {
+    method: 'POST',
+    body: JSON.stringify({ repos, originBaseUrl: window.location.origin }),
+  });
+}
+
 // ---- Sessions ------------------------------------------------------------
+
+export interface SessionDiff {
+  headBefore: string;
+  headAfter: string;
+  commitShas: string[];
+  diff: string;
+  diffTruncated: boolean;
+  linesAdded: number;
+  linesRemoved: number;
+}
+
+export interface PromptChange {
+  promptIndex: number;
+  promptText: string;
+  filesChanged: string[];
+  diff: string;
+}
 
 export interface Session {
   id: string;
   commitId: string;
   agentId: string | null;
   agentName: string | null;
+  userId: string | null;
+  userName: string | null;
+  userEmail: string | null;
   repoId: string | null;
   repoName: string | null;
   commitSha: string | null;
@@ -120,13 +197,19 @@ export interface Session {
   transcript: string;
   filesChanged: string;
   tokensUsed: number;
+  inputTokens: number;
+  outputTokens: number;
   toolCalls: number;
   durationMs: number;
   linesAdded: number;
   linesRemoved: number;
   costUsd: number;
+  agentSystemPrompt: string | null;
   createdAt: string;
   review: SessionReview | null;
+  pullRequests?: PullRequestInfo[];
+  sessionDiff?: SessionDiff | null;
+  promptChanges?: PromptChange[];
 }
 
 export interface SessionReview {
@@ -168,6 +251,10 @@ export function reviewSession(id: string, status: string, note?: string) {
   });
 }
 
+export function getSessionDiff(id: string) {
+  return request<SessionDiff | { diff: null }>(`/api/sessions/${id}/diff`);
+}
+
 // ---- Agents --------------------------------------------------------------
 
 export interface Agent {
@@ -177,8 +264,14 @@ export interface Agent {
   description: string | null;
   model: string;
   status: string;
+  systemPrompt: string | null;
+  allowedTools: string;        // JSON array string
+  maxCostPerSession: number | null;
+  maxTokensPerSession: number | null;
+  permissions: string;         // JSON object string
   createdAt: string;
-  _count?: { sessions: number };
+  updatedAt: string;
+  _count?: { sessions: number; versions: number };
   sessions?: any[];
 }
 
@@ -186,7 +279,31 @@ export function getAgents() {
   return request<Agent[]>('/api/agents');
 }
 
-export function createAgent(data: { name: string; slug: string; model: string; description?: string }) {
+export interface AgentCreateData {
+  name: string;
+  slug: string;
+  model: string;
+  description?: string;
+  systemPrompt?: string;
+  allowedTools?: string[];
+  maxCostPerSession?: number;
+  maxTokensPerSession?: number;
+  permissions?: Record<string, any>;
+}
+
+export interface AgentUpdateData {
+  name?: string;
+  description?: string;
+  model?: string;
+  status?: string;
+  systemPrompt?: string;
+  allowedTools?: string[];
+  maxCostPerSession?: number | null;
+  maxTokensPerSession?: number | null;
+  permissions?: Record<string, any>;
+}
+
+export function createAgent(data: AgentCreateData) {
   return request<Agent>('/api/agents', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -197,11 +314,19 @@ export function getAgent(id: string) {
   return request<Agent>(`/api/agents/${id}`);
 }
 
-export function updateAgent(id: string, data: Partial<{ name: string; description: string; model: string; status: string }>) {
+export function updateAgent(id: string, data: AgentUpdateData) {
   return request<Agent>(`/api/agents/${id}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   });
+}
+
+export function deleteAgent(id: string) {
+  return request<{ success: boolean }>(`/api/agents/${id}`, { method: 'DELETE' });
+}
+
+export function restoreAgentVersion(agentId: string, versionId: string) {
+  return request<Agent>(`/api/agents/${agentId}/restore/${versionId}`, { method: 'POST' });
 }
 
 // ---- Policies ------------------------------------------------------------
@@ -210,10 +335,14 @@ export interface PolicyRule {
   id: string;
   policyId: string;
   agentId: string | null;
+  machineId: string | null;
+  repoId: string | null;
   condition: string;
   action: string;
   severity: string;
   agent?: { name: string } | null;
+  machine?: { hostname: string } | null;
+  repo?: { name: string } | null;
 }
 
 export interface Policy {
@@ -248,7 +377,7 @@ export function deletePolicy(id: string) {
   return request<void>(`/api/policies/${id}`, { method: 'DELETE' });
 }
 
-export function createPolicyRule(policyId: string, data: { condition: string; action: string; severity?: string; agentId?: string }) {
+export function createPolicyRule(policyId: string, data: { condition: string; action: string; severity?: string; agentId?: string; machineId?: string; repoId?: string }) {
   return request<PolicyRule>(`/api/policies/${policyId}/rules`, {
     method: 'POST',
     body: JSON.stringify(data),
@@ -306,10 +435,31 @@ export interface Stats {
   policyViolations: number;
   linesAdded: number;
   linesRemoved: number;
+  // Enriched fields
+  costByDay: { date: string; cost: number }[];
+  tokensByDay: { date: string; tokens: number }[];
+  durationBuckets: { bucket: string; count: number }[];
+  topContributors: { id: string; name: string; sessions: number; cost: number; lines: number }[];
+  qualityMetrics: { approved: number; rejected: number; flagged: number; pending: number };
+  violationsByType: { type: string; count: number }[];
+  avgSessionCost: number;
+  avgSessionDuration: number;
+  avgSessionTokens: number;
+  costByUser: { userId: string; name: string; cost: number }[];
+  // Enhanced analytics fields
+  costByRepo: { repo: string; cost: number; sessions: number }[];
+  linesByDay: { date: string; added: number; removed: number }[];
+  sessionsByHour: { hour: number; count: number }[];
+  secretsByType: { type: string; count: number }[];
+  totalSecretFindings: number;
 }
 
-export function getStats() {
-  return request<Stats>('/api/stats');
+export function getStats(from?: string, to?: string) {
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  const qs = params.toString();
+  return request<Stats>(`/api/stats${qs ? `?${qs}` : ''}`);
 }
 
 // ---- Machines ---------------------------------------------------------------
@@ -325,6 +475,16 @@ export interface Machine {
 
 export function getMachines() {
   return request<Machine[]>('/api/machines');
+}
+
+export interface MachineDetail extends Machine {
+  policyRules: Array<PolicyRule & {
+    policy: { id: string; name: string; type: string; active: boolean };
+  }>;
+}
+
+export function getMachine(id: string) {
+  return request<MachineDetail>(`/api/machines/${id}`);
 }
 
 // ---- API Key Management -----------------------------------------------------
@@ -355,10 +515,6 @@ export function updateRepo(id: string, data: Partial<{ name: string; path: strin
     method: 'PUT',
     body: JSON.stringify(data),
   });
-}
-
-export function deleteAgent(id: string) {
-  return request<void>(`/api/agents/${id}`, { method: 'DELETE' });
 }
 
 export function deletePolicyRule(policyId: string, ruleId: string) {
@@ -461,6 +617,106 @@ export function deleteRepoWebhook(repoId: string, webhookId: string) {
   return request<void>(`/api/repos/${repoId}/webhooks/${webhookId}`, { method: 'DELETE' });
 }
 
+// ---- Integrations ------------------------------------------------------------
+
+export interface IntegrationConfig {
+  id: string;
+  provider: string;
+  baseUrl: string;
+  settings: { postChecks: boolean; postComments: boolean; checkOnReview: boolean };
+  hasToken: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function getIntegrations() {
+  return request<IntegrationConfig[]>('/api/integrations');
+}
+
+export function createIntegration(data: {
+  provider: string;
+  token: string;
+  baseUrl?: string;
+  settings?: { postChecks: boolean; postComments: boolean; checkOnReview: boolean };
+}) {
+  return request<IntegrationConfig>('/api/integrations', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateIntegration(
+  id: string,
+  data: {
+    token?: string;
+    baseUrl?: string;
+    settings?: { postChecks: boolean; postComments: boolean; checkOnReview: boolean };
+  },
+) {
+  return request<IntegrationConfig>(`/api/integrations/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteIntegration(id: string) {
+  return request<void>(`/api/integrations/${id}`, { method: 'DELETE' });
+}
+
+export function testIntegration(id: string) {
+  return request<{ success: boolean; login?: string; error?: string }>(
+    `/api/integrations/${id}/test`,
+    { method: 'POST' },
+  );
+}
+
+// ---- Pull Requests -----------------------------------------------------------
+
+export interface PullRequestInfo {
+  id: string;
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  checkStatus: string | null;
+  author: string;
+  baseBranch: string;
+  headBranch: string;
+}
+
+// ---- Budget / Cost Controls --------------------------------------------------
+
+export interface BudgetConfig {
+  monthlyLimit: number;
+  alertThresholds: number[];
+  blockOnExceed: boolean;
+  alertedAt: number[];
+}
+
+export interface BudgetSpend {
+  monthly: number;
+  percentage: number;
+  dailySpend: Array<{ date: string; cost: number }>;
+  byModel: Array<{ model: string; cost: number; sessions: number }>;
+  byUser: Array<{ userId: string; name: string; cost: number; sessions: number }>;
+}
+
+export interface BudgetData {
+  config: BudgetConfig;
+  currentSpend: BudgetSpend;
+}
+
+export function getBudget() {
+  return request<BudgetData>('/api/settings/budget');
+}
+
+export function updateBudget(data: Partial<BudgetConfig>) {
+  return request<BudgetConfig>('/api/settings/budget', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
 // ---- Team / Users ------------------------------------------------------------
 
 export interface TeamMember {
@@ -526,4 +782,167 @@ export function getUsers() {
 
 export function getUser(id: string) {
   return request<UserDetail>(`/api/users/${id}`);
+}
+
+// ---- Team Management ----------------------------------------------------------
+
+export function updateUserRole(id: string, role: string) {
+  return request<{ success: boolean }>(`/api/users/${id}/role`, { method: 'PATCH', body: JSON.stringify({ role }) });
+}
+
+export function removeUser(id: string) {
+  return request<{ success: boolean }>(`/api/users/${id}`, { method: 'DELETE' });
+}
+
+export interface Invitation {
+  id: string;
+  token: string;
+  email: string | null;
+  role: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export function createInvite(data: { email?: string; role: string }) {
+  return request<{ id: string; token: string; role: string; email: string | null; expiresAt: string }>('/api/users/invite', { method: 'POST', body: JSON.stringify(data) });
+}
+
+export function getInvites() {
+  return request<{ invites: Invitation[] }>('/api/users/invites');
+}
+
+export function cancelInvite(id: string) {
+  return request<{ success: boolean }>(`/api/users/invites/${id}`, { method: 'DELETE' });
+}
+
+export function getInviteInfo(token: string) {
+  return request<{ orgName: string; role: string; email: string | null }>(`/api/auth/invite/${token}`);
+}
+
+export function acceptInvite(data: { token: string; name: string; email: string; password: string }) {
+  return request<{ token: string; user: { id: string; email: string; name: string; role: string; orgId: string; orgName: string; orgSlug: string } }>('/api/auth/accept-invite', { method: 'POST', body: JSON.stringify(data) });
+}
+
+// ---- PR-Grouped Sessions -----------------------------------------------------
+
+export interface PRSessionGroup {
+  pr: {
+    id: string;
+    number: number;
+    title: string;
+    url: string;
+    state: string;
+    author: string;
+    baseBranch: string;
+    headBranch: string;
+    checkStatus: string | null;
+    repoName: string;
+    createdAt: string;
+  };
+  sessions: Session[];
+  stats: {
+    sessionCount: number;
+    totalCost: number;
+    totalTokens: number;
+    totalLinesAdded: number;
+    totalLinesRemoved: number;
+    reviewStatus: string;
+  };
+}
+
+export function getSessionsByPR() {
+  return request<{ groups: PRSessionGroup[] }>('/api/sessions/by-pr');
+}
+
+// ---- Real-Time Session Stream ------------------------------------------------
+
+export interface SessionStreamEvent {
+  type: 'connected' | 'session:started' | 'session:updated' | 'session:ended' | 'session:reviewed';
+  sessionId?: string;
+  orgId?: string;
+  data?: Record<string, unknown>;
+  timestamp?: string;
+}
+
+export function createSessionStream(onEvent: (event: SessionStreamEvent) => void): EventSource {
+  const token = localStorage.getItem('origin_token');
+  const es = new EventSource(`/api/sessions/stream?token=${encodeURIComponent(token || '')}`);
+  es.onmessage = (e) => {
+    try {
+      const event: SessionStreamEvent = JSON.parse(e.data);
+      onEvent(event);
+    } catch {
+      // ignore parse errors
+    }
+  };
+  return es;
+}
+
+// ---- Secret/PII Scanning -----------------------------------------------------
+
+export interface SecretFinding {
+  id: string;
+  sessionId: string;
+  type: string;
+  severity: string;
+  filePath: string;
+  lineNumber: number;
+  match: string;
+  ruleName: string;
+  createdAt: string;
+  session?: {
+    id: string;
+    model: string;
+    createdAt: string;
+    commit: { repo: { name: string } };
+  };
+}
+
+export interface ScanningStats {
+  total: number;
+  byType: { type: string; count: number }[];
+  bySeverity: { severity: string; count: number }[];
+}
+
+export function getSessionFindings(sessionId: string) {
+  return request<SecretFinding[]>(`/api/scanning/session/${sessionId}`);
+}
+
+export function getAllFindings(params?: { severity?: string; type?: string }) {
+  const qs = new URLSearchParams();
+  if (params?.severity) qs.set('severity', params.severity);
+  if (params?.type) qs.set('type', params.type);
+  const q = qs.toString();
+  return request<SecretFinding[]>(`/api/scanning${q ? `?${q}` : ''}`);
+}
+
+export function getScanningStats() {
+  return request<ScanningStats>('/api/scanning/stats');
+}
+
+// ---- Compliance Reports -------------------------------------------------------
+
+export interface ComplianceReport {
+  period: { from: string; to: string };
+  complianceScore: number;
+  summary: {
+    totalSessions: number;
+    totalCost: number;
+    totalViolations: number;
+    reviewRate: number;
+    secretFindings: number;
+  };
+  sessionActivity: { date: string; count: number }[];
+  violations: { type: string; count: number }[];
+  securityFindings: { type: string; count: number }[];
+  reviewCoverage: { reviewed: number; unreviewed: number };
+  modelUsage: { model: string; sessions: number; cost: number }[];
+}
+
+export function getComplianceReport(from: string, to: string) {
+  return request<ComplianceReport>(`/api/reports/compliance?from=${from}&to=${to}`);
+}
+
+export function getComplianceScore() {
+  return request<{ score: number }>('/api/reports/compliance/summary');
 }

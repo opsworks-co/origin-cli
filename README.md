@@ -119,13 +119,143 @@ origin-v2/
 
 ---
 
-## Docs
+## Testing Data Ingestion
 
-- [Policies Guide](docs/POLICIES.md)
-- [MCP Server Setup](docs/MCP_SERVER.md)
-- [CLI Reference](docs/CLI.md)
-- [API Reference](docs/API.md)
-- [Integrations](docs/INTEGRATIONS.md)
+### Option A: Test with curl
+
+```bash
+# 1. Get your API key from Settings → API Keys → Create New
+API_KEY="org_sk_..."
+
+# 2. Start a session
+curl -X POST http://localhost:4002/api/mcp/session/start \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "machineId": "my-laptop",
+    "prompt": "Add user authentication to the app",
+    "model": "claude-code",
+    "repoPath": "origin"
+  }'
+# → Returns { "sessionId": "abc123..." }
+
+# 3. End the session with metrics
+curl -X POST http://localhost:4002/api/mcp/session/end \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId": "SESSION_ID_FROM_ABOVE",
+    "summary": "Added JWT auth with login/register endpoints",
+    "tokensUsed": 45000,
+    "toolCalls": 23,
+    "linesAdded": 340,
+    "linesRemoved": 12,
+    "costUsd": 0.85,
+    "filesChanged": "[\"src/auth.ts\", \"src/middleware.ts\"]",
+    "durationMs": 180000
+  }'
+
+# 4. Check it appeared in the dashboard
+open http://localhost:5176/sessions
+```
+
+### Option B: Test with the CLI
+
+```bash
+# Build CLI
+cd packages/cli && npx tsc
+
+# Login (API key from Settings page)
+node dist/index.js login
+
+# Register machine
+node dist/index.js init
+
+# View data
+node dist/index.js sessions
+node dist/index.js stats
+node dist/index.js team
+
+# Review a session
+node dist/index.js review SESSION_ID --approve --note "Looks good"
+```
+
+### Option C: Connect an AI agent via MCP
+
+```bash
+# Build MCP server
+cd packages/mcp-server && npx tsc
+```
+
+Add to Claude Code (`~/.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "origin": {
+      "command": "node",
+      "args": ["/path/to/origin-v2/packages/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+Add to Cursor (`.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "origin": {
+      "command": "node",
+      "args": ["/path/to/origin-v2/packages/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+Then when the AI agent codes, it will automatically call `start_session` and `end_session`, and sessions appear in Origin in real time.
+
+### CLI Commands Reference
+
+```
+Setup:
+  origin login                    Authenticate (saves to ~/.origin/config.json)
+  origin init                     Register this machine + detect AI tools
+  origin whoami                   Show current user/org
+  origin status                   Show system status
+
+Sessions:
+  origin sessions                 List sessions (--status, --model, --limit)
+  origin session <id>             View session detail with transcript
+  origin review <id> --approve    Review (--approve/--reject/--flag, --note)
+
+Repos:
+  origin repos                    List repositories
+  origin repo:add                 Add repo (--name, --path, --provider)
+  origin sync                     Sync session data from current repo
+
+Agents:
+  origin agents                   List agents
+  origin agent:create             Create agent (--name, --slug, --model)
+  origin agent:versions <id>      Version history
+
+Governance:
+  origin policies                 List active policies
+  origin policy:versions <id>     Policy version history
+  origin audit                    View audit log (--action, --limit)
+
+Analytics:
+  origin stats                    Dashboard statistics
+  origin team                     List team members
+  origin user <id>                User detail + recent sessions
+  origin notifications            View notifications (--unread)
+```
+
+---
+
+## Running Tests
+
+```bash
+cd apps/api && npx vitest run    # 79 tests, 7 files
+```
 
 ---
 

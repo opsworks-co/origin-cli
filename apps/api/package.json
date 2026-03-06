@@ -13,6 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
     "@prisma/client": "^6.8.2",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

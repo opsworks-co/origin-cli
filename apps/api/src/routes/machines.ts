@@ -19,6 +19,27 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /:id — single machine detail
+router.get('/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const machine = await prisma.machine.findFirst({
+      where: { id: req.params.id as string, orgId: req.user!.orgId },
+      include: {
+        policyRules: {
+          include: {
+            policy: { select: { id: true, name: true, type: true, active: true } },
+          },
+        },
+      },
+    });
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+    res.json(machine);
+  } catch (err) {
+    console.error('Get machine error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST / — register a machine (upsert by machineId)
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {

@@ -163,6 +163,126 @@ router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
+// POST /accept-invite — accept invitation and create account (public, no auth)
+router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
+  try {
+    const { token, name, email, password } = req.body;
+
+    if (!token || !name || !email || !password) {
+      return res.status(400).json({ error: 'Missing required fields: token, name, email, password' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Find valid invitation
+    const invitation = await prisma.invitation.findFirst({
+      where: {
+        token,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      include: { org: true },
+    });
+
+    if (!invitation) {
+      return res.status(404).json({ error: 'Invalid or expired invitation link' });
+    }
+
+    // If invitation has a specific email, enforce it
+    if (invitation.email && invitation.email.toLowerCase() !== email.toLowerCase()) {
+      return res.status(400).json({ error: 'This invitation was sent to a different email address' });
+    }
+
+    // Check email not already registered
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(409).json({ error: 'Email already registered. Please log in instead.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Create user in the invitation's org
+    const user = await prisma.user.create({
+      data: {
+        orgId: invitation.orgId,
+        email,
+        name,
+        passwordHash,
+        role: invitation.role,
+      },
+    });
+
+    // Mark invitation as used
+    await prisma.invitation.update({
+      where: { id: invitation.id },
+      data: { usedAt: new Date(), usedBy: user.id },
+    });
+
+    // Audit log
+    await prisma.auditLog.create({
+      data: {
+        orgId: invitation.orgId,
+        userId: user.id,
+        action: 'INVITATION_ACCEPTED',
+        resource: invitation.id,
+        metadata: JSON.stringify({ email, role: invitation.role }),
+      },
+    });
+
+    const jwtToken = signToken({ id: user.id, orgId: invitation.orgId, role: user.role });
+
+    res.status(201).json({
+      token: jwtToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        orgId: invitation.orgId,
+        orgName: invitation.org.name,
+        orgSlug: invitation.org.slug,
+      },
+    });
+  } catch (err) {
+    console.error('Accept invite error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /invite/:token — get invitation info (public, no auth)
+router.get('/invite/:token', async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = req.params;
+    const invitation = await prisma.invitation.findFirst({
+      where: {
+        token: token as string,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      include: { org: { select: { name: true, slug: true } } },
+    });
+
+    if (!invitation) {
+      return res.status(404).json({ error: 'Invalid or expired invitation' });
+    }
+
+    res.json({
+      orgName: invitation.org.name,
+      role: invitation.role,
+      email: invitation.email,
+    });
+  } catch (err) {
+    console.error('Get invite info error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api-keys — create an API key
 router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => {
   try {

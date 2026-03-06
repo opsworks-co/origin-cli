@@ -1,10 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
-import type { Repo } from '../api';
+import type { Repo, GitHubDiscoveredRepo, ImportResult, IntegrationConfig } from '../api';
 
 function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return 'Never synced';
+  if (!dateStr) return 'Never';
   const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (seconds < 60) return 'just now';
   const minutes = Math.floor(seconds / 60);
@@ -13,6 +13,51 @@ function timeAgo(dateStr: string | null): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+/** Extract org/owner from repo path, e.g. "github.com/dolobanko/origin" → "dolobanko" */
+function extractOrg(repo: Repo): string {
+  const path = repo.path;
+  // GitHub: "github.com/owner/repo" or "https://github.com/owner/repo"
+  const match = path.match(/github\.com\/([^/]+)/);
+  if (match) return match[1];
+  // Local: group under path prefix or "Local"
+  if (repo.provider === 'local') return 'Local';
+  return 'Other';
+}
+
+interface OrgGroup {
+  org: string;
+  provider: string;
+  repos: Repo[];
+  totalCommits: number;
+  totalSessions: number;
+}
+
+function groupByOrg(repos: Repo[]): OrgGroup[] {
+  const map = new Map<string, OrgGroup>();
+  for (const repo of repos) {
+    const org = extractOrg(repo);
+    if (!map.has(org)) {
+      map.set(org, {
+        org,
+        provider: repo.provider,
+        repos: [],
+        totalCommits: 0,
+        totalSessions: 0,
+      });
+    }
+    const group = map.get(org)!;
+    group.repos.push(repo);
+    group.totalCommits += repo._count?.commits ?? 0;
+    group.totalSessions += repo._count?.sessions ?? 0;
+  }
+  // Sort: github orgs first, then local
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.provider === 'local' && b.provider !== 'local') return 1;
+    if (a.provider !== 'local' && b.provider === 'local') return -1;
+    return a.org.localeCompare(b.org);
+  });
 }
 
 export default function Repos() {
@@ -35,6 +80,16 @@ export default function Repos() {
   // Delete state
   const [deleting, setDeleting] = useState<Record<string, boolean>>({});
 
+  // GitHub import state
+  const [hasGitHub, setHasGitHub] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [githubRepos, setGithubRepos] = useState<GitHubDiscoveredRepo[]>([]);
+  const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set());
+  const [importing, setImporting] = useState(false);
+  const [importResults, setImportResults] = useState<ImportResult[]>([]);
+  const [searchFilter, setSearchFilter] = useState('');
+
   const fetchRepos = useCallback(() => {
     setLoading(true);
     api
@@ -46,6 +101,10 @@ export default function Repos() {
 
   useEffect(() => {
     fetchRepos();
+    api.getIntegrations().then((configs) => {
+      const gh = configs.find((c: IntegrationConfig) => c.provider === 'github' && c.hasToken);
+      setHasGitHub(!!gh);
+    }).catch(() => {});
   }, [fetchRepos]);
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -67,7 +126,7 @@ export default function Repos() {
   };
 
   const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Are you sure you want to delete ${name}? This will remove all commits and sessions.`)) return;
+    if (!confirm(`Delete ${name}? All commits and sessions will be removed.`)) return;
     setDeleting((prev) => ({ ...prev, [id]: true }));
     try {
       await api.deleteRepo(id);
@@ -86,15 +145,94 @@ export default function Repos() {
       const result = await api.syncRepo(id);
       setSyncResult((prev) => ({
         ...prev,
-        [id]: `Synced ${result.synced} new sessions (${result.total} total)`,
+        [id]: result.synced > 0
+          ? `+${result.synced} new`
+          : result.total > 0
+            ? 'Up to date'
+            : 'No commits',
       }));
       fetchRepos();
     } catch (err: any) {
-      setSyncResult((prev) => ({ ...prev, [id]: `Sync failed: ${err.message}` }));
+      setSyncResult((prev) => ({ ...prev, [id]: `Failed` }));
     } finally {
       setSyncing((prev) => ({ ...prev, [id]: false }));
     }
   };
+
+  // Sync all repos in an org group
+  const handleSyncAll = async (group: OrgGroup) => {
+    for (const repo of group.repos) {
+      await handleSync(repo.id);
+    }
+  };
+
+  // GitHub import handlers
+  const handleDiscover = async () => {
+    setShowImport(true);
+    setShowForm(false);
+    setDiscovering(true);
+    setError('');
+    setImportResults([]);
+    setSelectedRepos(new Set());
+    setSearchFilter('');
+    try {
+      const result = await api.discoverGitHubRepos();
+      setGithubRepos(result.repos);
+    } catch (err: any) {
+      setError(err.message);
+      setShowImport(false);
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const toggleSelect = (fullName: string) => {
+    setSelectedRepos((prev) => {
+      const next = new Set(prev);
+      if (next.has(fullName)) next.delete(fullName);
+      else next.add(fullName);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    const available = filteredGhRepos.filter((r) => !r.alreadyImported);
+    if (selectedRepos.size === available.length) {
+      setSelectedRepos(new Set());
+    } else {
+      setSelectedRepos(new Set(available.map((r) => r.fullName)));
+    }
+  };
+
+  const handleImport = async () => {
+    if (selectedRepos.size === 0) return;
+    setImporting(true);
+    setError('');
+    try {
+      const result = await api.importGitHubRepos(
+        Array.from(selectedRepos).map((fullName) => ({ fullName })),
+      );
+      setImportResults(result.results);
+      setSelectedRepos(new Set());
+      fetchRepos();
+      const updated = await api.discoverGitHubRepos();
+      setGithubRepos(updated.repos);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const filteredGhRepos = githubRepos.filter((r) =>
+    r.fullName.toLowerCase().includes(searchFilter.toLowerCase()),
+  );
+
+  const availableCount = filteredGhRepos.filter((r) => !r.alreadyImported).length;
+
+  const orgGroups = groupByOrg(repos);
+  const totalCommits = repos.reduce((sum, r) => sum + (r._count?.commits ?? 0), 0);
+  const totalSessions = repos.reduce((sum, r) => sum + (r._count?.sessions ?? 0), 0);
 
   if (loading) {
     return (
@@ -106,20 +244,146 @@ export default function Repos() {
 
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Repositories</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Connect and sync your code repositories
+            {repos.length} {repos.length === 1 ? 'repo' : 'repos'} &middot; {totalCommits} commits &middot; {totalSessions} sessions
           </p>
         </div>
-        <button onClick={() => setShowForm(!showForm)} className="btn-primary text-sm">
-          {showForm ? 'Cancel' : 'Add Repository'}
-        </button>
+        <div className="flex items-center gap-2">
+          {hasGitHub && (
+            <button
+              onClick={showImport ? () => setShowImport(false) : handleDiscover}
+              className="btn-secondary text-sm"
+            >
+              {showImport ? 'Close' : 'Import from GitHub'}
+            </button>
+          )}
+          <button
+            onClick={() => { setShowForm(!showForm); setShowImport(false); }}
+            className="btn-primary text-sm"
+          >
+            {showForm ? 'Cancel' : 'Add Repository'}
+          </button>
+        </div>
       </div>
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm">{error}</div>
+      )}
+
+      {/* GitHub Import Panel */}
+      {showImport && (
+        <div className="card space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold flex items-center gap-2">
+              <svg className="w-5 h-5" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+              </svg>
+              Import from GitHub
+            </h3>
+            {!discovering && githubRepos.length > 0 && (
+              <span className="text-sm text-gray-400">
+                {githubRepos.length} repos found
+              </span>
+            )}
+          </div>
+
+          {discovering ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="flex items-center gap-3 text-gray-400">
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-indigo-400" />
+                Fetching repos from GitHub...
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-3">
+                <input
+                  type="text"
+                  value={searchFilter}
+                  onChange={(e) => setSearchFilter(e.target.value)}
+                  className="input flex-1"
+                  placeholder="Filter repos..."
+                />
+                <button
+                  onClick={toggleSelectAll}
+                  className="text-sm text-indigo-400 hover:text-indigo-300 whitespace-nowrap"
+                >
+                  {selectedRepos.size === availableCount && availableCount > 0
+                    ? 'Deselect All'
+                    : `Select All (${availableCount})`}
+                </button>
+              </div>
+
+              <div className="max-h-80 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800">
+                {filteredGhRepos.length === 0 ? (
+                  <div className="text-center py-8 text-gray-500 text-sm">
+                    {searchFilter ? 'No repos match your filter' : 'No repos found'}
+                  </div>
+                ) : (
+                  filteredGhRepos.map((repo) => (
+                    <label
+                      key={repo.fullName}
+                      className={`flex items-center gap-3 px-4 py-2.5 hover:bg-gray-800/50 transition-colors ${
+                        repo.alreadyImported ? 'opacity-50' : 'cursor-pointer'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={repo.alreadyImported || selectedRepos.has(repo.fullName)}
+                        disabled={repo.alreadyImported}
+                        onChange={() => toggleSelect(repo.fullName)}
+                        className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500 bg-gray-800"
+                      />
+                      <span className="text-sm text-gray-200 truncate flex-1">{repo.fullName}</span>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        {repo.private && <span className="badge badge-amber text-xs">private</span>}
+                        {repo.alreadyImported && <span className="badge badge-green text-xs">imported</span>}
+                      </div>
+                    </label>
+                  ))
+                )}
+              </div>
+
+              {importResults.length > 0 && (
+                <div className="space-y-1">
+                  {importResults.map((r) => (
+                    <div
+                      key={r.fullName}
+                      className={`text-xs px-3 py-1.5 rounded ${
+                        r.success ? 'bg-green-900/20 text-green-400' : 'bg-red-900/20 text-red-400'
+                      }`}
+                    >
+                      {r.success ? '\u2713' : '\u2717'} {r.fullName}
+                      {r.error && ` — ${r.error}`}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-gray-500">Webhooks created automatically</p>
+                <button
+                  onClick={handleImport}
+                  disabled={selectedRepos.size === 0 || importing}
+                  className="btn-primary text-sm"
+                >
+                  {importing ? (
+                    <span className="flex items-center gap-2">
+                      <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
+                      Importing...
+                    </span>
+                  ) : (
+                    `Import ${selectedRepos.size} Selected`
+                  )}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       )}
 
       {/* Add Repo Form */}
@@ -165,93 +429,125 @@ export default function Repos() {
         </form>
       )}
 
-      {/* Repos Grid */}
-      {repos.length === 0 ? (
+      {/* Repos List */}
+      {repos.length === 0 && !showImport ? (
         <div className="card text-center py-16 text-gray-500">
-          <div className="text-4xl mb-3">📦</div>
+          <div className="text-4xl mb-3">{'\u{1F4E6}'}</div>
           <p className="text-lg mb-1">No repositories connected</p>
           <p className="text-sm">
-            Connect your first repository to start tracking AI coding sessions.
+            {hasGitHub
+              ? 'Click "Import from GitHub" to get started, or add a repository manually.'
+              : 'Connect your first repository to start tracking AI coding sessions.'}
           </p>
         </div>
       ) : (
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {repos.map((repo) => (
-            <div
-              key={repo.id}
-              className="card hover:border-gray-700 transition-colors cursor-pointer group"
-              onClick={() => navigate(`/repos/${repo.id}`)}
-            >
-              <div className="flex items-start justify-between mb-3">
-                <div className="min-w-0 flex-1">
-                  <h3 className="font-semibold text-gray-100 truncate group-hover:text-indigo-400 transition-colors">
-                    {repo.name}
-                  </h3>
-                  <p className="text-xs text-gray-500 truncate mt-0.5">{repo.path}</p>
-                </div>
-                <span
-                  className={`badge ${
-                    repo.provider === 'github' ? 'badge-purple' : 'badge-gray'
-                  } text-xs ml-2 flex-shrink-0`}
-                >
-                  {repo.provider}
-                </span>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 text-sm mb-4">
-                <div>
-                  <p className="text-gray-500">Commits</p>
-                  <p className="text-gray-200 font-medium">{repo._count?.commits ?? 0}</p>
-                </div>
-                <div>
-                  <p className="text-gray-500">Last Synced</p>
-                  <p className="text-gray-200 font-medium">{timeAgo(repo.syncedAt)}</p>
-                </div>
-              </div>
-
-              {/* Sync button */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleSync(repo.id);
-                }}
-                disabled={syncing[repo.id]}
-                className="btn-secondary text-xs py-1.5 w-full"
-              >
-                {syncing[repo.id] ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-indigo-400" />
-                    Syncing...
+        <div className="space-y-4">
+          {orgGroups.map((group) => (
+            <div key={group.org} className="card p-0 overflow-hidden">
+              {/* Org Header */}
+              <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between bg-gray-900/80">
+                <div className="flex items-center gap-3">
+                  {group.provider === 'github' ? (
+                    <svg className="w-4 h-4 text-gray-400" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+                    </svg>
+                  )}
+                  <span className="font-semibold text-gray-200 text-sm">{group.org}</span>
+                  <span className="text-xs text-gray-500">
+                    {group.repos.length} {group.repos.length === 1 ? 'repo' : 'repos'}
                   </span>
-                ) : (
-                  'Sync Now'
-                )}
-              </button>
+                </div>
+                <div className="flex items-center gap-4 text-xs text-gray-500">
+                  <span>{group.totalCommits} commits</span>
+                  <span>{group.totalSessions} sessions</span>
+                  <button
+                    onClick={() => handleSyncAll(group)}
+                    className="text-indigo-400 hover:text-indigo-300 transition-colors"
+                  >
+                    Sync all
+                  </button>
+                </div>
+              </div>
 
-              {/* Delete button */}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleDelete(repo.id, repo.name);
-                }}
-                disabled={deleting[repo.id]}
-                className="btn-danger text-xs py-1.5 w-full mt-2"
-              >
-                {deleting[repo.id] ? 'Deleting...' : 'Delete'}
-              </button>
+              {/* Repo Rows */}
+              <div className="divide-y divide-gray-800/50">
+                {group.repos.map((repo) => (
+                  <div
+                    key={repo.id}
+                    className="flex items-center gap-4 px-5 py-2.5 hover:bg-gray-800/30 transition-colors cursor-pointer group"
+                    onClick={() => navigate(`/repos/${repo.id}`)}
+                  >
+                    {/* Name */}
+                    <div className="min-w-0 flex-1">
+                      <span className="text-sm text-gray-200 group-hover:text-indigo-400 transition-colors font-medium">
+                        {repo.name}
+                      </span>
+                    </div>
 
-              {/* Sync result */}
-              {syncResult[repo.id] && (
-                <p
-                  className={`text-xs mt-2 ${
-                    syncResult[repo.id].startsWith('Sync failed')
-                      ? 'text-red-400'
-                      : 'text-green-400'
-                  }`}
-                >
-                  {syncResult[repo.id]}
-                </p>
-              )}
+                    {/* Stats - compact inline */}
+                    <div className="flex items-center gap-4 text-xs text-gray-500 flex-shrink-0">
+                      <span className="w-16 text-right" title="Commits">
+                        <span className="text-gray-300">{repo._count?.commits ?? 0}</span> commits
+                      </span>
+                      <span className="w-16 text-right" title="Sessions">
+                        <span className="text-gray-300">{repo._count?.sessions ?? 0}</span> sessions
+                      </span>
+                      <span className="w-14 text-right text-gray-600" title="Last synced">
+                        {timeAgo(repo.syncedAt)}
+                      </span>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center gap-1.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSync(repo.id);
+                        }}
+                        disabled={syncing[repo.id]}
+                        className="text-xs text-gray-400 hover:text-indigo-400 transition-colors px-2 py-1 rounded hover:bg-gray-800"
+                        title="Fetch commits"
+                      >
+                        {syncing[repo.id] ? (
+                          <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-indigo-400" />
+                        ) : (
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+                          </svg>
+                        )}
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDelete(repo.id, repo.name);
+                        }}
+                        disabled={deleting[repo.id]}
+                        className="text-xs text-gray-400 hover:text-red-400 transition-colors px-2 py-1 rounded hover:bg-gray-800"
+                        title="Delete repo"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    {/* Sync result inline */}
+                    {syncResult[repo.id] && (
+                      <span
+                        className={`text-[10px] flex-shrink-0 ${
+                          syncResult[repo.id] === 'Failed' ? 'text-red-400' : 'text-green-400'
+                        }`}
+                      >
+                        {syncResult[repo.id]}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           ))}
         </div>

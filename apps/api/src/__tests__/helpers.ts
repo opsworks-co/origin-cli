@@ -35,6 +35,13 @@ export const mockPrisma = {
   agentVersion: createModelMock(),
   machine: createModelMock(),
   auditLog: createModelMock(),
+  webhook: createModelMock(),
+  pullRequest: createModelMock(),
+  integrationConfig: createModelMock(),
+  notification: createModelMock(),
+  sessionDiff: createModelMock(),
+  promptChange: createModelMock(),
+  secretFinding: createModelMock(),
 };
 
 // Mock the db module (path relative to this file: src/__tests__/helpers.ts -> src/db.js)

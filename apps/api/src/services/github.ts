@@ -74,7 +74,7 @@ export async function fetchGitHubCommits(
   );
   return commits.map((c) => ({
     sha: c.sha,
-    message: c.commit.message.split('\n')[0], // first line only
+    message: c.commit.message, // full message including trailers
     author: c.commit.author.name,
     date: c.commit.author.date,
   }));

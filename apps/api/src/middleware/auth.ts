@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
+import { prisma } from '../db.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'origin-v2-dev-secret';
 
@@ -8,12 +10,42 @@ export interface AuthRequest extends Request {
 }
 
 export function authMiddleware(req: AuthRequest, _res: Response, next: NextFunction) {
+  // Support Bearer token in Authorization header
   const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return next();
-  try {
-    const payload = jwt.verify(header.slice(7), JWT_SECRET) as { id: string; orgId: string; role: string };
-    req.user = payload;
-  } catch { /* ignore invalid tokens */ }
+  if (header?.startsWith('Bearer ')) {
+    try {
+      const payload = jwt.verify(header.slice(7), JWT_SECRET) as { id: string; orgId: string; role: string };
+      req.user = payload;
+    } catch { /* ignore invalid tokens */ }
+  }
+  // Also support token in query param (for SSE EventSource which can't set headers)
+  if (!req.user && req.query.token) {
+    try {
+      const payload = jwt.verify(req.query.token as string, JWT_SECRET) as { id: string; orgId: string; role: string };
+      req.user = payload;
+    } catch { /* ignore invalid tokens */ }
+  }
+  // Support X-API-Key header (used by CLI)
+  if (!req.user) {
+    const apiKey = req.headers['x-api-key'] as string | undefined;
+    if (apiKey) {
+      const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+      prisma.apiKey.findFirst({ where: { keyHash }, include: { org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } } } })
+        .then((found) => {
+          if (found) {
+            const owner = found.org.users[0];
+            req.user = {
+              id: owner?.id ?? 'system',
+              orgId: found.orgId,
+              role: owner?.role ?? 'OWNER',
+            };
+          }
+          next();
+        })
+        .catch(() => next());
+      return; // async — don't call next() synchronously
+    }
+  }
   next();
 }
 

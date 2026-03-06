@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { UserDetail as UserDetailType } from '../api';
 
@@ -35,6 +35,7 @@ function timeAgo(dateStr: string): string {
 
 export default function UserDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [data, setData] = useState<UserDetailType | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -159,11 +160,13 @@ export default function UserDetail() {
                 </tr>
               ) : (
                 sessions.map((s) => (
-                  <tr key={s.id} className="hover:bg-gray-800/30 transition-colors">
+                  <tr
+                    key={s.id}
+                    onClick={() => navigate(`/sessions/${s.id}`)}
+                    className="hover:bg-gray-800/30 transition-colors cursor-pointer"
+                  >
                     <td className="px-6 py-3">
-                      <Link to={`/sessions/${s.id}`} className="badge-blue hover:opacity-80">
-                        {s.model}
-                      </Link>
+                      <span className="badge-blue">{s.model}</span>
                     </td>
                     <td className="px-6 py-3 text-gray-400">{s.repoName ?? '\u2014'}</td>
                     <td className="px-6 py-3 text-gray-300 max-w-[200px] truncate">
@@ -204,12 +207,12 @@ export default function UserDetail() {
                 </tr>
               ) : (
                 reviews.map((r) => (
-                  <tr key={r.id} className="hover:bg-gray-800/30 transition-colors">
-                    <td className="px-6 py-3">
-                      <Link to={`/sessions/${r.sessionId}`}>
-                        {statusBadge(r.status)}
-                      </Link>
-                    </td>
+                  <tr
+                    key={r.id}
+                    onClick={() => navigate(`/sessions/${r.sessionId}`)}
+                    className="hover:bg-gray-800/30 transition-colors cursor-pointer"
+                  >
+                    <td className="px-6 py-3">{statusBadge(r.status)}</td>
                     <td className="px-6 py-3 text-gray-400">{r.repoName ?? '\u2014'}</td>
                     <td className="px-6 py-3 text-gray-300 max-w-[200px] truncate">
                       {r.commitMessage ?? '\u2014'}

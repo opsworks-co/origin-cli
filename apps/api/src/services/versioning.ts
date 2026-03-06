@@ -51,9 +51,19 @@ export async function createAgentVersion(agentId: string, changedBy: string | nu
     description: agent.description,
     model: agent.model,
     status: agent.status,
+    systemPrompt: agent.systemPrompt,
+    allowedTools: safeParseJson(agent.allowedTools, []),
+    maxCostPerSession: agent.maxCostPerSession,
+    maxTokensPerSession: agent.maxTokensPerSession,
+    permissions: safeParseJson(agent.permissions, {}),
   });
 
   return prisma.agentVersion.create({
     data: { agentId, version: nextVersion, snapshot, changedBy, changeType },
   });
+}
+
+function safeParseJson(raw: string | null | undefined, fallback: any): any {
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); } catch { return fallback; }
 }
