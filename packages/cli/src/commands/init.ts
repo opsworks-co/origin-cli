@@ -12,6 +12,7 @@ function detectTools(): string[] {
     { name: 'cursor', cmd: 'which cursor' },
     { name: 'aider', cmd: 'which aider' },
     { name: 'gemini', cmd: 'which gemini' },
+    { name: 'windsurf', cmd: 'which windsurf' },
   ];
   for (const { name, cmd } of checks) {
     try { execSync(cmd, { stdio: 'ignore' }); tools.push(name); } catch {}

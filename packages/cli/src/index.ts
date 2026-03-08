@@ -28,7 +28,7 @@ program.command('login').description('Login to Origin').action(loginCommand);
 program.command('init').description('Register this machine as an agent host').action(initCommand);
 program.command('enable')
   .description('Install Origin hooks for session tracking in this repo')
-  .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini). Auto-detects if omitted.')
+  .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, windsurf, aider). Auto-detects if omitted.')
   .action(enableCommand);
 program.command('disable').description('Remove Origin hooks from this repo').action(disableCommand);
 program.command('status').description('Show current status').action(statusCommand);
@@ -39,6 +39,8 @@ const hooks = program.command('hooks').description('Internal hook handlers (used
 hooks.command('claude-code <event>').description('Handle Claude Code hook event').action((event) => hooksCommand(event, 'claude-code'));
 hooks.command('cursor <event>').description('Handle Cursor hook event').action((event) => hooksCommand(event, 'cursor'));
 hooks.command('gemini <event>').description('Handle Gemini CLI hook event').action((event) => hooksCommand(event, 'gemini'));
+hooks.command('windsurf <event>').description('Handle Windsurf hook event').action((event) => hooksCommand(event, 'windsurf'));
+hooks.command('aider <event>').description('Handle Aider hook event').action((event) => hooksCommand(event, 'aider'));
 hooks.command('git-post-commit').description('Handle git post-commit hook').action(() => handlePostCommit());
 
 // Sessions

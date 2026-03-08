@@ -8,6 +8,8 @@ Everything below is live at **https://origin-platform.fly.dev**
 - [x] Session tracking (start/update/end via CLI hooks + MCP)
 - [x] Policy engine (MODEL_ALLOWLIST, FILE_RESTRICTION, REQUIRE_REVIEW, COST_LIMIT)
 - [x] GitHub integration (webhooks, status checks, PR comments)
+- [x] **GitHub App** — one-click install, bot identity on checks, auto-webhooks, token auto-refresh
+- [x] **Slack notifications** — real-time alerts for violations, reviews, budget via Incoming Webhooks
 - [x] **PR blocking** — policy violations fail GitHub status checks, blocking merges
 - [x] PR Checks dashboard page
 - [x] Per-member API keys (sessions attributed to individual developers)
@@ -92,38 +94,14 @@ Then they just code normally — sessions are captured automatically.
 
 ### High Priority — Product Differentiators
 
-#### 1. GitHub App (replace PAT with proper App)
-**Why:** One-click install instead of manual PAT setup. Shows "Origin" identity on checks instead of the user's avatar. Better permission model.
+#### ~~1. GitHub App~~ ✅ DONE
+Completed. GitHub App (originv2) registered, deployed, and installed. Installation access tokens auto-refresh, centralized webhooks at `/api/webhooks/github-app`, one-click install flow in Settings.
 
-**What to build:**
-- Register a GitHub App on github.com/settings/apps
-- OAuth installation flow (user clicks "Install" → authorizes repos)
-- App receives webhooks automatically (no manual webhook creation)
-- Use installation access tokens instead of PATs
-- Auto-configure branch protection via API
+#### ~~2. Slack/Teams Notifications~~ ✅ DONE
+Completed. Slack Incoming Webhook integration in Settings with event toggles (violations, flags, reviews, budget). Hooks into `notifyOrgAdmins()` — one line provides full coverage.
 
-**Effort:** 2-3 days
-
-#### 2. Slack/Teams Notifications
-**Why:** Admins need to know about violations in real-time, not by checking a dashboard.
-
-**What to build:**
-- Slack webhook integration in Settings
-- Notify on: policy violations, sessions needing review, budget alerts
-- Optional: Slack bot with `/origin approve <session-id>` command
-
-**Effort:** 1 day
-
-#### 3. CLI Hooks for More Tools
-**Why:** Currently hooks work best with Claude Code. Need Cursor, Copilot, Aider support.
-
-**What to build:**
-- Cursor: `.cursor/hooks/` integration
-- Copilot: VS Code extension or git hooks
-- Aider: `--post-commit-hook` flag integration
-- Generic: `git post-commit` hook that detects any AI tool
-
-**Effort:** 2-3 days per tool
+#### ~~3. CLI Hooks for More Tools~~ ✅ DONE
+Completed. CLI now supports: Claude Code, Cursor, Gemini, Windsurf, and Aider. Auto-detection, hook installation, and cleanup for all five agents.
 
 ### Medium Priority — Enterprise Features
 

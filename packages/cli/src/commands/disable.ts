@@ -72,6 +72,25 @@ function filterCursorHooks(config: Record<string, any>): Record<string, any> {
   return config;
 }
 
+function removeAiderConfig(filePath: string): number {
+  if (!fs.existsSync(filePath)) return 0;
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    if (!content.includes('# origin-hooks')) return 0;
+
+    // Remove the origin-hooks block (from marker to next non-comment/non-origin line or EOF)
+    const cleaned = content
+      .replace(/\n# origin-hooks[\s\S]*?(?=\n[^\s#n]|\s*$)/g, '')
+      .trimEnd() + '\n';
+
+    fs.writeFileSync(filePath, cleaned);
+    console.log(chalk.green('  ✓ Removed Origin config from .aider.conf.yml'));
+    return 1;
+  } catch {
+    return 0;
+  }
+}
+
 export async function disableCommand(): Promise<void> {
   const gitRoot = getGitRoot();
   if (!gitRoot) {
@@ -103,6 +122,16 @@ export async function disableCommand(): Promise<void> {
     '.gemini/settings.json',
     filterClaudeOrGeminiHooks
   );
+
+  // Windsurf — .windsurf/hooks.json (same format as Cursor)
+  removedCount += removeOriginHooksFromFile(
+    path.join(gitRoot, '.windsurf', 'hooks.json'),
+    '.windsurf/hooks.json',
+    filterCursorHooks
+  );
+
+  // Aider — .aider.conf.yml
+  removedCount += removeAiderConfig(path.join(gitRoot, '.aider.conf.yml'));
 
   if (removedCount === 0) {
     console.log(chalk.gray('  No Origin hooks found in any agent config.'));

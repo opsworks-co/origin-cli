@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { sendSlackNotification } from './slack.js';
 
 export async function createNotification(
   orgId: string,
@@ -76,4 +77,7 @@ export async function notifyOrgAdmins(
   if (notifications.length > 0) {
     await prisma.notification.createMany({ data: notifications });
   }
+
+  // Also send to Slack (fire-and-forget — never blocks in-app flow)
+  sendSlackNotification({ orgId, type, title, message, link }).catch(() => {});
 }

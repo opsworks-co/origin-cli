@@ -3,6 +3,7 @@ import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { testGitHubConnection } from '../services/github-integration.js';
 import { testGitHubAppConnection } from '../services/github-app.js';
+import { testSlackWebhook } from '../services/slack.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -42,8 +43,8 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
       return res.status(400).json({ error: 'Missing required fields: provider, token' });
     }
 
-    if (!['github', 'gitlab'].includes(provider)) {
-      return res.status(400).json({ error: 'Provider must be "github" or "gitlab"' });
+    if (!['github', 'gitlab', 'slack'].includes(provider)) {
+      return res.status(400).json({ error: 'Provider must be "github", "gitlab", or "slack"' });
     }
 
     // Check for existing integration of same provider
@@ -201,6 +202,9 @@ router.post('/:id/test', requireRole('ADMIN'), async (req: AuthRequest, res: Res
       }
 
       const result = await testGitHubConnection(integration.token, apiBase);
+      res.json(result);
+    } else if (integration.provider === 'slack') {
+      const result = await testSlackWebhook(integration.token);
       res.json(result);
     } else {
       res.json({ success: false, error: `Testing not supported for ${integration.provider} yet` });

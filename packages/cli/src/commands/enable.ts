@@ -1,12 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
+import { execSync } from 'child_process';
 import { loadConfig } from '../config.js';
 import { getGitRoot } from '../session-state.js';
 
 // ─── Agent Definitions ────────────────────────────────────────────────────
 
-type AgentType = 'claude-code' | 'cursor' | 'gemini';
+type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'windsurf' | 'aider';
 
 interface AgentConfig {
   name: string;
@@ -136,6 +137,74 @@ function installGeminiHooks(gitRoot: string): void {
   console.log(chalk.green('  ✓ Hooks installed in .gemini/settings.json'));
 }
 
+// ── Windsurf Hooks ────────────────────────────────────────────────────────
+
+function installWindsurfHooks(gitRoot: string): void {
+  const windsurfDir = path.join(gitRoot, '.windsurf');
+  const hooksPath = path.join(windsurfDir, 'hooks.json');
+
+  if (!fs.existsSync(windsurfDir)) {
+    fs.mkdirSync(windsurfDir, { recursive: true });
+  }
+
+  let config: Record<string, any> = { version: 1, hooks: {} };
+  if (fs.existsSync(hooksPath)) {
+    try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = { version: 1, hooks: {} }; }
+  }
+
+  if (!config.hooks) config.hooks = {};
+
+  const hooks: Record<string, any[]> = {
+    sessionStart: [{ command: 'origin hooks windsurf session-start' }],
+    stop: [{ command: 'origin hooks windsurf stop' }],
+    beforeSubmitPrompt: [{ command: 'origin hooks windsurf user-prompt-submit' }],
+    sessionEnd: [{ command: 'origin hooks windsurf session-end' }],
+  };
+
+  for (const [eventType, entries] of Object.entries(hooks)) {
+    if (!config.hooks[eventType]) config.hooks[eventType] = [];
+    config.hooks[eventType] = config.hooks[eventType].filter(
+      (h: any) => !(h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks'))
+    );
+    config.hooks[eventType].push(...entries);
+  }
+
+  fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
+  console.log(chalk.green('  ✓ Hooks installed in .windsurf/hooks.json'));
+}
+
+// ── Aider Hooks ───────────────────────────────────────────────────────────
+
+function installAiderHooks(gitRoot: string): void {
+  const aiderConfPath = path.join(gitRoot, '.aider.conf.yml');
+
+  // Check if already configured
+  let existingConf = '';
+  if (fs.existsSync(aiderConfPath)) {
+    existingConf = fs.readFileSync(aiderConfPath, 'utf-8');
+  }
+
+  if (existingConf.includes('# origin-hooks')) {
+    console.log(chalk.gray('  ✓ Aider config already includes Origin settings'));
+    return;
+  }
+
+  const originBlock = [
+    '',
+    '# origin-hooks',
+    '# Enable git commit verification so Origin post-commit hook runs',
+    'git-commit-verify: true',
+    '# Notify Origin when LLM responses complete',
+    'notifications-command: origin hooks aider stop',
+    '',
+  ].join('\n');
+
+  fs.appendFileSync(aiderConfPath, originBlock);
+  console.log(chalk.green('  ✓ Hooks installed in .aider.conf.yml'));
+  console.log(chalk.gray('    • git-commit-verify: enabled (runs Origin post-commit hook)'));
+  console.log(chalk.gray('    • notifications-command: origin hooks aider stop'));
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function filterOriginHooks(entries: any[]): any[] {
@@ -175,13 +244,40 @@ const AGENTS: Record<AgentType, AgentConfig> = {
     hookCommand: 'origin hooks gemini',
     installHooks: installGeminiHooks,
   },
+  windsurf: {
+    name: 'Windsurf',
+    configDir: '.windsurf',
+    configFile: 'hooks.json',
+    detectDir: '.windsurf',
+    command: 'windsurf',
+    hookCommand: 'origin hooks windsurf',
+    installHooks: installWindsurfHooks,
+  },
+  aider: {
+    name: 'Aider',
+    configDir: '.',
+    configFile: '.aider.conf.yml',
+    detectDir: '',
+    command: 'aider',
+    hookCommand: 'origin hooks aider',
+    installHooks: installAiderHooks,
+  },
 };
 
 function detectAgents(gitRoot: string): AgentType[] {
   const detected: AgentType[] = [];
   for (const [type, agent] of Object.entries(AGENTS) as [AgentType, AgentConfig][]) {
-    if (fs.existsSync(path.join(gitRoot, agent.detectDir))) {
+    // Check for config directory
+    if (agent.detectDir && fs.existsSync(path.join(gitRoot, agent.detectDir))) {
       detected.push(type);
+      continue;
+    }
+    // For agents without a config dir (aider), check if binary exists
+    if (!agent.detectDir) {
+      try {
+        execSync(`which ${agent.command}`, { stdio: 'ignore' });
+        detected.push(type);
+      } catch { /* not installed */ }
     }
   }
   return detected;

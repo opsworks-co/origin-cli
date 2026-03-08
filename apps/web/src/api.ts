@@ -707,7 +707,7 @@ export interface IntegrationConfig {
   id: string;
   provider: string;
   baseUrl: string;
-  settings: { postChecks: boolean; postComments: boolean; checkOnReview: boolean };
+  settings: Record<string, any>;
   hasToken: boolean;
   authType: 'pat' | 'github_app';
   createdAt: string;
@@ -722,7 +722,7 @@ export function createIntegration(data: {
   provider: string;
   token: string;
   baseUrl?: string;
-  settings?: { postChecks: boolean; postComments: boolean; checkOnReview: boolean };
+  settings?: Record<string, any>;
 }) {
   return request<IntegrationConfig>('/api/integrations', {
     method: 'POST',
@@ -735,7 +735,7 @@ export function updateIntegration(
   data: {
     token?: string;
     baseUrl?: string;
-    settings?: { postChecks: boolean; postComments: boolean; checkOnReview: boolean };
+    settings?: Record<string, any>;
   },
 ) {
   return request<IntegrationConfig>(`/api/integrations/${id}`, {
