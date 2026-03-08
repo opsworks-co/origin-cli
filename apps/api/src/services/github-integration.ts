@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { getValidInstallationToken, listGitHubAppRepos } from './github-app.js';
 
 // ── GitHub API helpers ────────────────────────────────────────────
 
@@ -165,11 +166,18 @@ export interface GitHubRepoInfo {
 /**
  * List all repos accessible by the token (includes private repos).
  * Paginates through all pages automatically.
+ * For GitHub App tokens, uses /installation/repositories endpoint.
  */
 export async function listGitHubRepos(
   token: string,
   baseUrl: string = GITHUB_API,
+  authType: string = 'pat',
 ): Promise<{ success: boolean; repos?: GitHubRepoInfo[]; error?: string }> {
+  // GitHub App installation tokens use a different endpoint
+  if (authType === 'github_app') {
+    return listGitHubAppRepos(token, baseUrl);
+  }
+
   const allRepos: GitHubRepoInfo[] = [];
   let url: string | null = `${baseUrl}/user/repos?per_page=100&sort=updated&type=all`;
 
@@ -312,6 +320,15 @@ export interface IntegrationSettings {
   checkOnReview: boolean;
 }
 
+export interface GitHubAppSettings {
+  appId?: string;
+  installationId?: string;
+  privateKey?: string;
+  tokenExpiresAt?: string;
+  appSlug?: string;
+  appWebhookSecret?: string;
+}
+
 const DEFAULT_SETTINGS: IntegrationSettings = {
   postChecks: true,
   postComments: true,
@@ -324,17 +341,31 @@ export async function getIntegrationConfig(orgId: string, provider: string = 'gi
   });
   if (!config) return null;
 
-  let settings: IntegrationSettings;
+  let settings: IntegrationSettings & GitHubAppSettings;
   try {
     settings = { ...DEFAULT_SETTINGS, ...JSON.parse(config.settings) };
   } catch {
-    settings = DEFAULT_SETTINGS;
+    settings = DEFAULT_SETTINGS as IntegrationSettings & GitHubAppSettings;
+  }
+
+  let token = config.token;
+  const authType = (config as any).authType || 'pat';
+
+  // For GitHub App integrations, auto-refresh the installation access token
+  if (authType === 'github_app' && settings.appId && settings.installationId && settings.privateKey) {
+    try {
+      token = await getValidInstallationToken(config);
+    } catch (err) {
+      console.error('[github-app] Token refresh failed, using cached token:', err);
+    }
   }
 
   return {
     ...config,
+    token,
     parsedSettings: settings,
     apiBaseUrl: config.baseUrl || GITHUB_API,
+    authType,
   };
 }
 

@@ -73,6 +73,15 @@ export default function Settings() {
   const [integrationSuccess, setIntegrationSuccess] = useState<string | null>(null);
   const [webhookEvents, setWebhookEvents] = useState<api.AuditEntry[]>([]);
 
+  // GitHub App
+  const [githubAppStatus, setGithubAppStatus] = useState<{
+    installed: boolean;
+    serverConfigured: boolean;
+    installationId?: string;
+    appSlug?: string;
+  } | null>(null);
+  const [installingApp, setInstallingApp] = useState(false);
+
   // Org settings
   const [orgName, setOrgName] = useState('');
   const [orgSlug, setOrgSlug] = useState('');
@@ -156,6 +165,32 @@ export default function Settings() {
   }, [fetchOrg, fetchInvites]);
 
   // Fetch integrations/budget when tab is active
+  // Handle GitHub App callback URL params
+  useEffect(() => {
+    const githubAppResult = searchParams.get('github_app');
+    if (githubAppResult === 'success') {
+      setIntegrationSuccess('GitHub App installed successfully!');
+      setActiveTabState('integrations');
+      // Clean up URL params
+      const newParams = new URLSearchParams(searchParams);
+      newParams.delete('github_app');
+      newParams.set('tab', 'integrations');
+      setSearchParams(newParams);
+    } else if (githubAppResult === 'error') {
+      const msg = searchParams.get('msg') || 'Unknown error';
+      setIntegrationError(`GitHub App installation failed: ${msg}`);
+      setActiveTabState('integrations');
+      const newParams = new URLSearchParams(searchParams);
+      newParams.delete('github_app');
+      newParams.delete('msg');
+      newParams.set('tab', 'integrations');
+      setSearchParams(newParams);
+    } else if (githubAppResult === 'requested') {
+      setIntegrationSuccess('GitHub App installation requested. Your organization owner needs to approve it.');
+      setActiveTabState('integrations');
+    }
+  }, []);
+
   useEffect(() => {
     if (activeTab === 'integrations') {
       fetchIntegrations();
@@ -169,8 +204,12 @@ export default function Settings() {
   const fetchIntegrations = async () => {
     setLoadingIntegrations(true);
     try {
-      const data = await api.getIntegrations();
+      const [data, appStatus] = await Promise.all([
+        api.getIntegrations(),
+        api.getGitHubAppStatus().catch(() => null),
+      ]);
       setIntegrations(data);
+      if (appStatus) setGithubAppStatus(appStatus);
       // Populate form with existing GitHub integration
       const gh = data.find((i) => i.provider === 'github');
       if (gh) {
@@ -251,6 +290,35 @@ export default function Settings() {
     try {
       const result = await api.testIntegration(id);
       setTestResult(result);
+    } catch (err: any) {
+      setTestResult({ success: false, error: err.message });
+    } finally {
+      setTestingConnection(false);
+    }
+  };
+
+  const handleInstallGitHubApp = async () => {
+    setInstallingApp(true);
+    setIntegrationError(null);
+    try {
+      const { installUrl } = await api.getGitHubAppInstallUrl();
+      window.location.href = installUrl;
+    } catch (err: any) {
+      setIntegrationError(err.message || 'Failed to start GitHub App installation');
+      setInstallingApp(false);
+    }
+  };
+
+  const handleTestGitHubApp = async () => {
+    setTestingConnection(true);
+    setTestResult(null);
+    try {
+      const result = await api.testGitHubApp();
+      setTestResult({
+        success: result.success,
+        login: result.account ? `${result.appSlug} (installed on @${result.account})` : result.appSlug,
+        error: result.error,
+      });
     } catch (err: any) {
       setTestResult({ success: false, error: err.message });
     } finally {
@@ -785,11 +853,12 @@ export default function Settings() {
                   <p className="text-sm text-gray-500">Post status checks and comments on pull requests</p>
                 </div>
               </div>
-              {integrations.find((i) => i.provider === 'github') ? (
-                <span className="badge-green text-xs">Connected</span>
-              ) : (
-                <span className="badge-gray text-xs">Not Connected</span>
-              )}
+              {(() => {
+                const gh = integrations.find((i) => i.provider === 'github');
+                if (!gh) return <span className="badge-gray text-xs">Not Connected</span>;
+                if (gh.authType === 'github_app') return <span className="badge-green text-xs">GitHub App</span>;
+                return <span className="badge-green text-xs">Connected (PAT)</span>;
+              })()}
             </div>
 
             {integrationError && (
@@ -806,114 +875,221 @@ export default function Settings() {
             {loadingIntegrations ? (
               <p className="text-sm text-gray-500">Loading...</p>
             ) : (
-              <form onSubmit={handleSaveIntegration} className="space-y-4">
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">
-                    Personal Access Token {integrations.find((i) => i.provider === 'github') && (
-                      <span className="text-gray-600">(leave blank to keep current)</span>
-                    )}
-                  </label>
-                  <input
-                    type="password"
-                    value={ghToken}
-                    onChange={(e) => setGhToken(e.target.value)}
-                    className="input"
-                    placeholder={
-                      integrations.find((i) => i.provider === 'github')
-                        ? 'ghp_****... (saved)'
-                        : 'ghp_xxxxxxxxxxxx'
-                    }
-                  />
-                  <p className="text-xs text-gray-600 mt-1">
-                    Requires <code className="text-gray-500">repo</code> scope for status checks and PR comments
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">
-                    API Base URL <span className="text-gray-600">(optional, for GitHub Enterprise)</span>
-                  </label>
-                  <input
-                    value={ghBaseUrl}
-                    onChange={(e) => setGhBaseUrl(e.target.value)}
-                    className="input"
-                    placeholder="https://api.github.com (default)"
-                  />
-                </div>
-
-                <div className="space-y-3">
-                  <p className="text-sm font-medium text-gray-300">Features</p>
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={ghPostChecks}
-                      onChange={(e) => setGhPostChecks(e.target.checked)}
-                      className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    <div>
-                      <span className="text-sm text-gray-200">Post status checks on PRs</span>
-                      <p className="text-xs text-gray-500">Shows pass/fail based on AI session review status</p>
+              <div className="space-y-6">
+                {/* GitHub App (Recommended) */}
+                {githubAppStatus?.serverConfigured && (
+                  <div className="bg-gray-800/50 rounded-lg p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-200">GitHub App</span>
+                      <span className="text-xs bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded-full">Recommended</span>
                     </div>
-                  </label>
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={ghPostComments}
-                      onChange={(e) => setGhPostComments(e.target.checked)}
-                      className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    <div>
-                      <span className="text-sm text-gray-200">Post session summary comments</span>
-                      <p className="text-xs text-gray-500">Adds an AI governance report comment to each PR</p>
+                    <div className="text-xs text-gray-400 space-y-1">
+                      <p>One-click install. Status checks appear under the "Origin" bot identity.</p>
+                      <p>Automatic webhook setup — no per-repo configuration needed.</p>
                     </div>
-                  </label>
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={ghCheckOnReview}
-                      onChange={(e) => setGhCheckOnReview(e.target.checked)}
-                      className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    <div>
-                      <span className="text-sm text-gray-200">Update checks on review</span>
-                      <p className="text-xs text-gray-500">Refreshes PR status when sessions are approved/rejected in Origin</p>
-                    </div>
-                  </label>
-                </div>
 
-                <div className="flex items-center gap-3">
-                  <button
-                    type="submit"
-                    disabled={savingIntegration}
-                    className="btn-primary text-sm"
-                  >
-                    {savingIntegration
-                      ? 'Saving...'
-                      : integrations.find((i) => i.provider === 'github')
-                        ? 'Update'
-                        : 'Connect GitHub'}
-                  </button>
+                    {(() => {
+                      const gh = integrations.find((i) => i.provider === 'github');
+                      const isApp = gh?.authType === 'github_app';
 
-                  {integrations.find((i) => i.provider === 'github') && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => handleTestConnection(integrations.find((i) => i.provider === 'github')!.id)}
-                        disabled={testingConnection}
-                        className="btn-secondary text-sm"
-                      >
-                        {testingConnection ? 'Testing...' : 'Test Connection'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteIntegration(integrations.find((i) => i.provider === 'github')!.id)}
-                        className="text-sm text-red-400 hover:text-red-300"
-                      >
-                        Disconnect
-                      </button>
-                    </>
-                  )}
-                </div>
+                      if (isApp) {
+                        return (
+                          <div className="space-y-3">
+                            <div className="bg-green-900/20 border border-green-800/50 rounded-lg p-3 text-sm text-green-400 flex items-center gap-2">
+                              <span>GitHub App installed</span>
+                              {githubAppStatus?.installationId && (
+                                <span className="text-green-600 text-xs">(Installation #{githubAppStatus.installationId})</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <button
+                                type="button"
+                                onClick={handleTestGitHubApp}
+                                disabled={testingConnection}
+                                className="btn-secondary text-sm"
+                              >
+                                {testingConnection ? 'Testing...' : 'Test Connection'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteIntegration(gh!.id)}
+                                className="text-sm text-red-400 hover:text-red-300"
+                              >
+                                Disconnect
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <button
+                          type="button"
+                          onClick={handleInstallGitHubApp}
+                          disabled={installingApp}
+                          className="btn-primary text-sm"
+                        >
+                          {installingApp ? 'Redirecting to GitHub...' : 'Install GitHub App'}
+                        </button>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Divider */}
+                {githubAppStatus?.serverConfigured && (
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 border-t border-gray-700" />
+                    <span className="text-xs text-gray-500">or use a Personal Access Token</span>
+                    <div className="flex-1 border-t border-gray-700" />
+                  </div>
+                )}
+
+                {/* PAT Section */}
+                {(() => {
+                  const gh = integrations.find((i) => i.provider === 'github');
+                  const isApp = gh?.authType === 'github_app';
+
+                  // If GitHub App is connected, collapse PAT section
+                  if (isApp) {
+                    return (
+                      <div className="text-xs text-gray-500">
+                        GitHub App is active. PAT configuration is disabled while the App is connected.
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <form onSubmit={handleSaveIntegration} className="space-y-4">
+                      <div>
+                        <label className="block text-sm text-gray-400 mb-1">
+                          Personal Access Token {gh && (
+                            <span className="text-gray-600">(leave blank to keep current)</span>
+                          )}
+                        </label>
+                        <input
+                          type="password"
+                          value={ghToken}
+                          onChange={(e) => setGhToken(e.target.value)}
+                          className="input"
+                          placeholder={gh ? 'ghp_****... (saved)' : 'ghp_xxxxxxxxxxxx'}
+                        />
+                        <p className="text-xs text-gray-600 mt-1">
+                          Requires <code className="text-gray-500">repo</code> scope for status checks and PR comments
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm text-gray-400 mb-1">
+                          API Base URL <span className="text-gray-600">(optional, for GitHub Enterprise)</span>
+                        </label>
+                        <input
+                          value={ghBaseUrl}
+                          onChange={(e) => setGhBaseUrl(e.target.value)}
+                          className="input"
+                          placeholder="https://api.github.com (default)"
+                        />
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="submit"
+                          disabled={savingIntegration}
+                          className="btn-primary text-sm"
+                        >
+                          {savingIntegration ? 'Saving...' : gh ? 'Update' : 'Connect GitHub'}
+                        </button>
+
+                        {gh && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleTestConnection(gh.id)}
+                              disabled={testingConnection}
+                              className="btn-secondary text-sm"
+                            >
+                              {testingConnection ? 'Testing...' : 'Test Connection'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteIntegration(gh.id)}
+                              className="text-sm text-red-400 hover:text-red-300"
+                            >
+                              Disconnect
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </form>
+                  );
+                })()}
+
+                {/* Feature Toggles (shared between App and PAT) */}
+                {integrations.find((i) => i.provider === 'github') && (
+                  <div className="space-y-3 border-t border-gray-700 pt-4">
+                    <p className="text-sm font-medium text-gray-300">Features</p>
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={ghPostChecks}
+                        onChange={(e) => {
+                          setGhPostChecks(e.target.checked);
+                          const gh = integrations.find((i) => i.provider === 'github');
+                          if (gh) {
+                            api.updateIntegration(gh.id, {
+                              settings: { postChecks: e.target.checked, postComments: ghPostComments, checkOnReview: ghCheckOnReview },
+                            });
+                          }
+                        }}
+                        className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <div>
+                        <span className="text-sm text-gray-200">Post status checks on PRs</span>
+                        <p className="text-xs text-gray-500">Shows pass/fail based on AI session review status</p>
+                      </div>
+                    </label>
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={ghPostComments}
+                        onChange={(e) => {
+                          setGhPostComments(e.target.checked);
+                          const gh = integrations.find((i) => i.provider === 'github');
+                          if (gh) {
+                            api.updateIntegration(gh.id, {
+                              settings: { postChecks: ghPostChecks, postComments: e.target.checked, checkOnReview: ghCheckOnReview },
+                            });
+                          }
+                        }}
+                        className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <div>
+                        <span className="text-sm text-gray-200">Post session summary comments</span>
+                        <p className="text-xs text-gray-500">Adds an AI governance report comment to each PR</p>
+                      </div>
+                    </label>
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={ghCheckOnReview}
+                        onChange={(e) => {
+                          setGhCheckOnReview(e.target.checked);
+                          const gh = integrations.find((i) => i.provider === 'github');
+                          if (gh) {
+                            api.updateIntegration(gh.id, {
+                              settings: { postChecks: ghPostChecks, postComments: ghPostComments, checkOnReview: e.target.checked },
+                            });
+                          }
+                        }}
+                        className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <div>
+                        <span className="text-sm text-gray-200">Update checks on review</span>
+                        <p className="text-xs text-gray-500">Refreshes PR status when sessions are approved/rejected in Origin</p>
+                      </div>
+                    </label>
+                  </div>
+                )}
 
                 {testResult && (
                   <div
@@ -928,7 +1104,7 @@ export default function Settings() {
                       : `Connection failed: ${testResult.error}`}
                   </div>
                 )}
-              </form>
+              </div>
             )}
           </section>
 

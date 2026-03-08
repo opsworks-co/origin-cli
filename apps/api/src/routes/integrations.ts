@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { testGitHubConnection } from '../services/github-integration.js';
+import { testGitHubAppConnection } from '../services/github-app.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -21,6 +22,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         baseUrl: i.baseUrl,
         settings: safeParseJSON(i.settings),
         hasToken: !!i.token,
+        authType: (i as any).authType || 'pat',
         createdAt: i.createdAt,
         updatedAt: i.updatedAt,
       })),
@@ -78,6 +80,7 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
       baseUrl: integration.baseUrl,
       settings: safeParseJSON(integration.settings),
       hasToken: true,
+      authType: (integration as any).authType || 'pat',
       createdAt: integration.createdAt,
       updatedAt: integration.updatedAt,
     });
@@ -126,6 +129,7 @@ router.put('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response)
       baseUrl: integration.baseUrl,
       settings: safeParseJSON(integration.settings),
       hasToken: !!integration.token,
+      authType: (integration as any).authType || 'pat',
       createdAt: integration.createdAt,
       updatedAt: integration.updatedAt,
     });
@@ -180,6 +184,22 @@ router.post('/:id/test', requireRole('ADMIN'), async (req: AuthRequest, res: Res
 
     if (integration.provider === 'github') {
       const apiBase = integration.baseUrl || 'https://api.github.com';
+      const authType = (integration as any).authType || 'pat';
+
+      if (authType === 'github_app') {
+        const settings = safeParseJSON(integration.settings);
+        if (!settings.appId || !settings.privateKey || !settings.installationId) {
+          return res.json({ success: false, error: 'GitHub App credentials incomplete' });
+        }
+        const result = await testGitHubAppConnection(
+          settings.appId,
+          settings.privateKey,
+          settings.installationId,
+          apiBase,
+        );
+        return res.json(result);
+      }
+
       const result = await testGitHubConnection(integration.token, apiBase);
       res.json(result);
     } else {

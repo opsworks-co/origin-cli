@@ -315,9 +315,10 @@ model IntegrationConfig {
   orgId     String
   org       Org      @relation(fields: [orgId], references: [id])
   provider  String
-  token     String
+  token     String              // For PAT: the token. For github_app: cached installation access token
   baseUrl   String   @default("")
   settings  String   @default("{}")
+  authType  String   @default("pat") // "pat" or "github_app"
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

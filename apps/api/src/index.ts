@@ -39,6 +39,7 @@ import chatRoutes from './routes/chat.js';
 import scanningRoutes from './routes/scanning.js';
 import reportRoutes from './routes/reports.js';
 import pullRequestRoutes from './routes/pull-requests.js';
+import githubAppRoutes from './routes/github-app.js';
 
 const app = express();
 
@@ -64,6 +65,7 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/scanning', scanningRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/pull-requests', pullRequestRoutes);
+app.use('/api/github-app', githubAppRoutes);
 
 // Serve CLI install script
 app.get('/install.sh', (_req, res) => {

@@ -709,6 +709,7 @@ export interface IntegrationConfig {
   baseUrl: string;
   settings: { postChecks: boolean; postComments: boolean; checkOnReview: boolean };
   hasToken: boolean;
+  authType: 'pat' | 'github_app';
   createdAt: string;
   updatedAt: string;
 }
@@ -752,6 +753,31 @@ export function testIntegration(id: string) {
     `/api/integrations/${id}/test`,
     { method: 'POST' },
   );
+}
+
+// ---- GitHub App ---------------------------------------------------------------
+
+export function getGitHubAppInstallUrl() {
+  return request<{ installUrl: string }>('/api/github-app/install');
+}
+
+export function getGitHubAppStatus() {
+  return request<{
+    installed: boolean;
+    serverConfigured: boolean;
+    installationId?: string;
+    appSlug?: string;
+  }>('/api/github-app/status');
+}
+
+export function testGitHubApp() {
+  return request<{
+    success: boolean;
+    appSlug?: string;
+    account?: string;
+    permissions?: Record<string, string>;
+    error?: string;
+  }>('/api/github-app/test', { method: 'POST' });
 }
 
 // ---- Pull Requests -----------------------------------------------------------

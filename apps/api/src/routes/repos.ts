@@ -103,7 +103,7 @@ router.get('/github/discover', requireRole('MEMBER'), async (req: AuthRequest, r
       return res.status(400).json({ error: 'GitHub not connected. Add a GitHub token in Settings → Integrations.' });
     }
 
-    const result = await listGitHubRepos(integration.token, integration.apiBaseUrl);
+    const result = await listGitHubRepos(integration.token, integration.apiBaseUrl, integration.authType);
     if (!result.success || !result.repos) {
       return res.status(502).json({ error: result.error || 'Failed to fetch repos from GitHub' });
     }
@@ -193,32 +193,41 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
           },
         });
 
-        // 2. Create Webhook record with generated secret
-        const secret = generateWebhookSecret();
-        const webhookUrl = `${originBaseUrl}/api/webhooks/github/${repo.id}`;
+        // 2. Create webhook — only for PAT integrations (GitHub App handles webhooks centrally)
+        let webhookCreated = false;
+        let githubWebhookId: number | undefined;
 
-        const webhook = await prisma.webhook.create({
-          data: { repoId: repo.id, secret },
-        });
+        if (integration.authType !== 'github_app') {
+          const secret = generateWebhookSecret();
+          const webhookUrl = `${originBaseUrl}/api/webhooks/github/${repo.id}`;
 
-        // 3. Create webhook on GitHub
-        const ghResult = await createGitHubWebhook(
-          integration.token,
-          parsed.owner,
-          parsed.repo,
-          webhookUrl,
-          secret,
-          integration.apiBaseUrl,
-        );
-
-        if (ghResult.success && ghResult.hookId) {
-          await prisma.webhook.update({
-            where: { id: webhook.id },
-            data: { githubWebhookId: ghResult.hookId },
+          const webhook = await prisma.webhook.create({
+            data: { repoId: repo.id, secret },
           });
+
+          const ghResult = await createGitHubWebhook(
+            integration.token,
+            parsed.owner,
+            parsed.repo,
+            webhookUrl,
+            secret,
+            integration.apiBaseUrl,
+          );
+
+          webhookCreated = ghResult.success;
+          if (ghResult.success && ghResult.hookId) {
+            githubWebhookId = ghResult.hookId;
+            await prisma.webhook.update({
+              where: { id: webhook.id },
+              data: { githubWebhookId: ghResult.hookId },
+            });
+          }
+        } else {
+          // GitHub App: webhooks are handled via /api/webhooks/github-app
+          webhookCreated = true; // No per-repo webhook needed
         }
 
-        // 4. Audit log
+        // 3. Audit log
         await prisma.auditLog.create({
           data: {
             orgId: req.user!.orgId,
@@ -228,8 +237,9 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
             metadata: JSON.stringify({
               name: repoName,
               fullName: item.fullName,
-              webhookCreated: ghResult.success,
-              githubWebhookId: ghResult.hookId,
+              webhookCreated,
+              githubWebhookId,
+              authType: integration.authType,
             }),
           },
         });
@@ -238,7 +248,7 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
           fullName: item.fullName,
           success: true,
           repoId: repo.id,
-          error: ghResult.success ? undefined : `Repo created but webhook failed: ${ghResult.error}`,
+          error: webhookCreated ? undefined : 'Repo created but webhook failed',
         });
       } catch (importErr: any) {
         console.error(`Failed to import ${item.fullName}:`, importErr.message);
