@@ -78,13 +78,24 @@ export interface Repo {
   name: string;
   path: string;
   provider: string;
+  archived: boolean;
   syncedAt: string | null;
   createdAt: string;
   _count?: { commits: number; sessions?: number };
 }
 
-export function getRepos() {
-  return request<Repo[]>('/api/repos');
+export function getRepos(params?: { archived?: boolean }) {
+  const q = new URLSearchParams();
+  if (params?.archived) q.set('archived', 'true');
+  const qs = q.toString();
+  return request<Repo[]>(`/api/repos${qs ? `?${qs}` : ''}`);
+}
+
+export function archiveRepo(id: string, archived: boolean) {
+  return request<Repo>(`/api/repos/${id}/archive`, {
+    method: 'PATCH',
+    body: JSON.stringify({ archived }),
+  });
 }
 
 export function createRepo(data: { name: string; path: string; provider?: string }) {

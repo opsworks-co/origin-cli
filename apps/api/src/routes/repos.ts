@@ -19,8 +19,9 @@ router.use(requireAuth);
 // GET / — list repos for org
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
+    const showArchived = req.query.archived === 'true';
     const repos = await prisma.repo.findMany({
-      where: { orgId: req.user!.orgId },
+      where: { orgId: req.user!.orgId, ...(!showArchived && { archived: false }) },
       include: {
         _count: { select: { commits: true } },
       },
@@ -691,6 +692,39 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     res.json(repo);
   } catch (err) {
     console.error('Update repo error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /:id/archive — archive or unarchive a repo
+router.patch('/:id/archive', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { archived } = req.body;
+
+    const existing = await prisma.repo.findFirst({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (!existing) return res.status(404).json({ error: 'Repo not found' });
+
+    const repo = await prisma.repo.update({
+      where: { id },
+      data: { archived: !!archived },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: archived ? 'REPO_ARCHIVED' : 'REPO_UNARCHIVED',
+        resource: id,
+        metadata: JSON.stringify({ name: existing.name }),
+      },
+    });
+
+    res.json(repo);
+  } catch (err) {
+    console.error('Archive repo error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

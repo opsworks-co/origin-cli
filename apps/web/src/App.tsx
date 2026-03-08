@@ -55,6 +55,7 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
       <Route path="/invite/:token" element={<AcceptInvite />} />
+      <Route path="/accept-invite/:token" element={<AcceptInvite />} />
 
       {/* Protected routes — wrapped in Layout */}
       <Route

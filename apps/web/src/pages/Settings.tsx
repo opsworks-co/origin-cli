@@ -52,6 +52,11 @@ export default function Settings() {
   const [inviteRole, setInviteRole] = useState('member');
   const [inviting, setInviting] = useState(false);
   const [inviteSuccess, setInviteSuccess] = useState('');
+  const [inviteError, setInviteError] = useState('');
+  const [pendingInvites, setPendingInvites] = useState<api.Invitation[]>([]);
+  const [loadingInvites, setLoadingInvites] = useState(false);
+  const [cancellingInvite, setCancellingInvite] = useState<string | null>(null);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
 
   // Integrations
   const [integrations, setIntegrations] = useState<api.IntegrationConfig[]>([]);
@@ -130,11 +135,25 @@ export default function Settings() {
     }
   }, []);
 
+  const fetchInvites = useCallback(async () => {
+    if (user?.role !== 'ADMIN' && user?.role !== 'OWNER') return;
+    setLoadingInvites(true);
+    try {
+      const data = await api.getInvites();
+      setPendingInvites(data.invites);
+    } catch {
+      // ignore
+    } finally {
+      setLoadingInvites(false);
+    }
+  }, [user?.role]);
+
   // Fetch API keys and org settings on mount
   useEffect(() => {
     fetchApiKeys();
     fetchOrg();
-  }, [fetchOrg]);
+    fetchInvites();
+  }, [fetchOrg, fetchInvites]);
 
   // Fetch integrations/budget when tab is active
   useEffect(() => {
@@ -288,16 +307,35 @@ export default function Settings() {
     e.preventDefault();
     setInviting(true);
     setInviteSuccess('');
+    setInviteError('');
+    setInviteLink(null);
     try {
-      // Placeholder — team invite API not yet implemented
-      await new Promise((r) => setTimeout(r, 500));
-      setInviteSuccess(`Invitation sent to ${inviteEmail}`);
+      const result = await api.createInvite({
+        email: inviteEmail || undefined,
+        role: inviteRole.toUpperCase(),
+      });
+      const link = `${window.location.origin}/accept-invite/${result.token}`;
+      setInviteLink(link);
+      setInviteSuccess(`Invitation created${inviteEmail ? ` for ${inviteEmail}` : ''}! Share the link below.`);
       setInviteEmail('');
       setInviteRole('member');
-    } catch {
-      // Handle error
+      fetchInvites();
+    } catch (err: any) {
+      setInviteError(err.message || 'Failed to create invitation');
     } finally {
       setInviting(false);
+    }
+  };
+
+  const handleCancelInvite = async (id: string) => {
+    setCancellingInvite(id);
+    try {
+      await api.cancelInvite(id);
+      fetchInvites();
+    } catch (err: any) {
+      setInviteError(err.message || 'Failed to cancel invitation');
+    } finally {
+      setCancellingInvite(null);
     }
   };
 
@@ -500,8 +538,13 @@ export default function Settings() {
             <div>
               <h2 className="text-lg font-semibold">Team</h2>
               <p className="text-sm text-gray-500 mt-0.5">Invite team members to your organization</p>
-              <p className="text-xs text-amber-400 mt-1">Coming soon &mdash; team invites are not yet connected to the backend.</p>
             </div>
+
+            {inviteError && (
+              <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-red-400 text-sm">
+                {inviteError}
+              </div>
+            )}
 
             {inviteSuccess && (
               <div className="bg-green-900/20 border border-green-800 rounded-lg p-3 text-green-400 text-sm">
@@ -509,28 +552,92 @@ export default function Settings() {
               </div>
             )}
 
-            <form onSubmit={handleInvite} className="flex flex-col sm:flex-row gap-3">
-              <input
-                type="email"
-                required
-                value={inviteEmail}
-                onChange={(e) => setInviteEmail(e.target.value)}
-                className="input flex-1"
-                placeholder="colleague@company.com"
-              />
-              <select
-                value={inviteRole}
-                onChange={(e) => setInviteRole(e.target.value)}
-                className="select text-sm"
-              >
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-                <option value="viewer">Viewer</option>
-              </select>
-              <button type="submit" disabled={inviting} className="btn-primary text-sm whitespace-nowrap">
-                {inviting ? 'Sending...' : 'Send Invite'}
-              </button>
-            </form>
+            {inviteLink && (
+              <div className="bg-indigo-900/20 border border-indigo-800 rounded-lg p-4 space-y-2">
+                <p className="text-sm text-indigo-300 font-medium">Share this invite link:</p>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs text-gray-200 bg-gray-800 px-3 py-1.5 rounded block break-all flex-1">
+                    {inviteLink}
+                  </code>
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(inviteLink); }}
+                    className="btn-secondary text-xs whitespace-nowrap"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500">Link expires in 7 days</p>
+              </div>
+            )}
+
+            {(user?.role === 'ADMIN' || user?.role === 'OWNER') && (
+              <form onSubmit={handleInvite} className="flex flex-col sm:flex-row gap-3">
+                <input
+                  type="email"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  className="input flex-1"
+                  placeholder="colleague@company.com (optional)"
+                />
+                <select
+                  value={inviteRole}
+                  onChange={(e) => setInviteRole(e.target.value)}
+                  className="select text-sm"
+                >
+                  <option value="member">Member</option>
+                  <option value="admin">Admin</option>
+                  <option value="viewer">Viewer</option>
+                </select>
+                <button type="submit" disabled={inviting} className="btn-primary text-sm whitespace-nowrap">
+                  {inviting ? 'Creating...' : 'Create Invite'}
+                </button>
+              </form>
+            )}
+
+            {/* Pending invitations */}
+            {(user?.role === 'ADMIN' || user?.role === 'OWNER') && pendingInvites.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium text-gray-400">Pending Invitations</h3>
+                {pendingInvites.map((inv) => (
+                  <div
+                    key={inv.id}
+                    className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-2.5"
+                  >
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-sm text-gray-200">
+                        {inv.email || 'Open invite link'}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-500">
+                          Role: {inv.role}
+                        </span>
+                        <span className="text-xs text-gray-600">
+                          Expires {new Date(inv.expiresAt).toLocaleDateString()}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          const link = `${window.location.origin}/accept-invite/${inv.token}`;
+                          navigator.clipboard.writeText(link);
+                        }}
+                        className="text-xs text-indigo-400 hover:text-indigo-300"
+                      >
+                        Copy Link
+                      </button>
+                      <button
+                        onClick={() => handleCancelInvite(inv.id)}
+                        disabled={cancellingInvite === inv.id}
+                        className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
+                      >
+                        {cancellingInvite === inv.id ? 'Cancelling...' : 'Cancel'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           {/* Org Section */}

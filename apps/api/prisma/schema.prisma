@@ -75,6 +75,7 @@ model Repo {
   name      String
   path      String
   provider  String    @default("local")
+  archived  Boolean   @default(false)
   syncedAt  DateTime?
   createdAt DateTime  @default(now())
   commits      Commit[]
