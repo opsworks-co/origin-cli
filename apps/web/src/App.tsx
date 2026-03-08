@@ -26,6 +26,7 @@ import UserDetail from './pages/UserDetail';
 import Reports from './pages/Reports';
 import MachineDetail from './pages/MachineDetail';
 import AcceptInvite from './pages/AcceptInvite';
+import PullRequests from './pages/PullRequests';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -154,6 +155,16 @@ export default function App() {
           <ProtectedRoute>
             <Layout>
               <Notifications />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/pull-requests"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <PullRequests />
             </Layout>
           </ProtectedRoute>
         }

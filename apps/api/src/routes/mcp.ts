@@ -6,6 +6,7 @@ import { runAIReview } from '../services/ai-review.js';
 import { checkBudget, recordSpend } from '../services/budget.js';
 import { emitSessionEvent } from '../services/session-events.js';
 import { enforceSessionStart, enforceSessionEnd, applyEnforcementActions, enforceAgentLimits } from '../services/policy-engine.js';
+import { updateSessionPRChecks } from '../services/github-integration.js';
 import { scanForSecrets } from '../services/secret-scanner.js';
 import { detectAITool } from '../services/ai-commit-detector.js';
 
@@ -598,9 +599,9 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       agentId: codingSession.agentId,
       machineId: endMachineId,
       repoId: sessionRepoId,
-    }).then(result => {
+    }).then(async (result) => {
       if (result.violations.length > 0) {
-        return applyEnforcementActions({
+        await applyEnforcementActions({
           sessionId,
           orgId,
           model: codingSession.model,
@@ -615,6 +616,11 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           machineId: endMachineId,
           repoId: sessionRepoId,
         }, result);
+      }
+      // Update GitHub PR status checks for any PRs linked to this session's commits
+      const prsUpdated = await updateSessionPRChecks(sessionId, orgId);
+      if (prsUpdated > 0) {
+        console.log(`[pr-checks] Updated ${prsUpdated} PR(s) after session ${sessionId} enforcement`);
       }
     }).catch(err => console.error('[policy-engine] Background error:', err));
 
@@ -633,6 +639,11 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       agentId: codingSession.agentId,
       machineId: endMachineId,
       repoId: sessionRepoId,
+    }).then(async (result) => {
+      // If agent limits were violated, also update PR checks
+      if (result.violations.length > 0) {
+        await updateSessionPRChecks(sessionId, orgId);
+      }
     }).catch(err => console.error('[agent-limits] Background error:', err));
 
     res.json({ success: true });

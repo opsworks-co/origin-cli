@@ -950,6 +950,53 @@ export default function Settings() {
             </div>
           </section>
 
+          {/* Branch Protection Setup */}
+          {integrations.find((i) => i.provider === 'github') && (
+            <section className="card space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold">Branch Protection</h2>
+                <p className="text-sm text-gray-500 mt-0.5">
+                  Block merges to protected branches when AI sessions have policy violations
+                </p>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 space-y-4">
+                <div className="flex items-start gap-3">
+                  <span className="text-xl mt-0.5">🛡️</span>
+                  <div className="space-y-3 text-sm text-gray-300">
+                    <p>
+                      Origin posts a <code className="bg-gray-700 px-1.5 py-0.5 rounded text-xs text-indigo-300">origin/ai-governance</code> status
+                      check on every PR. Configure GitHub to require this check before merging:
+                    </p>
+
+                    <ol className="list-decimal list-inside space-y-2 text-gray-400">
+                      <li>Go to your GitHub repository → <strong className="text-gray-300">Settings</strong> → <strong className="text-gray-300">Branches</strong></li>
+                      <li>Click <strong className="text-gray-300">Add branch protection rule</strong> (or edit existing)</li>
+                      <li>Set <strong className="text-gray-300">Branch name pattern</strong> to <code className="bg-gray-700 px-1 rounded text-xs">main</code> (or your default branch)</li>
+                      <li>Enable <strong className="text-gray-300">"Require status checks to pass before merging"</strong></li>
+                      <li>Search for <code className="bg-gray-700 px-1 rounded text-xs text-indigo-300">origin/ai-governance</code> and select it</li>
+                      <li>Click <strong className="text-gray-300">Create</strong> (or <strong className="text-gray-300">Save changes</strong>)</li>
+                    </ol>
+
+                    <div className="bg-indigo-900/20 border border-indigo-800/30 rounded-lg p-3 text-xs text-indigo-300">
+                      <strong>Result:</strong> PRs with flagged or rejected AI sessions will show a failing check and
+                      cannot be merged until an admin approves the session in Origin.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <a
+                  href="/pull-requests"
+                  className="text-sm text-indigo-400 hover:text-indigo-300"
+                >
+                  View PR Checks Dashboard →
+                </a>
+              </div>
+            </section>
+          )}
+
           {/* Webhook Activity */}
           {webhookEvents.length > 0 && (
             <section className="card space-y-4">

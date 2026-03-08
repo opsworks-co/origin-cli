@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { prisma } from '../db.js';
-import { updatePRGitHubStatus } from './github-integration.js';
+import { updatePRGitHubStatus, listPRCommits, getIntegrationConfig, parseRepoFullName } from './github-integration.js';
 import { detectAITool } from './ai-commit-detector.js';
 
 export function generateWebhookSecret(): string {
@@ -104,7 +104,7 @@ export async function processGitHubPR(repoId: string, payload: GitHubPRPayload) 
     where: { repoId, number: payload.number },
   });
 
-  // Build commit SHAs list — include the head SHA and any existing ones
+  // Build commit SHAs list — fetch all PR commits from GitHub API if possible
   let commitShas: string[] = [];
   if (existing) {
     try {
@@ -114,19 +114,34 @@ export async function processGitHubPR(repoId: string, payload: GitHubPRPayload) 
     }
   }
 
+  // Try to fetch full PR commit list from GitHub API
+  const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+  if (repo) {
+    const integration = await getIntegrationConfig(repo.orgId);
+    const parsed = parseRepoFullName(repo.path);
+    if (integration && parsed) {
+      const prCommits = await listPRCommits(
+        integration.token,
+        parsed.owner,
+        parsed.repo,
+        payload.number,
+        integration.apiBaseUrl,
+      );
+      if (prCommits.success && prCommits.shas) {
+        // Merge GitHub API SHAs with existing ones
+        for (const sha of prCommits.shas) {
+          if (!commitShas.includes(sha)) {
+            commitShas.push(sha);
+          }
+        }
+      }
+    }
+  }
+
   // Add head SHA if not already present
   if (pr.head.sha && !commitShas.includes(pr.head.sha)) {
     commitShas.push(pr.head.sha);
   }
-
-  // Also find all commits in the repo that match any of the SHAs
-  // (to link sessions that were created via push events)
-  const repoCommits = await prisma.commit.findMany({
-    where: { repoId },
-    select: { sha: true },
-    orderBy: { committedAt: 'desc' },
-    take: 100,
-  });
 
   const prRecord = existing
     ? await prisma.pullRequest.update({
@@ -155,15 +170,15 @@ export async function processGitHubPR(repoId: string, payload: GitHubPRPayload) 
         },
       });
 
-  // Get the repo to find the org
-  const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+  // Get the repo to find the org (may already have it from above)
+  const repoForStatus = repo || await prisma.repo.findUnique({ where: { id: repoId } });
 
   // Post status check + comment to GitHub (if integration is configured)
-  if (repo && (action === 'opened' || action === 'synchronize' || action === 'reopened')) {
+  if (repoForStatus && (action === 'opened' || action === 'synchronize' || action === 'reopened')) {
     const originBaseUrl = process.env.ORIGIN_WEB_URL || 'http://localhost:5176';
     try {
       await updatePRGitHubStatus(
-        repo.orgId,
+        repoForStatus.orgId,
         repoId,
         payload.number,
         pr.head.sha,

@@ -338,6 +338,40 @@ export async function getIntegrationConfig(orgId: string, provider: string = 'gi
   };
 }
 
+// ── List PR Commits from GitHub ───────────────────────────────────
+
+/**
+ * Fetch all commit SHAs for a pull request via the GitHub API.
+ * Returns up to 250 commit SHAs (GitHub paginates at 250 per page).
+ */
+export async function listPRCommits(
+  token: string,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  baseUrl: string = GITHUB_API,
+): Promise<{ success: boolean; shas?: string[]; error?: string }> {
+  const url = `${baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}/commits?per_page=250`;
+
+  try {
+    const res = await fetch(url, {
+      headers: githubHeaders(token),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`GitHub list PR commits error (${res.status}):`, err);
+      return { success: false, error: `HTTP ${res.status}` };
+    }
+
+    const data = (await res.json()) as Array<{ sha: string }>;
+    return { success: true, shas: data.map((c) => c.sha) };
+  } catch (err: any) {
+    console.error('Failed to list PR commits:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 // ── Session Summary Comment Builder ───────────────────────────────
 
 interface SessionForComment {
@@ -349,6 +383,7 @@ interface SessionForComment {
   linesAdded: number;
   linesRemoved: number;
   reviewStatus: string | null;
+  reviewNote: string | null;
 }
 
 function statusEmoji(status: string | null): string {
@@ -403,7 +438,19 @@ export function buildSessionSummaryComment(
   else if (anyRejected) overallStatus = '❌ Session(s) rejected';
   else if (anyFlagged) overallStatus = '⚠️ Session(s) flagged';
 
-  return [
+  // Collect policy violation details from flagged sessions
+  const violationLines: string[] = [];
+  for (const s of sessions) {
+    if (s.reviewNote && (s.reviewStatus?.toUpperCase() === 'FLAGGED' || s.reviewStatus?.toUpperCase() === 'REJECTED')) {
+      // Parse auto-flag notes for violation details
+      const lines = s.reviewNote.split('\n').filter((l) => l.startsWith('- **'));
+      for (const line of lines) {
+        violationLines.push(line);
+      }
+    }
+  }
+
+  const parts = [
     '## 🔍 Origin — AI Governance Report',
     '',
     '| Session | Agent | Model | Cost | Tokens | Status |',
@@ -413,12 +460,24 @@ export function buildSessionSummaryComment(
     `**Summary:** ${sessions.length} AI session${sessions.length > 1 ? 's' : ''} linked to this PR · $${totalCost.toFixed(2)} total cost · +${totalLines.toLocaleString()} lines added`,
     '',
     `**Overall:** ${overallStatus}`,
+  ];
+
+  if (violationLines.length > 0) {
+    parts.push('', '### ⚠️ Policy Violations', '');
+    for (const line of violationLines) {
+      parts.push(line);
+    }
+  }
+
+  parts.push(
     '',
     `📊 [View in Origin](${originBaseUrl}/dashboard)`,
     '',
     '---',
     '*Powered by [Origin](https://github.com/dolobanko/origin-v2) — AI Coding Agent Governance*',
-  ].join('\n');
+  );
+
+  return parts.join('\n');
 }
 
 // ── Compute Check Status from Sessions ────────────────────────────
@@ -437,10 +496,15 @@ export function computeCheckStatus(sessions: SessionForComment[]): {
   const pending = sessions.filter((s) => !s.reviewStatus).length;
 
   if (anyRejected) {
-    return { state: 'failure', description: `${sessions.length} AI session(s) — rejected` };
+    // Extract first violation message from review note
+    const rejected = sessions.find((s) => s.reviewStatus?.toUpperCase() === 'REJECTED');
+    const detail = extractFirstViolation(rejected?.reviewNote);
+    return { state: 'failure', description: detail || `${sessions.length} AI session(s) — rejected` };
   }
   if (anyFlagged) {
-    return { state: 'failure', description: `${sessions.length} AI session(s) — flagged for review` };
+    const flagged = sessions.find((s) => s.reviewStatus?.toUpperCase() === 'FLAGGED');
+    const detail = extractFirstViolation(flagged?.reviewNote);
+    return { state: 'failure', description: detail || `${sessions.length} AI session(s) — policy violation` };
   }
   if (allApproved) {
     return { state: 'success', description: `${sessions.length} AI session(s) — all approved` };
@@ -449,6 +513,19 @@ export function computeCheckStatus(sessions: SessionForComment[]): {
     state: 'pending',
     description: `${sessions.length} AI session(s) — ${pending} awaiting review`,
   };
+}
+
+/** Extract first violation detail from a review note for the status description. */
+function extractFirstViolation(note: string | null | undefined): string | null {
+  if (!note) return null;
+  // Look for "- **PolicyName** (TYPE): message" format
+  const match = note.match(/- \*\*([^*]+)\*\*[^:]*:\s*(.+)/);
+  if (match) {
+    const msg = match[2].trim();
+    // GitHub status descriptions have a 140-char limit
+    return msg.length > 130 ? msg.slice(0, 127) + '...' : msg;
+  }
+  return null;
 }
 
 // ── Get Sessions for a PR ─────────────────────────────────────────
@@ -471,18 +548,24 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
     },
   });
 
-  return commits
-    .filter((c) => c.session)
-    .map((c) => ({
-      id: c.session!.id,
-      agentName: c.session!.agent?.name || null,
-      model: c.session!.model,
-      costUsd: c.session!.costUsd,
-      tokensUsed: c.session!.tokensUsed,
-      linesAdded: c.session!.linesAdded,
-      linesRemoved: c.session!.linesRemoved,
-      reviewStatus: c.session!.review?.status || null,
-    }));
+  // Deduplicate sessions (multiple commits can link to same session)
+  const sessionMap = new Map<string, SessionForComment>();
+  for (const c of commits) {
+    if (c.session && !sessionMap.has(c.session.id)) {
+      sessionMap.set(c.session.id, {
+        id: c.session!.id,
+        agentName: c.session!.agent?.name || null,
+        model: c.session!.model,
+        costUsd: c.session!.costUsd,
+        tokensUsed: c.session!.tokensUsed,
+        linesAdded: c.session!.linesAdded,
+        linesRemoved: c.session!.linesRemoved,
+        reviewStatus: c.session!.review?.status || null,
+        reviewNote: c.session!.review?.note || null,
+      });
+    }
+  }
+  return Array.from(sessionMap.values());
 }
 
 // ── Post Status + Comment for a PR ────────────────────────────────
@@ -567,4 +650,131 @@ export async function updatePRGitHubStatus(
       }
     }
   }
+}
+
+// ── Update PR Checks After Session Enforcement ────────────────────
+
+/**
+ * After a session is flagged/reviewed, find all PRs that include commits
+ * from this session and update their GitHub status checks + comments.
+ * Returns the number of PRs updated.
+ */
+export async function updateSessionPRChecks(
+  sessionId: string,
+  orgId: string,
+): Promise<number> {
+  const integration = await getIntegrationConfig(orgId);
+  if (!integration) return 0;
+
+  // Find the session and its commits
+  const session = await prisma.codingSession.findUnique({
+    where: { id: sessionId },
+    include: {
+      commit: { select: { repoId: true, sha: true } },
+      commits: { select: { sha: true } },
+    },
+  });
+
+  if (!session?.commit?.repoId) return 0;
+
+  const repoId = session.commit.repoId;
+  const sessionShas = [
+    session.commit.sha,
+    ...session.commits.map((c) => c.sha),
+  ].filter(Boolean);
+
+  if (sessionShas.length === 0) return 0;
+
+  // Find all open PRs for this repo
+  const openPRs = await prisma.pullRequest.findMany({
+    where: { repoId, state: 'open' },
+  });
+
+  const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+  if (!repo) return 0;
+
+  const parsed = parseRepoFullName(repo.path);
+  if (!parsed) return 0;
+
+  const originBaseUrl = process.env.ORIGIN_WEB_URL || 'http://localhost:5176';
+  let updated = 0;
+
+  for (const pr of openPRs) {
+    let prShas: string[];
+    try {
+      prShas = JSON.parse(pr.commitShas);
+    } catch {
+      prShas = [];
+    }
+
+    // Check if any of this session's commits are in the PR
+    const hasMatch = sessionShas.some((sha) => prShas.includes(sha));
+    if (!hasMatch) continue;
+
+    // Find the latest SHA for posting the status check (head of PR)
+    const headSha = prShas[prShas.length - 1];
+    if (!headSha) continue;
+
+    try {
+      const sessions = await getSessionsForPR(repoId, prShas);
+      const { state, description } = computeCheckStatus(sessions);
+
+      // Post status check
+      if (integration.parsedSettings.postChecks) {
+        await postCommitStatus(
+          integration.token,
+          parsed.owner,
+          parsed.repo,
+          headSha,
+          state,
+          description,
+          `${originBaseUrl}/sessions`,
+          integration.apiBaseUrl,
+        );
+      }
+
+      // Update comment
+      if (integration.parsedSettings.postComments) {
+        const commentBody = buildSessionSummaryComment(sessions, originBaseUrl);
+        if (pr.commentId) {
+          await updatePRComment(
+            integration.token,
+            parsed.owner,
+            parsed.repo,
+            pr.commentId,
+            commentBody,
+            integration.apiBaseUrl,
+          );
+        } else {
+          const result = await postPRComment(
+            integration.token,
+            parsed.owner,
+            parsed.repo,
+            pr.number,
+            commentBody,
+            integration.apiBaseUrl,
+          );
+          if (result.commentId) {
+            await prisma.pullRequest.update({
+              where: { id: pr.id },
+              data: { commentId: result.commentId },
+            });
+          }
+        }
+      }
+
+      // Update check status on PR record
+      const { state: newState } = computeCheckStatus(sessions);
+      await prisma.pullRequest.update({
+        where: { id: pr.id },
+        data: { checkStatus: newState },
+      });
+
+      updated++;
+    } catch (err) {
+      console.error(`Failed to update PR #${pr.number} status:`, err);
+    }
+  }
+
+  return updated;
 }

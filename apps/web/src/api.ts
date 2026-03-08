@@ -758,14 +758,42 @@ export function testIntegration(id: string) {
 
 export interface PullRequestInfo {
   id: string;
+  repoId: string;
+  repoName: string;
+  repoPath: string;
   number: number;
   title: string;
   url: string;
   state: string;
-  checkStatus: string | null;
   author: string;
   baseBranch: string;
   headBranch: string;
+  checkStatus: string;
+  checkDescription: string;
+  sessionsCount: number;
+  sessionsApproved: number;
+  sessionsFlagged: number;
+  sessionsRejected: number;
+  sessionsPending: number;
+  commitCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function getPullRequests(params?: { repoId?: string; status?: string; state?: string }) {
+  const q = new URLSearchParams();
+  if (params?.repoId) q.set('repoId', params.repoId);
+  if (params?.status) q.set('status', params.status);
+  if (params?.state) q.set('state', params.state);
+  const qs = q.toString();
+  return request<PullRequestInfo[]>(`/api/pull-requests${qs ? `?${qs}` : ''}`);
+}
+
+export function recheckPR(id: string) {
+  return request<{ success: boolean; checkStatus: string; checkDescription: string; sessionsCount: number }>(
+    `/api/pull-requests/${id}/recheck`,
+    { method: 'POST' },
+  );
 }
 
 // ---- Budget / Cost Controls --------------------------------------------------

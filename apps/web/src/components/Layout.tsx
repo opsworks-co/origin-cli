@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { to: '/repos', label: 'Repositories', icon: '\uD83D\uDCC1' },
   { to: '/agents', label: 'Agents', icon: '\uD83E\uDD16' },
   { to: '/sessions', label: 'Sessions', icon: '\u25B6' },
+  { to: '/pull-requests', label: 'PR Checks', icon: '\uD83D\uDD00' },
   { to: '/policies', label: 'Policies', icon: '\uD83D\uDEE1' },
   { to: '/settings', label: 'Settings', icon: '\u2699' },
 ];
