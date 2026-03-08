@@ -1,20 +1,42 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import type { BudgetData } from '../api';
+import Team from './Team';
+import AuditLog from './AuditLog';
+import Insights from './Insights';
+import Reports from './Reports';
 
 interface ApiKey {
   id: string;
   name: string;
   keyPrefix: string;
   createdAt: string;
+  userId: string | null;
+  user: { name: string; email: string } | null;
 }
+
+type SettingsTab = 'general' | 'agent-setup' | 'integrations' | 'budget' | 'team' | 'audit' | 'insights' | 'reports';
+const VALID_TABS: SettingsTab[] = ['general', 'agent-setup', 'integrations', 'budget', 'team', 'audit', 'insights', 'reports'];
 
 export default function Settings() {
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  // Active tab
-  const [activeTab, setActiveTab] = useState<'general' | 'agent-setup' | 'integrations' | 'budget'>('general');
+  // Active tab — read from URL ?tab= param, default to 'general'
+  const tabParam = searchParams.get('tab') as SettingsTab | null;
+  const initialTab: SettingsTab = tabParam && VALID_TABS.includes(tabParam) ? tabParam : 'general';
+  const [activeTab, setActiveTabState] = useState<SettingsTab>(initialTab);
+
+  const setActiveTab = (tab: SettingsTab) => {
+    setActiveTabState(tab);
+    if (tab === 'general') {
+      setSearchParams({});
+    } else {
+      setSearchParams({ tab });
+    }
+  };
 
   // API Keys
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
@@ -46,6 +68,15 @@ export default function Settings() {
   const [integrationSuccess, setIntegrationSuccess] = useState<string | null>(null);
   const [webhookEvents, setWebhookEvents] = useState<api.AuditEntry[]>([]);
 
+  // Org settings
+  const [orgName, setOrgName] = useState('');
+  const [orgSlug, setOrgSlug] = useState('');
+  const [orgStats, setOrgStats] = useState<{ users: number; repos: number; agents: number; policies: number } | null>(null);
+  const [orgCreatedAt, setOrgCreatedAt] = useState('');
+  const [orgLoading, setOrgLoading] = useState(false);
+  const [savingOrg, setSavingOrg] = useState(false);
+  const [orgMsg, setOrgMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
   // Budget state
   const [budgetData, setBudgetData] = useState<BudgetData | null>(null);
   const [budgetLoading, setBudgetLoading] = useState(false);
@@ -53,6 +84,37 @@ export default function Settings() {
   const [budgetBlock, setBudgetBlock] = useState(false);
   const [savingBudget, setSavingBudget] = useState(false);
   const [budgetMsg, setBudgetMsg] = useState('');
+
+  const fetchOrg = useCallback(async () => {
+    setOrgLoading(true);
+    try {
+      const data = await api.getOrgSettings();
+      setOrgName(data.org.name);
+      setOrgSlug(data.org.slug);
+      setOrgStats(data.org._count);
+      setOrgCreatedAt(data.org.createdAt);
+    } catch {
+      // ignore
+    } finally {
+      setOrgLoading(false);
+    }
+  }, []);
+
+  const handleSaveOrg = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingOrg(true);
+    setOrgMsg(null);
+    try {
+      const data = await api.updateOrgSettings({ name: orgName, slug: orgSlug });
+      setOrgName(data.org.name);
+      setOrgSlug(data.org.slug);
+      setOrgMsg({ type: 'success', text: 'Organization settings saved' });
+    } catch (err: any) {
+      setOrgMsg({ type: 'error', text: err.message || 'Failed to save' });
+    } finally {
+      setSavingOrg(false);
+    }
+  };
 
   const fetchBudget = useCallback(async () => {
     setBudgetLoading(true);
@@ -68,10 +130,11 @@ export default function Settings() {
     }
   }, []);
 
-  // Fetch API keys on mount
+  // Fetch API keys and org settings on mount
   useEffect(() => {
     fetchApiKeys();
-  }, []);
+    fetchOrg();
+  }, [fetchOrg]);
 
   // Fetch integrations/budget when tab is active
   useEffect(() => {
@@ -255,7 +318,7 @@ export default function Settings() {
   };
 
   return (
-    <div className="space-y-8 max-w-3xl">
+    <div className={`space-y-8 ${['team', 'audit', 'insights', 'reports'].includes(activeTab) ? '' : 'max-w-3xl'}`}>
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
         <p className="text-sm text-gray-500 mt-1">Manage API keys, team, and organization</p>
@@ -303,6 +366,47 @@ export default function Settings() {
         >
           Budget
         </button>
+        <div className="w-px h-5 bg-gray-800 self-center mx-1" />
+        <button
+          onClick={() => setActiveTab('team')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'team'
+              ? 'border-indigo-500 text-indigo-400'
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          Team
+        </button>
+        <button
+          onClick={() => setActiveTab('audit')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'audit'
+              ? 'border-indigo-500 text-indigo-400'
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          Audit Log
+        </button>
+        <button
+          onClick={() => setActiveTab('insights')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'insights'
+              ? 'border-indigo-500 text-indigo-400'
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          Insights
+        </button>
+        <button
+          onClick={() => setActiveTab('reports')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'reports'
+              ? 'border-indigo-500 text-indigo-400'
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          Reports
+        </button>
       </div>
 
       {activeTab === 'general' && (
@@ -341,6 +445,9 @@ export default function Settings() {
                       <code className="text-xs text-indigo-400">{key.keyPrefix}...</code>
                     </div>
                     <div className="flex items-center gap-3">
+                      {key.user && (
+                        <span className="text-xs text-gray-400">{key.user.name}</span>
+                      )}
                       <span className="text-xs text-gray-500">
                         Created {new Date(key.createdAt).toLocaleDateString()}
                       </span>
@@ -430,35 +537,127 @@ export default function Settings() {
           <section className="card space-y-4">
             <div>
               <h2 className="text-lg font-semibold">Organization</h2>
-              <p className="text-sm text-gray-500 mt-0.5">Your organization details</p>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Manage your organization settings
+                {user?.role !== 'OWNER' && user?.role !== 'ADMIN' && (
+                  <span className="text-gray-600 ml-1">(read-only for your role)</span>
+                )}
+              </p>
             </div>
 
-            <div className="grid sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm text-gray-500 mb-1">Organization Name</label>
-                <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
-                  {user?.orgName ?? '\u2014'}
-                </div>
+            {orgMsg && (
+              <div
+                className={`rounded-lg p-3 text-sm ${
+                  orgMsg.type === 'success'
+                    ? 'bg-green-900/20 border border-green-800 text-green-400'
+                    : 'bg-red-900/20 border border-red-800 text-red-400'
+                }`}
+              >
+                {orgMsg.text}
               </div>
-              <div>
-                <label className="block text-sm text-gray-500 mb-1">Slug</label>
-                <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
-                  {user?.orgSlug ?? '\u2014'}
+            )}
+
+            {orgLoading ? (
+              <div className="text-sm text-gray-500">Loading organization...</div>
+            ) : (
+              <form onSubmit={handleSaveOrg} className="space-y-4">
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">Organization Name</label>
+                    {user?.role === 'OWNER' || user?.role === 'ADMIN' ? (
+                      <input
+                        value={orgName}
+                        onChange={(e) => setOrgName(e.target.value)}
+                        className="input"
+                        placeholder="Your organization"
+                        required
+                      />
+                    ) : (
+                      <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
+                        {orgName || '\u2014'}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">Slug</label>
+                    {user?.role === 'OWNER' || user?.role === 'ADMIN' ? (
+                      <>
+                        <input
+                          value={orgSlug}
+                          onChange={(e) => setOrgSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+                          className="input"
+                          placeholder="my-org"
+                          required
+                          pattern="[a-z0-9][a-z0-9-]*[a-z0-9]"
+                          minLength={2}
+                          maxLength={48}
+                        />
+                        <p className="text-xs text-gray-600 mt-1">
+                          Used in URLs. Lowercase letters, numbers, and hyphens only.
+                        </p>
+                      </>
+                    ) : (
+                      <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
+                        {orgSlug || '\u2014'}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-              <div>
-                <label className="block text-sm text-gray-500 mb-1">Your Role</label>
-                <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
-                  {user?.role ?? '\u2014'}
+
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm text-gray-500 mb-1">Your Role</label>
+                    <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
+                      {user?.role ?? '\u2014'}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-500 mb-1">Your Email</label>
+                    <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
+                      {user?.email ?? '\u2014'}
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div>
-                <label className="block text-sm text-gray-500 mb-1">Your Email</label>
-                <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
-                  {user?.email ?? '\u2014'}
-                </div>
-              </div>
-            </div>
+
+                {/* Org stats */}
+                {orgStats && (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+                    <div className="bg-gray-800/30 rounded-lg px-3 py-2 text-center">
+                      <div className="text-lg font-semibold text-gray-100">{orgStats.users}</div>
+                      <div className="text-xs text-gray-500">Members</div>
+                    </div>
+                    <div className="bg-gray-800/30 rounded-lg px-3 py-2 text-center">
+                      <div className="text-lg font-semibold text-gray-100">{orgStats.repos}</div>
+                      <div className="text-xs text-gray-500">Repos</div>
+                    </div>
+                    <div className="bg-gray-800/30 rounded-lg px-3 py-2 text-center">
+                      <div className="text-lg font-semibold text-gray-100">{orgStats.agents}</div>
+                      <div className="text-xs text-gray-500">Agents</div>
+                    </div>
+                    <div className="bg-gray-800/30 rounded-lg px-3 py-2 text-center">
+                      <div className="text-lg font-semibold text-gray-100">{orgStats.policies}</div>
+                      <div className="text-xs text-gray-500">Policies</div>
+                    </div>
+                  </div>
+                )}
+
+                {orgCreatedAt && (
+                  <p className="text-xs text-gray-600">
+                    Organization created {new Date(orgCreatedAt).toLocaleDateString()}
+                  </p>
+                )}
+
+                {(user?.role === 'OWNER' || user?.role === 'ADMIN') && (
+                  <button
+                    type="submit"
+                    disabled={savingOrg}
+                    className="btn-primary text-sm"
+                  >
+                    {savingOrg ? 'Saving...' : 'Save Changes'}
+                  </button>
+                )}
+              </form>
+            )}
           </section>
         </>
       )}
@@ -1003,6 +1202,11 @@ origin init</pre>
           </section>
         </>
       )}
+
+      {activeTab === 'team' && <Team />}
+      {activeTab === 'audit' && <AuditLog />}
+      {activeTab === 'insights' && <Insights />}
+      {activeTab === 'reports' && <Reports />}
     </div>
   );
 }

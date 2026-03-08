@@ -37,7 +37,7 @@ setInterval(() => {
 // Helper: call Claude and extract text response
 // ---------------------------------------------------------------------------
 
-async function callClaude(
+export async function callClaude(
   systemPrompt: string,
   messages: Array<{ role: string; content: string }>,
   maxTokens: number = 1024,

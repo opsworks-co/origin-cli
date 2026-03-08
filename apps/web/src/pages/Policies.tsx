@@ -108,6 +108,11 @@ export default function Policies() {
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // Natural language input
+  const [nlPrompt, setNlPrompt] = useState('');
+  const [nlLoading, setNlLoading] = useState(false);
+  const [nlResult, setNlResult] = useState<string | null>(null);
+
   // Create policy form
   const [showForm, setShowForm] = useState(false);
   const [formName, setFormName] = useState('');
@@ -240,6 +245,24 @@ export default function Policies() {
     setRuleCondition(json);
   };
 
+  const handleNaturalLanguage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!nlPrompt.trim()) return;
+    setNlLoading(true);
+    setNlResult(null);
+    setError('');
+    try {
+      const result = await api.createPolicyFromNaturalLanguage(nlPrompt.trim());
+      setNlResult(result.message);
+      setNlPrompt('');
+      fetchPolicies();
+    } catch (err: any) {
+      setError(err.message || 'Failed to create policy');
+    } finally {
+      setNlLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -270,6 +293,41 @@ export default function Policies() {
           </button>
         </div>
       )}
+
+      {/* Natural language policy creation */}
+      <form onSubmit={handleNaturalLanguage} className="card space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="text-base">✨</span>
+          <h3 className="text-sm font-semibold text-gray-200">Create with Natural Language</h3>
+        </div>
+        <div className="flex gap-2">
+          <input
+            value={nlPrompt}
+            onChange={(e) => setNlPrompt(e.target.value)}
+            className="input flex-1 text-sm"
+            placeholder='e.g. "Block access to .env files and flag sessions costing over $2 for review"'
+            disabled={nlLoading}
+          />
+          <button
+            type="submit"
+            disabled={nlLoading || !nlPrompt.trim()}
+            className="btn-primary text-sm whitespace-nowrap"
+          >
+            {nlLoading ? 'Creating...' : 'Create'}
+          </button>
+        </div>
+        {nlResult && (
+          <div className="text-sm text-green-400 bg-green-900/20 border border-green-800/50 rounded-lg px-3 py-2 flex items-center justify-between">
+            <span>{nlResult}</span>
+            <button onClick={() => setNlResult(null)} className="text-green-500 hover:text-green-300 ml-2">
+              &times;
+            </button>
+          </div>
+        )}
+        <p className="text-xs text-gray-600">
+          Describe your policy in plain English. AI will create the policy with rules automatically.
+        </p>
+      </form>
 
       {/* Create form */}
       {showForm && (

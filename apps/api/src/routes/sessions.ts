@@ -12,6 +12,7 @@ import {
   parseRepoFullName,
 } from '../services/github-integration.js';
 import { onSessionEvent, SessionEvent, emitSessionEvent } from '../services/session-events.js';
+import { callClaude } from './chat.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -43,6 +44,9 @@ function mapSession(s: any, pullRequests?: any[]) {
     linesAdded: s.linesAdded,
     linesRemoved: s.linesRemoved,
     costUsd: s.costUsd,
+    status: s.status || 'COMPLETED',
+    startedAt: s.startedAt || null,
+    endedAt: s.endedAt || null,
     agentSystemPrompt: s.agentSystemPrompt || null,
     createdAt: s.createdAt,
     review: s.review
@@ -153,6 +157,32 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     });
   } catch (err) {
     console.error('List sessions error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /active — currently running sessions
+router.get('/active', async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+
+    const sessions = await prisma.codingSession.findMany({
+      where: {
+        status: 'RUNNING',
+        commit: { repo: { orgId } },
+      },
+      include: {
+        commit: { include: { repo: true } },
+        agent: true,
+        user: true,
+        review: { include: { user: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    res.json({ sessions: sessions.map((s) => mapSession(s)) });
+  } catch (err) {
+    console.error('List active sessions error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -572,6 +602,465 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Delete session error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /:id/blame — Line-level AI attribution for a file in a session
+// ---------------------------------------------------------------------------
+
+interface BlameLine {
+  lineNumber: number;
+  content: string;
+  attribution: {
+    promptIndex: number;
+    promptText: string;
+    type: 'added' | 'modified';
+  } | null;
+  isGap?: boolean;
+}
+
+interface BlamePrompt {
+  promptIndex: number;
+  promptText: string;
+  filesChanged: string[];
+}
+
+/**
+ * Parse a unified diff string and extract per-file hunks.
+ * Returns line additions/modifications for the target file.
+ */
+function parseDiffForFile(
+  diffText: string,
+  targetFile: string,
+): Array<{ lineNumber: number; content: string; type: 'added' | 'modified' }> {
+  if (!diffText) return [];
+
+  const results: Array<{ lineNumber: number; content: string; type: 'added' | 'modified' }> = [];
+
+  // Split by file sections (diff --git or --- a/)
+  const fileSections = diffText.split(/^diff --git /m).filter(Boolean);
+
+  for (const section of fileSections) {
+    const lines = section.split('\n');
+    const headerMatch = lines[0]?.match(/a\/(.+?)\s+b\/(.+)/);
+    const filePath = headerMatch ? headerMatch[2] : '';
+
+    // Check if this section is for our target file (flexible matching)
+    const normalizedTarget = targetFile.replace(/^\//, '');
+    const normalizedFile = filePath.replace(/^\//, '');
+    if (
+      normalizedFile !== normalizedTarget &&
+      !normalizedFile.endsWith(normalizedTarget) &&
+      !normalizedTarget.endsWith(normalizedFile)
+    ) {
+      continue;
+    }
+
+    // Parse hunks
+    let newLineNum = 0;
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith('@@')) {
+        // Parse hunk header: @@ -old,count +new,count @@
+        const hunkMatch = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (hunkMatch) {
+          newLineNum = parseInt(hunkMatch[1], 10);
+        }
+        continue;
+      }
+
+      if (line.startsWith('+++') || line.startsWith('---')) continue;
+
+      if (line.startsWith('+')) {
+        results.push({
+          lineNumber: newLineNum,
+          content: line.slice(1),
+          type: 'added',
+        });
+        newLineNum++;
+      } else if (line.startsWith('-')) {
+        // Removed lines don't increment new line number
+        // They indicate modification context
+      } else {
+        // Context line
+        newLineNum++;
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Parse a unified diff and extract ALL lines (context + additions + gap markers)
+ * for a target file. Returns the file view as seen in the "new" version.
+ * Context lines = human-written / unchanged. Added lines = AI-written.
+ */
+function parseFullDiffForFile(
+  diffText: string,
+  targetFile: string,
+): Array<{ lineNumber: number; content: string; type: 'context' | 'added'; isGap?: boolean }> {
+  if (!diffText) return [];
+
+  const results: Array<{ lineNumber: number; content: string; type: 'context' | 'added'; isGap?: boolean }> = [];
+  const fileSections = diffText.split(/^diff --git /m).filter(Boolean);
+  let lastLineNum = 0;
+
+  for (const section of fileSections) {
+    const lines = section.split('\n');
+    const headerMatch = lines[0]?.match(/a\/(.+?)\s+b\/(.+)/);
+    const filePath = headerMatch ? headerMatch[2] : '';
+
+    const normalizedTarget = targetFile.replace(/^\//, '');
+    const normalizedFile = filePath.replace(/^\//, '');
+    if (
+      normalizedFile !== normalizedTarget &&
+      !normalizedFile.endsWith(normalizedTarget) &&
+      !normalizedTarget.endsWith(normalizedFile)
+    ) continue;
+
+    let newLineNum = 0;
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+
+      // Skip meta lines
+      if (line.startsWith('\\ ')) continue;
+      if (line.startsWith('+++') || line.startsWith('---')) continue;
+      if (line.startsWith('index ') || line.startsWith('new file') || line.startsWith('deleted file') ||
+          line.startsWith('old mode') || line.startsWith('new mode') || line.startsWith('similarity') ||
+          line.startsWith('rename ') || line.startsWith('Binary ')) continue;
+
+      if (line.startsWith('@@')) {
+        const hunkMatch = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (hunkMatch) {
+          const nextLineNum = parseInt(hunkMatch[1], 10);
+          // Insert gap marker if there are hidden lines between hunks
+          if (lastLineNum > 0 && nextLineNum > lastLineNum + 1) {
+            results.push({
+              lineNumber: -1,
+              content: `${nextLineNum - lastLineNum - 1} lines hidden`,
+              type: 'context',
+              isGap: true,
+            });
+          } else if (lastLineNum === 0 && nextLineNum > 1) {
+            results.push({
+              lineNumber: -1,
+              content: `${nextLineNum - 1} lines hidden`,
+              type: 'context',
+              isGap: true,
+            });
+          }
+          newLineNum = nextLineNum;
+        }
+        continue;
+      }
+
+      if (line.startsWith('+')) {
+        results.push({ lineNumber: newLineNum, content: line.slice(1), type: 'added' });
+        lastLineNum = newLineNum;
+        newLineNum++;
+      } else if (line.startsWith('-')) {
+        // Removed lines are not in the new file — skip
+      } else {
+        // Context line (starts with ' ' or is empty)
+        results.push({
+          lineNumber: newLineNum,
+          content: line.startsWith(' ') ? line.slice(1) : line,
+          type: 'context',
+        });
+        lastLineNum = newLineNum;
+        newLineNum++;
+      }
+    }
+  }
+
+  return results;
+}
+
+router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const file = req.query.file as string;
+
+    if (!file) {
+      return res.status(400).json({ error: 'file query parameter is required' });
+    }
+
+    const session = await prisma.codingSession.findFirst({
+      where: {
+        id,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+      include: {
+        promptChanges: { orderBy: { promptIndex: 'asc' } },
+        sessionDiff: true,
+      },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Build attribution: walk through each prompt's diff in order
+    // Later prompts override earlier attributions for the same lines
+    const lineAttributions = new Map<
+      number,
+      { content: string; promptIndex: number; promptText: string; type: 'added' | 'modified' }
+    >();
+
+    const promptsInfo: BlamePrompt[] = [];
+
+    for (const pc of session.promptChanges) {
+      const filesChanged: string[] = (() => {
+        try {
+          return JSON.parse(pc.filesChanged || '[]');
+        } catch {
+          return [];
+        }
+      })();
+
+      promptsInfo.push({
+        promptIndex: pc.promptIndex,
+        promptText: pc.promptText,
+        filesChanged,
+      });
+
+      // Check if this prompt touched the target file
+      const normalizedTarget = file.replace(/^\//, '');
+      const touchesFile = filesChanged.some((f) => {
+        const nf = f.replace(/^\//, '');
+        return nf === normalizedTarget || nf.endsWith(normalizedTarget) || normalizedTarget.endsWith(nf);
+      });
+
+      if (!touchesFile || !pc.diff) continue;
+
+      // Parse the diff for this prompt and extract line attributions
+      const lineChanges = parseDiffForFile(pc.diff, file);
+      for (const change of lineChanges) {
+        lineAttributions.set(change.lineNumber, {
+          content: change.content,
+          promptIndex: pc.promptIndex,
+          promptText: pc.promptText,
+          type: change.type,
+        });
+      }
+    }
+
+    // Build the blame result
+    // If sessionDiff exists, show full file context (human + AI lines + gaps)
+    // Otherwise, fall back to only attributed lines
+    let blameLines: BlameLine[] = [];
+
+    if (session.sessionDiff?.diff) {
+      const fullView = parseFullDiffForFile(session.sessionDiff.diff, file);
+      blameLines = fullView.map((line) => {
+        if (line.isGap) {
+          return {
+            lineNumber: -1,
+            content: line.content,
+            attribution: null,
+            isGap: true,
+          };
+        }
+        // Check if this line has per-prompt attribution
+        const attr = lineAttributions.get(line.lineNumber);
+        return {
+          lineNumber: line.lineNumber,
+          content: line.content,
+          attribution: attr
+            ? {
+                promptIndex: attr.promptIndex,
+                promptText:
+                  attr.promptText.length > 200
+                    ? attr.promptText.slice(0, 200) + '...'
+                    : attr.promptText,
+                type: attr.type,
+              }
+            : null,
+        };
+      });
+    } else {
+      // Fallback: only attributed lines (no session diff available)
+      const allLineNumbers = Array.from(lineAttributions.keys()).sort(
+        (a, b) => a - b,
+      );
+      blameLines = allLineNumbers.map((ln) => {
+        const attr = lineAttributions.get(ln)!;
+        return {
+          lineNumber: ln,
+          content: attr.content,
+          attribution: {
+            promptIndex: attr.promptIndex,
+            promptText:
+              attr.promptText.length > 200
+                ? attr.promptText.slice(0, 200) + '...'
+                : attr.promptText,
+            type: attr.type,
+          },
+        };
+      });
+    }
+
+    const totalAttributedLines = blameLines.filter(
+      (l) => l.attribution !== null && !l.isGap,
+    ).length;
+
+    res.json({
+      file,
+      sessionId: id,
+      model: session.model,
+      totalAttributedLines,
+      lines: blameLines,
+      prompts: promptsInfo.map((p) => ({
+        ...p,
+        promptText:
+          p.promptText.length > 200 ? p.promptText.slice(0, 200) + '...' : p.promptText,
+      })),
+    });
+  } catch (err) {
+    console.error('Get session blame error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /:id/ask — Ask the Author: contextual questions about a session
+// ---------------------------------------------------------------------------
+
+const ASK_AUTHOR_SYSTEM_PROMPT = `You are explaining code that was written during an AI coding session. You have access to the full transcript of the conversation between the human developer and the AI assistant, along with the code changes that were produced.
+
+Your role is to explain WHY specific code decisions were made, based on what was discussed in the transcript. Reference specific parts of the conversation when relevant.
+
+When answering:
+- Reference specific prompts from the conversation that led to the code
+- Explain the reasoning and intent, not just what the code does
+- If the question is about code you don't have context for, say so
+- Be concise but thorough
+- Format responses in markdown when helpful
+`;
+
+router.post('/:id/ask', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { question, context, messages: conversationHistory } = req.body;
+
+    if (!question && (!conversationHistory || conversationHistory.length === 0)) {
+      return res.status(400).json({ error: 'question is required' });
+    }
+
+    const session = await prisma.codingSession.findFirst({
+      where: {
+        id,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+      include: {
+        commit: true,
+        promptChanges: { orderBy: { promptIndex: 'asc' } },
+      },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Build context sections
+    const contextParts: string[] = [];
+
+    // Session metadata
+    contextParts.push(
+      `=== Session Context ===\nModel: ${session.model}\nCommit: ${session.commit?.sha?.slice(0, 8) || 'n/a'} - ${session.commit?.message || 'n/a'}\nFiles Changed: ${(() => { try { return JSON.parse(session.filesChanged).join(', '); } catch { return 'n/a'; } })()}\nPrompt Count: ${session.promptChanges.length}`,
+    );
+
+    // Transcript (truncated to stay within token limits)
+    let transcript = '';
+    try {
+      const parsed = JSON.parse(session.transcript);
+      if (Array.isArray(parsed)) {
+        transcript = parsed
+          .map((m: any) => `[${m.role?.toUpperCase()}]: ${m.content}`)
+          .join('\n\n');
+      }
+    } catch {
+      transcript = session.transcript || '';
+    }
+
+    // Truncate transcript to ~30k chars
+    if (transcript.length > 30000) {
+      transcript = transcript.slice(-30000);
+      transcript = '...(transcript truncated)...\n\n' + transcript;
+    }
+
+    if (transcript) {
+      contextParts.push(`=== Transcript ===\n${transcript}`);
+    }
+
+    // Include relevant diffs
+    let diffContext = '';
+    if (context?.file) {
+      // File-specific context: only include diffs for that file
+      const relevantChanges = session.promptChanges.filter((pc) => {
+        const files: string[] = (() => {
+          try {
+            return JSON.parse(pc.filesChanged || '[]');
+          } catch {
+            return [];
+          }
+        })();
+        return files.some(
+          (f) =>
+            f === context.file ||
+            f.endsWith(context.file) ||
+            context.file.endsWith(f),
+        );
+      });
+
+      diffContext = relevantChanges
+        .map((pc) => `--- Prompt #${pc.promptIndex}: "${pc.promptText.slice(0, 100)}" ---\n${pc.diff}`)
+        .join('\n\n');
+    } else if (context?.promptIndex !== undefined) {
+      // Prompt-specific context
+      const pc = session.promptChanges.find(
+        (p) => p.promptIndex === context.promptIndex,
+      );
+      if (pc) {
+        diffContext = `--- Prompt #${pc.promptIndex}: "${pc.promptText}" ---\n${pc.diff}`;
+      }
+    } else {
+      // General context: include all diffs (truncated)
+      diffContext = session.promptChanges
+        .map((pc) => `--- Prompt #${pc.promptIndex}: "${pc.promptText.slice(0, 80)}" ---\n${(pc.diff || '').slice(0, 2000)}`)
+        .join('\n\n');
+
+      if (diffContext.length > 15000) {
+        diffContext = diffContext.slice(0, 15000) + '\n...(diffs truncated)...';
+      }
+    }
+
+    if (diffContext) {
+      contextParts.push(`=== Code Changes ===\n${diffContext}`);
+    }
+
+    const systemPrompt = ASK_AUTHOR_SYSTEM_PROMPT + '\n' + contextParts.join('\n\n');
+
+    // Build messages array
+    const msgs: Array<{ role: string; content: string }> = [];
+    if (conversationHistory && Array.isArray(conversationHistory)) {
+      msgs.push(...conversationHistory.slice(-10));
+    }
+    if (question) {
+      msgs.push({ role: 'user', content: question });
+    }
+
+    const answer = await callClaude(systemPrompt, msgs, 2048);
+
+    res.json({ answer });
+  } catch (err: any) {
+    console.error('Ask session author error:', err);
+    if (err.message === 'AI chat is not configured') {
+      return res.status(503).json({ error: 'AI chat is not configured. Set ANTHROPIC_API_KEY.' });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 });

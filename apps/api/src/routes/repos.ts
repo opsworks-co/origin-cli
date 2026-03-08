@@ -289,6 +289,265 @@ router.post('/:id/sync', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// POST /:id/import-sessions — import sessions from the origin-sessions git branch
+router.post('/:id/import-sessions', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const repo = await prisma.repo.findFirst({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+
+    // Get GitHub token
+    let token: string | undefined;
+    const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+    if (integration?.token) token = integration.token;
+    else if (process.env.GITHUB_TOKEN) token = process.env.GITHUB_TOKEN;
+
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github.v3+json',
+      'User-Agent': 'Origin-App',
+    };
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    // Determine owner/repo for GitHub API
+    let owner: string;
+    let repoName: string;
+    if (repo.provider === 'github') {
+      const parsed = parseRepoFullName(repo.path);
+      if (!parsed) return res.status(400).json({ error: 'Invalid GitHub repo path' });
+      owner = parsed.owner;
+      repoName = parsed.repo;
+    } else {
+      // For local repos, try to get the GitHub remote
+      return res.status(400).json({
+        error: 'Import from branch only works for GitHub repos. Push the origin-sessions branch to GitHub first: git push origin origin-sessions',
+      });
+    }
+
+    const apiBase = integration?.apiBaseUrl || 'https://api.github.com';
+
+    // 1. List files in the origin-sessions branch
+    let treeData: any;
+    try {
+      const treeRes = await fetch(
+        `${apiBase}/repos/${owner}/${repoName}/git/trees/origin-sessions?recursive=1`,
+        { headers },
+      );
+      if (!treeRes.ok) {
+        if (treeRes.status === 404) {
+          return res.status(404).json({
+            error: 'No origin-sessions branch found. Make sure the CLI has written session data and the branch is pushed to GitHub.',
+          });
+        }
+        return res.status(treeRes.status).json({ error: `GitHub API error: ${treeRes.status}` });
+      }
+      treeData = await treeRes.json();
+    } catch (err: any) {
+      return res.status(500).json({ error: `Failed to read origin-sessions branch: ${err.message}` });
+    }
+
+    // 2. Filter for session JSON files
+    const sessionFiles = (treeData.tree || []).filter(
+      (f: any) => f.path?.startsWith('sessions/') && f.path?.endsWith('.json') && f.type === 'blob',
+    );
+
+    if (sessionFiles.length === 0) {
+      return res.json({ imported: 0, skipped: 0, message: 'No session files found in origin-sessions branch' });
+    }
+
+    // 3. Get existing session IDs to skip duplicates
+    const existingSessions = await prisma.codingSession.findMany({
+      where: {
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+      select: { id: true },
+    });
+    const existingIds = new Set(existingSessions.map((s) => s.id));
+
+    let imported = 0;
+    let skipped = 0;
+
+    // 4. Fetch and import each session file
+    for (const file of sessionFiles) {
+      try {
+        const blobRes = await fetch(
+          `${apiBase}/repos/${owner}/${repoName}/git/blobs/${file.sha}`,
+          { headers },
+        );
+        if (!blobRes.ok) { skipped++; continue; }
+
+        const blobData = await blobRes.json() as any;
+        const content = Buffer.from(blobData.content, 'base64').toString('utf-8');
+        const session = JSON.parse(content) as {
+          sessionId: string;
+          model: string;
+          startedAt: string;
+          endedAt: string;
+          durationMs: number;
+          costUsd: number;
+          tokensUsed: number;
+          inputTokens: number;
+          outputTokens: number;
+          toolCalls: number;
+          linesAdded: number;
+          linesRemoved: number;
+          prompts: string[];
+          filesChanged: string[];
+          promptChanges: Array<{ prompt: string; files: string[] }>;
+          git: { headBefore: string; headAfter: string; commitShas: string[] };
+          summary: string;
+        };
+
+        // Skip if already imported
+        if (existingIds.has(session.sessionId)) { skipped++; continue; }
+
+        // Find or create the commit for this session
+        const commitSha = session.git.commitShas?.[0] || session.git.headAfter || '';
+        if (!commitSha) { skipped++; continue; }
+
+        let commit = await prisma.commit.findFirst({
+          where: { repoId: id, sha: commitSha },
+        });
+
+        if (!commit) {
+          // Create the commit record
+          commit = await prisma.commit.create({
+            data: {
+              repoId: id,
+              sha: commitSha,
+              message: session.summary || session.prompts[0]?.slice(0, 200) || '',
+              author: 'ai-agent',
+              aiToolDetected: session.model || 'claude-code',
+              aiDetectionMethod: 'session',
+              committedAt: new Date(session.endedAt || session.startedAt),
+            },
+          });
+        }
+
+        // Check if commit already has a session
+        const existingSession = await prisma.codingSession.findUnique({
+          where: { commitId: commit.id },
+        });
+        if (existingSession) { skipped++; continue; }
+
+        // Build transcript from prompts
+        const transcript = session.prompts.map((p, i) => ([
+          { role: 'user' as const, content: p },
+          { role: 'assistant' as const, content: `Completed task ${i + 1}.` },
+        ])).flat();
+
+        // Create the coding session
+        const codingSession = await prisma.codingSession.create({
+          data: {
+            id: session.sessionId,
+            commitId: commit.id,
+            model: session.model || 'unknown',
+            prompt: session.prompts[0] || '',
+            transcript: JSON.stringify(transcript),
+            filesChanged: JSON.stringify(session.filesChanged || []),
+            tokensUsed: session.tokensUsed || 0,
+            inputTokens: session.inputTokens || 0,
+            outputTokens: session.outputTokens || 0,
+            toolCalls: session.toolCalls || 0,
+            durationMs: session.durationMs || 0,
+            linesAdded: session.linesAdded || 0,
+            linesRemoved: session.linesRemoved || 0,
+            costUsd: session.costUsd || 0,
+          },
+        });
+
+        // Create promptChange records
+        for (let i = 0; i < (session.promptChanges || []).length; i++) {
+          const pc = session.promptChanges[i];
+          await prisma.promptChange.create({
+            data: {
+              sessionId: codingSession.id,
+              promptIndex: i,
+              promptText: (pc.prompt || '').slice(0, 1000),
+              filesChanged: JSON.stringify(pc.files || []),
+              diff: '',
+            },
+          });
+        }
+
+        // If no promptChanges, create from prompts array
+        if (!session.promptChanges?.length && session.prompts?.length) {
+          for (let i = 0; i < session.prompts.length; i++) {
+            await prisma.promptChange.create({
+              data: {
+                sessionId: codingSession.id,
+                promptIndex: i,
+                promptText: session.prompts[i].slice(0, 1000),
+                filesChanged: JSON.stringify([]),
+                diff: '',
+              },
+            });
+          }
+        }
+
+        // Create sessionDiff if git data available
+        if (session.git.headBefore && session.git.headAfter) {
+          await prisma.sessionDiff.create({
+            data: {
+              sessionId: codingSession.id,
+              headBefore: session.git.headBefore,
+              headAfter: session.git.headAfter,
+              commitShas: JSON.stringify(session.git.commitShas || []),
+              diff: '',
+              linesAdded: session.linesAdded || 0,
+              linesRemoved: session.linesRemoved || 0,
+            },
+          });
+        }
+
+        // Create individual Commit records for additional SHAs in this session
+        if (session.git.commitShas && session.git.commitShas.length > 1) {
+          for (const sha of session.git.commitShas.slice(1)) {
+            const exists = await prisma.commit.findFirst({ where: { repoId: id, sha } });
+            if (!exists) {
+              await prisma.commit.create({
+                data: {
+                  repoId: id,
+                  sha,
+                  message: '',
+                  author: 'ai-agent',
+                  aiToolDetected: session.model || 'claude-code',
+                  aiDetectionMethod: 'session',
+                  committedAt: new Date(session.endedAt || session.startedAt),
+                  sessionId: codingSession.id,
+                },
+              });
+            }
+          }
+        }
+
+        // Update commit AI detection
+        if (!commit.aiToolDetected) {
+          await prisma.commit.update({
+            where: { id: commit.id },
+            data: {
+              aiToolDetected: session.model || 'claude-code',
+              aiDetectionMethod: 'session',
+            },
+          });
+        }
+
+        existingIds.add(session.sessionId);
+        imported++;
+      } catch (err: any) {
+        console.error(`Failed to import session file ${file.path}:`, err.message);
+        skipped++;
+      }
+    }
+
+    res.json({ imported, skipped, total: sessionFiles.length });
+  } catch (err) {
+    console.error('Import sessions error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /:id/rescan — re-fetch full commit messages from GitHub and run AI detection
 router.post('/:id/rescan', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
@@ -336,12 +595,16 @@ router.post('/:id/rescan', requireRole('ADMIN'), async (req: AuthRequest, res: R
     // Process all commits in the repo
     const commits = await prisma.commit.findMany({
       where: { repoId: id },
-      include: { session: { select: { model: true } } },
+      include: {
+        session: { select: { model: true } },
+        codingSession: { select: { model: true } },
+      },
     });
 
     let updated = 0;
     for (const commit of commits) {
       const updates: any = {};
+      const sess = (commit as any).session || (commit as any).codingSession;
 
       // Update message from GitHub if we have a fuller version
       const ghMessage = fullMessages.get(commit.sha);
@@ -351,9 +614,9 @@ router.post('/:id/rescan', requireRole('ADMIN'), async (req: AuthRequest, res: R
 
       // Run AI detection
       const messageToScan = updates.message || commit.message;
-      if (commit.session) {
+      if (sess) {
         // Session-linked: mark with session method
-        updates.aiToolDetected = commit.session.model;
+        updates.aiToolDetected = sess.model;
         updates.aiDetectionMethod = 'session';
       } else {
         const detection = detectAITool(messageToScan, commit.author);
@@ -462,14 +725,30 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     await prisma.webhook.deleteMany({ where: { repoId: id } });
     await prisma.pullRequest.deleteMany({ where: { repoId: id } });
 
-    // Delete in order: reviews -> sessions -> commits -> repo
+    // Delete in order: clear session refs -> reviews -> prompt changes -> secret findings -> session diffs -> sessions -> commits -> repo
     const commits = await prisma.commit.findMany({ where: { repoId: id }, select: { id: true } });
     const commitIds = commits.map((c) => c.id);
 
     if (commitIds.length > 0) {
-      await prisma.sessionReview.deleteMany({
-        where: { session: { commitId: { in: commitIds } } },
+      // Clear sessionId FK on commits before deleting sessions
+      await prisma.commit.updateMany({
+        where: { repoId: id, sessionId: { not: null } },
+        data: { sessionId: null },
       });
+
+      // Find all sessions linked to these commits
+      const sessions = await prisma.codingSession.findMany({
+        where: { commitId: { in: commitIds } },
+        select: { id: true },
+      });
+      const sessionIds = sessions.map(s => s.id);
+
+      if (sessionIds.length > 0) {
+        await prisma.secretFinding.deleteMany({ where: { sessionId: { in: sessionIds } } });
+        await prisma.promptChange.deleteMany({ where: { sessionId: { in: sessionIds } } });
+        await prisma.sessionDiff.deleteMany({ where: { sessionId: { in: sessionIds } } });
+        await prisma.sessionReview.deleteMany({ where: { sessionId: { in: sessionIds } } });
+      }
       await prisma.codingSession.deleteMany({
         where: { commitId: { in: commitIds } },
       });
@@ -558,12 +837,97 @@ router.get('/:id/commits/:sha/diff', async (req: AuthRequest, res: Response) => 
       });
     }
 
-    // For local repos, return minimal info (diffs not available remotely)
+    // For local repos, use stored sessionDiff if available
+    const commit = await prisma.commit.findFirst({
+      where: { repoId: id, sha },
+      include: {
+        session: {
+          include: { sessionDiff: true },
+        },
+        codingSession: {
+          include: { sessionDiff: true },
+        },
+      },
+    });
+
+    // Use session (1:1 primary) or codingSession (many:1 via sessionId)
+    const sess = (commit as any)?.session || (commit as any)?.codingSession;
+
+    // Gather diff from sessionDiff or combine all promptChange diffs
+    let rawDiff = sess?.sessionDiff?.diff || '';
+    if (!rawDiff && sess) {
+      // Combine per-prompt diffs
+      const pcs = await prisma.promptChange.findMany({
+        where: { sessionId: sess.id },
+        orderBy: { promptIndex: 'asc' },
+      });
+      rawDiff = pcs.map((pc: any) => pc.diff || '').filter(Boolean).join('\n');
+    }
+
+    if (rawDiff) {
+      // Parse unified diff into per-file patches
+      const files: any[] = [];
+      const fileSections = rawDiff.split(/^diff --git /m).filter(Boolean);
+
+      for (const section of fileSections) {
+        const lines = section.split('\n');
+        // Extract filename from "a/path b/path"
+        const headerMatch = lines[0]?.match(/a\/(.+?)\s+b\/(.+)/);
+        if (!headerMatch) continue;
+
+        const filenameA = headerMatch[1];
+        const filenameB = headerMatch[2];
+        const filename = filenameB;
+
+        // Determine status
+        let status = 'modified';
+        if (section.includes('new file mode')) status = 'added';
+        else if (section.includes('deleted file mode')) status = 'removed';
+        else if (filenameA !== filenameB) status = 'renamed';
+
+        // Extract patch (everything from first @@ onward)
+        const patchStart = section.indexOf('@@');
+        const patch = patchStart >= 0 ? section.slice(patchStart) : '';
+
+        // Count additions/deletions
+        let additions = 0;
+        let deletions = 0;
+        for (const patchLine of patch.split('\n')) {
+          if (patchLine.startsWith('+') && !patchLine.startsWith('+++')) additions++;
+          if (patchLine.startsWith('-') && !patchLine.startsWith('---')) deletions++;
+        }
+
+        files.push({
+          filename,
+          status,
+          additions,
+          deletions,
+          changes: additions + deletions,
+          patch,
+          previousFilename: filenameA !== filenameB ? filenameA : null,
+        });
+      }
+
+      const totalAdditions = files.reduce((s, f) => s + f.additions, 0);
+      const totalDeletions = files.reduce((s, f) => s + f.deletions, 0);
+
+      return res.json({
+        sha,
+        message: commit?.message || '',
+        author: commit?.author || '',
+        date: commit?.committedAt?.toISOString() || '',
+        stats: { additions: totalAdditions, deletions: totalDeletions, total: totalAdditions + totalDeletions },
+        files,
+        htmlUrl: null,
+      });
+    }
+
+    // No diff data available
     return res.json({
       sha,
-      message: '',
-      author: '',
-      date: '',
+      message: commit?.message || '',
+      author: commit?.author || '',
+      date: commit?.committedAt?.toISOString() || '',
       stats: { additions: 0, deletions: 0, total: 0 },
       files: [],
       htmlUrl: null,
@@ -596,15 +960,26 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
             review: true,
           },
         },
+        codingSession: {
+          include: {
+            promptChanges: { orderBy: { promptIndex: 'asc' } },
+            review: true,
+          },
+        },
       },
       orderBy: { committedAt: 'desc' },
     });
 
     // Map promptChanges; fall back to parsing transcript for prompt texts
     const mapped = commits.map((c: any) => {
-      if (!c.session) return { ...c, session: null };
+      // Use session (1:1 via commitId) or codingSession (many:1 via sessionId)
+      const sess = c.session || c.codingSession;
+      // Remove codingSession from output to keep API shape consistent
+      const { codingSession: _cs, ...commitWithout } = c;
 
-      const dbPrompts = (c.session.promptChanges || []).map((pc: any) => ({
+      if (!sess) return { ...commitWithout, session: null };
+
+      const dbPrompts = (sess.promptChanges || []).map((pc: any) => ({
         promptIndex: pc.promptIndex,
         promptText: pc.promptText,
         filesChanged: JSON.parse(pc.filesChanged || '[]'),
@@ -613,9 +988,9 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
 
       // If no PromptChange records exist, extract prompts from transcript
       let promptChanges = dbPrompts;
-      if (dbPrompts.length === 0 && c.session.transcript) {
+      if (dbPrompts.length === 0 && sess.transcript) {
         try {
-          const msgs = JSON.parse(c.session.transcript);
+          const msgs = JSON.parse(sess.transcript);
           if (Array.isArray(msgs)) {
             let idx = 0;
             promptChanges = msgs
@@ -632,11 +1007,28 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
         }
       }
 
+      // Filter promptChanges by file overlap with this commit's files
+      let commitFiles: string[] = [];
+      try { commitFiles = JSON.parse(c.filesChanged || '[]'); } catch {}
+
+      if (commitFiles.length > 0 && promptChanges.length > 0) {
+        const relevant = promptChanges.filter((pc: any) => {
+          const pcFiles: string[] = pc.filesChanged || [];
+          return pcFiles.some((f: string) => commitFiles.some((cf: string) =>
+            f === cf || f.endsWith(cf) || cf.endsWith(f)
+          ));
+        });
+        // Use filtered prompts if any match; otherwise keep all (fallback)
+        if (relevant.length > 0) {
+          promptChanges = relevant;
+        }
+      }
+
       // Don't send full transcript in commits list (too large)
-      const { transcript, ...sessionWithoutTranscript } = c.session;
+      const { transcript, ...sessionWithoutTranscript } = sess;
 
       return {
-        ...c,
+        ...commitWithout,
         session: {
           ...sessionWithoutTranscript,
           promptChanges,
@@ -647,6 +1039,44 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
     res.json(mapped);
   } catch (err) {
     console.error('List commits error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /:id/backfilled-sessions — remove sessions that have 0 tokens (backfilled placeholder data)
+router.delete('/:id/backfilled-sessions', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+
+    // Find sessions with 0 tokens (placeholder backfills)
+    const commits = await prisma.commit.findMany({
+      where: { repoId: id },
+      include: { session: true, codingSession: true },
+    });
+
+    let deleted = 0;
+    for (const commit of commits) {
+      const sess = (commit as any).session || (commit as any).codingSession;
+      if (sess && sess.tokensUsed === 0) {
+        // Clear sessionId FK on commits before deleting session
+        await prisma.commit.updateMany({
+          where: { sessionId: sess.id },
+          data: { sessionId: null },
+        });
+        await prisma.promptChange.deleteMany({ where: { sessionId: sess.id } });
+        await prisma.sessionDiff.deleteMany({ where: { sessionId: sess.id } });
+        await prisma.sessionReview.deleteMany({ where: { sessionId: sess.id } });
+        await prisma.secretFinding.deleteMany({ where: { sessionId: sess.id } });
+        await prisma.codingSession.delete({ where: { id: sess.id } });
+        deleted++;
+      }
+    }
+
+    res.json({ deleted });
+  } catch (err) {
+    console.error('Delete backfilled sessions error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -410,3 +410,148 @@ export async function applyEnforcementActions(
     );
   }
 }
+
+// ── Agent-Level Enforcement ─────────────────────────────────────
+// Enforce the agent's own config limits (maxCostPerSession, maxTokensPerSession,
+// permissions.blockedPaths) as hard caps, separate from the policy system.
+
+export interface AgentEnforcementResult {
+  violations: Array<{
+    field: string;
+    message: string;
+    severity: 'HIGH';
+  }>;
+  requiresReview: boolean;
+}
+
+export async function enforceAgentLimits(ctx: SessionContext): Promise<AgentEnforcementResult> {
+  const result: AgentEnforcementResult = { violations: [], requiresReview: false };
+
+  if (!ctx.agentId) return result;
+
+  const agent = await prisma.agent.findUnique({
+    where: { id: ctx.agentId },
+    select: {
+      name: true,
+      maxCostPerSession: true,
+      maxTokensPerSession: true,
+      permissions: true,
+    },
+  });
+
+  if (!agent) return result;
+
+  // Check per-session cost limit
+  if (agent.maxCostPerSession && agent.maxCostPerSession > 0 && ctx.costUsd > agent.maxCostPerSession) {
+    result.violations.push({
+      field: 'maxCostPerSession',
+      message: `Agent "${agent.name}" cost $${ctx.costUsd.toFixed(2)} exceeds per-session limit $${agent.maxCostPerSession.toFixed(2)}`,
+      severity: 'HIGH',
+    });
+    result.requiresReview = true;
+  }
+
+  // Check per-session token limit
+  if (agent.maxTokensPerSession && agent.maxTokensPerSession > 0 && ctx.tokensUsed > agent.maxTokensPerSession) {
+    result.violations.push({
+      field: 'maxTokensPerSession',
+      message: `Agent "${agent.name}" used ${ctx.tokensUsed.toLocaleString()} tokens, exceeds per-session limit ${agent.maxTokensPerSession.toLocaleString()}`,
+      severity: 'HIGH',
+    });
+    result.requiresReview = true;
+  }
+
+  // Check blocked file paths from agent permissions
+  let permissions: { blockedPaths?: string[]; filePatterns?: string[] } = {};
+  try {
+    permissions = JSON.parse(agent.permissions || '{}');
+  } catch { /* ignore */ }
+
+  if (permissions.blockedPaths && Array.isArray(permissions.blockedPaths) && permissions.blockedPaths.length > 0) {
+    for (const file of ctx.filesChanged) {
+      for (const pattern of permissions.blockedPaths) {
+        if (matchGlob(pattern, file)) {
+          result.violations.push({
+            field: 'permissions.blockedPaths',
+            message: `Agent "${agent.name}" modified blocked file "${file}" (pattern: ${pattern})`,
+            severity: 'HIGH',
+          });
+          result.requiresReview = true;
+          break; // one match per file is enough
+        }
+      }
+    }
+  }
+
+  // Check allowed file patterns (if set, files outside these patterns are violations)
+  if (permissions.filePatterns && Array.isArray(permissions.filePatterns) && permissions.filePatterns.length > 0) {
+    for (const file of ctx.filesChanged) {
+      const allowed = permissions.filePatterns.some((pattern) => matchGlob(pattern, file));
+      if (!allowed) {
+        result.violations.push({
+          field: 'permissions.filePatterns',
+          message: `Agent "${agent.name}" modified file "${file}" outside allowed patterns: ${permissions.filePatterns.join(', ')}`,
+          severity: 'HIGH',
+        });
+        result.requiresReview = true;
+      }
+    }
+  }
+
+  // Log violations and auto-flag
+  if (result.violations.length > 0) {
+    for (const v of result.violations) {
+      await prisma.auditLog.create({
+        data: {
+          orgId: ctx.orgId,
+          action: 'AGENT_LIMIT_EXCEEDED',
+          resource: ctx.agentId,
+          metadata: JSON.stringify({
+            sessionId: ctx.sessionId,
+            agentId: ctx.agentId,
+            agentName: agent.name,
+            field: v.field,
+            message: v.message,
+          }),
+        },
+      });
+    }
+
+    // Auto-flag session for review
+    const existingReview = await prisma.sessionReview.findUnique({
+      where: { sessionId: ctx.sessionId },
+    });
+
+    if (!existingReview) {
+      const adminUser = await prisma.user.findFirst({
+        where: { orgId: ctx.orgId, role: { in: ['ADMIN', 'OWNER'] } },
+      });
+
+      if (adminUser) {
+        await prisma.sessionReview.create({
+          data: {
+            sessionId: ctx.sessionId,
+            userId: adminUser.id,
+            status: 'FLAGGED',
+            note: [
+              '**Agent Limit Exceeded**\n',
+              ...result.violations.map((v) => `- ${v.message}`),
+            ].join('\n'),
+          },
+        });
+      }
+    }
+
+    // Notify admins
+    await notifyOrgAdmins(
+      ctx.orgId,
+      'AGENT_LIMIT_EXCEEDED',
+      `Agent Limit Exceeded: ${agent.name}`,
+      result.violations.map((v) => v.message).join('; ').slice(0, 200),
+      `/sessions/${ctx.sessionId}`,
+      { sessionId: ctx.sessionId, agentId: ctx.agentId, violations: result.violations.length },
+    );
+  }
+
+  return result;
+}

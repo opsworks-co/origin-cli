@@ -240,6 +240,11 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       data: { agentId: null },
     });
 
+    // Delete agent versions (FK constraint)
+    await prisma.agentVersion.deleteMany({
+      where: { agentId: id },
+    });
+
     await prisma.agent.delete({ where: { id } });
 
     await prisma.auditLog.create({

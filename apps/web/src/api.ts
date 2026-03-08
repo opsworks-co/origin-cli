@@ -102,6 +102,10 @@ export function rescanRepoCommits(id: string) {
   return request<{ total: number; updated: number; githubMessages: number }>(`/api/repos/${id}/rescan`, { method: 'POST' });
 }
 
+export function importSessionsFromBranch(id: string) {
+  return request<{ imported: number; skipped: number; total: number }>(`/api/repos/${id}/import-sessions`, { method: 'POST' });
+}
+
 export function getRepoCommits(id: string) {
   return request<any[]>(`/api/repos/${id}/commits`);
 }
@@ -204,6 +208,9 @@ export interface Session {
   linesAdded: number;
   linesRemoved: number;
   costUsd: number;
+  status: string;
+  startedAt: string | null;
+  endedAt: string | null;
   agentSystemPrompt: string | null;
   createdAt: string;
   review: SessionReview | null;
@@ -244,6 +251,10 @@ export function getSession(id: string) {
   return request<Session>(`/api/sessions/${id}`);
 }
 
+export function getActiveSessions() {
+  return request<{ sessions: Session[] }>('/api/sessions/active');
+}
+
 export function reviewSession(id: string, status: string, note?: string) {
   return request<any>(`/api/sessions/${id}/review`, {
     method: 'POST',
@@ -253,6 +264,56 @@ export function reviewSession(id: string, status: string, note?: string) {
 
 export function getSessionDiff(id: string) {
   return request<SessionDiff | { diff: null }>(`/api/sessions/${id}/diff`);
+}
+
+// ---- AI Blame (line-level attribution) ------------------------------------
+
+export interface BlameAttribution {
+  promptIndex: number;
+  promptText: string;
+  type: 'added' | 'modified';
+}
+
+export interface BlameLine {
+  lineNumber: number;
+  content: string;
+  attribution: BlameAttribution | null;
+  isGap?: boolean;
+}
+
+export interface BlamePromptInfo {
+  promptIndex: number;
+  promptText: string;
+  filesChanged: string[];
+}
+
+export interface BlameResult {
+  file: string;
+  sessionId: string;
+  model: string;
+  totalAttributedLines: number;
+  lines: BlameLine[];
+  prompts: BlamePromptInfo[];
+}
+
+export function getSessionBlame(sessionId: string, file: string) {
+  return request<BlameResult>(`/api/sessions/${sessionId}/blame?file=${encodeURIComponent(file)}`);
+}
+
+// ---- Ask the Author -------------------------------------------------------
+
+export function askSessionAuthor(
+  sessionId: string,
+  data: {
+    question?: string;
+    context?: { file?: string; promptIndex?: number };
+    messages?: Array<{ role: string; content: string }>;
+  },
+) {
+  return request<{ answer: string }>(`/api/sessions/${sessionId}/ask`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
 }
 
 // ---- Agents --------------------------------------------------------------
@@ -384,6 +445,13 @@ export function createPolicyRule(policyId: string, data: { condition: string; ac
   });
 }
 
+export function createPolicyFromNaturalLanguage(prompt: string) {
+  return request<{ policies: Policy[]; parsed: any[]; message: string }>('/api/policies/from-natural-language', {
+    method: 'POST',
+    body: JSON.stringify({ prompt }),
+  });
+}
+
 // ---- Audit ---------------------------------------------------------------
 
 export interface AuditEntry {
@@ -417,6 +485,7 @@ export function getAuditLogs(params?: AuditParams) {
 
 export interface Stats {
   totalSessions: number;
+  activeSessions: number;
   activeAgents: number;
   sessionsThisWeek: number;
   aiPercentage: number;
@@ -497,7 +566,11 @@ export function createApiKey(data: { name: string }) {
 }
 
 export function getApiKeys() {
-  return request<Array<{ id: string; name: string; keyPrefix: string; createdAt: string }>>('/api/settings/api-keys');
+  return request<Array<{
+    id: string; name: string; keyPrefix: string; createdAt: string;
+    userId: string | null;
+    user: { name: string; email: string } | null;
+  }>>('/api/settings/api-keys');
 }
 
 export function deleteApiKey(id: string) {
@@ -712,6 +785,27 @@ export function getBudget() {
 
 export function updateBudget(data: Partial<BudgetConfig>) {
   return request<BudgetConfig>('/api/settings/budget', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+// ---- Organization Settings ---------------------------------------------------
+
+export interface OrgSettings {
+  id: string;
+  name: string;
+  slug: string;
+  createdAt: string;
+  _count: { users: number; repos: number; agents: number; policies: number };
+}
+
+export function getOrgSettings() {
+  return request<{ org: OrgSettings }>('/api/settings/org');
+}
+
+export function updateOrgSettings(data: { name?: string; slug?: string }) {
+  return request<{ org: OrgSettings }>('/api/settings/org', {
     method: 'PUT',
     body: JSON.stringify(data),
   });

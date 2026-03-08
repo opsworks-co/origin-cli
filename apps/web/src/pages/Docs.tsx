@@ -22,7 +22,11 @@ type Section =
   | 'realtime'
   | 'secret-scanning'
   | 'compliance'
-  | 'analytics';
+  | 'analytics'
+  | 'ai-blame'
+  | 'ask-author'
+  | 'git-notes'
+  | 'personal-insights';
 
 const SECTIONS: { key: Section; label: string; group?: string }[] = [
   { key: 'overview', label: 'Overview', group: 'Getting Started' },
@@ -36,12 +40,16 @@ const SECTIONS: { key: Section; label: string; group?: string }[] = [
   { key: 'rbac', label: 'Team & Roles' },
   { key: 'dashboard', label: 'Dashboard', group: 'Features' },
   { key: 'sessions', label: 'Sessions & Reviews' },
+  { key: 'ai-blame', label: 'AI Blame' },
+  { key: 'ask-author', label: 'Ask the Author' },
+  { key: 'git-notes', label: 'Git Notes' },
   { key: 'ai-review', label: 'AI Auto-Review' },
   { key: 'budget', label: 'Budget & Cost Controls' },
   { key: 'realtime', label: 'Real-Time Streaming' },
   { key: 'secret-scanning', label: 'Secret & PII Scanning' },
   { key: 'compliance', label: 'Compliance Reports' },
   { key: 'analytics', label: 'Enhanced Analytics' },
+  { key: 'personal-insights', label: 'Personal Insights' },
   { key: 'webhooks', label: 'Webhooks' },
   { key: 'cli', label: 'CLI Reference', group: 'Developer Tools' },
   { key: 'mcp', label: 'MCP Server' },
@@ -1262,19 +1270,22 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
             <h1 className="text-2xl font-bold mb-2">Dashboard</h1>
             <P>The dashboard provides a high-level governance overview of your organization&apos;s AI coding activity.</P>
 
+            <H3>Active Sessions</H3>
+            <P>
+              When AI coding sessions are currently running, a purple card appears at the top of the
+              dashboard with a pulsing indicator. Each active session shows the model, prompt, repo,
+              agent name, and elapsed time. Click any session to view its detail page. The active
+              sessions section polls every 10 seconds to stay up-to-date.
+            </P>
+
             <H3>KPI Cards</H3>
             <ul className="space-y-2 mb-4">
-              <Li><strong className="text-gray-200">Active Agents</strong> &mdash; Number of agents with status &ldquo;ACTIVE&rdquo;</Li>
+              <Li><strong className="text-purple-400">Active Now</strong> &mdash; Number of sessions currently running (purple when &gt; 0)</Li>
               <Li><strong className="text-gray-200">Sessions This Week</strong> &mdash; AI coding sessions in the past 7 days</Li>
-              <Li><strong className="text-gray-200">Unreviewed</strong> &mdash; Sessions awaiting human review</Li>
               <Li><strong className="text-gray-200">Est. Cost This Month</strong> &mdash; Total API cost from all sessions this month</Li>
+              <Li><strong className="text-gray-200">Unreviewed</strong> &mdash; Sessions awaiting human review</Li>
+              <Li><strong className="text-gray-200">Compliance Score</strong> &mdash; Policy adherence rating (0-100)</Li>
             </ul>
-
-            <H3>Engineering ROI</H3>
-            <P>
-              Shows lines of code written by AI this month and estimated engineering hours saved
-              (calculated at ~50 lines per hour).
-            </P>
 
             <H3>Recent Sessions</H3>
             <P>
@@ -1316,15 +1327,34 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               <Li><strong className="text-gray-200">Pull Requests</strong> &mdash; Linked PRs (if GitHub integration is active)</Li>
             </ul>
 
-            <H2>Session Detail View</H2>
+            <H2>Session Status</H2>
             <P>
-              Click any session to open the detail page. The right panel has three tabs:
+              Sessions have a status field that tracks their lifecycle:
             </P>
             <ul className="space-y-2 mb-4">
-              <Li><strong className="text-gray-200">Transcript</strong> &mdash; Full replay of the AI conversation with user prompts and agent responses</Li>
-              <Li><strong className="text-gray-200">Changes</strong> &mdash; A timeline showing each user prompt and the files it caused the agent to modify. This is the core governance audit trail: &ldquo;User asked X &rarr; Agent changed Y&rdquo;</Li>
-              <Li><strong className="text-gray-200">Full Diff</strong> &mdash; The complete unified diff with syntax-colored additions (green) and deletions (red), organized by file with collapsible sections</Li>
+              <Li><strong className="text-purple-400">RUNNING</strong> &mdash; Session is currently active (an AI agent is working). Shown with a purple pulsing badge.</Li>
+              <Li><strong className="text-gray-200">COMPLETED</strong> &mdash; Session has ended. All data (transcript, diffs, costs) is finalized.</Li>
             </ul>
+            <P>
+              Running sessions appear in the Dashboard&apos;s active sessions section and in the Sessions
+              list with a purple &ldquo;running&rdquo; badge. They transition to COMPLETED when
+              the agent sends the session-end hook.
+            </P>
+
+            <H2>Session Detail View</H2>
+            <P>
+              Click any session to open the detail page. The right panel has four tabs:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Session</strong> &mdash; Full replay of the AI conversation with user prompts, agent responses, prompt-to-change timeline, and full diff view</Li>
+              <Li><strong className="text-gray-200">AI Blame</strong> &mdash; Line-level attribution showing which prompt wrote each line of code (see <strong className="text-indigo-400">AI Blame</strong> docs)</Li>
+              <Li><strong className="text-gray-200">Security</strong> &mdash; Secret and PII scan results for the session&apos;s code changes</Li>
+            </ul>
+            <P>
+              The header also includes a purple <strong className="text-purple-400">Ask</strong> button
+              that opens the Ask the Author panel for contextual Q&amp;A about the session
+              (see <strong className="text-indigo-400">Ask the Author</strong> docs).
+            </P>
             <P>
               The left panel shows commit info (real SHA hashes, HEAD range), linked PRs,
               agent/model info, session stats, and any existing review.
@@ -1390,6 +1420,246 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               to approve, reject, or flag all selected sessions at once. The select-all checkbox
               applies only to sessions that haven&apos;t been reviewed yet.
             </P>
+          </div>
+        )}
+
+        {/* ─── AI BLAME ─────────────────────────────────────────── */}
+        {active === 'ai-blame' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">AI Blame</h1>
+            <P>
+              AI Blame provides line-level attribution for AI-generated code. It tells you
+              exactly which prompt (and which developer) caused each line of code to be written,
+              similar to <code className="text-indigo-400">git blame</code> but for AI authorship.
+            </P>
+
+            <H2>How It Works</H2>
+            <P>
+              When Origin tracks a coding session, it records a mapping of each user prompt to
+              the code changes it produced (via <strong className="text-gray-200">PromptChanges</strong> with unified diffs).
+              AI Blame parses these diffs to build a line-by-line attribution map for every file.
+            </P>
+            <P>
+              The algorithm walks through prompts in chronological order. For each prompt, it parses
+              the unified diff to determine which lines were added. Later prompts override earlier ones
+              for the same line numbers, giving you the final attribution.
+            </P>
+
+            <H2>Using AI Blame in the Dashboard</H2>
+            <P>
+              Open any session detail page and click the <strong className="text-gray-200">AI Blame</strong> tab.
+              You will see:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">File Selector</strong> &mdash; Dropdown listing all files changed in the session. Select a file to view its blame.</Li>
+              <Li><strong className="text-gray-200">Prompt Legend</strong> &mdash; Color-coded list of all prompts that touched the selected file, each with a unique color for visual identification.</Li>
+              <Li><strong className="text-gray-200">Blame View</strong> &mdash; Line-by-line code display with colored left border indicating which prompt wrote each line. Hover over any line to see prompt details.</Li>
+              <Li><strong className="text-gray-200">Ask Button</strong> &mdash; Each line has an &ldquo;Ask&rdquo; button that opens the Ask the Author panel pre-filled with context about that specific line.</Li>
+            </ul>
+
+            <H2>API Endpoint</H2>
+            <CodeBlock title="GET /api/sessions/:id/blame">{`# Get blame for a specific file in a session
+GET /api/sessions/:id/blame?file=src/components/App.tsx
+
+# Response
+{
+  "sessionId": "abc-123",
+  "file": "src/components/App.tsx",
+  "lines": [
+    {
+      "lineNumber": 1,
+      "content": "import React from 'react';",
+      "promptIndex": 0,
+      "promptText": "Create a new React component..."
+    },
+    ...
+  ],
+  "prompts": {
+    "0": {
+      "promptText": "Create a new React component...",
+      "filesChanged": ["src/components/App.tsx"],
+      "lineCount": 42
+    }
+  }
+}`}</CodeBlock>
+
+            <H2>How Attribution Is Calculated</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Unified diff parsing</strong> &mdash; Each prompt&apos;s diff is parsed to extract <code className="text-indigo-400">@@ -old,count +new,count @@</code> hunks</Li>
+              <Li><strong className="text-gray-200">Line tracking</strong> &mdash; Only added lines (<code className="text-indigo-400">+</code> prefix) are tracked; removed lines are excluded</Li>
+              <Li><strong className="text-gray-200">Last-write wins</strong> &mdash; If multiple prompts modify the same line, the last one is attributed</Li>
+              <Li><strong className="text-gray-200">Full file coverage</strong> &mdash; Every added line across all prompts in the session is attributed</Li>
+            </ul>
+
+            <Callout type="tip">
+              AI Blame is most useful for sessions with multiple prompts. For single-prompt sessions,
+              all lines are attributed to that one prompt.
+            </Callout>
+          </div>
+        )}
+
+        {/* ─── ASK THE AUTHOR ──────────────────────────────────── */}
+        {active === 'ask-author' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Ask the Author</h1>
+            <P>
+              Ask the Author lets you ask questions about any coding session and get answers
+              grounded in the actual conversation transcript and code changes. It&apos;s like
+              having the AI agent explain why it wrote the code it did.
+            </P>
+
+            <H2>How It Works</H2>
+            <P>
+              When you ask a question, Origin loads the session&apos;s full transcript (the conversation
+              between the developer and AI) along with all code diffs, and sends them to Claude
+              as context. Claude then answers your question by referencing specific parts of the
+              conversation and code changes.
+            </P>
+
+            <H2>Using Ask the Author</H2>
+            <P>
+              There are two ways to open the Ask panel:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Ask button in header</strong> &mdash; Click the purple &ldquo;Ask&rdquo; button in the session detail header to open a general Q&amp;A panel</Li>
+              <Li><strong className="text-gray-200">Ask from AI Blame</strong> &mdash; Click the &ldquo;Ask&rdquo; button on any line in the AI Blame view. The question is pre-filled with context about that specific line, file, and prompt.</Li>
+            </ul>
+
+            <H2>Features</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Multi-turn conversations</strong> &mdash; Ask follow-up questions; the full conversation history is maintained</Li>
+              <Li><strong className="text-gray-200">Suggestion chips</strong> &mdash; Quick-start questions like &ldquo;Why was this approach chosen?&rdquo; and &ldquo;What alternatives were considered?&rdquo;</Li>
+              <Li><strong className="text-gray-200">Contextual answers</strong> &mdash; When opened from AI Blame, the AI knows which file, line, and prompt you&apos;re asking about</Li>
+              <Li><strong className="text-gray-200">Transcript grounding</strong> &mdash; Answers reference specific prompts from the conversation that led to the code</Li>
+            </ul>
+
+            <H2>API Endpoint</H2>
+            <CodeBlock title="POST /api/sessions/:id/ask">{`# Ask a question about a session
+POST /api/sessions/:id/ask
+Content-Type: application/json
+
+{
+  "question": "Why did the agent use a Map instead of a plain object here?",
+  "context": {
+    "file": "src/utils/cache.ts",
+    "lineNumber": 42,
+    "lineContent": "const cache = new Map<string, CacheEntry>();"
+  },
+  "history": []  // Previous Q&A turns for multi-turn conversation
+}
+
+# Response
+{
+  "answer": "Looking at the transcript, in prompt #3 the developer asked for...",
+  "model": "claude-sonnet-4-20250514"
+}`}</CodeBlock>
+
+            <H2>Setup</H2>
+            <P>
+              Ask the Author requires the <code className="text-indigo-400">ANTHROPIC_API_KEY</code> environment
+              variable to be set on the Origin server. Without it, the endpoint returns a 503 error.
+            </P>
+            <CodeBlock title="Environment variable">{`ANTHROPIC_API_KEY=sk-ant-api03-...`}</CodeBlock>
+
+            <Callout type="info">
+              The AI receives a truncated version of the transcript (up to 30,000 characters) and
+              diffs (up to 15,000 characters) to stay within token limits. For very long sessions,
+              the most recent parts of the conversation are prioritized.
+            </Callout>
+          </div>
+        )}
+
+        {/* ─── GIT NOTES ──────────────────────────────────────── */}
+        {active === 'git-notes' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Git Notes</h1>
+            <P>
+              Origin writes structured AI metadata as Git Notes on every commit created during
+              a coding session. This makes AI authorship information portable and accessible
+              from any Git client without cluttering commit history.
+            </P>
+
+            <H2>What Are Git Notes?</H2>
+            <P>
+              Git Notes are a built-in Git feature that lets you attach extra information to commits
+              without modifying the commit itself. Origin uses a custom namespace
+              (<code className="text-indigo-400">refs/notes/origin</code>) to avoid conflicts with
+              other tools.
+            </P>
+
+            <H2>What Gets Written</H2>
+            <P>Each Git Note contains a JSON object with the following fields:</P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">sessionId</strong> &mdash; The Origin session ID for the full audit trail</Li>
+              <Li><strong className="text-gray-200">model</strong> &mdash; Which AI model was used (e.g. claude-sonnet-4-20250514)</Li>
+              <Li><strong className="text-gray-200">promptCount</strong> &mdash; How many prompts were in the session</Li>
+              <Li><strong className="text-gray-200">promptSummary</strong> &mdash; First 200 characters of the initial prompt</Li>
+              <Li><strong className="text-gray-200">tokensUsed</strong> &mdash; Total tokens consumed</Li>
+              <Li><strong className="text-gray-200">costUsd</strong> &mdash; Estimated cost in USD</Li>
+              <Li><strong className="text-gray-200">toolCalls</strong> &mdash; Number of tool invocations</Li>
+              <Li><strong className="text-gray-200">durationMs</strong> &mdash; Session duration in milliseconds</Li>
+              <Li><strong className="text-gray-200">linesAdded / linesRemoved</strong> &mdash; Code change metrics</Li>
+              <Li><strong className="text-gray-200">filesChanged</strong> &mdash; List of files modified</Li>
+              <Li><strong className="text-gray-200">originUrl</strong> &mdash; Direct link to the session in the Origin dashboard</Li>
+            </ul>
+
+            <H2>When Notes Are Written</H2>
+            <P>
+              Notes are written automatically at the end of every coding session, right after the session
+              data is uploaded to Origin. If a session produced multiple commits, each commit gets
+              its own note with the same session metadata.
+            </P>
+
+            <H2>Reading Git Notes</H2>
+            <CodeBlock title="View AI metadata for a commit">{`# Show Origin notes for a specific commit
+git notes --ref=origin show HEAD
+
+# Show notes for any commit SHA
+git notes --ref=origin show abc1234
+
+# List all commits that have Origin notes
+git notes --ref=origin list
+
+# Include notes in git log output
+git log --notes=origin`}</CodeBlock>
+
+            <H2>Sharing Notes</H2>
+            <P>
+              Git Notes are stored locally by default. To share them with your team, push and fetch
+              the notes ref:
+            </P>
+            <CodeBlock title="Push and fetch Origin notes">{`# Push notes to remote
+git push origin refs/notes/origin
+
+# Fetch notes from remote
+git fetch origin refs/notes/origin:refs/notes/origin
+
+# Auto-fetch notes (add to .git/config)
+[remote "origin"]
+  fetch = +refs/notes/origin:refs/notes/origin`}</CodeBlock>
+
+            <H2>Example Note</H2>
+            <CodeBlock title="git notes --ref=origin show HEAD">{`{
+  "origin": true,
+  "sessionId": "ea74b665-88ef-48a6-bcc1-833d8e5cfc87",
+  "model": "claude-sonnet-4-20250514",
+  "promptCount": 12,
+  "promptSummary": "Implement user authentication with JWT tokens...",
+  "tokensUsed": 45230,
+  "costUsd": 0.42,
+  "toolCalls": 87,
+  "durationMs": 342000,
+  "linesAdded": 156,
+  "linesRemoved": 23,
+  "filesChanged": ["src/auth.ts", "src/middleware.ts", "src/routes/login.ts"],
+  "originUrl": "https://origin-platform.fly.dev/sessions/ea74b665..."
+}`}</CodeBlock>
+
+            <Callout type="tip">
+              Git Notes are non-destructive &mdash; they never modify your commits or history.
+              If a note fails to write (e.g. git is not available), it fails silently and never
+              blocks the session from completing.
+            </Callout>
           </div>
         )}
 
@@ -1772,6 +2042,62 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
           </div>
         )}
 
+        {/* ─── PERSONAL INSIGHTS ─────────────────────────────── */}
+        {active === 'personal-insights' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Personal Insights</h1>
+            <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg p-4 mb-6">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-indigo-400 text-lg">🚧</span>
+                <span className="text-sm font-semibold text-indigo-300">Coming Soon</span>
+              </div>
+              <P>
+                Personal Insights is an upcoming feature that provides per-developer analytics
+                and AI-usage patterns. Track your personal coding efficiency, AI collaboration
+                habits, and improvement over time.
+              </P>
+            </div>
+
+            <H2>Planned Features</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Developer Dashboard</strong> &mdash; Personal view of your AI-assisted sessions, costs, and productivity metrics</Li>
+              <Li><strong className="text-gray-200">Prompt Effectiveness</strong> &mdash; Analysis of which prompts lead to successful outcomes vs. repeated iterations</Li>
+              <Li><strong className="text-gray-200">Code Acceptance Rate</strong> &mdash; Percentage of AI-generated code that passes review without modification</Li>
+              <Li><strong className="text-gray-200">Model Preferences</strong> &mdash; Which AI models you use most and their effectiveness by task type</Li>
+              <Li><strong className="text-gray-200">Time Savings Estimate</strong> &mdash; Estimated hours saved through AI-assisted development</Li>
+              <Li><strong className="text-gray-200">Weekly Digest</strong> &mdash; Automated summary of your AI coding activity sent via email or Slack</Li>
+            </ul>
+
+            <H2>Skill Analysis</H2>
+            <P>
+              Personal Insights will categorize your AI usage patterns to help you improve your
+              AI-assisted development workflow:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Prompt Engineering</strong> &mdash; Track how your prompts improve over time based on session outcomes</Li>
+              <Li><strong className="text-gray-200">Domain Expertise</strong> &mdash; Identify areas where you leverage AI most (frontend, backend, testing, DevOps)</Li>
+              <Li><strong className="text-gray-200">Collaboration Patterns</strong> &mdash; Multi-turn vs single-prompt sessions, tool usage frequency</Li>
+              <Li><strong className="text-gray-200">Security Awareness</strong> &mdash; Track secret detection hits and policy compliance over time</Li>
+            </ul>
+
+            <H2>API Access (Planned)</H2>
+            <CodeBlock title="Personal Insights API (coming soon)">{`# Get your personal insights
+GET /api/insights/me
+
+# Get insights for a specific developer (admin only)
+GET /api/insights/users/:userId
+
+# Get prompt effectiveness analysis
+GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
+
+            <Callout type="info">
+              Personal Insights will be available for all team members. Organization admins
+              will have access to aggregated team-level insights while individual data
+              remains private to each developer.
+            </Callout>
+          </div>
+        )}
+
         {/* ─── WEBHOOKS ────────────────────────────────────────── */}
         {active === 'webhooks' && (
           <div>
@@ -1884,6 +2210,52 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin enable</code>
+                <P>Install Origin hooks for AI coding tools. Supports Claude Code, Cursor, Aider, and Gemini CLI. Hooks automatically track session start/end, user prompts, and file changes.</P>
+                <CodeBlock>{`origin enable claude-code
+origin enable cursor
+origin enable aider
+origin enable gemini`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin disable</code>
+                <P>Remove Origin hooks from an AI coding tool.</P>
+                <CodeBlock>{`origin disable claude-code`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin agents</code>
+                <P>List and manage registered AI agents. Shows agent name, model, status, and session count.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin repos</code>
+                <P>List connected repositories with session counts.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin review &lt;sessionId&gt;</code>
+                <P>Review a coding session from the command line. Approve, reject, or flag sessions with an optional note.</P>
+                <CodeBlock>{`origin review abc123 --approve
+origin review abc123 --reject --note "Security concern"
+origin review abc123 --flag`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin stats</code>
+                <P>Show organization-wide statistics: sessions this week, active agents, AI code percentage, costs, and tokens.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin audit</code>
+                <P>View the audit log. Filter by action type (SESSION_STARTED, SESSION_ENDED, POLICY_VIOLATION, etc.).</P>
+                <CodeBlock>{`origin audit
+origin audit --action POLICY_VIOLATION
+origin audit --limit 50`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin mcp serve</code>
                 <P>Start the MCP server for real-time policy enforcement. Usually configured as an MCP server in AI tools rather than run directly.</P>
               </div>
@@ -1953,13 +2325,24 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
               <Li><code className="text-indigo-400">origin://session</code> &mdash; Current session state and metadata</Li>
             </ul>
 
-            <H3>Tools</H3>
+            <H3>Tools (17 total)</H3>
             <ul className="space-y-2 mb-4">
               <Li><code className="text-indigo-400">check_file_access</code> &mdash; Check if a file path is allowed by policies</Li>
               <Li><code className="text-indigo-400">report_violation</code> &mdash; Report a policy violation</Li>
               <Li><code className="text-indigo-400">start_session</code> &mdash; Begin tracking a coding session</Li>
               <Li><code className="text-indigo-400">end_session</code> &mdash; End and finalize a session</Li>
               <Li><code className="text-indigo-400">log_tool_call</code> &mdash; Log a tool invocation during a session</Li>
+              <Li><code className="text-indigo-400">list_sessions</code> &mdash; List sessions with filters (status, model)</Li>
+              <Li><code className="text-indigo-400">get_session</code> &mdash; Get full session details including transcript and diff</Li>
+              <Li><code className="text-indigo-400">review_session</code> &mdash; Approve, reject, or flag a session</Li>
+              <Li><code className="text-indigo-400">list_agents</code> &mdash; List all registered agents</Li>
+              <Li><code className="text-indigo-400">list_repos</code> &mdash; List connected repositories</Li>
+              <Li><code className="text-indigo-400">get_stats</code> &mdash; Dashboard stats (sessions, costs, agents)</Li>
+              <Li><code className="text-indigo-400">get_audit_log</code> &mdash; Audit log with filtering</Li>
+              <Li><code className="text-indigo-400">get_policy_versions</code> &mdash; Policy version history</Li>
+              <Li><code className="text-indigo-400">get_agent_versions</code> &mdash; Agent version history</Li>
+              <Li><code className="text-indigo-400">list_notifications</code> &mdash; User notifications</Li>
+              <Li><code className="text-indigo-400">list_users</code> &mdash; Team members with activity stats</Li>
             </ul>
           </div>
         )}
@@ -2076,6 +2459,48 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
                   <code className="text-sm text-gray-200">/api/sessions/:id/review</code>
                 </div>
                 <P>Review a session. Body: <code className="text-indigo-400">{`{ status: "APPROVED"|"REJECTED"|"FLAGGED", note? }`}</code></P>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <div className="flex gap-2 items-center mb-2">
+                  <span className="badge-blue text-xs">GET</span>
+                  <code className="text-sm text-gray-200">/api/sessions/active</code>
+                </div>
+                <P>Get all currently running sessions (status = RUNNING). Returns <code className="text-indigo-400">{`{ sessions: Session[] }`}</code>.</P>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <div className="flex gap-2 items-center mb-2">
+                  <span className="badge-blue text-xs">GET</span>
+                  <code className="text-sm text-gray-200">/api/sessions/:id/blame</code>
+                </div>
+                <P>Get line-level AI attribution for a file. Query: <code className="text-indigo-400">file</code> (file path). Returns per-line prompt attribution.</P>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <div className="flex gap-2 items-center mb-2">
+                  <span className="badge-green text-xs">POST</span>
+                  <code className="text-sm text-gray-200">/api/sessions/:id/ask</code>
+                </div>
+                <P>Ask a question about a session. Body: <code className="text-indigo-400">{`{ question, context?, history? }`}</code>. Requires <code className="text-indigo-400">ANTHROPIC_API_KEY</code>.</P>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <div className="flex gap-2 items-center mb-2">
+                  <span className="badge-blue text-xs">GET</span>
+                  <code className="text-sm text-gray-200">/api/sessions/:id/diff</code>
+                </div>
+                <P>Get the full unified diff for a session. Returns HEAD before/after, commit SHAs, and diff content.</P>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <div className="flex gap-2 items-center mb-2">
+                  <span className="badge-blue text-xs">GET</span>
+                  <code className="text-sm text-gray-200">/api/sessions/by-pr</code>
+                </div>
+                <P>Get sessions grouped by pull request with aggregated stats per PR.</P>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <div className="flex gap-2 items-center mb-2">
+                  <span className="badge-blue text-xs">GET</span>
+                  <code className="text-sm text-gray-200">/api/sessions/stream</code>
+                </div>
+                <P>SSE endpoint for real-time session events. Query: <code className="text-indigo-400">token</code> (JWT). Emits session:started, session:ended, session:updated, session:reviewed.</P>
               </div>
             </div>
 

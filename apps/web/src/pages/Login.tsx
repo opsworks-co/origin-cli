@@ -30,13 +30,13 @@ export default function Login() {
       <div className="absolute top-0 left-1/3 w-96 h-96 bg-indigo-600/5 rounded-full blur-3xl" />
 
       <div className="w-full max-w-sm relative">
-        {/* Logo */}
-        <div className="flex items-center justify-center gap-2 mb-8">
+        {/* Logo — links to home */}
+        <Link to="/" className="flex items-center justify-center gap-2 mb-8 hover:opacity-80 transition-opacity">
           <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-bold">
             O
           </div>
           <span className="text-xl font-semibold">Origin</span>
-        </div>
+        </Link>
 
         <div className="card">
           <h2 className="text-xl font-semibold text-center mb-6">Sign in to your account</h2>

@@ -256,6 +256,14 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       }
     }
 
+    // Clean up related records before deleting user
+    await prisma.notification.deleteMany({ where: { userId: targetId } });
+    await prisma.apiKey.deleteMany({ where: { userId: targetId } });
+    await prisma.sessionReview.deleteMany({ where: { userId: targetId } });
+    await prisma.auditLog.deleteMany({ where: { userId: targetId } });
+    // Unlink sessions (keep them, just remove user reference)
+    await prisma.codingSession.updateMany({ where: { userId: targetId }, data: { userId: null } });
+
     await prisma.user.delete({ where: { id: targetId } });
 
     await prisma.auditLog.create({

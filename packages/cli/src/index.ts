@@ -14,7 +14,7 @@ import { auditCommand } from './commands/audit.js';
 import { statsCommand } from './commands/stats.js';
 import { enableCommand } from './commands/enable.js';
 import { disableCommand } from './commands/disable.js';
-import { hooksCommand } from './commands/hooks.js';
+import { hooksCommand, handlePostCommit } from './commands/hooks.js';
 
 const program = new Command();
 
@@ -39,6 +39,7 @@ const hooks = program.command('hooks').description('Internal hook handlers (used
 hooks.command('claude-code <event>').description('Handle Claude Code hook event').action((event) => hooksCommand(event, 'claude-code'));
 hooks.command('cursor <event>').description('Handle Cursor hook event').action((event) => hooksCommand(event, 'cursor'));
 hooks.command('gemini <event>').description('Handle Gemini CLI hook event').action((event) => hooksCommand(event, 'gemini'));
+hooks.command('git-post-commit').description('Handle git post-commit hook').action(() => handlePostCommit());
 
 // Sessions
 const sessions = program.command('sessions').description('List coding sessions');

@@ -296,6 +296,7 @@ router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) =>
     const apiKey = await prisma.apiKey.create({
       data: {
         orgId: req.user!.orgId,
+        userId: req.user!.id,
         name: name || 'Unnamed key',
         keyHash,
         keyPrefix,
@@ -324,7 +325,11 @@ router.get('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => 
   try {
     const keys = await prisma.apiKey.findMany({
       where: { orgId: req.user!.orgId },
-      select: { id: true, name: true, keyPrefix: true, createdAt: true },
+      select: {
+        id: true, name: true, keyPrefix: true, createdAt: true,
+        userId: true,
+        user: { select: { name: true, email: true } },
+      },
       orderBy: { createdAt: 'desc' },
     });
     res.json(keys);

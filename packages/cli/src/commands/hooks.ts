@@ -11,6 +11,8 @@ import {
 } from '../session-state.js';
 import { captureGitState } from '../git-capture.js';
 import { writeLocalEntrypoint } from '../local-entrypoint.js';
+import { writeGitNotes } from '../git-notes.js';
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -311,6 +313,27 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
       summary: parsed.summary,
       originUrl: `${apiUrl}/sessions/${state.sessionId}`,
     });
+
+    // Write Git Notes with AI attribution metadata on each commit
+    if (gitCapture.commitShas.length > 0) {
+      try {
+        writeGitNotes(state.repoPath, gitCapture.commitShas, {
+          sessionId: state.sessionId,
+          model,
+          promptCount: prompts.length,
+          promptSummary: prompts[0] || '',
+          tokensUsed: parsed.tokensUsed,
+          costUsd,
+          durationMs,
+          linesAdded: gitCapture.linesAdded,
+          linesRemoved: gitCapture.linesRemoved,
+          originUrl: `${apiUrl}/sessions/${state.sessionId}`,
+        });
+        debugLog('session-end', 'git notes written', { commitCount: gitCapture.commitShas.length });
+      } catch (err: any) {
+        debugLog('session-end', 'git notes error (non-fatal)', { message: err.message });
+      }
+    }
   } catch (err: any) {
     debugLog('session-end', 'ERROR', { message: err.message, stack: err.stack });
     process.stderr.write(`[origin] session-end error: ${err.message}\n`);
@@ -318,6 +341,124 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
     clearSessionState(hookCwd);
     debugLog('session-end', 'state cleared');
   }
+}
+
+// ─── Git Hook: Post-Commit ────────────────────────────────────────────────
+
+/**
+ * Called by .git/hooks/post-commit after every commit.
+ * Sends incremental session data to the API so nothing is lost
+ * even if the AI session never formally ends.
+ */
+export async function handlePostCommit(): Promise<void> {
+  debugLog('post-commit', '=== GIT HOOK INVOKED ===', { pid: process.pid, cwd: process.cwd() });
+
+  const config = loadConfig();
+  if (!config) {
+    debugLog('post-commit', 'SKIP: no config');
+    return;
+  }
+
+  const hookCwd = process.cwd();
+  const repoPath = getGitRoot(hookCwd);
+  if (!repoPath) {
+    debugLog('post-commit', 'SKIP: not a git repo');
+    return;
+  }
+
+  // Get latest commit info
+  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  let commitSha: string, commitMessage: string, commitAuthor: string;
+  try {
+    commitSha = execSync('git rev-parse HEAD', execOpts).trim();
+    commitMessage = execSync('git log -1 --format=%s', execOpts).trim();
+    commitAuthor = execSync('git log -1 --format=%an', execOpts).trim();
+  } catch (err: any) {
+    debugLog('post-commit', 'ERROR: cannot read commit', { message: err.message });
+    return;
+  }
+
+  debugLog('post-commit', 'commit info', { commitSha, commitMessage, commitAuthor });
+
+  // Get files changed in this commit
+  let filesChanged: string[] = [];
+  try {
+    const raw = execSync(`git diff-tree --no-commit-id --name-only -r ${commitSha}`, execOpts).trim();
+    filesChanged = raw ? raw.split('\n').filter(Boolean) : [];
+  } catch { /* ignore */ }
+
+  // Get diff for this single commit
+  let diff = '';
+  try {
+    diff = execSync(`git diff ${commitSha}~1..${commitSha}`, execOpts).trim();
+  } catch {
+    try {
+      // First commit in repo — no parent
+      diff = execSync(`git show ${commitSha} --format= --diff-merges=first-parent`, execOpts).trim();
+    } catch { /* ignore */ }
+  }
+
+  // Count lines
+  let linesAdded = 0, linesRemoved = 0;
+  if (diff) {
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
+      if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+    }
+  }
+
+  // Write git notes on this commit immediately
+  const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+  const state = loadSessionState(hookCwd);
+
+  try {
+    writeGitNotes(repoPath, [commitSha], {
+      sessionId: state?.sessionId || 'unknown',
+      model: state?.model || 'unknown',
+      promptCount: state?.prompts?.length || 0,
+      promptSummary: state?.prompts?.[state.prompts.length - 1] || '',
+      tokensUsed: 0,
+      costUsd: 0,
+      durationMs: 0,
+      linesAdded,
+      linesRemoved,
+      originUrl: state ? `${apiUrl}/sessions/${state.sessionId}` : '',
+    });
+    debugLog('post-commit', 'git notes written');
+  } catch (err: any) {
+    debugLog('post-commit', 'git notes error (non-fatal)', { message: err.message });
+  }
+
+  // If there's an active Origin session, send incremental update
+  if (state) {
+    try {
+      // Build incremental git capture
+      const gitCapture = {
+        headBefore: state.headShaAtStart || commitSha,
+        headAfter: commitSha,
+        commitShas: [commitSha],
+        commitDetails: [{ sha: commitSha, message: commitMessage, author: commitAuthor, filesChanged }],
+        diff: diff.length > 500_000 ? diff.slice(0, 500_000) : diff,
+        diffTruncated: diff.length > 500_000,
+        linesAdded,
+        linesRemoved,
+      };
+
+      debugLog('post-commit', 'sending incremental update', { sessionId: state.sessionId, filesChanged: filesChanged.length });
+
+      await api.updateSession(state.sessionId, {
+        filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
+        gitCapture,
+      });
+      debugLog('post-commit', 'API update complete');
+    } catch (err: any) {
+      debugLog('post-commit', 'API update error (non-fatal)', { message: err.message });
+    }
+  } else {
+    debugLog('post-commit', 'no active session, skipped API update');
+  }
+
+  debugLog('post-commit', '=== GIT HOOK COMPLETE ===');
 }
 
 // ─── Main Entry Point ──────────────────────────────────────────────────────

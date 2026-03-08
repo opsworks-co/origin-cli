@@ -63,6 +63,58 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/scanning', scanningRoutes);
 app.use('/api/reports', reportRoutes);
 
+// Serve CLI install script
+app.get('/install.sh', (_req, res) => {
+  res.setHeader('Content-Type', 'text/plain');
+  res.send(`#!/bin/sh
+set -e
+
+echo ""
+echo "  Origin CLI Installer"
+echo "  ===================="
+echo ""
+
+# Check for Node.js
+if ! command -v node >/dev/null 2>&1; then
+  echo "Error: Node.js is required. Install it from https://nodejs.org"
+  exit 1
+fi
+
+NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
+if [ "$NODE_VERSION" -lt 18 ]; then
+  echo "Error: Node.js 18+ required (found $(node -v))"
+  exit 1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Error: npm is required."
+  exit 1
+fi
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+echo "  Downloading Origin CLI..."
+curl -fsSL "https://origin-platform.fly.dev/cli/origin-cli-latest.tgz" -o "$TMPDIR/origin-cli.tgz"
+
+echo "  Installing..."
+npm install -g "$TMPDIR/origin-cli.tgz" --silent 2>/dev/null
+
+echo ""
+echo "  Origin CLI installed successfully!"
+echo ""
+echo "  Get started:"
+echo ""
+echo "    origin login          # authenticate with your org"
+echo "    origin init           # register this machine"
+echo "    origin enable         # install hooks in your repo"
+echo ""
+echo "  Then just code with Claude Code, Cursor, or Gemini."
+echo "  Sessions are captured automatically."
+echo ""
+`);
+});
+
 // Serve React app in production
 const webDist = path.join(__dirname, '../../web/dist');
 app.use(express.static(webDist));

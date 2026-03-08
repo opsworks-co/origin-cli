@@ -82,6 +82,31 @@ Status options: `APPROVED` | `REJECTED` | `FLAGGED`
 
 ---
 
+### GET `/sessions/:id/blame?file=<filepath>`
+Line-level AI attribution for a file in a session.
+
+Query params:
+- `file` (required) — file path to get blame for
+
+Returns: `{ file, totalAttributedLines, lines: [{ lineNumber, content, attribution }], prompts }`
+
+---
+
+### POST `/sessions/:id/ask`
+Ask questions about a coding session. Requires `ANTHROPIC_API_KEY`.
+
+```json
+{
+  "question": "Why was this approach chosen?",
+  "context": { "file": "src/auth.ts", "promptIndex": 0 },
+  "messages": []
+}
+```
+
+Returns: `{ "answer": "..." }`
+
+---
+
 ## Repos
 
 ### GET `/repos`

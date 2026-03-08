@@ -237,6 +237,9 @@ export async function enableCommand(opts: { agent?: string }): Promise<void> {
     console.log(chalk.gray('    • Turn end — files, tokens, tool calls'));
   }
 
+  // Install git post-commit hook for incremental data capture
+  installGitPostCommitHook(gitRoot);
+
   console.log(chalk.bold('\n📋 Next steps:\n'));
   const firstAgent = AGENTS[agentsToEnable[0]];
   console.log(chalk.white('  1. Start coding: ') + chalk.cyan(firstAgent.command));
@@ -245,4 +248,39 @@ export async function enableCommand(opts: { agent?: string }): Promise<void> {
   console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
 
   console.log(chalk.green('\n✓ Origin session tracking enabled.\n'));
+}
+
+// ─── Git Post-Commit Hook ─────────────────────────────────────────────────
+
+function installGitPostCommitHook(gitRoot: string): void {
+  const hooksDir = path.join(gitRoot, '.git', 'hooks');
+  const hookPath = path.join(hooksDir, 'post-commit');
+
+  // Ensure hooks directory exists
+  if (!fs.existsSync(hooksDir)) {
+    fs.mkdirSync(hooksDir, { recursive: true });
+  }
+
+  const ORIGIN_MARKER = '# origin-post-commit';
+  const hookScript = `origin hooks git-post-commit`;
+
+  // Check if hook file already exists
+  if (fs.existsSync(hookPath)) {
+    const existing = fs.readFileSync(hookPath, 'utf-8');
+    if (existing.includes(ORIGIN_MARKER)) {
+      console.log(chalk.gray('  ✓ Git post-commit hook already installed'));
+      return;
+    }
+    // Append to existing hook
+    const append = `\n${ORIGIN_MARKER}\n${hookScript} &\n`;
+    fs.appendFileSync(hookPath, append);
+  } else {
+    // Create new hook file
+    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript} &\n`;
+    fs.writeFileSync(hookPath, content);
+  }
+
+  // Make executable
+  fs.chmodSync(hookPath, '755');
+  console.log(chalk.green('  ✓ Git post-commit hook installed'));
 }

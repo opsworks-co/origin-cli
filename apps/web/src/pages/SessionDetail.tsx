@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Session } from '../api';
 import UnifiedSessionView from '../components/UnifiedSessionView';
+import AiBlameView from '../components/AiBlameView';
+import AskAuthorPanel from '../components/AskAuthorPanel';
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -33,7 +35,7 @@ export default function SessionDetail() {
   const [error, setError] = useState('');
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'session' | 'security'>('session');
+  const [activeTab, setActiveTab] = useState<'session' | 'security' | 'blame'>('session');
 
   // Review state
   const [reviewNote, setReviewNote] = useState('');
@@ -46,6 +48,10 @@ export default function SessionDetail() {
 
   // Metadata panel
   const [showMeta, setShowMeta] = useState(false);
+
+  // Ask the Author panel
+  const [showAskPanel, setShowAskPanel] = useState(false);
+  const [askContext, setAskContext] = useState<{ file?: string; lineNumber?: number; lineContent?: string; promptIndex?: number } | undefined>();
 
   useEffect(() => {
     if (!id) return;
@@ -268,6 +274,16 @@ export default function SessionDetail() {
             )}
           </button>
           <button
+            onClick={() => setActiveTab('blame')}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              activeTab === 'blame'
+                ? 'bg-indigo-600/20 text-indigo-400 font-medium'
+                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
+            }`}
+          >
+            AI Blame
+          </button>
+          <button
             onClick={() => setActiveTab('security')}
             className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
               activeTab === 'security'
@@ -282,13 +298,37 @@ export default function SessionDetail() {
               </span>
             )}
           </button>
+
+          {/* Ask the Author button */}
+          <button
+            onClick={() => { setShowAskPanel(!showAskPanel); setAskContext(undefined); }}
+            className={`ml-auto px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 ${
+              showAskPanel
+                ? 'bg-purple-600/20 text-purple-400 font-medium'
+                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
+            }`}
+          >
+            <span className="text-xs">&#128172;</span>
+            Ask
+          </button>
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto flex">
+          <div className={`flex-1 overflow-y-auto ${showAskPanel ? 'min-w-0' : ''}`}>
           {activeTab === 'session' && (
             <UnifiedSessionView
               transcript={(() => { try { return JSON.parse(session.transcript); } catch { return []; } })()}
               promptChanges={session.promptChanges || []}
               sessionDiff={session.sessionDiff}
+            />
+          )}
+          {activeTab === 'blame' && (
+            <AiBlameView
+              sessionId={session.id}
+              filesChanged={(() => { try { return JSON.parse(session.filesChanged); } catch { return []; } })()}
+              onAskAboutLine={(file, lineNumber, content) => {
+                setAskContext({ file, lineNumber, lineContent: content });
+                setShowAskPanel(true);
+              }}
             />
           )}
           {activeTab === 'security' && (
@@ -354,6 +394,18 @@ export default function SessionDetail() {
                   </div>
                 </>
               )}
+            </div>
+          )}
+          </div>
+
+          {/* Ask the Author side panel */}
+          {showAskPanel && (
+            <div className="w-96 border-l border-gray-800 flex-shrink-0">
+              <AskAuthorPanel
+                sessionId={session.id}
+                onClose={() => setShowAskPanel(false)}
+                initialContext={askContext}
+              />
             </div>
           )}
         </div>

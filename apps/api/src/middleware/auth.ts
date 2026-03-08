@@ -30,14 +30,21 @@ export function authMiddleware(req: AuthRequest, _res: Response, next: NextFunct
     const apiKey = req.headers['x-api-key'] as string | undefined;
     if (apiKey) {
       const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-      prisma.apiKey.findFirst({ where: { keyHash }, include: { org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } } } })
+      prisma.apiKey.findFirst({
+        where: { keyHash },
+        include: {
+          user: true,
+          org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
+        },
+      })
         .then((found) => {
           if (found) {
-            const owner = found.org.users[0];
+            // Prefer the API key's own user; fall back to org owner
+            const resolvedUser = found.user ?? found.org.users[0];
             req.user = {
-              id: owner?.id ?? 'system',
+              id: resolvedUser?.id ?? 'system',
               orgId: found.orgId,
-              role: owner?.role ?? 'OWNER',
+              role: resolvedUser?.role ?? 'OWNER',
             };
           }
           next();

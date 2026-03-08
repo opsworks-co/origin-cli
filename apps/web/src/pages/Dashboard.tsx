@@ -40,6 +40,7 @@ export default function Dashboard() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationConfig[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
+  const [activeSessions, setActiveSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [complianceScore, setComplianceScore] = useState<number | null>(null);
@@ -51,13 +52,15 @@ export default function Dashboard() {
       api.getMachines(),
       api.getIntegrations().catch(() => []),
       api.getPolicies().catch(() => []),
+      api.getActiveSessions().catch(() => ({ sessions: [] })),
     ])
-      .then(([s, sess, m, integ, pol]) => {
+      .then(([s, sess, m, integ, pol, active]) => {
         setStats(s);
         setSessions(sess.sessions);
         setMachines(m);
         setIntegrations(integ);
         setPolicies(pol);
+        setActiveSessions(active.sessions);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -65,6 +68,15 @@ export default function Dashboard() {
     api.getComplianceScore()
       .then((r) => setComplianceScore(r.score))
       .catch(() => {});
+
+    // Poll active sessions every 10 seconds
+    const interval = setInterval(() => {
+      api.getActiveSessions()
+        .then((r) => setActiveSessions(r.sessions))
+        .catch(() => {});
+    }, 10000);
+
+    return () => clearInterval(interval);
   }, []);
 
   if (loading) {
@@ -198,10 +210,75 @@ export default function Dashboard() {
         policyViolations={stats.policyViolations}
       />
 
+      {/* ── Active Sessions ──────────────────────────────────────────────── */}
+      {activeSessions.length > 0 && (
+        <div className="card border-purple-500/30">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-purple-500" />
+              </span>
+              <h2 className="text-sm font-semibold text-purple-300">
+                {activeSessions.length} Active Session{activeSessions.length !== 1 ? 's' : ''}
+              </h2>
+            </div>
+            <Link to="/sessions" className="text-xs text-purple-400 hover:text-purple-300 transition-colors">
+              View all &rarr;
+            </Link>
+          </div>
+          <div className="space-y-2">
+            {activeSessions.map((s) => {
+              const elapsed = s.startedAt
+                ? Math.floor((Date.now() - new Date(s.startedAt).getTime()) / 1000)
+                : 0;
+              const elapsedStr = elapsed < 60
+                ? `${elapsed}s`
+                : elapsed < 3600
+                  ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+                  : `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`;
+
+              return (
+                <Link
+                  key={s.id}
+                  to={`/sessions/${s.id}`}
+                  className="flex items-center justify-between bg-purple-500/5 hover:bg-purple-500/10 rounded-lg px-4 py-3 transition-colors border border-purple-500/10"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="badge-purple text-xs">{s.model}</span>
+                    <span className="text-gray-300 text-sm truncate max-w-[300px]">
+                      {s.prompt
+                        ? s.prompt.split('\n')[0].slice(0, 80) + (s.prompt.length > 80 ? '...' : '')
+                        : 'Session in progress...'}
+                    </span>
+                    {s.repoName && (
+                      <span className="text-xs text-gray-600">{s.repoName}</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-4 flex-shrink-0">
+                    {s.agentName && (
+                      <span className="text-xs text-gray-500">{s.agentName}</span>
+                    )}
+                    <span className="text-xs text-purple-400 font-mono">{elapsedStr}</span>
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* ── Key Metrics ───────────────────────────────────────────────────── */}
       <div>
         <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Overview</h2>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <KpiCard
+            label="Active Now"
+            value={stats.activeSessions ?? activeSessions.length}
+            color={stats.activeSessions > 0 ? 'purple' : undefined}
+            subtext="sessions currently running"
+            to="/sessions"
+          />
           <KpiCard
             label="Sessions This Week"
             value={stats.sessionsThisWeek}

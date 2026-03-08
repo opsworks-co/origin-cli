@@ -2,10 +2,18 @@ import { execSync } from 'child_process';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
+export interface CommitInfo {
+  sha: string;
+  message: string;
+  author: string;
+  filesChanged: string[];
+}
+
 export interface GitCaptureResult {
   headBefore: string;
   headAfter: string;
   commitShas: string[];     // Real commit SHAs created during session
+  commitDetails: CommitInfo[]; // Per-commit metadata
   diff: string;             // Unified diff (capped at MAX_DIFF_SIZE)
   diffTruncated: boolean;
   linesAdded: number;
@@ -57,7 +65,25 @@ export function captureGitState(repoPath: string, headBefore: string | null): Gi
     }
   }
 
-  // 3. Build unified diff
+  // 3. Capture per-commit metadata (message, author, files changed)
+  const commitDetails: CommitInfo[] = [];
+  for (const sha of commitShas) {
+    try {
+      const message = execSync(`git log -1 --format=%s ${sha}`, execOpts).trim();
+      const author = execSync(`git log -1 --format=%an ${sha}`, execOpts).trim();
+      const filesRaw = execSync(
+        `git diff-tree --no-commit-id --name-only -r ${sha}`,
+        execOpts,
+      ).trim();
+      const filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean) : [];
+      commitDetails.push({ sha, message, author, filesChanged });
+    } catch {
+      // If we can't get details for a commit, include it with minimal info
+      commitDetails.push({ sha, message: '', author: '', filesChanged: [] });
+    }
+  }
+
+  // 4. Build unified diff
   let diff = '';
   let diffTruncated = false;
 
@@ -102,6 +128,7 @@ export function captureGitState(repoPath: string, headBefore: string | null): Gi
     headBefore: safeBefore,
     headAfter,
     commitShas,
+    commitDetails,
     diff,
     diffTruncated,
     linesAdded,
@@ -116,6 +143,7 @@ function emptyResult(headBefore: string): GitCaptureResult {
     headBefore,
     headAfter: headBefore,
     commitShas: [],
+    commitDetails: [],
     diff: '',
     diffTruncated: false,
     linesAdded: 0,

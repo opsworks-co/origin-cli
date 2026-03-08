@@ -197,6 +197,7 @@ function CommitDiffModal({
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
   const promptChanges = commit.session?.promptChanges || [];
   const hasPrompts = promptChanges.length > 0;
+  const isAICommit = !!commit.session || !!commit.aiToolDetected;
   const [activeTab, setActiveTab] = useState<ModalTab>(hasPrompts ? 'prompts' : 'changes');
 
   // Auto-expand first 3 files on load
@@ -270,8 +271,8 @@ function CommitDiffModal({
           </button>
         </div>
 
-        {/* Tab bar (only show if there are prompts) */}
-        {hasPrompts && (
+        {/* Tab bar — show for all AI commits */}
+        {isAICommit && (
           <div className="flex items-center gap-1 px-6 py-2 border-b border-gray-800 flex-shrink-0">
             <button
               onClick={() => setActiveTab('prompts')}
@@ -282,9 +283,11 @@ function CommitDiffModal({
               }`}
             >
               AI Prompts
-              <span className="ml-1.5 bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded text-[10px]">
-                {promptChanges.length}
-              </span>
+              {hasPrompts && (
+                <span className="ml-1.5 bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded text-[10px]">
+                  {promptChanges.length}
+                </span>
+              )}
             </button>
             <button
               onClick={() => setActiveTab('changes')}
@@ -307,25 +310,42 @@ function CommitDiffModal({
         {/* Content */}
         <div className="flex-1 overflow-y-auto">
           {/* ─── Prompts Tab ─── */}
-          {activeTab === 'prompts' && hasPrompts && (
+          {activeTab === 'prompts' && (
             <div className="px-6 py-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-xs text-gray-500">
-                  {promptChanges.length} prompt{promptChanges.length !== 1 ? 's' : ''} produced this commit
-                </p>
-                {commit.session && (
-                  <Link
-                    to={`/sessions/${commit.session.id}`}
-                    className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-                  >
-                    Full session &rarr;
-                  </Link>
-                )}
-              </div>
+              {hasPrompts ? (
+                <>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-gray-500">
+                      {promptChanges.length} prompt{promptChanges.length !== 1 ? 's' : ''} produced this commit
+                    </p>
+                    {commit.session && (
+                      <Link
+                        to={`/sessions/${commit.session.id}`}
+                        className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+                      >
+                        Full session &rarr;
+                      </Link>
+                    )}
+                  </div>
 
-              {promptChanges.map((pc, i) => (
-                <PromptCard key={pc.promptIndex} pc={pc} index={i} />
-              ))}
+                  {promptChanges.map((pc, i) => (
+                    <PromptCard key={pc.promptIndex} pc={pc} index={i} />
+                  ))}
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <div className="w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center mb-4">
+                    <svg className="w-6 h-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                    </svg>
+                  </div>
+                  <p className="text-sm text-gray-400 font-medium mb-1">No prompt data available</p>
+                  <p className="text-xs text-gray-600 max-w-sm">
+                    This commit was detected as AI-generated{commit.aiToolDetected ? ` (${commit.aiToolDetected})` : ''}, but no session was captured.
+                    Use the Origin CLI to record sessions and see which prompts produce each commit.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -435,7 +455,7 @@ function CommitDiffModal({
         </div>
 
         {/* Footer with session link */}
-        {commit.session && !hasPrompts && (
+        {commit.session && !isAICommit && (
           <div className="px-6 py-3 border-t border-gray-800 flex-shrink-0">
             <Link
               to={`/sessions/${commit.session.id}`}
@@ -488,6 +508,7 @@ export default function RepoDetail() {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [rescanning, setRescanning] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   // Diff modal states
   const [selectedCommit, setSelectedCommit] = useState<Commit | null>(null);
@@ -544,6 +565,21 @@ export default function RepoDetail() {
       setSyncMsg(`Rescan failed: ${err.message}`);
     } finally {
       setRescanning(false);
+    }
+  };
+
+  const handleImportSessions = async () => {
+    if (!id) return;
+    setImporting(true);
+    setSyncMsg('');
+    try {
+      const result = await api.importSessionsFromBranch(id);
+      setSyncMsg(`Imported ${result.imported} sessions (${result.skipped} skipped, ${result.total} total in branch)`);
+      fetchData();
+    } catch (err: any) {
+      setSyncMsg(`Import failed: ${err.message}`);
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -677,6 +713,22 @@ export default function RepoDetail() {
               'Rescan AI'
             )}
           </button>
+          {repo?.provider === 'github' && (
+            <button
+              onClick={handleImportSessions}
+              disabled={syncing || rescanning || importing}
+              className="text-sm px-3 py-1.5 rounded-lg bg-green-600/20 text-green-400 hover:bg-green-600/30 border border-green-500/30 transition-colors"
+            >
+              {importing ? (
+                <span className="flex items-center gap-2">
+                  <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-green-400" />
+                  Importing...
+                </span>
+              ) : (
+                'Import Sessions'
+              )}
+            </button>
+          )}
         </div>
       </div>
 

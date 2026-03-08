@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 const FEATURES = [
@@ -72,6 +72,38 @@ const TOOLS = [
   { name: 'Aider', badge: 'badge-green' },
 ];
 
+const INSTALL_CMD = 'curl -fsSL https://origin-platform.fly.dev/install.sh | sh';
+
+function InstallCommand() {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(INSTALL_CMD);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="mt-10 max-w-xl mx-auto">
+      <button
+        onClick={handleCopy}
+        className="w-full group relative bg-gray-900 border border-gray-700 hover:border-indigo-500/50 rounded-xl px-5 py-4 text-left transition-colors cursor-pointer"
+      >
+        <div className="flex items-center gap-3">
+          <span className="text-green-400 text-sm font-mono shrink-0">$</span>
+          <code className="text-sm font-mono text-gray-200 truncate flex-1">
+            {INSTALL_CMD}
+          </code>
+          <span className="text-xs text-gray-500 group-hover:text-indigo-400 transition-colors shrink-0">
+            {copied ? 'Copied!' : 'Click to copy'}
+          </span>
+        </div>
+      </button>
+      <p className="text-xs text-gray-600 mt-2">Requires Node.js 18+</p>
+    </div>
+  );
+}
+
 export default function Landing() {
   return (
     <>
@@ -98,7 +130,10 @@ export default function Landing() {
             Origin gives CTOs and CSOs full visibility into every AI coding session
             &mdash; what was prompted, what was built, and whether it followed the rules.
           </p>
-          <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
+          {/* Install one-liner */}
+          <InstallCommand />
+
+          <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-4">
             <Link
               to="/register"
               className="btn-primary px-8 py-3 text-base font-semibold rounded-xl shadow-lg shadow-indigo-600/20"
@@ -222,37 +257,41 @@ $ origin stats && origin audit`}
         </div>
       </section>
 
-      {/* Setup / CTA */}
+      {/* Install / CTA */}
       <section id="setup" className="bg-gradient-to-b from-gray-950 to-indigo-950/20 border-t border-gray-800/50">
         <div className="max-w-4xl mx-auto px-6 py-24 text-center">
           <h2 className="text-3xl font-bold mb-4">
-            Get started in under 5 minutes
+            Get started in under 2 minutes
           </h2>
           <p className="text-gray-400 mb-10 max-w-xl mx-auto">
-            Create an account, connect your repos, and start tracking AI-authored code
-            across your organization.
+            Install the CLI, login, and enable session tracking. That&apos;s it.
           </p>
-          <div className="grid sm:grid-cols-4 gap-4 mb-12">
-            {[
-              { step: '1', title: 'Create account', desc: 'Sign up with your email' },
-              { step: '2', title: 'Connect repos', desc: 'Add local or GitHub repos' },
-              { step: '3', title: 'Set policies', desc: 'Define governance rules' },
-              { step: '4', title: 'Start coding', desc: 'Sessions tracked automatically' },
-            ].map((s) => (
-              <div key={s.step} className="text-center">
-                <div className="w-10 h-10 rounded-full bg-indigo-600 text-white font-bold text-sm flex items-center justify-center mx-auto mb-3">
-                  {s.step}
+
+          <div className="max-w-2xl mx-auto mb-12">
+            <InstallCommand />
+
+            <div className="grid sm:grid-cols-3 gap-6 mt-10">
+              {[
+                { step: '1', cmd: 'curl ... | sh', title: 'Install CLI', desc: 'One command to install' },
+                { step: '2', cmd: 'origin login', title: 'Authenticate', desc: 'Login with your org' },
+                { step: '3', cmd: 'origin enable', title: 'Enable tracking', desc: 'Hooks installed automatically' },
+              ].map((s) => (
+                <div key={s.step} className="text-center">
+                  <div className="w-10 h-10 rounded-full bg-indigo-600 text-white font-bold text-sm flex items-center justify-center mx-auto mb-3">
+                    {s.step}
+                  </div>
+                  <p className="font-semibold text-gray-200 text-sm">{s.title}</p>
+                  <p className="text-xs text-gray-500 mt-1">{s.desc}</p>
                 </div>
-                <p className="font-semibold text-gray-200 text-sm">{s.title}</p>
-                <p className="text-xs text-gray-500 mt-1">{s.desc}</p>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
+
           <Link
             to="/register"
             className="btn-primary px-10 py-3 text-base font-semibold rounded-xl shadow-lg shadow-indigo-600/20"
           >
-            Start for free &rarr;
+            Create your account &rarr;
           </Link>
         </div>
       </section>

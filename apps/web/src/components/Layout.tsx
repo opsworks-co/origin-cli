@@ -7,13 +7,9 @@ import ChatWidget from './ChatWidget';
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: '\u25A3' },
   { to: '/repos', label: 'Repositories', icon: '\uD83D\uDCC1' },
-  { to: '/sessions', label: 'Sessions', icon: '\u25B6' },
   { to: '/agents', label: 'Agents', icon: '\uD83E\uDD16' },
+  { to: '/sessions', label: 'Sessions', icon: '\u25B6' },
   { to: '/policies', label: 'Policies', icon: '\uD83D\uDEE1' },
-  { to: '/team', label: 'Team', icon: '\uD83D\uDC65' },
-  { to: '/audit', label: 'Audit Log', icon: '\uD83D\uDCDC' },
-  { to: '/insights', label: 'Insights', icon: '\uD83D\uDCCA' },
-  { to: '/reports', label: 'Reports', icon: '\uD83D\uDCCB' },
   { to: '/settings', label: 'Settings', icon: '\u2699' },
 ];
 

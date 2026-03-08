@@ -5,7 +5,7 @@ import { notifyOrgAdmins } from '../services/notifications.js';
 import { runAIReview } from '../services/ai-review.js';
 import { checkBudget, recordSpend } from '../services/budget.js';
 import { emitSessionEvent } from '../services/session-events.js';
-import { enforceSessionStart, enforceSessionEnd, applyEnforcementActions } from '../services/policy-engine.js';
+import { enforceSessionStart, enforceSessionEnd, applyEnforcementActions, enforceAgentLimits } from '../services/policy-engine.js';
 import { scanForSecrets } from '../services/secret-scanner.js';
 import { detectAITool } from '../services/ai-commit-detector.js';
 
@@ -13,6 +13,7 @@ const router = Router();
 
 interface McpRequest extends Request {
   orgId?: string;
+  mcpUserId?: string;  // User ID resolved from the API key (for per-member attribution)
 }
 
 // Helper: authenticate by API key header
@@ -27,6 +28,9 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
 
     const found = await prisma.apiKey.findFirst({
       where: { keyHash },
+      include: {
+        org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
+      },
     });
 
     if (!found) {
@@ -34,6 +38,8 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     }
 
     req.orgId = found.orgId;
+    // Resolve user: prefer API key's userId, fall back to org owner
+    req.mcpUserId = found.userId ?? found.org.users[0]?.id ?? undefined;
     next();
   } catch (err) {
     console.error('API key auth error:', err);
@@ -185,7 +191,9 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         prompt: prompt || '',
         transcript: '',
         filesChanged: '[]',
-        userId: (req as any).user?.id || null,
+        status: 'RUNNING',
+        startedAt: new Date(),
+        userId: req.mcpUserId || null,
         agentId: agent?.id || null,
         agentSystemPrompt: agent?.systemPrompt || null,
       },
@@ -201,6 +209,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     await prisma.auditLog.create({
       data: {
         orgId,
+        userId: req.mcpUserId || null,
         action: 'SESSION_STARTED',
         resource: codingSession.id,
         metadata: JSON.stringify({ machineId, model, repoPath, agentSlug }),
@@ -249,6 +258,83 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         ...(costUsd !== undefined && { costUsd }),
       },
     });
+
+    // Git capture: store incremental commit data (sent by post-commit hook)
+    const { gitCapture } = req.body;
+    if (gitCapture && typeof gitCapture === 'object') {
+      const session = await prisma.codingSession.findUnique({
+        where: { id },
+        include: { commit: { select: { repoId: true } } },
+      });
+
+      if (session?.commit?.repoId) {
+        const commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }> =
+          gitCapture.commitDetails || [];
+
+        // Create Commit records for each new commit
+        for (const detail of commitDetails) {
+          const existing = await prisma.commit.findFirst({ where: { sha: detail.sha, repoId: session.commit.repoId } });
+          if (!existing) {
+            await prisma.commit.create({
+              data: {
+                repoId: session.commit.repoId,
+                sha: detail.sha,
+                message: detail.message || '',
+                author: detail.author || 'ai-agent',
+                aiToolDetected: session.model || 'unknown',
+                aiDetectionMethod: 'session',
+                filesChanged: JSON.stringify(detail.filesChanged || []),
+                committedAt: new Date(),
+                sessionId: id,
+              },
+            });
+          }
+        }
+
+        // Upsert SessionDiff — merge with existing if present
+        const existingDiff = await prisma.sessionDiff.findUnique({ where: { sessionId: id } });
+        if (existingDiff) {
+          // Merge: append new diff, update headAfter, merge commitShas
+          const existingShas = JSON.parse(existingDiff.commitShas || '[]') as string[];
+          const newShas = (gitCapture.commitShas || []) as string[];
+          const mergedShas = [...new Set([...existingShas, ...newShas])];
+          await prisma.sessionDiff.update({
+            where: { sessionId: id },
+            data: {
+              headAfter: gitCapture.headAfter || existingDiff.headAfter,
+              commitShas: JSON.stringify(mergedShas),
+              diff: existingDiff.diff + '\n' + (gitCapture.diff || ''),
+              linesAdded: (existingDiff.linesAdded || 0) + (gitCapture.linesAdded || 0),
+              linesRemoved: (existingDiff.linesRemoved || 0) + (gitCapture.linesRemoved || 0),
+            },
+          });
+        } else {
+          await prisma.sessionDiff.create({
+            data: {
+              sessionId: id,
+              headBefore: gitCapture.headBefore || '',
+              headAfter: gitCapture.headAfter || '',
+              commitShas: JSON.stringify(gitCapture.commitShas || []),
+              diff: gitCapture.diff || '',
+              diffTruncated: gitCapture.diffTruncated || false,
+              linesAdded: gitCapture.linesAdded || 0,
+              linesRemoved: gitCapture.linesRemoved || 0,
+            },
+          });
+        }
+
+        // Update session line counts
+        if (gitCapture.linesAdded || gitCapture.linesRemoved) {
+          await prisma.codingSession.update({
+            where: { id },
+            data: {
+              linesAdded: { increment: gitCapture.linesAdded || 0 },
+              linesRemoved: { increment: gitCapture.linesRemoved || 0 },
+            },
+          });
+        }
+      }
+    }
 
     // Replace prompt→file change mappings (delete old, create new)
     if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
@@ -323,6 +409,8 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         ...(costUsd !== undefined && { costUsd }),
         ...(filesChanged !== undefined && { filesChanged: JSON.stringify(filesChanged) }),
         ...(durationMs !== undefined && { durationMs }),
+        status: 'COMPLETED',
+        endedAt: new Date(),
       },
       include: { commit: { select: { repoId: true } } },
     });
@@ -349,19 +437,50 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     const { gitCapture, promptChanges } = req.body;
 
     if (gitCapture && typeof gitCapture === 'object') {
+      const repoId = codingSession.commit.repoId;
+      const commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }> =
+        gitCapture.commitDetails || [];
+
       // Update placeholder commit SHA with real value
       const realSha = (gitCapture.commitShas?.length > 0)
         ? gitCapture.commitShas[0]         // First real commit SHA
         : (gitCapture.headAfter || null);  // Or HEAD at session end
 
       if (realSha) {
+        // Find matching detail for the first commit
+        const firstDetail = commitDetails.find(d => d.sha.startsWith(realSha) || realSha.startsWith(d.sha));
         await prisma.commit.update({
           where: { id: codingSession.commitId },
           data: {
             sha: realSha,
-            author: gitCapture.commitShas?.length > 0 ? 'ai-agent' : 'mcp-agent',
+            message: firstDetail?.message || commitMessage || '',
+            author: firstDetail?.author || 'ai-agent',
+            filesChanged: firstDetail ? JSON.stringify(firstDetail.filesChanged) : '[]',
           },
         });
+      }
+
+      // Create individual Commit records for remaining SHAs (linked via sessionId)
+      if (commitDetails.length > 1) {
+        for (const detail of commitDetails) {
+          // Skip the first commit (already stored as the placeholder)
+          if (detail.sha === realSha || detail.sha.startsWith(realSha?.slice(0, 7) || '___') || realSha?.startsWith(detail.sha.slice(0, 7))) {
+            continue;
+          }
+          await prisma.commit.create({
+            data: {
+              repoId,
+              sha: detail.sha,
+              message: detail.message || '',
+              author: detail.author || 'ai-agent',
+              aiToolDetected: codingSession.model,
+              aiDetectionMethod: 'session',
+              filesChanged: JSON.stringify(detail.filesChanged || []),
+              committedAt: new Date(),
+              sessionId,
+            },
+          });
+        }
       }
 
       // Create SessionDiff record with full diff
@@ -498,6 +617,23 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         }, result);
       }
     }).catch(err => console.error('[policy-engine] Background error:', err));
+
+    // Run agent-level limits enforcement in background
+    enforceAgentLimits({
+      sessionId,
+      orgId,
+      model: codingSession.model,
+      costUsd: costUsd ?? codingSession.costUsd ?? 0,
+      tokensUsed: tokensUsed ?? codingSession.tokensUsed ?? 0,
+      toolCalls: toolCalls ?? codingSession.toolCalls ?? 0,
+      linesAdded: linesAdded ?? codingSession.linesAdded ?? 0,
+      linesRemoved: linesRemoved ?? codingSession.linesRemoved ?? 0,
+      durationMs: durationMs ?? codingSession.durationMs ?? 0,
+      filesChanged: parsedFiles,
+      agentId: codingSession.agentId,
+      machineId: endMachineId,
+      repoId: sessionRepoId,
+    }).catch(err => console.error('[agent-limits] Background error:', err));
 
     res.json({ success: true });
   } catch (err) {

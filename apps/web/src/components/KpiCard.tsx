@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 interface KpiCardProps {
   label: string;
   value: string | number;
-  color?: 'green' | 'amber' | 'red' | 'default';
+  color?: 'green' | 'amber' | 'red' | 'purple' | 'default';
   subtext?: string;
   to?: string;
 }
@@ -13,6 +13,7 @@ const colorMap = {
   green: 'text-green-400',
   amber: 'text-amber-400',
   red: 'text-red-400',
+  purple: 'text-purple-400',
   default: 'text-gray-100',
 };
 

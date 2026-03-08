@@ -37,6 +37,7 @@ model User {
   reviews       SessionReview[]
   notifications Notification[]
   sessions      CodingSession[]
+  apiKeys       ApiKey[]
 }
 
 model Invitation {
@@ -57,6 +58,8 @@ model ApiKey {
   id        String   @id @default(uuid())
   orgId     String
   org       Org      @relation(fields: [orgId], references: [id])
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
   name      String
   keyHash   String
   keyPrefix String
@@ -89,15 +92,19 @@ model Commit {
   author            String
   aiToolDetected    String?        // Detected AI tool: "claude-code", "copilot", "cursor", "aider", "gemini"
   aiDetectionMethod String?        // How: "session", "co-author-trailer", "author-pattern", "commit-message"
+  filesChanged      String         @default("[]") // JSON array of file paths changed in this commit
   committedAt       DateTime
   createdAt         DateTime       @default(now())
-  session           CodingSession?
+  session           CodingSession? @relation("primaryCommit")
+  sessionId         String?
+  codingSession     CodingSession? @relation("sessionCommits", fields: [sessionId], references: [id])
 }
 
 model CodingSession {
   id           String         @id @default(uuid())
   commitId     String         @unique
-  commit       Commit         @relation(fields: [commitId], references: [id])
+  commit       Commit         @relation("primaryCommit", fields: [commitId], references: [id])
+  commits      Commit[]       @relation("sessionCommits")
   agentId      String?
   agent        Agent?         @relation(fields: [agentId], references: [id])
   userId       String?
@@ -114,7 +121,10 @@ model CodingSession {
   linesAdded   Int            @default(0)
   linesRemoved Int            @default(0)
   costUsd      Float          @default(0)
+  status       String         @default("COMPLETED") // RUNNING or COMPLETED
   agentSystemPrompt String?                    // Snapshot of agent system prompt active during session
+  startedAt    DateTime?                       // When session actually started (from session/start)
+  endedAt      DateTime?                       // When session ended (from session/end)
   createdAt    DateTime       @default(now())
   review       SessionReview?
   sessionDiff    SessionDiff?

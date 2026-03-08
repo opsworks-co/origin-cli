@@ -32,6 +32,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where: { commit: { repoId: { in: repoIds } } },
     });
 
+    // Active (running) sessions
+    const activeSessions = await prisma.codingSession.count({
+      where: { commit: { repoId: { in: repoIds } }, status: 'RUNNING' },
+    });
+
     // Sessions this week
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
@@ -429,6 +434,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     res.json({
       totalSessions,
+      activeSessions,
       activeAgents,
       sessionsThisWeek,
       aiPercentage,

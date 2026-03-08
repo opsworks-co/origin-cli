@@ -157,16 +157,7 @@ export default function App() {
           </ProtectedRoute>
         }
       />
-      <Route
-        path="/team"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <Team />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
+      <Route path="/team" element={<Navigate to="/settings?tab=team" replace />} />
       <Route
         path="/team/:id"
         element={
@@ -177,36 +168,9 @@ export default function App() {
           </ProtectedRoute>
         }
       />
-      <Route
-        path="/audit"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <AuditLog />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/insights"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <Insights />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/reports"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <Reports />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
+      <Route path="/audit" element={<Navigate to="/settings?tab=audit" replace />} />
+      <Route path="/insights" element={<Navigate to="/settings?tab=insights" replace />} />
+      <Route path="/reports" element={<Navigate to="/settings?tab=reports" replace />} />
       <Route
         path="/machines/:id"
         element={

@@ -115,6 +115,220 @@ function buildUnifiedTurns(
 // Sub-components
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Formatted assistant message renderer
+// ---------------------------------------------------------------------------
+
+function FormattedMessage({ text }: { text: string }) {
+  const elements: React.ReactNode[] = [];
+
+  // Split into blocks: code blocks, tool calls, and regular text
+  const lines = text.split('\n');
+  let i = 0;
+  let key = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code block: ```lang ... ```
+    if (line.trimStart().startsWith('```')) {
+      const lang = line.trimStart().slice(3).trim();
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trimStart().startsWith('```')) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing ```
+      elements.push(
+        <div key={key++} className="my-2 rounded-md border border-gray-700 overflow-hidden">
+          {lang && (
+            <div className="bg-gray-800 px-3 py-1 text-[10px] text-gray-500 font-mono border-b border-gray-700">
+              {lang}
+            </div>
+          )}
+          <pre className="bg-gray-900/80 px-3 py-2 text-[12px] leading-[1.6] font-mono text-gray-300 overflow-x-auto">
+            {codeLines.join('\n')}
+          </pre>
+        </div>,
+      );
+      continue;
+    }
+
+    // Tool call patterns: [Tool: ToolName], [Tool: ToolName → arg], [Tool: ToolName: arg]
+    const toolMatch = line.match(/^\[Tool:\s*([^\]→:]+?)(?:\s*[→:]\s*(.+?))?\]$/);
+    if (toolMatch) {
+      const rawName = toolMatch[1].trim();
+      const toolArg = toolMatch[2]?.trim() || '';
+
+      // Simplify MCP tool names: mcp__Claude_Preview__preview_click → Preview: click
+      let displayName = rawName;
+      const mcpMatch = rawName.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/);
+      if (mcpMatch) {
+        const server = mcpMatch[1].replace(/_/g, ' ');
+        const tool = mcpMatch[2].replace(/_/g, ' ');
+        displayName = `${server}: ${tool}`;
+      }
+
+      // Color by tool category
+      const getToolStyle = (name: string): { color: string; icon: string } => {
+        if (name === 'Read') return { color: 'bg-blue-500/15 text-blue-400 border-blue-500/30', icon: '📄' };
+        if (name === 'Edit') return { color: 'bg-amber-500/15 text-amber-400 border-amber-500/30', icon: '✏️' };
+        if (name === 'Write') return { color: 'bg-amber-500/15 text-amber-400 border-amber-500/30', icon: '📝' };
+        if (name === 'Bash') return { color: 'bg-green-500/15 text-green-400 border-green-500/30', icon: '⚡' };
+        if (name === 'Grep') return { color: 'bg-purple-500/15 text-purple-400 border-purple-500/30', icon: '🔍' };
+        if (name === 'Glob') return { color: 'bg-purple-500/15 text-purple-400 border-purple-500/30', icon: '📂' };
+        if (name === 'Task') return { color: 'bg-indigo-500/15 text-indigo-400 border-indigo-500/30', icon: '🔧' };
+        if (name === 'TaskOutput') return { color: 'bg-indigo-500/15 text-indigo-400 border-indigo-500/30', icon: '📋' };
+        if (name === 'WebFetch' || name === 'WebSearch') return { color: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30', icon: '🌐' };
+        if (name === 'TodoWrite') return { color: 'bg-pink-500/15 text-pink-400 border-pink-500/30', icon: '✅' };
+        if (name === 'EnterPlanMode' || name === 'ExitPlanMode') return { color: 'bg-violet-500/15 text-violet-400 border-violet-500/30', icon: '📐' };
+        if (rawName.includes('Preview') || rawName.includes('preview')) return { color: 'bg-teal-500/15 text-teal-400 border-teal-500/30', icon: '🖥️' };
+        if (rawName.includes('Chrome') || rawName.includes('chrome')) return { color: 'bg-orange-500/15 text-orange-400 border-orange-500/30', icon: '🌐' };
+        return { color: 'bg-gray-700/30 text-gray-400 border-gray-600/30', icon: '🔧' };
+      };
+
+      const style = getToolStyle(rawName);
+
+      elements.push(
+        <div key={key++} className="my-1 flex items-center gap-2">
+          <span
+            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono border ${style.color}`}
+          >
+            <span className="text-[10px]">{style.icon}</span>
+            {displayName}
+            {toolArg && (
+              <span className="opacity-60 ml-0.5 truncate max-w-[200px]">{toolArg}</span>
+            )}
+          </span>
+        </div>,
+      );
+      i++;
+      continue;
+    }
+
+    // Empty line = paragraph break
+    if (line.trim() === '') {
+      elements.push(<div key={key++} className="h-2" />);
+      i++;
+      continue;
+    }
+
+    // Collect consecutive normal text lines into a paragraph
+    const textLines: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== '' &&
+      !lines[i].trimStart().startsWith('```') &&
+      !lines[i].match(
+        /^\[(?:Tool:\s*)?(?:Read|Edit|Write|Grep|Glob|Bash|Search|WebFetch|Task)(?:\s*[→:]\s*.+?)?\]$/,
+      )
+    ) {
+      textLines.push(lines[i]);
+      i++;
+    }
+
+    if (textLines.length > 0) {
+      const paragraph = textLines.join('\n');
+      elements.push(
+        <p key={key++} className="text-[13px] leading-[1.7] text-gray-400">
+          {formatInlineText(paragraph)}
+        </p>,
+      );
+    }
+  }
+
+  // Group consecutive tool call elements into compact clusters
+  const grouped: React.ReactNode[] = [];
+  let toolBatch: React.ReactNode[] = [];
+
+  const flushToolBatch = () => {
+    if (toolBatch.length > 0) {
+      grouped.push(
+        <div key={`batch-${grouped.length}`} className="my-2 flex flex-wrap gap-1 items-center">
+          {toolBatch}
+        </div>,
+      );
+      toolBatch = [];
+    }
+  };
+
+  for (const el of elements) {
+    // Check if this is a tool call element (has 'my-1' in className)
+    const isToolCall =
+      el && typeof el === 'object' && 'props' in (el as any) &&
+      (el as any).props?.className?.includes('my-1 ');
+    if (isToolCall) {
+      toolBatch.push(el);
+    } else {
+      flushToolBatch();
+      grouped.push(el);
+    }
+  }
+  flushToolBatch();
+
+  return <div className="space-y-0.5">{grouped}</div>;
+}
+
+/** Render inline formatting: `code`, **bold**, *italic*, file paths */
+function formatInlineText(text: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  // Split by inline code, bold, and italic markers
+  const regex = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+
+  while ((match = regex.exec(text)) !== null) {
+    // Text before the match
+    if (match.index > lastIndex) {
+      parts.push(
+        <span key={key++}>{text.slice(lastIndex, match.index)}</span>,
+      );
+    }
+
+    const token = match[0];
+    if (token.startsWith('`') && token.endsWith('`')) {
+      // Inline code
+      parts.push(
+        <code
+          key={key++}
+          className="bg-gray-800 text-indigo-300 px-1.5 py-0.5 rounded text-[12px] font-mono"
+        >
+          {token.slice(1, -1)}
+        </code>,
+      );
+    } else if (token.startsWith('**') && token.endsWith('**')) {
+      // Bold
+      parts.push(
+        <strong key={key++} className="text-gray-200 font-semibold">
+          {token.slice(2, -2)}
+        </strong>,
+      );
+    } else if (token.startsWith('*') && token.endsWith('*')) {
+      // Italic
+      parts.push(
+        <em key={key++} className="text-gray-300 italic">
+          {token.slice(1, -1)}
+        </em>,
+      );
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Remaining text
+  if (lastIndex < text.length) {
+    parts.push(<span key={key++}>{text.slice(lastIndex)}</span>);
+  }
+
+  return parts;
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
 function DiffHunkRenderer({ hunks }: { hunks: string[] }) {
   return (
     <pre className="text-[11px] leading-[1.6] font-mono">
@@ -249,8 +463,8 @@ function TurnCard({
                 </div>
                 <span className="text-[11px] font-medium text-gray-500">Assistant</span>
               </div>
-              <div className="text-[13px] leading-[1.7] whitespace-pre-wrap text-gray-400 ml-7">
-                {truncatedResponse}
+              <div className="ml-7">
+                <FormattedMessage text={truncatedResponse} />
                 {assistantText.length > TRUNCATE_LEN && !showFullResponse && (
                   <span className="text-gray-600">...</span>
                 )}
@@ -457,6 +671,7 @@ export default function UnifiedSessionView({
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
   const [visibleCount, setVisibleCount] = useState(50);
   const [showSessionDiff, setShowSessionDiff] = useState(false);
+  const [newestFirst, setNewestFirst] = useState(true);
   const diffCache = useRef<Map<number, DiffFile[]>>(new Map());
 
   const turns = useMemo(
@@ -464,8 +679,13 @@ export default function UnifiedSessionView({
     [transcript, promptChanges],
   );
 
-  const visibleTurns = turns.slice(0, visibleCount);
-  const hasMore = visibleCount < turns.length;
+  const orderedTurns = useMemo(
+    () => (newestFirst ? [...turns].reverse() : turns),
+    [turns, newestFirst],
+  );
+
+  const visibleTurns = orderedTurns.slice(0, visibleCount);
+  const hasMore = visibleCount < orderedTurns.length;
 
   const turnsWithChanges = turns.filter((t) => t.promptChange && t.promptChange.filesChanged.length > 0).length;
   const totalFiles = new Set(promptChanges.flatMap((pc) => pc.filesChanged)).size;
@@ -525,6 +745,13 @@ export default function UnifiedSessionView({
         </div>
         <div className="flex items-center gap-3 text-[11px]">
           <button
+            onClick={() => { setNewestFirst((prev) => !prev); setVisibleCount(50); }}
+            className="text-gray-600 hover:text-gray-400 transition-colors flex items-center gap-1"
+          >
+            {newestFirst ? '↓ Newest first' : '↑ Oldest first'}
+          </button>
+          <span className="text-gray-800">|</span>
+          <button
             onClick={expandAll}
             className="text-gray-600 hover:text-gray-400 transition-colors"
           >
@@ -562,7 +789,7 @@ export default function UnifiedSessionView({
               onClick={() => setVisibleCount((prev) => prev + 50)}
               className="text-[11px] text-indigo-400/70 hover:text-indigo-400 bg-indigo-600/10 hover:bg-indigo-600/20 px-4 py-2 rounded-lg transition-colors"
             >
-              Load more ({turns.length - visibleCount} remaining)
+              Load more ({orderedTurns.length - visibleCount} remaining)
             </button>
           </div>
         )}

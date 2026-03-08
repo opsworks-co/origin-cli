@@ -12,6 +12,8 @@ RUN pnpm install --frozen-lockfile
 COPY apps/api ./apps/api
 COPY packages ./packages
 RUN cd apps/api && npx prisma generate && pnpm run build
+# Build & pack CLI for download
+RUN cd packages/cli && pnpm run build && npm pack && mv origin-cli-*.tgz origin-cli-latest.tgz
 
 # Build Web
 FROM base AS web-builder
@@ -35,6 +37,9 @@ COPY --from=api-builder /app/apps/api/prisma ./apps/api/prisma
 COPY --from=api-builder /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=api-builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=web-builder /app/apps/web/dist ./apps/web/dist
+# CLI tarball for download
+RUN mkdir -p ./apps/web/dist/cli
+COPY --from=api-builder /app/packages/cli/origin-cli-latest.tgz ./apps/web/dist/cli/origin-cli-latest.tgz
 COPY docker-start.sh ./docker-start.sh
 RUN chmod +x docker-start.sh
 

@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -46,6 +46,28 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     res.json({ entries, total });
   } catch (err) {
     console.error('List audit logs error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /bulk — delete specific audit entries by ID (admin only)
+router.delete('/bulk', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array required' });
+    }
+
+    const result = await prisma.auditLog.deleteMany({
+      where: {
+        id: { in: ids },
+        orgId: req.user!.orgId,
+      },
+    });
+
+    res.json({ deleted: result.count });
+  } catch (err) {
+    console.error('Bulk delete audit error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

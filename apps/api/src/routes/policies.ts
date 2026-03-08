@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import Anthropic from '@anthropic-ai/sdk';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { createPolicyVersion } from '../services/versioning.js';
@@ -252,6 +253,174 @@ router.get('/:id/versions', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('List policy versions error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Natural Language Policy Creation ────────────────────────────
+// POST /from-natural-language — parse a natural language description into policies
+
+const NL_SYSTEM_PROMPT = `You are a policy engine for Origin, an AI code governance platform. Your job is to convert natural language policy descriptions into structured policy objects.
+
+Available policy types:
+- MODEL_ALLOWLIST: Restrict which AI models can be used
+- COST_LIMIT: Per-session cost/token thresholds
+- FILE_RESTRICTION: Block or flag file access patterns
+- REQUIRE_REVIEW: Auto-flag sessions for review based on conditions
+
+Available actions for rules:
+- BLOCK: Prevent the session from starting (MODEL_ALLOWLIST only)
+- WARN: Log a warning but allow
+- REQUIRE_REVIEW: Flag the session for human review
+- NOTIFY: Notify admins
+
+Available severity levels: LOW, MEDIUM, HIGH
+
+Condition format (JSON) depends on policy type:
+- MODEL_ALLOWLIST: { "models": ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"] }
+- COST_LIMIT: { "max_cost": 5.0 } or { "max_tokens": 100000 }
+- FILE_RESTRICTION: { "path": "**/.env" }
+- REQUIRE_REVIEW: { "cost_above": 2.0 } or { "files_above": 20 } or { "max_lines": 500 } or { "max_duration_minutes": 30 } or { "path": "**/auth/**" }
+
+You MUST respond with valid JSON only. No markdown, no explanation. The response must be an array of policy objects:
+[
+  {
+    "name": "Human-readable policy name",
+    "description": "What this policy does",
+    "type": "POLICY_TYPE",
+    "rules": [
+      {
+        "condition": "{ valid JSON string }",
+        "action": "ACTION",
+        "severity": "SEVERITY",
+        "agentSlug": null or "agent-slug-if-mentioned"
+      }
+    ]
+  }
+]
+
+If the user mentions a specific agent (like "claude code", "cursor"), set agentSlug to the slug form (e.g. "claude-code", "cursor"). If no agent is specified, set agentSlug to null (applies to all agents).
+
+Multiple rules can be part of the same policy, or the user may describe multiple policies. Use your judgement.`;
+
+router.post('/from-natural-language', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { prompt } = req.body;
+
+    if (!prompt || typeof prompt !== 'string') {
+      return res.status(400).json({ error: 'Missing required field: prompt' });
+    }
+
+    const orgId = req.user!.orgId;
+
+    // Fetch context: existing agents, repos for name resolution
+    const [agents, repos] = await Promise.all([
+      prisma.agent.findMany({ where: { orgId }, select: { id: true, slug: true, name: true } }),
+      prisma.repo.findMany({ where: { orgId }, select: { id: true, name: true } }),
+    ]);
+
+    const contextInfo = [
+      `Available agents: ${agents.map(a => `${a.name} (slug: ${a.slug})`).join(', ') || 'none'}`,
+      `Available repos: ${repos.map(r => r.name).join(', ') || 'none'}`,
+    ].join('\n');
+
+    const anthropic = new Anthropic();
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2000,
+      system: NL_SYSTEM_PROMPT,
+      messages: [
+        { role: 'user', content: `Context:\n${contextInfo}\n\nUser request:\n${prompt}` },
+      ],
+    });
+
+    const text = message.content[0].type === 'text' ? message.content[0].text : '';
+
+    let parsed: any[];
+    try {
+      // Strip any markdown fences if present
+      const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      parsed = JSON.parse(cleaned);
+      if (!Array.isArray(parsed)) parsed = [parsed];
+    } catch {
+      return res.status(422).json({
+        error: 'Failed to parse AI response into policies',
+        raw: text,
+      });
+    }
+
+    // Create the policies and rules in the database
+    const created = [];
+
+    for (const policyDef of parsed) {
+      const policy = await prisma.policy.create({
+        data: {
+          orgId,
+          name: policyDef.name || 'Untitled Policy',
+          description: policyDef.description || null,
+          type: policyDef.type || 'REQUIRE_REVIEW',
+        },
+      });
+
+      const rules = [];
+      for (const ruleDef of (policyDef.rules || [])) {
+        // Resolve agent slug to ID
+        let agentId: string | null = null;
+        if (ruleDef.agentSlug) {
+          const agent = agents.find(a => a.slug === ruleDef.agentSlug);
+          if (agent) agentId = agent.id;
+        }
+
+        // Resolve repo name to ID
+        let repoId: string | null = null;
+        if (ruleDef.repoName) {
+          const repo = repos.find(r => r.name.toLowerCase() === ruleDef.repoName.toLowerCase());
+          if (repo) repoId = repo.id;
+        }
+
+        const condition = typeof ruleDef.condition === 'string'
+          ? ruleDef.condition
+          : JSON.stringify(ruleDef.condition);
+
+        const rule = await prisma.policyRule.create({
+          data: {
+            policyId: policy.id,
+            agentId,
+            repoId,
+            condition,
+            action: ruleDef.action || 'WARN',
+            severity: ruleDef.severity || 'MEDIUM',
+          },
+          include: {
+            agent: { select: { name: true } },
+            repo: { select: { name: true } },
+          },
+        });
+        rules.push(rule);
+      }
+
+      await createPolicyVersion(policy.id, req.user!.id, 'CREATED');
+
+      await prisma.auditLog.create({
+        data: {
+          orgId,
+          userId: req.user!.id,
+          action: 'POLICY_CREATED',
+          resource: policy.id,
+          metadata: JSON.stringify({ name: policy.name, type: policy.type, fromNaturalLanguage: true, prompt }),
+        },
+      });
+
+      created.push({ ...policy, rules });
+    }
+
+    res.status(201).json({
+      policies: created,
+      parsed,
+      message: `Created ${created.length} polic${created.length === 1 ? 'y' : 'ies'} with ${created.reduce((sum, p) => sum + p.rules.length, 0)} rule(s)`,
+    });
+  } catch (err) {
+    console.error('Natural language policy error:', err);
+    res.status(500).json({ error: 'Failed to create policy from natural language' });
   }
 });
 
