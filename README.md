@@ -22,6 +22,7 @@ Git blame shows you *who*. Origin shows you *why* and *how*.
 
 - **Session Replay** — full transcript of every AI coding session, linked to every commit
 - **Policy Enforcement** — rules enforced inside Claude Code and Cursor via MCP server
+- **PR Blocking** — GitHub status checks that block merges when AI sessions violate policies
 - **Intent Review** — approve, reject, or flag AI sessions before they ship
 - **Audit Trail** — complete log of every AI decision in your codebase
 - **Insights** — AI authorship %, cost by model, ROI tracking

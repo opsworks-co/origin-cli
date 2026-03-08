@@ -47,6 +47,24 @@ GITHUB_TOKEN=ghp_your_token bash dev.sh
 - Sessions from `.entire/` checkpoints in the repo
 - Links commits to sessions for session replay
 
+### PR Status Checks
+
+When webhooks are configured, Origin automatically:
+
+1. **Receives push and PR events** from GitHub
+2. **Links commits to AI sessions** tracked by Origin
+3. **Posts `origin/ai-governance` status checks** on PRs — pass/fail based on policy compliance
+4. **Posts governance reports** as PR comments with session details, costs, and violations
+
+To block merges on policy violations, enable branch protection:
+
+1. Go to your GitHub repo → Settings → Branches
+2. Add a branch protection rule for `main`
+3. Enable "Require status checks to pass before merging"
+4. Search for `origin/ai-governance` and add it
+
+See [Policies docs](POLICIES.md#pr-blocking) for details.
+
 ---
 
 ## GitLab

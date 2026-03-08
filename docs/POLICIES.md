@@ -77,6 +77,44 @@ When an engineer starts a Claude Code or Cursor session with the Origin MCP serv
 
 ---
 
+## PR Blocking
+
+Policies can block GitHub pull requests from being merged. When an AI session violates a policy, Origin posts a failing `origin/ai-governance` status check to the PR.
+
+### How it works
+
+1. Developer codes with an AI agent, makes commits, and pushes to GitHub
+2. GitHub webhook notifies Origin — Origin links the commits to AI sessions
+3. When the session ends, the policy engine evaluates all rules
+4. If a violation is found, Origin:
+   - Flags the session with status `FLAGGED`
+   - Posts a **failing** `origin/ai-governance` status check to any PR containing those commits
+   - Posts a comment on the PR with the full AI Governance Report and violation details
+5. With **GitHub branch protection** enabled, the PR **cannot be merged** until the check passes
+6. An admin reviews and approves the session in Origin → check updates to **success** → merge unblocked
+
+### Setup
+
+1. **Connect GitHub** — Go to Settings → Integrations, add your GitHub PAT
+2. **Import repos** — Go to Repositories → Import from GitHub (webhooks are created automatically)
+3. **Create policies** — Set up FILE_RESTRICTION, COST_LIMIT, or REQUIRE_REVIEW policies
+4. **Enable branch protection** — In your GitHub repo:
+   - Settings → Branches → Add rule for `main`
+   - Enable "Require status checks to pass before merging"
+   - Search for `origin/ai-governance` and select it
+
+### What the PR sees
+
+Origin posts a status check and a comment on every PR:
+
+- **✅ Passed** — All AI sessions approved or no violations
+- **❌ Failed** — One or more sessions flagged or rejected (shows specific violation)
+- **⏳ Pending** — Sessions awaiting review
+
+The PR comment includes a table of all AI sessions linked to the PR, with cost, tokens, model, and review status. If violations exist, a dedicated "Policy Violations" section shows exactly what triggered.
+
+---
+
 ## Common Policy Examples
 
 ### "No AI changes to payments code"
