@@ -43,7 +43,12 @@ import githubAppRoutes from './routes/github-app.js';
 
 const app = express();
 
-app.use(cors({ origin: true }));
+app.use(cors({
+  origin: process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',')
+    : ['http://localhost:5176', 'http://localhost:4002'],
+  credentials: true,
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(authMiddleware);
 

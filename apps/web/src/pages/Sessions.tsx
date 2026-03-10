@@ -2,44 +2,10 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent } from '../api';
-
-function timeAgo(dateStr: string): string {
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
-function formatCost(cost: number): string {
-  if (cost === 0) return '$0.00';
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(2)}`;
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return '<1s';
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  if (m === 0) return `${s}s`;
-  return `${m}m ${s}s`;
-}
+import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../utils';
 
 function statusBadge(status: string) {
-  const map: Record<string, string> = {
-    approved: 'badge-green',
-    rejected: 'badge-red',
-    flagged: 'badge-amber',
-    pending: 'badge-gray',
-    ended: 'badge-blue',
-    completed: 'badge-blue',
-    running: 'badge-purple',
-  };
-  return <span className={map[status] ?? 'badge-gray'}>{status}</span>;
+  return <span className={getStatusBadgeClass(status)}>{status}</span>;
 }
 
 type SortField = 'model' | 'cost' | 'tokens' | 'duration' | 'toolCalls' | 'date';

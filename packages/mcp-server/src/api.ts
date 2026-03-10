@@ -36,6 +36,10 @@ export async function reportViolation(data: { machineId: string; policyId: strin
   return originRequest('/api/mcp/violations', { method: 'POST', body: JSON.stringify(data) });
 }
 
+export async function logToolCall(data: { sessionId: string; tool: string; args: string; result: string }) {
+  return originRequest('/api/mcp/session/tool-call', { method: 'POST', body: JSON.stringify(data) });
+}
+
 // Sessions
 export async function listSessions(params?: Record<string, string>) {
   const q = params ? '?' + new URLSearchParams(params).toString() : '';

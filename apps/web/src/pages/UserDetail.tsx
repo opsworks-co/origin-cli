@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { UserDetail as UserDetailType } from '../api';
+import { timeAgo, getStatusBadgeClass } from '../utils';
 
 function roleBadge(role: string) {
   const map: Record<string, string> = {
@@ -14,23 +15,7 @@ function roleBadge(role: string) {
 }
 
 function statusBadge(status: string) {
-  const map: Record<string, string> = {
-    APPROVED: 'badge-green',
-    REJECTED: 'badge-red',
-    FLAGGED: 'badge-amber',
-  };
-  return <span className={map[status] ?? 'badge-gray'}>{status}</span>;
-}
-
-function timeAgo(dateStr: string): string {
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return <span className={getStatusBadgeClass(status)}>{status}</span>;
 }
 
 export default function UserDetail() {

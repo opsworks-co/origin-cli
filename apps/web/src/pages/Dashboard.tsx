@@ -5,32 +5,14 @@ import * as api from '../api';
 import type { Stats, Session, Policy, Machine, IntegrationConfig } from '../api';
 import StatusBanner from '../components/StatusBanner';
 import KpiCard from '../components/KpiCard';
+import { timeAgo, getStatusBadgeClass } from '../utils';
 import {
   AreaChart, Area, PieChart, Pie, Cell,
   Tooltip, ResponsiveContainer,
 } from 'recharts';
 
-function timeAgo(dateStr: string): string {
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
 function statusBadge(status: string) {
-  const map: Record<string, string> = {
-    approved: 'badge-green',
-    rejected: 'badge-red',
-    flagged: 'badge-amber',
-    pending: 'badge-gray',
-    completed: 'badge-blue',
-    running: 'badge-purple',
-  };
-  return <span className={map[status] ?? 'badge-gray'}>{status}</span>;
+  return <span className={getStatusBadgeClass(status)}>{status}</span>;
 }
 
 export default function Dashboard() {

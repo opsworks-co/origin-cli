@@ -93,15 +93,12 @@ export function captureGitState(repoPath: string, headBefore: string | null): Gi
       diff = execSync(`git diff ${safeBefore}..${headAfter}`, execOpts).trim();
     }
 
-    // Also include uncommitted changes (staged + unstaged)
+    // Also include uncommitted changes (staged + unstaged combined)
+    // `git diff HEAD` captures both staged and unstaged changes in one pass
     const uncommitted = execSync('git diff HEAD', execOpts).trim();
-    const staged = execSync('git diff --cached', execOpts).trim();
 
-    // Merge: committed changes + unstaged + staged (avoid duplicates from staged)
     if (uncommitted) {
       diff = diff ? diff + '\n' + uncommitted : uncommitted;
-    } else if (staged) {
-      diff = diff ? diff + '\n' + staged : staged;
     }
 
     // Enforce size limit

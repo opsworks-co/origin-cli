@@ -3,14 +3,19 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../db.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'origin-v2-dev-secret';
+function requireEnv(name: string): string {
+  const val = process.env[name];
+  if (!val) throw new Error(`FATAL: ${name} environment variable is required.`);
+  return val;
+}
+const JWT_SECRET = requireEnv('JWT_SECRET');
 
 export interface AuthRequest extends Request {
   user?: { id: string; orgId: string; role: string };
   apiKeyRepoScopes?: string[]; // Repo IDs this API key is scoped to (empty = unrestricted)
 }
 
-export function authMiddleware(req: AuthRequest, _res: Response, next: NextFunction) {
+export async function authMiddleware(req: AuthRequest, _res: Response, next: NextFunction) {
   // Support Bearer token in Authorization header
   const header = req.headers.authorization;
   if (header?.startsWith('Bearer ')) {
@@ -31,30 +36,27 @@ export function authMiddleware(req: AuthRequest, _res: Response, next: NextFunct
     const apiKey = req.headers['x-api-key'] as string | undefined;
     if (apiKey) {
       const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-      prisma.apiKey.findFirst({
-        where: { keyHash },
-        include: {
-          user: true,
-          org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
-          repoScopes: { select: { repoId: true } },
-        },
-      })
-        .then((found) => {
-          if (found) {
-            // Standalone key (no userId): use key's own id + role
-            // Linked key (has userId): use the linked user's identity + role
-            const resolvedUser = found.user ?? found.org.users[0];
-            req.user = {
-              id: found.user?.id ?? found.id,
-              orgId: found.orgId,
-              role: found.role ?? resolvedUser?.role ?? 'MEMBER',
-            };
-            req.apiKeyRepoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
-          }
-          next();
-        })
-        .catch(() => next());
-      return; // async — don't call next() synchronously
+      try {
+        const found = await prisma.apiKey.findFirst({
+          where: { keyHash },
+          include: {
+            user: true,
+            org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
+            repoScopes: { select: { repoId: true } },
+          },
+        });
+        if (found) {
+          // Standalone key (no userId): use key's own id + role
+          // Linked key (has userId): use the linked user's identity + role
+          const resolvedUser = found.user ?? found.org.users[0];
+          req.user = {
+            id: found.user?.id ?? found.id,
+            orgId: found.orgId,
+            role: found.role ?? resolvedUser?.role ?? 'MEMBER',
+          };
+          req.apiKeyRepoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
+        }
+      } catch { /* API key lookup failed — continue unauthenticated */ }
     }
   }
   next();

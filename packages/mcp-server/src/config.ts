@@ -10,6 +10,15 @@ export interface OriginConfig {
 }
 
 export function loadConfig(): OriginConfig | null {
+  // Prefer environment variables (documented in README for MCP server usage)
+  if (process.env.ORIGIN_API_URL && process.env.ORIGIN_API_KEY) {
+    return {
+      apiUrl: process.env.ORIGIN_API_URL,
+      apiKey: process.env.ORIGIN_API_KEY,
+      orgId: process.env.ORIGIN_ORG_ID || '',
+    };
+  }
+  // Fall back to config file
   try {
     const configPath = path.join(os.homedir(), '.origin', 'config.json');
     return JSON.parse(fs.readFileSync(configPath, 'utf-8'));

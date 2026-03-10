@@ -112,8 +112,8 @@ export function writeLocalEntrypoint(repoPath: string, data: LocalEntrypoint): v
     }
 
     const commitHash = execSync(
-      `git commit-tree ${treeHash} ${parentArg} -m "${commitMsg.replace(/"/g, '\\"')}"`,
-      execOpts,
+      `git commit-tree ${treeHash} ${parentArg} -m -`,
+      { ...execOpts, input: commitMsg },
     ).trim();
 
     // 5. Update the branch ref

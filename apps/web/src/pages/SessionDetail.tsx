@@ -5,32 +5,10 @@ import type { Session } from '../api';
 import UnifiedSessionView from '../components/UnifiedSessionView';
 import AiBlameView from '../components/AiBlameView';
 import AskAuthorPanel from '../components/AskAuthorPanel';
-
-function formatCost(cost: number): string {
-  if (cost === 0) return '$0.00';
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(2)}`;
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remaining = seconds % 60;
-  return `${minutes}m ${remaining}s`;
-}
+import { formatCost, formatDuration, getStatusBadgeClass } from '../utils';
 
 function statusBadge(status: string) {
-  const map: Record<string, string> = {
-    approved: 'badge-green',
-    rejected: 'badge-red',
-    flagged: 'badge-amber',
-    pending: 'badge-gray',
-    completed: 'badge-blue',
-    running: 'badge-purple',
-  };
-  return <span className={`${map[status] ?? 'badge-gray'} text-sm`}>{status}</span>;
+  return <span className={`${getStatusBadgeClass(status)} text-sm`}>{status}</span>;
 }
 
 export default function SessionDetail() {

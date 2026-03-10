@@ -31,7 +31,7 @@ export function loadConfig(): OriginConfig | null {
 
 export function saveConfig(config: OriginConfig) {
   ensureConfigDir();
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
 export function loadAgentConfig(): AgentConfig | null {

@@ -9,7 +9,7 @@ primary_region = "iad"
 [env]
   PORT = "8080"
   NODE_ENV = "production"
-  JWT_SECRET = "change-me-in-production-secrets"
+  # JWT_SECRET must be set via `fly secrets set JWT_SECRET=<value>` — never commit secrets
 
 [http_service]
   internal_port = 8080

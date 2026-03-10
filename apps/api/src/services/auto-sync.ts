@@ -70,13 +70,13 @@ async function syncAllRepos() {
 
 // ─── Stale Session Cleanup ─────────────────────────────────────────────────
 
-// Auto-close sessions stuck in RUNNING for more than 2 hours.
-// This happens when SessionEnd hooks don't fire (e.g., Gemini, crashed agents).
-const STALE_SESSION_HOURS = 2;
+// Auto-close sessions stuck in RUNNING for more than 1 hour.
+// This happens when SessionEnd hooks don't fire (e.g., context switch, Gemini, crashed agents).
+const STALE_SESSION_MS = 60 * 60 * 1000; // 1 hour
 
 async function closeStaleSession() {
   try {
-    const cutoff = new Date(Date.now() - STALE_SESSION_HOURS * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - STALE_SESSION_MS);
 
     const staleSessions = await prisma.codingSession.findMany({
       where: {
@@ -116,5 +116,6 @@ export function startAutoSync() {
 
   // Then repeat on interval
   setInterval(syncAllRepos, SYNC_INTERVAL_MS);
-  setInterval(closeStaleSession, SYNC_INTERVAL_MS);
+  // Check for stale sessions more frequently (every 5 minutes)
+  setInterval(closeStaleSession, 5 * 60 * 1000);
 }

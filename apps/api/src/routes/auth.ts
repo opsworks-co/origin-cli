@@ -6,12 +6,25 @@ import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'origin-v2-dev-secret';
+function requireEnv(name: string): string {
+  const val = process.env[name];
+  if (!val) throw new Error(`FATAL: ${name} environment variable is required.`);
+  return val;
+}
+const JWT_SECRET = requireEnv('JWT_SECRET');
 
 // Simple in-memory rate limiter for login
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 const MAX_LOGIN_ATTEMPTS = 10;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+// Periodically clean up expired rate limit entries to prevent memory leak
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginAttempts) {
+    if (now > entry.resetAt) loginAttempts.delete(ip);
+  }
+}, 60_000).unref();
 
 function signToken(payload: { id: string; orgId: string; role: string }): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });

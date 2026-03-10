@@ -2,18 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Repo, GitHubDiscoveredRepo, ImportResult, IntegrationConfig } from '../api';
-
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return 'Never';
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
+import { timeAgo } from '../utils';
 
 /** Extract org/owner from repo path, e.g. "github.com/dolobanko/origin" → "dolobanko" */
 function extractOrg(repo: Repo): string {

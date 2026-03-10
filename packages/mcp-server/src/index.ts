@@ -8,7 +8,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, loadAgentConfig } from './config.js';
-import { fetchPolicies, startSession, endSession, reportViolation, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount, listUsers } from './api.js';
+import { fetchPolicies, startSession, endSession, reportViolation, logToolCall, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount, listUsers } from './api.js';
 
 interface PolicyData {
   id: string;
@@ -164,6 +164,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           sessionId: { type: 'string', description: 'Session ID to end' },
           summary: { type: 'string', description: 'Summary of what was done' },
+          tokensUsed: { type: 'number', description: 'Total tokens used in session' },
+          toolCalls: { type: 'number', description: 'Number of tool calls made' },
+          linesAdded: { type: 'number', description: 'Lines of code added' },
+          linesRemoved: { type: 'number', description: 'Lines of code removed' },
+          costUsd: { type: 'number', description: 'Estimated cost in USD' },
+          filesChanged: { type: 'string', description: 'JSON array of changed file paths' },
+          durationMs: { type: 'number', description: 'Session duration in milliseconds' },
         },
         required: ['sessionId', 'summary'],
       },
@@ -340,8 +347,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         await endSession({
           sessionId: args?.sessionId as string,
           summary: args?.summary as string,
-          tokensUsed: 0,
-          toolCalls: 0,
+          tokensUsed: (args?.tokensUsed as number) || 0,
+          toolCalls: (args?.toolCalls as number) || 0,
+          linesAdded: (args?.linesAdded as number) || undefined,
+          linesRemoved: (args?.linesRemoved as number) || undefined,
+          costUsd: (args?.costUsd as number) || undefined,
+          filesChanged: args?.filesChanged as string | undefined,
+          durationMs: (args?.durationMs as number) || undefined,
         });
         currentSessionId = null;
         return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
@@ -351,8 +363,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'log_tool_call': {
-      console.error(`[origin-mcp] Tool call logged: ${args?.tool} in session ${args?.sessionId}`);
-      return { content: [{ type: 'text', text: JSON.stringify({ logged: true }) }] };
+      try {
+        await logToolCall({
+          sessionId: args?.sessionId as string,
+          tool: args?.tool as string,
+          args: args?.args as string,
+          result: args?.result as string,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify({ logged: true }) }] };
+      } catch (err: any) {
+        // Non-critical — log locally and report success to avoid disrupting the agent
+        console.error(`[origin-mcp] Failed to log tool call: ${err.message}`);
+        return { content: [{ type: 'text', text: JSON.stringify({ logged: true, warning: 'Failed to persist to server' }) }] };
+      }
     }
 
     case 'list_sessions': {

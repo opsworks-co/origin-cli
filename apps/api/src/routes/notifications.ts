@@ -9,7 +9,7 @@ router.use(requireAuth);
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const limit = parseInt(req.query.limit as string) || 50;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const offset = parseInt(req.query.offset as string) || 0;
     const unreadOnly = req.query.unread === 'true';
 

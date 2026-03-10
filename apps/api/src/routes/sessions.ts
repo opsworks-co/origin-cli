@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { notifyOrgAdmins, notifyOrgMembers } from '../services/notifications.js';
 import {
   getIntegrationConfig,
@@ -99,7 +99,7 @@ function mapSession(s: any, pullRequests?: any[]) {
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
-    const limit = parseInt(req.query.limit as string) || 50;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const offset = parseInt(req.query.offset as string) || 0;
 
     const where: any = {
@@ -579,7 +579,7 @@ router.post('/:id/review', async (req: AuthRequest, res: Response) => {
 });
 
 // DELETE /:id — delete a session and its related data (ADMIN+)
-router.delete('/:id', async (req: AuthRequest, res: Response) => {
+router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
 
