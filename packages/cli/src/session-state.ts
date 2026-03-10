@@ -36,6 +36,51 @@ export function getGitRoot(cwd?: string): string | null {
   }
 }
 
+/**
+ * Try harder to find a git repo when the cwd itself isn't one.
+ * Checks immediate subdirectories and common workspace patterns.
+ * Useful when Claude Code reports a project root that's a parent of the actual repo.
+ */
+export function discoverGitRoot(cwd?: string): string | null {
+  const dir = cwd || process.cwd();
+
+  // 1. Direct check
+  const direct = getGitRoot(dir);
+  if (direct) return direct;
+
+  // 2. Check common workspace patterns (e.g. .openclaw/workspace/*)
+  const workspacePatterns = [
+    path.join(dir, '.openclaw', 'workspace'),
+    path.join(dir, 'workspace'),
+  ];
+  for (const wsDir of workspacePatterns) {
+    try {
+      if (!fs.existsSync(wsDir)) continue;
+      const entries = fs.readdirSync(wsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidate = path.join(wsDir, entry.name);
+        const found = getGitRoot(candidate);
+        if (found) return found;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 3. Scan immediate subdirectories (one level deep)
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const candidate = path.join(dir, entry.name);
+      if (fs.existsSync(path.join(candidate, '.git'))) {
+        return getGitRoot(candidate);
+      }
+    }
+  } catch { /* ignore */ }
+
+  return null;
+}
+
 export function getHeadSha(cwd?: string): string | null {
   try {
     return execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();

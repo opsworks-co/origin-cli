@@ -6,6 +6,7 @@ import {
   loadSessionState,
   clearSessionState,
   getGitRoot,
+  discoverGitRoot,
   getHeadSha,
   getBranch,
   type SessionState,
@@ -125,12 +126,14 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   debugLog('session-start', 'cwd resolved', { hookCwd, inputCwd: input.cwd, processCwd: process.cwd() });
 
   // Only track sessions in git repos — no repo means no code to govern
-  const repoPath = getGitRoot(hookCwd);
+  // Use discoverGitRoot to handle cases where cwd is a parent of the actual repo
+  // (e.g. Claude Code reports /project but the repo is /project/.openclaw/workspace/repo)
+  const repoPath = discoverGitRoot(hookCwd);
   if (!repoPath) {
-    debugLog('session-start', 'SKIP: not a git repo', { hookCwd });
+    debugLog('session-start', 'SKIP: not a git repo (even after discovery)', { hookCwd });
     return;
   }
-  debugLog('session-start', 'repo path resolved', { repoPath });
+  debugLog('session-start', 'repo path resolved', { repoPath, hookCwd, discovered: repoPath !== getGitRoot(hookCwd) });
 
   // Resolve agent slug: .origin.json takes priority → hook command slug → undefined
   const repoConfig = loadRepoConfig(repoPath);
@@ -213,7 +216,10 @@ async function handleUserPromptSubmit(input: Record<string, any>): Promise<void>
   debugLog('user-prompt-submit', 'begin', { hasPrompt: !!input.prompt, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  const state = loadSessionState(hookCwd);
+  // Try direct cwd first, then discover git root for state lookup
+  let state = loadSessionState(hookCwd);
+  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
+  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
   if (!state) {
     debugLog('user-prompt-submit', 'ABORT: no session state', { hookCwd });
     return;
@@ -228,7 +234,7 @@ async function handleUserPromptSubmit(input: Record<string, any>): Promise<void>
       state.transcriptPath = input.transcript_path;
     }
 
-    saveSessionState(state, hookCwd);
+    saveSessionState(state, resolvedCwd || hookCwd);
     debugLog('user-prompt-submit', 'prompt saved', { promptCount: state.prompts.length, sessionId: state.sessionId });
   }
 }
@@ -238,7 +244,9 @@ async function handleStop(input: Record<string, any>): Promise<void> {
 
   const config = loadConfig();
   const hookCwd = input.cwd || process.cwd();
-  const state = loadSessionState(hookCwd);
+  let state = loadSessionState(hookCwd);
+  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
+  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
   if (!config || !state) {
     debugLog('stop', 'ABORT: missing config or state', { hasConfig: !!config, hasState: !!state });
     return;
@@ -317,7 +325,9 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
 
   const config = loadConfig();
   const hookCwd = input.cwd || process.cwd();
-  const state = loadSessionState(hookCwd);
+  let state = loadSessionState(hookCwd);
+  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
+  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
   if (!config || !state) {
     debugLog('session-end', 'ABORT: missing config or state', { hasConfig: !!config, hasState: !!state });
     return;

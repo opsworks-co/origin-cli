@@ -53,7 +53,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             O
           </div>
           <span className="text-lg font-semibold text-gray-100">Origin</span>
-          <span className="text-xs text-gray-500 ml-1">v2</span>
+          <span className="text-[10px] text-gray-600 ml-1 leading-tight">AI coding agents<br/>orchestrator</span>
         </div>
 
         {/* Nav links */}
@@ -106,6 +106,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </svg>
           </button>
           <span className="text-lg font-semibold">Origin</span>
+          <span className="text-[10px] text-gray-500">AI coding agents orchestrator</span>
         </header>
 
         {/* Page content */}
