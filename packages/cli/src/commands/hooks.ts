@@ -12,7 +12,7 @@ import {
   type SessionState,
 } from '../session-state.js';
 import { captureGitState } from '../git-capture.js';
-import { writeLocalEntrypoint } from '../local-entrypoint.js';
+import { writeLocalEntrypoint, pushSessionBranch } from '../local-entrypoint.js';
 import { writeGitNotes } from '../git-notes.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
@@ -428,6 +428,8 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
       summary: parsed.summary,
       originUrl: `${apiUrl}/sessions/${state.sessionId}`,
     });
+    pushSessionBranch(state.repoPath);
+    debugLog('session-end', 'entrypoint written + pushed');
 
     // Write Git Notes with AI attribution metadata on each commit
     if (gitCapture.commitShas.length > 0) {
@@ -603,6 +605,57 @@ export async function handlePostCommit(): Promise<void> {
     }
   } else {
     debugLog('post-commit', 'no active session, skipped API update');
+  }
+
+  // Write full session entrypoint to origin-sessions branch on every commit
+  // Parse transcript now (not just at session-end) so we capture tokens, cost, prompts, files
+  if (state) {
+    const durationMs = Date.now() - new Date(state.startedAt).getTime();
+
+    // Parse transcript for full metrics (tokens, cost, files, prompts)
+    const parsed = parseTranscript(state.transcriptPath || '');
+    const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
+    const model = parsed.model || state.model;
+    const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens);
+    const promptMappings = extractPromptFileMappings(state.transcriptPath || '');
+
+    // Merge transcript-discovered files with this commit's files
+    const allFiles = Array.from(new Set([...parsed.filesChanged, ...filesChanged]));
+
+    writeLocalEntrypoint(repoPath, {
+      sessionId: state.sessionId,
+      model,
+      startedAt: state.startedAt,
+      endedAt: new Date().toISOString(),
+      durationMs,
+      costUsd,
+      tokensUsed: parsed.tokensUsed,
+      inputTokens: parsed.inputTokens,
+      outputTokens: parsed.outputTokens,
+      toolCalls: parsed.toolCalls,
+      linesAdded,
+      linesRemoved,
+      prompts,
+      filesChanged: allFiles,
+      promptChanges: promptMappings.map((m) => ({
+        prompt: m.promptText,
+        files: m.filesChanged,
+      })),
+      git: {
+        headBefore: state.headShaAtStart || commitSha,
+        headAfter: commitSha,
+        commitShas: [commitSha],
+      },
+      summary: commitMessage,
+      originUrl: `${apiUrl}/sessions/${state.sessionId}`,
+    });
+    pushSessionBranch(repoPath);
+    debugLog('post-commit', 'entrypoint written + pushed', {
+      prompts: prompts.length,
+      tokensUsed: parsed.tokensUsed,
+      costUsd,
+      files: allFiles.length,
+    });
   }
 
   debugLog('post-commit', '=== GIT HOOK COMPLETE ===');

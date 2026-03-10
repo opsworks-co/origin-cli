@@ -132,3 +132,29 @@ export function writeLocalEntrypoint(repoPath: string, data: LocalEntrypoint): v
     // Never fail the session — this is a best-effort local write
   }
 }
+
+/**
+ * Push the `origin-sessions` branch to remote so entrypoints are visible on GitHub.
+ * Runs in the background — never blocks or throws.
+ */
+export function pushSessionBranch(repoPath: string): void {
+  try {
+    const execOpts = {
+      encoding: 'utf-8' as const,
+      cwd: repoPath,
+      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+      timeout: 15_000, // 15s max — don't block the hook
+    };
+
+    // Check if remote exists
+    try {
+      execSync('git remote get-url origin', execOpts);
+    } catch {
+      return; // no remote — nothing to push
+    }
+
+    execSync(`git push origin ${BRANCH} --no-verify --quiet`, execOpts);
+  } catch {
+    // Never fail — push is best-effort
+  }
+}
