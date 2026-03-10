@@ -117,8 +117,13 @@ export function importSessionsFromBranch(id: string) {
   return request<{ imported: number; skipped: number; total: number }>(`/api/repos/${id}/import-sessions`, { method: 'POST' });
 }
 
-export function getRepoCommits(id: string) {
-  return request<any[]>(`/api/repos/${id}/commits`);
+export function getRepoCommits(id: string, branch?: string) {
+  const q = branch ? `?branch=${encodeURIComponent(branch)}` : '';
+  return request<any[]>(`/api/repos/${id}/commits${q}`);
+}
+
+export function getRepoBranches(id: string) {
+  return request<{ branches: string[] }>(`/api/repos/${id}/branches`);
 }
 
 export interface CommitDiff {
@@ -571,8 +576,8 @@ export function getMachine(id: string) {
 
 // ---- API Key Management -----------------------------------------------------
 
-export function createApiKey(data: { name: string; role?: string }) {
-  return request<{ id: string; key: string; keyPrefix: string; role: string | null }>('/api/settings/api-keys', {
+export function createApiKey(data: { name: string; role?: string; repoIds?: string[] }) {
+  return request<{ id: string; key: string; keyPrefix: string; role: string | null; repoScopes: { repoId: string; repoName: string }[] }>('/api/settings/api-keys', {
     method: 'POST',
     body: JSON.stringify(data),
   });
@@ -583,6 +588,7 @@ export function getApiKeys() {
     id: string; name: string; keyPrefix: string; createdAt: string;
     userId: string | null; role: string | null;
     user: { name: string; email: string } | null;
+    repoScopes: { repoId: string; repoName: string }[];
   }>>('/api/settings/api-keys');
 }
 

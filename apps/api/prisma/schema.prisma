@@ -65,6 +65,17 @@ model ApiKey {
   keyPrefix String
   role      String?  // Standalone key role: VIEWER, MEMBER, ADMIN. Null = uses linked user's role
   createdAt DateTime @default(now())
+  repoScopes ApiKeyRepoScope[]
+}
+
+model ApiKeyRepoScope {
+  id       String @id @default(uuid())
+  apiKeyId String
+  apiKey   ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  repoId   String
+  repo     Repo   @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@unique([apiKeyId, repoId])
 }
 
 // ── Repos & Sessions ────────────────────────────────────────────
@@ -83,6 +94,7 @@ model Repo {
   webhooks     Webhook[]
   pullRequests PullRequest[]
   policyRules  PolicyRule[]
+  apiKeyScopes ApiKeyRepoScope[]
 }
 
 model Commit {
@@ -94,6 +106,7 @@ model Commit {
   author            String
   aiToolDetected    String?        // Detected AI tool: "claude-code", "copilot", "cursor", "aider", "gemini"
   aiDetectionMethod String?        // How: "session", "co-author-trailer", "author-pattern", "commit-message"
+  branch            String?        // Git branch this commit was pushed to
   filesChanged      String         @default("[]") // JSON array of file paths changed in this commit
   committedAt       DateTime
   createdAt         DateTime       @default(now())

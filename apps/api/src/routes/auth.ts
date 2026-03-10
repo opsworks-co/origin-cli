@@ -302,7 +302,18 @@ router.get('/invite/:token', async (req: AuthRequest, res: Response) => {
 // POST /api-keys — create an API key
 router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name } = req.body;
+    const { name, repoIds } = req.body;
+
+    // Validate repoIds belong to this org
+    if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
+      const validRepos = await prisma.repo.findMany({
+        where: { orgId: req.user!.orgId, id: { in: repoIds } },
+        select: { id: true },
+      });
+      if (validRepos.length !== repoIds.length) {
+        return res.status(400).json({ error: 'One or more repos do not belong to your organization' });
+      }
+    }
 
     // Generate a random API key
     const rawKey = `org_${crypto.randomBytes(32).toString('hex')}`;
@@ -316,6 +327,12 @@ router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) =>
         name: name || 'Unnamed key',
         keyHash,
         keyPrefix,
+        repoScopes: {
+          create: (repoIds && Array.isArray(repoIds) ? repoIds : []).map((repoId: string) => ({ repoId })),
+        },
+      },
+      include: {
+        repoScopes: { include: { repo: { select: { id: true, name: true } } } },
       },
     });
 
@@ -325,11 +342,20 @@ router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) =>
         userId: req.user!.id,
         action: 'API_KEY_CREATED',
         resource: apiKey.id,
-        metadata: JSON.stringify({ name: apiKey.name, prefix: keyPrefix }),
+        metadata: JSON.stringify({
+          name: apiKey.name,
+          prefix: keyPrefix,
+          repoScopes: apiKey.repoScopes.map((s) => s.repo.name),
+        }),
       },
     });
 
-    res.status(201).json({ id: apiKey.id, key: rawKey, keyPrefix });
+    res.status(201).json({
+      id: apiKey.id,
+      key: rawKey,
+      keyPrefix,
+      repoScopes: apiKey.repoScopes.map((s) => ({ repoId: s.repo.id, repoName: s.repo.name })),
+    });
   } catch (err) {
     console.error('Create API key error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -345,10 +371,14 @@ router.get('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => 
         id: true, name: true, keyPrefix: true, createdAt: true,
         userId: true,
         user: { select: { name: true, email: true } },
+        repoScopes: { include: { repo: { select: { id: true, name: true } } } },
       },
       orderBy: { createdAt: 'desc' },
     });
-    res.json(keys);
+    res.json(keys.map((k) => ({
+      ...k,
+      repoScopes: k.repoScopes.map((s) => ({ repoId: s.repo.id, repoName: s.repo.name })),
+    })));
   } catch (err) {
     console.error('List API keys error:', err);
     res.status(500).json({ error: 'Internal server error' });

@@ -16,6 +16,7 @@ interface ApiKey {
   userId: string | null;
   role: string | null;
   user: { name: string; email: string } | null;
+  repoScopes: { repoId: string; repoName: string }[];
 }
 
 type SettingsTab = 'general' | 'agent-setup' | 'integrations' | 'budget' | 'team' | 'audit' | 'insights' | 'reports';
@@ -44,6 +45,8 @@ export default function Settings() {
   const [loadingKeys, setLoadingKeys] = useState(true);
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyRole, setNewKeyRole] = useState('MEMBER');
+  const [newKeyRepoIds, setNewKeyRepoIds] = useState<string[]>([]);
+  const [allRepos, setAllRepos] = useState<{ id: string; name: string }[]>([]);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [creatingKey, setCreatingKey] = useState(false);
   const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
@@ -174,6 +177,7 @@ export default function Settings() {
     fetchApiKeys();
     fetchOrg();
     fetchInvites();
+    api.getRepos().then(repos => setAllRepos(repos.map(r => ({ id: r.id, name: r.name })))).catch(() => {});
   }, [fetchOrg, fetchInvites]);
 
   // Fetch integrations/budget when tab is active
@@ -422,10 +426,15 @@ export default function Settings() {
     setCreatedKey(null);
     setKeyError(null);
     try {
-      const result = await api.createApiKey({ name: newKeyName || 'Unnamed key', role: newKeyRole });
+      const result = await api.createApiKey({
+        name: newKeyName || 'Unnamed key',
+        role: newKeyRole,
+        repoIds: newKeyRepoIds.length > 0 ? newKeyRepoIds : undefined,
+      });
       setCreatedKey(result.key);
       setNewKeyName('');
       setNewKeyRole('MEMBER');
+      setNewKeyRepoIds([]);
       // Refresh the list to include the new key
       await fetchApiKeys();
     } catch (err: any) {
@@ -634,6 +643,17 @@ export default function Settings() {
                         )}
                       </div>
                       <code className="text-xs text-indigo-400">{key.keyPrefix}...</code>
+                      {key.repoScopes && key.repoScopes.length > 0 ? (
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {key.repoScopes.map((s: { repoId: string; repoName: string }) => (
+                            <span key={s.repoId} className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300">
+                              {s.repoName}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-[10px] text-gray-600 mt-0.5">All repos</span>
+                      )}
                     </div>
                     <div className="flex items-center gap-3">
                       {key.user ? (
@@ -696,6 +716,30 @@ export default function Settings() {
                   {creatingKey ? 'Creating...' : 'Create New'}
                 </button>
               </div>
+              {allRepos.length > 0 && (
+                <div>
+                  <p className="text-xs text-gray-500 mb-1.5">Restrict to repos (optional — empty = all repos):</p>
+                  <div className="flex flex-wrap gap-2">
+                    {allRepos.map((r) => (
+                      <label key={r.id} className="inline-flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={newKeyRepoIds.includes(r.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setNewKeyRepoIds([...newKeyRepoIds, r.id]);
+                            } else {
+                              setNewKeyRepoIds(newKeyRepoIds.filter((id) => id !== r.id));
+                            }
+                          }}
+                          className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500"
+                        />
+                        {r.name}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
               <p className="text-xs text-gray-600">
                 Standalone tokens let users access Origin via CLI without a platform account.
               </p>

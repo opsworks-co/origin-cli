@@ -16,6 +16,7 @@ interface McpRequest extends Request {
   orgId?: string;
   mcpUserId?: string;  // User ID resolved from the API key (for per-member attribution)
   apiKeyName?: string; // Name of the API key (for standalone key attribution)
+  repoScopes?: string[]; // Repo IDs this API key is scoped to (empty = unrestricted)
 }
 
 // Helper: authenticate by API key header
@@ -32,6 +33,7 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
       where: { keyHash },
       include: {
         org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
+        repoScopes: { select: { repoId: true } },
       },
     });
 
@@ -41,6 +43,7 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
 
     req.orgId = found.orgId;
     req.apiKeyName = found.name;
+    req.repoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
     // Standalone key (has role, no userId): no user attribution
     // Linked key: use the key's userId, fall back to org owner
     if (found.role && !found.userId) {
@@ -127,6 +130,14 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
           path: repoPath,
           provider: 'local',
         },
+      });
+    }
+
+    // Enforce repo-scoped API key access
+    if (req.repoScopes && req.repoScopes.length > 0 && !req.repoScopes.includes(repo.id)) {
+      return res.status(403).json({
+        error: 'Access denied',
+        message: `This API key does not have access to repo "${repo.name}"`,
       });
     }
 

@@ -17,6 +17,7 @@ interface Commit {
   sha: string;
   message: string;
   author: string;
+  branch: string | null;
   aiToolDetected: string | null;
   aiDetectionMethod: string | null;
   committedAt: string;
@@ -504,6 +505,10 @@ export default function RepoDetail() {
   const [error, setError] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
 
+  // Branch filter
+  const [branches, setBranches] = useState<string[]>([]);
+  const [branchFilter, setBranchFilter] = useState<string>('');
+
   // Sync & rescan states
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
@@ -520,19 +525,21 @@ export default function RepoDetail() {
     if (!id) return;
     setLoading(true);
     try {
-      const [repos, commitData] = await Promise.all([
+      const [repos, commitData, branchData] = await Promise.all([
         api.getRepos(),
-        api.getRepoCommits(id),
+        api.getRepoCommits(id, branchFilter || undefined),
+        api.getRepoBranches(id),
       ]);
       const found = repos.find((r) => r.id === id) || null;
       setRepo(found);
       setCommits(commitData as Commit[]);
+      setBranches(branchData.branches.filter(Boolean));
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, branchFilter]);
 
   useEffect(() => {
     fetchData();
@@ -755,7 +762,7 @@ export default function RepoDetail() {
       </div>
 
       {/* Filters */}
-      <div className="flex gap-2 flex-wrap">
+      <div className="flex gap-2 flex-wrap items-center">
         {(
           [
             { key: 'all', label: 'All', count: commits.length },
@@ -777,6 +784,24 @@ export default function RepoDetail() {
             <span className="text-xs opacity-60">({count})</span>
           </button>
         ))}
+
+        {/* Branch filter dropdown */}
+        {branches.length > 0 && (
+          <>
+            <div className="w-px h-6 bg-gray-700 mx-1" />
+            <select
+              value={branchFilter}
+              onChange={(e) => setBranchFilter(e.target.value)}
+              className="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-800 text-gray-300 border border-gray-700 hover:text-gray-200 transition-colors appearance-none cursor-pointer pr-8"
+              style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
+            >
+              <option value="">All branches</option>
+              {branches.map((b) => (
+                <option key={b} value={b}>{b}</option>
+              ))}
+            </select>
+          </>
+        )}
       </div>
 
       {/* Webhooks Section */}
@@ -798,6 +823,7 @@ export default function RepoDetail() {
                 <th className="px-6 py-3 font-medium">Type</th>
                 <th className="px-6 py-3 font-medium">SHA</th>
                 <th className="px-6 py-3 font-medium">Message</th>
+                <th className="px-6 py-3 font-medium">Branch</th>
                 <th className="px-6 py-3 font-medium">Author</th>
                 <th className="px-6 py-3 font-medium text-center">Prompts</th>
                 <th className="px-6 py-3 font-medium text-right">Files</th>
@@ -809,7 +835,7 @@ export default function RepoDetail() {
             <tbody className="divide-y divide-gray-800/50">
               {filteredCommits.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-12 text-center text-gray-500">
+                  <td colSpan={10} className="px-6 py-12 text-center text-gray-500">
                     No commits match this filter
                   </td>
                 </tr>
@@ -850,6 +876,15 @@ export default function RepoDetail() {
                       </td>
                       <td className="px-6 py-3 text-gray-300 max-w-[300px] truncate">
                         {commit.message}
+                      </td>
+                      <td className="px-6 py-3">
+                        {commit.branch ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 max-w-[120px] truncate">
+                            {commit.branch}
+                          </span>
+                        ) : (
+                          <span className="text-gray-600 text-xs">{'\u2014'}</span>
+                        )}
                       </td>
                       <td className="px-6 py-3 text-gray-400">{commit.author}</td>
                       <td className="px-6 py-3 text-center">

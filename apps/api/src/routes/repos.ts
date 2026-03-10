@@ -982,6 +982,34 @@ router.get('/:id/commits/:sha/diff', async (req: AuthRequest, res: Response) => 
   }
 });
 
+// GET /:id/branches — list distinct branches for a repo
+router.get('/:id/branches', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+
+    const repo = await prisma.repo.findFirst({
+      where: { id, orgId: req.user!.orgId },
+    });
+
+    if (!repo) {
+      return res.status(404).json({ error: 'Repo not found' });
+    }
+
+    const commits = await prisma.commit.findMany({
+      where: { repoId: id, branch: { not: null } },
+      select: { branch: true },
+      distinct: ['branch'],
+      orderBy: { committedAt: 'desc' },
+    });
+
+    const branches = commits.map((c) => c.branch).filter(Boolean) as string[];
+    res.json({ branches });
+  } catch (err) {
+    console.error('List branches error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET /:id/commits — list commits for a repo
 router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
   try {
@@ -995,8 +1023,13 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Repo not found' });
     }
 
+    const commitWhere: any = { repoId: id };
+    if (req.query.branch) {
+      commitWhere.branch = req.query.branch as string;
+    }
+
     const commits = await prisma.commit.findMany({
-      where: { repoId: id },
+      where: commitWhere,
       include: {
         session: {
           include: {

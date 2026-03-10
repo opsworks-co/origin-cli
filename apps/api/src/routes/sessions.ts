@@ -127,6 +127,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where.branch = req.query.branch as string;
     }
 
+    // Enforce repo-scoped API key access
+    if (req.apiKeyRepoScopes && req.apiKeyRepoScopes.length > 0) {
+      where.commit = {
+        ...where.commit,
+        repoId: { in: req.apiKeyRepoScopes },
+      };
+    }
+
     const status = req.query.status as string;
     if (status === 'reviewed') {
       where.review = { isNot: null };

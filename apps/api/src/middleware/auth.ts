@@ -7,6 +7,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'origin-v2-dev-secret';
 
 export interface AuthRequest extends Request {
   user?: { id: string; orgId: string; role: string };
+  apiKeyRepoScopes?: string[]; // Repo IDs this API key is scoped to (empty = unrestricted)
 }
 
 export function authMiddleware(req: AuthRequest, _res: Response, next: NextFunction) {
@@ -35,6 +36,7 @@ export function authMiddleware(req: AuthRequest, _res: Response, next: NextFunct
         include: {
           user: true,
           org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
+          repoScopes: { select: { repoId: true } },
         },
       })
         .then((found) => {
@@ -47,6 +49,7 @@ export function authMiddleware(req: AuthRequest, _res: Response, next: NextFunct
               orgId: found.orgId,
               role: found.role ?? resolvedUser?.role ?? 'MEMBER',
             };
+            req.apiKeyRepoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
           }
           next();
         })

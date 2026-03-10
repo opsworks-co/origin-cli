@@ -39,6 +39,9 @@ interface GitHubPushPayload {
 export async function processGitHubPush(repoId: string, payload: GitHubPushPayload) {
   const results = { created: 0, skipped: 0 };
 
+  // Extract branch name from ref (e.g., "refs/heads/main" → "main")
+  const branch = payload.ref?.replace('refs/heads/', '') || null;
+
   for (const commit of payload.commits) {
     // Check for duplicate by SHA
     const existing = await prisma.commit.findFirst({
@@ -46,6 +49,13 @@ export async function processGitHubPush(repoId: string, payload: GitHubPushPaylo
     });
 
     if (existing) {
+      // Update branch on existing commit if not set
+      if (!existing.branch && branch) {
+        await prisma.commit.update({
+          where: { id: existing.id },
+          data: { branch },
+        });
+      }
       results.skipped++;
       continue;
     }
@@ -59,6 +69,7 @@ export async function processGitHubPush(repoId: string, payload: GitHubPushPaylo
         author: commit.author.name,
         aiToolDetected: detection.aiToolDetected,
         aiDetectionMethod: detection.aiDetectionMethod,
+        branch,
         committedAt: new Date(commit.timestamp),
       },
     });
