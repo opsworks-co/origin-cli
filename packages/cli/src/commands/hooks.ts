@@ -12,7 +12,7 @@ import {
   type SessionState,
 } from '../session-state.js';
 import { captureGitState } from '../git-capture.js';
-import { writeLocalEntrypoint, pushSessionBranch } from '../local-entrypoint.js';
+import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes } from '../git-notes.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
@@ -35,6 +35,82 @@ function debugLog(event: string, message: string, data?: any): void {
   } catch {
     // Never fail on logging
   }
+}
+
+// ─── Session Write Helper ─────────────────────────────────────────────────
+
+import type { ParsedTranscript, PromptFileMapping } from '../transcript.js';
+
+/**
+ * Assemble SessionWriteData from hook state + parsed transcript + git capture.
+ * Shared by handleStop, handleSessionEnd, and handlePostCommit.
+ */
+function buildSessionWriteData(opts: {
+  state: SessionState;
+  parsed: ParsedTranscript;
+  promptMappings: PromptFileMapping[];
+  gitCapture: { headBefore: string; headAfter: string; commitShas: string[]; linesAdded: number; linesRemoved: number };
+  status: 'running' | 'ended';
+  apiUrl: string;
+  extraFiles?: string[];
+}): SessionWriteData {
+  const { state, parsed, promptMappings, gitCapture, status, apiUrl, extraFiles } = opts;
+
+  const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
+  const model = parsed.model || state.model;
+  const durationMs = Date.now() - new Date(state.startedAt).getTime();
+  const branch = getBranch(state.repoPath) || state.branch || '';
+
+  // Merge file lists
+  const allFiles = Array.from(new Set([
+    ...parsed.filesChanged,
+    ...(extraFiles || []),
+  ]));
+
+  // Build PromptEntry[] — match prompts to their file changes
+  const promptEntries: PromptEntry[] = prompts.map((text, i) => {
+    const mapping = promptMappings.find(m => m.promptIndex === i);
+    return {
+      index: i + 1,
+      text: typeof text === 'string' ? text : String(text),
+      filesChanged: mapping?.filesChanged || [],
+    };
+  });
+
+  // Build PromptChange[] from mappings
+  const changes: PromptChange[] = promptMappings.map(m => ({
+    promptIndex: m.promptIndex + 1,
+    promptText: m.promptText.slice(0, 200),
+    filesChanged: m.filesChanged,
+    diff: m.diff,
+  }));
+
+  return {
+    sessionId: state.sessionId,
+    model,
+    startedAt: state.startedAt,
+    endedAt: new Date().toISOString(),
+    durationMs,
+    status,
+    costUsd: estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens),
+    tokensUsed: parsed.tokensUsed,
+    inputTokens: parsed.inputTokens,
+    outputTokens: parsed.outputTokens,
+    toolCalls: parsed.toolCalls,
+    linesAdded: gitCapture.linesAdded,
+    linesRemoved: gitCapture.linesRemoved,
+    prompts: promptEntries,
+    filesChanged: allFiles,
+    git: {
+      branch,
+      headBefore: gitCapture.headBefore || '',
+      headAfter: gitCapture.headAfter || '',
+      commitShas: gitCapture.commitShas,
+    },
+    summary: parsed.summary,
+    originUrl: `${apiUrl}/sessions/${state.sessionId}`,
+    changes,
+  };
 }
 
 // ─── Stdin Reader ──────────────────────────────────────────────────────────
@@ -314,6 +390,17 @@ async function handleStop(input: Record<string, any>): Promise<void> {
       promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
     });
     debugLog('stop', 'update complete');
+
+    // Write session files to origin-sessions branch + push on every Stop
+    const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+    const gitCapture = captureGitState(state.repoPath, state.headShaAtStart);
+    const writeData = buildSessionWriteData({
+      state, parsed, promptMappings, gitCapture,
+      status: 'running', apiUrl,
+    });
+    writeSessionFiles(state.repoPath, writeData);
+    pushSessionBranch(state.repoPath);
+    debugLog('stop', 'session files written + pushed', { prompts: writeData.prompts.length, costUsd: writeData.costUsd });
   } catch (err: any) {
     debugLog('stop', 'ERROR', { message: err.message, stack: err.stack });
     process.stderr.write(`[origin] stop error: ${err.message}\n`);
@@ -399,37 +486,15 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
     });
     debugLog('session-end', 'api.endSession complete');
 
-    // Write local entrypoint file to .origin/sessions/ (like Entire's .entire/ checkpoints)
+    // Write session files to origin-sessions branch (directory per session)
     const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
-    writeLocalEntrypoint(state.repoPath, {
-      sessionId: state.sessionId,
-      model,
-      startedAt: state.startedAt,
-      endedAt: new Date().toISOString(),
-      durationMs,
-      costUsd,
-      tokensUsed: parsed.tokensUsed,
-      inputTokens: parsed.inputTokens,
-      outputTokens: parsed.outputTokens,
-      toolCalls: parsed.toolCalls,
-      linesAdded: gitCapture.linesAdded,
-      linesRemoved: gitCapture.linesRemoved,
-      prompts,
-      filesChanged: parsed.filesChanged,
-      promptChanges: promptMappings.map((m) => ({
-        prompt: m.promptText,
-        files: m.filesChanged,
-      })),
-      git: {
-        headBefore: gitCapture.headBefore || '',
-        headAfter: gitCapture.headAfter || '',
-        commitShas: gitCapture.commitShas,
-      },
-      summary: parsed.summary,
-      originUrl: `${apiUrl}/sessions/${state.sessionId}`,
+    const writeData = buildSessionWriteData({
+      state, parsed, promptMappings, gitCapture,
+      status: 'ended', apiUrl,
     });
+    writeSessionFiles(state.repoPath, writeData);
     pushSessionBranch(state.repoPath);
-    debugLog('session-end', 'entrypoint written + pushed');
+    debugLog('session-end', 'session files written + pushed');
 
     // Write Git Notes with AI attribution metadata on each commit
     if (gitCapture.commitShas.length > 0) {
@@ -612,49 +677,27 @@ export async function handlePostCommit(): Promise<void> {
   if (state) {
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
 
-    // Parse transcript for full metrics (tokens, cost, files, prompts)
+    // Parse transcript for full metrics and write session files
     const parsed = parseTranscript(state.transcriptPath || '');
-    const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
-    const model = parsed.model || state.model;
-    const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens);
     const promptMappings = extractPromptFileMappings(state.transcriptPath || '');
-
-    // Merge transcript-discovered files with this commit's files
-    const allFiles = Array.from(new Set([...parsed.filesChanged, ...filesChanged]));
-
-    writeLocalEntrypoint(repoPath, {
-      sessionId: state.sessionId,
-      model,
-      startedAt: state.startedAt,
-      endedAt: new Date().toISOString(),
-      durationMs,
-      costUsd,
-      tokensUsed: parsed.tokensUsed,
-      inputTokens: parsed.inputTokens,
-      outputTokens: parsed.outputTokens,
-      toolCalls: parsed.toolCalls,
-      linesAdded,
-      linesRemoved,
-      prompts,
-      filesChanged: allFiles,
-      promptChanges: promptMappings.map((m) => ({
-        prompt: m.promptText,
-        files: m.filesChanged,
-      })),
-      git: {
+    const writeData = buildSessionWriteData({
+      state, parsed, promptMappings,
+      gitCapture: {
         headBefore: state.headShaAtStart || commitSha,
         headAfter: commitSha,
         commitShas: [commitSha],
+        linesAdded,
+        linesRemoved,
       },
-      summary: commitMessage,
-      originUrl: `${apiUrl}/sessions/${state.sessionId}`,
+      status: 'running', apiUrl,
+      extraFiles: filesChanged,
     });
+    writeSessionFiles(repoPath, writeData);
     pushSessionBranch(repoPath);
-    debugLog('post-commit', 'entrypoint written + pushed', {
-      prompts: prompts.length,
-      tokensUsed: parsed.tokensUsed,
-      costUsd,
-      files: allFiles.length,
+    debugLog('post-commit', 'session files written + pushed', {
+      prompts: writeData.prompts.length,
+      costUsd: writeData.costUsd,
+      files: writeData.filesChanged.length,
     });
   }
 
