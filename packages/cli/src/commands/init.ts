@@ -4,6 +4,7 @@ import { execSync } from 'child_process';
 import chalk from 'chalk';
 import { loadConfig, saveAgentConfig } from '../config.js';
 import { api } from '../api.js';
+import { enableCommand } from './enable.js';
 
 function detectTools(): string[] {
   const tools: string[] = [];
@@ -47,29 +48,7 @@ export async function initCommand() {
   saveAgentConfig({ machineId, hostname, detectedTools, orgId: config.orgId });
   console.log(chalk.gray('  Agent config saved to ~/.origin/agent.json'));
 
-  // Print MCP setup instructions
-  console.log(chalk.bold('\n📋 Next steps — Add the Origin MCP server:\n'));
-
-  console.log(chalk.cyan('For Claude Code') + chalk.gray(' — add to ~/.claude/settings.json:'));
-  console.log(chalk.white(JSON.stringify({
-    mcpServers: {
-      origin: {
-        command: 'npx',
-        args: ['@origin/mcp-server'],
-        env: {},
-      }
-    }
-  }, null, 2)));
-
-  console.log(chalk.cyan('\nFor Cursor') + chalk.gray(' — add to .cursor/mcp.json in your repo:'));
-  console.log(chalk.white(JSON.stringify({
-    mcpServers: {
-      origin: {
-        command: 'npx',
-        args: ['@origin/mcp-server'],
-      }
-    }
-  }, null, 2)));
-
-  console.log(chalk.green('\n✓ Setup complete. Start coding — Origin is watching.\n'));
+  // Auto-install global hooks so all repos are tracked
+  console.log(chalk.bold('\n📡 Installing global hooks...\n'));
+  await enableCommand({ global: true });
 }

@@ -225,10 +225,18 @@ function cleanPrompt(text: string): string | null {
 
 // ─── Gemini Transcript Parser ──────────────────────────────────────────────
 
+// Gemini CLI transcript format:
+// { sessionId, messages: [{ id, timestamp, type: "user"|"gemini", content, tokens?, model?, thoughts? }] }
+// - User messages: type: "user", content: [{ text: "..." }]
+// - Gemini messages: type: "gemini", content: "string", tokens: { input, output, cached, thoughts, tool, total }, model: "gemini-..."
+
 interface GeminiMessage {
-  role: 'user' | 'model';
+  type?: string;     // "user" | "gemini" (actual Gemini CLI format)
+  role?: string;     // "user" | "model" (Google AI API format — fallback)
+  content?: string | Array<{ text?: string; functionCall?: { name: string; args?: Record<string, any> }; functionResponse?: any }>;
   parts?: Array<{ text?: string; functionCall?: { name: string; args?: Record<string, any> }; functionResponse?: any }>;
-  tokens?: { input?: number; output?: number; cached?: number; total?: number };
+  tokens?: { input?: number; output?: number; cached?: number; thoughts?: number; tool?: number; total?: number };
+  model?: string;
 }
 
 function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTranscript {
@@ -238,31 +246,51 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
     const filesSet = new Set<string>();
 
     for (const msg of messages) {
-      if (msg.role === 'user' && msg.parts) {
-        for (const part of msg.parts) {
-          if (part.text) {
-            const cleaned = cleanPrompt(part.text);
-            if (cleaned) result.prompts.push(cleaned);
+      const msgType = msg.type || msg.role || '';
+      const contentParts = msg.content || msg.parts;
+
+      // User messages
+      if (msgType === 'user') {
+        if (Array.isArray(contentParts)) {
+          for (const part of contentParts) {
+            if (part.text) {
+              const cleaned = cleanPrompt(part.text);
+              if (cleaned) result.prompts.push(cleaned);
+            }
           }
+        } else if (typeof contentParts === 'string') {
+          const cleaned = cleanPrompt(contentParts);
+          if (cleaned) result.prompts.push(cleaned);
         }
       }
 
-      if (msg.role === 'model' && msg.parts) {
-        for (const part of msg.parts) {
-          if (part.text) {
-            result.summary = part.text;
-          }
-          if (part.functionCall) {
-            result.toolCalls++;
-            const name = part.functionCall.name || '';
-            if (FILE_MODIFICATION_TOOLS.has(name) && part.functionCall.args) {
-              const fp = part.functionCall.args.file_path || part.functionCall.args.path;
-              if (fp && typeof fp === 'string') filesSet.add(fp);
+      // Model/Gemini messages
+      if (msgType === 'gemini' || msgType === 'model') {
+        // Content can be a string (Gemini CLI) or array of parts (Google AI API)
+        if (typeof contentParts === 'string') {
+          result.summary = contentParts;
+        } else if (Array.isArray(contentParts)) {
+          for (const part of contentParts) {
+            if (part.text) {
+              result.summary = part.text;
+            }
+            if (part.functionCall) {
+              result.toolCalls++;
+              const name = part.functionCall.name || '';
+              if (FILE_MODIFICATION_TOOLS.has(name) && part.functionCall.args) {
+                const fp = part.functionCall.args.file_path || part.functionCall.args.path;
+                if (fp && typeof fp === 'string') filesSet.add(fp);
+              }
             }
           }
         }
 
-        // Gemini provides token counts per message (no cache breakdown available)
+        // Extract model name from individual messages
+        if (msg.model && !result.model) {
+          result.model = msg.model;
+        }
+
+        // Token counts per message
         if (msg.tokens) {
           result.inputTokens += msg.tokens.input ?? 0;
           result.cacheReadTokens += msg.tokens.cached ?? 0;
@@ -271,9 +299,9 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
       }
     }
 
-    result.tokensUsed = result.inputTokens + result.outputTokens;
+    result.tokensUsed = result.inputTokens + result.cacheReadTokens + result.outputTokens;
     result.filesChanged = Array.from(filesSet);
-    result.model = data.model || 'gemini';
+    if (!result.model) result.model = data.model || 'gemini';
 
     if (result.summary.length > 500) {
       result.summary = result.summary.slice(0, 500) + '...';
@@ -661,26 +689,42 @@ function formatGeminiMessages(raw: string): DisplayMessage[] {
     const messages: DisplayMessage[] = [];
 
     for (const msg of msgs) {
-      if (msg.role === 'user' && msg.parts) {
-        const texts = msg.parts.filter((p) => p.text).map((p) => p.text!).join('\n');
-        const cleaned = cleanPrompt(texts);
-        if (cleaned) {
-          messages.push({ role: 'user', content: cleaned });
+      const msgType = msg.type || msg.role || '';
+      const contentParts = msg.content || msg.parts;
+
+      if (msgType === 'user') {
+        if (Array.isArray(contentParts)) {
+          const texts = contentParts.filter((p: any) => p.text).map((p: any) => p.text!).join('\n');
+          const cleaned = cleanPrompt(texts);
+          if (cleaned) {
+            messages.push({ role: 'user', content: cleaned });
+          }
+        } else if (typeof contentParts === 'string') {
+          const cleaned = cleanPrompt(contentParts);
+          if (cleaned) {
+            messages.push({ role: 'user', content: cleaned });
+          }
         }
       }
 
-      if (msg.role === 'model' && msg.parts) {
-        const parts: string[] = [];
-        for (const part of msg.parts) {
-          if (part.text) {
-            parts.push(part.text);
-          } else if (part.functionCall) {
-            parts.push(`[Tool: ${part.functionCall.name}]`);
+      if (msgType === 'gemini' || msgType === 'model') {
+        if (typeof contentParts === 'string') {
+          if (contentParts.trim()) {
+            messages.push({ role: 'assistant', content: contentParts });
           }
-        }
-        const text = parts.join('\n');
-        if (text.trim()) {
-          messages.push({ role: 'assistant', content: text });
+        } else if (Array.isArray(contentParts)) {
+          const parts: string[] = [];
+          for (const part of contentParts) {
+            if (part.text) {
+              parts.push(part.text);
+            } else if (part.functionCall) {
+              parts.push(`[Tool: ${part.functionCall.name}]`);
+            }
+          }
+          const text = parts.join('\n');
+          if (text.trim()) {
+            messages.push({ role: 'assistant', content: text });
+          }
         }
       }
     }
@@ -703,6 +747,8 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   // Google
   'gemini-2.5-pro': { input: 1.25, output: 10 },
   'gemini-2.5-flash': { input: 0.15, output: 0.60 },
+  'gemini-3-pro': { input: 1.25, output: 10 },
+  'gemini-3-flash': { input: 0.15, output: 0.60 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
   // OpenAI (for Cursor users)
   'gpt-4o': { input: 2.50, output: 10 },

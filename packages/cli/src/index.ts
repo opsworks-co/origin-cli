@@ -14,6 +14,7 @@ import { auditCommand } from './commands/audit.js';
 import { statsCommand } from './commands/stats.js';
 import { enableCommand } from './commands/enable.js';
 import { disableCommand } from './commands/disable.js';
+import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit } from './commands/hooks.js';
 
 const program = new Command();
@@ -27,10 +28,19 @@ program
 program.command('login').description('Login to Origin').action(loginCommand);
 program.command('init').description('Register this machine as an agent host').action(initCommand);
 program.command('enable')
-  .description('Install Origin hooks for session tracking in this repo')
+  .description('Install Origin hooks for session tracking')
   .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, windsurf, aider). Auto-detects if omitted.')
+  .option('-g, --global', 'Install hooks globally (~/) so ALL repos are tracked automatically')
+  .option('-l, --link <slug>', 'Link this repo to an Origin agent by slug (writes .origin.json)')
   .action(enableCommand);
-program.command('disable').description('Remove Origin hooks from this repo').action(disableCommand);
+program.command('disable')
+  .description('Remove Origin hooks')
+  .option('-g, --global', 'Remove global hooks from ~/  ')
+  .action(disableCommand);
+program.command('link [slug]')
+  .description('Link this repo to an Origin agent (set .origin.json)')
+  .option('--clear', 'Remove agent mapping')
+  .action(linkCommand);
 program.command('status').description('Show current status').action(statusCommand);
 program.command('whoami').description('Show current user and org info').action(whoamiCommand);
 

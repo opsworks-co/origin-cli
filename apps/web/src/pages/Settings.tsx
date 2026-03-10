@@ -14,6 +14,7 @@ interface ApiKey {
   keyPrefix: string;
   createdAt: string;
   userId: string | null;
+  role: string | null;
   user: { name: string; email: string } | null;
 }
 
@@ -42,6 +43,7 @@ export default function Settings() {
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [loadingKeys, setLoadingKeys] = useState(true);
   const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyRole, setNewKeyRole] = useState('MEMBER');
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [creatingKey, setCreatingKey] = useState(false);
   const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
@@ -420,9 +422,10 @@ export default function Settings() {
     setCreatedKey(null);
     setKeyError(null);
     try {
-      const result = await api.createApiKey({ name: newKeyName || 'Unnamed key' });
+      const result = await api.createApiKey({ name: newKeyName || 'Unnamed key', role: newKeyRole });
       setCreatedKey(result.key);
       setNewKeyName('');
+      setNewKeyRole('MEMBER');
       // Refresh the list to include the new key
       await fetchApiKeys();
     } catch (err: any) {
@@ -622,13 +625,22 @@ export default function Settings() {
                     className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-3"
                   >
                     <div className="flex flex-col gap-0.5">
-                      <span className="text-sm text-gray-200">{key.name}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-gray-200">{key.name}</span>
+                        {key.role && (
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-900/50 text-indigo-300 uppercase">
+                            {key.role}
+                          </span>
+                        )}
+                      </div>
                       <code className="text-xs text-indigo-400">{key.keyPrefix}...</code>
                     </div>
                     <div className="flex items-center gap-3">
-                      {key.user && (
+                      {key.user ? (
                         <span className="text-xs text-gray-400">{key.user.name}</span>
-                      )}
+                      ) : key.role ? (
+                        <span className="text-xs text-gray-500 italic">Standalone</span>
+                      ) : null}
                       <span className="text-xs text-gray-500">
                         Created {new Date(key.createdAt).toLocaleDateString()}
                       </span>
@@ -663,16 +675,30 @@ export default function Settings() {
             )}
 
             {/* Create new key */}
-            <form onSubmit={handleCreateKey} className="flex gap-3">
-              <input
-                value={newKeyName}
-                onChange={(e) => setNewKeyName(e.target.value)}
-                className="input flex-1"
-                placeholder="Key name (optional)"
-              />
-              <button type="submit" disabled={creatingKey} className="btn-primary text-sm whitespace-nowrap">
-                {creatingKey ? 'Creating...' : 'Create New'}
-              </button>
+            <form onSubmit={handleCreateKey} className="space-y-3">
+              <div className="flex gap-3">
+                <input
+                  value={newKeyName}
+                  onChange={(e) => setNewKeyName(e.target.value)}
+                  className="input flex-1"
+                  placeholder="Key name (e.g. CI Pipeline, Bob)"
+                />
+                <select
+                  value={newKeyRole}
+                  onChange={(e) => setNewKeyRole(e.target.value)}
+                  className="input w-32"
+                >
+                  <option value="VIEWER">Viewer</option>
+                  <option value="MEMBER">Member</option>
+                  <option value="ADMIN">Admin</option>
+                </select>
+                <button type="submit" disabled={creatingKey} className="btn-primary text-sm whitespace-nowrap">
+                  {creatingKey ? 'Creating...' : 'Create New'}
+                </button>
+              </div>
+              <p className="text-xs text-gray-600">
+                Standalone tokens let users access Origin via CLI without a platform account.
+              </p>
             </form>
           </section>
 

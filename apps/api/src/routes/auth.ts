@@ -199,24 +199,40 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'This invitation was sent to a different email address' });
     }
 
-    // Check email not already registered
+    // Check if email already registered
     const existingUser = await prisma.user.findUnique({ where: { email } });
+
+    let user;
+
     if (existingUser) {
-      return res.status(409).json({ error: 'Email already registered. Please log in instead.' });
+      // Existing user — verify password, then move/add to invited org
+      const valid = await bcrypt.compare(password, existingUser.passwordHash);
+      if (!valid) {
+        return res.status(401).json({ error: 'Incorrect password. Enter the password for your existing account to join.' });
+      }
+
+      // Update user to the invited org with the invited role
+      user = await prisma.user.update({
+        where: { id: existingUser.id },
+        data: {
+          orgId: invitation.orgId,
+          role: invitation.role,
+          name: name || existingUser.name,
+        },
+      });
+    } else {
+      // New user — create account
+      const passwordHash = await bcrypt.hash(password, 10);
+      user = await prisma.user.create({
+        data: {
+          orgId: invitation.orgId,
+          email,
+          name,
+          passwordHash,
+          role: invitation.role,
+        },
+      });
     }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    // Create user in the invitation's org
-    const user = await prisma.user.create({
-      data: {
-        orgId: invitation.orgId,
-        email,
-        name,
-        passwordHash,
-        role: invitation.role,
-      },
-    });
 
     // Mark invitation as used
     await prisma.invitation.update({
@@ -231,7 +247,7 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
         userId: user.id,
         action: 'INVITATION_ACCEPTED',
         resource: invitation.id,
-        metadata: JSON.stringify({ email, role: invitation.role }),
+        metadata: JSON.stringify({ email, role: invitation.role, existingUser: !!existingUser }),
       },
     });
 

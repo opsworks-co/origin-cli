@@ -39,12 +39,13 @@ export function authMiddleware(req: AuthRequest, _res: Response, next: NextFunct
       })
         .then((found) => {
           if (found) {
-            // Prefer the API key's own user; fall back to org owner
+            // Standalone key (no userId): use key's own id + role
+            // Linked key (has userId): use the linked user's identity + role
             const resolvedUser = found.user ?? found.org.users[0];
             req.user = {
-              id: resolvedUser?.id ?? 'system',
+              id: found.user?.id ?? found.id,
               orgId: found.orgId,
-              role: resolvedUser?.role ?? 'OWNER',
+              role: found.role ?? resolvedUser?.role ?? 'MEMBER',
             };
           }
           next();

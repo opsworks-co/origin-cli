@@ -119,6 +119,10 @@ echo ""
 `);
 });
 
+// Serve CLI tarballs from /cli/
+const publicDir = path.join(__dirname, '../public');
+app.use('/cli', express.static(path.join(publicDir, 'cli')));
+
 // Serve React app in production
 const webDist = path.join(__dirname, '../../web/dist');
 app.use(express.static(webDist));

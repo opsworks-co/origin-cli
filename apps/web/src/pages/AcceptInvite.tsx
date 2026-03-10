@@ -118,9 +118,12 @@ export default function AcceptInvite() {
               placeholder="Min 8 characters"
               className="input w-full"
             />
+            <p className="text-xs text-gray-600 mt-1">
+              Already have an account? Use your existing password to join.
+            </p>
           </div>
           <button type="submit" disabled={submitting} className="btn-primary w-full">
-            {submitting ? 'Joining...' : 'Create Account & Join'}
+            {submitting ? 'Joining...' : 'Join'}
           </button>
         </form>
 

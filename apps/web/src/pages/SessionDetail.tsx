@@ -6,6 +6,12 @@ import UnifiedSessionView from '../components/UnifiedSessionView';
 import AiBlameView from '../components/AiBlameView';
 import AskAuthorPanel from '../components/AskAuthorPanel';
 
+function formatCost(cost: number): string {
+  if (cost === 0) return '$0.00';
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
+}
+
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const seconds = Math.floor(ms / 1000);
@@ -53,6 +59,9 @@ export default function SessionDetail() {
   const [showAskPanel, setShowAskPanel] = useState(false);
   const [askContext, setAskContext] = useState<{ file?: string; lineNumber?: number; lineContent?: string; promptIndex?: number } | undefined>();
 
+  // Delete
+  const [deleting, setDeleting] = useState(false);
+
   useEffect(() => {
     if (!id) return;
     api
@@ -94,6 +103,18 @@ export default function SessionDetail() {
     }
   };
 
+  const handleDelete = async () => {
+    if (!id || !confirm('Delete this session? This cannot be undone.')) return;
+    setDeleting(true);
+    try {
+      await api.deleteSession(id);
+      navigate('/sessions');
+    } catch (err: any) {
+      setError(err.message);
+      setDeleting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -127,7 +148,7 @@ export default function SessionDetail() {
           &larr; Sessions
         </button>
         <h1 className="text-xl font-bold">{session.repoName ?? 'Session'}</h1>
-        {statusBadge(session.review?.status?.toLowerCase() ?? 'pending')}
+        {statusBadge(session.review?.status?.toLowerCase() ?? (session.status === 'RUNNING' ? 'running' : 'ended'))}
         <span className="text-xs text-gray-600 font-mono">{session.commitSha?.slice(0, 8)}</span>
 
         {/* Quick stats */}
@@ -141,7 +162,7 @@ export default function SessionDetail() {
           )}
           <span>{formatDuration(session.durationMs)}</span>
           <span>{session.tokensUsed.toLocaleString()} tokens</span>
-          <span>${session.costUsd.toFixed(2)}</span>
+          <span>{formatCost(session.costUsd)}</span>
           <span>{session.toolCalls} tools</span>
           <span>{filesCount} files</span>
           <span className="text-green-400">+{session.linesAdded}</span>
@@ -154,6 +175,14 @@ export default function SessionDetail() {
             title="Show details"
           >
             {showMeta ? 'Hide details' : 'Details'}
+          </button>
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            className="text-red-500/60 hover:text-red-400 transition-colors ml-1 disabled:opacity-50"
+            title="Delete session"
+          >
+            {deleting ? 'Deleting...' : 'Delete'}
           </button>
         </div>
       </div>

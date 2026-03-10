@@ -569,8 +569,8 @@ export function getMachine(id: string) {
 
 // ---- API Key Management -----------------------------------------------------
 
-export function createApiKey(data: { name: string }) {
-  return request<{ id: string; key: string; keyPrefix: string }>('/api/settings/api-keys', {
+export function createApiKey(data: { name: string; role?: string }) {
+  return request<{ id: string; key: string; keyPrefix: string; role: string | null }>('/api/settings/api-keys', {
     method: 'POST',
     body: JSON.stringify(data),
   });
@@ -579,7 +579,7 @@ export function createApiKey(data: { name: string }) {
 export function getApiKeys() {
   return request<Array<{
     id: string; name: string; keyPrefix: string; createdAt: string;
-    userId: string | null;
+    userId: string | null; role: string | null;
     user: { name: string; email: string } | null;
   }>>('/api/settings/api-keys');
 }
@@ -589,6 +589,10 @@ export function deleteApiKey(id: string) {
 }
 
 // ---- Delete Operations -------------------------------------------------------
+
+export function deleteSession(id: string) {
+  return request<void>(`/api/sessions/${id}`, { method: 'DELETE' });
+}
 
 export function deleteRepo(id: string) {
   return request<void>(`/api/repos/${id}`, { method: 'DELETE' });

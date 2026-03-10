@@ -63,6 +63,7 @@ model ApiKey {
   name      String
   keyHash   String
   keyPrefix String
+  role      String?  // Standalone key role: VIEWER, MEMBER, ADMIN. Null = uses linked user's role
   createdAt DateTime @default(now())
 }
 

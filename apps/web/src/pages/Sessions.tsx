@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
-import type { Session, Repo, PRSessionGroup, SessionStreamEvent } from '../api';
+import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent } from '../api';
 
 function timeAgo(dateStr: string): string {
   const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
@@ -12,6 +12,12 @@ function timeAgo(dateStr: string): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+function formatCost(cost: number): string {
+  if (cost === 0) return '$0.00';
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
 }
 
 function formatDuration(ms: number): string {
@@ -29,6 +35,7 @@ function statusBadge(status: string) {
     rejected: 'badge-red',
     flagged: 'badge-amber',
     pending: 'badge-gray',
+    ended: 'badge-blue',
     completed: 'badge-blue',
     running: 'badge-purple',
   };
@@ -63,10 +70,14 @@ export default function Sessions() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
 
+  // Agents
+  const [agents, setAgents] = useState<Agent[]>([]);
+
   // Filters
   const [model, setModel] = useState('');
   const [status, setStatus] = useState('');
   const [repoId, setRepoId] = useState('');
+  const [agentId, setAgentId] = useState('');
   const [offset, setOffset] = useState(0);
 
   // Sorting
@@ -78,7 +89,7 @@ export default function Sessions() {
     setError('');
     setSelectedIds(new Set());
     try {
-      const res = await api.getSessions({ model, status, repoId, limit: LIMIT, offset });
+      const res = await api.getSessions({ model, status, repoId, agentId, limit: LIMIT, offset });
       setSessions(res.sessions);
       setTotal(res.total);
     } catch (err: any) {
@@ -86,7 +97,7 @@ export default function Sessions() {
     } finally {
       setLoading(false);
     }
-  }, [model, status, repoId, offset]);
+  }, [model, status, repoId, agentId, offset]);
 
   useEffect(() => {
     fetchSessions();
@@ -94,12 +105,13 @@ export default function Sessions() {
 
   useEffect(() => {
     api.getRepos().then(setRepos).catch(() => {});
+    api.getAgents().then(setAgents).catch(() => {});
   }, []);
 
   // Reset offset when filters change
   useEffect(() => {
     setOffset(0);
-  }, [model, status, repoId]);
+  }, [model, status, repoId, agentId]);
 
   // Fetch PR groups when view mode changes
   useEffect(() => {
@@ -425,6 +437,19 @@ export default function Sessions() {
             ))}
           </select>
 
+          <select
+            value={agentId}
+            onChange={(e) => setAgentId(e.target.value)}
+            className="select text-sm"
+          >
+            <option value="">All agents</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+
           <div className="ml-auto text-sm text-gray-500 self-center">
             {total} session{total !== 1 ? 's' : ''}
           </div>
@@ -567,9 +592,9 @@ export default function Sessions() {
                         {formatDuration(s.durationMs)}
                       </span>
                       <span className="text-gray-400 text-xs tabular-nums">
-                        ${s.costUsd.toFixed(2)}
+                        {formatCost(s.costUsd)}
                       </span>
-                      {statusBadge(s.review?.status?.toLowerCase() ?? 'pending')}
+                      {statusBadge(s.review?.status?.toLowerCase() ?? (s.status === 'RUNNING' ? 'running' : 'ended'))}
                       <span className="text-gray-600 text-xs">{timeAgo(s.createdAt)}</span>
                     </div>
                   ))}
@@ -678,10 +703,12 @@ export default function Sessions() {
                         {(s.tokensUsed / 1000).toFixed(1)}k
                       </td>
                       <td className="px-6 py-3 text-right text-gray-300 tabular-nums">
-                        ${s.costUsd.toFixed(2)}
+                        {formatCost(s.costUsd)}
                       </td>
                       <td className="px-6 py-3">
-                        {s.status === 'RUNNING' ? (
+                        {s.review?.status ? (
+                          statusBadge(s.review.status.toLowerCase())
+                        ) : s.status === 'RUNNING' ? (
                           <span className="badge-purple inline-flex items-center gap-1">
                             <span className="relative flex h-1.5 w-1.5">
                               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
@@ -690,7 +717,7 @@ export default function Sessions() {
                             running
                           </span>
                         ) : (
-                          statusBadge(s.review?.status?.toLowerCase() ?? 'pending')
+                          statusBadge('ended')
                         )}
                       </td>
                       <td className="px-6 py-3 text-right text-gray-500">

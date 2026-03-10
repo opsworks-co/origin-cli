@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
 import { getGitRoot, clearSessionState } from '../session-state.js';
@@ -91,47 +92,62 @@ function removeAiderConfig(filePath: string): number {
   }
 }
 
-export async function disableCommand(): Promise<void> {
-  const gitRoot = getGitRoot();
-  if (!gitRoot) {
-    console.log(chalk.red('Not inside a git repository.'));
-    process.exit(1);
-  }
+export async function disableCommand(opts?: { global?: boolean }): Promise<void> {
+  const isGlobal = !!opts?.global;
+  let basePath: string;
 
-  console.log(chalk.bold('\n🔌 Disabling Origin session tracking\n'));
+  if (isGlobal) {
+    basePath = os.homedir();
+    console.log(chalk.bold('\n🔌 Disabling Origin session tracking globally\n'));
+  } else {
+    const gitRoot = getGitRoot();
+    if (!gitRoot) {
+      console.log(chalk.red('Not inside a git repository.'));
+      console.log(chalk.gray('  Tip: Use --global to remove global hooks from ~/.'));
+      process.exit(1);
+    }
+    basePath = gitRoot;
+    console.log(chalk.bold('\n🔌 Disabling Origin session tracking\n'));
+  }
 
   let removedCount = 0;
 
   // Claude Code — .claude/settings.json
+  const claudeLabel = isGlobal ? '~/.claude/settings.json' : '.claude/settings.json';
   removedCount += removeOriginHooksFromFile(
-    path.join(gitRoot, '.claude', 'settings.json'),
-    '.claude/settings.json',
+    path.join(basePath, '.claude', 'settings.json'),
+    claudeLabel,
     filterClaudeOrGeminiHooks
   );
 
   // Cursor — .cursor/hooks.json
+  const cursorLabel = isGlobal ? '~/.cursor/hooks.json' : '.cursor/hooks.json';
   removedCount += removeOriginHooksFromFile(
-    path.join(gitRoot, '.cursor', 'hooks.json'),
-    '.cursor/hooks.json',
+    path.join(basePath, '.cursor', 'hooks.json'),
+    cursorLabel,
     filterCursorHooks
   );
 
   // Gemini CLI — .gemini/settings.json
+  const geminiLabel = isGlobal ? '~/.gemini/settings.json' : '.gemini/settings.json';
   removedCount += removeOriginHooksFromFile(
-    path.join(gitRoot, '.gemini', 'settings.json'),
-    '.gemini/settings.json',
+    path.join(basePath, '.gemini', 'settings.json'),
+    geminiLabel,
     filterClaudeOrGeminiHooks
   );
 
   // Windsurf — .windsurf/hooks.json (same format as Cursor)
+  const windsurfLabel = isGlobal ? '~/.windsurf/hooks.json' : '.windsurf/hooks.json';
   removedCount += removeOriginHooksFromFile(
-    path.join(gitRoot, '.windsurf', 'hooks.json'),
-    '.windsurf/hooks.json',
+    path.join(basePath, '.windsurf', 'hooks.json'),
+    windsurfLabel,
     filterCursorHooks
   );
 
-  // Aider — .aider.conf.yml
-  removedCount += removeAiderConfig(path.join(gitRoot, '.aider.conf.yml'));
+  // Aider — .aider.conf.yml (only for per-repo mode)
+  if (!isGlobal) {
+    removedCount += removeAiderConfig(path.join(basePath, '.aider.conf.yml'));
+  }
 
   if (removedCount === 0) {
     console.log(chalk.gray('  No Origin hooks found in any agent config.'));
@@ -141,5 +157,5 @@ export async function disableCommand(): Promise<void> {
   clearSessionState();
   console.log(chalk.gray('  ✓ Cleaned up session state'));
 
-  console.log(chalk.green('\n✓ Origin session tracking disabled.\n'));
+  console.log(chalk.green(`\n✓ Origin session tracking disabled${isGlobal ? ' globally' : ''}.\n`));
 }

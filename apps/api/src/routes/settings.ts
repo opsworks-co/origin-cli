@@ -18,7 +18,7 @@ router.get('/api-keys', async (req: AuthRequest, res: Response) => {
       where: { orgId: req.user!.orgId },
       select: {
         id: true, name: true, keyPrefix: true, createdAt: true,
-        userId: true,
+        userId: true, role: true,
         user: { select: { name: true, email: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -33,22 +33,31 @@ router.get('/api-keys', async (req: AuthRequest, res: Response) => {
 // POST /api/settings/api-keys
 router.post('/api-keys', async (req: AuthRequest, res: Response) => {
   try {
-    const { name } = req.body;
+    const { name, role } = req.body;
+
+    // Validate role if provided (standalone key)
+    const validRoles = ['VIEWER', 'MEMBER', 'ADMIN'];
+    if (role && !validRoles.includes(role)) {
+      return res.status(400).json({ error: 'Invalid role. Must be VIEWER, MEMBER, or ADMIN.' });
+    }
+
     const rawKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
     const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
     const keyPrefix = rawKey.slice(0, 14);
 
+    // If role is set → standalone key (no userId). Otherwise → linked to current user.
     const key = await prisma.apiKey.create({
       data: {
         orgId: req.user!.orgId,
-        userId: req.user!.id,
+        userId: role ? null : req.user!.id,
         name: name || 'API Key',
         keyHash,
         keyPrefix,
+        role: role || null,
       },
     });
 
-    res.json({ id: key.id, name: key.name, keyPrefix: key.keyPrefix, key: rawKey, createdAt: key.createdAt });
+    res.json({ id: key.id, name: key.name, keyPrefix: key.keyPrefix, key: rawKey, role: key.role, createdAt: key.createdAt });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });

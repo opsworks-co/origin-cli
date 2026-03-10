@@ -1,8 +1,10 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
 import { execSync } from 'child_process';
-import { loadConfig } from '../config.js';
+import { loadConfig, saveRepoConfig } from '../config.js';
+import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 
 // ─── Agent Definitions ────────────────────────────────────────────────────
@@ -50,7 +52,8 @@ function installClaudeHooks(gitRoot: string): void {
   }
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-  console.log(chalk.green('  ✓ Hooks installed in .claude/settings.json'));
+  const claudeLabel = gitRoot === os.homedir() ? `~/.claude/settings.json` : `.claude/settings.json`;
+  console.log(chalk.green(`  ✓ Hooks installed in ${claudeLabel}`));
 }
 
 // ── Cursor Hooks ───────────────────────────────────────────────────────────
@@ -86,7 +89,8 @@ function installCursorHooks(gitRoot: string): void {
   }
 
   fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
-  console.log(chalk.green('  ✓ Hooks installed in .cursor/hooks.json'));
+  const cursorLabel = gitRoot === os.homedir() ? `~/.cursor/hooks.json` : `.cursor/hooks.json`;
+  console.log(chalk.green(`  ✓ Hooks installed in ${cursorLabel}`));
 }
 
 // ── Gemini CLI Hooks ───────────────────────────────────────────────────────
@@ -134,7 +138,8 @@ function installGeminiHooks(gitRoot: string): void {
   }
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-  console.log(chalk.green('  ✓ Hooks installed in .gemini/settings.json'));
+  const geminiLabel = gitRoot === os.homedir() ? `~/.gemini/settings.json` : `.gemini/settings.json`;
+  console.log(chalk.green(`  ✓ Hooks installed in ${geminiLabel}`));
 }
 
 // ── Windsurf Hooks ────────────────────────────────────────────────────────
@@ -170,7 +175,8 @@ function installWindsurfHooks(gitRoot: string): void {
   }
 
   fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
-  console.log(chalk.green('  ✓ Hooks installed in .windsurf/hooks.json'));
+  const windsurfLabel = gitRoot === os.homedir() ? `~/.windsurf/hooks.json` : `.windsurf/hooks.json`;
+  console.log(chalk.green(`  ✓ Hooks installed in ${windsurfLabel}`));
 }
 
 // ── Aider Hooks ───────────────────────────────────────────────────────────
@@ -285,20 +291,33 @@ function detectAgents(gitRoot: string): AgentType[] {
 
 // ─── Main Command ──────────────────────────────────────────────────────────
 
-export async function enableCommand(opts: { agent?: string }): Promise<void> {
+// Agents that support global (~/) hook installation
+const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'windsurf'];
+
+export async function enableCommand(opts: { agent?: string; global?: boolean; link?: string }): Promise<void> {
   const config = loadConfig();
   if (!config) {
     console.log(chalk.red('Not logged in. Run: origin login'));
     process.exit(1);
   }
 
-  const gitRoot = getGitRoot();
-  if (!gitRoot) {
-    console.log(chalk.red('Not inside a git repository. Run this from your project directory.'));
-    process.exit(1);
-  }
+  const isGlobal = !!opts.global;
+  let basePath: string;
 
-  console.log(chalk.bold('\n🔗 Enabling Origin session tracking\n'));
+  if (isGlobal) {
+    basePath = os.homedir();
+    console.log(chalk.bold('\n🌐 Enabling Origin session tracking globally\n'));
+    console.log(chalk.gray(`  Home directory: ${basePath}`));
+  } else {
+    const gitRoot = getGitRoot();
+    if (!gitRoot) {
+      console.log(chalk.red('Not inside a git repository. Run this from your project directory.'));
+      console.log(chalk.gray('  Tip: Use --global to install hooks for ALL repos.'));
+      process.exit(1);
+    }
+    basePath = gitRoot;
+    console.log(chalk.bold('\n🔗 Enabling Origin session tracking\n'));
+  }
 
   // Determine which agents to enable
   let agentsToEnable: AgentType[];
@@ -310,16 +329,37 @@ export async function enableCommand(opts: { agent?: string }): Promise<void> {
       console.log(chalk.gray(`Supported agents: ${Object.keys(AGENTS).join(', ')}`));
       process.exit(1);
     }
+    if (isGlobal && !GLOBAL_CAPABLE_AGENTS.includes(agent)) {
+      console.log(chalk.yellow(`  ⚠ ${AGENTS[agent].name} doesn't support global hooks (config is per-project).`));
+      console.log(chalk.gray('    Use "origin enable" inside your repo instead.'));
+      process.exit(1);
+    }
     agentsToEnable = [agent];
   } else {
-    // Auto-detect agents
-    agentsToEnable = detectAgents(gitRoot);
-    if (agentsToEnable.length === 0) {
-      // Default to claude-code if nothing detected
-      agentsToEnable = ['claude-code'];
-      console.log(chalk.gray('  No agent config detected, defaulting to Claude Code'));
+    if (isGlobal) {
+      // In global mode, detect which agent binaries are installed
+      agentsToEnable = GLOBAL_CAPABLE_AGENTS.filter((type) => {
+        try {
+          execSync(`which ${AGENTS[type].command}`, { stdio: 'ignore' });
+          return true;
+        } catch { return false; }
+      });
+      if (agentsToEnable.length === 0) {
+        // Default to claude-code
+        agentsToEnable = ['claude-code'];
+        console.log(chalk.gray('  No agent binaries detected, defaulting to Claude Code'));
+      } else {
+        console.log(chalk.gray(`  Detected: ${agentsToEnable.map((a) => AGENTS[a].name).join(', ')}`));
+      }
     } else {
-      console.log(chalk.gray(`  Detected: ${agentsToEnable.map((a) => AGENTS[a].name).join(', ')}`));
+      // Auto-detect agents from repo config dirs
+      agentsToEnable = detectAgents(basePath);
+      if (agentsToEnable.length === 0) {
+        agentsToEnable = ['claude-code'];
+        console.log(chalk.gray('  No agent config detected, defaulting to Claude Code'));
+      } else {
+        console.log(chalk.gray(`  Detected: ${agentsToEnable.map((a) => AGENTS[a].name).join(', ')}`));
+      }
     }
   }
 
@@ -327,23 +367,52 @@ export async function enableCommand(opts: { agent?: string }): Promise<void> {
   for (const agentType of agentsToEnable) {
     const agent = AGENTS[agentType];
     console.log(chalk.cyan(`\n  ${agent.name}:`));
-    agent.installHooks(gitRoot);
+    agent.installHooks(basePath);
     console.log(chalk.gray('    • Session start/end — lifecycle tracking'));
     console.log(chalk.gray('    • Prompt capture — real user prompts'));
     console.log(chalk.gray('    • Turn end — files, tokens, tool calls'));
   }
 
-  // Install git post-commit hook for incremental data capture
-  installGitPostCommitHook(gitRoot);
+  // Install git post-commit hook (only for per-repo mode, not global)
+  if (!isGlobal) {
+    installGitPostCommitHook(basePath);
+  }
+
+  // If --link provided, validate agent and write .origin.json
+  if (opts.link && !isGlobal) {
+    try {
+      const agents = await api.getAgents() as any[];
+      const match = agents.find((a: any) => a.slug === opts.link && a.status === 'ACTIVE');
+      if (!match) {
+        console.log(chalk.red(`\n  ✗ Agent "${opts.link}" not found in Origin.`));
+        console.log(chalk.gray('    Create it in the dashboard first, then re-run with --link.'));
+      } else {
+        saveRepoConfig(basePath, { agent: opts.link });
+        console.log(chalk.green(`\n  ✓ Linked repo to agent "${opts.link}" (.origin.json created)`));
+      }
+    } catch (err: any) {
+      console.log(chalk.yellow(`\n  ⚠ Could not validate agent: ${err.message}`));
+      // Still write the config — user might know what they're doing
+      saveRepoConfig(basePath, { agent: opts.link });
+      console.log(chalk.gray(`    Wrote .origin.json with agent "${opts.link}" anyway.`));
+    }
+  }
 
   console.log(chalk.bold('\n📋 Next steps:\n'));
   const firstAgent = AGENTS[agentsToEnable[0]];
-  console.log(chalk.white('  1. Start coding: ') + chalk.cyan(firstAgent.command));
-  console.log(chalk.white('  2. Work normally — Origin captures everything automatically'));
-  console.log(chalk.white('  3. View sessions: ') + chalk.cyan('origin sessions'));
-  console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
+  if (isGlobal) {
+    console.log(chalk.white('  1. Open any repo and start coding with ') + chalk.cyan(firstAgent.command));
+    console.log(chalk.white('  2. Sessions are captured automatically for ALL repos'));
+    console.log(chalk.white('  3. View sessions: ') + chalk.cyan('origin sessions'));
+    console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
+  } else {
+    console.log(chalk.white('  1. Start coding: ') + chalk.cyan(firstAgent.command));
+    console.log(chalk.white('  2. Work normally — Origin captures everything automatically'));
+    console.log(chalk.white('  3. View sessions: ') + chalk.cyan('origin sessions'));
+    console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
+  }
 
-  console.log(chalk.green('\n✓ Origin session tracking enabled.\n'));
+  console.log(chalk.green(`\n✓ Origin session tracking enabled${isGlobal ? ' globally' : ''}.\n`));
 }
 
 // ─── Git Post-Commit Hook ─────────────────────────────────────────────────

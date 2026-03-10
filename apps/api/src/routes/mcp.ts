@@ -15,6 +15,7 @@ const router = Router();
 interface McpRequest extends Request {
   orgId?: string;
   mcpUserId?: string;  // User ID resolved from the API key (for per-member attribution)
+  apiKeyName?: string; // Name of the API key (for standalone key attribution)
 }
 
 // Helper: authenticate by API key header
@@ -39,8 +40,14 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     }
 
     req.orgId = found.orgId;
-    // Resolve user: prefer API key's userId, fall back to org owner
-    req.mcpUserId = found.userId ?? found.org.users[0]?.id ?? undefined;
+    req.apiKeyName = found.name;
+    // Standalone key (has role, no userId): no user attribution
+    // Linked key: use the key's userId, fall back to org owner
+    if (found.role && !found.userId) {
+      req.mcpUserId = undefined;
+    } else {
+      req.mcpUserId = found.userId ?? found.org.users[0]?.id ?? undefined;
+    }
     next();
   } catch (err) {
     console.error('API key auth error:', err);
@@ -135,20 +142,12 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         where: { orgId, slug: agentSlug, status: 'ACTIVE' },
         select: { id: true, systemPrompt: true },
       });
-      // If no agent exists for this slug, auto-create one
+      // Strict mode: reject unknown agents (admins must create them in the dashboard first)
       if (!agent) {
-        const agentName = agentSlug
-          .split('-')
-          .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
-          .join(' ');
-        agent = await prisma.agent.create({
-          data: {
-            orgId,
-            name: agentName,
-            slug: agentSlug,
-            model,
-          },
-          select: { id: true },
+        return res.status(403).json({
+          error: 'Unknown agent',
+          message: `Agent "${agentSlug}" is not registered. Ask your admin to create it in the Origin dashboard under Agents.`,
+          agentSlug,
         });
       }
     }
@@ -172,12 +171,14 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     const placeholderSha = crypto.randomBytes(20).toString('hex');
 
     // Create a commit with placeholder SHA (mark as session-detected AI)
+    // Use API key name for standalone tokens so sessions show the token name
+    const commitAuthor = req.mcpUserId ? 'mcp-agent' : (req.apiKeyName || 'mcp-agent');
     const commit = await prisma.commit.create({
       data: {
         repoId: repo.id,
         sha: placeholderSha,
         message: '',
-        author: 'mcp-agent',
+        author: commitAuthor,
         aiToolDetected: model,
         aiDetectionMethod: 'session',
         committedAt: new Date(),
@@ -359,6 +360,46 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
       orgId: req.orgId as string,
       timestamp: new Date().toISOString(),
     });
+
+    // Real-time agent limit enforcement (check during active session, not just at end)
+    // Run in background — never block the hook response
+    if (costUsd !== undefined || tokensUsed !== undefined) {
+      (async () => {
+        try {
+          const session = await prisma.codingSession.findUnique({
+            where: { id },
+            select: {
+              agentId: true, model: true, costUsd: true, tokensUsed: true,
+              toolCalls: true, linesAdded: true, linesRemoved: true, durationMs: true,
+              commit: { select: { repoId: true } },
+            },
+          });
+          if (!session?.agentId) return;
+
+          const result = await enforceAgentLimits({
+            sessionId: id,
+            orgId: req.orgId as string,
+            model: session.model,
+            costUsd: session.costUsd,
+            tokensUsed: session.tokensUsed,
+            toolCalls: session.toolCalls,
+            linesAdded: session.linesAdded,
+            linesRemoved: session.linesRemoved,
+            durationMs: session.durationMs,
+            filesChanged: [],
+            agentId: session.agentId,
+            machineId: null,
+            repoId: session.commit?.repoId ?? null,
+          });
+
+          if (result.violations.length > 0) {
+            console.log(`[agent-limits] Session ${id} flagged mid-session: ${result.violations.map(v => v.message).join('; ')}`);
+          }
+        } catch (err) {
+          console.error('[agent-limits] Real-time check error:', err);
+        }
+      })();
+    }
 
     res.json({ success: true });
   } catch (err) {

@@ -1,4 +1,4 @@
-import { loadConfig, loadAgentConfig } from '../config.js';
+import { loadConfig, loadAgentConfig, loadRepoConfig } from '../config.js';
 import { api } from '../api.js';
 import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings } from '../transcript.js';
 import {
@@ -60,6 +60,47 @@ async function readStdin(): Promise<Record<string, any>> {
   });
 }
 
+// ─── Gemini Transcript Discovery ──────────────────────────────────────────
+
+/**
+ * Gemini CLI stores transcripts in ~/.gemini/tmp/<workspace>/chats/session-*.json
+ * If the hook doesn't receive transcript_path via stdin, try to find the most
+ * recently modified session file.
+ */
+function discoverGeminiTranscriptPath(): string | null {
+  try {
+    const geminiTmpDir = path.join(os.homedir(), '.gemini', 'tmp');
+    if (!fs.existsSync(geminiTmpDir)) return null;
+
+    // Walk through workspace dirs to find the newest session file
+    let newestFile = '';
+    let newestMtime = 0;
+
+    const workspaces = fs.readdirSync(geminiTmpDir);
+    for (const ws of workspaces) {
+      const chatsDir = path.join(geminiTmpDir, ws, 'chats');
+      if (!fs.existsSync(chatsDir)) continue;
+      const files = fs.readdirSync(chatsDir).filter(f => f.startsWith('session-') && f.endsWith('.json'));
+      for (const f of files) {
+        const fp = path.join(chatsDir, f);
+        const stat = fs.statSync(fp);
+        if (stat.mtimeMs > newestMtime) {
+          newestMtime = stat.mtimeMs;
+          newestFile = fp;
+        }
+      }
+    }
+
+    // Only use it if modified within the last 10 minutes (likely the active session)
+    if (newestFile && (Date.now() - newestMtime) < 10 * 60 * 1000) {
+      return newestFile;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Hook Handlers ─────────────────────────────────────────────────────────
 
 async function handleSessionStart(input: Record<string, any>, agentSlug?: string): Promise<void> {
@@ -84,18 +125,46 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
   debugLog('session-start', 'repo path resolved', { repoPath });
 
+  // Resolve agent slug: .origin.json takes priority → hook command slug → undefined
+  const repoConfig = loadRepoConfig(repoPath);
+  const finalAgentSlug = repoConfig?.agent || agentSlug || undefined;
+  debugLog('session-start', 'agent resolved', {
+    fromRepoConfig: repoConfig?.agent,
+    fromHookCommand: agentSlug,
+    final: finalAgentSlug,
+  });
+
   const claudeSessionId = input.session_id || '';
-  const transcriptPath = input.transcript_path || '';
-  const model = input.model || 'unknown';
+  let transcriptPath = input.transcript_path || '';
+
+  // Auto-discover Gemini transcript if not provided via stdin
+  if (!transcriptPath && (finalAgentSlug === 'gemini' || agentSlug === 'gemini')) {
+    transcriptPath = discoverGeminiTranscriptPath() || '';
+    if (transcriptPath) debugLog('session-start', 'auto-discovered transcript path', { transcriptPath });
+  }
+
+  // Resolve model: use stdin value, fall back to agent-specific default
+  let model = input.model || '';
+  if (!model || model === 'unknown') {
+    // Default model name from agent slug so we never store 'unknown'
+    const AGENT_DEFAULT_MODELS: Record<string, string> = {
+      'gemini': 'gemini',
+      'claude-code': 'claude',
+      'cursor': 'cursor',
+      'windsurf': 'windsurf',
+      'aider': 'aider',
+    };
+    model = AGENT_DEFAULT_MODELS[finalAgentSlug || ''] || 'unknown';
+  }
 
   try {
-    debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath });
+    debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, agentSlug: finalAgentSlug });
     const result = await api.startSession({
       machineId: agentConfig.machineId,
       prompt: '',
       model,
       repoPath,
-      agentSlug: agentSlug || undefined,
+      agentSlug: finalAgentSlug,
     });
     debugLog('session-start', 'api returned', { sessionId: result.sessionId });
 
@@ -120,7 +189,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     process.stdout.write(output);
   } catch (err: any) {
     debugLog('session-start', 'ERROR', { message: err.message, stack: err.stack });
-    process.stderr.write(`[origin] session-start error: ${err.message}\n`);
+    // Show clear message if agent was rejected (strict mode)
+    if (err.message?.includes('Unknown agent') || err.message?.includes('not registered')) {
+      process.stderr.write(`[origin] Agent not registered. Ask your admin to add it in the Origin dashboard.\n`);
+    } else {
+      process.stderr.write(`[origin] session-start error: ${err.message}\n`);
+    }
   }
 }
 
@@ -163,6 +237,16 @@ async function handleStop(input: Record<string, any>): Promise<void> {
   if (input.transcript_path) {
     state.transcriptPath = input.transcript_path;
     saveSessionState(state, hookCwd);
+  }
+
+  // Auto-discover Gemini transcript path if not already set
+  if (!state.transcriptPath) {
+    const discovered = discoverGeminiTranscriptPath();
+    if (discovered) {
+      state.transcriptPath = discovered;
+      saveSessionState(state, hookCwd);
+      debugLog('stop', 'auto-discovered transcript path', { discovered });
+    }
   }
 
   try {
@@ -233,6 +317,15 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
   // Update transcript path if provided
   if (input.transcript_path) {
     state.transcriptPath = input.transcript_path;
+  }
+
+  // Auto-discover Gemini transcript path if not already set
+  if (!state.transcriptPath) {
+    const discovered = discoverGeminiTranscriptPath();
+    if (discovered) {
+      state.transcriptPath = discovered;
+      debugLog('session-end', 'auto-discovered transcript path', { discovered });
+    }
   }
 
   try {

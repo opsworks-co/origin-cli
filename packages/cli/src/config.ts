@@ -42,3 +42,25 @@ export function saveAgentConfig(config: AgentConfig) {
   ensureConfigDir();
   fs.writeFileSync(AGENT_PATH, JSON.stringify(config, null, 2));
 }
+
+// ── Per-repo config (.origin.json in repo root) ─────────────────────────────
+
+export interface RepoConfig {
+  agent?: string;  // Origin agent slug to link sessions to
+}
+
+export function loadRepoConfig(repoPath: string): RepoConfig | null {
+  try {
+    const configPath = path.join(repoPath, '.origin.json');
+    return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  } catch { return null; }
+}
+
+export function saveRepoConfig(repoPath: string, config: RepoConfig) {
+  fs.writeFileSync(path.join(repoPath, '.origin.json'), JSON.stringify(config, null, 2) + '\n');
+}
+
+export function clearRepoConfig(repoPath: string) {
+  const configPath = path.join(repoPath, '.origin.json');
+  try { fs.unlinkSync(configPath); } catch { /* ignore */ }
+}
