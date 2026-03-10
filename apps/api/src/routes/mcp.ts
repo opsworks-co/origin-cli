@@ -94,7 +94,7 @@ router.get('/policies', async (req: McpRequest, res: Response) => {
 // POST /session/start — start a coding session
 router.post('/session/start', async (req: McpRequest, res: Response) => {
   try {
-    const { machineId, prompt, model, repoPath, agentSlug } = req.body;
+    const { machineId, prompt, model, repoPath, agentSlug, branch } = req.body;
 
     if (!machineId || !model || !repoPath) {
       return res.status(400).json({ error: 'Missing required fields: machineId, model, repoPath' });
@@ -198,6 +198,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         userId: req.mcpUserId || null,
         agentId: agent?.id || null,
         agentSystemPrompt: agent?.systemPrompt || null,
+        branch: branch || null,
       },
     });
 

@@ -44,6 +44,7 @@ function mapSession(s: any, pullRequests?: any[]) {
     linesAdded: s.linesAdded,
     linesRemoved: s.linesRemoved,
     costUsd: s.costUsd,
+    branch: s.branch || null,
     status: s.status || 'COMPLETED',
     startedAt: s.startedAt || null,
     endedAt: s.endedAt || null,

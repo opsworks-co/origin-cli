@@ -627,6 +627,7 @@ export default function Sessions() {
                   <th className="px-6 py-3 font-medium">Agent</th>
                   <th className="px-6 py-3 font-medium">User</th>
                   <th className="px-6 py-3 font-medium">Repo</th>
+                  <th className="px-6 py-3 font-medium">Branch</th>
                   <th className="px-6 py-3 font-medium">Commit</th>
                   <SortHeader field="duration" align="right">
                     Duration
@@ -649,13 +650,13 @@ export default function Sessions() {
               <tbody className="divide-y divide-gray-800/50">
                 {loading ? (
                   <tr>
-                    <td colSpan={12} className="px-6 py-12 text-center">
+                    <td colSpan={13} className="px-6 py-12 text-center">
                       <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-500 mx-auto" />
                     </td>
                   </tr>
                 ) : sortedSessions.length === 0 ? (
                   <tr>
-                    <td colSpan={12} className="px-6 py-12 text-center text-gray-500">
+                    <td colSpan={13} className="px-6 py-12 text-center text-gray-500">
                       No sessions found
                     </td>
                   </tr>
@@ -690,6 +691,16 @@ export default function Sessions() {
                           s.commitAuthor ?? <span className="text-gray-600">—</span>}
                       </td>
                       <td className="px-6 py-3 text-gray-400">{s.repoName ?? '—'}</td>
+                      <td className="px-6 py-3 text-gray-400 text-xs max-w-[140px] truncate">
+                        {s.branch ? (
+                          <span className="inline-flex items-center gap-1">
+                            <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+                            {s.branch}
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
+                      </td>
                       <td className="px-6 py-3 text-gray-300 max-w-[180px] truncate">
                         {s.commitMessage ?? '—'}
                       </td>

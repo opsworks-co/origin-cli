@@ -7,6 +7,7 @@ import {
   clearSessionState,
   getGitRoot,
   getHeadSha,
+  getBranch,
   type SessionState,
 } from '../session-state.js';
 import { captureGitState } from '../git-capture.js';
@@ -58,6 +59,12 @@ async function readStdin(): Promise<Record<string, any>> {
       resolve({});
     }
   });
+}
+
+// ─── Shell Escape ─────────────────────────────────────────────────────────
+
+function escapeShellArg(arg: string): string {
+  return "'" + arg.replace(/'/g, "'\\''") + "'";
 }
 
 // ─── Gemini Transcript Discovery ──────────────────────────────────────────
@@ -157,14 +164,17 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     model = AGENT_DEFAULT_MODELS[finalAgentSlug || ''] || 'unknown';
   }
 
+  const branch = getBranch(hookCwd);
+
   try {
-    debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, agentSlug: finalAgentSlug });
+    debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, agentSlug: finalAgentSlug, branch });
     const result = await api.startSession({
       machineId: agentConfig.machineId,
       prompt: '',
       model,
       repoPath,
       agentSlug: finalAgentSlug,
+      branch: branch || undefined,
     });
     debugLog('session-start', 'api returned', { sessionId: result.sessionId });
 
@@ -177,6 +187,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       prompts: [],
       repoPath,
       headShaAtStart: getHeadSha(hookCwd),
+      branch,
     };
 
     saveSessionState(state, hookCwd);
@@ -500,9 +511,30 @@ export async function handlePostCommit(): Promise<void> {
     }
   }
 
-  // Write git notes on this commit immediately
+  // Add Origin-Session trailer to commit message (like Entire's Entire-Checkpoint trailer)
   const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
   const state = loadSessionState(hookCwd);
+
+  if (state) {
+    try {
+      // Only add trailer if not already present
+      const fullMessage = execSync('git log -1 --format=%B', execOpts).trim();
+      if (!fullMessage.includes('Origin-Session:')) {
+        const shortId = state.sessionId.slice(0, 12);
+        const trailer = `Origin-Session: ${shortId}`;
+        // Amend the commit message to add the trailer
+        const newMessage = fullMessage + '\n\n' + trailer;
+        execSync(`git commit --amend -m ${escapeShellArg(newMessage)} --no-verify`, execOpts);
+        debugLog('post-commit', 'added Origin-Session trailer', { shortId });
+        // Re-read commit SHA since amend changes it
+        commitSha = execSync('git rev-parse HEAD', execOpts).trim();
+      }
+    } catch (err: any) {
+      debugLog('post-commit', 'trailer amend error (non-fatal)', { message: err.message });
+    }
+  }
+
+  // Write git notes on this commit immediately
 
   try {
     writeGitNotes(repoPath, [commitSha], {

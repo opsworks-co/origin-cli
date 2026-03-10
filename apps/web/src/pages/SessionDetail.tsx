@@ -150,6 +150,12 @@ export default function SessionDetail() {
         <h1 className="text-xl font-bold">{session.repoName ?? 'Session'}</h1>
         {statusBadge(session.review?.status?.toLowerCase() ?? (session.status === 'RUNNING' ? 'running' : 'ended'))}
         <span className="text-xs text-gray-600 font-mono">{session.commitSha?.slice(0, 8)}</span>
+        {session.branch && (
+          <span className="text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full font-mono inline-flex items-center gap-1">
+            <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+            {session.branch}
+          </span>
+        )}
 
         {/* Quick stats */}
         <div className="ml-auto flex items-center gap-4 text-xs text-gray-500">

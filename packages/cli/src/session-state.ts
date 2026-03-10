@@ -15,6 +15,7 @@ export interface SessionState {
   prompts: string[];          // Accumulated user prompts
   repoPath: string;           // Git repo root path OR working directory
   headShaAtStart: string | null; // HEAD commit SHA when session started (null if no git)
+  branch: string | null;      // Git branch at session start
 }
 
 // ─── Git Directory ─────────────────────────────────────────────────────────
@@ -38,6 +39,14 @@ export function getGitRoot(cwd?: string): string | null {
 export function getHeadSha(cwd?: string): string | null {
   try {
     return execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+export function getBranch(cwd?: string): string | null {
+  try {
+    return execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
   } catch {
     return null;
   }

@@ -219,6 +219,7 @@ export interface Session {
   linesAdded: number;
   linesRemoved: number;
   costUsd: number;
+  branch: string | null;
   status: string;
   startedAt: string | null;
   endedAt: string | null;

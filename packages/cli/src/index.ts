@@ -16,6 +16,9 @@ import { enableCommand } from './commands/enable.js';
 import { disableCommand } from './commands/disable.js';
 import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit } from './commands/hooks.js';
+import { explainCommand } from './commands/explain.js';
+import { doctorCommand } from './commands/doctor.js';
+import { resetCommand } from './commands/reset.js';
 
 const program = new Command();
 
@@ -41,8 +44,23 @@ program.command('link [slug]')
   .description('Link this repo to an Origin agent (set .origin.json)')
   .option('--clear', 'Remove agent mapping')
   .action(linkCommand);
-program.command('status').description('Show current status').action(statusCommand);
+program.command('status').description('Show current status (active session, branch, repo info)').action(statusCommand);
 program.command('whoami').description('Show current user and org info').action(whoamiCommand);
+
+// Session management (like Entire's explain/doctor/reset)
+program.command('explain [sessionId]')
+  .description('Explain a coding session (prompts, files, cost, review)')
+  .option('-c, --commit <sha>', 'Look up session by commit SHA (via git notes)')
+  .option('-s, --short', 'Short output (skip prompt-change mapping)')
+  .action(explainCommand);
+program.command('doctor')
+  .description('Scan for and fix stuck/orphaned sessions')
+  .option('-f, --fix', 'Auto-fix issues found')
+  .action(doctorCommand);
+program.command('reset')
+  .description('Clear local session state for this repo')
+  .option('-f, --force', 'Force clear even if session looks active')
+  .action(resetCommand);
 
 // Internal hook handlers (called by agent hooks, not by users directly)
 const hooks = program.command('hooks').description('Internal hook handlers (used by AI agents)');

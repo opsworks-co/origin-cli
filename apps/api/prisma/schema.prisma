@@ -123,6 +123,7 @@ model CodingSession {
   linesAdded   Int            @default(0)
   linesRemoved Int            @default(0)
   costUsd      Float          @default(0)
+  branch       String?                        // Git branch at session start
   status       String         @default("COMPLETED") // RUNNING or COMPLETED
   agentSystemPrompt String?                    // Snapshot of agent system prompt active during session
   startedAt    DateTime?                       // When session actually started (from session/start)
