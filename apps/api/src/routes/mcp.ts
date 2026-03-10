@@ -241,7 +241,7 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
     const {
       prompt, transcript, filesChanged, tokensUsed, toolCalls,
       linesAdded, linesRemoved, model, inputTokens, outputTokens,
-      durationMs, costUsd, promptChanges,
+      durationMs, costUsd, promptChanges, branch,
     } = req.body;
 
     await prisma.codingSession.update({
@@ -259,6 +259,7 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         ...(outputTokens !== undefined && { outputTokens }),
         ...(durationMs !== undefined && { durationMs }),
         ...(costUsd !== undefined && { costUsd }),
+        ...(branch !== undefined && { branch }),
       },
     });
 
@@ -426,6 +427,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       costUsd,
       filesChanged,
       durationMs,
+      branch,
     } = req.body;
 
     if (!sessionId) {
@@ -452,6 +454,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         ...(costUsd !== undefined && { costUsd }),
         ...(filesChanged !== undefined && { filesChanged: JSON.stringify(filesChanged) }),
         ...(durationMs !== undefined && { durationMs }),
+        ...(branch !== undefined && { branch }),
         status: 'COMPLETED',
         endedAt: new Date(),
       },

@@ -244,6 +244,7 @@ export interface SessionListParams {
   status?: string;
   agentId?: string;
   repoId?: string;
+  branch?: string;
   limit?: number;
   offset?: number;
 }

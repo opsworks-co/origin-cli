@@ -78,6 +78,7 @@ export default function Sessions() {
   const [status, setStatus] = useState('');
   const [repoId, setRepoId] = useState('');
   const [agentId, setAgentId] = useState('');
+  const [branch, setBranch] = useState('');
   const [offset, setOffset] = useState(0);
 
   // Sorting
@@ -89,7 +90,7 @@ export default function Sessions() {
     setError('');
     setSelectedIds(new Set());
     try {
-      const res = await api.getSessions({ model, status, repoId, agentId, limit: LIMIT, offset });
+      const res = await api.getSessions({ model, status, repoId, agentId, branch, limit: LIMIT, offset });
       setSessions(res.sessions);
       setTotal(res.total);
     } catch (err: any) {
@@ -97,7 +98,7 @@ export default function Sessions() {
     } finally {
       setLoading(false);
     }
-  }, [model, status, repoId, agentId, offset]);
+  }, [model, status, repoId, agentId, branch, offset]);
 
   useEffect(() => {
     fetchSessions();
@@ -111,7 +112,7 @@ export default function Sessions() {
   // Reset offset when filters change
   useEffect(() => {
     setOffset(0);
-  }, [model, status, repoId, agentId]);
+  }, [model, status, repoId, agentId, branch]);
 
   // Fetch PR groups when view mode changes
   useEffect(() => {
@@ -155,6 +156,7 @@ export default function Sessions() {
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
   const models = Array.from(new Set(sessions.map((s) => s.model).filter(Boolean)));
+  const branches = Array.from(new Set(sessions.map((s) => s.branch).filter(Boolean))) as string[];
 
   // Analytics summary computed from current page sessions
   const analytics = useMemo(() => {
@@ -446,6 +448,19 @@ export default function Sessions() {
             {agents.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={branch}
+            onChange={(e) => setBranch(e.target.value)}
+            className="select text-sm"
+          >
+            <option value="">All branches</option>
+            {branches.map((b) => (
+              <option key={b} value={b}>
+                {b}
               </option>
             ))}
           </select>

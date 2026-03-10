@@ -385,6 +385,7 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
       costUsd: costUsd > 0 ? costUsd : undefined,
       gitCapture: gitCapture.diff ? gitCapture : undefined,
       promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
+      branch: getBranch(hookCwd) || undefined,
     });
     debugLog('session-end', 'api.endSession complete');
 
@@ -511,9 +512,19 @@ export async function handlePostCommit(): Promise<void> {
     }
   }
 
+  // Detect current branch (may have changed since session started)
+  const currentBranch = getBranch(hookCwd);
+
   // Add Origin-Session trailer to commit message (like Entire's Entire-Checkpoint trailer)
   const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
   const state = loadSessionState(hookCwd);
+
+  // Update local state if branch changed mid-session
+  if (state && currentBranch && currentBranch !== state.branch) {
+    debugLog('post-commit', 'branch changed', { from: state.branch, to: currentBranch });
+    state.branch = currentBranch;
+    saveSessionState(state, hookCwd);
+  }
 
   if (state) {
     try {
@@ -573,6 +584,7 @@ export async function handlePostCommit(): Promise<void> {
 
       await api.updateSession(state.sessionId, {
         filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
+        branch: currentBranch || undefined,
         gitCapture,
       });
       debugLog('post-commit', 'API update complete');

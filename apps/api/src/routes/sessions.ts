@@ -123,6 +123,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       };
     }
 
+    if (req.query.branch) {
+      where.branch = req.query.branch as string;
+    }
+
     const status = req.query.status as string;
     if (status === 'reviewed') {
       where.review = { isNot: null };

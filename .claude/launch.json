@@ -3,17 +3,9 @@
   "configurations": [
     {
       "name": "web",
-      "cwd": "apps/web",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["vite", "--host", "--port", "5176"],
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "web", "dev"],
       "port": 5176
-    },
-    {
-      "name": "api",
-      "cwd": "apps/api",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["tsx", "src/index.ts"],
-      "port": 4002
     }
   ]
 }
