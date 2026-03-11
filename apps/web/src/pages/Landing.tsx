@@ -185,8 +185,69 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* How It Works */}
+      <section id="how-it-works" className="bg-gray-900/30 border-y border-gray-800/50">
+        <div className="max-w-5xl mx-auto px-6 py-24">
+          <div className="text-center mb-16">
+            <h2 className="text-3xl font-bold">How Origin works</h2>
+            <p className="text-gray-400 mt-3 max-w-xl mx-auto">
+              From code to merge &mdash; Origin tracks every AI coding session and enforces your policies automatically.
+            </p>
+          </div>
+          <div className="relative">
+            {/* Vertical line */}
+            <div className="absolute left-6 top-0 bottom-0 w-px bg-gray-800 hidden md:block" />
+
+            <div className="space-y-12">
+              {[
+                {
+                  step: '1',
+                  title: 'Developer codes with AI',
+                  desc: 'A developer uses Claude Code, Cursor, Copilot, or any AI coding tool. Origin\'s MCP server and git hooks silently track the session \u2014 prompts, files changed, model, cost, and token usage.',
+                  accent: 'bg-indigo-600',
+                },
+                {
+                  step: '2',
+                  title: 'Origin captures the session',
+                  desc: 'Every prompt-to-code-change is recorded as a session with full transcript replay. Policies are evaluated in real-time \u2014 file restrictions, model allowlists, cost limits, and review requirements.',
+                  accent: 'bg-purple-600',
+                },
+                {
+                  step: '3',
+                  title: 'Developer pushes to GitHub',
+                  desc: 'Origin\'s webhook receives the push event and links commits to AI sessions. It knows exactly which code was AI-authored and which session produced it.',
+                  accent: 'bg-cyan-600',
+                },
+                {
+                  step: '4',
+                  title: 'PR gets a governance check',
+                  desc: 'Origin posts an origin/ai\u2011governance status check on the pull request with a summary \u2014 sessions linked, total cost, policy violations. If policies are violated, the PR is blocked from merging.',
+                  accent: 'bg-amber-500',
+                },
+                {
+                  step: '5',
+                  title: 'Team lead reviews and approves',
+                  desc: 'Flagged sessions are reviewed in the Origin dashboard or CLI. Once approved, the status check goes green and the PR can be merged. Full audit trail preserved.',
+                  accent: 'bg-green-500',
+                },
+              ].map((s) => (
+                <div key={s.step} className="flex items-start gap-6 relative">
+                  <div className={`${s.accent} w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-lg shrink-0 z-10 shadow-lg`}>
+                    {s.step}
+                  </div>
+                  <div className="pt-1">
+                    <h3 className="text-lg font-semibold text-gray-100">{s.title}</h3>
+                    <p className="mt-1.5 text-sm text-gray-400 leading-relaxed max-w-2xl">{s.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Use Cases */}
-      <section id="use-cases" className="bg-gray-900/30 border-y border-gray-800/50">
+      <section id="use-cases" className="bg-gray-950/50 border-b border-gray-800/50">
         <div className="max-w-6xl mx-auto px-6 py-24">
           <div className="text-center mb-16">
             <h2 className="text-3xl font-bold">Built for every stakeholder</h2>
