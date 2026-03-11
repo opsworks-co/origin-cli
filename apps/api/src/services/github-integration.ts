@@ -613,7 +613,16 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
       sha: { in: commitShas },
     },
     include: {
+      // "primaryCommit" relation: CodingSession.commitId → Commit.id
       session: {
+        include: {
+          agent: true,
+          review: true,
+        },
+      },
+      // "sessionCommits" relation: Commit.sessionId → CodingSession.id
+      // This is the link created by post-commit hooks when real commits are captured
+      codingSession: {
         include: {
           agent: true,
           review: true,
@@ -624,20 +633,28 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
 
   // Deduplicate sessions (multiple commits can link to same session)
   const sessionMap = new Map<string, SessionForComment>();
-  for (const c of commits) {
-    if (c.session && !sessionMap.has(c.session.id)) {
-      sessionMap.set(c.session.id, {
-        id: c.session!.id,
-        agentName: c.session!.agent?.name || null,
-        model: c.session!.model,
-        costUsd: c.session!.costUsd,
-        tokensUsed: c.session!.tokensUsed,
-        linesAdded: c.session!.linesAdded,
-        linesRemoved: c.session!.linesRemoved,
-        reviewStatus: c.session!.review?.status || null,
-        reviewNote: c.session!.review?.note || null,
+
+  function addSession(s: { id: string; agent?: { name: string } | null; model: string; costUsd: number; tokensUsed: number; linesAdded: number; linesRemoved: number; review?: { status: string; note?: string | null } | null }) {
+    if (!sessionMap.has(s.id)) {
+      sessionMap.set(s.id, {
+        id: s.id,
+        agentName: s.agent?.name || null,
+        model: s.model,
+        costUsd: s.costUsd,
+        tokensUsed: s.tokensUsed,
+        linesAdded: s.linesAdded,
+        linesRemoved: s.linesRemoved,
+        reviewStatus: s.review?.status || null,
+        reviewNote: s.review?.note || null,
       });
     }
+  }
+
+  for (const c of commits) {
+    // Primary commit relation (placeholder SHA → session)
+    if (c.session) addSession(c.session);
+    // Secondary commit relation (real SHA → session via sessionId)
+    if (c.codingSession) addSession(c.codingSession);
   }
 
   // Load policy violations from audit log for each session

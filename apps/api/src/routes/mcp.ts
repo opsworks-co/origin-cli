@@ -312,10 +312,22 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         const commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }> =
           gitCapture.commitDetails || [];
 
-        // Create Commit records for each new commit
+        // Create or link Commit records for each new commit
         for (const detail of commitDetails) {
           const existing = await prisma.commit.findFirst({ where: { sha: detail.sha, repoId: session.commit.repoId } });
-          if (!existing) {
+          if (existing) {
+            // Commit already exists (e.g., created by GitHub webhook) — link it to this session
+            if (!existing.sessionId) {
+              await prisma.commit.update({
+                where: { id: existing.id },
+                data: {
+                  sessionId: id,
+                  aiToolDetected: existing.aiToolDetected || session.model || 'unknown',
+                  aiDetectionMethod: existing.aiDetectionMethod || 'session',
+                },
+              });
+            }
+          } else {
             await prisma.commit.create({
               data: {
                 repoId: session.commit.repoId,
@@ -530,39 +542,78 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         : (gitCapture.headAfter || null);  // Or HEAD at session end
 
       if (realSha) {
-        // Find matching detail for the first commit
-        const firstDetail = commitDetails.find(d => d.sha.startsWith(realSha) || realSha.startsWith(d.sha));
-        await prisma.commit.update({
-          where: { id: codingSession.commitId },
-          data: {
-            sha: realSha,
-            message: firstDetail?.message || commitMessage || '',
-            author: firstDetail?.author || 'ai-agent',
-            filesChanged: firstDetail ? JSON.stringify(firstDetail.filesChanged) : '[]',
-          },
+        // Check if a commit with this SHA already exists (e.g., created by GitHub webhook)
+        const existingReal = await prisma.commit.findFirst({
+          where: { repoId, sha: realSha },
         });
+
+        if (existingReal && existingReal.id !== codingSession.commitId) {
+          // A webhook-created commit exists — link it to this session and delete the placeholder
+          await prisma.commit.update({
+            where: { id: existingReal.id },
+            data: {
+              sessionId: sessionId,
+              aiToolDetected: existingReal.aiToolDetected || codingSession.model || 'unknown',
+              aiDetectionMethod: existingReal.aiDetectionMethod || 'session',
+            },
+          });
+          // Move the session's primary commit to the real one
+          await prisma.codingSession.update({
+            where: { id: sessionId },
+            data: { commitId: existingReal.id },
+          });
+          // Delete the placeholder commit
+          await prisma.commit.delete({ where: { id: codingSession.commitId } });
+        } else {
+          // No duplicate — update the placeholder with real SHA
+          const firstDetail = commitDetails.find(d => d.sha.startsWith(realSha) || realSha.startsWith(d.sha));
+          await prisma.commit.update({
+            where: { id: codingSession.commitId },
+            data: {
+              sha: realSha,
+              message: firstDetail?.message || commitMessage || '',
+              author: firstDetail?.author || 'ai-agent',
+              filesChanged: firstDetail ? JSON.stringify(firstDetail.filesChanged) : '[]',
+            },
+          });
+        }
       }
 
-      // Create individual Commit records for remaining SHAs (linked via sessionId)
+      // Create or link individual Commit records for remaining SHAs
       if (commitDetails.length > 1) {
         for (const detail of commitDetails) {
-          // Skip the first commit (already stored as the placeholder)
+          // Skip the first commit (already stored as the primary commit)
           if (detail.sha === realSha || detail.sha.startsWith(realSha?.slice(0, 7) || '___') || realSha?.startsWith(detail.sha.slice(0, 7))) {
             continue;
           }
-          await prisma.commit.create({
-            data: {
-              repoId,
-              sha: detail.sha,
-              message: detail.message || '',
-              author: detail.author || 'ai-agent',
-              aiToolDetected: codingSession.model,
-              aiDetectionMethod: 'session',
-              filesChanged: JSON.stringify(detail.filesChanged || []),
-              committedAt: new Date(),
-              sessionId,
-            },
-          });
+          const existingCommit = await prisma.commit.findFirst({ where: { sha: detail.sha, repoId } });
+          if (existingCommit) {
+            // Link existing commit (e.g., from webhook) to this session
+            if (!existingCommit.sessionId) {
+              await prisma.commit.update({
+                where: { id: existingCommit.id },
+                data: {
+                  sessionId,
+                  aiToolDetected: existingCommit.aiToolDetected || codingSession.model,
+                  aiDetectionMethod: existingCommit.aiDetectionMethod || 'session',
+                },
+              });
+            }
+          } else {
+            await prisma.commit.create({
+              data: {
+                repoId,
+                sha: detail.sha,
+                message: detail.message || '',
+                author: detail.author || 'ai-agent',
+                aiToolDetected: codingSession.model,
+                aiDetectionMethod: 'session',
+                filesChanged: JSON.stringify(detail.filesChanged || []),
+                committedAt: new Date(),
+                sessionId,
+              },
+            });
+          }
         }
       }
 
