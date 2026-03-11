@@ -223,13 +223,7 @@ export default function App() {
       />
       <Route
         path="/trails"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <Trails />
-            </Layout>
-          </ProtectedRoute>
-        }
+        element={<Navigate to="/settings?tab=trails" replace />}
       />
       <Route
         path="/trails/:id"
@@ -253,13 +247,7 @@ export default function App() {
       />
       <Route
         path="/compliance"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <ComplianceDashboard />
-            </Layout>
-          </ProtectedRoute>
-        }
+        element={<Navigate to="/settings?tab=compliance" replace />}
       />
       <Route
         path="/models"

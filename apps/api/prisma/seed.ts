@@ -479,6 +479,7 @@ async function main() {
   await prisma.pullRequest.deleteMany();
   await prisma.integrationConfig.deleteMany();
   await prisma.auditLog.deleteMany();
+  await prisma.promptChange.deleteMany();
   await prisma.sessionReview.deleteMany();
   await prisma.codingSession.deleteMany();
   await prisma.commit.deleteMany();
@@ -703,6 +704,32 @@ async function main() {
     commitIds.push(commitId);
   }
   console.log(`  Created ${SESSION_DEFS.length} coding sessions with commits`);
+
+  // ── 5a. Prompt changes (populate Prompts page) ──────────────────
+  let promptChangeCount = 0;
+  for (let i = 0; i < SESSION_DEFS.length; i++) {
+    const def = SESSION_DEFS[i];
+    // Create 1-3 prompt changes per session
+    const numPrompts = randInt(1, 3);
+    for (let p = 0; p < numPrompts; p++) {
+      const promptText = p === 0
+        ? def.prompt
+        : def.transcript[Math.min(p * 2, def.transcript.length - 1)]?.content?.slice(0, 1000) || def.prompt;
+      const filesSubset = def.filesChanged.slice(0, randInt(1, def.filesChanged.length));
+      await prisma.promptChange.create({
+        data: {
+          id: uuid(),
+          sessionId: sessionIds[i],
+          promptIndex: p,
+          promptText,
+          filesChanged: JSON.stringify(filesSubset),
+          diff: `@@ -1,5 +1,${randInt(5, 30)} @@\n-// old code\n+// new implementation`,
+        },
+      });
+      promptChangeCount++;
+    }
+  }
+  console.log(`  Created ${promptChangeCount} prompt changes`);
 
   // ── 5b. Reviews (some sessions reviewed) ────────────────────────
   // Review roughly 12 of 20 sessions — spread reviewers across users
@@ -1034,76 +1061,8 @@ async function main() {
   });
   console.log("  Created 1 integration config (GitHub)");
 
-  // ── 12. Pull Requests ────────────────────────────────────────────
-  // Collect commit SHAs for the GitHub repos to link to PRs
-  const wtCommits = await prisma.commit.findMany({
-    where: { repoId: repoWorkTrustId },
-    select: { sha: true },
-    take: 3,
-  });
-  const pvCommits = await prisma.commit.findMany({
-    where: { repoId: repoProvenantId },
-    select: { sha: true },
-    take: 2,
-  });
-
-  const prDefs = [
-    {
-      repoId: repoWorkTrustId,
-      number: 42,
-      title: "feat: add JWT authentication system",
-      url: "https://github.com/dolobanko/WorkTrust/pull/42",
-      state: "merged",
-      author: "artem-dolobanko",
-      baseBranch: "main",
-      headBranch: "feature/jwt-auth",
-      commitShas: wtCommits.map((c) => c.sha),
-      checkStatus: "success",
-    },
-    {
-      repoId: repoWorkTrustId,
-      number: 45,
-      title: "fix: pagination bug in sessions endpoint",
-      url: "https://github.com/dolobanko/WorkTrust/pull/45",
-      state: "open",
-      author: "sarah-chen",
-      baseBranch: "main",
-      headBranch: "fix/pagination",
-      commitShas: wtCommits.slice(0, 1).map((c) => c.sha),
-      checkStatus: "pending",
-    },
-    {
-      repoId: repoProvenantId,
-      number: 18,
-      title: "feat: implement RBAC with custom roles",
-      url: "https://github.com/dolobanko/provenant/pull/18",
-      state: "open",
-      author: "marcus-johnson",
-      baseBranch: "main",
-      headBranch: "feature/rbac",
-      commitShas: pvCommits.map((c) => c.sha),
-      checkStatus: "failure",
-    },
-  ];
-
-  for (const pr of prDefs) {
-    await prisma.pullRequest.create({
-      data: {
-        id: uuid(),
-        repoId: pr.repoId,
-        number: pr.number,
-        title: pr.title,
-        url: pr.url,
-        state: pr.state,
-        author: pr.author,
-        baseBranch: pr.baseBranch,
-        headBranch: pr.headBranch,
-        commitShas: JSON.stringify(pr.commitShas),
-        checkStatus: pr.checkStatus,
-      },
-    });
-  }
-  console.log(`  Created ${prDefs.length} pull requests`);
+  // ── 12. Pull Requests — skipped (created via real GitHub webhooks)
+  console.log("  Skipped pull requests (created via real webhooks)");
 
   // ── Heuristically-detected AI commits (no sessions) ──────────────────────
   // These demonstrate the AI detection feature detecting commits via git metadata
