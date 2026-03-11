@@ -322,6 +322,55 @@ async function handleUserPromptSubmit(input: Record<string, any>): Promise<void>
 
     saveSessionState(state, resolvedCwd || hookCwd);
     debugLog('user-prompt-submit', 'prompt saved', { promptCount: state.prompts.length, sessionId: state.sessionId });
+
+    // ── Heartbeat: send incremental update to API on every prompt ──
+    try {
+      const config = loadConfig();
+      if (config) {
+        const durationMs = Date.now() - new Date(state.startedAt).getTime();
+
+        // Try to parse transcript for live token/cost data
+        let parsed: ParsedTranscript | null = null;
+        let displayTranscript = '';
+        try {
+          if (state.transcriptPath) {
+            parsed = parseTranscript(state.transcriptPath);
+            displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
+          }
+        } catch {
+          // Transcript may not be readable mid-session for all agents
+        }
+
+        const model = parsed?.model || state.model;
+        const costUsd = parsed
+          ? estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens)
+          : 0;
+
+        // Redact secrets from prompts
+        const shouldRedact = config.secretRedaction !== false;
+        const redactedPrompts = shouldRedact
+          ? state.prompts.map(p => redactSecrets(p).redacted)
+          : state.prompts;
+        const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
+
+        await api.updateSession(state.sessionId, {
+          prompt: joinedPrompt || undefined,
+          transcript: displayTranscript || undefined,
+          model: model && model !== 'unknown' ? model : undefined,
+          filesChanged: parsed?.filesChanged && parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
+          tokensUsed: parsed?.tokensUsed || undefined,
+          inputTokens: parsed?.inputTokens || undefined,
+          outputTokens: parsed?.outputTokens || undefined,
+          toolCalls: parsed?.toolCalls || undefined,
+          durationMs: durationMs > 0 ? durationMs : undefined,
+          costUsd: costUsd > 0 ? costUsd : undefined,
+        });
+        debugLog('user-prompt-submit', 'heartbeat sent', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd });
+      }
+    } catch (err: any) {
+      debugLog('user-prompt-submit', 'heartbeat error (non-fatal)', { message: err.message });
+      // Non-fatal — don't block the agent
+    }
   }
 }
 
