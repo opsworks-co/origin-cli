@@ -170,7 +170,8 @@ app.get('{*path}', (req, res) => {
 });
 
 const PORT = process.env.PORT || 4002;
-app.listen(PORT, () => {
-  console.log(`Origin v2 running on http://localhost:${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(Number(PORT), HOST, () => {
+  console.log(`Origin v2 running on http://${HOST}:${PORT}`);
   startAutoSync();
 });
