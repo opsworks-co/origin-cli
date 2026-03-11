@@ -3,6 +3,7 @@ import ChatWidget from '../components/ChatWidget';
 
 type Section =
   | 'overview'
+  | 'workflow'
   | 'quickstart'
   | 'integrations'
   | 'session-tracking'
@@ -36,6 +37,7 @@ type Section =
 
 const SECTIONS: { key: Section; label: string; group?: string }[] = [
   { key: 'overview', label: 'Overview', group: 'Getting Started' },
+  { key: 'workflow', label: 'How It Works' },
   { key: 'quickstart', label: 'Quick Start' },
   { key: 'session-tracking', label: 'Session Tracking', group: 'Setup Guides' },
   { key: 'integrations', label: 'GitHub Integration' },
@@ -259,6 +261,94 @@ export default function Docs() {
                 Install the CLI on developer machines and configure the MCP server in AI tools for real-time enforcement.
               </Step>
             </div>
+          </div>
+        )}
+
+        {/* ─── HOW IT WORKS ────────────────────────────────────── */}
+        {active === 'workflow' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">How Origin Works</h1>
+            <P>
+              Developer codes with AI &rarr; Origin captures everything &rarr; Policies evaluate &rarr;
+              Team reviews &rarr; PR gets approved or blocked.
+            </P>
+
+            <H2>1. Setup (one-time)</H2>
+            <ul className="space-y-2 mb-4">
+              <Li>Admin creates an org, connects GitHub (PAT or GitHub App) in Settings &rarr; Integrations</Li>
+              <Li>Import repos from GitHub &mdash; auto-creates webhooks on each repo</Li>
+              <Li>Create policies: block payments files, require review for infra, set cost limits, restrict models</Li>
+              <Li>Register agents (Claude Code, Cursor, Copilot, Gemini CLI, Aider, etc.)</Li>
+            </ul>
+
+            <H2>2. Developer installs CLI (one-time per machine)</H2>
+            <CodeBlock title="Terminal">{`npm i -g @origin/cli
+origin login
+origin init          # registers machine, detects installed tools
+origin enable        # installs hooks into Claude Code / Cursor / etc`}</CodeBlock>
+            <P>
+              After this, everything is automatic. The developer doesn&apos;t need to think about Origin again.
+            </P>
+
+            <H2>3. Daily workflow (automatic)</H2>
+            <div className="space-y-1 mb-4">
+              <Step n={1} title="Developer opens AI coding tool">
+                Claude Code, Cursor, or any supported agent. The Origin CLI hook fires automatically and creates a session record on the server.
+              </Step>
+              <Step n={2} title="Every prompt is captured">
+                Each user prompt is saved with a timestamp. The heartbeat sends live token count, cost, and transcript to the dashboard in real time.
+              </Step>
+              <Step n={3} title="Every tool call is logged">
+                File edits, terminal commands, search queries &mdash; all tracked as part of the session.
+              </Step>
+              <Step n={4} title="On git commit">
+                The git diff is captured, files changed are recorded, and session data is pushed to the server. AI blame attribution is computed.
+              </Step>
+              <Step n={5} title="Session ends">
+                Full transcript, total cost, tokens used, duration, and all files changed are finalized. The secret scanner checks the diff for leaked API keys, passwords, and connection strings.
+              </Step>
+              <Step n={6} title="Policy engine evaluates">
+                All active policies run against the session: file restrictions, model allowlist, cost limits, review requirements. Violations are logged to the audit trail.
+              </Step>
+            </div>
+
+            <H2>4. GitHub PR flow</H2>
+            <div className="space-y-1 mb-4">
+              <Step n={1} title="Developer pushes and opens a PR">
+                GitHub sends a webhook (push + pull_request) to Origin.
+              </Step>
+              <Step n={2} title="Origin links commits to sessions">
+                Commits are matched to AI sessions by SHA. Origin knows which sessions contributed to this PR.
+              </Step>
+              <Step n={3} title="Status check posted">
+                Origin posts an <code className="text-indigo-400">origin/ai-governance</code> commit status on the PR, plus a summary comment with a table of linked sessions, costs, and violations.
+              </Step>
+              <Step n={4} title="Merge gating">
+                With GitHub branch protection enabled, the PR <strong className="text-gray-200">cannot be merged</strong> if the check fails. Flagged or rejected sessions block the merge.
+              </Step>
+            </div>
+
+            <H2>5. Team review</H2>
+            <ul className="space-y-2 mb-4">
+              <Li>Admin or lead sees unreviewed sessions in the dashboard</Li>
+              <Li>Opens session &rarr; reads transcript, views diff, checks AI blame (which prompt wrote which line)</Li>
+              <Li>Approves, rejects, or flags the session with a note</Li>
+              <Li>On approve &rarr; GitHub check turns green &rarr; PR can merge</Li>
+            </ul>
+
+            <H2>6. Ongoing governance</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Dashboard</strong> &mdash; Total sessions, cost trends, AI % of code, unreviewed count</Li>
+              <Li><strong className="text-gray-200">Leaderboard</strong> &mdash; Who uses AI most, who has the best approval rate</Li>
+              <Li><strong className="text-gray-200">Budget</strong> &mdash; Monthly cost limits with alerts at 50/80/90/100%</Li>
+              <Li><strong className="text-gray-200">Compliance</strong> &mdash; 90-day reports with violation trends, secret findings, review coverage score</Li>
+              <Li><strong className="text-gray-200">Audit log</strong> &mdash; Every action (review, policy change, repo sync) is recorded with timestamp and user</Li>
+            </ul>
+
+            <Callout type="tip">
+              The developer&apos;s experience is simple: code normally with AI, push to GitHub. Everything else
+              happens automatically behind the scenes.
+            </Callout>
           </div>
         )}
 

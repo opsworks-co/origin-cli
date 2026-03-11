@@ -274,6 +274,43 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* How It Works */}
+      <section id="how-it-works" className="max-w-6xl mx-auto px-6 py-24">
+        <div className="text-center mb-16">
+          <h2 className="text-3xl font-bold">How it works</h2>
+          <p className="text-gray-400 mt-3 max-w-xl mx-auto">
+            Developer codes with AI. Origin captures everything. Policies evaluate.
+            Team reviews. PR merges or gets blocked.
+          </p>
+        </div>
+        <div className="grid md:grid-cols-3 gap-6">
+          {[
+            { step: '1', title: 'Code with AI', desc: 'Developers use Claude Code, Cursor, or any AI agent. Origin hooks capture every prompt, tool call, and file change automatically.' },
+            { step: '2', title: 'Origin evaluates', desc: 'Policy engine checks file restrictions, model allowlists, and cost limits. Secret scanner flags leaked credentials. Sessions are linked to PRs.' },
+            { step: '3', title: 'Team reviews', desc: 'Admin reviews AI sessions, approves or rejects. GitHub check updates automatically. PR can merge only when governance passes.' },
+          ].map((item) => (
+            <div key={item.step} className="card relative">
+              <div className="absolute -top-3 -left-3 w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
+                {item.step}
+              </div>
+              <h3 className="text-lg font-semibold text-gray-200 mt-2 mb-2">{item.title}</h3>
+              <p className="text-sm text-gray-400 leading-relaxed">{item.desc}</p>
+            </div>
+          ))}
+        </div>
+        <div className="mt-10 card bg-gray-800/30 border-gray-700">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-4">Developer setup (one-time)</p>
+          <pre className="text-sm font-mono text-gray-300 overflow-x-auto">
+{`npm i -g @origin/cli
+origin login          # authenticate with your Origin server
+origin init           # register machine, detect installed tools
+origin enable         # install hooks into Claude Code / Cursor / etc
+
+# That's it. Everything is automatic from here.`}
+          </pre>
+        </div>
+      </section>
+
       {/* Comparison */}
       <section id="comparison" className="max-w-6xl mx-auto px-6 py-24">
         <div className="text-center mb-16">
