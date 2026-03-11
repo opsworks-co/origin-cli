@@ -9,7 +9,7 @@ export function generateWebhookSecret(): string {
 
 export function verifyGitHubSignature(payload: string | Buffer, signature: string, secret: string): boolean {
   const hmac = crypto.createHmac('sha256', secret);
-  hmac.update(typeof payload === 'string' ? payload : payload);
+  hmac.update(payload);
   const expected = 'sha256=' + hmac.digest('hex');
   try {
     return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));

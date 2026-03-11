@@ -24,8 +24,11 @@ router.post('/github/:repoId', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'No active webhook for this repo' });
     }
 
-    // Verify HMAC signature
-    const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    // Verify HMAC signature using the raw body buffer (before JSON parsing)
+    const rawBody = (req as any).rawBody;
+    if (!rawBody) {
+      return res.status(500).json({ error: 'Raw body not captured' });
+    }
     if (!verifyGitHubSignature(rawBody, signature, webhook.secret)) {
       return res.status(401).json({ error: 'Invalid signature' });
     }
@@ -35,7 +38,8 @@ router.post('/github/:repoId', async (req: Request, res: Response) => {
       return res.json({ message: 'pong' });
     }
 
-    const payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    // Body already parsed by raw body middleware in index.ts
+    const payload = req.body;
 
     // Get repo for audit log
     const repo = await prisma.repo.findUnique({ where: { id: repoId } });
@@ -113,7 +117,10 @@ router.post('/github-app', async (req: Request, res: Response) => {
       return res.status(500).json({ error: 'App webhook secret not configured' });
     }
 
-    const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const rawBody = (req as any).rawBody;
+    if (!rawBody) {
+      return res.status(500).json({ error: 'Raw body not captured' });
+    }
     if (!verifyGitHubSignature(rawBody, signature, appWebhookSecret)) {
       return res.status(401).json({ error: 'Invalid signature' });
     }
@@ -123,7 +130,8 @@ router.post('/github-app', async (req: Request, res: Response) => {
       return res.json({ message: 'pong' });
     }
 
-    const payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    // Body already parsed by raw body middleware in index.ts
+    const payload = req.body;
     const installationId = String(payload.installation?.id || '');
     const repoFullName = payload.repository?.full_name;
 

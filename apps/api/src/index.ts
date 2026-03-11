@@ -54,6 +54,28 @@ app.use(cors({
     : ['http://localhost:5176', 'http://localhost:4002'],
   credentials: true,
 }));
+
+// Webhook routes need the raw body for HMAC signature verification.
+// Mount them BEFORE the JSON body parser so we can capture raw bytes.
+app.use('/api/webhooks', express.raw({ type: '*/*', limit: '10mb' }), (req, _res, next) => {
+  // Store raw buffer for HMAC, then parse as JSON for route handlers
+  (req as any).rawBody = req.body;
+  if (Buffer.isBuffer(req.body)) {
+    try {
+      req.body = JSON.parse(req.body.toString('utf8'));
+    } catch {
+      // If not JSON (e.g. form-encoded with payload field), try to extract
+      const str = req.body.toString('utf8');
+      if (str.startsWith('payload=')) {
+        try {
+          req.body = JSON.parse(decodeURIComponent(str.slice(8)));
+        } catch { /* leave as-is */ }
+      }
+    }
+  }
+  next();
+}, webhookRoutes);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(authMiddleware);
 
@@ -69,7 +91,7 @@ app.use('/api/machines', machineRoutes);
 app.use('/api/mcp', mcpRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/notifications', notificationRoutes);
-app.use('/api/webhooks', webhookRoutes);
+// webhookRoutes already mounted above (before JSON parser, for raw body HMAC)
 app.use('/api/integrations', integrationRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/chat', chatRoutes);
