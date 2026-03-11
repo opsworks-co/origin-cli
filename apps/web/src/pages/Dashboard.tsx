@@ -388,6 +388,65 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* ── Cost Forecast ──────────────────────────────────────────────────── */}
+      {stats.projectedMonthlyCost !== undefined && stats.projectedMonthlyCost > 0 && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Cost Forecast</p>
+              <p className="text-xs text-gray-600 mt-0.5">Projected end-of-month spend based on current trend</p>
+            </div>
+            <Link to="/models" className="text-xs text-indigo-400 hover:text-indigo-300">Model comparison &rarr;</Link>
+          </div>
+          <div className="flex items-center gap-6">
+            <div>
+              <div className="flex items-baseline gap-2">
+                <p className="text-3xl font-bold text-gray-100">
+                  ${stats.projectedMonthlyCost.toFixed(2)}
+                </p>
+                {stats.dailyCostTrend !== undefined && stats.dailyCostTrend !== 0 && (
+                  <span className={`flex items-center gap-0.5 text-sm font-medium ${stats.dailyCostTrend > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    {stats.dailyCostTrend > 0 ? '↑' : '↓'}
+                    {Math.abs(stats.dailyCostTrend * 100).toFixed(1)}%/day
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Projected total &middot; Day {stats.daysElapsed ?? '?'} of {stats.daysInMonth ?? '?'}
+              </p>
+            </div>
+            <div className="flex-1 h-16">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={[
+                  ...(stats.costByDay?.slice(-14) ?? []),
+                  ...(stats.projectedMonthlyCost ? [
+                    { date: 'Projected', cost: stats.projectedMonthlyCost / (stats.daysInMonth ?? 30) },
+                  ] : []),
+                ]}>
+                  <defs>
+                    <linearGradient id="forecastGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#f59e0b" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <Area type="monotone" dataKey="cost" stroke="#f59e0b" strokeWidth={2} fill="url(#forecastGrad)" strokeDasharray="0" />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '0.5rem', color: '#f3f4f6', fontSize: '0.75rem' }}
+                    formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+          {stats.projectedMonthlyCost > stats.estimatedCostThisMonth * 2 && (
+            <div className="mt-3 flex items-center gap-2 text-xs bg-amber-900/20 border border-amber-800/30 rounded-lg px-3 py-2">
+              <span className="text-amber-400">&#9888;</span>
+              <span className="text-amber-300">Projected cost is significantly higher than current spend. Consider reviewing agent usage.</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Review Pipeline ───────────────────────────────────────────────── */}
       <div>
         <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">

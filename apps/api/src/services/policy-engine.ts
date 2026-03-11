@@ -27,6 +27,7 @@ export interface PolicyData {
   name: string;
   type: string;
   description: string | null;
+  assignedAgentIds: string[]; // empty = org-wide, non-empty = only these agents
   rules: Array<{
     id: string;
     condition: string;
@@ -91,7 +92,7 @@ function parseCondition(raw: string): Record<string, unknown> {
 }
 
 /** Check if a rule should be skipped based on scope (agent, machine, repo). */
-function shouldSkipRule(
+export function shouldSkipRule(
   rule: { agentId: string | null; machineId: string | null; repoId: string | null },
   scope: RuleScope,
 ): boolean {
@@ -118,7 +119,10 @@ function matchGlob(pattern: string, filepath: string): boolean {
 export async function loadOrgPolicies(orgId: string): Promise<PolicyData[]> {
   const policies = await prisma.policy.findMany({
     where: { orgId, active: true },
-    include: { rules: true },
+    include: {
+      rules: true,
+      assignments: { select: { agentId: true } },
+    },
   });
 
   return policies.map((p) => ({
@@ -126,6 +130,7 @@ export async function loadOrgPolicies(orgId: string): Promise<PolicyData[]> {
     name: p.name,
     type: p.type,
     description: p.description,
+    assignedAgentIds: p.assignments.map((a) => a.agentId),
     rules: p.rules.map((r) => ({
       id: r.id,
       condition: r.condition,
@@ -136,6 +141,15 @@ export async function loadOrgPolicies(orgId: string): Promise<PolicyData[]> {
       repoId: r.repoId,
     })),
   }));
+}
+
+/** Check if a policy should be skipped based on its agent assignments. */
+export function shouldSkipPolicy(policy: PolicyData, scope: RuleScope): boolean {
+  // No assignments = org-wide, applies to all agents
+  if (policy.assignedAgentIds.length === 0) return false;
+  // Has assignments = only applies to those agents
+  if (!scope.agentId) return true; // no agent context, skip assigned policies
+  return !policy.assignedAgentIds.includes(scope.agentId);
 }
 
 // ── Enforce: Session Start ────────────────────────────────────────
@@ -157,6 +171,8 @@ export async function enforceSessionStart(
 
   for (const policy of policies) {
     if (policy.type !== 'MODEL_ALLOWLIST') continue;
+    // Skip policies not assigned to this agent
+    if (shouldSkipPolicy(policy, scope)) continue;
 
     for (const rule of policy.rules) {
       // Skip scoped rules that don't match
@@ -207,6 +223,9 @@ export async function enforceSessionEnd(ctx: SessionContext): Promise<Enforcemen
   const reviewReasons: string[] = [];
 
   for (const policy of policies) {
+    // Skip policies not assigned to this agent
+    if (shouldSkipPolicy(policy, ctx)) continue;
+
     for (const rule of policy.rules) {
       // Skip scoped rules that don't match
       if (shouldSkipRule(rule, ctx)) continue;
@@ -347,6 +366,8 @@ export async function applyEnforcementActions(
           ruleId: v.ruleId,
           severity: v.severity,
           message: v.message,
+          condition: v.condition,
+          action: v.action,
         }),
       },
     });

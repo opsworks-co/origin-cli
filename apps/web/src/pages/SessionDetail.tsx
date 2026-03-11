@@ -40,6 +40,9 @@ export default function SessionDetail() {
   // Delete
   const [deleting, setDeleting] = useState(false);
 
+  // Real-time watch
+  const [elapsed, setElapsed] = useState(0);
+
   useEffect(() => {
     if (!id) return;
     api
@@ -56,6 +59,31 @@ export default function SessionDetail() {
       .catch(() => {}) // Silently fail — new feature
       .finally(() => setFindingsLoading(false));
   }, [id]);
+
+  // Elapsed timer for running sessions
+  useEffect(() => {
+    if (!session || session.status !== 'RUNNING') return;
+    const update = () => {
+      if (session.startedAt) {
+        setElapsed(Math.floor((Date.now() - new Date(session.startedAt).getTime()) / 1000));
+      }
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [session?.status, session?.startedAt]);
+
+  // Poll for updates when session is running
+  useEffect(() => {
+    if (!id || !session || session.status !== 'RUNNING') return;
+    const poll = setInterval(() => {
+      api.getSession(id).then((updated) => {
+        setSession(updated);
+        if (updated.status !== 'RUNNING') clearInterval(poll);
+      }).catch(() => {});
+    }, 5000);
+    return () => clearInterval(poll);
+  }, [id, session?.status]);
 
   const handleReview = async (status: string) => {
     if (!id) return;
@@ -170,6 +198,94 @@ export default function SessionDetail() {
           </button>
         </div>
       </div>
+
+      {/* ── Review Reason Banner (always visible for flagged/rejected) ── */}
+      {session.review && ['flagged', 'rejected'].includes(session.review.status?.toLowerCase()) && (
+        <div className={`rounded-lg px-4 py-3 flex-shrink-0 border ${
+          session.review.status?.toLowerCase() === 'rejected'
+            ? 'bg-red-900/20 border-red-800/40'
+            : 'bg-amber-900/20 border-amber-800/40'
+        }`}>
+          <div className="flex items-start gap-3">
+            <span className={`text-lg flex-shrink-0 mt-0.5 ${
+              session.review.status?.toLowerCase() === 'rejected' ? 'text-red-400' : 'text-amber-400'
+            }`}>
+              {session.review.status?.toLowerCase() === 'rejected' ? '\u2718' : '\u26A0'}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className={`text-sm font-medium ${
+                  session.review.status?.toLowerCase() === 'rejected' ? 'text-red-300' : 'text-amber-300'
+                }`}>
+                  Session {session.review.status?.toLowerCase() === 'rejected' ? 'Rejected' : 'Flagged'}
+                </span>
+                <span className="text-xs text-gray-500">
+                  by {session.review.note?.includes('**AI Auto-Review**') ? 'Origin AI' : (session.review.reviewerName ?? 'unknown')}
+                  {session.review.createdAt && ` \u00B7 ${new Date(session.review.createdAt).toLocaleString()}`}
+                </span>
+              </div>
+              {session.review.note ? (
+                <div className="text-sm text-gray-300 space-y-1">
+                  {session.review.note.split('\n').filter((l: string) => l.trim() && !l.includes('**AI Auto-Review**')).slice(0, 8).map((line: string, i: number) => (
+                    <p key={i} className="leading-relaxed">{line.replace(/\*\*/g, '')}</p>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500 italic">No reason provided</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Live Session Watch ── */}
+      {session.status === 'RUNNING' && (
+        <div className="card border-purple-500/30 bg-purple-500/5 flex-shrink-0">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-purple-500" />
+              </span>
+              <span className="text-sm font-medium text-purple-300">Session Running</span>
+              <span className="text-lg font-mono text-purple-200">
+                {elapsed >= 3600
+                  ? `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m ${elapsed % 60}s`
+                  : elapsed >= 60
+                    ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+                    : `${elapsed}s`}
+              </span>
+            </div>
+            <div className="flex items-center gap-4 text-xs text-gray-400">
+              {session.toolCalls > 0 && (
+                <span className="flex items-center gap-1">
+                  <span className="text-purple-400 font-medium">{session.toolCalls}</span> tool calls
+                </span>
+              )}
+              {session.tokensUsed > 0 && (
+                <span className="flex items-center gap-1">
+                  <span className="text-purple-400 font-medium">{session.tokensUsed.toLocaleString()}</span> tokens
+                </span>
+              )}
+              {session.costUsd > 0 && (
+                <span className="flex items-center gap-1">
+                  <span className="text-purple-400 font-medium">{formatCost(session.costUsd)}</span>
+                </span>
+              )}
+              {(() => {
+                try {
+                  const files = JSON.parse(session.filesChanged);
+                  return files.length > 0 ? (
+                    <span className="flex items-center gap-1">
+                      <span className="text-purple-400 font-medium">{files.length}</span> files modified
+                    </span>
+                  ) : null;
+                } catch { return null; }
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Collapsible metadata panel ── */}
       {showMeta && (

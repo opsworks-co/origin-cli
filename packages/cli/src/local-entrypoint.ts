@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { execSync } from 'child_process';
+import { loadConfig } from './config.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -189,6 +190,26 @@ export function writeSessionFiles(repoPath: string, data: SessionWriteData): voi
     const safeId = data.sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const dir = `sessions/${safeId}`;
 
+    // "Don't downgrade" guard: if the branch already has this session's
+    // metadata with MORE prompts than we're about to write, skip the write.
+    // This prevents the workspace post-commit hook (stale session with 0 prompts)
+    // from overwriting good data written by the Stop hook (18+ prompts).
+    try {
+      const existingMeta = execSync(
+        `git show refs/heads/${BRANCH}:${dir}/metadata.json`,
+        execOpts,
+      ).trim();
+      const existing = JSON.parse(existingMeta) as SessionMetadata;
+      const existingPromptCount = existing.filesChanged?.length || 0;
+      const newPromptCount = data.prompts.length;
+      // Skip if existing data is richer (more prompts or higher cost)
+      if (existingPromptCount > 0 && newPromptCount === 0 && existing.cost.usd > data.costUsd) {
+        return; // Don't downgrade — existing data is better
+      }
+    } catch {
+      // No existing data for this session — proceed with write
+    }
+
     // Build file contents
     const files: Array<[string, string]> = [
       [`${dir}/metadata.json`, buildMetadataJson(data)],
@@ -268,9 +289,20 @@ export function writeSessionFiles(repoPath: string, data: SessionWriteData): voi
 /**
  * Push the `origin-sessions` branch to remote so session data is visible on GitHub.
  * Never blocks or throws. 15s timeout.
+ *
+ * Respects config.pushStrategy:
+ *   - 'auto' (default): push automatically
+ *   - 'prompt': skip (user will push manually or via pre-push hook)
+ *   - 'false': never push
  */
 export function pushSessionBranch(repoPath: string): void {
   try {
+    // F18: Check push strategy
+    const config = loadConfig();
+    const strategy = config?.pushStrategy || 'auto';
+    if (strategy === 'false') return; // Never push
+    if (strategy === 'prompt') return; // User pushes manually via pre-push hook
+
     const execOpts = {
       encoding: 'utf-8' as const,
       cwd: repoPath,

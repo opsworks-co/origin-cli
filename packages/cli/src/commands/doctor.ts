@@ -2,8 +2,9 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execSync } from 'child_process';
 import { loadConfig } from '../config.js';
-import { loadSessionState, clearSessionState, getGitRoot, getGitDir } from '../session-state.js';
+import { loadSessionState, clearSessionState, getGitRoot, getGitDir, listActiveSessions } from '../session-state.js';
 
 /**
  * origin doctor
@@ -15,7 +16,7 @@ import { loadSessionState, clearSessionState, getGitRoot, getGitDir } from '../s
  *  2. Orphaned session files in ~/.origin/sessions/
  *  3. Hook installation health
  */
-export async function doctorCommand(opts?: { fix?: boolean }) {
+export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean }) {
   const config = loadConfig();
   console.log(chalk.bold('\n  Origin Doctor\n'));
 
@@ -49,6 +50,82 @@ export async function doctorCommand(opts?: { fix?: boolean }) {
       }
     } else {
       console.log(chalk.green(`  ✓ No active session in current repo`));
+    }
+
+    // 1b. Stuck session detection (>1hr ACTIVE)
+    const activeSessions = listActiveSessions(cwd);
+    const stuckSessions = activeSessions.filter(s => {
+      const ageMs = Date.now() - new Date(s.startedAt).getTime();
+      return ageMs > 60 * 60 * 1000; // >1hr
+    });
+
+    if (stuckSessions.length > 0) {
+      issues += stuckSessions.length;
+      console.log(chalk.yellow(`  ⚠ ${stuckSessions.length} stuck session${stuckSessions.length !== 1 ? 's' : ''} (>1hr old):`));
+      for (const s of stuckSessions) {
+        const ageHrs = (Date.now() - new Date(s.startedAt).getTime()) / (1000 * 60 * 60);
+        console.log(chalk.gray(`    ${s.sessionId.slice(0, 8)} — ${s.model} — ${ageHrs.toFixed(1)}h`));
+        if (opts?.verbose) {
+          console.log(chalk.gray(`      Branch: ${s.branch || 'unknown'}, Prompts: ${s.prompts.length}`));
+        }
+      }
+      if (opts?.fix) {
+        for (const s of stuckSessions) {
+          clearSessionState(cwd, s.sessionTag);
+          fixed++;
+        }
+        console.log(chalk.green(`    ✓ Cleared ${stuckSessions.length} stuck session${stuckSessions.length !== 1 ? 's' : ''}`));
+      } else {
+        console.log(chalk.gray(`    Run with --fix to clear`));
+      }
+    } else if (opts?.verbose) {
+      console.log(chalk.green(`  ✓ No stuck sessions`));
+    }
+
+    // 1c. Orphaned origin-sessions entries (referencing non-existent commits)
+    try {
+      const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+      // Check if origin-sessions branch exists
+      execSync('git rev-parse refs/heads/origin-sessions', execOpts);
+
+      const tree = execSync(
+        'git ls-tree --name-only refs/heads/origin-sessions sessions/',
+        execOpts,
+      ).trim();
+      const sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
+      let orphanedEntries = 0;
+
+      for (const dir of sessionDirs) {
+        try {
+          const metaRaw = execSync(
+            `git show refs/heads/origin-sessions:${dir}/metadata.json`,
+            execOpts,
+          ).trim();
+          const metadata = JSON.parse(metaRaw);
+          const headAfter = metadata.git?.headAfter;
+          if (headAfter) {
+            try {
+              execSync(`git cat-file -t ${headAfter}`, execOpts);
+            } catch {
+              orphanedEntries++;
+              if (opts?.verbose) {
+                console.log(chalk.gray(`    Orphaned: ${dir} (commit ${headAfter.slice(0, 8)} not found)`));
+              }
+            }
+          }
+        } catch { /* skip unreadable */ }
+      }
+
+      if (orphanedEntries > 0) {
+        issues++;
+        console.log(chalk.yellow(`  ⚠ ${orphanedEntries} orphaned origin-sessions entries (referencing non-existent commits)`));
+      } else if (opts?.verbose) {
+        console.log(chalk.green(`  ✓ All origin-sessions entries reference valid commits`));
+      }
+    } catch {
+      if (opts?.verbose) {
+        console.log(chalk.gray(`  No origin-sessions branch to check`));
+      }
     }
   } else {
     console.log(chalk.gray('  Not in a git repo, skipping session check'));

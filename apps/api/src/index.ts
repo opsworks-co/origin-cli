@@ -26,6 +26,7 @@ import repoRoutes from './routes/repos.js';
 import sessionRoutes from './routes/sessions.js';
 import agentRoutes from './routes/agents.js';
 import policyRoutes from './routes/policies.js';
+import publicPolicyRoutes from './routes/public-policies.js';
 import auditRoutes from './routes/audit.js';
 import statsRoutes from './routes/stats.js';
 import machineRoutes from './routes/machines.js';
@@ -40,6 +41,10 @@ import scanningRoutes from './routes/scanning.js';
 import reportRoutes from './routes/reports.js';
 import pullRequestRoutes from './routes/pull-requests.js';
 import githubAppRoutes from './routes/github-app.js';
+import trailRoutes from './routes/trails.js';
+import leaderboardRoutes from './routes/leaderboard.js';
+import promptRoutes from './routes/prompts.js';
+import modelRoutes from './routes/models.js';
 
 const app = express();
 
@@ -56,6 +61,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/repos', repoRoutes);
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/agents', agentRoutes);
+app.use('/api/policies/public', publicPolicyRoutes);
 app.use('/api/policies', policyRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/stats', statsRoutes);
@@ -71,6 +77,10 @@ app.use('/api/scanning', scanningRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/pull-requests', pullRequestRoutes);
 app.use('/api/github-app', githubAppRoutes);
+app.use('/api/trails', trailRoutes);
+app.use('/api/leaderboard', leaderboardRoutes);
+app.use('/api/prompts', promptRoutes);
+app.use('/api/models', modelRoutes);
 
 // Serve CLI install script
 app.get('/install.sh', (_req, res) => {

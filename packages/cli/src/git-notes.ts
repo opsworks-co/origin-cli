@@ -23,6 +23,9 @@ export interface GitNoteData {
   linesAdded: number;
   linesRemoved: number;
   originUrl: string;
+  aiPercentage?: number;
+  humanPercentage?: number;
+  mixedPercentage?: number;
 }
 
 export function writeGitNotes(
@@ -55,6 +58,9 @@ export function writeGitNotes(
         linesAdded: data.linesAdded,
         linesRemoved: data.linesRemoved,
         originUrl: data.originUrl,
+        aiPercentage: data.aiPercentage ?? undefined,
+        humanPercentage: data.humanPercentage ?? undefined,
+        mixedPercentage: data.mixedPercentage ?? undefined,
         timestamp: new Date().toISOString(),
       },
     },

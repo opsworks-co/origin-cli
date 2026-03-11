@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import * as api from '../api';
-import type { Repo, CommitDiff } from '../api';
+import type { Repo, CommitDiff, RepoHealth } from '../api';
 import WebhookSettings from '../components/WebhookSettings';
+import ScoreGauge from '../components/ScoreGauge';
 import { timeAgo } from '../utils';
 
 interface PromptChangeData {
@@ -506,6 +507,9 @@ export default function RepoDetail() {
   const [rescanning, setRescanning] = useState(false);
   const [importing, setImporting] = useState(false);
 
+  // Health
+  const [health, setHealth] = useState<RepoHealth | null>(null);
+
   // Diff modal states
   const [selectedCommit, setSelectedCommit] = useState<Commit | null>(null);
   const [diff, setDiff] = useState<CommitDiff | null>(null);
@@ -530,6 +534,8 @@ export default function RepoDetail() {
     } finally {
       setLoading(false);
     }
+    // Fetch health score separately (non-blocking)
+    api.getRepoHealth(id).then(setHealth).catch(() => {});
   }, [id, branchFilter]);
 
   useEffect(() => {
@@ -751,6 +757,39 @@ export default function RepoDetail() {
           </p>
         </div>
       </div>
+
+      {/* Health Score */}
+      {health && (
+        <div className="card">
+          <div className="flex items-center gap-6">
+            <ScoreGauge score={health.healthScore} label="Repo Health" size={90} />
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 flex-1">
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-wider">AI %</p>
+                <p className="text-lg font-bold text-indigo-400 mt-0.5">{health.aiPercentage.toFixed(0)}%</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-wider">Review Coverage</p>
+                <p className={`text-lg font-bold mt-0.5 ${health.reviewCoverage >= 80 ? 'text-green-400' : health.reviewCoverage >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
+                  {health.reviewCoverage.toFixed(0)}%
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-wider">Violations</p>
+                <p className={`text-lg font-bold mt-0.5 ${health.violations === 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {health.violations}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-wider">Last Session</p>
+                <p className="text-sm text-gray-300 mt-1">
+                  {health.lastSession ? timeAgo(health.lastSession) : 'None'}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex gap-2 flex-wrap items-center">

@@ -432,6 +432,31 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     const totalSecretFindings = secretsByType.reduce((s, g) => s + g._count, 0);
 
+    // ── Cost Forecasting via Linear Regression ──────────────────
+    const now = new Date();
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const daysElapsed = now.getDate();
+
+    // Linear regression on costByDay data
+    const costDays = Object.entries(dayCosts).filter(([_, v]) => v > 0);
+    let projectedMonthlyCost = estimatedCostThisMonth;
+    let dailyCostTrend = 0;
+
+    if (costDays.length >= 3) {
+      const n = costDays.length;
+      let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+      costDays.forEach(([_, cost], i) => {
+        sumX += i;
+        sumY += cost;
+        sumXY += i * cost;
+        sumX2 += i * i;
+      });
+      const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+      dailyCostTrend = parseFloat(slope.toFixed(4));
+      const avgDaily = sumY / n;
+      projectedMonthlyCost = parseFloat((avgDaily * daysInMonth).toFixed(2));
+    }
+
     res.json({
       totalSessions,
       activeSessions,
@@ -470,6 +495,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       sessionsByHour,
       secretsByType: secretsByType.map((g) => ({ type: g.type, count: g._count })),
       totalSecretFindings,
+      // Cost forecasting
+      projectedMonthlyCost,
+      dailyCostTrend,
+      daysInMonth,
+      daysElapsed,
     });
   } catch (err) {
     console.error('Stats error:', err);

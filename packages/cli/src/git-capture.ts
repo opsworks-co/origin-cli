@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import { shouldIgnoreFile } from './ignore-patterns.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -75,7 +76,7 @@ export function captureGitState(repoPath: string, headBefore: string | null): Gi
         `git diff-tree --no-commit-id --name-only -r ${sha}`,
         execOpts,
       ).trim();
-      const filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean) : [];
+      const filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean).filter(f => !shouldIgnoreFile(f)) : [];
       commitDetails.push({ sha, message, author, filesChanged });
     } catch {
       // If we can't get details for a commit, include it with minimal info

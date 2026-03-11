@@ -1,5 +1,6 @@
 import { prisma } from '../db.js';
 import { getValidInstallationToken, listGitHubAppRepos } from './github-app.js';
+import { describeCondition, describeAction, policyTypeLabel } from '../utils/policy-descriptions.js';
 
 // ── GitHub API helpers ────────────────────────────────────────────
 
@@ -415,6 +416,13 @@ interface SessionForComment {
   linesRemoved: number;
   reviewStatus: string | null;
   reviewNote: string | null;
+  violations?: Array<{
+    policyName: string;
+    policyType: string;
+    condition: string;
+    action: string;
+    message: string;
+  }>;
 }
 
 function statusEmoji(status: string | null): string {
@@ -438,6 +446,7 @@ function statusLabel(status: string | null): string {
 export function buildSessionSummaryComment(
   sessions: SessionForComment[],
   originBaseUrl: string,
+  orgSlug?: string,
 ): string {
   if (sessions.length === 0) {
     return [
@@ -469,18 +478,6 @@ export function buildSessionSummaryComment(
   else if (anyRejected) overallStatus = '❌ Session(s) rejected';
   else if (anyFlagged) overallStatus = '⚠️ Session(s) flagged';
 
-  // Collect policy violation details from flagged sessions
-  const violationLines: string[] = [];
-  for (const s of sessions) {
-    if (s.reviewNote && (s.reviewStatus?.toUpperCase() === 'FLAGGED' || s.reviewStatus?.toUpperCase() === 'REJECTED')) {
-      // Parse auto-flag notes for violation details
-      const lines = s.reviewNote.split('\n').filter((l) => l.startsWith('- **'));
-      for (const line of lines) {
-        violationLines.push(line);
-      }
-    }
-  }
-
   const parts = [
     '## 🔍 Origin — AI Governance Report',
     '',
@@ -493,10 +490,45 @@ export function buildSessionSummaryComment(
     `**Overall:** ${overallStatus}`,
   ];
 
-  if (violationLines.length > 0) {
-    parts.push('', '### ⚠️ Policy Violations', '');
-    for (const line of violationLines) {
-      parts.push(line);
+  // Collect policy violations — prefer structured data, fall back to review notes
+  const hasStructuredViolations = sessions.some(s => s.violations && s.violations.length > 0);
+
+  if (hasStructuredViolations) {
+    parts.push('', '### Policy Violations', '');
+    const seen = new Set<string>();
+    for (const s of sessions) {
+      for (const v of (s.violations || [])) {
+        const key = `${v.policyName}:${v.message}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const desc = describeCondition(v.policyType, v.condition);
+        parts.push(`**${v.policyName}** (${policyTypeLabel(v.policyType)})`);
+        parts.push(`- ${v.message}`);
+        parts.push(`- Action: ${describeAction(v.action)}`);
+        parts.push(`- How to fix: ${desc.fixHint}`);
+        parts.push('');
+      }
+    }
+    if (orgSlug) {
+      parts.push(`[View all policies](${originBaseUrl}/org/${orgSlug}/policies)`);
+      parts.push('');
+    }
+  } else {
+    // Fallback: parse violation lines from review notes
+    const violationLines: string[] = [];
+    for (const s of sessions) {
+      if (s.reviewNote && (s.reviewStatus?.toUpperCase() === 'FLAGGED' || s.reviewStatus?.toUpperCase() === 'REJECTED')) {
+        const lines = s.reviewNote.split('\n').filter((l) => l.startsWith('- **'));
+        for (const line of lines) {
+          violationLines.push(line);
+        }
+      }
+    }
+    if (violationLines.length > 0) {
+      parts.push('', '### Policy Violations', '');
+      for (const line of violationLines) {
+        parts.push(line);
+      }
     }
   }
 
@@ -527,15 +559,26 @@ export function computeCheckStatus(sessions: SessionForComment[]): {
   const pending = sessions.filter((s) => !s.reviewStatus).length;
 
   if (anyRejected) {
-    // Extract first violation message from review note
     const rejected = sessions.find((s) => s.reviewStatus?.toUpperCase() === 'REJECTED');
-    const detail = extractFirstViolation(rejected?.reviewNote);
-    return { state: 'failure', description: detail || `${sessions.length} AI session(s) — rejected` };
+    const firstViolation = rejected?.violations?.[0];
+    let detail: string | null;
+    if (firstViolation) {
+      detail = `${firstViolation.policyName}: ${firstViolation.message}`;
+    } else {
+      detail = extractFirstViolation(rejected?.reviewNote) || `${sessions.length} AI session(s) — rejected`;
+    }
+    return { state: 'failure', description: detail.length > 130 ? detail.slice(0, 127) + '...' : detail };
   }
   if (anyFlagged) {
     const flagged = sessions.find((s) => s.reviewStatus?.toUpperCase() === 'FLAGGED');
-    const detail = extractFirstViolation(flagged?.reviewNote);
-    return { state: 'failure', description: detail || `${sessions.length} AI session(s) — policy violation` };
+    const firstViolation = flagged?.violations?.[0];
+    let detail: string | null;
+    if (firstViolation) {
+      detail = `${firstViolation.policyName}: ${firstViolation.message}`;
+    } else {
+      detail = extractFirstViolation(flagged?.reviewNote) || `${sessions.length} AI session(s) — policy violation`;
+    }
+    return { state: 'failure', description: detail.length > 130 ? detail.slice(0, 127) + '...' : detail };
   }
   if (allApproved) {
     return { state: 'success', description: `${sessions.length} AI session(s) — all approved` };
@@ -596,6 +639,37 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
       });
     }
   }
+
+  // Load policy violations from audit log for each session
+  const sessionIds = Array.from(sessionMap.keys());
+  if (sessionIds.length > 0) {
+    const violationLogs = await prisma.auditLog.findMany({
+      where: {
+        action: 'POLICY_VIOLATION',
+        resource: { in: sessionIds },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    for (const log of violationLogs) {
+      try {
+        const meta = JSON.parse(log.metadata);
+        const sessionId = meta.sessionId || log.resource;
+        const session = sessionMap.get(sessionId as string);
+        if (session) {
+          if (!session.violations) session.violations = [];
+          session.violations.push({
+            policyName: meta.policyName || 'Unknown Policy',
+            policyType: meta.policyType || 'UNKNOWN',
+            condition: meta.condition || '{}',
+            action: meta.action || 'WARN',
+            message: meta.message || '',
+          });
+        }
+      } catch { /* ignore parse errors */ }
+    }
+  }
+
   return Array.from(sessionMap.values());
 }
 
@@ -630,6 +704,7 @@ export async function updatePRGitHubStatus(
   }
 
   const sessions = await getSessionsForPR(repoId, commitShas);
+  const org = await prisma.org.findUnique({ where: { id: orgId }, select: { slug: true } });
 
   // Post status check
   if (integration.parsedSettings.postChecks) {
@@ -653,7 +728,7 @@ export async function updatePRGitHubStatus(
 
   // Post or update comment
   if (integration.parsedSettings.postComments) {
-    const commentBody = buildSessionSummaryComment(sessions, originBaseUrl);
+    const commentBody = buildSessionSummaryComment(sessions, originBaseUrl, org?.slug);
 
     if (pr.commentId) {
       await updatePRComment(
@@ -728,6 +803,7 @@ export async function updateSessionPRChecks(
   if (!parsed) return 0;
 
   const originBaseUrl = process.env.ORIGIN_WEB_URL || 'http://localhost:5176';
+  const org = await prisma.org.findUnique({ where: { id: orgId }, select: { slug: true } });
   let updated = 0;
 
   for (const pr of openPRs) {
@@ -766,7 +842,7 @@ export async function updateSessionPRChecks(
 
       // Update comment
       if (integration.parsedSettings.postComments) {
-        const commentBody = buildSessionSummaryComment(sessions, originBaseUrl);
+        const commentBody = buildSessionSummaryComment(sessions, originBaseUrl, org?.slug);
         if (pr.commentId) {
           await updatePRComment(
             integration.token,

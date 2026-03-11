@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { shouldIgnoreFile } from './ignore-patterns.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -170,8 +171,8 @@ export function parseTranscript(transcriptPath: string): ParsedTranscript {
   }
   result.tokensUsed = result.inputTokens + result.cacheReadTokens + result.cacheCreationTokens + result.outputTokens;
 
-  // Deduplicated file list
-  result.filesChanged = Array.from(filesSet);
+  // Deduplicated file list, filtered through ignore patterns
+  result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
 
   // Truncate summary to 500 chars
   if (result.summary.length > 500) {
@@ -300,7 +301,7 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
     }
 
     result.tokensUsed = result.inputTokens + result.cacheReadTokens + result.outputTokens;
-    result.filesChanged = Array.from(filesSet);
+    result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
     if (!result.model) result.model = data.model || 'gemini';
 
     if (result.summary.length > 500) {

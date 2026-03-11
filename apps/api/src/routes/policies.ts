@@ -7,7 +7,7 @@ import { createPolicyVersion } from '../services/versioning.js';
 const router = Router();
 router.use(requireAuth);
 
-// GET / — list policies for org
+// GET / — list policies for org (includes agent assignments)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const policies = await prisma.policy.findMany({
@@ -18,6 +18,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
             agent: { select: { name: true } },
             machine: { select: { hostname: true } },
             repo: { select: { name: true } },
+          },
+        },
+        assignments: {
+          include: {
+            agent: { select: { id: true, name: true, slug: true } },
           },
         },
       },
@@ -123,8 +128,9 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       return res.status(404).json({ error: 'Policy not found' });
     }
 
-    // Delete rules first, then policy
+    // Delete rules and assignments first, then policy
     await prisma.policyRule.deleteMany({ where: { policyId: id } });
+    await prisma.policyAssignment.deleteMany({ where: { policyId: id } });
     await prisma.policy.delete({ where: { id } });
 
     await prisma.auditLog.create({
@@ -252,6 +258,86 @@ router.get('/:id/versions', async (req: AuthRequest, res: Response) => {
     });
   } catch (err) {
     console.error('List policy versions error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Policy-Agent Assignments ───────────────────────────────────
+
+// PUT /:id/assignments — set agent assignments for a policy (MEMBER+)
+router.put('/:id/assignments', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { agentIds } = req.body as { agentIds: string[] };
+
+    if (!Array.isArray(agentIds)) {
+      return res.status(400).json({ error: 'agentIds must be an array' });
+    }
+
+    const policy = await prisma.policy.findFirst({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (!policy) return res.status(404).json({ error: 'Policy not found' });
+
+    // Validate all agent IDs belong to the same org
+    if (agentIds.length > 0) {
+      const agents = await prisma.agent.findMany({
+        where: { id: { in: agentIds }, orgId: req.user!.orgId },
+        select: { id: true },
+      });
+      const validIds = new Set(agents.map(a => a.id));
+      const invalid = agentIds.filter(aid => !validIds.has(aid));
+      if (invalid.length > 0) {
+        return res.status(400).json({ error: `Agent(s) not found in your organization: ${invalid.join(', ')}` });
+      }
+    }
+
+    // Replace all assignments: delete existing, create new
+    await prisma.policyAssignment.deleteMany({ where: { policyId: id } });
+    if (agentIds.length > 0) {
+      await prisma.policyAssignment.createMany({
+        data: agentIds.map(agentId => ({ policyId: id, agentId })),
+      });
+    }
+
+    // Fetch updated assignments
+    const assignments = await prisma.policyAssignment.findMany({
+      where: { policyId: id },
+      include: { agent: { select: { id: true, name: true, slug: true } } },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'POLICY_ASSIGNMENTS_UPDATED',
+        resource: id,
+        metadata: JSON.stringify({ policyName: policy.name, agentIds }),
+      },
+    });
+
+    res.json({ assignments });
+  } catch (err) {
+    console.error('Update policy assignments error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:id/assignments — get agent assignments for a policy
+router.get('/:id/assignments', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const policy = await prisma.policy.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!policy) return res.status(404).json({ error: 'Policy not found' });
+
+    const assignments = await prisma.policyAssignment.findMany({
+      where: { policyId: id },
+      include: { agent: { select: { id: true, name: true, slug: true } } },
+    });
+
+    res.json({ assignments });
+  } catch (err) {
+    console.error('Get policy assignments error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

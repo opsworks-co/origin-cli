@@ -138,15 +138,24 @@ export default function AgentDetail() {
 
   const latestVersion = versions.length > 0 ? versions[0].version : 0;
 
-  // Compute policy rules scoped to this agent
+  // Compute policies assigned to this agent and policy rules scoped to this agent
+  const assignedPolicies: api.Policy[] = [];
   const agentRules: Array<api.PolicyRule & { policyName: string; policyType: string; policyActive: boolean }> = [];
   const orgWideRules: Array<api.PolicyRule & { policyName: string; policyType: string; policyActive: boolean }> = [];
+  const assignedPolicyIds = new Set<string>();
   for (const policy of policies) {
+    // Check if this policy is assigned to this agent via PolicyAssignment
+    const isAssigned = (policy.assignments || []).some(a => a.agent.id === id);
+    if (isAssigned) {
+      assignedPolicies.push(policy);
+      assignedPolicyIds.add(policy.id);
+    }
     for (const rule of (policy.rules || [])) {
       const enriched = { ...rule, policyName: policy.name, policyType: policy.type, policyActive: policy.active };
       if (rule.agentId === id) {
         agentRules.push(enriched);
-      } else if (!rule.agentId) {
+      } else if (!rule.agentId && !isAssigned) {
+        // Only show as org-wide if not already shown via assignment
         orgWideRules.push(enriched);
       }
     }
@@ -270,7 +279,7 @@ export default function AgentDetail() {
           Configuration
         </button>
         <button onClick={() => setTab('policies')} className={tabClasses('policies')}>
-          Policies ({agentRules.length})
+          Policies ({assignedPolicies.length + agentRules.length})
         </button>
         <button onClick={() => setTab('sessions')} className={tabClasses('sessions')}>
           Sessions ({agent.sessions?.length ?? 0})
@@ -403,6 +412,42 @@ export default function AgentDetail() {
       {/* Policies Tab */}
       {tab === 'policies' && (
         <div className="space-y-6">
+          {/* Assigned Policies */}
+          {assignedPolicies.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-300 mb-3">
+                Assigned Policies <span className="text-gray-500 font-normal">(all rules apply to this agent)</span>
+              </h3>
+              <div className="space-y-2">
+                {assignedPolicies.map(policy => (
+                  <Link
+                    key={policy.id}
+                    to={`/policies/${policy.id}`}
+                    className="card py-3 flex items-center gap-3 hover:border-gray-700 transition-colors block"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-indigo-400">{policy.name}</span>
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${TYPE_BADGE[policy.type] || 'bg-gray-800 text-gray-400'}`}>
+                          {policy.type.replace(/_/g, ' ')}
+                        </span>
+                        {!policy.active && (
+                          <span className="text-xs text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">inactive</span>
+                        )}
+                      </div>
+                      {policy.description && (
+                        <p className="text-xs text-gray-500 mt-0.5 truncate">{policy.description}</p>
+                      )}
+                    </div>
+                    <span className="text-xs text-gray-500 flex-shrink-0">
+                      {policy.rules.length} rule{policy.rules.length !== 1 ? 's' : ''}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Agent-specific rules */}
           <div>
             <div className="flex items-center justify-between mb-3">

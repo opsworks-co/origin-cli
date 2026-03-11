@@ -10,6 +10,11 @@ const NAV_ITEMS = [
   { to: '/agents', label: 'Agents', icon: '\uD83E\uDD16' },
   { to: '/sessions', label: 'Sessions', icon: '\u25B6' },
   { to: '/pull-requests', label: 'PR Checks', icon: '\uD83D\uDD00' },
+  { to: '/leaderboard', label: 'Leaderboard', icon: '\uD83C\uDFC6' },
+  { to: '/trails', label: 'Trails', icon: '\uD83D\uDEE4' },
+  { to: '/prompts', label: 'Prompts', icon: '\uD83D\uDCAC' },
+  { to: '/compliance', label: 'Compliance', icon: '\u2713' },
+  { to: '/models', label: 'Models', icon: '\u26A1' },
   { to: '/policies', label: 'Policies', icon: '\uD83D\uDEE1' },
   { to: '/settings', label: 'Settings', icon: '\u2699' },
 ];

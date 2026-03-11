@@ -433,6 +433,24 @@ export default function Policies() {
                     {policy.description && (
                       <p className="text-xs text-gray-500 mt-0.5">{policy.description}</p>
                     )}
+                    {/* Assigned agents */}
+                    {policy.assignments && policy.assignments.length > 0 && (
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        {policy.assignments.map(a => (
+                          <Link
+                            key={a.agent.id}
+                            to={`/agents/${a.agent.id}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-xs px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 hover:bg-indigo-500/25 transition-colors"
+                          >
+                            {a.agent.name}
+                          </Link>
+                        ))}
+                      </div>
+                    )}
+                    {policy.assignments && policy.assignments.length === 0 && (
+                      <span className="text-xs text-gray-600 mt-1 inline-block">org-wide</span>
+                    )}
                   </div>
                   <div className="flex items-center gap-3 flex-shrink-0">
                     {policy.active ? (

@@ -124,6 +124,82 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
       orgId,
     });
 
+    // ── Unreviewed Aging ──────────────────────────────────────────
+    const unreviewedSessions = await prisma.codingSession.findMany({
+      where: {
+        commit: { repoId: { in: repoIds } },
+        review: null,
+      },
+      select: { createdAt: true },
+    });
+
+    const nowDate = new Date();
+    const aging = { lessThan1d: 0, from1to3d: 0, from3to7d: 0, moreThan7d: 0 };
+    for (const s of unreviewedSessions) {
+      const ageMs = nowDate.getTime() - s.createdAt.getTime();
+      const ageDays = ageMs / (24 * 60 * 60 * 1000);
+      if (ageDays < 1) aging.lessThan1d++;
+      else if (ageDays < 3) aging.from1to3d++;
+      else if (ageDays < 7) aging.from3to7d++;
+      else aging.moreThan7d++;
+    }
+
+    // ── Policy Coverage per Repo ────────────────────────────────
+    const policies = await prisma.policy.findMany({
+      where: { orgId, active: true },
+      include: { rules: { select: { repoId: true } } },
+    });
+
+    const policyCoverage = repos.map((r) => ({
+      repo: r.name,
+      repoId: r.id,
+      policies: policies
+        .filter((p) =>
+          p.rules.some((rule) => !rule.repoId || rule.repoId === r.id)
+        )
+        .map((p) => p.type),
+    }));
+
+    // ── Compliance Trend (weekly scores for last 12 weeks) ──────
+    const complianceTrend: Array<{ week: string; score: number }> = [];
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+
+    for (let i = 11; i >= 0; i--) {
+      const weekEnd = new Date(nowDate.getTime() - i * weekMs);
+      const weekStart = new Date(weekEnd.getTime() - weekMs);
+
+      const weekYear = weekEnd.getFullYear();
+      const yearStart = new Date(weekYear, 0, 1);
+      const dayOfYear =
+        Math.floor(
+          (weekEnd.getTime() - yearStart.getTime()) / (24 * 60 * 60 * 1000)
+        ) + 1;
+      const weekNum = Math.ceil((dayOfYear + yearStart.getDay()) / 7);
+      const weekKey = `${weekYear}-W${String(weekNum).padStart(2, '0')}`;
+
+      const weekSessions = sessions.filter(
+        (s) => s.createdAt >= weekStart && s.createdAt < weekEnd
+      );
+
+      const weekTotal = weekSessions.length;
+      const weekReviewed = weekSessions.filter((s) => s.review).length;
+      const weekReviewRate =
+        weekTotal > 0 ? (weekReviewed / weekTotal) * 100 : 100;
+
+      // Approximate even distribution of violations across weeks
+      const weekViolationCount = Math.round(violations.length / 12);
+
+      const weekScore = computeComplianceScore({
+        totalSessions: weekTotal,
+        reviewRate: weekReviewRate,
+        totalViolations: weekViolationCount,
+        totalSecretFindings: Math.round(totalSecretFindings / 12),
+        orgId,
+      });
+
+      complianceTrend.push({ week: weekKey, score: weekScore });
+    }
+
     res.json({
       period: { from: fromDate.toISOString(), to: toDate.toISOString() },
       complianceScore: score,
@@ -139,6 +215,9 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
       securityFindings: secretFindings.map((g) => ({ type: g.type, count: g._count })),
       reviewCoverage: { reviewed, unreviewed },
       modelUsage,
+      unreviewedAging: aging,
+      policyCoverage,
+      complianceTrend,
     });
   } catch (err) {
     console.error('Compliance report error:', err);

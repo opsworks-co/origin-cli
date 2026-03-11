@@ -1253,4 +1253,115 @@ router.delete('/:id/webhooks/:webhookId', requireRole('ADMIN'), async (req: Auth
   }
 });
 
+// GET /:id/health — repo health score
+router.get('/:id/health', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const orgId = req.user!.orgId;
+
+    const repo = await prisma.repo.findFirst({
+      where: { id, orgId },
+    });
+
+    if (!repo) {
+      return res.status(404).json({ error: 'Repo not found' });
+    }
+
+    // Get all sessions for this repo
+    const sessions = await prisma.codingSession.findMany({
+      where: {
+        commit: { repoId: id },
+      },
+      select: {
+        id: true,
+        costUsd: true,
+        linesAdded: true,
+        linesRemoved: true,
+        createdAt: true,
+        review: { select: { status: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const sessionCount = sessions.length;
+
+    // AI percentage for this repo
+    const totalCommits = await prisma.commit.count({
+      where: { repoId: id },
+    });
+    const aiCommits = await prisma.commit.count({
+      where: {
+        repoId: id,
+        OR: [
+          { session: { isNot: null } },
+          { aiToolDetected: { not: null } },
+        ],
+      },
+    });
+    const aiPercentage = totalCommits > 0
+      ? parseFloat(((aiCommits / totalCommits) * 100).toFixed(1))
+      : 0;
+
+    // Review coverage
+    const reviewedCount = sessions.filter((s) => s.review !== null).length;
+    const reviewCoverage = sessionCount > 0
+      ? parseFloat(((reviewedCount / sessionCount) * 100).toFixed(1))
+      : 100;
+
+    // Violations for this repo
+    const violations = await prisma.auditLog.count({
+      where: {
+        orgId,
+        action: { contains: 'VIOLATION' },
+        resource: id,
+      },
+    });
+
+    // Last session date
+    const lastSession = sessions.length > 0 ? sessions[0].createdAt : null;
+
+    // Health score calculation (0-100)
+    // Factors: review coverage (40%), low violations (30%), activity recency (20%), base (10%)
+    let healthScore = 10; // Base
+
+    // Review coverage (0-40)
+    healthScore += Math.min(40, (reviewCoverage / 100) * 40);
+
+    // Violation rate (0-30, inversely proportional)
+    if (sessionCount > 0) {
+      const violationRate = violations / sessionCount;
+      healthScore += Math.max(0, 30 * (1 - Math.min(1, violationRate * 5)));
+    } else {
+      healthScore += 30;
+    }
+
+    // Activity recency (0-20)
+    if (lastSession) {
+      const daysSinceLastSession =
+        (Date.now() - lastSession.getTime()) / (24 * 60 * 60 * 1000);
+      if (daysSinceLastSession < 1) healthScore += 20;
+      else if (daysSinceLastSession < 7) healthScore += 15;
+      else if (daysSinceLastSession < 30) healthScore += 10;
+      else if (daysSinceLastSession < 90) healthScore += 5;
+    }
+
+    healthScore = Math.round(Math.min(100, Math.max(0, healthScore)));
+
+    res.json({
+      repoId: id,
+      repoName: repo.name,
+      healthScore,
+      aiPercentage,
+      sessionCount,
+      reviewCoverage,
+      violations,
+      lastSession,
+      totalCommits,
+    });
+  } catch (err) {
+    console.error('Repo health error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

@@ -27,6 +27,13 @@ import Reports from './pages/Reports';
 import MachineDetail from './pages/MachineDetail';
 import AcceptInvite from './pages/AcceptInvite';
 import PullRequests from './pages/PullRequests';
+import Leaderboard from './pages/Leaderboard';
+import Trails from './pages/Trails';
+import TrailDetail from './pages/TrailDetail';
+import Prompts from './pages/Prompts';
+import ComplianceDashboard from './pages/Compliance';
+import ModelComparison from './pages/ModelComparison';
+import PublicPolicies from './pages/PublicPolicies';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -53,6 +60,7 @@ export default function App() {
       <Route path="/" element={<PublicLayout><Landing /></PublicLayout>} />
       <Route path="/docs" element={<PublicLayout><Docs /></PublicLayout>} />
       <Route path="/pricing" element={<PublicLayout><Pricing /></PublicLayout>} />
+      <Route path="/org/:orgSlug/policies" element={<PublicLayout><PublicPolicies /></PublicLayout>} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
       <Route path="/invite/:token" element={<AcceptInvite />} />
@@ -199,6 +207,66 @@ export default function App() {
           <ProtectedRoute>
             <Layout>
               <Settings />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/leaderboard"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Leaderboard />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/trails"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Trails />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/trails/:id"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <TrailDetail />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/prompts"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Prompts />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/compliance"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <ComplianceDashboard />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/models"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <ModelComparison />
             </Layout>
           </ProtectedRoute>
         }

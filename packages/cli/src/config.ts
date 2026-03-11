@@ -12,6 +12,13 @@ export interface OriginConfig {
   orgId: string;
   userId: string;
   machineId?: string;
+  // Feature flags
+  commitLinking?: 'always' | 'prompt' | 'never';
+  pushStrategy?: 'auto' | 'prompt' | 'false';
+  telemetry?: boolean;
+  autoUpdate?: boolean;
+  secretRedaction?: boolean;
+  hookChaining?: boolean;
 }
 
 export interface AgentConfig {
@@ -47,6 +54,8 @@ export function saveAgentConfig(config: AgentConfig) {
 
 export interface RepoConfig {
   agent?: string;  // Origin agent slug to link sessions to
+  ignorePatterns?: string[];
+  trackTabCompletions?: boolean;
 }
 
 export function loadRepoConfig(repoPath: string): RepoConfig | null {

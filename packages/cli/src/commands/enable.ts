@@ -33,6 +33,7 @@ function installClaudeHooks(gitRoot: string): void {
 
   let settings: Record<string, any> = {};
   if (fs.existsSync(settingsPath)) {
+    backupExistingHooks(settingsPath);
     try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')); } catch { settings = {}; }
   }
 
@@ -43,12 +44,29 @@ function installClaudeHooks(gitRoot: string): void {
     Stop: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code stop' }] }],
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code user-prompt-submit' }] }],
     SessionEnd: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code session-end' }] }],
+    PreToolUse: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code pre-tool-use' }] }],
+    PostToolUse: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code post-tool-use' }] }],
   };
 
   for (const [eventType, entries] of Object.entries(hooks)) {
     if (!settings.hooks[eventType]) settings.hooks[eventType] = [];
     settings.hooks[eventType] = filterOriginHooks(settings.hooks[eventType]);
     settings.hooks[eventType].push(...entries);
+  }
+
+  // F17: Add permission deny rules for reading/editing origin session files
+  if (!settings.permissions) settings.permissions = {};
+  if (!settings.permissions.deny) settings.permissions.deny = [];
+  const denyRules = [
+    'Read(.git/origin-session*.json)',
+    'Read(.origin.json)',
+    'Edit(.git/origin-session*.json)',
+    'Edit(.origin.json)',
+  ];
+  for (const rule of denyRules) {
+    if (!settings.permissions.deny.includes(rule)) {
+      settings.permissions.deny.push(rule);
+    }
   }
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
@@ -68,6 +86,7 @@ function installCursorHooks(gitRoot: string): void {
 
   let config: Record<string, any> = { version: 1, hooks: {} };
   if (fs.existsSync(hooksPath)) {
+    backupExistingHooks(hooksPath);
     try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = { version: 1, hooks: {} }; }
   }
 
@@ -105,6 +124,7 @@ function installGeminiHooks(gitRoot: string): void {
 
   let settings: Record<string, any> = {};
   if (fs.existsSync(settingsPath)) {
+    backupExistingHooks(settingsPath);
     try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')); } catch { settings = {}; }
   }
 
@@ -154,6 +174,7 @@ function installWindsurfHooks(gitRoot: string): void {
 
   let config: Record<string, any> = { version: 1, hooks: {} };
   if (fs.existsSync(hooksPath)) {
+    backupExistingHooks(hooksPath);
     try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = { version: 1, hooks: {} }; }
   }
 
@@ -209,6 +230,27 @@ function installAiderHooks(gitRoot: string): void {
   console.log(chalk.green('  ✓ Hooks installed in .aider.conf.yml'));
   console.log(chalk.gray('    • git-commit-verify: enabled (runs Origin post-commit hook)'));
   console.log(chalk.gray('    • notifications-command: origin hooks aider stop'));
+}
+
+// ── Hook Backup (F8) ──────────────────────────────────────────────────────
+
+/**
+ * Backup an existing hook configuration file before Origin modifies it.
+ * Creates a .origin-backup copy so the user can restore it later.
+ */
+function backupExistingHooks(filePath: string): void {
+  if (!fs.existsSync(filePath)) return;
+
+  const backupPath = filePath + '.origin-backup';
+
+  // Don't overwrite an existing backup — only create on first install
+  if (fs.existsSync(backupPath)) return;
+
+  try {
+    fs.copyFileSync(filePath, backupPath);
+  } catch {
+    // Best effort — don't block installation
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -373,9 +415,10 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
     console.log(chalk.gray('    • Turn end — files, tokens, tool calls'));
   }
 
-  // Install git post-commit hook (only for per-repo mode, not global)
+  // Install git hooks (only for per-repo mode, not global)
   if (!isGlobal) {
     installGitPostCommitHook(basePath);
+    installGitPrePushHook(basePath);
   }
 
   // If --link provided, validate agent and write .origin.json
@@ -448,4 +491,40 @@ function installGitPostCommitHook(gitRoot: string): void {
   // Make executable
   fs.chmodSync(hookPath, '755');
   console.log(chalk.green('  ✓ Git post-commit hook installed'));
+}
+
+// ─── Git Pre-Push Hook (F14) ──────────────────────────────────────────────
+
+function installGitPrePushHook(gitRoot: string): void {
+  const hooksDir = path.join(gitRoot, '.git', 'hooks');
+  const hookPath = path.join(hooksDir, 'pre-push');
+
+  // Ensure hooks directory exists
+  if (!fs.existsSync(hooksDir)) {
+    fs.mkdirSync(hooksDir, { recursive: true });
+  }
+
+  const ORIGIN_MARKER = '# origin-pre-push';
+  const hookScript = `origin hooks git-pre-push`;
+
+  // Check if hook file already exists
+  if (fs.existsSync(hookPath)) {
+    const existing = fs.readFileSync(hookPath, 'utf-8');
+    if (existing.includes(ORIGIN_MARKER)) {
+      console.log(chalk.gray('  ✓ Git pre-push hook already installed'));
+      return;
+    }
+    // Backup and append to existing hook
+    backupExistingHooks(hookPath);
+    const append = `\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    fs.appendFileSync(hookPath, append);
+  } else {
+    // Create new hook file
+    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    fs.writeFileSync(hookPath, content);
+  }
+
+  // Make executable
+  fs.chmodSync(hookPath, '755');
+  console.log(chalk.green('  ✓ Git pre-push hook installed'));
 }

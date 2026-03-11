@@ -10,10 +10,12 @@ import {
   getHeadSha,
   getBranch,
   type SessionState,
+  type SubagentRecord,
 } from '../session-state.js';
 import { captureGitState } from '../git-capture.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes } from '../git-notes.js';
+import { redactSecrets } from '../redaction.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -61,11 +63,15 @@ function buildSessionWriteData(opts: {
   const durationMs = Date.now() - new Date(state.startedAt).getTime();
   const branch = getBranch(state.repoPath) || state.branch || '';
 
-  // Merge file lists
+  // Merge file lists and make paths relative to repo root
+  const repoRoot = state.repoPath || '';
   const allFiles = Array.from(new Set([
     ...parsed.filesChanged,
     ...(extraFiles || []),
-  ]));
+  ])).map(f => f.startsWith(repoRoot) ? f.slice(repoRoot.length + 1) : f);
+
+  // Helper to make paths relative to repo root
+  const rel = (f: string) => f.startsWith(repoRoot) ? f.slice(repoRoot.length + 1) : f;
 
   // Build PromptEntry[] — match prompts to their file changes
   const promptEntries: PromptEntry[] = prompts.map((text, i) => {
@@ -73,7 +79,7 @@ function buildSessionWriteData(opts: {
     return {
       index: i + 1,
       text: typeof text === 'string' ? text : String(text),
-      filesChanged: mapping?.filesChanged || [],
+      filesChanged: (mapping?.filesChanged || []).map(rel),
     };
   });
 
@@ -81,7 +87,7 @@ function buildSessionWriteData(opts: {
   const changes: PromptChange[] = promptMappings.map(m => ({
     promptIndex: m.promptIndex + 1,
     promptText: m.promptText.slice(0, 200),
-    filesChanged: m.filesChanged,
+    filesChanged: m.filesChanged.map(rel),
     diff: m.diff,
   }));
 
@@ -272,10 +278,14 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     saveSessionState(state, hookCwd);
     debugLog('session-start', 'state saved', { sessionId: result.sessionId });
 
-    // Output system message to Claude Code
-    const output = JSON.stringify({
-      systemMessage: 'Origin: Session tracking active — prompts, files, and tokens will be captured.',
-    });
+    // Build system message with active policy summary
+    let systemMsg = 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
+    if (result.activePolicies && Array.isArray(result.activePolicies) && result.activePolicies.length > 0) {
+      systemMsg += '\n\nActive policies for this session:\n' +
+        result.activePolicies.map((p: string) => `- ${p}`).join('\n');
+    }
+
+    const output = JSON.stringify({ systemMessage: systemMsg });
     process.stdout.write(output);
   } catch (err: any) {
     debugLog('session-start', 'ERROR', { message: err.message, stack: err.stack });
@@ -354,7 +364,14 @@ async function handleStop(input: Record<string, any>): Promise<void> {
 
     // Use prompts from transcript if we captured them, else from state
     const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
-    const joinedPrompt = prompts.join('\n\n---\n\n');
+
+    // F9: Redact secrets before sending to API
+    const config_ = loadConfig();
+    const shouldRedact = config_?.secretRedaction !== false; // default: true
+    const redactedPrompts = shouldRedact
+      ? prompts.map(p => redactSecrets(p).redacted)
+      : prompts;
+    const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
 
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
     const model = parsed.model || state.model;
@@ -444,7 +461,14 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
     debugLog('session-end', 'formatted transcript', { displayLength: displayTranscript.length });
 
     const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
-    const joinedPrompt = prompts.join('\n\n---\n\n');
+
+    // F9: Redact secrets before sending to API
+    const config_ = loadConfig();
+    const shouldRedact = config_?.secretRedaction !== false; // default: true
+    const redactedPrompts = shouldRedact
+      ? prompts.map(p => redactSecrets(p).redacted)
+      : prompts;
+    const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
 
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
     const model = parsed.model || state.model;
@@ -603,7 +627,9 @@ export async function handlePostCommit(): Promise<void> {
     saveSessionState(state, hookCwd);
   }
 
-  if (state) {
+  // F13: Respect config.commitLinking setting (always|prompt|never)
+  const commitLinkingConfig = config.commitLinking || 'always';
+  if (state && commitLinkingConfig !== 'never') {
     try {
       // Only add trailer if not already present
       const fullMessage = execSync('git log -1 --format=%B', execOpts).trim();
@@ -704,6 +730,120 @@ export async function handlePostCommit(): Promise<void> {
   debugLog('post-commit', '=== GIT HOOK COMPLETE ===');
 }
 
+// ─── Pre-Tool-Use / Post-Tool-Use (F7: Subagent Tracking) ─────────────────
+
+async function handlePreToolUse(input: Record<string, any>): Promise<void> {
+  debugLog('pre-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
+
+  const hookCwd = input.cwd || process.cwd();
+  let state = loadSessionState(hookCwd);
+  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
+  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
+  if (!state) {
+    debugLog('pre-tool-use', 'ABORT: no session state');
+    return;
+  }
+
+  // Initialize subagents array if needed
+  if (!state.subagents) state.subagents = [];
+
+  const toolCallId = input.tool_call_id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const record: SubagentRecord = {
+    toolCallId,
+    toolName: input.tool_name || 'unknown',
+    startedAt: new Date().toISOString(),
+    prompt: input.tool_input ? JSON.stringify(input.tool_input).slice(0, 500) : undefined,
+  };
+
+  state.subagents.push(record);
+  saveSessionState(state, resolvedCwd || hookCwd);
+  debugLog('pre-tool-use', 'recorded', { toolCallId, toolName: record.toolName });
+}
+
+async function handlePostToolUse(input: Record<string, any>): Promise<void> {
+  debugLog('post-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
+
+  const hookCwd = input.cwd || process.cwd();
+  let state = loadSessionState(hookCwd);
+  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
+  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
+  if (!state) {
+    debugLog('post-tool-use', 'ABORT: no session state');
+    return;
+  }
+
+  if (state.subagents && state.subagents.length > 0) {
+    // Find the matching pre-tool-use record (last unfinished one with matching tool name)
+    const toolName = input.tool_name || 'unknown';
+    const record = [...state.subagents].reverse().find(
+      r => r.toolName === toolName && !r.endedAt
+    );
+
+    if (record) {
+      record.endedAt = new Date().toISOString();
+      if (input.tool_result) {
+        record.result = typeof input.tool_result === 'string'
+          ? input.tool_result.slice(0, 500)
+          : JSON.stringify(input.tool_result).slice(0, 500);
+      }
+      saveSessionState(state, resolvedCwd || hookCwd);
+      debugLog('post-tool-use', 'updated', { toolCallId: record.toolCallId, toolName });
+    }
+  }
+}
+
+// ─── Git Hook: Pre-Push (F14) ─────────────────────────────────────────────
+
+/**
+ * Called by .git/hooks/pre-push.
+ * Pushes origin-sessions branch and refs/notes/origin alongside the user's push.
+ */
+export async function handlePrePush(): Promise<void> {
+  debugLog('pre-push', '=== GIT HOOK INVOKED ===');
+
+  const hookCwd = process.cwd();
+  const repoPath = getGitRoot(hookCwd);
+  if (!repoPath) {
+    debugLog('pre-push', 'SKIP: not a git repo');
+    return;
+  }
+
+  const execOpts = {
+    encoding: 'utf-8' as const,
+    cwd: repoPath,
+    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    timeout: 15_000,
+  };
+
+  // Check if remote exists
+  try {
+    execSync('git remote get-url origin', execOpts);
+  } catch {
+    debugLog('pre-push', 'SKIP: no remote');
+    return;
+  }
+
+  // Push origin-sessions branch if it exists
+  try {
+    execSync('git rev-parse refs/heads/origin-sessions', execOpts);
+    execSync('git push origin origin-sessions --no-verify --quiet', execOpts);
+    debugLog('pre-push', 'pushed origin-sessions');
+  } catch (err: any) {
+    debugLog('pre-push', 'origin-sessions push skipped', { message: err.message });
+  }
+
+  // Push refs/notes/origin if they exist
+  try {
+    execSync('git rev-parse refs/notes/origin', execOpts);
+    execSync('git push origin refs/notes/origin --no-verify --quiet', execOpts);
+    debugLog('pre-push', 'pushed refs/notes/origin');
+  } catch (err: any) {
+    debugLog('pre-push', 'notes push skipped', { message: err.message });
+  }
+
+  debugLog('pre-push', '=== GIT HOOK COMPLETE ===');
+}
+
 // ─── Main Entry Point ──────────────────────────────────────────────────────
 
 export async function hooksCommand(event: string, agentSlug?: string): Promise<void> {
@@ -723,6 +863,12 @@ export async function hooksCommand(event: string, agentSlug?: string): Promise<v
       break;
     case 'session-end':
       await handleSessionEnd(input);
+      break;
+    case 'pre-tool-use':
+      await handlePreToolUse(input);
+      break;
+    case 'post-tool-use':
+      await handlePostToolUse(input);
       break;
     default:
       debugLog(event, 'unknown event');

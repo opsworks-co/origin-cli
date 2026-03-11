@@ -5,7 +5,8 @@ import { notifyOrgAdmins } from '../services/notifications.js';
 import { runAIReview } from '../services/ai-review.js';
 import { checkBudget, recordSpend } from '../services/budget.js';
 import { emitSessionEvent } from '../services/session-events.js';
-import { enforceSessionStart, enforceSessionEnd, applyEnforcementActions, enforceAgentLimits } from '../services/policy-engine.js';
+import { enforceSessionStart, enforceSessionEnd, applyEnforcementActions, enforceAgentLimits, loadOrgPolicies, shouldSkipRule, shouldSkipPolicy } from '../services/policy-engine.js';
+import { describeCondition, describeAction } from '../utils/policy-descriptions.js';
 import { updateSessionPRChecks } from '../services/github-integration.js';
 import { scanForSecrets } from '../services/secret-scanner.js';
 import { detectAITool } from '../services/ai-commit-detector.js';
@@ -67,6 +68,9 @@ router.get('/policies', async (req: McpRequest, res: Response) => {
       where: { orgId: req.orgId as string, active: true },
       include: {
         rules: true,
+        assignments: {
+          include: { agent: { select: { id: true, name: true, slug: true } } },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -76,6 +80,11 @@ router.get('/policies', async (req: McpRequest, res: Response) => {
       name: p.name,
       description: p.description,
       type: p.type,
+      assignedAgents: p.assignments.map((a) => ({
+        id: a.agent.id,
+        name: a.agent.name,
+        slug: a.agent.slug,
+      })),
       rules: p.rules.map((r) => ({
         id: r.id,
         condition: r.condition,
@@ -238,7 +247,24 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       timestamp: new Date().toISOString(),
     });
 
-    res.json({ sessionId: codingSession.id });
+    // Build active policy summary for system message
+    let activePolicies: string[] = [];
+    try {
+      const allPolicies = await loadOrgPolicies(orgId);
+      const scope = { agentId: agent?.id ?? null, machineId: machine?.id ?? null, repoId: repo.id };
+      activePolicies = allPolicies
+        .filter(p => !shouldSkipPolicy(p, scope))
+        .flatMap(p =>
+          p.rules
+            .filter(r => !shouldSkipRule(r, scope))
+            .map(r => {
+              const desc = describeCondition(p.type, r.condition);
+              return `${p.name}: ${desc.summary} (${describeAction(r.action)})`;
+            })
+        );
+    } catch { /* non-critical */ }
+
+    res.json({ sessionId: codingSession.id, activePolicies });
   } catch (err) {
     console.error('Start session error:', err);
     res.status(500).json({ error: 'Internal server error' });

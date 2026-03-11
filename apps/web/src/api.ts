@@ -424,6 +424,13 @@ export interface PolicyRule {
   repo?: { name: string } | null;
 }
 
+export interface PolicyAssignment {
+  id: string;
+  policyId: string;
+  agentId: string;
+  agent: { id: string; name: string; slug: string };
+}
+
 export interface Policy {
   id: string;
   name: string;
@@ -431,6 +438,7 @@ export interface Policy {
   description: string | null;
   active: boolean;
   rules: PolicyRule[];
+  assignments?: PolicyAssignment[];
   createdAt: string;
 }
 
@@ -467,6 +475,13 @@ export function createPolicyFromNaturalLanguage(prompt: string) {
   return request<{ policies: Policy[]; parsed: any[]; message: string }>('/api/policies/from-natural-language', {
     method: 'POST',
     body: JSON.stringify({ prompt }),
+  });
+}
+
+export function updatePolicyAssignments(policyId: string, agentIds: string[]) {
+  return request<{ assignments: PolicyAssignment[] }>(`/api/policies/${policyId}/assignments`, {
+    method: 'PUT',
+    body: JSON.stringify({ agentIds }),
   });
 }
 
@@ -539,6 +554,11 @@ export interface Stats {
   sessionsByHour: { hour: number; count: number }[];
   secretsByType: { type: string; count: number }[];
   totalSecretFindings: number;
+  // Cost forecasting
+  projectedMonthlyCost?: number;
+  dailyCostTrend?: number;
+  daysInMonth?: number;
+  daysElapsed?: number;
 }
 
 export function getStats(from?: string, to?: string) {
@@ -1108,6 +1128,9 @@ export interface ComplianceReport {
   securityFindings: { type: string; count: number }[];
   reviewCoverage: { reviewed: number; unreviewed: number };
   modelUsage: { model: string; sessions: number; cost: number }[];
+  unreviewedAging?: { lessThan1d: number; from1to3d: number; from3to7d: number; moreThan7d: number };
+  policyCoverage?: { repo: string; repoId: string; policies: string[] }[];
+  complianceTrend?: { week: string; score: number }[];
 }
 
 export function getComplianceReport(from: string, to: string) {
@@ -1116,4 +1139,170 @@ export function getComplianceReport(from: string, to: string) {
 
 export function getComplianceScore() {
   return request<{ score: number }>('/api/reports/compliance/summary');
+}
+
+// ---- Trails (Feature Tracking) -----------------------------------------------
+
+export interface Trail {
+  id: string;
+  name: string;
+  description: string | null;
+  branch: string | null;
+  status: string;
+  priority: string;
+  labels: string[];
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  sessionCount: number;
+  totalCost: number;
+}
+
+export interface TrailSessionEntry {
+  id: string;
+  addedAt: string;
+  sessionId: string;
+  model: string;
+  prompt: string;
+  costUsd: number;
+  linesAdded: number;
+  linesRemoved: number;
+  status: string;
+  createdAt: string;
+  reviewStatus: string | null;
+  repoName: string | null;
+  commitSha: string | null;
+  commitMessage: string | null;
+  userName: string | null;
+}
+
+export interface TrailDetail extends Trail {
+  sessions: TrailSessionEntry[];
+  pullRequests: PullRequestInfo[];
+}
+
+export function getTrails(params?: { status?: string; label?: string; limit?: number; offset?: number }) {
+  const q = new URLSearchParams();
+  if (params) Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') q.set(k, String(v)); });
+  const qs = q.toString();
+  return request<{ trails: Trail[]; total: number }>(`/api/trails${qs ? `?${qs}` : ''}`);
+}
+
+export function createTrail(data: { name: string; description?: string; branch?: string; priority?: string; labels?: string[] }) {
+  return request<Trail>('/api/trails', { method: 'POST', body: JSON.stringify(data) });
+}
+
+export function getTrail(id: string) {
+  return request<TrailDetail>(`/api/trails/${id}`);
+}
+
+export function updateTrail(id: string, data: { name?: string; description?: string; status?: string; priority?: string; labels?: string[] }) {
+  return request<Trail>(`/api/trails/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+}
+
+export function deleteTrail(id: string) {
+  return request<void>(`/api/trails/${id}`, { method: 'DELETE' });
+}
+
+export function addTrailSessions(trailId: string, sessionIds: string[]) {
+  return request<{ added: string[]; skipped: string[] }>(`/api/trails/${trailId}/sessions`, { method: 'POST', body: JSON.stringify({ sessionIds }) });
+}
+
+export function removeTrailSession(trailId: string, sessionId: string) {
+  return request<void>(`/api/trails/${trailId}/sessions/${sessionId}`, { method: 'DELETE' });
+}
+
+// ---- Leaderboard -------------------------------------------------------------
+
+export interface LeaderboardEntry {
+  userId: string;
+  name: string;
+  email: string;
+  sessions: number;
+  lines: number;
+  cost: number;
+  approvalRate: number;
+  qualityScore: number;
+  activityGrid: { date: string; count: number }[];
+}
+
+export function getLeaderboard(params?: { period?: string; sortBy?: string }) {
+  const q = new URLSearchParams();
+  if (params?.period) q.set('period', params.period);
+  if (params?.sortBy) q.set('sortBy', params.sortBy);
+  const qs = q.toString();
+  return request<{ entries: LeaderboardEntry[] }>(`/api/leaderboard${qs ? `?${qs}` : ''}`);
+}
+
+// ---- Prompts Library ---------------------------------------------------------
+
+export interface PromptEntry {
+  id: string;
+  promptIndex: number;
+  promptText: string;
+  filesChanged: string[];
+  createdAt: string;
+  sessionId: string;
+  model: string;
+  userName: string | null;
+  costUsd: number;
+  reviewStatus: string | null;
+  repoName: string | null;
+}
+
+export interface PromptPattern {
+  category: string;
+  count: number;
+  approvalRate: number;
+}
+
+export function searchPrompts(params?: { q?: string; model?: string; repoId?: string; userId?: string; limit?: number; offset?: number }) {
+  const q = new URLSearchParams();
+  if (params) Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') q.set(k, String(v)); });
+  const qs = q.toString();
+  return request<{ prompts: PromptEntry[]; total: number }>(`/api/prompts${qs ? `?${qs}` : ''}`);
+}
+
+export function getPromptPatterns() {
+  return request<{ patterns: PromptPattern[] }>('/api/prompts/patterns');
+}
+
+// ---- Model Comparison --------------------------------------------------------
+
+export interface ModelStats {
+  model: string;
+  sessions: number;
+  avgCost: number;
+  totalCost: number;
+  avgDuration: number;
+  avgTokens: number;
+  avgLines: number;
+  approvalRate: number;
+}
+
+export interface ModelTrend {
+  week: string;
+  models: Record<string, number>;
+}
+
+export function getModelComparison() {
+  return request<{ models: ModelStats[]; trend: ModelTrend[] }>('/api/models/comparison');
+}
+
+// ---- Repo Health -------------------------------------------------------------
+
+export interface RepoHealth {
+  repoId: string;
+  repoName: string;
+  healthScore: number;
+  aiPercentage: number;
+  sessionCount: number;
+  reviewCoverage: number;
+  violations: number;
+  lastSession: string | null;
+  totalCommits: number;
+}
+
+export function getRepoHealth(id: string) {
+  return request<RepoHealth>(`/api/repos/${id}/health`);
 }

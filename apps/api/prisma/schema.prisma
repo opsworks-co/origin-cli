@@ -22,6 +22,7 @@ model Org {
   machines      Machine[]
   notifications Notification[]
   invitations   Invitation[]
+  trails        Trail[]
 }
 
 model User {
@@ -146,6 +147,7 @@ model CodingSession {
   sessionDiff    SessionDiff?
   promptChanges  PromptChange[]
   secretFindings SecretFinding[]
+  trailSessions  TrailSession[]
 }
 
 model SessionDiff {
@@ -205,6 +207,7 @@ model Agent {
   sessions          CodingSession[]
   policyRules       PolicyRule[]
   versions          AgentVersion[]
+  policyAssignments PolicyAssignment[]
 }
 
 // ── Policies ────────────────────────────────────────────────────
@@ -220,6 +223,7 @@ model Policy {
   active      Boolean      @default(true)
   createdAt   DateTime     @default(now())
   versions    PolicyVersion[]
+  assignments PolicyAssignment[]
 }
 
 model PolicyRule {
@@ -235,6 +239,17 @@ model PolicyRule {
   condition String
   action    String
   severity  String   @default("MEDIUM")
+}
+
+model PolicyAssignment {
+  id        String   @id @default(uuid())
+  policyId  String
+  policy    Policy   @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  agentId   String
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([policyId, agentId])
 }
 
 // ── Machines ────────────────────────────────────────────────────
@@ -371,4 +386,33 @@ model SecretFinding {
   match       String        // Redacted snippet
   ruleName    String        // Which regex rule matched
   createdAt   DateTime      @default(now())
+}
+
+// ── Trails (Feature Tracking) ─────────────────────────────────────
+
+model Trail {
+  id          String         @id @default(uuid())
+  orgId       String
+  org         Org            @relation(fields: [orgId], references: [id])
+  name        String
+  description String?
+  branch      String?
+  status      String         @default("active")   // active, review, done, paused
+  priority    String         @default("medium")    // low, medium, high, critical
+  labels      String         @default("[]")        // JSON array of label strings
+  createdBy   String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @default(now()) @updatedAt
+  sessions    TrailSession[]
+}
+
+model TrailSession {
+  id        String        @id @default(uuid())
+  trailId   String
+  trail     Trail         @relation(fields: [trailId], references: [id], onDelete: Cascade)
+  sessionId String
+  session   CodingSession @relation(fields: [sessionId], references: [id])
+  addedAt   DateTime      @default(now())
+
+  @@unique([trailId, sessionId])
 }
