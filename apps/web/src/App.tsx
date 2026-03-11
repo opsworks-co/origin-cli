@@ -237,13 +237,7 @@ export default function App() {
       />
       <Route
         path="/prompts"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <Prompts />
-            </Layout>
-          </ProtectedRoute>
-        }
+        element={<Navigate to="/sessions" replace />}
       />
       <Route
         path="/compliance"
