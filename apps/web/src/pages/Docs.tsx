@@ -26,7 +26,13 @@ type Section =
   | 'ai-blame'
   | 'ask-author'
   | 'git-notes'
-  | 'personal-insights';
+  | 'personal-insights'
+  | 'leaderboard'
+  | 'pull-requests'
+  | 'trails'
+  | 'prompts'
+  | 'model-comparison'
+  | 'machines';
 
 const SECTIONS: { key: Section; label: string; group?: string }[] = [
   { key: 'overview', label: 'Overview', group: 'Getting Started' },
@@ -49,6 +55,12 @@ const SECTIONS: { key: Section; label: string; group?: string }[] = [
   { key: 'secret-scanning', label: 'Secret & PII Scanning' },
   { key: 'compliance', label: 'Compliance Reports' },
   { key: 'analytics', label: 'Enhanced Analytics' },
+  { key: 'leaderboard', label: 'Leaderboard' },
+  { key: 'prompts', label: 'Prompt Library' },
+  { key: 'model-comparison', label: 'Model Comparison' },
+  { key: 'pull-requests', label: 'Pull Requests' },
+  { key: 'trails', label: 'Trails' },
+  { key: 'machines', label: 'Machines' },
   { key: 'personal-insights', label: 'Personal Insights' },
   { key: 'webhooks', label: 'Webhooks' },
   { key: 'cli', label: 'CLI Reference', group: 'Developer Tools' },
@@ -2039,6 +2051,331 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
               The Reports page generates exportable compliance snapshots while Insights provides
               interactive, drill-down analytics.
             </Callout>
+          </div>
+        )}
+
+        {/* ─── LEADERBOARD ──────────────────────────────────── */}
+        {active === 'leaderboard' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Leaderboard</h1>
+            <P>
+              The Leaderboard ranks team members by AI coding activity across your organization.
+              Use it to identify power users, recognize high-quality contributors, and understand
+              adoption patterns across your engineering team.
+            </P>
+
+            <H2>How It Works</H2>
+            <P>
+              Origin aggregates data from all coding sessions and reviews to compute rankings.
+              The leaderboard queries session counts, lines of code changed, total cost,
+              approval rates, and quality scores per user for a given time period.
+            </P>
+
+            <H2>Ranking Metrics</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Sessions</strong> &mdash; Total number of AI coding sessions completed. Higher counts indicate more active AI adoption.</Li>
+              <Li><strong className="text-gray-200">Lines Changed</strong> &mdash; Combined lines added and removed across all sessions. Measures raw output volume.</Li>
+              <Li><strong className="text-gray-200">Total Cost</strong> &mdash; Cumulative API cost across all sessions. Helps identify expensive usage patterns.</Li>
+              <Li><strong className="text-gray-200">Approval Rate</strong> &mdash; Percentage of reviewed sessions that were approved. Indicates code quality and policy compliance.</Li>
+              <Li><strong className="text-gray-200">Quality Score</strong> &mdash; Composite score combining approval rate, review coverage, and policy violation count.</Li>
+            </ul>
+
+            <H2>Time Periods</H2>
+            <P>
+              Filter rankings by time period: <strong className="text-gray-200">7 days</strong>, <strong className="text-gray-200">30 days</strong>,
+              or <strong className="text-gray-200">all time</strong>. Use shorter periods to track recent activity and longer periods for overall contribution.
+            </P>
+
+            <H2>API</H2>
+            <CodeBlock title="Leaderboard API">{`GET /api/leaderboard?period=30d&sort=sessions
+# Query params: period (7d, 30d, all), sort (sessions, lines, cost, approvalRate, quality)`}</CodeBlock>
+
+            <Callout type="tip">
+              The Leaderboard is a great way to gamify AI adoption and recognize developers
+              who produce high-quality AI-assisted code with strong approval rates.
+            </Callout>
+          </div>
+        )}
+
+        {/* ─── PROMPT LIBRARY ──────────────────────────────────── */}
+        {active === 'prompts' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Prompt Library</h1>
+            <P>
+              The Prompt Library captures every prompt-to-code-change mapping across your organization.
+              Search through prompts, see what files they changed, and analyze patterns in how your
+              team uses AI coding tools.
+            </P>
+
+            <H2>How It Works</H2>
+            <P>
+              When a coding session ends, Origin creates <code className="text-indigo-400">PromptChange</code> records
+              that link individual prompts to the files they modified and the diffs they produced.
+              This gives you a searchable database of every AI interaction and its outcome.
+            </P>
+
+            <H2>Search View</H2>
+            <P>The default view lets you search and filter prompts:</P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Text Search</strong> &mdash; Search prompt text across all sessions</Li>
+              <Li><strong className="text-gray-200">Model Filter</strong> &mdash; Filter by AI model (Claude Sonnet, Opus, GPT-4o, Gemini)</Li>
+              <Li><strong className="text-gray-200">Repository Filter</strong> &mdash; Narrow results to a specific repo</Li>
+            </ul>
+            <P>
+              Each result shows the prompt text (truncated to 200 chars), model used, review status,
+              repo name, author, files changed count, cost, and timestamp. Click a prompt to view the
+              full session detail.
+            </P>
+
+            <H2>Pattern Analysis View</H2>
+            <P>
+              Switch to the &ldquo;Patterns&rdquo; tab to see aggregate analysis. Origin categorizes
+              prompts into types using keyword matching:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Bug Fix</strong> &mdash; Prompts containing fix, bug, error, issue, broken</Li>
+              <Li><strong className="text-gray-200">New Feature</strong> &mdash; Prompts with add, create, implement, build, new</Li>
+              <Li><strong className="text-gray-200">Refactoring</strong> &mdash; Prompts with refactor, clean, restructure, reorganize</Li>
+              <Li><strong className="text-gray-200">Testing</strong> &mdash; Prompts with test, spec, coverage, assert</Li>
+              <Li><strong className="text-gray-200">Documentation</strong> &mdash; Prompts with document, readme, comment, explain</Li>
+            </ul>
+            <P>
+              For each category, you see the count and <strong className="text-gray-200">approval rate</strong> &mdash;
+              the percentage of prompts in that category whose sessions were approved. This helps identify
+              which types of AI tasks produce the best outcomes.
+            </P>
+
+            <H2>API</H2>
+            <CodeBlock title="Prompts API">{`# Search prompts
+GET /api/prompts?q=authentication&model=claude-code&repoId=...&limit=20&offset=0
+
+# Get pattern analysis
+GET /api/prompts/patterns`}</CodeBlock>
+
+            <Callout type="info">
+              The Prompt Library is powered by PromptChange records created when sessions end.
+              If the library is empty, make sure session tracking is configured via the CLI or MCP server.
+            </Callout>
+          </div>
+        )}
+
+        {/* ─── MODEL COMPARISON ────────────────────────────────── */}
+        {active === 'model-comparison' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Model Comparison</h1>
+            <P>
+              Compare AI model performance across your organization. See which models
+              are most cost-effective, produce the highest-quality code, and best fit
+              different task types.
+            </P>
+
+            <H2>How It Works</H2>
+            <P>
+              Origin aggregates session data by model to compute comparative statistics.
+              Every session records the model used (e.g. <code className="text-indigo-400">claude-code</code>,
+              <code className="text-indigo-400">cursor</code>, <code className="text-indigo-400">copilot</code>),
+              along with cost, duration, token usage, and review outcomes. The comparison page
+              queries these aggregations side by side.
+            </P>
+
+            <H2>Comparison Metrics</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Total Sessions</strong> &mdash; How many sessions used each model</Li>
+              <Li><strong className="text-gray-200">Average Cost</strong> &mdash; Mean cost per session for the model</Li>
+              <Li><strong className="text-gray-200">Average Duration</strong> &mdash; Mean session duration (how long it takes to complete tasks)</Li>
+              <Li><strong className="text-gray-200">Token Usage</strong> &mdash; Average input and output tokens per session</Li>
+              <Li><strong className="text-gray-200">Approval Rate</strong> &mdash; Percentage of reviewed sessions approved for each model</Li>
+              <Li><strong className="text-gray-200">Lines Changed</strong> &mdash; Average code output per session</Li>
+            </ul>
+
+            <H2>Trend Analysis</H2>
+            <P>
+              The comparison includes a timeline chart showing model usage trends over time.
+              Track adoption shifts as your team experiments with different models, and correlate
+              model switches with changes in cost or quality metrics.
+            </P>
+
+            <H2>API</H2>
+            <CodeBlock title="Model Comparison API">{`GET /api/models/comparison
+# Returns: per-model stats (sessions, avgCost, avgDuration, avgTokens, approvalRate)
+#          and daily trend data for charts`}</CodeBlock>
+
+            <Callout type="tip">
+              Use Model Comparison to inform your MODEL_ALLOWLIST policy. If a model consistently
+              produces low-quality output (low approval rate), consider restricting it.
+            </Callout>
+          </div>
+        )}
+
+        {/* ─── PULL REQUESTS ──────────────────────────────────── */}
+        {active === 'pull-requests' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Pull Request Checks</h1>
+            <P>
+              Origin integrates with GitHub to post governance status checks on pull requests.
+              When a PR contains AI-authored commits, Origin links the relevant coding sessions,
+              evaluates policies, and posts a pass/fail check that controls whether the PR can be merged.
+            </P>
+
+            <H2>How It Works</H2>
+            <div className="space-y-1 mb-4">
+              <Step n={1} title="Developer pushes code">
+                After coding with an AI agent, the developer pushes commits to a GitHub branch and opens a PR.
+              </Step>
+              <Step n={2} title="Origin receives the webhook">
+                GitHub sends a <code className="text-indigo-400">push</code> and <code className="text-indigo-400">pull_request</code> event
+                to Origin. Commits are matched to AI sessions by SHA.
+              </Step>
+              <Step n={3} title="Policy engine evaluates">
+                Origin runs all active policies against the linked sessions: cost limits, file restrictions,
+                model allowlists, and review requirements.
+              </Step>
+              <Step n={4} title="Status check posted">
+                Origin posts an <code className="text-indigo-400">origin/ai-governance</code> commit status on the PR.
+                A summary comment is also posted with a table of linked sessions, costs, and violations.
+              </Step>
+              <Step n={5} title="Merge gating">
+                With GitHub branch protection enabled, the PR cannot be merged if the check fails.
+                Admin reviews the flagged sessions in Origin, approves them, and the check updates to green.
+              </Step>
+            </div>
+
+            <H2>Check Status Logic</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-green-400">Success</strong> &mdash; All linked sessions are approved (or no sessions linked)</Li>
+              <Li><strong className="text-amber-400">Pending</strong> &mdash; Sessions exist but some are unreviewed</Li>
+              <Li><strong className="text-red-400">Failure</strong> &mdash; Any session is rejected or flagged, or policy violations detected</Li>
+            </ul>
+
+            <H2>PR Summary Comment</H2>
+            <P>
+              Origin posts (or updates) a single comment on the PR with a session summary table:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li>Link to each session in Origin (View button)</Li>
+              <Li>Agent name and model used</Li>
+              <Li>Cost and token count per session</Li>
+              <Li>Review status (approved, flagged, pending)</Li>
+              <Li>Total cost and lines added across all sessions</Li>
+              <Li>Policy violation details with fix hints</Li>
+            </ul>
+
+            <H2>Dashboard View</H2>
+            <P>
+              The Pull Requests page shows all PRs with filter tabs: All, Open, Passing, Failing, Pending.
+              Each PR card shows the title, repo, author, branch, commit count, session count, and check status.
+              Click &ldquo;Details&rdquo; to drill into linked sessions. Click &ldquo;Re-check&rdquo; to recompute the status.
+            </P>
+
+            <H2>API</H2>
+            <CodeBlock title="Pull Requests API">{`# List all PRs with session analysis
+GET /api/pull-requests
+
+# Recheck a PR (recompute status after review changes)
+POST /api/pull-requests/:id/recheck`}</CodeBlock>
+
+            <Callout type="warning">
+              PR checks require a GitHub integration (PAT or GitHub App) configured in Settings &rarr; Integrations
+              with &ldquo;Post Checks&rdquo; and &ldquo;Post Comments&rdquo; enabled. Webhooks must be active on the repo.
+            </Callout>
+          </div>
+        )}
+
+        {/* ─── TRAILS ─────────────────────────────────────────── */}
+        {active === 'trails' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Trails</h1>
+            <P>
+              Trails let you group coding sessions by feature, project, or initiative.
+              Track the total cost, effort, and progress of AI-assisted work at the feature level
+              rather than individual session level.
+            </P>
+
+            <H2>How It Works</H2>
+            <P>
+              A Trail is a named container with a status lifecycle (active, review, done, paused),
+              priority level, and labels. You add coding sessions to a trail, and Origin aggregates
+              the cost, tokens, lines changed, and time spent across all sessions in that trail.
+            </P>
+
+            <H2>Trail Properties</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Name & Description</strong> &mdash; Human-readable identifier for the feature or initiative</Li>
+              <Li><strong className="text-gray-200">Status</strong> &mdash; Lifecycle state: <code className="text-indigo-400">active</code>, <code className="text-indigo-400">review</code>, <code className="text-indigo-400">done</code>, <code className="text-indigo-400">paused</code></Li>
+              <Li><strong className="text-gray-200">Priority</strong> &mdash; Urgency level for sorting and filtering</Li>
+              <Li><strong className="text-gray-200">Labels</strong> &mdash; Tags for categorization (e.g. &ldquo;frontend&rdquo;, &ldquo;security&rdquo;, &ldquo;tech-debt&rdquo;)</Li>
+              <Li><strong className="text-gray-200">Sessions</strong> &mdash; Linked coding sessions with aggregated metrics</Li>
+            </ul>
+
+            <H2>Use Cases</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Feature cost tracking</strong> &mdash; How much did AI assistance cost to build the auth system?</Li>
+              <Li><strong className="text-gray-200">Sprint planning</strong> &mdash; Group sessions by sprint to measure AI contribution per cycle</Li>
+              <Li><strong className="text-gray-200">Incident response</strong> &mdash; Track all AI sessions related to a production incident fix</Li>
+            </ul>
+
+            <H2>API</H2>
+            <CodeBlock title="Trails API">{`# List trails
+GET /api/trails?status=active&label=frontend
+
+# Create a trail
+POST /api/trails
+{ "name": "User Auth System", "description": "JWT auth + RBAC", "priority": "high", "labels": ["backend", "security"] }
+
+# Add sessions to trail
+POST /api/trails/:id/sessions
+{ "sessionIds": ["session-uuid-1", "session-uuid-2"] }`}</CodeBlock>
+
+            <Callout type="info">
+              Trails are accessible from Settings &rarr; Trails tab. You can also manage trails via
+              the CLI with <code className="text-indigo-400">origin trail</code> commands.
+            </Callout>
+          </div>
+        )}
+
+        {/* ─── MACHINES ───────────────────────────────────────── */}
+        {active === 'machines' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">Machines</h1>
+            <P>
+              The Machines page shows all client devices registered with Origin.
+              Track which developer machines are running AI coding tools, what software
+              is installed, and enforce machine-level policies.
+            </P>
+
+            <H2>How It Works</H2>
+            <P>
+              When a developer runs <code className="text-indigo-400">origin init</code> on their machine,
+              the CLI detects installed tools (git, node, python, docker, etc.) and registers the machine
+              with Origin. The machine record includes a unique machine ID, hostname, and tool inventory.
+              Machines are updated on each CLI interaction and show a &ldquo;last seen&rdquo; timestamp.
+            </P>
+
+            <H2>Machine Data</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Hostname</strong> &mdash; The machine&apos;s network hostname (e.g. &ldquo;artem-mbp.local&rdquo;)</Li>
+              <Li><strong className="text-gray-200">Machine ID</strong> &mdash; Unique identifier generated at registration</Li>
+              <Li><strong className="text-gray-200">Detected Tools</strong> &mdash; Software found on the machine (git, node, python, docker, kubectl, etc.)</Li>
+              <Li><strong className="text-gray-200">Last Seen</strong> &mdash; Timestamp of the most recent CLI interaction from this machine</Li>
+            </ul>
+
+            <H2>Machine-Scoped Policies</H2>
+            <P>
+              Policy rules can be scoped to specific machines using the <code className="text-indigo-400">machineId</code> scope.
+              This lets you enforce different rules on CI runners vs developer laptops. For example:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li>Block GPT-4 usage on CI machines while allowing it on dev workstations</Li>
+              <Li>Require review for all sessions from a shared CI runner</Li>
+              <Li>Set lower cost limits on production-access machines</Li>
+            </ul>
+
+            <H2>API</H2>
+            <CodeBlock title="Machines API">{`# List machines
+GET /api/machines
+
+# Get machine detail with policy rules
+GET /api/machines/:id`}</CodeBlock>
           </div>
         )}
 

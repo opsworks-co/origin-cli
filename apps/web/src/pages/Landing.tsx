@@ -274,6 +274,78 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* Comparison */}
+      <section id="comparison" className="max-w-6xl mx-auto px-6 py-24">
+        <div className="text-center mb-16">
+          <h2 className="text-3xl font-bold">How Origin compares</h2>
+          <p className="text-gray-400 mt-3 max-w-xl mx-auto">
+            Origin is the most complete AI coding governance platform. Here&apos;s how it stacks up.
+          </p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm border border-gray-800 rounded-xl overflow-hidden">
+            <thead>
+              <tr className="bg-gray-800/60">
+                <th className="text-left px-5 py-3 text-gray-400 font-medium w-1/4">Capability</th>
+                <th className="text-center px-5 py-3 text-indigo-400 font-semibold">Origin</th>
+                <th className="text-center px-5 py-3 text-gray-400 font-medium">Entire</th>
+                <th className="text-center px-5 py-3 text-gray-400 font-medium">git-ai</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800">
+              {[
+                ['Session recording & replay', true, true, false],
+                ['Prompt & transcript capture', true, true, true],
+                ['AI blame (line-level attribution)', true, false, true],
+                ['Policy enforcement (file, model, cost)', true, false, false],
+                ['PR merge gating (GitHub checks)', true, false, false],
+                ['Secret & PII scanning', true, false, false],
+                ['Budget & cost controls', true, false, false],
+                ['Human review workflow', true, false, false],
+                ['Compliance reports', true, false, false],
+                ['MCP server (real-time enforcement)', true, false, false],
+                ['CLI with 30+ commands', true, false, true],
+                ['Self-hosted / open-source', true, false, true],
+                ['GitHub App integration', true, false, false],
+                ['Team roles & RBAC', true, false, false],
+                ['Model comparison analytics', true, false, false],
+              ].map(([feature, origin, entire, gitai], i) => (
+                <tr key={i} className={i % 2 === 0 ? 'bg-gray-900/30' : ''}>
+                  <td className="px-5 py-2.5 text-gray-300">{feature as string}</td>
+                  <td className="px-5 py-2.5 text-center">{origin ? <span className="text-green-400">&#10003;</span> : <span className="text-gray-600">&mdash;</span>}</td>
+                  <td className="px-5 py-2.5 text-center">{entire ? <span className="text-green-400">&#10003;</span> : <span className="text-gray-600">&mdash;</span>}</td>
+                  <td className="px-5 py-2.5 text-center">{gitai ? <span className="text-green-400">&#10003;</span> : <span className="text-gray-600">&mdash;</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="grid md:grid-cols-3 gap-6 mt-10">
+          <div className="card border-indigo-500/30">
+            <h3 className="font-semibold text-indigo-400 mb-2">Origin</h3>
+            <p className="text-xs text-gray-400 leading-relaxed">
+              Full governance platform: session tracking, policy enforcement, PR merge gating,
+              secret scanning, budget controls, compliance reports, and team management.
+              Self-hosted with CLI + MCP server.
+            </p>
+          </div>
+          <div className="card">
+            <h3 className="font-semibold text-gray-300 mb-2">Entire</h3>
+            <p className="text-xs text-gray-400 leading-relaxed">
+              Prompt logging and session context capture built by the former GitHub CEO.
+              Focuses on preserving AI coding context for reuse. No policy enforcement or merge gating.
+            </p>
+          </div>
+          <div className="card">
+            <h3 className="font-semibold text-gray-300 mb-2">git-ai</h3>
+            <p className="text-xs text-gray-400 leading-relaxed">
+              Open-source Git extension for AI code attribution. Tracks which lines were AI-authored
+              with blame and ask commands. Local-first, no governance layer or policy enforcement.
+            </p>
+          </div>
+        </div>
+      </section>
+
       {/* Integrations */}
       <section id="integrations" className="max-w-6xl mx-auto px-6 py-24">
         <div className="text-center mb-16">
