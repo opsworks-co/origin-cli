@@ -819,7 +819,7 @@ export async function updateSessionPRChecks(
   const parsed = parseRepoFullName(repo.path);
   if (!parsed) return 0;
 
-  const originBaseUrl = process.env.ORIGIN_WEB_URL || 'http://localhost:5176';
+  const originBaseUrl = process.env.ORIGIN_WEB_URL || (process.env.NODE_ENV === 'production' ? 'https://origin-platform.fly.dev' : 'http://localhost:5176');
   const org = await prisma.org.findUnique({ where: { id: orgId }, select: { slug: true } });
   let updated = 0;
 
