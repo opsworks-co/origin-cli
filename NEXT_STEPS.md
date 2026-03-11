@@ -22,6 +22,18 @@ Everything below is live at **https://origin-platform.fly.dev**
 - [x] Repo archiving (soft delete)
 - [x] Org settings (editable name, slug)
 
+### Analytics & Insights
+- [x] **Leaderboard** — rank team members by sessions, lines, cost, quality score with activity heatmaps
+- [x] **Compliance Dashboard** — compliance score gauge, violation trends, KPI cards (90-day window)
+- [x] **Model Comparison** — per-model stats (cost, tokens, approval rate) with 12-week trend charts
+- [x] **Prompt Analytics** — searchable prompt log with keyword-based pattern detection (Bug Fix, New Feature, Refactoring, etc.)
+- [x] **Investigation Trails** — group sessions into audit threads with status (active/review/done) and priority
+- [x] **AI Blame** — line-level attribution showing which prompt produced each line of code
+- [x] **Ask the Author** — natural-language Q&A about any session (Claude-powered, uses transcript context)
+
+### Bug Fixes
+- [x] **Production URL fix** — "View in Origin" links in GitHub PR comments now point to production URL instead of localhost
+
 ---
 
 ## Your Immediate Next Steps

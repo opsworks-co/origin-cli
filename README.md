@@ -25,10 +25,19 @@ Git blame shows you *who*. Origin shows you *why* and *how*.
 - **PR Blocking** — GitHub status checks that block merges when AI sessions violate policies
 - **Intent Review** — approve, reject, or flag AI sessions before they ship
 - **Audit Trail** — complete log of every AI decision in your codebase
+- **Compliance Dashboard** — compliance score, policy violation trends, and exportable reports
+- **Model Comparison** — cost, token usage, and approval rates across AI models over time
+- **Leaderboard** — rank team members by AI usage, lines written, cost, and quality score
+- **Prompt Analytics** — searchable log of every prompt with pattern detection
+- **Investigation Trails** — group related sessions into audit investigation threads
+- **AI Blame** — line-level attribution showing which AI prompt produced each line of code
+- **Ask the Author** — ask natural-language questions about any AI coding session
 - **Insights** — AI authorship %, cost by model, ROI tracking
 - **Machine Registration** — know which engineers are using which AI tools
 - **MCP Server** — native integration with Claude Code and Cursor
 - **CLI** — `origin init` registers your machine in 30 seconds
+- **Slack Notifications** — real-time alerts for violations, reviews, and budget
+- **GitHub App** — one-click install with bot identity on status checks
 
 ---
 
@@ -114,9 +123,12 @@ origin-v2/
     └── mcp-server/   # MCP server for Claude Code and Cursor
 ```
 
+**Dashboard Pages:** Dashboard, Repositories, Agents, Sessions, PR Checks, Leaderboard, Trails, Prompts, Compliance, Models, Policies, Settings
+
 **Ports:**
 - API: `http://localhost:4002`
 - Web: `http://localhost:5176`
+- Production: `https://origin-platform.fly.dev`
 
 ---
 
@@ -255,7 +267,7 @@ Analytics:
 ## Running Tests
 
 ```bash
-cd apps/api && npx vitest run    # 79 tests, 7 files
+cd apps/api && npx vitest run    # 150 tests, 11 files
 ```
 
 ---
@@ -263,9 +275,10 @@ cd apps/api && npx vitest run    # 79 tests, 7 files
 ## Tech Stack
 
 - **Backend:** Node.js, Express, TypeScript, Prisma, SQLite
-- **Frontend:** React, Vite, Tailwind CSS
+- **Frontend:** React, Vite, Tailwind CSS, Recharts
 - **Protocol:** MCP (Model Context Protocol)
-- **Integrations:** Entire.io, GitHub API, Agent Trace spec
+- **Integrations:** GitHub App, Slack Webhooks, Entire.io, Agent Trace spec
+- **Deployment:** Fly.io (Docker, single-machine with volume mount)
 
 ---
 

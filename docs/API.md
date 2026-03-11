@@ -1,6 +1,6 @@
 # API Reference
 
-Base URL: `http://localhost:4002/api`
+Base URL: `http://localhost:4002/api` (local) or `https://origin-platform.fly.dev/api` (production)
 
 All endpoints except auth require a `Authorization: Bearer TOKEN` header.
 MCP endpoints use `x-api-key: YOUR_API_KEY` header instead.
@@ -298,3 +298,114 @@ Returns audit log entries for the org, ordered by most recent.
 Query params:
 - `limit` — default 50
 - `action` — filter by action type
+
+---
+
+## Leaderboard
+
+### GET `/leaderboard`
+Rank team members by AI usage.
+
+Query params:
+- `period` — `week`, `month`, `quarter`, `all` (default: `month`)
+- `sortBy` — `sessions`, `lines`, `cost`, `quality` (default: `sessions`)
+
+Returns: `{ entries: [{ userId, name, email, sessions, lines, cost, approvalRate, qualityScore, activityGrid }] }`
+
+---
+
+## Trails
+
+### GET `/trails`
+List investigation trails for the org.
+
+Query params:
+- `status` — `active`, `review`, `done`, `paused`
+- `label` — filter by label
+- `limit` — default 20
+- `offset` — pagination offset
+
+Returns: `{ trails: [...], total }`
+
+### POST `/trails`
+Create a new investigation trail.
+
+```json
+{
+  "title": "Investigate auth changes",
+  "description": "Review all AI changes to auth module this week",
+  "status": "active",
+  "priority": "high"
+}
+```
+
+### GET `/trails/:id`
+Get trail detail with linked sessions.
+
+### PUT `/trails/:id`
+Update trail status, priority, or details.
+
+---
+
+## Prompts
+
+### GET `/prompts`
+Search AI prompts across sessions.
+
+Query params:
+- `q` — text search in prompt content
+- `model` — filter by AI model
+- `repoId` — filter by repository
+- `userId` — filter by user
+- `limit` — default 20
+- `offset` — pagination offset
+
+Returns: `{ prompts: [{ id, sessionId, promptIndex, promptText, filesChanged, session }], total }`
+
+### GET `/prompts/patterns`
+Prompt pattern analysis — categorizes prompts by intent (Bug Fix, New Feature, Refactoring, Testing, etc.) with approval rates.
+
+Returns: `{ patterns: [{ category, count, approvalRate }] }`
+
+---
+
+## Compliance
+
+### GET `/reports/compliance`
+Generate a compliance report for a date range.
+
+Query params:
+- `from` — ISO date string (required)
+- `to` — ISO date string (required)
+
+Returns: `{ period, complianceScore, summary: { totalSessions, totalCost, totalViolations, reviewRate, secretFindings }, sessionActivity, complianceTrend, ... }`
+
+### GET `/reports/compliance/summary`
+Quick compliance score for the org.
+
+---
+
+## Models
+
+### GET `/models/comparison`
+Model comparison stats — cost, tokens, approval rate, and usage trend across AI models.
+
+Returns:
+```json
+{
+  "models": [
+    {
+      "model": "claude-code",
+      "sessions": 7,
+      "avgCost": 2.52,
+      "totalCost": 17.65,
+      "avgDuration": 590587,
+      "avgTokens": 42657,
+      "avgLines": 301,
+      "approvalRate": 50
+    }
+  ],
+  "trend": [
+    { "week": "2026-W07", "models": { "claude-code": 2, "aider": 2 } }
+  ]
+}

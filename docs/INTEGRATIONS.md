@@ -121,6 +121,46 @@ curl -X POST http://localhost:4002/api/agent-traces \
 
 ---
 
+## Slack
+
+Origin sends real-time notifications to a Slack channel via Incoming Webhooks.
+
+### Setup
+
+1. Go to **Settings → Integrations** in Origin
+2. Enter your Slack Incoming Webhook URL
+3. Toggle which events to receive:
+   - **Violations** — policy violation alerts
+   - **Flags** — sessions flagged for review
+   - **Reviews** — session approval/rejection notifications
+   - **Budget** — cost limit alerts
+
+### What you get
+
+Slack messages include session details, model used, cost, and a direct link to the session in Origin.
+
+---
+
+## GitHub App
+
+Origin has a native GitHub App (`originv2`) for a streamlined setup experience.
+
+### What it provides
+
+- **Bot identity** on status checks and PR comments (instead of a personal access token)
+- **Auto-webhook setup** — webhooks created automatically when you import a repo
+- **Token auto-refresh** — installation access tokens refresh automatically
+- **One-click install** — install from Settings → Integrations
+
+### Setup
+
+1. Go to **Settings → Integrations** in Origin
+2. Click "Install GitHub App"
+3. Select the repos you want to connect
+4. Webhooks are configured automatically
+
+---
+
 ## MCP Protocol
 
 Origin implements the [Model Context Protocol](https://modelcontextprotocol.io) for native integration with Claude Code and Cursor.
