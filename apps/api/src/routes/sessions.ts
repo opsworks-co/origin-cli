@@ -506,7 +506,7 @@ router.post('/:id/review', async (req: AuthRequest, res: Response) => {
           });
 
           const parsed = parseRepoFullName(commit.repo.path);
-          const originBaseUrl = process.env.ORIGIN_WEB_URL || (process.env.NODE_ENV === 'production' ? 'https://origin-platform.fly.dev' : 'http://localhost:5176');
+          const originBaseUrl = process.env.ORIGIN_WEB_URL || 'https://origin-platform.fly.dev';
 
           for (const pr of linkedPRs) {
             let commitShas: string[];

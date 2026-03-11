@@ -186,7 +186,7 @@ export async function processGitHubPR(repoId: string, payload: GitHubPRPayload) 
 
   // Post status check + comment to GitHub (if integration is configured)
   if (repoForStatus && (action === 'opened' || action === 'synchronize' || action === 'reopened')) {
-    const originBaseUrl = process.env.ORIGIN_WEB_URL || (process.env.NODE_ENV === 'production' ? 'https://origin-platform.fly.dev' : 'http://localhost:5176');
+    const originBaseUrl = process.env.ORIGIN_WEB_URL || 'https://origin-platform.fly.dev';
     try {
       await updatePRGitHubStatus(
         repoForStatus.orgId,
