@@ -1,4 +1,5 @@
-import { loadConfig, loadAgentConfig, loadRepoConfig } from '../config.js';
+import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig } from '../config.js';
+import { detectTools } from '../tools-detector.js';
 import { api } from '../api.js';
 import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings } from '../transcript.js';
 import {
@@ -250,6 +251,37 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
 
   const branch = getBranch(hookCwd);
+
+  // ── Re-detect tools on every session start ─────────────────────────────────
+  try {
+    const freshTools = detectTools();
+    const oldTools = agentConfig.detectedTools || [];
+    const changed = freshTools.length !== oldTools.length ||
+      freshTools.some(t => !oldTools.includes(t)) ||
+      oldTools.some(t => !freshTools.includes(t));
+
+    if (changed) {
+      debugLog('session-start', 'tools changed', { old: oldTools, new: freshTools });
+      agentConfig.detectedTools = freshTools;
+      agentConfig.lastToolDetection = new Date().toISOString();
+      saveAgentConfig(agentConfig);
+      // Update server with new tool list
+      try {
+        await api.registerMachine({
+          hostname: agentConfig.hostname,
+          machineId: agentConfig.machineId,
+          detectedTools: freshTools,
+        });
+        debugLog('session-start', 'machine re-registered with updated tools');
+      } catch (regErr: any) {
+        debugLog('session-start', 'machine re-registration failed (non-fatal)', { message: regErr.message });
+      }
+    } else {
+      debugLog('session-start', 'tools unchanged', { tools: freshTools });
+    }
+  } catch (detectErr: any) {
+    debugLog('session-start', 'tool detection failed (non-fatal)', { message: detectErr.message });
+  }
 
   try {
     debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, agentSlug: finalAgentSlug, branch });

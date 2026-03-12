@@ -1,25 +1,10 @@
 import os from 'os';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
 import chalk from 'chalk';
 import { loadConfig, saveAgentConfig } from '../config.js';
 import { api } from '../api.js';
 import { enableCommand } from './enable.js';
-
-function detectTools(): string[] {
-  const tools: string[] = [];
-  const checks = [
-    { name: 'claude', cmd: 'which claude' },
-    { name: 'cursor', cmd: 'which cursor' },
-    { name: 'aider', cmd: 'which aider' },
-    { name: 'gemini', cmd: 'which gemini' },
-    { name: 'windsurf', cmd: 'which windsurf' },
-  ];
-  for (const { name, cmd } of checks) {
-    try { execSync(cmd, { stdio: 'ignore' }); tools.push(name); } catch {}
-  }
-  return tools;
-}
+import { detectTools } from '../tools-detector.js';
 
 export async function initCommand() {
   const config = loadConfig();

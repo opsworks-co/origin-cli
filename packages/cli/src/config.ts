@@ -26,6 +26,7 @@ export interface AgentConfig {
   hostname: string;
   detectedTools: string[];
   orgId: string;
+  lastToolDetection?: string; // ISO timestamp of last tool scan
 }
 
 export function ensureConfigDir() {
