@@ -331,7 +331,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
 }
 
-async function handleUserPromptSubmit(input: Record<string, any>): Promise<void> {
+async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('user-prompt-submit', 'begin', { hasPrompt: !!input.prompt, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
@@ -339,6 +339,48 @@ async function handleUserPromptSubmit(input: Record<string, any>): Promise<void>
   let state = loadSessionState(hookCwd);
   const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
   if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
+
+  // ── Auto-create session on resume ──────────────────────────────────────────
+  // When Claude Code (or other agents) resume a session, SessionStart hook may
+  // not fire again. If we have no state, create a new Origin session on the fly.
+  if (!state) {
+    debugLog('user-prompt-submit', 'no session state — attempting auto-create (resume scenario)', { hookCwd });
+    const config = loadConfig();
+    const agentConfig = loadAgentConfig();
+    const repoPath = discoverGitRoot(hookCwd);
+    if (config && agentConfig && repoPath) {
+      try {
+        const repoConfig = loadRepoConfig(repoPath);
+        const finalAgentSlug = repoConfig?.agent || agentSlug || undefined;
+        const branch = getBranch(hookCwd);
+        const model = input.model || (finalAgentSlug === 'gemini' ? 'gemini' : finalAgentSlug === 'codex' ? 'codex' : 'claude');
+        const result = await api.startSession({
+          machineId: agentConfig.machineId,
+          prompt: input.prompt || '',
+          model,
+          repoPath,
+          agentSlug: finalAgentSlug,
+          branch: branch || undefined,
+        });
+        debugLog('user-prompt-submit', 'auto-created session', { sessionId: result.sessionId });
+        state = {
+          sessionId: result.sessionId,
+          claudeSessionId: input.session_id || '',
+          transcriptPath: input.transcript_path || '',
+          model,
+          startedAt: new Date().toISOString(),
+          prompts: [],
+          repoPath,
+          headShaAtStart: getHeadSha(hookCwd),
+          branch,
+        };
+        saveSessionState(state, repoPath);
+      } catch (err: any) {
+        debugLog('user-prompt-submit', 'auto-create failed', { message: err.message });
+      }
+    }
+  }
+
   if (!state) {
     debugLog('user-prompt-submit', 'ABORT: no session state', { hookCwd });
     return;
@@ -938,7 +980,7 @@ export async function hooksCommand(event: string, agentSlug?: string): Promise<v
       await handleSessionStart(input, agentSlug);
       break;
     case 'user-prompt-submit':
-      await handleUserPromptSubmit(input);
+      await handleUserPromptSubmit(input, agentSlug);
       break;
     case 'stop':
       await handleStop(input);
