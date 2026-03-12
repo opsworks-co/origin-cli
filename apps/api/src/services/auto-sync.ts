@@ -70,9 +70,10 @@ async function syncAllRepos() {
 
 // ─── Stale Session Cleanup ─────────────────────────────────────────────────
 
-// Auto-close sessions stuck in RUNNING for more than 1 hour.
+// Auto-close sessions stuck in RUNNING for more than 8 hours.
 // This happens when SessionEnd hooks don't fire (e.g., context switch, Gemini, crashed agents).
-const STALE_SESSION_MS = 60 * 60 * 1000; // 1 hour
+// Note: checks startedAt not last activity, so must be generous to avoid killing active sessions.
+const STALE_SESSION_MS = 8 * 60 * 60 * 1000; // 8 hours
 
 async function closeStaleSession() {
   try {
