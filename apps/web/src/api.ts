@@ -560,6 +560,9 @@ export interface Stats {
   dailyCostTrend?: number;
   daysInMonth?: number;
   daysElapsed?: number;
+  // Onboarding
+  totalRepos?: number;
+  totalUsers?: number;
 }
 
 export function getStats(from?: string, to?: string) {

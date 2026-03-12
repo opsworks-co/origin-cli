@@ -500,6 +500,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       dailyCostTrend,
       daysInMonth,
       daysElapsed,
+      // Onboarding
+      totalRepos: repos.length,
+      totalUsers: orgUsers.length,
     });
   } catch (err) {
     console.error('Stats error:', err);

@@ -80,37 +80,35 @@ export default function Dashboard() {
 
   if (!stats) return null;
 
-  // ── Setup checklist ──────────────────────────────────────────────────────
+  // ── Onboarding checklist ─────────────────────────────────────────────────
   const setupSteps = [
     {
-      label: 'Register machine',
-      description: 'Connect a developer machine to Origin',
+      label: 'Connect your first repo',
+      description: 'Link a GitHub repo or add a local repository to start tracking AI-authored code.',
+      done: (stats.totalRepos ?? 0) > 0,
+      link: '/repos',
+      cta: 'Add repo',
+    },
+    {
+      label: 'Install the CLI',
+      description: 'Run origin login then origin init on your dev machine to start capturing sessions.',
       done: machines.length > 0,
       link: '/docs',
+      cta: 'View setup guide',
     },
     {
-      label: 'Connect agent',
-      description: 'Set up Claude Code, Cursor, or Gemini hooks',
-      done: stats.activeAgents > 0,
-      link: '/agents',
-    },
-    {
-      label: 'Track a session',
-      description: 'Complete your first AI coding session',
-      done: stats.totalSessions > 0,
-      link: '/sessions',
-    },
-    {
-      label: 'Create policy',
-      description: 'Set governance rules for AI coding',
+      label: 'Create your first policy',
+      description: 'Set governance rules to control which files AI can touch, cost limits, and required reviews.',
       done: policies.length > 0,
       link: '/policies',
+      cta: 'Create policy',
     },
     {
-      label: 'Connect GitHub',
-      description: 'Auto-discover repos and post PR checks',
-      done: integrations.some((i) => i.provider === 'github'),
-      link: '/settings',
+      label: 'Invite a team member',
+      description: 'Add your team so they can review AI-generated code and share governance policies.',
+      done: (stats.totalUsers ?? 0) > 1,
+      link: '/settings?tab=team',
+      cta: 'Invite team',
     },
   ];
 
@@ -132,57 +130,75 @@ export default function Dashboard() {
         </p>
       </div>
 
-      {/* ── Setup Status ──────────────────────────────────────────────────── */}
+      {/* ── Onboarding Checklist ─────────────────────────────────────────── */}
       {!allSetUp ? (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h2 className="text-sm font-semibold text-gray-300">Getting Started</h2>
-              <p className="text-xs text-gray-500 mt-0.5">
-                {completedSteps} of {setupSteps.length} steps completed
+              <h2 className="text-lg font-semibold text-gray-100">Get started with Origin</h2>
+              <p className="text-sm text-gray-500 mt-0.5">
+                Complete these steps to set up AI code governance for your team.
               </p>
             </div>
-            <div className="flex items-center gap-1.5">
-              {setupSteps.map((step, i) => (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500">{completedSteps}/{setupSteps.length}</span>
+              <div className="w-24 h-2 bg-gray-700 rounded-full overflow-hidden">
                 <div
-                  key={i}
-                  className={`h-2 w-8 rounded-full transition-colors ${
-                    step.done ? 'bg-green-500' : 'bg-gray-700'
-                  }`}
+                  className="h-full bg-green-500 rounded-full transition-all duration-500"
+                  style={{ width: `${(completedSteps / setupSteps.length) * 100}%` }}
                 />
-              ))}
+              </div>
             </div>
           </div>
-          <div className="grid sm:grid-cols-5 gap-3">
+          <div className="space-y-2">
             {setupSteps.map((step, i) => (
-              <Link
+              <div
                 key={i}
-                to={step.link}
-                className={`rounded-lg px-3 py-3 text-center transition-colors ${
+                className={`flex items-center gap-4 rounded-lg px-4 py-3 transition-colors ${
                   step.done
-                    ? 'bg-green-900/20 border border-green-800/50'
-                    : 'bg-gray-800/50 border border-gray-700/50 hover:border-indigo-600/50 hover:bg-gray-800'
+                    ? 'bg-green-900/10 border border-green-800/30'
+                    : 'bg-gray-800/50 border border-gray-700/50'
                 }`}
               >
-                <div className="text-lg mb-1">
-                  {step.done ? (
-                    <span className="text-green-400">&#10003;</span>
-                  ) : (
-                    <span className="text-gray-600">{i + 1}</span>
-                  )}
+                {/* Step indicator */}
+                <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
+                  step.done
+                    ? 'bg-green-500/20 text-green-400'
+                    : 'bg-gray-700/50 text-gray-500'
+                }`}>
+                  {step.done ? '\u2713' : i + 1}
                 </div>
-                <p className={`text-xs font-medium ${step.done ? 'text-green-400' : 'text-gray-300'}`}>
-                  {step.label}
-                </p>
-                <p className="text-xs text-gray-500 mt-0.5 leading-tight">{step.description}</p>
-              </Link>
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm font-medium ${step.done ? 'text-green-400 line-through decoration-green-700' : 'text-gray-200'}`}>
+                    {step.label}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">{step.description}</p>
+                </div>
+                {/* CTA */}
+                {!step.done && (
+                  <Link
+                    to={step.link}
+                    className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                  >
+                    {step.cta}
+                  </Link>
+                )}
+              </div>
             ))}
           </div>
         </div>
       ) : (
-        <div className="flex items-center gap-2 px-1 text-xs text-green-400/70">
-          <span>&#10003;</span>
-          <span>All systems connected and configured</span>
+        <div className="card bg-green-900/10 border-green-800/30">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center text-green-400">
+              {'\u2713'}
+            </div>
+            <div>
+              <p className="text-sm font-medium text-green-400">You're all set!</p>
+              <p className="text-xs text-gray-500">Your AI code governance is fully configured.</p>
+            </div>
+          </div>
         </div>
       )}
 
