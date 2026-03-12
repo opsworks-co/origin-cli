@@ -2,6 +2,15 @@ import { useState, useMemo, useRef, useCallback } from 'react';
 import type { SessionDiff, PromptChange } from '../api';
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatPromptTime(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -432,6 +441,11 @@ function TurnCard({
 
           {/* Stats */}
           <div className="flex items-center gap-2 flex-shrink-0 mt-0.5">
+            {pc?.createdAt && (
+              <span className="text-[11px] text-gray-600 tabular-nums" title={new Date(pc.createdAt).toLocaleString()}>
+                {formatPromptTime(pc.createdAt)}
+              </span>
+            )}
             {hasChanges && (
               <span className="text-[11px] text-gray-500 bg-gray-800/60 px-1.5 py-0.5 rounded">
                 {pc!.filesChanged.length} file{pc!.filesChanged.length !== 1 ? 's' : ''}

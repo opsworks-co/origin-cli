@@ -9,7 +9,7 @@ import { getGitRoot } from '../session-state.js';
 
 // ─── Agent Definitions ────────────────────────────────────────────────────
 
-type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'windsurf' | 'aider';
+type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'windsurf' | 'codex' | 'aider';
 
 interface AgentConfig {
   name: string;
@@ -200,6 +200,41 @@ function installWindsurfHooks(gitRoot: string): void {
   console.log(chalk.green(`  ✓ Hooks installed in ${windsurfLabel}`));
 }
 
+// ── Codex CLI Hooks ──────────────────────────────────────────────────────
+
+function installCodexHooks(gitRoot: string): void {
+  const codexDir = path.join(gitRoot, '.codex');
+  const hooksPath = path.join(codexDir, 'hooks.json');
+
+  if (!fs.existsSync(codexDir)) {
+    fs.mkdirSync(codexDir, { recursive: true });
+  }
+
+  let config: Record<string, any> = { hooks: {} };
+  if (fs.existsSync(hooksPath)) {
+    backupExistingHooks(hooksPath);
+    try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = { hooks: {} }; }
+  }
+
+  if (!config.hooks) config.hooks = {};
+
+  const hooks: Record<string, any[]> = {
+    SessionStart: [{ hooks: [{ type: 'command', command: 'origin hooks codex session-start', timeout: 10 }] }],
+    Stop: [{ hooks: [{ type: 'command', command: 'origin hooks codex stop', timeout: 10 }] }],
+  };
+
+  for (const [eventType, entries] of Object.entries(hooks)) {
+    if (!config.hooks[eventType]) config.hooks[eventType] = [];
+    config.hooks[eventType] = filterOriginHooks(config.hooks[eventType]);
+    config.hooks[eventType].push(...entries);
+  }
+
+  fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
+  const codexLabel = gitRoot === os.homedir() ? `~/.codex/hooks.json` : `.codex/hooks.json`;
+  console.log(chalk.green(`  ✓ Hooks installed in ${codexLabel}`));
+  console.log(chalk.gray('    Note: Enable hooks in Codex with: codex -c features.codex_hooks=true'));
+}
+
 // ── Aider Hooks ───────────────────────────────────────────────────────────
 
 function installAiderHooks(gitRoot: string): void {
@@ -301,6 +336,15 @@ const AGENTS: Record<AgentType, AgentConfig> = {
     hookCommand: 'origin hooks windsurf',
     installHooks: installWindsurfHooks,
   },
+  codex: {
+    name: 'Codex CLI',
+    configDir: '.codex',
+    configFile: 'hooks.json',
+    detectDir: '.codex',
+    command: 'codex',
+    hookCommand: 'origin hooks codex',
+    installHooks: installCodexHooks,
+  },
   aider: {
     name: 'Aider',
     configDir: '.',
@@ -334,7 +378,7 @@ function detectAgents(gitRoot: string): AgentType[] {
 // ─── Main Command ──────────────────────────────────────────────────────────
 
 // Agents that support global (~/) hook installation
-const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'windsurf'];
+const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'windsurf', 'codex'];
 
 export async function enableCommand(opts: { agent?: string; global?: boolean; link?: string }): Promise<void> {
   const config = loadConfig();

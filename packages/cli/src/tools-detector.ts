@@ -15,6 +15,7 @@ const CLI_CHECKS = [
   { name: 'continue',  cmd: 'which continue' },
   { name: 'code',      cmd: 'which code' },       // VS Code
   { name: 'codium',    cmd: 'which codium' },      // VSCodium
+  { name: 'codex',     cmd: 'which codex' },       // OpenAI Codex CLI
 ];
 
 // ── IDE extensions that indicate AI tool usage ───────────────────────────────

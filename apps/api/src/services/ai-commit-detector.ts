@@ -96,6 +96,22 @@ const AI_SIGNATURES: ToolSignature[] = [
     ],
   },
   {
+    tool: 'codex',
+    coAuthorPatterns: [
+      /codex/i,
+      /openai\s*codex/i,
+      /noreply@openai\.com/i,
+    ],
+    authorPatterns: [
+      /^codex$/i,
+      /^openai[\s-]?codex$/i,
+    ],
+    messagePatterns: [
+      /generated\s+(by|with)\s+codex/i,
+      /openai\s+codex/i,
+    ],
+  },
+  {
     tool: 'codeium',
     coAuthorPatterns: [
       /codeium/i,

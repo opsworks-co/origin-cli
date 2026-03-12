@@ -245,6 +245,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       'claude-code': 'claude',
       'cursor': 'cursor',
       'windsurf': 'windsurf',
+      'codex': 'codex',
       'aider': 'aider',
     };
     model = AGENT_DEFAULT_MODELS[finalAgentSlug || ''] || 'unknown';

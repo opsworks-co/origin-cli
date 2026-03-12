@@ -196,6 +196,7 @@ export interface PromptChange {
   promptText: string;
   filesChanged: string[];
   diff: string;
+  createdAt?: string;
 }
 
 export interface Session {
