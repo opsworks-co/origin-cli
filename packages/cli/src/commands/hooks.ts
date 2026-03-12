@@ -342,7 +342,18 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
 
   // ── Auto-create session on resume ──────────────────────────────────────────
   // When Claude Code (or other agents) resume a session, SessionStart hook may
-  // not fire again. If we have no state, create a new Origin session on the fly.
+  // not fire again. If we have no state OR the Claude session ID changed (context
+  // window reset), create a new Origin session on the fly.
+  const incomingSessionId = input.session_id || '';
+  const isResumedSession = state && incomingSessionId && state.claudeSessionId && state.claudeSessionId !== incomingSessionId;
+  if (isResumedSession) {
+    debugLog('user-prompt-submit', 'session ID changed — new context window detected', {
+      old: state!.claudeSessionId,
+      new: incomingSessionId,
+      oldOriginSession: state!.sessionId,
+    });
+    state = null; // Force new session creation
+  }
   if (!state) {
     debugLog('user-prompt-submit', 'no session state — attempting auto-create (resume scenario)', { hookCwd });
     const config = loadConfig();
@@ -439,6 +450,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           toolCalls: parsed?.toolCalls || undefined,
           durationMs: durationMs > 0 ? durationMs : undefined,
           costUsd: costUsd > 0 ? costUsd : undefined,
+          status: 'RUNNING',
         });
         debugLog('user-prompt-submit', 'heartbeat sent', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd });
       }

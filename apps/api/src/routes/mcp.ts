@@ -278,7 +278,7 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
     const {
       prompt, transcript, filesChanged, tokensUsed, toolCalls,
       linesAdded, linesRemoved, model, inputTokens, outputTokens,
-      durationMs, costUsd, promptChanges, branch,
+      durationMs, costUsd, promptChanges, branch, status,
     } = req.body;
 
     await prisma.codingSession.update({
@@ -297,6 +297,9 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         ...(durationMs !== undefined && { durationMs }),
         ...(costUsd !== undefined && { costUsd }),
         ...(branch !== undefined && { branch }),
+        ...(status !== undefined && { status }),
+        // Re-opening a completed session clears endedAt
+        ...(status === 'RUNNING' && { endedAt: null }),
       },
     });
 
