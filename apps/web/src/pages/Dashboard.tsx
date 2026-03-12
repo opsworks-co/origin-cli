@@ -26,6 +26,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [complianceScore, setComplianceScore] = useState<number | null>(null);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(() => localStorage.getItem('origin_onboarding_dismissed') === 'true');
 
   useEffect(() => {
     Promise.all([
@@ -131,7 +132,7 @@ export default function Dashboard() {
       </div>
 
       {/* ── Onboarding Checklist ─────────────────────────────────────────── */}
-      {!allSetUp ? (
+      {!allSetUp && !onboardingDismissed ? (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -140,7 +141,7 @@ export default function Dashboard() {
                 Complete these steps to set up AI code governance for your team.
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500">{completedSteps}/{setupSteps.length}</span>
               <div className="w-24 h-2 bg-gray-700 rounded-full overflow-hidden">
                 <div
@@ -148,6 +149,15 @@ export default function Dashboard() {
                   style={{ width: `${(completedSteps / setupSteps.length) * 100}%` }}
                 />
               </div>
+              <button
+                onClick={() => { localStorage.setItem('origin_onboarding_dismissed', 'true'); setOnboardingDismissed(true); }}
+                className="text-gray-600 hover:text-gray-400 transition-colors"
+                title="Dismiss"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
             </div>
           </div>
           <div className="space-y-2">
