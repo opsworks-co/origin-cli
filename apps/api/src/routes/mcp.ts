@@ -170,6 +170,25 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
           agentSlug,
         });
       }
+
+      // Enforce agent membership: if the user has explicit assignments, they can only use assigned agents
+      if (req.mcpUserId) {
+        const userAssignments = await prisma.agentMember.count({
+          where: { userId: req.mcpUserId },
+        });
+        if (userAssignments > 0) {
+          const isAssigned = await prisma.agentMember.findUnique({
+            where: { agentId_userId: { agentId: agent.id, userId: req.mcpUserId } },
+          });
+          if (!isAssigned) {
+            return res.status(403).json({
+              error: 'Agent not assigned',
+              message: `You are not assigned to agent "${agentSlug}". Contact your admin to get access.`,
+              agentSlug,
+            });
+          }
+        }
+      }
     }
 
     // Check model allowlist policies (with agent/machine/repo scope)
