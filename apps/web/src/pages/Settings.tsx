@@ -9,6 +9,7 @@ import Insights from './Insights';
 import Reports from './Reports';
 import Trails from './Trails';
 import Compliance from './Compliance';
+import ModelComparison from './ModelComparison';
 
 interface ApiKey {
   id: string;
@@ -21,8 +22,8 @@ interface ApiKey {
   repoScopes: { repoId: string; repoName: string }[];
 }
 
-type SettingsTab = 'general' | 'agent-setup' | 'integrations' | 'budget' | 'team' | 'audit' | 'insights' | 'reports' | 'trails' | 'compliance';
-const VALID_TABS: SettingsTab[] = ['general', 'agent-setup', 'integrations', 'budget', 'team', 'audit', 'insights', 'reports', 'trails', 'compliance'];
+type SettingsTab = 'general' | 'agent-setup' | 'integrations' | 'budget' | 'team' | 'audit' | 'insights' | 'reports' | 'trails' | 'compliance' | 'models';
+const VALID_TABS: SettingsTab[] = ['general', 'agent-setup', 'integrations', 'budget', 'team', 'audit', 'insights', 'reports', 'trails', 'compliance', 'models'];
 
 export default function Settings() {
   const { user } = useAuth();
@@ -622,6 +623,16 @@ export default function Settings() {
           }`}
         >
           Compliance
+        </button>
+        <button
+          onClick={() => setActiveTab('models')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'models'
+              ? 'border-indigo-500 text-indigo-400'
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          ⚡ Models
         </button>
       </div>
 
@@ -1841,6 +1852,7 @@ origin init</pre>
       {activeTab === 'reports' && <Reports />}
       {activeTab === 'trails' && <Trails />}
       {activeTab === 'compliance' && <Compliance />}
+      {activeTab === 'models' && <ModelComparison />}
     </div>
   );
 }

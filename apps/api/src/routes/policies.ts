@@ -128,7 +128,8 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       return res.status(404).json({ error: 'Policy not found' });
     }
 
-    // Delete rules and assignments first, then policy
+    // Delete related records first, then policy
+    await prisma.policyVersion.deleteMany({ where: { policyId: id } });
     await prisma.policyRule.deleteMany({ where: { policyId: id } });
     await prisma.policyAssignment.deleteMany({ where: { policyId: id } });
     await prisma.policy.delete({ where: { id } });

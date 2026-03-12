@@ -32,7 +32,6 @@ import Trails from './pages/Trails';
 import TrailDetail from './pages/TrailDetail';
 import Prompts from './pages/Prompts';
 import ComplianceDashboard from './pages/Compliance';
-import ModelComparison from './pages/ModelComparison';
 import PublicPolicies from './pages/PublicPolicies';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -245,13 +244,7 @@ export default function App() {
       />
       <Route
         path="/models"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <ModelComparison />
-            </Layout>
-          </ProtectedRoute>
-        }
+        element={<Navigate to="/settings?tab=models" replace />}
       />
 
       {/* Catch-all */}
