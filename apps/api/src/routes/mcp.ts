@@ -191,6 +191,45 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     }
 
+    // Enforce User → Repo access: if user has explicit RepoMember assignments, restrict to those repos
+    if (req.mcpUserId) {
+      const userRepoAssignments = await prisma.repoMember.count({
+        where: { userId: req.mcpUserId },
+      });
+      if (userRepoAssignments > 0) {
+        const isRepoAssigned = await prisma.repoMember.findUnique({
+          where: { repoId_userId: { repoId: repo.id, userId: req.mcpUserId } },
+        });
+        if (!isRepoAssigned) {
+          return res.status(403).json({
+            error: 'Repo not assigned',
+            message: `You do not have access to repo "${repo.name}". Contact your admin to get access.`,
+            repoName: repo.name,
+          });
+        }
+      }
+    }
+
+    // Enforce Agent → Repo access: if agent has explicit AgentRepo assignments, restrict to those repos
+    if (agent) {
+      const agentRepoAssignments = await prisma.agentRepo.count({
+        where: { agentId: agent.id },
+      });
+      if (agentRepoAssignments > 0) {
+        const isAgentRepoAssigned = await prisma.agentRepo.findUnique({
+          where: { agentId_repoId: { agentId: agent.id, repoId: repo.id } },
+        });
+        if (!isAgentRepoAssigned) {
+          return res.status(403).json({
+            error: 'Agent repo access denied',
+            message: `Agent "${agentSlug}" does not have access to repo "${repo.name}". Contact your admin to configure agent repo access.`,
+            agentSlug,
+            repoName: repo.name,
+          });
+        }
+      }
+    }
+
     // Check model allowlist policies (with agent/machine/repo scope)
     const modelCheck = await enforceSessionStart(orgId, model, {
       agentId: agent?.id ?? null,

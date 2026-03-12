@@ -40,6 +40,7 @@ model User {
   sessions      CodingSession[]
   apiKeys       ApiKey[]
   agentMembers  AgentMember[]
+  repoMembers   RepoMember[]
 }
 
 model Invitation {
@@ -97,6 +98,8 @@ model Repo {
   pullRequests PullRequest[]
   policyRules  PolicyRule[]
   apiKeyScopes ApiKeyRepoScope[]
+  members      RepoMember[]
+  agentAccess  AgentRepo[]
 }
 
 model Commit {
@@ -210,6 +213,7 @@ model Agent {
   versions          AgentVersion[]
   policyAssignments PolicyAssignment[]
   members           AgentMember[]
+  repoAccess        AgentRepo[]
 }
 
 // ── Agent-User Assignment ───────────────────────────────────────
@@ -223,6 +227,32 @@ model AgentMember {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([agentId, userId])
+}
+
+// ── Repo-User Assignment ─────────────────────────────────────────
+
+model RepoMember {
+  id        String   @id @default(uuid())
+  repoId    String
+  userId    String
+  createdAt DateTime @default(now())
+  repo      Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([repoId, userId])
+}
+
+// ── Agent-Repo Assignment ────────────────────────────────────────
+
+model AgentRepo {
+  id        String   @id @default(uuid())
+  agentId   String
+  repoId    String
+  createdAt DateTime @default(now())
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  repo      Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, repoId])
 }
 
 // ── Policies ────────────────────────────────────────────────────

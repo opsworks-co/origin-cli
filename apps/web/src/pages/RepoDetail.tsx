@@ -510,6 +510,14 @@ export default function RepoDetail() {
   // Health
   const [health, setHealth] = useState<RepoHealth | null>(null);
 
+  // Access control
+  const [repoMembers, setRepoMembers] = useState<api.RepoMemberUser[]>([]);
+  const [repoAgents, setRepoAgents] = useState<api.RepoAgentAccess[]>([]);
+  const [orgUsers, setOrgUsers] = useState<{ id: string; name: string; email: string; role: string }[]>([]);
+  const [orgAgents, setOrgAgents] = useState<api.Agent[]>([]);
+  const [accessSaving, setAccessSaving] = useState(false);
+  const [showAccessControl, setShowAccessControl] = useState(false);
+
   // Diff modal states
   const [selectedCommit, setSelectedCommit] = useState<Commit | null>(null);
   const [diff, setDiff] = useState<CommitDiff | null>(null);
@@ -534,8 +542,12 @@ export default function RepoDetail() {
     } finally {
       setLoading(false);
     }
-    // Fetch health score separately (non-blocking)
+    // Fetch health score and access control separately (non-blocking)
     api.getRepoHealth(id).then(setHealth).catch(() => {});
+    api.getRepoMembers(id).then(setRepoMembers).catch(() => {});
+    api.getRepoAgents(id).then(setRepoAgents).catch(() => {});
+    api.getUsers().then(r => setOrgUsers(r.users)).catch(() => {});
+    api.getAgents().then(setOrgAgents).catch(() => {});
   }, [id, branchFilter]);
 
   useEffect(() => {
@@ -790,6 +802,157 @@ export default function RepoDetail() {
           </div>
         </div>
       )}
+
+      {/* Access Control */}
+      <div className="card">
+        <button
+          onClick={() => setShowAccessControl(!showAccessControl)}
+          className="w-full flex items-center justify-between text-left"
+        >
+          <div>
+            <h3 className="text-sm font-semibold text-gray-300">Access Control</h3>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {repoMembers.length === 0 && repoAgents.length === 0
+                ? 'Open access — all users and agents can work in this repo.'
+                : `${repoMembers.length} user${repoMembers.length !== 1 ? 's' : ''}, ${repoAgents.length} agent${repoAgents.length !== 1 ? 's' : ''} assigned.`}
+            </p>
+          </div>
+          <span className="text-gray-500 text-xs">{showAccessControl ? '▼' : '▶'}</span>
+        </button>
+
+        {showAccessControl && (
+          <div className="mt-4 space-y-6">
+            {/* User Access */}
+            <div>
+              <h4 className="text-xs font-semibold text-gray-400 mb-2">User Access</h4>
+              <p className="text-xs text-gray-600 mb-2">
+                {repoMembers.length === 0 ? 'No user restrictions — all org members can work here.' : 'Only these users can start sessions in this repo.'}
+              </p>
+              {repoMembers.length > 0 && (
+                <div className="space-y-1.5 mb-3">
+                  {repoMembers.map((m) => (
+                    <div key={m.id} className="flex items-center justify-between px-3 py-2 bg-gray-800/50 border border-gray-700/50 rounded-md">
+                      <div>
+                        <span className="text-sm text-gray-200">{m.name}</span>
+                        <span className="text-xs text-gray-500 ml-2">{m.email}</span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          setAccessSaving(true);
+                          try {
+                            const newIds = repoMembers.filter(x => x.id !== m.id).map(x => x.id);
+                            await api.updateRepoMembers(id!, newIds);
+                            setRepoMembers(repoMembers.filter(x => x.id !== m.id));
+                          } catch {}
+                          setAccessSaving(false);
+                        }}
+                        disabled={accessSaving}
+                        className="text-xs text-red-400 hover:text-red-300"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(() => {
+                const memberIds = new Set(repoMembers.map(m => m.id));
+                const available = orgUsers.filter(u => !memberIds.has(u.id));
+                if (available.length === 0) return null;
+                return (
+                  <select
+                    className="select text-sm w-full"
+                    value=""
+                    onChange={async (e) => {
+                      const userId = e.target.value;
+                      if (!userId) return;
+                      setAccessSaving(true);
+                      try {
+                        const newIds = [...repoMembers.map(x => x.id), userId];
+                        await api.updateRepoMembers(id!, newIds);
+                        const user = orgUsers.find(u => u.id === userId);
+                        if (user) setRepoMembers([...repoMembers, { ...user, assignedAt: new Date().toISOString() }]);
+                      } catch {}
+                      setAccessSaving(false);
+                    }}
+                    disabled={accessSaving}
+                  >
+                    <option value="">Add user...</option>
+                    {available.map(u => (
+                      <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
+                    ))}
+                  </select>
+                );
+              })()}
+            </div>
+
+            {/* Agent Access */}
+            <div>
+              <h4 className="text-xs font-semibold text-gray-400 mb-2">Agent Access</h4>
+              <p className="text-xs text-gray-600 mb-2">
+                {repoAgents.length === 0 ? 'No agent restrictions — all agents can access this repo.' : 'Only these agents can work in this repo.'}
+              </p>
+              {repoAgents.length > 0 && (
+                <div className="space-y-1.5 mb-3">
+                  {repoAgents.map((a) => (
+                    <div key={a.id} className="flex items-center justify-between px-3 py-2 bg-gray-800/50 border border-gray-700/50 rounded-md">
+                      <div>
+                        <span className="text-sm text-gray-200">{a.name}</span>
+                        <span className="text-xs text-gray-500 ml-2 font-mono">{a.slug}</span>
+                        <span className="text-xs text-gray-600 ml-2">{a.model}</span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          setAccessSaving(true);
+                          try {
+                            const newIds = repoAgents.filter(x => x.id !== a.id).map(x => x.id);
+                            await api.updateRepoAgents(id!, newIds);
+                            setRepoAgents(repoAgents.filter(x => x.id !== a.id));
+                          } catch {}
+                          setAccessSaving(false);
+                        }}
+                        disabled={accessSaving}
+                        className="text-xs text-red-400 hover:text-red-300"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(() => {
+                const agentIds = new Set(repoAgents.map(a => a.id));
+                const available = orgAgents.filter(a => !agentIds.has(a.id) && a.status === 'ACTIVE');
+                if (available.length === 0) return null;
+                return (
+                  <select
+                    className="select text-sm w-full"
+                    value=""
+                    onChange={async (e) => {
+                      const agentId = e.target.value;
+                      if (!agentId) return;
+                      setAccessSaving(true);
+                      try {
+                        const newIds = [...repoAgents.map(x => x.id), agentId];
+                        await api.updateRepoAgents(id!, newIds);
+                        const agent = orgAgents.find(a => a.id === agentId);
+                        if (agent) setRepoAgents([...repoAgents, { id: agent.id, name: agent.name, slug: agent.slug, model: agent.model, status: agent.status, assignedAt: new Date().toISOString() }]);
+                      } catch {}
+                      setAccessSaving(false);
+                    }}
+                    disabled={accessSaving}
+                  >
+                    <option value="">Add agent...</option>
+                    {available.map(a => (
+                      <option key={a.id} value={a.id}>{a.name} ({a.slug})</option>
+                    ))}
+                  </select>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Filters */}
       <div className="flex gap-2 flex-wrap items-center">

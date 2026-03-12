@@ -430,6 +430,70 @@ export function updateAgentMembers(agentId: string, userIds: string[]) {
   });
 }
 
+// ---- Agent Repos ----------------------------------------------------------
+
+export interface AgentRepoAccess {
+  id: string;
+  name: string;
+  path: string;
+  provider: string;
+  assignedAt: string;
+}
+
+export function getAgentRepos(agentId: string) {
+  return request<AgentRepoAccess[]>(`/api/agents/${agentId}/repos`);
+}
+
+export function updateAgentRepos(agentId: string, repoIds: string[]) {
+  return request<{ success: boolean; repoCount: number }>(`/api/agents/${agentId}/repos`, {
+    method: 'PUT',
+    body: JSON.stringify({ repoIds }),
+  });
+}
+
+// ---- Repo Members ---------------------------------------------------------
+
+export interface RepoMemberUser {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  assignedAt: string;
+}
+
+export function getRepoMembers(repoId: string) {
+  return request<RepoMemberUser[]>(`/api/repos/${repoId}/members`);
+}
+
+export function updateRepoMembers(repoId: string, userIds: string[]) {
+  return request<{ success: boolean; memberCount: number }>(`/api/repos/${repoId}/members`, {
+    method: 'PUT',
+    body: JSON.stringify({ userIds }),
+  });
+}
+
+// ---- Repo Agent Access ----------------------------------------------------
+
+export interface RepoAgentAccess {
+  id: string;
+  name: string;
+  slug: string;
+  model: string;
+  status: string;
+  assignedAt: string;
+}
+
+export function getRepoAgents(repoId: string) {
+  return request<RepoAgentAccess[]>(`/api/repos/${repoId}/agents`);
+}
+
+export function updateRepoAgents(repoId: string, agentIds: string[]) {
+  return request<{ success: boolean; agentCount: number }>(`/api/repos/${repoId}/agents`, {
+    method: 'PUT',
+    body: JSON.stringify({ agentIds }),
+  });
+}
+
 // ---- Policies ------------------------------------------------------------
 
 export interface PolicyRule {

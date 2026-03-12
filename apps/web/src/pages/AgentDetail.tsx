@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import * as api from '../api';
 import VersionHistory from '../components/VersionHistory';
 
-type Tab = 'config' | 'sessions' | 'policies' | 'versions' | 'members';
+type Tab = 'config' | 'sessions' | 'policies' | 'versions' | 'members' | 'repos';
 
 function safeParseJson(raw: string | null | undefined, fallback: any): any {
   if (!raw) return fallback;
@@ -45,6 +45,11 @@ export default function AgentDetail() {
   const [orgUsers, setOrgUsers] = useState<{ users: { id: string; name: string; email: string; role: string }[] }>({ users: [] });
   const [membersSaving, setMembersSaving] = useState(false);
 
+  // Repos state
+  const [agentRepos, setAgentRepos] = useState<api.AgentRepoAccess[]>([]);
+  const [allRepos, setAllRepos] = useState<api.Repo[]>([]);
+  const [reposSaving, setReposSaving] = useState(false);
+
   const loadData = () => {
     if (!id) return;
     setLoading(true);
@@ -57,6 +62,8 @@ export default function AgentDetail() {
       api.getPolicies().then(setPolicies).catch(() => {}),
       api.getAgentMembers(id).then(setMembers).catch(() => {}),
       api.getUsers().then(setOrgUsers).catch(() => {}),
+      api.getAgentRepos(id).then(setAgentRepos).catch(() => {}),
+      api.getRepos().then(setAllRepos).catch(() => {}),
     ])
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
@@ -293,6 +300,9 @@ export default function AgentDetail() {
         </button>
         <button onClick={() => setTab('members')} className={tabClasses('members')}>
           Members ({members.length})
+        </button>
+        <button onClick={() => setTab('repos')} className={tabClasses('repos')}>
+          Repos ({agentRepos.length})
         </button>
         <button onClick={() => setTab('versions')} className={tabClasses('versions')}>
           Versions ({versions.length})
@@ -738,6 +748,94 @@ export default function AgentDetail() {
                           setMembersSaving(false);
                         }}
                         disabled={membersSaving}
+                        className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Repos Tab */}
+      {tab === 'repos' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-300">Repo Access</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {agentRepos.length === 0
+                  ? 'No repos assigned — this agent can access all repos.'
+                  : `${agentRepos.length} repo${agentRepos.length !== 1 ? 's' : ''} assigned. This agent can only work in these repos.`}
+              </p>
+            </div>
+          </div>
+
+          {/* Current repos */}
+          {agentRepos.length > 0 && (
+            <div className="space-y-2">
+              {agentRepos.map((r) => (
+                <div key={r.id} className="flex items-center justify-between px-4 py-2.5 bg-gray-800/50 border border-gray-700/50 rounded-lg">
+                  <div>
+                    <span className="text-sm text-gray-200">{r.name}</span>
+                    <span className="text-xs text-gray-500 ml-2 font-mono">{r.path}</span>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      setReposSaving(true);
+                      try {
+                        const newIds = agentRepos.filter((x) => x.id !== r.id).map((x) => x.id);
+                        await api.updateAgentRepos(id!, newIds);
+                        setAgentRepos(agentRepos.filter((x) => x.id !== r.id));
+                        setSuccess(`Removed ${r.name} from agent`);
+                      } catch (err: any) {
+                        setError(err.message);
+                      }
+                      setReposSaving(false);
+                    }}
+                    disabled={reposSaving}
+                    className="text-xs text-red-400 hover:text-red-300 transition-colors"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add repo */}
+          {(() => {
+            const assignedIds = new Set(agentRepos.map((r) => r.id));
+            const available = allRepos.filter((r) => !assignedIds.has(r.id));
+            if (available.length === 0) return null;
+            return (
+              <div className="card">
+                <h4 className="text-xs font-semibold text-gray-400 mb-2">Add Repo</h4>
+                <div className="space-y-2">
+                  {available.map((r) => (
+                    <div key={r.id} className="flex items-center justify-between px-3 py-2 bg-gray-800/30 rounded-md">
+                      <div>
+                        <span className="text-sm text-gray-300">{r.name}</span>
+                        <span className="text-xs text-gray-500 ml-2 font-mono">{r.path}</span>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          setReposSaving(true);
+                          try {
+                            const newIds = [...agentRepos.map((x) => x.id), r.id];
+                            await api.updateAgentRepos(id!, newIds);
+                            setAgentRepos([...agentRepos, { id: r.id, name: r.name, path: r.path, provider: r.provider, assignedAt: new Date().toISOString() }]);
+                            setSuccess(`Added ${r.name} to agent`);
+                          } catch (err: any) {
+                            setError(err.message);
+                          }
+                          setReposSaving(false);
+                        }}
+                        disabled={reposSaving}
                         className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
                       >
                         Add
