@@ -409,6 +409,27 @@ export function restoreAgentVersion(agentId: string, versionId: string) {
   return request<Agent>(`/api/agents/${agentId}/restore/${versionId}`, { method: 'POST' });
 }
 
+// ---- Agent Members --------------------------------------------------------
+
+export interface AgentMemberUser {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  assignedAt: string;
+}
+
+export function getAgentMembers(agentId: string) {
+  return request<AgentMemberUser[]>(`/api/agents/${agentId}/members`);
+}
+
+export function updateAgentMembers(agentId: string, userIds: string[]) {
+  return request<{ success: boolean; memberCount: number }>(`/api/agents/${agentId}/members`, {
+    method: 'PUT',
+    body: JSON.stringify({ userIds }),
+  });
+}
+
 // ---- Policies ------------------------------------------------------------
 
 export interface PolicyRule {

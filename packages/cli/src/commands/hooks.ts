@@ -218,12 +218,13 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
   debugLog('session-start', 'repo path resolved', { repoPath, hookCwd, discovered: repoPath !== getGitRoot(hookCwd) });
 
-  // Resolve agent slug: .origin.json takes priority → hook command slug → undefined
+  // Resolve agent slug: .origin.json → hook command slug → saved default → undefined
   const repoConfig = loadRepoConfig(repoPath);
-  const finalAgentSlug = repoConfig?.agent || agentSlug || undefined;
+  const finalAgentSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
   debugLog('session-start', 'agent resolved', {
     fromRepoConfig: repoConfig?.agent,
     fromHookCommand: agentSlug,
+    fromSavedDefault: agentConfig.agentSlug,
     final: finalAgentSlug,
   });
 
@@ -362,7 +363,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     if (config && agentConfig && repoPath) {
       try {
         const repoConfig = loadRepoConfig(repoPath);
-        const finalAgentSlug = repoConfig?.agent || agentSlug || undefined;
+        const finalAgentSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
         const branch = getBranch(hookCwd);
         const model = input.model || (finalAgentSlug === 'gemini' ? 'gemini' : finalAgentSlug === 'codex' ? 'codex' : 'claude');
         const result = await api.startSession({

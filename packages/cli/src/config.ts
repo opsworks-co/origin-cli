@@ -27,6 +27,7 @@ export interface AgentConfig {
   detectedTools: string[];
   orgId: string;
   lastToolDetection?: string; // ISO timestamp of last tool scan
+  agentSlug?: string; // Default agent slug (selected during init)
 }
 
 export function ensureConfigDir() {

@@ -39,6 +39,7 @@ model User {
   notifications Notification[]
   sessions      CodingSession[]
   apiKeys       ApiKey[]
+  agentMembers  AgentMember[]
 }
 
 model Invitation {
@@ -208,6 +209,20 @@ model Agent {
   policyRules       PolicyRule[]
   versions          AgentVersion[]
   policyAssignments PolicyAssignment[]
+  members           AgentMember[]
+}
+
+// ── Agent-User Assignment ───────────────────────────────────────
+
+model AgentMember {
+  id        String   @id @default(uuid())
+  agentId   String
+  userId    String
+  createdAt DateTime @default(now())
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, userId])
 }
 
 // ── Policies ────────────────────────────────────────────────────

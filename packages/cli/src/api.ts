@@ -49,6 +49,7 @@ export const api = {
     request(`/api/sessions/${id}/review`, { method: 'POST', body: JSON.stringify({ status, note }) }),
 
   // Agents
+  getMyAgents: () => request('/api/agents/my'),
   getAgents: () => request('/api/agents'),
   getAgent: (id: string) => request(`/api/agents/${id}`),
   createAgent: (data: any) => request('/api/agents', { method: 'POST', body: JSON.stringify(data) }),
