@@ -303,10 +303,11 @@ export default function Landing() {
           <pre className="text-sm font-mono text-gray-300 overflow-x-auto">
 {`npm i -g @origin/cli
 origin login          # authenticate with your Origin server
-origin init           # register machine, detect installed tools
-origin enable         # install hooks into Claude Code / Cursor / etc
+origin init           # register machine, detect tools, install hooks
 
-# That's it. Everything is automatic from here.`}
+# That's it — 2 commands. Everything is automatic from here.
+# Tools are auto-detected (Claude Code, Cursor, Copilot, Gemini, Aider, etc.)
+# Hooks re-scan on every session start — no need to re-run init.`}
           </pre>
         </div>
       </section>
@@ -434,7 +435,7 @@ $ origin stats && origin audit`}
             Get started in under 2 minutes
           </h2>
           <p className="text-gray-400 mb-10 max-w-xl mx-auto">
-            Install the CLI, login, and enable session tracking. That&apos;s it.
+            Install the CLI, login, and init. Two commands and you&apos;re done.
           </p>
 
           <div className="max-w-2xl mx-auto mb-12">
@@ -444,7 +445,7 @@ $ origin stats && origin audit`}
               {[
                 { step: '1', cmd: 'curl ... | sh', title: 'Install CLI', desc: 'One command to install' },
                 { step: '2', cmd: 'origin login', title: 'Authenticate', desc: 'Login with your org' },
-                { step: '3', cmd: 'origin enable', title: 'Enable tracking', desc: 'Hooks installed automatically' },
+                { step: '3', cmd: 'origin init', title: 'Initialize', desc: 'Detects tools & installs hooks' },
               ].map((s) => (
                 <div key={s.step} className="text-center">
                   <div className="w-10 h-10 rounded-full bg-indigo-600 text-white font-bold text-sm flex items-center justify-center mx-auto mb-3">

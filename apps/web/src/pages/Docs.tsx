@@ -283,11 +283,13 @@ export default function Docs() {
 
             <H2>2. Developer installs CLI (one-time per machine)</H2>
             <CodeBlock title="Terminal">{`npm i -g @origin/cli
-origin login
-origin init          # registers machine, detects installed tools
-origin enable        # installs hooks into Claude Code / Cursor / etc`}</CodeBlock>
+origin login         # authenticate with your Origin server
+origin init          # registers machine, detects tools, installs global hooks`}</CodeBlock>
             <P>
-              After this, everything is automatic. The developer doesn&apos;t need to think about Origin again.
+              That&apos;s it &mdash; two commands. <code className="text-indigo-400">origin init</code> auto-detects
+              installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, etc.), registers the machine,
+              and installs global hooks. Tools are re-scanned on every session start, so new installations are picked up
+              automatically without re-running init.
             </P>
 
             <H2>3. Daily workflow (automatic)</H2>
@@ -413,14 +415,13 @@ All passwords: password123`}</CodeBlock>
               To capture AI coding sessions (prompts, transcripts, diffs, cost), install the Origin CLI and
               enable hooks for your AI agent:
             </P>
-            <CodeBlock>{`npm i -g @anthropic/origin-cli
+            <CodeBlock>{`npm i -g @origin/cli
 origin login
-origin init
-cd your-project && origin enable`}</CodeBlock>
+origin init          # detects tools, registers machine, installs global hooks`}</CodeBlock>
             <P>
-              This installs lightweight hooks into your agent (Claude Code, Cursor, or Gemini CLI) that
-              automatically track every session. See the <strong className="text-gray-200">Session Tracking</strong> guide
-              for full details and manual configuration.
+              That&apos;s it. <code className="text-indigo-400">origin init</code> automatically detects installed AI tools,
+              registers your machine, and installs global hooks for all repos. Tools are re-detected on every session start.
+              See the <strong className="text-gray-200">Session Tracking</strong> guide for details.
             </P>
 
             <H3>Production Deployment</H3>
@@ -456,29 +457,26 @@ fly deploy`}</CodeBlock>
             </Callout>
 
             <H2>Prerequisites</H2>
-            <P>Before enabling session tracking, make sure you have:</P>
+            <P>Before session tracking works, make sure you have:</P>
             <ul className="space-y-1 ml-4 mb-4">
-              <Li>Installed the Origin CLI: <code className="text-indigo-400">npm i -g @anthropic/origin-cli</code></Li>
+              <Li>Installed the Origin CLI: <code className="text-indigo-400">npm i -g @origin/cli</code></Li>
               <Li>Logged in: <code className="text-indigo-400">origin login</code></Li>
-              <Li>Registered your machine: <code className="text-indigo-400">origin init</code></Li>
+              <Li>Initialized: <code className="text-indigo-400">origin init</code> (registers machine, detects tools, installs global hooks)</Li>
             </ul>
 
             <H2>Quick Setup</H2>
             <P>
-              From inside your project directory (a git repo), run:
-            </P>
-            <CodeBlock title="Terminal">{`cd your-project
-origin enable`}</CodeBlock>
-            <P>
-              That&rsquo;s it. Origin auto-detects which agents are configured in this repo and installs
-              hooks for all of them. If no agent config is found, it defaults to Claude Code.
+              <code className="text-indigo-400">origin init</code> installs hooks globally, so all git repos are tracked automatically.
+              No per-repo setup is needed. AI tools are auto-detected (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, etc.)
+              and re-scanned on every session start.
             </P>
 
-            <H3>Specify a Single Agent</H3>
+            <H3>Per-Repo Override (Optional)</H3>
             <P>
-              To install hooks for only one agent:
+              If you prefer per-repo hooks instead of global, or need to install hooks for a specific agent only:
             </P>
-            <CodeBlock title="Terminal">{`origin enable --agent claude-code
+            <CodeBlock title="Terminal">{`origin enable                    # install hooks for this repo only
+origin enable --agent claude-code  # specific agent
 origin enable --agent cursor
 origin enable --agent gemini`}</CodeBlock>
 
@@ -2608,7 +2606,7 @@ GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin init</code>
-                <P>Register the current machine with Origin. Detects installed tools (git, node, python, etc.) and reports them to the server. Shows up in Dashboard &rarr; Registered Machines.</P>
+                <P>Register the current machine with Origin. Auto-detects installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, etc.) via CLI checks, IDE extension scanning, and MCP config inspection. Installs global hooks so all repos are tracked automatically. Tools are re-detected on every session start.</P>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -2638,11 +2636,11 @@ GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin enable</code>
-                <P>Install Origin hooks for AI coding tools. Supports Claude Code, Cursor, Aider, and Gemini CLI. Hooks automatically track session start/end, user prompts, and file changes.</P>
-                <CodeBlock>{`origin enable claude-code
-origin enable cursor
-origin enable aider
-origin enable gemini`}</CodeBlock>
+                <P>Install Origin hooks for a specific repo (optional &mdash; <code className="text-indigo-400">origin init</code> already installs global hooks). Useful for per-repo overrides or agent-specific configuration.</P>
+                <CodeBlock>{`origin enable                    # all detected agents
+origin enable --agent claude-code  # specific agent
+origin enable --agent cursor
+origin enable --agent gemini`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">

@@ -1732,7 +1732,8 @@ origin login</pre>
               </div>
               <div className="ml-10">
                 <p className="text-sm text-gray-400 mb-2">
-                  Register this machine and detect installed tools (git, node, etc.).
+                  Register this machine, auto-detect AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, etc.),
+                  and install global hooks. Tools are re-detected on every session start.
                 </p>
                 <pre className="bg-gray-800 rounded-lg px-4 py-3 text-sm font-mono text-gray-200 overflow-x-auto">
 origin init</pre>

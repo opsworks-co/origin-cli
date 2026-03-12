@@ -69,9 +69,11 @@ node dist/index.js login
 
 ```bash
 origin login       # authenticate with your Origin instance
-origin init        # register this machine, detect AI tools
-origin policies    # view your org's active policies
+origin init        # register machine, auto-detect AI tools, install global hooks
+origin policies    # view your org's active policies (optional)
 ```
+
+> **That's it — 2 commands.** `origin init` auto-detects installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, etc.) via CLI checks, IDE extension scanning, and MCP config inspection. Global hooks are installed so all repos are tracked automatically. Tools are re-scanned on every session start.
 
 ### 4. Add the MCP server to Claude Code
 
