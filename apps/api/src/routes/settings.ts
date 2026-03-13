@@ -20,10 +20,16 @@ router.get('/api-keys', async (req: AuthRequest, res: Response) => {
         id: true, name: true, keyPrefix: true, createdAt: true,
         userId: true, role: true,
         user: { select: { name: true, email: true } },
+        repoScopes: { include: { repo: { select: { id: true, name: true } } } },
+        agentScopes: { include: { agent: { select: { id: true, name: true, slug: true } } } },
       },
       orderBy: { createdAt: 'desc' },
     });
-    res.json(keys);
+    res.json(keys.map((k) => ({
+      ...k,
+      repoScopes: k.repoScopes.map((s) => ({ repoId: s.repo.id, repoName: s.repo.name })),
+      agentScopes: k.agentScopes.map((s) => ({ agentId: s.agent.id, agentName: s.agent.name, agentSlug: s.agent.slug })),
+    })));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
@@ -33,12 +39,34 @@ router.get('/api-keys', async (req: AuthRequest, res: Response) => {
 // POST /api/settings/api-keys
 router.post('/api-keys', async (req: AuthRequest, res: Response) => {
   try {
-    const { name, role } = req.body;
+    const { name, role, repoIds, agentIds } = req.body;
 
     // Validate role if provided (standalone key)
     const validRoles = ['VIEWER', 'MEMBER', 'ADMIN'];
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({ error: 'Invalid role. Must be VIEWER, MEMBER, or ADMIN.' });
+    }
+
+    // Validate repoIds belong to this org
+    if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
+      const validRepos = await prisma.repo.findMany({
+        where: { orgId: req.user!.orgId, id: { in: repoIds } },
+        select: { id: true },
+      });
+      if (validRepos.length !== repoIds.length) {
+        return res.status(400).json({ error: 'One or more repos do not belong to your organization' });
+      }
+    }
+
+    // Validate agentIds belong to this org
+    if (agentIds && Array.isArray(agentIds) && agentIds.length > 0) {
+      const validAgents = await prisma.agent.findMany({
+        where: { orgId: req.user!.orgId, id: { in: agentIds } },
+        select: { id: true },
+      });
+      if (validAgents.length !== agentIds.length) {
+        return res.status(400).json({ error: 'One or more agents do not belong to your organization' });
+      }
     }
 
     const rawKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
@@ -54,10 +82,91 @@ router.post('/api-keys', async (req: AuthRequest, res: Response) => {
         keyHash,
         keyPrefix,
         role: role || null,
+        repoScopes: {
+          create: (repoIds && Array.isArray(repoIds) ? repoIds : []).map((repoId: string) => ({ repoId })),
+        },
+        agentScopes: {
+          create: (agentIds && Array.isArray(agentIds) ? agentIds : []).map((agentId: string) => ({ agentId })),
+        },
+      },
+      include: {
+        repoScopes: { include: { repo: { select: { id: true, name: true } } } },
+        agentScopes: { include: { agent: { select: { id: true, name: true, slug: true } } } },
       },
     });
 
-    res.json({ id: key.id, name: key.name, keyPrefix: key.keyPrefix, key: rawKey, role: key.role, createdAt: key.createdAt });
+    res.json({
+      id: key.id, name: key.name, keyPrefix: key.keyPrefix, key: rawKey, role: key.role, createdAt: key.createdAt,
+      repoScopes: key.repoScopes.map((s) => ({ repoId: s.repo.id, repoName: s.repo.name })),
+      agentScopes: key.agentScopes.map((s) => ({ agentId: s.agent.id, agentName: s.agent.name, agentSlug: s.agent.slug })),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/settings/api-keys/:id — update agent/repo scopes on an existing key
+router.put('/api-keys/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { agentIds, repoIds } = req.body;
+
+    const key = await prisma.apiKey.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!key) return res.status(404).json({ error: 'API key not found' });
+
+    // Update agent scopes if provided
+    if (agentIds !== undefined && Array.isArray(agentIds)) {
+      if (agentIds.length > 0) {
+        const validAgents = await prisma.agent.findMany({
+          where: { orgId: req.user!.orgId, id: { in: agentIds } },
+          select: { id: true },
+        });
+        if (validAgents.length !== agentIds.length) {
+          return res.status(400).json({ error: 'One or more agents do not belong to your organization' });
+        }
+      }
+      await prisma.apiKeyAgentScope.deleteMany({ where: { apiKeyId: id } });
+      if (agentIds.length > 0) {
+        await prisma.apiKeyAgentScope.createMany({
+          data: agentIds.map((agentId: string) => ({ apiKeyId: id, agentId })),
+        });
+      }
+    }
+
+    // Update repo scopes if provided
+    if (repoIds !== undefined && Array.isArray(repoIds)) {
+      if (repoIds.length > 0) {
+        const validRepos = await prisma.repo.findMany({
+          where: { orgId: req.user!.orgId, id: { in: repoIds } },
+          select: { id: true },
+        });
+        if (validRepos.length !== repoIds.length) {
+          return res.status(400).json({ error: 'One or more repos do not belong to your organization' });
+        }
+      }
+      await prisma.apiKeyRepoScope.deleteMany({ where: { apiKeyId: id } });
+      if (repoIds.length > 0) {
+        await prisma.apiKeyRepoScope.createMany({
+          data: repoIds.map((repoId: string) => ({ apiKeyId: id, repoId })),
+        });
+      }
+    }
+
+    // Return updated key
+    const updated = await prisma.apiKey.findUnique({
+      where: { id },
+      include: {
+        repoScopes: { include: { repo: { select: { id: true, name: true } } } },
+        agentScopes: { include: { agent: { select: { id: true, name: true, slug: true } } } },
+      },
+    });
+
+    res.json({
+      id: updated!.id,
+      repoScopes: updated!.repoScopes.map((s) => ({ repoId: s.repo.id, repoName: s.repo.name })),
+      agentScopes: updated!.agentScopes.map((s) => ({ agentId: s.agent.id, agentName: s.agent.name, agentSlug: s.agent.slug })),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });

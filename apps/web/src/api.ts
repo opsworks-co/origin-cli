@@ -230,6 +230,7 @@ export interface Session {
   startedAt: string | null;
   endedAt: string | null;
   agentSystemPrompt: string | null;
+  agentVersion: number | null;
   createdAt: string;
   review: SessionReview | null;
   pullRequests?: PullRequestInfo[];
@@ -407,91 +408,6 @@ export function deleteAgent(id: string) {
 
 export function restoreAgentVersion(agentId: string, versionId: string) {
   return request<Agent>(`/api/agents/${agentId}/restore/${versionId}`, { method: 'POST' });
-}
-
-// ---- Agent Members --------------------------------------------------------
-
-export interface AgentMemberUser {
-  id: string;
-  name: string;
-  email: string;
-  role: string;
-  assignedAt: string;
-}
-
-export function getAgentMembers(agentId: string) {
-  return request<AgentMemberUser[]>(`/api/agents/${agentId}/members`);
-}
-
-export function updateAgentMembers(agentId: string, userIds: string[]) {
-  return request<{ success: boolean; memberCount: number }>(`/api/agents/${agentId}/members`, {
-    method: 'PUT',
-    body: JSON.stringify({ userIds }),
-  });
-}
-
-// ---- Agent Repos ----------------------------------------------------------
-
-export interface AgentRepoAccess {
-  id: string;
-  name: string;
-  path: string;
-  provider: string;
-  assignedAt: string;
-}
-
-export function getAgentRepos(agentId: string) {
-  return request<AgentRepoAccess[]>(`/api/agents/${agentId}/repos`);
-}
-
-export function updateAgentRepos(agentId: string, repoIds: string[]) {
-  return request<{ success: boolean; repoCount: number }>(`/api/agents/${agentId}/repos`, {
-    method: 'PUT',
-    body: JSON.stringify({ repoIds }),
-  });
-}
-
-// ---- Repo Members ---------------------------------------------------------
-
-export interface RepoMemberUser {
-  id: string;
-  name: string;
-  email: string;
-  role: string;
-  assignedAt: string;
-}
-
-export function getRepoMembers(repoId: string) {
-  return request<RepoMemberUser[]>(`/api/repos/${repoId}/members`);
-}
-
-export function updateRepoMembers(repoId: string, userIds: string[]) {
-  return request<{ success: boolean; memberCount: number }>(`/api/repos/${repoId}/members`, {
-    method: 'PUT',
-    body: JSON.stringify({ userIds }),
-  });
-}
-
-// ---- Repo Agent Access ----------------------------------------------------
-
-export interface RepoAgentAccess {
-  id: string;
-  name: string;
-  slug: string;
-  model: string;
-  status: string;
-  assignedAt: string;
-}
-
-export function getRepoAgents(repoId: string) {
-  return request<RepoAgentAccess[]>(`/api/repos/${repoId}/agents`);
-}
-
-export function updateRepoAgents(repoId: string, agentIds: string[]) {
-  return request<{ success: boolean; agentCount: number }>(`/api/repos/${repoId}/agents`, {
-    method: 'PUT',
-    body: JSON.stringify({ agentIds }),
-  });
 }
 
 // ---- Policies ------------------------------------------------------------
@@ -685,8 +601,8 @@ export function getMachine(id: string) {
 
 // ---- API Key Management -----------------------------------------------------
 
-export function createApiKey(data: { name: string; role?: string; repoIds?: string[] }) {
-  return request<{ id: string; key: string; keyPrefix: string; role: string | null; repoScopes: { repoId: string; repoName: string }[] }>('/api/settings/api-keys', {
+export function createApiKey(data: { name: string; role?: string; repoIds?: string[]; agentIds?: string[] }) {
+  return request<{ id: string; key: string; keyPrefix: string; role: string | null; repoScopes: { repoId: string; repoName: string }[]; agentScopes: { agentId: string; agentName: string; agentSlug: string }[] }>('/api/settings/api-keys', {
     method: 'POST',
     body: JSON.stringify(data),
   });
@@ -698,7 +614,15 @@ export function getApiKeys() {
     userId: string | null; role: string | null;
     user: { name: string; email: string } | null;
     repoScopes: { repoId: string; repoName: string }[];
+    agentScopes: { agentId: string; agentName: string; agentSlug: string }[];
   }>>('/api/settings/api-keys');
+}
+
+export function updateApiKey(id: string, data: { agentIds?: string[]; repoIds?: string[] }) {
+  return request<{ id: string; repoScopes: { repoId: string; repoName: string }[]; agentScopes: { agentId: string; agentName: string; agentSlug: string }[] }>(`/api/settings/api-keys/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
 }
 
 export function deleteApiKey(id: string) {

@@ -49,6 +49,7 @@ function mapSession(s: any, pullRequests?: any[]) {
     startedAt: s.startedAt || null,
     endedAt: s.endedAt || null,
     agentSystemPrompt: s.agentSystemPrompt || null,
+    agentVersion: s.agentVersion || null,
     createdAt: s.createdAt,
     review: s.review
       ? {

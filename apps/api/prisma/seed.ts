@@ -579,14 +579,15 @@ async function main() {
   // ── 4. Agents ───────────────────────────────────────────────────
   const agentClaudeId = uuid();
   const agentCursorId = uuid();
+  const agentGeminiId = uuid();
 
   const agents = await Promise.all([
     prisma.agent.create({
       data: {
         id: agentClaudeId,
         orgId: org.id,
-        name: "Claude Code Bot",
-        slug: "claude-code-bot",
+        name: "Claude Code",
+        slug: "claude-code",
         description: "Automated coding agent powered by Claude",
         model: "claude-code",
         status: "ACTIVE",
@@ -596,10 +597,21 @@ async function main() {
       data: {
         id: agentCursorId,
         orgId: org.id,
-        name: "Cursor Agent",
-        slug: "cursor-agent",
+        name: "Cursor",
+        slug: "cursor",
         description: "Cursor IDE integrated coding agent",
         model: "cursor",
+        status: "ACTIVE",
+      },
+    }),
+    prisma.agent.create({
+      data: {
+        id: agentGeminiId,
+        orgId: org.id,
+        name: "Gemini CLI",
+        slug: "gemini",
+        description: "Google Gemini CLI coding agent",
+        model: "gemini",
         status: "ACTIVE",
       },
     }),
@@ -613,7 +625,7 @@ async function main() {
   const agentMap: Record<string, string | null> = {
     "claude-code": agentClaudeId,
     cursor: agentCursorId,
-    "gemini-cli": null,
+    "gemini": agentGeminiId,
     aider: null,
     copilot: null,
   };

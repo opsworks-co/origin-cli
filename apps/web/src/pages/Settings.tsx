@@ -20,6 +20,7 @@ interface ApiKey {
   role: string | null;
   user: { name: string; email: string } | null;
   repoScopes: { repoId: string; repoName: string }[];
+  agentScopes: { agentId: string; agentName: string; agentSlug: string }[];
 }
 
 type SettingsTab = 'general' | 'agent-setup' | 'integrations' | 'budget' | 'team' | 'audit' | 'insights' | 'reports' | 'trails' | 'compliance' | 'models';
@@ -49,7 +50,9 @@ export default function Settings() {
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyRole, setNewKeyRole] = useState('MEMBER');
   const [newKeyRepoIds, setNewKeyRepoIds] = useState<string[]>([]);
+  const [newKeyAgentIds, setNewKeyAgentIds] = useState<string[]>([]);
   const [allRepos, setAllRepos] = useState<{ id: string; name: string }[]>([]);
+  const [allAgents, setAllAgents] = useState<{ id: string; name: string; slug: string }[]>([]);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [creatingKey, setCreatingKey] = useState(false);
   const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
@@ -181,6 +184,7 @@ export default function Settings() {
     fetchOrg();
     fetchInvites();
     api.getRepos().then(repos => setAllRepos(repos.map(r => ({ id: r.id, name: r.name })))).catch(() => {});
+    api.getAgents().then(agents => setAllAgents(agents.map(a => ({ id: a.id, name: a.name, slug: a.slug })))).catch(() => {});
   }, [fetchOrg, fetchInvites]);
 
   // Fetch integrations/budget when tab is active
@@ -433,11 +437,13 @@ export default function Settings() {
         name: newKeyName || 'Unnamed key',
         role: newKeyRole,
         repoIds: newKeyRepoIds.length > 0 ? newKeyRepoIds : undefined,
+        agentIds: newKeyAgentIds.length > 0 ? newKeyAgentIds : undefined,
       });
       setCreatedKey(result.key);
       setNewKeyName('');
       setNewKeyRole('MEMBER');
       setNewKeyRepoIds([]);
+      setNewKeyAgentIds([]);
       // Refresh the list to include the new key
       await fetchApiKeys();
     } catch (err: any) {
@@ -677,6 +683,36 @@ export default function Settings() {
                         )}
                       </div>
                       <code className="text-xs text-indigo-400">{key.keyPrefix}...</code>
+                      <div className="flex flex-wrap gap-1.5 mt-0.5">
+                        {allAgents.map((a) => {
+                          const assigned = key.agentScopes?.some((s) => s.agentId === a.id);
+                          return (
+                            <label key={a.id} className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded cursor-pointer transition-colors ${assigned ? 'bg-indigo-900/40 text-indigo-300' : 'bg-gray-800 text-gray-600'}`}>
+                              <input
+                                type="checkbox"
+                                checked={assigned}
+                                onChange={async () => {
+                                  const currentIds = (key.agentScopes || []).map((s) => s.agentId);
+                                  const newIds = assigned
+                                    ? currentIds.filter((id) => id !== a.id)
+                                    : [...currentIds, a.id];
+                                  try {
+                                    await api.updateApiKey(key.id, { agentIds: newIds });
+                                    await fetchApiKeys();
+                                  } catch (err: any) {
+                                    setKeyError(err.message || 'Failed to update key');
+                                  }
+                                }}
+                                className="sr-only"
+                              />
+                              {a.name}
+                            </label>
+                          );
+                        })}
+                        {allAgents.length === 0 && (
+                          <span className="text-[10px] text-amber-500">No agents configured</span>
+                        )}
+                      </div>
                       {key.repoScopes && key.repoScopes.length > 0 ? (
                         <div className="flex flex-wrap gap-1 mt-0.5">
                           {key.repoScopes.map((s: { repoId: string; repoName: string }) => (
@@ -750,6 +786,30 @@ export default function Settings() {
                   {creatingKey ? 'Creating...' : 'Create New'}
                 </button>
               </div>
+              {allAgents.length > 0 && (
+                <div>
+                  <p className="text-xs text-gray-500 mb-1.5">Assign to agents (required — key won't work without agents):</p>
+                  <div className="flex flex-wrap gap-2">
+                    {allAgents.map((a) => (
+                      <label key={a.id} className="inline-flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={newKeyAgentIds.includes(a.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setNewKeyAgentIds([...newKeyAgentIds, a.id]);
+                            } else {
+                              setNewKeyAgentIds(newKeyAgentIds.filter((id) => id !== a.id));
+                            }
+                          }}
+                          className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500"
+                        />
+                        {a.name}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
               {allRepos.length > 0 && (
                 <div>
                   <p className="text-xs text-gray-500 mb-1.5">Restrict to repos (optional — empty = all repos):</p>

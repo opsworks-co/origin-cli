@@ -66,23 +66,11 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
   }
 });
 
-// GET /my — agents assigned to current user (for CLI agent selection)
+// GET /my — agents available to current user (for CLI agent selection)
 router.get('/my', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user!.id;
     const orgId = req.user!.orgId;
 
-    // Find agents explicitly assigned to this user
-    const assignments = await prisma.agentMember.findMany({
-      where: { userId, agent: { orgId, status: 'ACTIVE' } },
-      include: { agent: true },
-    });
-
-    if (assignments.length > 0) {
-      return res.json(assignments.map((a) => a.agent));
-    }
-
-    // Fallback: if no explicit assignments, return all active org agents (backward compat)
     const allAgents = await prisma.agent.findMany({
       where: { orgId, status: 'ACTIVE' },
       orderBy: { name: 'asc' },
@@ -90,138 +78,6 @@ router.get('/my', async (req: AuthRequest, res: Response) => {
     res.json(allAgents);
   } catch (err) {
     console.error('Get my agents error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /:id/repos — list repos this agent can access
-router.get('/:id/repos', async (req: AuthRequest, res: Response) => {
-  try {
-    const id = req.params.id as string;
-    const agent = await prisma.agent.findFirst({ where: { id, orgId: req.user!.orgId } });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-    const access = await prisma.agentRepo.findMany({
-      where: { agentId: id },
-      include: { repo: { select: { id: true, name: true, path: true, provider: true } } },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    res.json(access.map((a) => ({ ...a.repo, assignedAt: a.createdAt })));
-  } catch (err) {
-    console.error('Get agent repos error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// PUT /:id/repos — admin: set repo list for an agent
-router.put('/:id/repos', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
-  try {
-    const id = req.params.id as string;
-    const { repoIds } = req.body;
-
-    if (!Array.isArray(repoIds)) {
-      return res.status(400).json({ error: 'repoIds must be an array' });
-    }
-
-    const agent = await prisma.agent.findFirst({ where: { id, orgId: req.user!.orgId } });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-    // Verify all repos belong to same org
-    const repos = await prisma.repo.findMany({
-      where: { id: { in: repoIds }, orgId: req.user!.orgId },
-    });
-    if (repos.length !== repoIds.length) {
-      return res.status(400).json({ error: 'Some repo IDs are invalid or not in your org' });
-    }
-
-    // Replace: delete all existing, insert new
-    await prisma.agentRepo.deleteMany({ where: { agentId: id } });
-    if (repoIds.length > 0) {
-      await prisma.agentRepo.createMany({
-        data: repoIds.map((repoId: string) => ({ agentId: id, repoId })),
-      });
-    }
-
-    await prisma.auditLog.create({
-      data: {
-        orgId: req.user!.orgId,
-        userId: req.user!.id,
-        action: 'AGENT_REPOS_UPDATED',
-        resource: id,
-        metadata: JSON.stringify({ agentName: agent.name, repoCount: repoIds.length }),
-      },
-    });
-
-    res.json({ success: true, repoCount: repoIds.length });
-  } catch (err) {
-    console.error('Update agent repos error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /:id/members — list members assigned to an agent
-router.get('/:id/members', async (req: AuthRequest, res: Response) => {
-  try {
-    const id = req.params.id as string;
-    const agent = await prisma.agent.findFirst({ where: { id, orgId: req.user!.orgId } });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-    const members = await prisma.agentMember.findMany({
-      where: { agentId: id },
-      include: { user: { select: { id: true, name: true, email: true, role: true } } },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    res.json(members.map((m) => ({ ...m.user, assignedAt: m.createdAt })));
-  } catch (err) {
-    console.error('Get agent members error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// PUT /:id/members — replace all members for an agent (ADMIN+)
-router.put('/:id/members', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
-  try {
-    const id = req.params.id as string;
-    const { userIds } = req.body;
-
-    if (!Array.isArray(userIds)) {
-      return res.status(400).json({ error: 'userIds must be an array' });
-    }
-
-    const agent = await prisma.agent.findFirst({ where: { id, orgId: req.user!.orgId } });
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-    // Verify all users belong to same org
-    const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, orgId: req.user!.orgId },
-    });
-    if (users.length !== userIds.length) {
-      return res.status(400).json({ error: 'Some user IDs are invalid or not in your org' });
-    }
-
-    // Replace: delete all existing, insert new
-    await prisma.agentMember.deleteMany({ where: { agentId: id } });
-    if (userIds.length > 0) {
-      await prisma.agentMember.createMany({
-        data: userIds.map((userId: string) => ({ agentId: id, userId })),
-      });
-    }
-
-    await prisma.auditLog.create({
-      data: {
-        orgId: req.user!.orgId,
-        userId: req.user!.id,
-        action: 'AGENT_MEMBERS_UPDATED',
-        resource: id,
-        metadata: JSON.stringify({ agentName: agent.name, memberCount: userIds.length }),
-      },
-    });
-
-    res.json({ success: true, memberCount: userIds.length });
-  } catch (err) {
-    console.error('Update agent members error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

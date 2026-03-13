@@ -167,6 +167,9 @@ export default function SessionDetail() {
         <div className="ml-auto flex items-center gap-4 text-xs text-gray-500">
           <span className="flex items-center gap-1">
             <span className="text-gray-400">{session.agentName ?? 'Agent'}</span>
+            {session.agentVersion && (
+              <span className="text-[10px] text-gray-600">v{session.agentVersion}</span>
+            )}
             <span className="badge-blue text-[10px] py-0">{session.model}</span>
           </span>
           {session.userName && (

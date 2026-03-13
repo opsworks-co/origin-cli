@@ -36,6 +36,8 @@ export const api = {
     request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) }),
   updateSession: (id: string, data: any) =>
     request(`/api/mcp/session/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  resumeSession: (id: string) =>
+    request(`/api/mcp/session/${id}/resume`, { method: 'POST' }),
   endSession: (data: any) =>
     request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(data) }),
 
@@ -88,4 +90,7 @@ export const api = {
   // Users / Team
   getUsers: () => request('/api/users'),
   getUser: (id: string) => request(`/api/users/${id}`),
+
+  // Pricing
+  getPricing: () => request('/api/pricing'),
 };

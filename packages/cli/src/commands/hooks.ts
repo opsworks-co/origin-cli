@@ -1,11 +1,12 @@
 import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig } from '../config.js';
 import { detectTools } from '../tools-detector.js';
 import { api } from '../api.js';
-import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings } from '../transcript.js';
+import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, setActivePricing } from '../transcript.js';
 import {
   saveSessionState,
   loadSessionState,
   clearSessionState,
+  getGitDir,
   getGitRoot,
   discoverGitRoot,
   getHeadSha,
@@ -204,6 +205,17 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     return;
   }
 
+  // Fetch latest model pricing from API (non-blocking, falls back to defaults)
+  try {
+    const { pricing } = await api.getPricing();
+    if (pricing && typeof pricing === 'object') {
+      setActivePricing(pricing);
+      debugLog('session-start', 'pricing fetched from API', { models: Object.keys(pricing).length });
+    }
+  } catch (err: any) {
+    debugLog('session-start', 'pricing fetch failed, using defaults', { error: err.message });
+  }
+
   // Use cwd from hook input (Claude Code passes this) or fall back to process.cwd()
   const hookCwd = input.cwd || process.cwd();
   debugLog('session-start', 'cwd resolved', { hookCwd, inputCwd: input.cwd, processCwd: process.cwd() });
@@ -230,6 +242,32 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
   const claudeSessionId = input.session_id || '';
   let transcriptPath = input.transcript_path || '';
+
+  // ── SessionStart always means a NEW session in Claude Code ──────────────────
+  // If a previous session exists, end it on the backend first (SessionEnd hook
+  // may not fire reliably, e.g. when archiving sessions in Claude Code).
+  const existingState = loadSessionState(hookCwd) || loadSessionState(repoPath);
+  if (existingState && existingState.sessionId) {
+    debugLog('session-start', 'ending previous session before creating new one', {
+      oldOriginSessionId: existingState.sessionId,
+      oldClaudeSessionId: existingState.claudeSessionId,
+      newClaudeSessionId: claudeSessionId,
+    });
+    try {
+      const durationMs = Date.now() - new Date(existingState.startedAt).getTime();
+      await api.endSession({
+        sessionId: existingState.sessionId,
+        prompt: existingState.prompts.join('\n\n---\n\n') || undefined,
+        durationMs: durationMs > 0 ? durationMs : undefined,
+        branch: existingState.branch || undefined,
+      });
+      debugLog('session-start', 'previous session ended successfully');
+    } catch (err: any) {
+      debugLog('session-start', 'failed to end previous session (non-fatal)', { message: err.message });
+    }
+    clearSessionState(hookCwd);
+    if (repoPath !== hookCwd) clearSessionState(repoPath);
+  }
 
   // Auto-discover Gemini transcript if not provided via stdin
   if (!transcriptPath && (finalAgentSlug === 'gemini' || agentSlug === 'gemini')) {
@@ -307,13 +345,19 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       repoPath,
       headShaAtStart: getHeadSha(hookCwd),
       branch,
+      agentSystemPrompt: result.agentSystemPrompt || undefined,
+      activePolicies: result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined,
     };
 
     saveSessionState(state, hookCwd);
     debugLog('session-start', 'state saved', { sessionId: result.sessionId });
 
-    // Build system message with active policy summary
-    let systemMsg = 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
+    // Build system message: agent system prompt first, then tracking notice + policies
+    let systemMsg = '';
+    if (result.agentSystemPrompt) {
+      systemMsg += result.agentSystemPrompt + '\n\n';
+    }
+    systemMsg += 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
     if (result.activePolicies && Array.isArray(result.activePolicies) && result.activePolicies.length > 0) {
       systemMsg += '\n\nActive policies for this session:\n' +
         result.activePolicies.map((p: string) => `- ${p}`).join('\n');
@@ -341,22 +385,28 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
   if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
 
-  // ── Auto-create session on resume ──────────────────────────────────────────
-  // When Claude Code (or other agents) resume a session, SessionStart hook may
-  // not fire again. If we have no state OR the Claude session ID changed (context
-  // window reset), create a new Origin session on the fly.
-  const incomingSessionId = input.session_id || '';
-  const isResumedSession = state && incomingSessionId && state.claudeSessionId && state.claudeSessionId !== incomingSessionId;
-  if (isResumedSession) {
-    debugLog('user-prompt-submit', 'session ID changed — new context window detected', {
-      old: state!.claudeSessionId,
-      new: incomingSessionId,
-      oldOriginSession: state!.sessionId,
-    });
-    state = null; // Force new session creation
+  // ── Use existing session state if available ─────────────────────────────────
+  // The session ID from Claude Code may change (agent subprocesses, context resets)
+  // but the Origin session should remain the same. handleSessionStart already
+  // handles resume detection — here we just use whatever state exists.
+  // Only auto-create if there's truly no state (first prompt without SessionStart).
+  if (state) {
+    // Update Claude session ID and transcript path if they changed
+    const incomingSessionId = input.session_id || '';
+    if (incomingSessionId && state.claudeSessionId !== incomingSessionId) {
+      debugLog('user-prompt-submit', 'updating claudeSessionId', {
+        old: state.claudeSessionId,
+        new: incomingSessionId,
+        originSession: state.sessionId,
+      });
+      state.claudeSessionId = incomingSessionId;
+    }
+    if (input.transcript_path) state.transcriptPath = input.transcript_path;
+    saveSessionState(state, resolvedCwd || hookCwd);
   }
   if (!state) {
-    debugLog('user-prompt-submit', 'no session state — attempting auto-create (resume scenario)', { hookCwd });
+    // No existing session at all — auto-create one (first prompt without SessionStart)
+    debugLog('user-prompt-submit', 'no session state — attempting auto-create', { hookCwd });
     const config = loadConfig();
     const agentConfig = loadAgentConfig();
     const repoPath = discoverGitRoot(hookCwd);
@@ -680,6 +730,21 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
   } catch (err: any) {
     debugLog('session-end', 'ERROR', { message: err.message, stack: err.stack });
     process.stderr.write(`[origin] session-end error: ${err.message}\n`);
+
+    // Even if transcript parsing or other steps fail, still mark the session as ended
+    // so it doesn't stay RUNNING forever on the dashboard.
+    try {
+      const durationMs = Date.now() - new Date(state.startedAt).getTime();
+      await api.endSession({
+        sessionId: state.sessionId,
+        prompt: state.prompts.join('\n\n---\n\n') || undefined,
+        durationMs: durationMs > 0 ? durationMs : undefined,
+        branch: getBranch(hookCwd) || undefined,
+      });
+      debugLog('session-end', 'fallback endSession succeeded');
+    } catch (fallbackErr: any) {
+      debugLog('session-end', 'fallback endSession also failed', { message: fallbackErr.message });
+    }
   } finally {
     clearSessionState(hookCwd);
     debugLog('session-end', 'state cleared');

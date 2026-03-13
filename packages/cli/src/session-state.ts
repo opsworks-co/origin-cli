@@ -35,6 +35,8 @@ export interface SessionState {
   sessionTag?: string;        // Tag for concurrent session support
   subagents?: SubagentRecord[];
   tabCompletions?: TabCompletionStats;
+  agentSystemPrompt?: string; // Cached agent system prompt for session resume
+  activePolicies?: string[];  // Cached active policies for session resume
 }
 
 // ─── Git Directory ─────────────────────────────────────────────────────────

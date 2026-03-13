@@ -45,6 +45,7 @@ import trailRoutes from './routes/trails.js';
 import leaderboardRoutes from './routes/leaderboard.js';
 import promptRoutes from './routes/prompts.js';
 import modelRoutes from './routes/models.js';
+import pricingRoutes, { seedDefaultPricing } from './routes/pricing.js';
 
 const app = express();
 
@@ -103,6 +104,7 @@ app.use('/api/trails', trailRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/prompts', promptRoutes);
 app.use('/api/models', modelRoutes);
+app.use('/api/pricing', pricingRoutes);
 
 // Serve CLI install script
 app.get('/install.sh', (_req, res) => {
@@ -174,4 +176,5 @@ const HOST = process.env.HOST || '0.0.0.0';
 app.listen(Number(PORT), HOST, () => {
   console.log(`Origin v2 running on http://${HOST}:${PORT}`);
   startAutoSync();
+  seedDefaultPricing();
 });

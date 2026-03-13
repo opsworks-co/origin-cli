@@ -740,14 +740,16 @@ function formatGeminiMessages(raw: string): DisplayMessage[] {
 
 // Pricing per 1M tokens (input, output)
 // Cache read = input × 0.1 (90% discount), cache creation = input × 1.25 (25% premium)
-const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  // Anthropic
+export type ModelPricing = Record<string, { input: number; output: number }>;
+
+const DEFAULT_MODEL_PRICING: ModelPricing = {
+  // Anthropic (Opus 4.5/4.6, Sonnet 4.x, Haiku 4.5)
   'sonnet': { input: 3, output: 15 },
-  'opus': { input: 15, output: 75 },
-  'haiku': { input: 0.25, output: 1.25 },
+  'opus': { input: 5, output: 25 },
+  'haiku': { input: 1, output: 5 },
   // Google
   'gemini-2.5-pro': { input: 1.25, output: 10 },
-  'gemini-2.5-flash': { input: 0.15, output: 0.60 },
+  'gemini-2.5-flash': { input: 0.30, output: 2.50 },
   'gemini-3-pro': { input: 1.25, output: 10 },
   'gemini-3-flash': { input: 0.15, output: 0.60 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
@@ -760,6 +762,21 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   'o4-mini': { input: 1.10, output: 4.40 },
 };
 
+// Dynamic pricing: fetched from API, falls back to defaults
+let activePricing: ModelPricing = DEFAULT_MODEL_PRICING;
+
+export function setActivePricing(pricing: ModelPricing): void {
+  activePricing = pricing;
+}
+
+export function getActivePricing(): ModelPricing {
+  return activePricing;
+}
+
+export function getDefaultPricing(): ModelPricing {
+  return { ...DEFAULT_MODEL_PRICING };
+}
+
 export function estimateCost(
   model: string,
   inputTokens: number,
@@ -769,8 +786,8 @@ export function estimateCost(
 ): number {
   const modelLower = model.toLowerCase();
 
-  let pricing = MODEL_PRICING['sonnet']; // default to sonnet pricing
-  for (const [key, value] of Object.entries(MODEL_PRICING)) {
+  let pricing = activePricing['sonnet'] ?? DEFAULT_MODEL_PRICING['sonnet']; // default to sonnet pricing
+  for (const [key, value] of Object.entries(activePricing)) {
     if (modelLower.includes(key)) {
       pricing = value;
       break;

@@ -39,8 +39,6 @@ model User {
   notifications Notification[]
   sessions      CodingSession[]
   apiKeys       ApiKey[]
-  agentMembers  AgentMember[]
-  repoMembers   RepoMember[]
 }
 
 model Invitation {
@@ -68,7 +66,8 @@ model ApiKey {
   keyPrefix String
   role      String?  // Standalone key role: VIEWER, MEMBER, ADMIN. Null = uses linked user's role
   createdAt DateTime @default(now())
-  repoScopes ApiKeyRepoScope[]
+  repoScopes  ApiKeyRepoScope[]
+  agentScopes ApiKeyAgentScope[]
 }
 
 model ApiKeyRepoScope {
@@ -79,6 +78,16 @@ model ApiKeyRepoScope {
   repo     Repo   @relation(fields: [repoId], references: [id], onDelete: Cascade)
 
   @@unique([apiKeyId, repoId])
+}
+
+model ApiKeyAgentScope {
+  id       String @id @default(uuid())
+  apiKeyId String
+  apiKey   ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  agentId  String
+  agent    Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([apiKeyId, agentId])
 }
 
 // ── Repos & Sessions ────────────────────────────────────────────
@@ -98,8 +107,6 @@ model Repo {
   pullRequests PullRequest[]
   policyRules  PolicyRule[]
   apiKeyScopes ApiKeyRepoScope[]
-  members      RepoMember[]
-  agentAccess  AgentRepo[]
 }
 
 model Commit {
@@ -144,6 +151,7 @@ model CodingSession {
   branch       String?                        // Git branch at session start
   status       String         @default("COMPLETED") // RUNNING or COMPLETED
   agentSystemPrompt String?                    // Snapshot of agent system prompt active during session
+  agentVersion      Int?                        // Agent version number at session start
   startedAt    DateTime?                       // When session actually started (from session/start)
   endedAt      DateTime?                       // When session ended (from session/end)
   createdAt    DateTime       @default(now())
@@ -212,47 +220,7 @@ model Agent {
   policyRules       PolicyRule[]
   versions          AgentVersion[]
   policyAssignments PolicyAssignment[]
-  members           AgentMember[]
-  repoAccess        AgentRepo[]
-}
-
-// ── Agent-User Assignment ───────────────────────────────────────
-
-model AgentMember {
-  id        String   @id @default(uuid())
-  agentId   String
-  userId    String
-  createdAt DateTime @default(now())
-  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([agentId, userId])
-}
-
-// ── Repo-User Assignment ─────────────────────────────────────────
-
-model RepoMember {
-  id        String   @id @default(uuid())
-  repoId    String
-  userId    String
-  createdAt DateTime @default(now())
-  repo      Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([repoId, userId])
-}
-
-// ── Agent-Repo Assignment ────────────────────────────────────────
-
-model AgentRepo {
-  id        String   @id @default(uuid())
-  agentId   String
-  repoId    String
-  createdAt DateTime @default(now())
-  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  repo      Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
-
-  @@unique([agentId, repoId])
+  apiKeyScopes      ApiKeyAgentScope[]
 }
 
 // ── Policies ────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ interface McpRequest extends Request {
   mcpUserId?: string;  // User ID resolved from the API key (for per-member attribution)
   apiKeyName?: string; // Name of the API key (for standalone key attribution)
   repoScopes?: string[]; // Repo IDs this API key is scoped to (empty = unrestricted)
+  agentScopes?: string[]; // Agent IDs this API key is scoped to (empty = no agent access)
 }
 
 // Helper: authenticate by API key header
@@ -35,6 +36,7 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
       include: {
         org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
         repoScopes: { select: { repoId: true } },
+        agentScopes: { select: { agentId: true } },
       },
     });
 
@@ -45,6 +47,7 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     req.orgId = found.orgId;
     req.apiKeyName = found.name;
     req.repoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
+    req.agentScopes = found.agentScopes.map((s: { agentId: string }) => s.agentId);
     // Standalone key (has role, no userId): no user attribution
     // Linked key: use the key's userId, fall back to org owner
     if (found.role && !found.userId) {
@@ -156,11 +159,11 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     });
 
     // Resolve agent slug to Agent record (for policy scoping & session linking)
-    let agent: { id: string; systemPrompt?: string | null } | null = null;
+    let agent: { id: string; systemPrompt?: string | null; versions?: { version: number }[] } | null = null;
     if (agentSlug) {
       agent = await prisma.agent.findFirst({
         where: { orgId, slug: agentSlug, status: 'ACTIVE' },
-        select: { id: true, systemPrompt: true },
+        select: { id: true, systemPrompt: true, versions: { orderBy: { version: 'desc' }, take: 1, select: { version: true } } },
       });
       // Strict mode: reject unknown agents (admins must create them in the dashboard first)
       if (!agent) {
@@ -171,62 +174,13 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         });
       }
 
-      // Enforce agent membership: if the user has explicit assignments, they can only use assigned agents
-      if (req.mcpUserId) {
-        const userAssignments = await prisma.agentMember.count({
-          where: { userId: req.mcpUserId },
+      // Enforce API key → agent scope: key must be assigned to this agent
+      if (req.agentScopes && !req.agentScopes.includes(agent.id)) {
+        return res.status(403).json({
+          error: 'Agent not allowed',
+          message: `This API key does not have access to agent "${agentSlug}". Update the key's agent assignments in Settings.`,
+          agentSlug,
         });
-        if (userAssignments > 0) {
-          const isAssigned = await prisma.agentMember.findUnique({
-            where: { agentId_userId: { agentId: agent.id, userId: req.mcpUserId } },
-          });
-          if (!isAssigned) {
-            return res.status(403).json({
-              error: 'Agent not assigned',
-              message: `You are not assigned to agent "${agentSlug}". Contact your admin to get access.`,
-              agentSlug,
-            });
-          }
-        }
-      }
-    }
-
-    // Enforce User → Repo access: if user has explicit RepoMember assignments, restrict to those repos
-    if (req.mcpUserId) {
-      const userRepoAssignments = await prisma.repoMember.count({
-        where: { userId: req.mcpUserId },
-      });
-      if (userRepoAssignments > 0) {
-        const isRepoAssigned = await prisma.repoMember.findUnique({
-          where: { repoId_userId: { repoId: repo.id, userId: req.mcpUserId } },
-        });
-        if (!isRepoAssigned) {
-          return res.status(403).json({
-            error: 'Repo not assigned',
-            message: `You do not have access to repo "${repo.name}". Contact your admin to get access.`,
-            repoName: repo.name,
-          });
-        }
-      }
-    }
-
-    // Enforce Agent → Repo access: if agent has explicit AgentRepo assignments, restrict to those repos
-    if (agent) {
-      const agentRepoAssignments = await prisma.agentRepo.count({
-        where: { agentId: agent.id },
-      });
-      if (agentRepoAssignments > 0) {
-        const isAgentRepoAssigned = await prisma.agentRepo.findUnique({
-          where: { agentId_repoId: { agentId: agent.id, repoId: repo.id } },
-        });
-        if (!isAgentRepoAssigned) {
-          return res.status(403).json({
-            error: 'Agent repo access denied',
-            message: `Agent "${agentSlug}" does not have access to repo "${repo.name}". Contact your admin to configure agent repo access.`,
-            agentSlug,
-            repoName: repo.name,
-          });
-        }
       }
     }
 
@@ -276,6 +230,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         userId: req.mcpUserId || null,
         agentId: agent?.id || null,
         agentSystemPrompt: agent?.systemPrompt || null,
+        agentVersion: agent?.versions?.[0]?.version || null,
         branch: branch || null,
       },
     });
@@ -322,9 +277,39 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         );
     } catch { /* non-critical */ }
 
-    res.json({ sessionId: codingSession.id, activePolicies });
+    res.json({ sessionId: codingSession.id, activePolicies, agentSystemPrompt: agent?.systemPrompt || null });
   } catch (err) {
     console.error('Start session error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /session/:id/resume — resume an existing session (returns fresh agent prompt + policies)
+router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const session = await prisma.codingSession.findUnique({
+      where: { id },
+      include: { agent: true },
+    });
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Fetch the latest agent system prompt (not the snapshot — the live version)
+    const agentSystemPrompt = session.agent?.systemPrompt || session.agentSystemPrompt || null;
+
+    // Fetch active policies
+    let activePolicies: string[] = [];
+    try {
+      const allPolicies = await prisma.policy.findMany({ where: { active: true } });
+      activePolicies = allPolicies
+        .map((p: any) => `[${p.type}] ${p.name}: ${p.description || ''}`.trim());
+    } catch { /* non-critical */ }
+
+    res.json({ sessionId: id, status: session.status, activePolicies, agentSystemPrompt });
+  } catch (err) {
+    console.error('Resume session error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

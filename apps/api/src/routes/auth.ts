@@ -315,7 +315,7 @@ router.get('/invite/:token', async (req: AuthRequest, res: Response) => {
 // POST /api-keys — create an API key
 router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, repoIds } = req.body;
+    const { name, repoIds, agentIds } = req.body;
 
     // Validate repoIds belong to this org
     if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
@@ -325,6 +325,17 @@ router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) =>
       });
       if (validRepos.length !== repoIds.length) {
         return res.status(400).json({ error: 'One or more repos do not belong to your organization' });
+      }
+    }
+
+    // Validate agentIds belong to this org
+    if (agentIds && Array.isArray(agentIds) && agentIds.length > 0) {
+      const validAgents = await prisma.agent.findMany({
+        where: { orgId: req.user!.orgId, id: { in: agentIds } },
+        select: { id: true },
+      });
+      if (validAgents.length !== agentIds.length) {
+        return res.status(400).json({ error: 'One or more agents do not belong to your organization' });
       }
     }
 
@@ -343,9 +354,13 @@ router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) =>
         repoScopes: {
           create: (repoIds && Array.isArray(repoIds) ? repoIds : []).map((repoId: string) => ({ repoId })),
         },
+        agentScopes: {
+          create: (agentIds && Array.isArray(agentIds) ? agentIds : []).map((agentId: string) => ({ agentId })),
+        },
       },
       include: {
         repoScopes: { include: { repo: { select: { id: true, name: true } } } },
+        agentScopes: { include: { agent: { select: { id: true, name: true, slug: true } } } },
       },
     });
 
@@ -359,6 +374,7 @@ router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) =>
           name: apiKey.name,
           prefix: keyPrefix,
           repoScopes: apiKey.repoScopes.map((s) => s.repo.name),
+          agentScopes: apiKey.agentScopes.map((s) => s.agent.name),
         }),
       },
     });
@@ -368,6 +384,7 @@ router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) =>
       key: rawKey,
       keyPrefix,
       repoScopes: apiKey.repoScopes.map((s) => ({ repoId: s.repo.id, repoName: s.repo.name })),
+      agentScopes: apiKey.agentScopes.map((s) => ({ agentId: s.agent.id, agentName: s.agent.name, agentSlug: s.agent.slug })),
     });
   } catch (err) {
     console.error('Create API key error:', err);
@@ -385,12 +402,14 @@ router.get('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => 
         userId: true,
         user: { select: { name: true, email: true } },
         repoScopes: { include: { repo: { select: { id: true, name: true } } } },
+        agentScopes: { include: { agent: { select: { id: true, name: true, slug: true } } } },
       },
       orderBy: { createdAt: 'desc' },
     });
     res.json(keys.map((k) => ({
       ...k,
       repoScopes: k.repoScopes.map((s) => ({ repoId: s.repo.id, repoName: s.repo.name })),
+      agentScopes: k.agentScopes.map((s) => ({ agentId: s.agent.id, agentName: s.agent.name, agentSlug: s.agent.slug })),
     })));
   } catch (err) {
     console.error('List API keys error:', err);

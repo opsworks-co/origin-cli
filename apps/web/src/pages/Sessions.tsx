@@ -666,6 +666,7 @@ export default function Sessions() {
                       </td>
                       <td className="px-6 py-3 text-gray-400 text-xs">
                         {s.agentName ?? <span className="text-gray-600">—</span>}
+                        {s.agentVersion && <span className="text-gray-600 ml-1">v{s.agentVersion}</span>}
                       </td>
                       <td className="px-6 py-3 text-gray-400 text-xs">
                         {s.userName ??
