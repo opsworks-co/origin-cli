@@ -91,7 +91,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       where: { id, orgId: req.user!.orgId },
       include: {
         sessions: {
-          take: 10,
+          where: { status: 'RUNNING' },
           orderBy: { createdAt: 'desc' },
           include: { commit: true },
         },

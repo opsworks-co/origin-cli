@@ -1007,12 +1007,8 @@ async function main() {
   console.log(`  Created ${auditEntries.length} audit log entries`);
 
   // ── 9. Machines ─────────────────────────────────────────────────
-  const machineDefs = [
-    { hostname: "artem-mbp.local", tools: ["claude-code", "cursor", "git", "node", "docker"] },
-    { hostname: "sarah-workstation", tools: ["cursor", "git", "python", "terraform"] },
-    { hostname: "ci-runner-01", tools: ["claude-code", "git", "docker", "kubectl"] },
-    { hostname: "marcus-laptop.local", tools: ["copilot", "git", "node", "vscode"] },
-  ];
+  // Machines are registered automatically via `origin init` — no seed data needed
+  const machineDefs: { hostname: string; tools: string[] }[] = [];
 
   for (const def of machineDefs) {
     await prisma.machine.create({

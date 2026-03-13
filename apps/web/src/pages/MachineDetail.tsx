@@ -166,7 +166,7 @@ export default function MachineDetail() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <Link to="/dashboard" className="text-sm text-gray-400 hover:text-gray-200 mb-4 inline-block">&larr; Back to Dashboard</Link>
+      <Link to="/infrastructure" className="text-sm text-gray-400 hover:text-gray-200 mb-4 inline-block">&larr; Back to Infrastructure</Link>
 
       <div className="flex items-center justify-between mb-6">
         <div>

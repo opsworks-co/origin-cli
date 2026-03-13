@@ -404,8 +404,46 @@ export default function Policies() {
 
       {/* Policy list */}
       {policies.length > 0 && (
-        <div className="space-y-3">
-          {policies.map((policy) => {
+        <div className="space-y-6">
+          {/* Org-wide policies */}
+          {(() => {
+            const orgPolicies = policies.filter(p => !p.assignments || p.assignments.length === 0);
+            const agentPolicies = policies.filter(p => p.assignments && p.assignments.length > 0);
+            return (
+              <>
+                {orgPolicies.length > 0 && (
+                  <div>
+                    <div className="flex items-center gap-2 mb-3">
+                      <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Org-wide Policies</h2>
+                      <span className="text-xs text-gray-600">Apply to all agents and sessions</span>
+                    </div>
+                    <div className="space-y-3">
+                      {orgPolicies.map((policy) => renderPolicy(policy))}
+                    </div>
+                  </div>
+                )}
+                {agentPolicies.length > 0 && (
+                  <div>
+                    <div className="flex items-center gap-2 mb-3">
+                      <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Per-Agent Policies</h2>
+                      <span className="text-xs text-gray-600">Scoped to specific agents</span>
+                    </div>
+                    <div className="space-y-3">
+                      {agentPolicies.map((policy) => renderPolicy(policy))}
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Policy rendering is done via renderPolicy() above */}
+    </div>
+  );
+
+  function renderPolicy(policy: Policy) {
             const expanded = expandedId === policy.id;
             return (
               <div key={policy.id} className="card p-0 overflow-hidden">
@@ -743,9 +781,5 @@ export default function Policies() {
                 )}
               </div>
             );
-          })}
-        </div>
-      )}
-    </div>
-  );
+  }
 }

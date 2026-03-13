@@ -282,7 +282,7 @@ export default function AgentDetail() {
           Policies ({assignedPolicies.length + agentRules.length})
         </button>
         <button onClick={() => setTab('sessions')} className={tabClasses('sessions')}>
-          Sessions ({agent.sessions?.length ?? 0})
+          Active Sessions ({agent.sessions?.length ?? 0})
         </button>
         <button onClick={() => setTab('versions')} className={tabClasses('versions')}>
           Versions ({versions.length})
@@ -629,14 +629,17 @@ export default function AgentDetail() {
       {tab === 'sessions' && (
         <div className="space-y-3">
           {!agent.sessions?.length ? (
-            <p className="text-gray-500 text-sm py-8 text-center">No sessions yet</p>
+            <p className="text-gray-500 text-sm py-8 text-center">No active sessions</p>
           ) : (
             agent.sessions.map((s: any) => (
               <Link key={s.id} to={`/sessions/${s.id}`} className="card hover:border-gray-700 transition-colors block">
                 <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-gray-200">{s.model}</p>
-                    <p className="text-xs text-gray-400 mt-1 truncate max-w-md">{s.prompt || 'No prompt'}</p>
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse flex-shrink-0" />
+                    <div>
+                      <p className="text-sm font-medium text-gray-200">{s.model}</p>
+                      <p className="text-xs text-gray-400 mt-1 truncate max-w-md">{s.prompt || 'No prompt'}</p>
+                    </div>
                   </div>
                   <div className="text-right">
                     {s.costUsd > 0 && (

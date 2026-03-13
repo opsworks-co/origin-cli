@@ -609,7 +609,12 @@ export default function Dashboard() {
 
       {/* ── Connected Infrastructure ──────────────────────────────────────── */}
       <div>
-        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Connected Infrastructure</h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider">Connected Infrastructure</h2>
+          <Link to="/infrastructure" className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+            View all &rarr;
+          </Link>
+        </div>
         <div className="card">
           <div className="flex flex-wrap items-center gap-6">
             {/* Machines */}
@@ -623,7 +628,7 @@ export default function Dashboard() {
                 <div className="flex flex-wrap gap-1.5">
                   {machines.map((m) => (
                     <Link key={m.id} to={`/machines/${m.id}`} className="inline-flex items-center gap-1.5 text-xs bg-gray-800 rounded-full px-2.5 py-1 text-gray-300 hover:bg-gray-700 hover:text-gray-100 transition-colors">
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+                      <span className={`h-1.5 w-1.5 rounded-full ${(Date.now() - new Date(m.lastSeenAt).getTime()) < 1000 * 60 * 30 ? 'bg-green-500' : 'bg-gray-600'}`} />
                       {m.hostname}
                       <span className="text-gray-500">&middot; {timeAgo(m.lastSeenAt)}</span>
                     </Link>

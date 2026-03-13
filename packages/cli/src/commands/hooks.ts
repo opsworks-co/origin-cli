@@ -354,7 +354,8 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     model = AGENT_DEFAULT_MODELS[finalAgentSlug || ''] || 'unknown';
   }
 
-  const branch = getBranch(hookCwd);
+  const branch = getBranch(repoPath) || getBranch(hookCwd);
+  debugLog('session-start', 'branch resolved', { branch, repoPath, hookCwd });
 
   // ── Re-detect tools on every session start ─────────────────────────────────
   try {

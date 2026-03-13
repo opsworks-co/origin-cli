@@ -25,6 +25,7 @@ import Team from './pages/Team';
 import UserDetail from './pages/UserDetail';
 import Reports from './pages/Reports';
 import MachineDetail from './pages/MachineDetail';
+import Infrastructure from './pages/Infrastructure';
 import AcceptInvite from './pages/AcceptInvite';
 import PullRequests from './pages/PullRequests';
 import Leaderboard from './pages/Leaderboard';
@@ -190,6 +191,16 @@ export default function App() {
       <Route path="/audit" element={<Navigate to="/settings?tab=audit" replace />} />
       <Route path="/insights" element={<Navigate to="/settings?tab=insights" replace />} />
       <Route path="/reports" element={<Navigate to="/settings?tab=reports" replace />} />
+      <Route
+        path="/infrastructure"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Infrastructure />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
       <Route
         path="/machines/:id"
         element={
