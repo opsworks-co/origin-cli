@@ -6,6 +6,8 @@ import {
   saveSessionState,
   loadSessionState,
   clearSessionState,
+  findSessionByClaudeId,
+  listActiveSessions,
   getGitDir,
   getGitRoot,
   discoverGitRoot,
@@ -152,6 +154,63 @@ function escapeShellArg(arg: string): string {
   return "'" + arg.replace(/'/g, "'\\''") + "'";
 }
 
+// ─── Concurrent Session State Lookup ──────────────────────────────────────
+
+/**
+ * Find the correct session state for a hook invocation.
+ *
+ * With concurrent session support, each Claude Code window has its own
+ * state file (tagged by sessionTag). This helper finds the right one by:
+ * 1. Exact match on claudeSessionId (current or stored in state)
+ * 2. Most recently started session (fallback for agent subprocesses
+ *    that have a different session_id from the parent)
+ *
+ * Returns the state and the resolved cwd to use for saving.
+ */
+function findStateForHook(hookCwd: string, claudeSessionId?: string): { state: SessionState; saveCwd: string } | null {
+  const repoPath = discoverGitRoot(hookCwd) || hookCwd;
+
+  // 1. If we have a claude session ID, try exact match
+  if (claudeSessionId) {
+    const found = findSessionByClaudeId(claudeSessionId, hookCwd)
+      || (repoPath !== hookCwd ? findSessionByClaudeId(claudeSessionId, repoPath) : null);
+    if (found) {
+      debugLog('findStateForHook', 'exact match', { claudeSessionId, sessionId: found.sessionId, tag: found.sessionTag });
+      return { state: found, saveCwd: found.repoPath || repoPath };
+    }
+  }
+
+  // 2. Fall back to most recently started session for this repo
+  //    (handles agent subprocesses with unknown session IDs)
+  let sessions = listActiveSessions(hookCwd);
+  if (sessions.length === 0 && repoPath !== hookCwd) {
+    sessions = listActiveSessions(repoPath);
+  }
+
+  if (sessions.length > 0) {
+    sessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+    const best = sessions[0];
+    debugLog('findStateForHook', 'fallback to most recent', {
+      claudeSessionId,
+      matchedSessionId: best.sessionId,
+      matchedClaudeId: best.claudeSessionId,
+      tag: best.sessionTag,
+      totalSessions: sessions.length,
+    });
+    return { state: best, saveCwd: best.repoPath || repoPath };
+  }
+
+  // 3. Legacy: try untagged state file (backward compat before concurrent support)
+  const legacy = loadSessionState(hookCwd) || (repoPath !== hookCwd ? loadSessionState(repoPath) : null);
+  if (legacy) {
+    debugLog('findStateForHook', 'legacy untagged match', { sessionId: legacy.sessionId });
+    return { state: legacy, saveCwd: legacy.repoPath || repoPath };
+  }
+
+  debugLog('findStateForHook', 'no state found', { hookCwd, repoPath, claudeSessionId });
+  return null;
+}
+
 // ─── Gemini Transcript Discovery ──────────────────────────────────────────
 
 /**
@@ -243,27 +302,32 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   const claudeSessionId = input.session_id || '';
   let transcriptPath = input.transcript_path || '';
 
-  // ── SessionStart always means a NEW session in Claude Code ──────────────────
-  // If a previous session exists, end it on the backend first (SessionEnd hook
-  // may not fire reliably, e.g. when archiving sessions in Claude Code).
-  const existingState = loadSessionState(hookCwd) || loadSessionState(repoPath);
-  if (existingState && existingState.sessionId) {
-    debugLog('session-start', 'ending previous session before creating new one', {
-      oldOriginSessionId: existingState.sessionId,
-      oldClaudeSessionId: existingState.claudeSessionId,
-      newClaudeSessionId: claudeSessionId,
+  // ── Concurrent session support ─────────────────────────────────────────────
+  // Each Claude Code window gets its own tagged state file so multiple sessions
+  // on the same repo don't overwrite each other.
+  // Generate a stable session tag from this Claude session ID.
+  const sessionTag = claudeSessionId
+    ? claudeSessionId.slice(0, 12)
+    : `s${Date.now().toString(36)}`;
+  debugLog('session-start', 'session tag', { sessionTag, claudeSessionId });
+
+  // Clean up legacy untagged state file if it exists (one-time migration).
+  // This prevents old untagged files from confusing concurrent lookups.
+  const legacyState = loadSessionState(hookCwd) || loadSessionState(repoPath);
+  if (legacyState && !legacyState.sessionTag) {
+    debugLog('session-start', 'migrating legacy untagged session', {
+      oldSessionId: legacyState.sessionId,
     });
     try {
-      const durationMs = Date.now() - new Date(existingState.startedAt).getTime();
+      const durationMs = Date.now() - new Date(legacyState.startedAt).getTime();
       await api.endSession({
-        sessionId: existingState.sessionId,
-        prompt: existingState.prompts.join('\n\n---\n\n') || undefined,
+        sessionId: legacyState.sessionId,
+        prompt: legacyState.prompts.join('\n\n---\n\n') || undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
-        branch: existingState.branch || undefined,
+        branch: legacyState.branch || undefined,
       });
-      debugLog('session-start', 'previous session ended successfully');
     } catch (err: any) {
-      debugLog('session-start', 'failed to end previous session (non-fatal)', { message: err.message });
+      debugLog('session-start', 'legacy session end failed (non-fatal)', { message: err.message });
     }
     clearSessionState(hookCwd);
     if (repoPath !== hookCwd) clearSessionState(repoPath);
@@ -345,12 +409,14 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       repoPath,
       headShaAtStart: getHeadSha(hookCwd),
       branch,
+      sessionTag,
       agentSystemPrompt: result.agentSystemPrompt || undefined,
       activePolicies: result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined,
     };
 
-    saveSessionState(state, hookCwd);
-    debugLog('session-start', 'state saved', { sessionId: result.sessionId });
+    // Save to tagged file — each concurrent session gets its own state file
+    saveSessionState(state, repoPath, sessionTag);
+    debugLog('session-start', 'state saved', { sessionId: result.sessionId, sessionTag });
 
     // Build system message: agent system prompt first, then tracking notice + policies
     let systemMsg = '';
@@ -380,29 +446,26 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   debugLog('user-prompt-submit', 'begin', { hasPrompt: !!input.prompt, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  // Try direct cwd first, then discover git root for state lookup
-  let state = loadSessionState(hookCwd);
-  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
-  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
 
-  // ── Use existing session state if available ─────────────────────────────────
-  // The session ID from Claude Code may change (agent subprocesses, context resets)
-  // but the Origin session should remain the same. handleSessionStart already
-  // handles resume detection — here we just use whatever state exists.
-  // Only auto-create if there's truly no state (first prompt without SessionStart).
+  // ── Find session state using concurrent-aware lookup ────────────────────────
+  const found = findStateForHook(hookCwd, input.session_id);
+  let state = found?.state || null;
+
   if (state) {
     // Update Claude session ID and transcript path if they changed
+    // (agent subprocesses may have different session_id)
     const incomingSessionId = input.session_id || '';
     if (incomingSessionId && state.claudeSessionId !== incomingSessionId) {
       debugLog('user-prompt-submit', 'updating claudeSessionId', {
         old: state.claudeSessionId,
         new: incomingSessionId,
         originSession: state.sessionId,
+        tag: state.sessionTag,
       });
       state.claudeSessionId = incomingSessionId;
     }
     if (input.transcript_path) state.transcriptPath = input.transcript_path;
-    saveSessionState(state, resolvedCwd || hookCwd);
+    saveSessionState(state, found!.saveCwd, state.sessionTag);
   }
   if (!state) {
     // No existing session at all — auto-create one (first prompt without SessionStart)
@@ -424,7 +487,8 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           agentSlug: finalAgentSlug,
           branch: branch || undefined,
         });
-        debugLog('user-prompt-submit', 'auto-created session', { sessionId: result.sessionId });
+        const autoTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
+        debugLog('user-prompt-submit', 'auto-created session', { sessionId: result.sessionId, sessionTag: autoTag });
         state = {
           sessionId: result.sessionId,
           claudeSessionId: input.session_id || '',
@@ -435,8 +499,9 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           repoPath,
           headShaAtStart: getHeadSha(hookCwd),
           branch,
+          sessionTag: autoTag,
         };
-        saveSessionState(state, repoPath);
+        saveSessionState(state, repoPath, autoTag);
       } catch (err: any) {
         debugLog('user-prompt-submit', 'auto-create failed', { message: err.message });
       }
@@ -457,8 +522,8 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       state.transcriptPath = input.transcript_path;
     }
 
-    saveSessionState(state, resolvedCwd || hookCwd);
-    debugLog('user-prompt-submit', 'prompt saved', { promptCount: state.prompts.length, sessionId: state.sessionId });
+    saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
+    debugLog('user-prompt-submit', 'prompt saved', { promptCount: state.prompts.length, sessionId: state.sessionId, tag: state.sessionTag });
 
     // ── Heartbeat: send incremental update to API on every prompt ──
     try {
@@ -517,9 +582,8 @@ async function handleStop(input: Record<string, any>): Promise<void> {
 
   const config = loadConfig();
   const hookCwd = input.cwd || process.cwd();
-  let state = loadSessionState(hookCwd);
-  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
-  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
+  const found = findStateForHook(hookCwd, input.session_id);
+  const state = found?.state || null;
   if (!config || !state) {
     debugLog('stop', 'ABORT: missing config or state', { hasConfig: !!config, hasState: !!state });
     return;
@@ -528,7 +592,7 @@ async function handleStop(input: Record<string, any>): Promise<void> {
   // Update transcript path if provided
   if (input.transcript_path) {
     state.transcriptPath = input.transcript_path;
-    saveSessionState(state, hookCwd);
+    saveSessionState(state, found!.saveCwd, state.sessionTag);
   }
 
   // Auto-discover Gemini transcript path if not already set
@@ -536,7 +600,7 @@ async function handleStop(input: Record<string, any>): Promise<void> {
     const discovered = discoverGeminiTranscriptPath();
     if (discovered) {
       state.transcriptPath = discovered;
-      saveSessionState(state, hookCwd);
+      saveSessionState(state, found!.saveCwd, state.sessionTag);
       debugLog('stop', 'auto-discovered transcript path', { discovered });
     }
   }
@@ -616,9 +680,8 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
 
   const config = loadConfig();
   const hookCwd = input.cwd || process.cwd();
-  let state = loadSessionState(hookCwd);
-  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
-  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
+  const found = findStateForHook(hookCwd, input.session_id);
+  const state = found?.state || null;
   if (!config || !state) {
     debugLog('session-end', 'ABORT: missing config or state', { hasConfig: !!config, hasState: !!state });
     return;
@@ -746,8 +809,10 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
       debugLog('session-end', 'fallback endSession also failed', { message: fallbackErr.message });
     }
   } finally {
-    clearSessionState(hookCwd);
-    debugLog('session-end', 'state cleared');
+    // Clear only THIS session's state file (tagged), not other concurrent sessions
+    const saveCwd = found?.saveCwd || hookCwd;
+    clearSessionState(saveCwd, state.sessionTag);
+    debugLog('session-end', 'state cleared', { tag: state.sessionTag, saveCwd });
   }
 }
 
@@ -820,13 +885,21 @@ export async function handlePostCommit(): Promise<void> {
 
   // Add Origin-Session trailer to commit message (like Entire's Entire-Checkpoint trailer)
   const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
-  const state = loadSessionState(hookCwd);
 
-  // Update local state if branch changed mid-session
-  if (state && currentBranch && currentBranch !== state.branch) {
-    debugLog('post-commit', 'branch changed', { from: state.branch, to: currentBranch });
-    state.branch = currentBranch;
-    saveSessionState(state, hookCwd);
+  // Get ALL active sessions for this repo (concurrent session support)
+  const activeSessions = listActiveSessions(hookCwd);
+  // Pick the most recent session for trailer/notes (or null)
+  const state = activeSessions.length > 0
+    ? activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0]
+    : null;
+
+  // Update branch on all active sessions if it changed
+  for (const s of activeSessions) {
+    if (currentBranch && currentBranch !== s.branch) {
+      debugLog('post-commit', 'branch changed', { from: s.branch, to: currentBranch, sessionId: s.sessionId });
+      s.branch = currentBranch;
+      saveSessionState(s, s.repoPath || hookCwd, s.sessionTag);
+    }
   }
 
   // F13: Respect config.commitLinking setting (always|prompt|never)
@@ -870,34 +943,34 @@ export async function handlePostCommit(): Promise<void> {
     debugLog('post-commit', 'git notes error (non-fatal)', { message: err.message });
   }
 
-  // If there's an active Origin session, send incremental update
-  if (state) {
-    try {
-      // Build incremental git capture
-      const gitCapture = {
-        headBefore: state.headShaAtStart || commitSha,
-        headAfter: commitSha,
-        commitShas: [commitSha],
-        commitDetails: [{ sha: commitSha, message: commitMessage, author: commitAuthor, filesChanged }],
-        diff: diff.length > 500_000 ? diff.slice(0, 500_000) : diff,
-        diffTruncated: diff.length > 500_000,
-        linesAdded,
-        linesRemoved,
-      };
+  // Send incremental update to ALL active sessions (concurrent support)
+  if (activeSessions.length > 0) {
+    const gitCapture = {
+      headBefore: (state?.headShaAtStart) || commitSha,
+      headAfter: commitSha,
+      commitShas: [commitSha],
+      commitDetails: [{ sha: commitSha, message: commitMessage, author: commitAuthor, filesChanged }],
+      diff: diff.length > 500_000 ? diff.slice(0, 500_000) : diff,
+      diffTruncated: diff.length > 500_000,
+      linesAdded,
+      linesRemoved,
+    };
 
-      debugLog('post-commit', 'sending incremental update', { sessionId: state.sessionId, filesChanged: filesChanged.length });
-
-      await api.updateSession(state.sessionId, {
-        filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
-        branch: currentBranch || undefined,
-        gitCapture,
-      });
-      debugLog('post-commit', 'API update complete');
-    } catch (err: any) {
-      debugLog('post-commit', 'API update error (non-fatal)', { message: err.message });
+    for (const s of activeSessions) {
+      try {
+        debugLog('post-commit', 'sending incremental update', { sessionId: s.sessionId, filesChanged: filesChanged.length });
+        await api.updateSession(s.sessionId, {
+          filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
+          branch: currentBranch || undefined,
+          gitCapture,
+        });
+        debugLog('post-commit', 'API update complete', { sessionId: s.sessionId });
+      } catch (err: any) {
+        debugLog('post-commit', 'API update error (non-fatal)', { sessionId: s.sessionId, message: err.message });
+      }
     }
   } else {
-    debugLog('post-commit', 'no active session, skipped API update');
+    debugLog('post-commit', 'no active sessions, skipped API update');
   }
 
   // Write full session entrypoint to origin-sessions branch on every commit
@@ -938,13 +1011,12 @@ async function handlePreToolUse(input: Record<string, any>): Promise<void> {
   debugLog('pre-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  let state = loadSessionState(hookCwd);
-  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
-  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
-  if (!state) {
+  const found = findStateForHook(hookCwd, input.session_id);
+  if (!found) {
     debugLog('pre-tool-use', 'ABORT: no session state');
     return;
   }
+  const { state, saveCwd } = found;
 
   // Initialize subagents array if needed
   if (!state.subagents) state.subagents = [];
@@ -958,7 +1030,7 @@ async function handlePreToolUse(input: Record<string, any>): Promise<void> {
   };
 
   state.subagents.push(record);
-  saveSessionState(state, resolvedCwd || hookCwd);
+  saveSessionState(state, saveCwd, state.sessionTag);
   debugLog('pre-tool-use', 'recorded', { toolCallId, toolName: record.toolName });
 }
 
@@ -966,13 +1038,12 @@ async function handlePostToolUse(input: Record<string, any>): Promise<void> {
   debugLog('post-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  let state = loadSessionState(hookCwd);
-  const resolvedCwd = !state ? discoverGitRoot(hookCwd) : hookCwd;
-  if (!state && resolvedCwd) state = loadSessionState(resolvedCwd);
-  if (!state) {
+  const found = findStateForHook(hookCwd, input.session_id);
+  if (!found) {
     debugLog('post-tool-use', 'ABORT: no session state');
     return;
   }
+  const { state, saveCwd } = found;
 
   if (state.subagents && state.subagents.length > 0) {
     // Find the matching pre-tool-use record (last unfinished one with matching tool name)
@@ -988,7 +1059,7 @@ async function handlePostToolUse(input: Record<string, any>): Promise<void> {
           ? input.tool_result.slice(0, 500)
           : JSON.stringify(input.tool_result).slice(0, 500);
       }
-      saveSessionState(state, resolvedCwd || hookCwd);
+      saveSessionState(state, saveCwd, state.sessionTag);
       debugLog('post-tool-use', 'updated', { toolCallId: record.toolCallId, toolName });
     }
   }

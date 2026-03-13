@@ -4,6 +4,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
+import { prisma } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -177,4 +178,30 @@ app.listen(Number(PORT), HOST, () => {
   console.log(`Origin v2 running on http://${HOST}:${PORT}`);
   startAutoSync();
   seedDefaultPricing();
+
+  // Auto-complete stale RUNNING sessions every 5 minutes.
+  // Sessions with no update for 15+ minutes are considered abandoned
+  // (SessionEnd hook doesn't fire reliably in all agents).
+  const STALE_SESSION_CHECK_MS = 5 * 60 * 1000;   // check every 5 min
+  const STALE_THRESHOLD_MS = 15 * 60 * 1000;       // 15 min without update
+  setInterval(async () => {
+    try {
+      const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS);
+      const stale = await prisma.codingSession.updateMany({
+        where: {
+          status: 'RUNNING',
+          updatedAt: { lt: cutoff },
+        },
+        data: {
+          status: 'COMPLETED',
+          endedAt: new Date(),
+        },
+      });
+      if (stale.count > 0) {
+        console.log(`🧹 Auto-completed ${stale.count} stale session(s)`);
+      }
+    } catch (err) {
+      console.error('Stale session cleanup error:', err);
+    }
+  }, STALE_SESSION_CHECK_MS);
 });

@@ -155,6 +155,7 @@ model CodingSession {
   startedAt    DateTime?                       // When session actually started (from session/start)
   endedAt      DateTime?                       // When session ended (from session/end)
   createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @default(now()) @updatedAt
   review       SessionReview?
   sessionDiff    SessionDiff?
   promptChanges  PromptChange[]
