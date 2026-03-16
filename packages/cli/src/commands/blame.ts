@@ -124,10 +124,10 @@ export async function blameCommand(
   console.log(chalk.bold(`\n  ${file}\n`));
   console.log(
     chalk.gray(
-      `  ${'Line'.padStart(lineNumWidth)}  Tag   ${opts?.line ? '' : 'Author/Model'.padEnd(16)}  Content`,
+      `  ${'Line'.padStart(lineNumWidth)}  Tag   ${opts?.line ? '' : 'Author'.padEnd(16) + '  ' + 'Model'.padEnd(16)}  Content`,
     ),
   );
-  console.log(chalk.gray('  ' + '─'.repeat(lineNumWidth + 60)));
+  console.log(chalk.gray('  ' + '─'.repeat(lineNumWidth + 80)));
 
   // Summary counters
   let aiCount = 0;
@@ -138,12 +138,9 @@ export async function blameCommand(
     const lineNum = String(line.lineNumber).padStart(lineNumWidth);
     const tag = authorshipTag(line.authorship);
     const coloredTag = colorTag(line.authorship, tag);
-    // Show model for AI lines, git author for human lines
-    const modelDisplay = line.model
-      ? line.model.slice(0, 15)
-      : (line.author ? line.author.slice(0, 15) : '—');
-    const model = modelDisplay.padEnd(16);
-    const content = line.content.slice(0, 120);
+    const authorDisplay = (line.author ? line.author.slice(0, 15) : '—').padEnd(16);
+    const modelDisplay = (line.model ? line.model.slice(0, 15) : '—').padEnd(16);
+    const content = line.content.slice(0, 100);
 
     // Count authorship
     if (line.authorship === 'ai') aiCount++;
@@ -153,13 +150,13 @@ export async function blameCommand(
     if (opts?.line) {
       console.log(`  ${chalk.gray(lineNum)}  ${coloredTag}  ${colorTag(line.authorship, content)}`);
     } else {
-      console.log(`  ${chalk.gray(lineNum)}  ${coloredTag}  ${chalk.gray(model)}  ${colorTag(line.authorship, content)}`);
+      console.log(`  ${chalk.gray(lineNum)}  ${coloredTag}  ${chalk.gray(authorDisplay)}  ${chalk.gray(modelDisplay)}  ${colorTag(line.authorship, content)}`);
     }
   }
 
   // Summary
   const total = filtered.length;
-  console.log(chalk.gray('\n  ' + '─'.repeat(lineNumWidth + 60)));
+  console.log(chalk.gray('\n  ' + '─'.repeat(lineNumWidth + 80)));
   console.log(
     `  ${chalk.bold('Summary:')} ` +
     `${chalk.green(`AI: ${aiCount} (${total > 0 ? Math.round((aiCount / total) * 100) : 0}%)`)}  ` +
