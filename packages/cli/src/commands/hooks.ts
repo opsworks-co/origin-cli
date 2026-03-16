@@ -1,4 +1,5 @@
-import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig } from '../config.js';
+import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
+import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
 import { api } from '../api.js';
 import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, setActivePricing } from '../transcript.js';
@@ -13,6 +14,8 @@ import {
   discoverGitRoot,
   getHeadSha,
   getBranch,
+  startHeartbeat,
+  stopHeartbeat,
   type SessionState,
   type SubagentRecord,
 } from '../session-state.js';
@@ -167,7 +170,7 @@ function escapeShellArg(arg: string): string {
  *
  * Returns the state and the resolved cwd to use for saving.
  */
-function findStateForHook(hookCwd: string, claudeSessionId?: string): { state: SessionState; saveCwd: string } | null {
+function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?: string): { state: SessionState; saveCwd: string } | null {
   const repoPath = discoverGitRoot(hookCwd) || hookCwd;
 
   // 1. If we have a claude session ID, try exact match
@@ -182,6 +185,8 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string): { state: S
 
   // 2. Fall back to most recently started session for this repo
   //    (handles agent subprocesses with unknown session IDs)
+  //    When agentSlug is provided, prefer sessions matching that agent's model
+  //    to avoid closing Claude's session when Gemini ends (and vice versa).
   let sessions = listActiveSessions(hookCwd);
   if (sessions.length === 0 && repoPath !== hookCwd) {
     sessions = listActiveSessions(repoPath);
@@ -189,11 +194,27 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string): { state: S
 
   if (sessions.length > 0) {
     sessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
-    const best = sessions[0];
+
+    // If we know the agent type, prefer sessions matching that model
+    let best = sessions[0];
+    if (agentSlug && sessions.length > 1) {
+      const slugLower = agentSlug.toLowerCase();
+      const modelMatch = sessions.find(s => {
+        const m = (s.model || '').toLowerCase();
+        return m.includes(slugLower) || slugLower.includes(m);
+      });
+      if (modelMatch) {
+        best = modelMatch;
+        debugLog('findStateForHook', 'agent-filtered match', { agentSlug, model: best.model, sessionId: best.sessionId });
+      }
+    }
+
     debugLog('findStateForHook', 'fallback to most recent', {
       claudeSessionId,
+      agentSlug,
       matchedSessionId: best.sessionId,
       matchedClaudeId: best.claudeSessionId,
+      matchedModel: best.model,
       tag: best.sessionTag,
       totalSessions: sessions.length,
     });
@@ -258,21 +279,38 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   debugLog('session-start', 'begin', { agentSlug, inputKeys: Object.keys(input) });
 
   const config = loadConfig();
-  const agentConfig = loadAgentConfig();
-  if (!config || !agentConfig) {
-    debugLog('session-start', 'ABORT: missing config', { hasConfig: !!config, hasAgentConfig: !!agentConfig });
-    return;
+  let agentConfig = loadAgentConfig();
+  const connected = isConnectedMode();
+
+  // In standalone mode, create minimal agent config if missing
+  if (!agentConfig) {
+    if (connected) {
+      debugLog('session-start', 'ABORT: missing agent config (run origin init)', { hasConfig: !!config });
+      return;
+    }
+    // Auto-create minimal agent config for standalone
+    agentConfig = {
+      machineId: crypto.randomUUID(),
+      hostname: os.hostname(),
+      detectedTools: detectTools(),
+      orgId: 'local',
+    };
+    ensureConfigDir();
+    saveAgentConfig(agentConfig);
+    debugLog('session-start', 'auto-created agent config (standalone)', { machineId: agentConfig.machineId });
   }
 
   // Fetch latest model pricing from API (non-blocking, falls back to defaults)
-  try {
-    const { pricing } = await api.getPricing();
-    if (pricing && typeof pricing === 'object') {
-      setActivePricing(pricing);
-      debugLog('session-start', 'pricing fetched from API', { models: Object.keys(pricing).length });
+  if (connected) {
+    try {
+      const { pricing } = await api.getPricing();
+      if (pricing && typeof pricing === 'object') {
+        setActivePricing(pricing);
+        debugLog('session-start', 'pricing fetched from API', { models: Object.keys(pricing).length });
+      }
+    } catch (err: any) {
+      debugLog('session-start', 'pricing fetch failed, using defaults', { error: err.message });
     }
-  } catch (err: any) {
-    debugLog('session-start', 'pricing fetch failed, using defaults', { error: err.message });
   }
 
   // Use cwd from hook input (Claude Code passes this) or fall back to process.cwd()
@@ -311,6 +349,18 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     : `s${Date.now().toString(36)}`;
   debugLog('session-start', 'session tag', { sessionTag, claudeSessionId });
 
+  // ── Deduplicate: skip if we already have an active session for this Claude session ──
+  if (claudeSessionId) {
+    const existing = findSessionByClaudeId(claudeSessionId, repoPath);
+    if (existing && existing.sessionId) {
+      debugLog('session-start', 'SKIP: session already exists for this Claude session', {
+        existingSessionId: existing.sessionId,
+        claudeSessionId,
+      });
+      return;
+    }
+  }
+
   // Clean up legacy untagged state file if it exists (one-time migration).
   // This prevents old untagged files from confusing concurrent lookups.
   const legacyState = loadSessionState(hookCwd) || loadSessionState(repoPath);
@@ -318,16 +368,18 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     debugLog('session-start', 'migrating legacy untagged session', {
       oldSessionId: legacyState.sessionId,
     });
-    try {
-      const durationMs = Date.now() - new Date(legacyState.startedAt).getTime();
-      await api.endSession({
-        sessionId: legacyState.sessionId,
-        prompt: legacyState.prompts.join('\n\n---\n\n') || undefined,
-        durationMs: durationMs > 0 ? durationMs : undefined,
-        branch: legacyState.branch || undefined,
-      });
-    } catch (err: any) {
-      debugLog('session-start', 'legacy session end failed (non-fatal)', { message: err.message });
+    if (connected) {
+      try {
+        const durationMs = Date.now() - new Date(legacyState.startedAt).getTime();
+        await api.endSession({
+          sessionId: legacyState.sessionId,
+          prompt: legacyState.prompts.join('\n\n---\n\n') || undefined,
+          durationMs: durationMs > 0 ? durationMs : undefined,
+          branch: legacyState.branch || undefined,
+        });
+      } catch (err: any) {
+        debugLog('session-start', 'legacy session end failed (non-fatal)', { message: err.message });
+      }
     }
     clearSessionState(hookCwd);
     if (repoPath !== hookCwd) clearSessionState(repoPath);
@@ -354,6 +406,15 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     model = AGENT_DEFAULT_MODELS[finalAgentSlug || ''] || 'unknown';
   }
 
+  // Extract git remote origin URL for smarter repo matching on the API side
+  let repoUrl = '';
+  try {
+    repoUrl = execSync('git remote get-url origin', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    debugLog('session-start', 'git remote origin url', { repoUrl });
+  } catch {
+    debugLog('session-start', 'no git remote origin (non-fatal)');
+  }
+
   const branch = getBranch(repoPath) || getBranch(hookCwd);
   debugLog('session-start', 'branch resolved', { branch, repoPath, hookCwd });
 
@@ -370,16 +431,18 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       agentConfig.detectedTools = freshTools;
       agentConfig.lastToolDetection = new Date().toISOString();
       saveAgentConfig(agentConfig);
-      // Update server with new tool list
-      try {
-        await api.registerMachine({
-          hostname: agentConfig.hostname,
-          machineId: agentConfig.machineId,
-          detectedTools: freshTools,
-        });
-        debugLog('session-start', 'machine re-registered with updated tools');
-      } catch (regErr: any) {
-        debugLog('session-start', 'machine re-registration failed (non-fatal)', { message: regErr.message });
+      // Update server with new tool list (only in connected mode)
+      if (connected) {
+        try {
+          await api.registerMachine({
+            hostname: agentConfig.hostname,
+            machineId: agentConfig.machineId,
+            detectedTools: freshTools,
+          });
+          debugLog('session-start', 'machine re-registered with updated tools');
+        } catch (regErr: any) {
+          debugLog('session-start', 'machine re-registration failed (non-fatal)', { message: regErr.message });
+        }
       }
     } else {
       debugLog('session-start', 'tools unchanged', { tools: freshTools });
@@ -389,19 +452,37 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
 
   try {
-    debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, agentSlug: finalAgentSlug, branch });
-    const result = await api.startSession({
-      machineId: agentConfig.machineId,
-      prompt: '',
-      model,
-      repoPath,
-      agentSlug: finalAgentSlug,
-      branch: branch || undefined,
-    });
-    debugLog('session-start', 'api returned', { sessionId: result.sessionId });
+    let sessionId: string;
+    let agentSystemPrompt: string | undefined;
+    let activePolicies: string[] | undefined;
+    let enforcementRules: any[] | undefined;
+
+    if (connected) {
+      // ── Connected mode: register session with Origin platform ──
+      debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, repoUrl, agentSlug: finalAgentSlug, branch });
+      const result = await api.startSession({
+        machineId: agentConfig.machineId,
+        prompt: '',
+        model,
+        repoPath,
+        repoUrl: repoUrl || undefined,
+        agentSlug: finalAgentSlug,
+        branch: branch || undefined,
+        hostname: agentConfig.hostname || undefined,
+      });
+      sessionId = result.sessionId;
+      agentSystemPrompt = result.agentSystemPrompt || undefined;
+      activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
+      enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+      debugLog('session-start', 'api returned', { sessionId });
+    } else {
+      // ── Standalone mode: generate local session ID ──
+      sessionId = `local-${crypto.randomUUID()}`;
+      debugLog('session-start', 'standalone session', { sessionId });
+    }
 
     const state: SessionState = {
-      sessionId: result.sessionId,
+      sessionId,
       claudeSessionId,
       transcriptPath,
       model,
@@ -411,23 +492,33 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       headShaAtStart: getHeadSha(hookCwd),
       branch,
       sessionTag,
-      agentSystemPrompt: result.agentSystemPrompt || undefined,
-      activePolicies: result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined,
+      agentSystemPrompt,
+      activePolicies,
+      enforcementRules,
     };
 
     // Save to tagged file — each concurrent session gets its own state file
     saveSessionState(state, repoPath, sessionTag);
-    debugLog('session-start', 'state saved', { sessionId: result.sessionId, sessionTag });
+    debugLog('session-start', 'state saved', { sessionId, sessionTag });
+
+    // Start background heartbeat daemon (only in connected mode)
+    if (connected && config) {
+      startHeartbeat(sessionId, config.apiUrl || 'https://getorigin.io', config.apiKey);
+      debugLog('session-start', 'heartbeat started', { sessionId });
+    }
 
     // Build system message: agent system prompt first, then tracking notice + policies
     let systemMsg = '';
-    if (result.agentSystemPrompt) {
-      systemMsg += result.agentSystemPrompt + '\n\n';
+    if (agentSystemPrompt) {
+      systemMsg += agentSystemPrompt + '\n\n';
     }
     systemMsg += 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
-    if (result.activePolicies && Array.isArray(result.activePolicies) && result.activePolicies.length > 0) {
+    if (!connected) {
+      systemMsg += ' (standalone mode)';
+    }
+    if (activePolicies && Array.isArray(activePolicies) && activePolicies.length > 0) {
       systemMsg += '\n\nActive policies for this session:\n' +
-        result.activePolicies.map((p: string) => `- ${p}`).join('\n');
+        activePolicies.map((p: string) => `- ${p}`).join('\n');
     }
 
     const output = JSON.stringify({ systemMessage: systemMsg });
@@ -471,27 +562,46 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   if (!state) {
     // No existing session at all — auto-create one (first prompt without SessionStart)
     debugLog('user-prompt-submit', 'no session state — attempting auto-create', { hookCwd });
-    const config = loadConfig();
-    const agentConfig = loadAgentConfig();
+    const autoConfig = loadConfig();
+    let autoAgentConfig = loadAgentConfig();
     const repoPath = discoverGitRoot(hookCwd);
-    if (config && agentConfig && repoPath) {
+    if (repoPath) {
       try {
+        // Auto-create agent config in standalone mode
+        if (!autoAgentConfig) {
+          autoAgentConfig = {
+            machineId: crypto.randomUUID(),
+            hostname: os.hostname(),
+            detectedTools: detectTools(),
+            orgId: 'local',
+          };
+          ensureConfigDir();
+          saveAgentConfig(autoAgentConfig);
+        }
         const repoConfig = loadRepoConfig(repoPath);
-        const finalAgentSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
+        const finalAgentSlug = repoConfig?.agent || agentSlug || autoAgentConfig.agentSlug || undefined;
         const branch = getBranch(hookCwd);
         const model = input.model || (finalAgentSlug === 'gemini' ? 'gemini' : finalAgentSlug === 'codex' ? 'codex' : 'claude');
-        const result = await api.startSession({
-          machineId: agentConfig.machineId,
-          prompt: input.prompt || '',
-          model,
-          repoPath,
-          agentSlug: finalAgentSlug,
-          branch: branch || undefined,
-        });
         const autoTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
-        debugLog('user-prompt-submit', 'auto-created session', { sessionId: result.sessionId, sessionTag: autoTag });
+
+        let sessionId: string;
+        if (isConnectedMode() && autoConfig) {
+          const result = await api.startSession({
+            machineId: autoAgentConfig.machineId,
+            prompt: input.prompt || '',
+            model,
+            repoPath,
+            agentSlug: finalAgentSlug,
+            branch: branch || undefined,
+          });
+          sessionId = result.sessionId;
+        } else {
+          sessionId = `local-${crypto.randomUUID()}`;
+        }
+
+        debugLog('user-prompt-submit', 'auto-created session', { sessionId, sessionTag: autoTag });
         state = {
-          sessionId: result.sessionId,
+          sessionId,
           claudeSessionId: input.session_id || '',
           transcriptPath: input.transcript_path || '',
           model,
@@ -526,10 +636,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
     debugLog('user-prompt-submit', 'prompt saved', { promptCount: state.prompts.length, sessionId: state.sessionId, tag: state.sessionTag });
 
-    // ── Heartbeat: send incremental update to API on every prompt ──
+    // ── Heartbeat: send incremental update to API on every prompt (connected mode only) ──
     try {
       const config = loadConfig();
-      if (config) {
+      if (config && isConnectedMode()) {
         const durationMs = Date.now() - new Date(state.startedAt).getTime();
 
         // Try to parse transcript for live token/cost data
@@ -578,15 +688,16 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   }
 }
 
-async function handleStop(input: Record<string, any>): Promise<void> {
+async function handleStop(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('stop', 'begin', { cwd: input.cwd });
 
   const config = loadConfig();
+  const connected = isConnectedMode();
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, input.session_id);
+  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
   const state = found?.state || null;
-  if (!config || !state) {
-    debugLog('stop', 'ABORT: missing config or state', { hasConfig: !!config, hasState: !!state });
+  if (!state) {
+    debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
     return;
   }
 
@@ -633,35 +744,37 @@ async function handleStop(input: Record<string, any>): Promise<void> {
     const promptMappings = extractPromptFileMappings(state.transcriptPath);
     debugLog('stop', 'prompt mappings', { count: promptMappings.length });
 
-    debugLog('stop', 'calling api.updateSession', {
-      sessionId: state.sessionId,
-      promptCount: prompts.length,
-      model,
-      tokensUsed: parsed.tokensUsed,
-      inputTokens: parsed.inputTokens,
-      outputTokens: parsed.outputTokens,
-      cacheReadTokens: parsed.cacheReadTokens,
-      cacheCreationTokens: parsed.cacheCreationTokens,
-      costUsd,
-      promptMappings: promptMappings.length,
-    });
-    await api.updateSession(state.sessionId, {
-      prompt: joinedPrompt || undefined,
-      transcript: displayTranscript || undefined,
-      model: model !== 'unknown' ? model : undefined,
-      filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
-      tokensUsed: parsed.tokensUsed || undefined,
-      inputTokens: parsed.inputTokens || undefined,
-      outputTokens: parsed.outputTokens || undefined,
-      toolCalls: parsed.toolCalls || undefined,
-      durationMs: durationMs > 0 ? durationMs : undefined,
-      costUsd: costUsd > 0 ? costUsd : undefined,
-      promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
-    });
-    debugLog('stop', 'update complete');
+    if (connected) {
+      debugLog('stop', 'calling api.updateSession', {
+        sessionId: state.sessionId,
+        promptCount: prompts.length,
+        model,
+        tokensUsed: parsed.tokensUsed,
+        inputTokens: parsed.inputTokens,
+        outputTokens: parsed.outputTokens,
+        cacheReadTokens: parsed.cacheReadTokens,
+        cacheCreationTokens: parsed.cacheCreationTokens,
+        costUsd,
+        promptMappings: promptMappings.length,
+      });
+      await api.updateSession(state.sessionId, {
+        prompt: joinedPrompt || undefined,
+        transcript: displayTranscript || undefined,
+        model: model !== 'unknown' ? model : undefined,
+        filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
+        tokensUsed: parsed.tokensUsed || undefined,
+        inputTokens: parsed.inputTokens || undefined,
+        outputTokens: parsed.outputTokens || undefined,
+        toolCalls: parsed.toolCalls || undefined,
+        durationMs: durationMs > 0 ? durationMs : undefined,
+        costUsd: costUsd > 0 ? costUsd : undefined,
+        promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
+      });
+      debugLog('stop', 'update complete');
+    }
 
     // Write session files to origin-sessions branch + push on every Stop
-    const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+    const apiUrl = config?.apiUrl || 'https://getorigin.io';
     const gitCapture = captureGitState(state.repoPath, state.headShaAtStart);
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings, gitCapture,
@@ -676,15 +789,16 @@ async function handleStop(input: Record<string, any>): Promise<void> {
   }
 }
 
-async function handleSessionEnd(input: Record<string, any>): Promise<void> {
+async function handleSessionEnd(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('session-end', 'begin', { cwd: input.cwd });
 
   const config = loadConfig();
+  const connected = isConnectedMode();
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, input.session_id);
+  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
   const state = found?.state || null;
-  if (!config || !state) {
-    debugLog('session-end', 'ABORT: missing config or state', { hasConfig: !!config, hasState: !!state });
+  if (!state) {
+    debugLog('session-end', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
     return;
   }
 
@@ -731,38 +845,40 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
     // Extract prompt → file change mappings from transcript
     const promptMappings = extractPromptFileMappings(state.transcriptPath);
 
-    debugLog('session-end', 'calling api.endSession', {
-      sessionId: state.sessionId,
-      promptCount: prompts.length,
-      filesCount: parsed.filesChanged.length,
-      tokensUsed: parsed.tokensUsed,
-      inputTokens: parsed.inputTokens,
-      outputTokens: parsed.outputTokens,
-      durationMs,
-      costUsd,
-      hasDiff: !!gitCapture.diff,
-    });
+    if (connected) {
+      debugLog('session-end', 'calling api.endSession', {
+        sessionId: state.sessionId,
+        promptCount: prompts.length,
+        filesCount: parsed.filesChanged.length,
+        tokensUsed: parsed.tokensUsed,
+        inputTokens: parsed.inputTokens,
+        outputTokens: parsed.outputTokens,
+        durationMs,
+        costUsd,
+        hasDiff: !!gitCapture.diff,
+      });
 
-    await api.endSession({
-      sessionId: state.sessionId,
-      prompt: joinedPrompt || undefined,
-      summary: parsed.summary || undefined,
-      transcript: displayTranscript || undefined,
-      filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
-      tokensUsed: parsed.tokensUsed || undefined,
-      inputTokens: parsed.inputTokens || undefined,
-      outputTokens: parsed.outputTokens || undefined,
-      toolCalls: parsed.toolCalls || undefined,
-      durationMs: durationMs > 0 ? durationMs : undefined,
-      costUsd: costUsd > 0 ? costUsd : undefined,
-      gitCapture: gitCapture.diff ? gitCapture : undefined,
-      promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
-      branch: getBranch(hookCwd) || undefined,
-    });
-    debugLog('session-end', 'api.endSession complete');
+      await api.endSession({
+        sessionId: state.sessionId,
+        prompt: joinedPrompt || undefined,
+        summary: parsed.summary || undefined,
+        transcript: displayTranscript || undefined,
+        filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
+        tokensUsed: parsed.tokensUsed || undefined,
+        inputTokens: parsed.inputTokens || undefined,
+        outputTokens: parsed.outputTokens || undefined,
+        toolCalls: parsed.toolCalls || undefined,
+        durationMs: durationMs > 0 ? durationMs : undefined,
+        costUsd: costUsd > 0 ? costUsd : undefined,
+        gitCapture: gitCapture.diff ? gitCapture : undefined,
+        promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
+        branch: getBranch(hookCwd) || undefined,
+      });
+      debugLog('session-end', 'api.endSession complete');
+    }
 
     // Write session files to origin-sessions branch (directory per session)
-    const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+    const apiUrl = config?.apiUrl || 'https://getorigin.io';
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings, gitCapture,
       status: 'ended', apiUrl,
@@ -797,19 +913,25 @@ async function handleSessionEnd(input: Record<string, any>): Promise<void> {
 
     // Even if transcript parsing or other steps fail, still mark the session as ended
     // so it doesn't stay RUNNING forever on the dashboard.
-    try {
-      const durationMs = Date.now() - new Date(state.startedAt).getTime();
-      await api.endSession({
-        sessionId: state.sessionId,
-        prompt: state.prompts.join('\n\n---\n\n') || undefined,
-        durationMs: durationMs > 0 ? durationMs : undefined,
-        branch: getBranch(hookCwd) || undefined,
-      });
-      debugLog('session-end', 'fallback endSession succeeded');
-    } catch (fallbackErr: any) {
-      debugLog('session-end', 'fallback endSession also failed', { message: fallbackErr.message });
+    if (connected) {
+      try {
+        const durationMs = Date.now() - new Date(state.startedAt).getTime();
+        await api.endSession({
+          sessionId: state.sessionId,
+          prompt: state.prompts.join('\n\n---\n\n') || undefined,
+          durationMs: durationMs > 0 ? durationMs : undefined,
+          branch: getBranch(hookCwd) || undefined,
+        });
+        debugLog('session-end', 'fallback endSession succeeded');
+      } catch (fallbackErr: any) {
+        debugLog('session-end', 'fallback endSession also failed', { message: fallbackErr.message });
+      }
     }
   } finally {
+    // Stop the heartbeat daemon
+    stopHeartbeat(state.sessionId);
+    debugLog('session-end', 'heartbeat stopped', { sessionId: state.sessionId });
+
     // Clear only THIS session's state file (tagged), not other concurrent sessions
     const saveCwd = found?.saveCwd || hookCwd;
     clearSessionState(saveCwd, state.sessionTag);
@@ -828,10 +950,7 @@ export async function handlePostCommit(): Promise<void> {
   debugLog('post-commit', '=== GIT HOOK INVOKED ===', { pid: process.pid, cwd: process.cwd() });
 
   const config = loadConfig();
-  if (!config) {
-    debugLog('post-commit', 'SKIP: no config');
-    return;
-  }
+  const connected = isConnectedMode();
 
   const hookCwd = process.cwd();
   const repoPath = getGitRoot(hookCwd);
@@ -885,14 +1004,46 @@ export async function handlePostCommit(): Promise<void> {
   const currentBranch = getBranch(hookCwd);
 
   // Add Origin-Session trailer to commit message (like Entire's Entire-Checkpoint trailer)
-  const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+  const apiUrl = config?.apiUrl || 'https://getorigin.io';
 
   // Get ALL active sessions for this repo (concurrent session support)
   const activeSessions = listActiveSessions(hookCwd);
   // Pick the most recent session for trailer/notes (or null)
-  const state = activeSessions.length > 0
+  let state = activeSessions.length > 0
     ? activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0]
     : null;
+
+  // If no active session, detect if an AI agent CLI process is running
+  // This handles cases where agent hooks didn't fire (e.g., Gemini CLI)
+  if (!state) {
+    let detectedModel: string | null = null;
+    try {
+      // Use pgrep for targeted process detection — look for CLI binaries, not desktop apps
+      const checks = [
+        { cmd: 'pgrep -f "gemini.*cli|/gemini "', model: 'gemini' },
+        { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
+        { cmd: 'pgrep -f "codex"', model: 'codex' },
+        { cmd: 'pgrep -f "aider"', model: 'aider' },
+      ];
+      for (const check of checks) {
+        try {
+          execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+          detectedModel = check.model;
+          break;
+        } catch { /* pgrep exits 1 if no match */ }
+      }
+    } catch { /* ignore */ }
+
+    if (detectedModel) {
+      debugLog('post-commit', 'no active session but detected AI process', { detectedModel });
+      // Create a synthetic state so notes get tagged as AI
+      state = {
+        sessionId: `detected-${detectedModel}-${Date.now().toString(36)}`,
+        model: detectedModel,
+        startedAt: new Date().toISOString(),
+      } as any;
+    }
+  }
 
   // Update branch on all active sessions if it changed
   for (const s of activeSessions) {
@@ -904,7 +1055,7 @@ export async function handlePostCommit(): Promise<void> {
   }
 
   // F13: Respect config.commitLinking setting (always|prompt|never)
-  const commitLinkingConfig = config.commitLinking || 'always';
+  const commitLinkingConfig = config?.commitLinking || 'always';
   if (state && commitLinkingConfig !== 'never') {
     try {
       // Only add trailer if not already present
@@ -957,17 +1108,19 @@ export async function handlePostCommit(): Promise<void> {
       linesRemoved,
     };
 
-    for (const s of activeSessions) {
-      try {
-        debugLog('post-commit', 'sending incremental update', { sessionId: s.sessionId, filesChanged: filesChanged.length });
-        await api.updateSession(s.sessionId, {
-          filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
-          branch: currentBranch || undefined,
-          gitCapture,
-        });
-        debugLog('post-commit', 'API update complete', { sessionId: s.sessionId });
-      } catch (err: any) {
-        debugLog('post-commit', 'API update error (non-fatal)', { sessionId: s.sessionId, message: err.message });
+    if (connected) {
+      for (const s of activeSessions) {
+        try {
+          debugLog('post-commit', 'sending incremental update', { sessionId: s.sessionId, filesChanged: filesChanged.length });
+          await api.updateSession(s.sessionId, {
+            filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
+            branch: currentBranch || undefined,
+            gitCapture,
+          });
+          debugLog('post-commit', 'API update complete', { sessionId: s.sessionId });
+        } catch (err: any) {
+          debugLog('post-commit', 'API update error (non-fatal)', { sessionId: s.sessionId, message: err.message });
+        }
       }
     }
   } else {
@@ -976,7 +1129,8 @@ export async function handlePostCommit(): Promise<void> {
 
   // Write full session entrypoint to origin-sessions branch on every commit
   // Parse transcript now (not just at session-end) so we capture tokens, cost, prompts, files
-  if (state) {
+  // Skip for detected (synthetic) sessions — they don't have transcripts
+  if (state && state.transcriptPath) {
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
 
     // Parse transcript for full metrics and write session files
@@ -1008,16 +1162,111 @@ export async function handlePostCommit(): Promise<void> {
 
 // ─── Pre-Tool-Use / Post-Tool-Use (F7: Subagent Tracking) ─────────────────
 
-async function handlePreToolUse(input: Record<string, any>): Promise<void> {
+// ── Policy Enforcement Helpers ────────────────────────────────────────────
+
+function matchGlob(pattern: string, filepath: string): boolean {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '<<<GLOBSTAR>>>')
+    .replace(/\*/g, '[^/]*')
+    .replace(/<<<GLOBSTAR>>>/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`).test(filepath);
+}
+
+/**
+ * Extract file paths from tool input across different agents.
+ * Claude: { file_path, command (grep for paths) }
+ * Gemini: { path, file_path, command }
+ */
+function extractFilePaths(toolName: string, toolInput: Record<string, any>): string[] {
+  const paths: string[] = [];
+
+  // Direct file path fields (Read, Write, Edit tools)
+  for (const key of ['file_path', 'path', 'filePath', 'filename', 'file']) {
+    if (typeof toolInput[key] === 'string' && toolInput[key]) {
+      paths.push(toolInput[key]);
+    }
+  }
+
+  // Bash/shell commands — extract paths from common file operations
+  const cmd = toolInput.command || toolInput.cmd || toolInput.script || '';
+  if (typeof cmd === 'string' && cmd) {
+    // Match common file access patterns: cat, less, head, tail, vim, nano, code, read, source
+    const fileOps = /(?:cat|less|head|tail|vim|nano|code|source|rm|mv|cp|chmod|chown)\s+(?:-[a-zA-Z]*\s+)*([^\s|>&;]+)/g;
+    let m;
+    while ((m = fileOps.exec(cmd)) !== null) {
+      if (m[1] && !m[1].startsWith('-')) paths.push(m[1]);
+    }
+  }
+
+  return paths;
+}
+
+function enforceFileRestrictions(
+  rules: Array<{ type: string; condition: string; action: string; severity: string }>,
+  filePaths: string[],
+  repoPath: string,
+): { blocked: boolean; reason: string } | null {
+  if (!rules || rules.length === 0 || filePaths.length === 0) return null;
+
+  for (const rule of rules) {
+    if (rule.type !== 'FILE_RESTRICTION') continue;
+    if (rule.action.toUpperCase() !== 'BLOCK') continue;
+
+    let cond: Record<string, unknown>;
+    try { cond = JSON.parse(rule.condition); } catch { continue; }
+    const pattern = cond.path as string | undefined;
+    if (!pattern) continue;
+
+    for (const fp of filePaths) {
+      // Normalize: try both absolute and relative-to-repo
+      const relPath = fp.startsWith('/') && repoPath
+        ? fp.replace(repoPath + '/', '').replace(repoPath, '')
+        : fp;
+      const candidates = [fp, relPath, relPath.replace(/^\//, '')];
+
+      for (const candidate of candidates) {
+        if (matchGlob(pattern, candidate)) {
+          return {
+            blocked: true,
+            reason: `[Origin Policy] Blocked: file "${candidate}" matches restricted pattern "${pattern}"`,
+          };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+async function handlePreToolUse(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('pre-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, input.session_id);
+  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
   if (!found) {
     debugLog('pre-tool-use', 'ABORT: no session state');
     return;
   }
   const { state, saveCwd } = found;
+
+  // ── Policy Enforcement: FILE_RESTRICTION ──────────────────────────────
+  if (state.enforcementRules && state.enforcementRules.length > 0) {
+    const toolInput = input.tool_input || {};
+    const filePaths = extractFilePaths(input.tool_name || '', toolInput);
+    debugLog('pre-tool-use', 'extracted paths', { filePaths, toolName: input.tool_name });
+
+    if (filePaths.length > 0) {
+      const result = enforceFileRestrictions(state.enforcementRules, filePaths, state.repoPath);
+      if (result?.blocked) {
+        debugLog('pre-tool-use', 'BLOCKED by policy', { reason: result.reason });
+        // Exit code 2 + stderr blocks the tool for both Claude Code and Gemini CLI
+        process.stderr.write(result.reason + '\n');
+        process.exit(2);
+      }
+    }
+  }
 
   // Initialize subagents array if needed
   if (!state.subagents) state.subagents = [];
@@ -1035,11 +1284,11 @@ async function handlePreToolUse(input: Record<string, any>): Promise<void> {
   debugLog('pre-tool-use', 'recorded', { toolCallId, toolName: record.toolName });
 }
 
-async function handlePostToolUse(input: Record<string, any>): Promise<void> {
+async function handlePostToolUse(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('post-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, input.session_id);
+  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
   if (!found) {
     debugLog('post-tool-use', 'ABORT: no session state');
     return;
@@ -1063,6 +1312,26 @@ async function handlePostToolUse(input: Record<string, any>): Promise<void> {
       saveSessionState(state, saveCwd, state.sessionTag);
       debugLog('post-tool-use', 'updated', { toolCallId: record.toolCallId, toolName });
     }
+  }
+
+  // ── Mid-session branch tracking ──────────────────────────────────────────
+  // Check branch on every tool use — different agents use different tool names
+  // (Claude: Bash, Gemini: shell/run_terminal_command, etc.)
+  // getBranch() just reads .git/HEAD so it's cheap
+  try {
+    const repoPath = state.repoPath || saveCwd;
+    const currentBranch = getBranch(repoPath);
+    if (currentBranch && currentBranch !== state.branch) {
+      debugLog('post-tool-use', 'branch changed', { from: state.branch, to: currentBranch });
+      state.branch = currentBranch;
+      saveSessionState(state, saveCwd, state.sessionTag);
+      // Update server (connected mode only)
+      if (isConnectedMode() && state.sessionId) {
+        api.updateSession(state.sessionId, { branch: currentBranch }).catch(() => {});
+      }
+    }
+  } catch {
+    // non-fatal
   }
 }
 
@@ -1133,16 +1402,16 @@ export async function hooksCommand(event: string, agentSlug?: string): Promise<v
       await handleUserPromptSubmit(input, agentSlug);
       break;
     case 'stop':
-      await handleStop(input);
+      await handleStop(input, agentSlug);
       break;
     case 'session-end':
-      await handleSessionEnd(input);
+      await handleSessionEnd(input, agentSlug);
       break;
     case 'pre-tool-use':
-      await handlePreToolUse(input);
+      await handlePreToolUse(input, agentSlug);
       break;
     case 'post-tool-use':
-      await handlePostToolUse(input);
+      await handlePostToolUse(input, agentSlug);
       break;
     default:
       debugLog(event, 'unknown event');

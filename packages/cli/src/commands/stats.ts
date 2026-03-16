@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { computeAttributionStats, type AttributionStats } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
@@ -75,6 +76,10 @@ function displayLocalStats(stats: AttributionStats): void {
 // ─── Command ──────────────────────────────────────────────────────────────
 
 export async function statsCommand(opts?: { local?: boolean; range?: string }) {
+  // Auto-set local mode if not connected to platform
+  if (!isConnectedMode() && !opts?.local) {
+    opts = { ...opts, local: true };
+  }
   // Local stats mode
   if (opts?.local) {
     const cwd = process.cwd();

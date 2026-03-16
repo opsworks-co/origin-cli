@@ -4,6 +4,7 @@ import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import {
   createInstallationToken,
+  generateAppJWT,
   testGitHubAppConnection,
   getGitHubAppConfig,
 } from '../services/github-app.js';
@@ -213,6 +214,143 @@ router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest,
   } catch (err) {
     console.error('[github-app] Test error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /detect — auto-detect existing GitHub App installation ──
+// When the app is already installed on a user's GitHub account, GitHub won't
+// redirect back with a new installation_id. This endpoint lists all installations
+// of the Origin GitHub App and lets the admin pick/auto-link one.
+
+router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const appConfig = getGitHubAppConfig();
+    if (!appConfig.configured) {
+      return res.status(500).json({ error: 'GitHub App not configured on this server.' });
+    }
+
+    // Already connected?
+    const existing = await prisma.integrationConfig.findFirst({
+      where: { orgId: req.user!.orgId, provider: 'github', authType: 'github_app' },
+    });
+    if (existing) {
+      let s: any = {};
+      try { s = JSON.parse(existing.settings); } catch { /* */ }
+      if (s.installationId) {
+        return res.json({ linked: true, installationId: s.installationId, message: 'Already linked.' });
+      }
+    }
+
+    // Authenticate as the GitHub App itself and list all installations
+    const decodedKey = appConfig.privateKey!.replace(/\\n/g, '\n');
+    const appJwt = generateAppJWT(appConfig.appId!, decodedKey);
+
+    const ghRes = await fetch('https://api.github.com/app/installations?per_page=100', {
+      headers: {
+        Authorization: `Bearer ${appJwt}`,
+        Accept: 'application/vnd.github.v3+json',
+        'User-Agent': 'Origin-AI-Governance/1.0',
+      },
+    });
+
+    if (!ghRes.ok) {
+      const err = await ghRes.text();
+      return res.status(502).json({ error: `GitHub API error (${ghRes.status}): ${err}` });
+    }
+
+    const installationsRaw = await ghRes.json();
+    const installations: any[] = Array.isArray(installationsRaw) ? installationsRaw : [];
+    console.log(`[github-app] Detect: GitHub returned ${installations.length} installation(s)`, installations.map((i: any) => ({ id: i.id, account: i.account?.login })));
+
+    if (installations.length === 0) {
+      return res.json({ linked: false, installations: [], message: 'No installations found. Install the GitHub App first.' });
+    }
+
+    // If exactly one installation, auto-link it
+    // If multiple, return the list so frontend can let admin pick
+    const installationList = installations.map((inst: any) => ({
+      installationId: String(inst.id),
+      account: inst.account?.login || 'unknown',
+      accountType: inst.account?.type || 'unknown', // User or Organization
+      avatarUrl: inst.account?.avatar_url || null,
+    }));
+
+    // Only auto-link if a specific installationId was explicitly passed by the admin
+    const targetId = req.body?.installationId || null;
+
+    if (targetId) {
+      const target = installations.find((i: any) => String(i.id) === targetId);
+      if (!target) {
+        return res.status(400).json({ error: 'Installation not found.' });
+      }
+
+      // Create installation token
+      const tokenResult = await createInstallationToken(
+        appConfig.appId!,
+        decodedKey,
+        targetId,
+      );
+
+      const settings = {
+        postChecks: true,
+        postComments: true,
+        checkOnReview: true,
+        appId: appConfig.appId,
+        installationId: targetId,
+        privateKey: appConfig.privateKey, // store escaped version
+        tokenExpiresAt: tokenResult.expiresAt,
+        appSlug: appConfig.appSlug,
+      };
+
+      if (existing) {
+        const existingSettings = (() => { try { return JSON.parse(existing.settings); } catch { return {}; } })();
+        await prisma.integrationConfig.update({
+          where: { id: existing.id },
+          data: {
+            token: tokenResult.token,
+            authType: 'github_app',
+            settings: JSON.stringify({ ...existingSettings, ...settings }),
+          },
+        });
+      } else {
+        await prisma.integrationConfig.create({
+          data: {
+            orgId: req.user!.orgId,
+            provider: 'github',
+            token: tokenResult.token,
+            authType: 'github_app',
+            settings: JSON.stringify(settings),
+          },
+        });
+      }
+
+      await prisma.auditLog.create({
+        data: {
+          orgId: req.user!.orgId,
+          userId: req.user!.id,
+          action: 'GITHUB_APP_LINKED',
+          resource: targetId,
+          metadata: JSON.stringify({
+            installationId: targetId,
+            account: target.account?.login,
+            method: 'auto-detect',
+          }),
+        },
+      });
+
+      return res.json({
+        linked: true,
+        installationId: targetId,
+        account: target.account?.login,
+        message: `Linked to GitHub account "${target.account?.login}"`,
+      });
+    }
+
+    // Multiple installations — return list for user to pick
+    res.json({ linked: false, installations: installationList });
+  } catch (err: any) {
+    console.error('[github-app] Detect error:', err);
+    res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 

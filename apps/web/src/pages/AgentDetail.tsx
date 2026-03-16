@@ -305,6 +305,13 @@ export default function AgentDetail() {
                 />
               </div>
               <div>
+                <label className="block text-sm text-gray-400 mb-1">Slug</label>
+                <div className="flex items-center gap-2">
+                  <code className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-indigo-400 font-mono flex-1">{agent.slug}</code>
+                  <span className="text-[10px] text-gray-600">Used by CLI to identify this agent</span>
+                </div>
+              </div>
+              <div>
                 <label className="block text-sm text-gray-400 mb-1">Model</label>
                 <input
                   value={editModel}
@@ -378,21 +385,6 @@ export default function AgentDetail() {
               className="input w-full font-mono text-sm"
               rows={4}
               placeholder={"Read\nWrite\nEdit\nBash\nGlob\nGrep"}
-            />
-          </div>
-
-          {/* Permissions */}
-          <div className="card">
-            <h3 className="text-sm font-semibold text-gray-300 mb-2">Permissions (JSON)</h3>
-            <p className="text-xs text-gray-500 mb-3">
-              File access patterns and restrictions. Example: {`{"filePatterns": ["src/**/*.ts"], "blockedPaths": ["**/.env", "**/secrets/**"]}`}
-            </p>
-            <textarea
-              value={editPermissions}
-              onChange={e => setEditPermissions(e.target.value)}
-              className="input w-full font-mono text-sm"
-              rows={4}
-              placeholder='{"filePatterns": ["**/*.ts", "**/*.tsx"], "blockedPaths": ["**/.env"]}'
             />
           </div>
 

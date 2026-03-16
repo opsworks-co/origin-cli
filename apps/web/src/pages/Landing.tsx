@@ -72,7 +72,7 @@ const TOOLS = [
   { name: 'Aider', badge: 'badge-green' },
 ];
 
-const INSTALL_CMD = 'curl -fsSL https://origin-platform.fly.dev/install.sh | sh';
+const INSTALL_CMD = 'npm i -g https://getorigin.io/cli/origin-cli-latest.tgz';
 
 function InstallCommand() {
   const [copied, setCopied] = useState(false);
@@ -412,18 +412,21 @@ get_audit_log       \u2192 audit trail`}
             </pre>
           </div>
           <div className="card">
-            <h3 className="text-lg font-semibold mb-3">CLI &mdash; 15 Commands</h3>
+            <h3 className="text-lg font-semibold mb-3">CLI &mdash; Works Standalone</h3>
             <p className="text-sm text-gray-400 mb-4">
-              Full command-line management. Sessions, agents, repos, policies,
-              reviews, stats, and audit &mdash; all from your terminal.
+              No server needed. Session tracking, AI attribution, blame, search, and stats &mdash;
+              all stored locally in git. Connect to Origin platform for policies and team features.
             </p>
             <pre className="bg-gray-800 rounded-lg px-4 py-3 text-xs font-mono text-gray-300 overflow-x-auto leading-relaxed">
-{`$ origin login && origin init
-$ origin sessions --status unreviewed
-$ origin review abc123 --approve
-$ origin agents && origin repos
-$ origin stats && origin audit`}
+{`$ origin init                  # no login needed
+$ origin sessions              # local session history
+$ origin blame src/app.ts      # AI vs human attribution
+$ origin stats                 # local analytics
+$ origin login                 # optional: unlock policies`}
             </pre>
+            <Link to="/cli" className="inline-block mt-3 text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+              Full CLI documentation &rarr;
+            </Link>
           </div>
         </div>
       </section>
@@ -435,7 +438,7 @@ $ origin stats && origin audit`}
             Get started in under 2 minutes
           </h2>
           <p className="text-gray-400 mb-10 max-w-xl mx-auto">
-            Install the CLI, login, and init. Two commands and you&apos;re done.
+            Install the CLI and init. Works standalone — no server, no account. Add <code className="text-indigo-400">origin login</code> later for team features.
           </p>
 
           <div className="max-w-2xl mx-auto mb-12">
@@ -443,9 +446,9 @@ $ origin stats && origin audit`}
 
             <div className="grid sm:grid-cols-3 gap-6 mt-10">
               {[
-                { step: '1', cmd: 'curl ... | sh', title: 'Install CLI', desc: 'One command to install' },
-                { step: '2', cmd: 'origin login', title: 'Authenticate', desc: 'Login with your org' },
-                { step: '3', cmd: 'origin init', title: 'Initialize', desc: 'Detects tools & installs hooks' },
+                { step: '1', cmd: 'npm i -g ...', title: 'Install CLI', desc: 'One command to install' },
+                { step: '2', cmd: 'origin init', title: 'Initialize', desc: 'Detects tools & installs hooks' },
+                { step: '3', cmd: 'Start coding', title: 'Track sessions', desc: 'Sessions tracked automatically' },
               ].map((s) => (
                 <div key={s.step} className="text-center">
                   <div className="w-10 h-10 rounded-full bg-indigo-600 text-white font-bold text-sm flex items-center justify-center mx-auto mb-3">

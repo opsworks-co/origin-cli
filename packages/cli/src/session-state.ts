@@ -2,7 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ export interface SessionState {
   tabCompletions?: TabCompletionStats;
   agentSystemPrompt?: string; // Cached agent system prompt for session resume
   activePolicies?: string[];  // Cached active policies for session resume
+  enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
 }
 
 // ─── Git Directory ─────────────────────────────────────────────────────────
@@ -230,6 +232,63 @@ export function findSessionByClaudeId(claudeSessionId: string, cwd?: string): Se
 /**
  * Clear all session state files (e.g., after session-end).
  */
+// ─── Heartbeat Daemon ───────────────────────────────────────────────────────
+
+function getHeartbeatPidFile(sessionId: string): string {
+  const dir = path.join(os.homedir(), '.origin', 'heartbeats');
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${sessionId}.pid`);
+}
+
+/**
+ * Spawn a detached background process that pings the API every 30s.
+ * Keeps the session marked as RUNNING even when idle between prompts.
+ */
+export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string): void {
+  const pidFile = getHeartbeatPidFile(sessionId);
+
+  // Kill any existing heartbeat for this session
+  stopHeartbeat(sessionId);
+
+  try {
+    // Resolve the heartbeat script path (sibling to this file in dist/)
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const heartbeatScript = path.join(__dirname, 'heartbeat.js');
+
+    if (!fs.existsSync(heartbeatScript)) {
+      // Fallback: script not found (dev mode or missing build)
+      return;
+    }
+
+    const child = spawn(process.execPath, [heartbeatScript, sessionId, apiUrl, apiKey, pidFile], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+  } catch {
+    // Non-fatal — session tracking still works, just no keepalive
+  }
+}
+
+/**
+ * Kill the heartbeat daemon for a session.
+ */
+export function stopHeartbeat(sessionId: string): void {
+  const pidFile = getHeartbeatPidFile(sessionId);
+  try {
+    if (fs.existsSync(pidFile)) {
+      const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+      if (pid > 0) {
+        try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+      }
+      fs.unlinkSync(pidFile);
+    }
+  } catch {
+    // Ignore
+  }
+}
+
 export function clearAllSessionStates(cwd?: string): void {
   const gitDir = getGitDir(cwd);
   if (gitDir) {

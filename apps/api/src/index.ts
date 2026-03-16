@@ -139,13 +139,14 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "  Downloading Origin CLI..."
-curl -fsSL "https://origin-platform.fly.dev/cli/origin-cli-latest.tgz" -o "$TMPDIR/origin-cli.tgz"
+curl -fsSL "https://getorigin.io/cli/origin-cli-latest.tgz" -o "$TMPDIR/origin-cli.tgz"
 
 echo "  Installing..."
 npm install -g "$TMPDIR/origin-cli.tgz" --silent 2>/dev/null
 
+VERSION=$(origin --version 2>/dev/null || echo "unknown")
 echo ""
-echo "  Origin CLI installed successfully!"
+echo "  Origin CLI installed successfully! (v$VERSION)"
 echo ""
 echo "  Get started:"
 echo ""
@@ -179,11 +180,10 @@ app.listen(Number(PORT), HOST, () => {
   startAutoSync();
   seedDefaultPricing();
 
-  // Auto-complete stale RUNNING sessions every 5 minutes.
-  // Sessions with no update for 15+ minutes are considered abandoned
-  // (SessionEnd hook doesn't fire reliably in all agents).
-  const STALE_SESSION_CHECK_MS = 1 * 60 * 1000;   // check every 1 min
-  const STALE_THRESHOLD_MS = 3 * 60 * 1000;        // 3 min without update
+  // Auto-complete stale RUNNING sessions periodically.
+  // CLI sends heartbeat pings every 30s. No ping for 2 min = session is dead.
+  const STALE_SESSION_CHECK_MS = 1 * 60 * 1000;    // check every 1 min
+  const STALE_THRESHOLD_MS = 2 * 60 * 1000;         // 2 min without update
   setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS);

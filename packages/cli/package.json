@@ -1,12 +1,13 @@
 {
   "name": "@origin/cli",
-  "version": "0.1.0",
+  "version": "0.20260316.0047",
   "type": "module",
   "bin": {
     "origin": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "version:bump": "node -e \"const p=require('./package.json');const d=new Date();const hm=String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0');p.version='0.'+d.toISOString().slice(0,10).replace(/-/g,'')+'.'+hm;require('fs').writeFileSync('./package.json',JSON.stringify(p,null,2)+'\\n')\"",
+    "build": "npm run version:bump && tsc",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

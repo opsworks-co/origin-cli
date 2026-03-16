@@ -1,7 +1,9 @@
 import chalk from 'chalk';
+import { requirePlatform } from '../config.js';
 import { api } from '../api.js';
 
 export async function reviewCommand(sessionId: string, opts: { approve?: boolean; reject?: boolean; flag?: boolean; note?: string }) {
+  if (!requirePlatform('review')) return;
   try {
     let status: string;
     if (opts.approve) status = 'APPROVED';

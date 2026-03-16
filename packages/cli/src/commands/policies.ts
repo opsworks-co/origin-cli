@@ -1,15 +1,13 @@
 import chalk from 'chalk';
-import { loadConfig } from '../config.js';
+import { loadConfig, requirePlatform } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 import { describeCondition, describeAction, policyTypeLabel } from '../utils/policy-descriptions.js';
 
 export async function policiesCommand() {
+  if (!requirePlatform('policies')) return;
   const config = loadConfig();
-  if (!config) {
-    console.log(chalk.red('Not logged in. Run: origin login'));
-    process.exit(1);
-  }
+  if (!config) return;
 
   console.log(chalk.bold('\nActive Policies\n'));
 

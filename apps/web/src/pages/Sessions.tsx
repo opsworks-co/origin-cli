@@ -8,7 +8,7 @@ function statusBadge(status: string) {
   return <span className={getStatusBadgeClass(status)}>{status}</span>;
 }
 
-type SortField = 'model' | 'cost' | 'tokens' | 'duration' | 'toolCalls' | 'date';
+type SortField = 'model' | 'cost' | 'tokens' | 'duration' | 'toolCalls' | 'date' | 'score';
 type SortDir = 'asc' | 'desc';
 type ViewMode = 'list' | 'by-pr';
 
@@ -137,6 +137,13 @@ export default function Sessions() {
     const approved = sessions.filter(
       (s) => s.review?.status?.toLowerCase() === 'approved'
     ).length;
+    const scoredSessions = sessions.filter((s) => s.review?.score != null);
+    const avgScore = scoredSessions.length > 0
+      ? Math.round(scoredSessions.reduce((sum, s) => sum + (s.review?.score ?? 0), 0) / scoredSessions.length)
+      : null;
+    const flaggedCount = sessions.filter(
+      (s) => s.review?.status?.toLowerCase() === 'flagged' || s.review?.status?.toLowerCase() === 'rejected'
+    ).length;
     return {
       totalCost,
       totalTokens,
@@ -145,6 +152,8 @@ export default function Sessions() {
       totalTools,
       reviewed,
       approved,
+      avgScore,
+      flaggedCount,
       approvalRate: reviewed > 0 ? ((approved / reviewed) * 100).toFixed(0) : '—',
     };
   }, [sessions]);
@@ -216,6 +225,9 @@ export default function Sessions() {
           break;
         case 'model':
           cmp = a.model.localeCompare(b.model);
+          break;
+        case 'score':
+          cmp = (a.review?.score ?? -1) - (b.review?.score ?? -1);
           break;
         case 'date':
         default:
@@ -346,15 +358,19 @@ export default function Sessions() {
             <p className="text-lg font-semibold text-gray-200 mt-0.5">{analytics.totalTools}</p>
           </div>
           <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Reviewed</p>
-            <p className="text-lg font-semibold text-gray-200 mt-0.5">
-              {analytics.reviewed}/{sessions.length}
+            <p className="text-xs text-gray-500 uppercase tracking-wider">Avg Score</p>
+            <p className={`text-lg font-semibold mt-0.5 ${
+              analytics.avgScore == null ? 'text-gray-500' :
+              analytics.avgScore >= 80 ? 'text-green-400' :
+              analytics.avgScore >= 50 ? 'text-amber-400' : 'text-red-400'
+            }`}>
+              {analytics.avgScore ?? '—'}
             </p>
           </div>
           <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Approval Rate</p>
-            <p className="text-lg font-semibold text-green-400 mt-0.5">
-              {analytics.approvalRate}%
+            <p className="text-xs text-gray-500 uppercase tracking-wider">Flagged</p>
+            <p className={`text-lg font-semibold mt-0.5 ${analytics.flaggedCount > 0 ? 'text-red-400' : 'text-green-400'}`}>
+              {analytics.flaggedCount}
             </p>
           </div>
         </div>
@@ -575,7 +591,13 @@ export default function Sessions() {
                       <span className="text-gray-400 text-xs tabular-nums">
                         {formatCost(s.costUsd)}
                       </span>
-                      {statusBadge(s.review?.status?.toLowerCase() ?? (s.status === 'RUNNING' ? 'running' : 'ended'))}
+                      {s.review?.score != null ? (
+                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                          s.review.score >= 80 ? 'bg-green-500/20 text-green-400' :
+                          s.review.score >= 50 ? 'bg-amber-500/20 text-amber-400' :
+                          'bg-red-500/20 text-red-400'
+                        }`}>{s.review.score}</span>
+                      ) : statusBadge(s.review?.status?.toLowerCase() ?? (s.status === 'RUNNING' ? 'running' : 'ended'))}
                       <span className="text-gray-600 text-xs">{timeAgo(s.createdAt)}</span>
                     </div>
                   ))}
@@ -605,11 +627,11 @@ export default function Sessions() {
                     />
                   </th>
                   <SortHeader field="model">Model</SortHeader>
+                  <th className="px-6 py-3 font-medium">Status</th>
                   <th className="px-6 py-3 font-medium">Agent</th>
                   <th className="px-6 py-3 font-medium">User</th>
                   <th className="px-6 py-3 font-medium">Repo</th>
                   <th className="px-6 py-3 font-medium">Branch</th>
-                  <th className="px-6 py-3 font-medium">Commit</th>
                   <SortHeader field="duration" align="right">
                     Duration
                   </SortHeader>
@@ -622,7 +644,7 @@ export default function Sessions() {
                   <SortHeader field="cost" align="right">
                     Cost
                   </SortHeader>
-                  <th className="px-6 py-3 font-medium">Status</th>
+                  <SortHeader field="score">Score</SortHeader>
                   <SortHeader field="date" align="right">
                     Age
                   </SortHeader>
@@ -664,6 +686,21 @@ export default function Sessions() {
                       <td className="px-6 py-3">
                         <span className="badge-blue">{s.model}</span>
                       </td>
+                      <td className="px-6 py-3">
+                        {s.status === 'RUNNING' ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-400">
+                            <span className="relative flex h-1.5 w-1.5">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-green-400" />
+                            </span>
+                            running
+                          </span>
+                        ) : s.status === 'ERROR' ? (
+                          <span className="text-xs font-medium text-red-400">error</span>
+                        ) : (
+                          <span className="text-xs text-gray-500">ended</span>
+                        )}
+                      </td>
                       <td className="px-6 py-3 text-gray-400 text-xs">
                         {s.agentName ?? <span className="text-gray-600">—</span>}
                         {s.agentVersion && <span className="text-gray-600 ml-1">v{s.agentVersion}</span>}
@@ -683,9 +720,6 @@ export default function Sessions() {
                           <span className="text-gray-600">—</span>
                         )}
                       </td>
-                      <td className="px-6 py-3 text-gray-300 max-w-[180px] truncate">
-                        {s.commitMessage ?? '—'}
-                      </td>
                       <td className="px-6 py-3 text-right text-gray-400 tabular-nums">
                         {formatDuration(s.durationMs)}
                       </td>
@@ -699,18 +733,21 @@ export default function Sessions() {
                         {formatCost(s.costUsd)}
                       </td>
                       <td className="px-6 py-3">
-                        {s.review?.status ? (
-                          statusBadge(s.review.status.toLowerCase())
-                        ) : s.status === 'RUNNING' ? (
-                          <span className="badge-purple inline-flex items-center gap-1">
-                            <span className="relative flex h-1.5 w-1.5">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
-                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-purple-400" />
-                            </span>
-                            running
+                        {s.review?.score != null ? (
+                          <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full ${
+                            s.review.score >= 80 ? 'bg-green-500/20 text-green-400' :
+                            s.review.score >= 50 ? 'bg-amber-500/20 text-amber-400' :
+                            'bg-red-500/20 text-red-400'
+                          }`}>
+                            {s.review.score}
+                            {s.review.isAutoReview && (
+                              <span className="text-[9px] opacity-60">AI</span>
+                            )}
                           </span>
+                        ) : s.review?.status ? (
+                          statusBadge(s.review.status.toLowerCase())
                         ) : (
-                          statusBadge('ended')
+                          <span className="text-xs text-gray-600">—</span>
                         )}
                       </td>
                       <td className="px-6 py-3 text-right text-gray-500">

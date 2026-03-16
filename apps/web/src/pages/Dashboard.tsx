@@ -3,7 +3,6 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import type { Stats, Session, Policy, Machine, IntegrationConfig } from '../api';
-import StatusBanner from '../components/StatusBanner';
 import KpiCard from '../components/KpiCard';
 import { timeAgo, getStatusBadgeClass } from '../utils';
 import {
@@ -132,7 +131,7 @@ export default function Dashboard() {
       </div>
 
       {/* ── Onboarding Checklist ─────────────────────────────────────────── */}
-      {!allSetUp && !onboardingDismissed ? (
+      {!allSetUp && !onboardingDismissed && (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -198,25 +197,9 @@ export default function Dashboard() {
             ))}
           </div>
         </div>
-      ) : (
-        <div className="card bg-green-900/10 border-green-800/30">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center text-green-400">
-              {'\u2713'}
-            </div>
-            <div>
-              <p className="text-sm font-medium text-green-400">You're all set!</p>
-              <p className="text-xs text-gray-500">Your AI code governance is fully configured.</p>
-            </div>
-          </div>
-        </div>
       )}
 
-      {/* ── Action Banner ─────────────────────────────────────────────────── */}
-      <StatusBanner
-        unreviewed={stats.unreviewed}
-        policyViolations={stats.policyViolations}
-      />
+      {/* ── Action Banner (removed) ──────────────────────────────────────── */}
 
       {/* ── Active Sessions ──────────────────────────────────────────────── */}
       {activeSessions.length > 0 && (
@@ -473,14 +456,50 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ── Review Pipeline ───────────────────────────────────────────────── */}
+      {/* ── AI Quality & Compliance ──────────────────────────────────────── */}
       <div>
         <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">
-          Review Pipeline
-          <span className="text-gray-600 font-normal normal-case ml-2">Every AI session is tracked for human review</span>
+          AI Quality & Compliance
+          <span className="text-gray-600 font-normal normal-case ml-2">Every session is scored automatically by AI</span>
         </h2>
-        <div className="grid lg:grid-cols-2 gap-4">
-          {/* Session Quality */}
+        <div className="grid lg:grid-cols-3 gap-4">
+          {/* AI Score Overview */}
+          <div className="card">
+            <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">AI Quality Score</p>
+            {(() => {
+              const scored = sessions.filter(s => s.review?.score != null);
+              const avgScore = scored.length > 0
+                ? Math.round(scored.reduce((sum, s) => sum + (s.review?.score ?? 0), 0) / scored.length)
+                : null;
+              const autoReviewed = sessions.filter(s => s.review?.isAutoReview).length;
+              return (
+                <div className="flex items-center gap-5">
+                  <div className="text-center">
+                    <div className={`text-4xl font-bold tabular-nums ${
+                      avgScore == null ? 'text-gray-500' :
+                      avgScore >= 80 ? 'text-green-400' :
+                      avgScore >= 50 ? 'text-amber-400' : 'text-red-400'
+                    }`}>
+                      {avgScore ?? '—'}
+                    </div>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mt-0.5">Avg Score</p>
+                  </div>
+                  <div className="flex-1 space-y-2 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Auto-reviewed</span>
+                      <span className="text-gray-300 font-medium">{autoReviewed}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Scored</span>
+                      <span className="text-gray-300 font-medium">{scored.length}/{sessions.length}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Review Status Breakdown */}
           <div className="card">
             <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Review Status</p>
             {stats.qualityMetrics && (
@@ -525,7 +544,7 @@ export default function Dashboard() {
             <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Policy Compliance</p>
             <div className="flex items-baseline gap-2">
               <p className="text-3xl font-bold text-gray-100">{stats.policyViolations}</p>
-              <p className="text-sm text-gray-500">violations detected</p>
+              <p className="text-sm text-gray-500">violations</p>
             </div>
             {stats.violationsByType && stats.violationsByType.length > 0 && (
               <div className="mt-3 space-y-2">
@@ -596,7 +615,16 @@ export default function Dashboard() {
                         : s.commitMessage ?? '\u2014'}
                     </td>
                     <td className="px-6 py-3">
-                      {statusBadge(s.review?.status?.toLowerCase() ?? 'pending')}
+                      {s.review?.score != null ? (
+                        <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
+                          s.review.score >= 80 ? 'bg-green-500/20 text-green-400' :
+                          s.review.score >= 50 ? 'bg-amber-500/20 text-amber-400' :
+                          'bg-red-500/20 text-red-400'
+                        }`}>
+                          {s.review.score}
+                          {s.review.isAutoReview && <span className="text-[9px] opacity-60">AI</span>}
+                        </span>
+                      ) : statusBadge(s.review?.status?.toLowerCase() ?? 'pending')}
                     </td>
                     <td className="px-6 py-3 text-right text-gray-500">{timeAgo(s.createdAt)}</td>
                   </tr>

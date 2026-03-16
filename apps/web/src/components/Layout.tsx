@@ -8,11 +8,11 @@ const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: '\u25A3' },
   { to: '/repos', label: 'Repositories', icon: '\uD83D\uDCC1' },
   { to: '/agents', label: 'Agents', icon: '\uD83E\uDD16' },
+  { to: '/policies', label: 'Policies', icon: '\uD83D\uDEE1' },
   { to: '/sessions', label: 'Sessions', icon: '\u25B6' },
   { to: '/pull-requests', label: 'PR Checks', icon: '\uD83D\uDD00' },
   { to: '/infrastructure', label: 'Infrastructure', icon: '\uD83D\uDDA5' },
-  { to: '/leaderboard', label: 'Leaderboard', icon: '\uD83C\uDFC6' },
-  { to: '/policies', label: 'Policies', icon: '\uD83D\uDEE1' },
+  { to: '/api-keys', label: 'API Keys', icon: '\uD83D\uDD11' },
   { to: '/settings', label: 'Settings', icon: '\u2699' },
 ];
 

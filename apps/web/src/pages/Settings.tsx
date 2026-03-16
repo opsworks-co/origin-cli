@@ -10,6 +10,7 @@ import Reports from './Reports';
 import Trails from './Trails';
 import Compliance from './Compliance';
 import ModelComparison from './ModelComparison';
+import Leaderboard from './Leaderboard';
 
 interface ApiKey {
   id: string;
@@ -23,8 +24,8 @@ interface ApiKey {
   agentScopes: { agentId: string; agentName: string; agentSlug: string }[];
 }
 
-type SettingsTab = 'general' | 'agent-setup' | 'integrations' | 'budget' | 'team' | 'audit' | 'insights' | 'reports' | 'trails' | 'compliance' | 'models';
-const VALID_TABS: SettingsTab[] = ['general', 'agent-setup', 'integrations', 'budget', 'team', 'audit', 'insights', 'reports', 'trails', 'compliance', 'models'];
+type SettingsTab = 'general' | 'integrations' | 'budget' | 'team' | 'audit' | 'insights' | 'reports' | 'trails' | 'compliance' | 'models' | 'leaderboard';
+const VALID_TABS: SettingsTab[] = ['general', 'integrations', 'budget', 'team', 'audit', 'insights', 'reports', 'trails', 'compliance', 'models', 'leaderboard'];
 
 export default function Settings() {
   const { user } = useAuth();
@@ -102,6 +103,9 @@ export default function Settings() {
     appSlug?: string;
   } | null>(null);
   const [installingApp, setInstallingApp] = useState(false);
+  const [availableInstallations, setAvailableInstallations] = useState<
+    { installationId: string; account: string; accountType: string; avatarUrl: string | null }[]
+  >([]);
 
   // Org settings
   const [orgName, setOrgName] = useState('');
@@ -389,6 +393,27 @@ export default function Settings() {
     setInstallingApp(true);
     setIntegrationError(null);
     try {
+      // First, try to auto-detect existing installations
+      const detect = await api.detectGitHubApp();
+      if (detect.linked) {
+        // Already linked — refresh status
+        setIntegrationSuccess(`Connected to GitHub account "${detect.account || 'unknown'}"`);
+        const [status, intgs] = await Promise.all([
+          api.getGitHubAppStatus(),
+          api.getIntegrations(),
+        ]);
+        setGithubAppStatus(status);
+        setIntegrations(intgs || []);
+        setInstallingApp(false);
+        return;
+      }
+      if (detect.installations && detect.installations.length > 0) {
+        // Show picker so admin can choose which GitHub account to link
+        setAvailableInstallations(detect.installations);
+        setInstallingApp(false);
+        return;
+      }
+      // No existing installation found — redirect to GitHub to install
       const { installUrl } = await api.getGitHubAppInstallUrl();
       window.location.href = installUrl;
     } catch (err: any) {
@@ -539,16 +564,6 @@ export default function Settings() {
           General
         </button>
         <button
-          onClick={() => setActiveTab('agent-setup')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'agent-setup'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Agent Setup
-        </button>
-        <button
           onClick={() => setActiveTab('integrations')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'integrations'
@@ -640,6 +655,16 @@ export default function Settings() {
         >
           ⚡ Models
         </button>
+        <button
+          onClick={() => setActiveTab('leaderboard')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'leaderboard'
+              ? 'border-indigo-500 text-indigo-400'
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          Leaderboard
+        </button>
       </div>
 
       {activeTab === 'general' && (
@@ -683,47 +708,80 @@ export default function Settings() {
                         )}
                       </div>
                       <code className="text-xs text-indigo-400">{key.keyPrefix}...</code>
-                      <div className="flex flex-wrap gap-1.5 mt-0.5">
-                        {allAgents.map((a) => {
-                          const assigned = key.agentScopes?.some((s) => s.agentId === a.id);
-                          return (
-                            <label key={a.id} className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded cursor-pointer transition-colors ${assigned ? 'bg-indigo-900/40 text-indigo-300' : 'bg-gray-800 text-gray-600'}`}>
-                              <input
-                                type="checkbox"
-                                checked={assigned}
-                                onChange={async () => {
-                                  const currentIds = (key.agentScopes || []).map((s) => s.agentId);
-                                  const newIds = assigned
-                                    ? currentIds.filter((id) => id !== a.id)
-                                    : [...currentIds, a.id];
-                                  try {
-                                    await api.updateApiKey(key.id, { agentIds: newIds });
-                                    await fetchApiKeys();
-                                  } catch (err: any) {
-                                    setKeyError(err.message || 'Failed to update key');
-                                  }
-                                }}
-                                className="sr-only"
-                              />
-                              {a.name}
-                            </label>
-                          );
-                        })}
-                        {allAgents.length === 0 && (
-                          <span className="text-[10px] text-amber-500">No agents configured</span>
-                        )}
-                      </div>
-                      {key.repoScopes && key.repoScopes.length > 0 ? (
-                        <div className="flex flex-wrap gap-1 mt-0.5">
-                          {key.repoScopes.map((s: { repoId: string; repoName: string }) => (
-                            <span key={s.repoId} className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300">
-                              {s.repoName}
-                            </span>
-                          ))}
+                      <div className="mt-1.5 space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-gray-500 uppercase tracking-wider w-12">Agents</span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {allAgents.map((a) => {
+                              const assigned = key.agentScopes?.some((s) => s.agentId === a.id);
+                              return (
+                                <label key={a.id} className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded cursor-pointer transition-colors border ${assigned ? 'bg-indigo-900/40 text-indigo-300 border-indigo-700' : 'bg-gray-800/50 text-gray-600 border-gray-700 hover:border-gray-600'}`}>
+                                  <input
+                                    type="checkbox"
+                                    checked={assigned}
+                                    onChange={async () => {
+                                      const currentIds = (key.agentScopes || []).map((s) => s.agentId);
+                                      const newIds = assigned
+                                        ? currentIds.filter((id) => id !== a.id)
+                                        : [...currentIds, a.id];
+                                      try {
+                                        await api.updateApiKey(key.id, { agentIds: newIds });
+                                        await fetchApiKeys();
+                                      } catch (err: any) {
+                                        setKeyError(err.message || 'Failed to update key');
+                                      }
+                                    }}
+                                    className="sr-only"
+                                  />
+                                  {assigned ? '✓ ' : ''}{a.name}
+                                </label>
+                              );
+                            })}
+                            {allAgents.length === 0 && (
+                              <span className="text-[10px] text-gray-600 italic">No agents configured</span>
+                            )}
+                            {allAgents.length > 0 && !key.agentScopes?.length && (
+                              <span className="text-[10px] text-red-400">No access</span>
+                            )}
+                          </div>
                         </div>
-                      ) : (
-                        <span className="text-[10px] text-gray-600 mt-0.5">All repos</span>
-                      )}
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-gray-500 uppercase tracking-wider w-12">Repos</span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {allRepos.map((r) => {
+                              const assigned = key.repoScopes?.some((s) => s.repoId === r.id);
+                              return (
+                                <label key={r.id} className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded cursor-pointer transition-colors border ${assigned ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700' : 'bg-gray-800/50 text-gray-600 border-gray-700 hover:border-gray-600'}`}>
+                                  <input
+                                    type="checkbox"
+                                    checked={assigned}
+                                    onChange={async () => {
+                                      const currentIds = (key.repoScopes || []).map((s) => s.repoId);
+                                      const newIds = assigned
+                                        ? currentIds.filter((id) => id !== r.id)
+                                        : [...currentIds, r.id];
+                                      try {
+                                        await api.updateApiKey(key.id, { repoIds: newIds });
+                                        await fetchApiKeys();
+                                      } catch (err: any) {
+                                        setKeyError(err.message || 'Failed to update key');
+                                      }
+                                    }}
+                                    className="sr-only"
+                                  />
+                                  {assigned ? '✓ ' : ''}{r.name}
+                                </label>
+                              );
+                            })}
+                            {allRepos.length === 0 && (
+                              <span className="text-[10px] text-gray-600 italic">No repos added</span>
+                            )}
+                            {allRepos.length > 0 && !key.repoScopes?.length && (
+                              <span className="text-[10px] text-red-400">No access</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
                     </div>
                     <div className="flex items-center gap-3">
                       {key.user ? (
@@ -1162,14 +1220,71 @@ export default function Settings() {
                       }
 
                       return (
-                        <button
-                          type="button"
-                          onClick={handleInstallGitHubApp}
-                          disabled={installingApp}
-                          className="btn-primary text-sm"
-                        >
-                          {installingApp ? 'Redirecting to GitHub...' : 'Install GitHub App'}
-                        </button>
+                        <div className="space-y-3">
+                          {availableInstallations.length > 0 ? (
+                            <>
+                              <p className="text-sm text-gray-400">Select a GitHub account to connect:</p>
+                              <div className="space-y-2">
+                                {availableInstallations.map((inst) => (
+                                  <button
+                                    key={inst.installationId}
+                                    type="button"
+                                    onClick={async () => {
+                                      setInstallingApp(true);
+                                      try {
+                                        const result = await api.detectGitHubApp(inst.installationId);
+                                        if (result.linked) {
+                                          setIntegrationSuccess(`Connected to GitHub account "${result.account || inst.account}"`);
+                                          const [status, intgs] = await Promise.all([
+                                            api.getGitHubAppStatus(),
+                                            api.getIntegrations(),
+                                          ]);
+                                          setGithubAppStatus(status);
+                                          setIntegrations(intgs || []);
+                                          setAvailableInstallations([]);
+                                        }
+                                      } catch (err: any) {
+                                        setIntegrationError(err.message);
+                                      } finally {
+                                        setInstallingApp(false);
+                                      }
+                                    }}
+                                    disabled={installingApp}
+                                    className="flex items-center gap-3 w-full p-3 rounded-lg border border-gray-700 hover:border-indigo-500/50 hover:bg-gray-800/50 transition-all text-left"
+                                  >
+                                    {inst.avatarUrl && (
+                                      <img src={inst.avatarUrl} alt="" className="w-8 h-8 rounded-full" />
+                                    )}
+                                    <div>
+                                      <span className="text-sm font-medium text-gray-200">{inst.account}</span>
+                                      <span className="text-xs text-gray-500 ml-2">{inst.accountType}</span>
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  setAvailableInstallations([]);
+                                  const { installUrl } = await api.getGitHubAppInstallUrl();
+                                  window.location.href = installUrl;
+                                }}
+                                className="text-sm text-indigo-400 hover:text-indigo-300"
+                              >
+                                + Install on a different GitHub account
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={handleInstallGitHubApp}
+                              disabled={installingApp}
+                              className="btn-primary text-sm"
+                            >
+                              {installingApp ? 'Checking...' : 'Install GitHub App'}
+                            </button>
+                          )}
+                        </div>
                       );
                     })()}
                   </div>
@@ -1748,163 +1863,8 @@ export default function Settings() {
         </>
       )}
 
-      {activeTab === 'agent-setup' && (
-        <>
-          {/* Agent Setup Instructions */}
-          <section className="card space-y-6">
-            <div>
-              <h2 className="text-lg font-semibold">Agent Setup Guide</h2>
-              <p className="text-sm text-gray-500 mt-0.5">
-                Connect your AI coding agents to Origin in a few steps
-              </p>
-            </div>
+      {/* Agent Setup tab removed — content moved to Docs */}
 
-            {/* Step 1 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <span className="flex-shrink-0 w-7 h-7 rounded-full bg-indigo-600 text-white text-sm font-bold flex items-center justify-center">
-                  1
-                </span>
-                <h3 className="font-medium text-gray-200">Install the CLI</h3>
-              </div>
-              <div className="ml-10">
-                <p className="text-sm text-gray-400 mb-2">
-                  Install the Origin CLI globally via npm.
-                </p>
-                <pre className="bg-gray-800 rounded-lg px-4 py-3 text-sm font-mono text-gray-200 overflow-x-auto">
-npm install -g @origin/cli</pre>
-              </div>
-            </div>
-
-            {/* Step 2 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <span className="flex-shrink-0 w-7 h-7 rounded-full bg-indigo-600 text-white text-sm font-bold flex items-center justify-center">
-                  2
-                </span>
-                <h3 className="font-medium text-gray-200">Login to your account</h3>
-              </div>
-              <div className="ml-10">
-                <p className="text-sm text-gray-400 mb-2">
-                  Authenticate with your Origin account. This will open a browser window for login.
-                </p>
-                <pre className="bg-gray-800 rounded-lg px-4 py-3 text-sm font-mono text-gray-200 overflow-x-auto">
-origin login</pre>
-              </div>
-            </div>
-
-            {/* Step 3 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <span className="flex-shrink-0 w-7 h-7 rounded-full bg-indigo-600 text-white text-sm font-bold flex items-center justify-center">
-                  3
-                </span>
-                <h3 className="font-medium text-gray-200">Initialize your machine</h3>
-              </div>
-              <div className="ml-10">
-                <p className="text-sm text-gray-400 mb-2">
-                  Register this machine, auto-detect AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, etc.),
-                  and install global hooks. Tools are re-detected on every session start.
-                </p>
-                <pre className="bg-gray-800 rounded-lg px-4 py-3 text-sm font-mono text-gray-200 overflow-x-auto">
-origin init</pre>
-              </div>
-            </div>
-
-            {/* Step 4 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <span className="flex-shrink-0 w-7 h-7 rounded-full bg-indigo-600 text-white text-sm font-bold flex items-center justify-center">
-                  4
-                </span>
-                <h3 className="font-medium text-gray-200">Add MCP server configuration</h3>
-              </div>
-              <div className="ml-10">
-                <p className="text-sm text-gray-400 mb-3">
-                  Add Origin as an MCP server in your AI coding tool. Choose your tool below:
-                </p>
-
-                <div className="space-y-4">
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
-                      Claude Code &mdash; <code className="text-gray-400">~/.claude/claude_desktop_config.json</code>
-                    </p>
-                    <pre className="bg-gray-800 rounded-lg px-4 py-3 text-sm font-mono text-gray-200 overflow-x-auto">
-{`{
-  "mcpServers": {
-    "origin": {
-      "command": "origin",
-      "args": ["mcp", "serve"],
-      "env": {
-        "ORIGIN_API_URL": "${window.location.origin}"
-      }
-    }
-  }
-}`}</pre>
-                  </div>
-
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
-                      Cursor &mdash; <code className="text-gray-400">.cursor/mcp.json</code>
-                    </p>
-                    <pre className="bg-gray-800 rounded-lg px-4 py-3 text-sm font-mono text-gray-200 overflow-x-auto">
-{`{
-  "mcpServers": {
-    "origin": {
-      "command": "origin",
-      "args": ["mcp", "serve"],
-      "env": {
-        "ORIGIN_API_URL": "${window.location.origin}"
-      }
-    }
-  }
-}`}</pre>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Step 5 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-3">
-                <span className="flex-shrink-0 w-7 h-7 rounded-full bg-indigo-600 text-white text-sm font-bold flex items-center justify-center">
-                  5
-                </span>
-                <h3 className="font-medium text-gray-200">Start coding</h3>
-              </div>
-              <div className="ml-10">
-                <p className="text-sm text-gray-400">
-                  That&apos;s it! Your agent sessions will now be tracked, governed by your policies,
-                  and visible on the Origin dashboard. Every commit made by an AI agent will be
-                  logged with full context including model, tokens, cost, and files changed.
-                </p>
-              </div>
-            </div>
-          </section>
-
-          {/* Quick Reference */}
-          <section className="card space-y-4">
-            <div>
-              <h2 className="text-lg font-semibold">Quick Reference</h2>
-              <p className="text-sm text-gray-500 mt-0.5">Common CLI commands</p>
-            </div>
-            <div className="space-y-2">
-              {[
-                { cmd: 'origin status', desc: 'Check connection status and machine info' },
-                { cmd: 'origin sessions', desc: 'List recent agent sessions' },
-                { cmd: 'origin policies', desc: 'View active governance policies' },
-                { cmd: 'origin mcp serve', desc: 'Start the MCP server manually' },
-              ].map(({ cmd, desc }) => (
-                <div key={cmd} className="flex items-start gap-3 bg-gray-800/50 rounded-lg px-4 py-3">
-                  <code className="text-sm text-indigo-400 font-mono whitespace-nowrap">{cmd}</code>
-                  <span className="text-sm text-gray-500">&mdash;</span>
-                  <span className="text-sm text-gray-400">{desc}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-        </>
-      )}
 
       {activeTab === 'team' && <Team />}
       {activeTab === 'audit' && <AuditLog />}
@@ -1913,6 +1873,7 @@ origin init</pre>
       {activeTab === 'trails' && <Trails />}
       {activeTab === 'compliance' && <Compliance />}
       {activeTab === 'models' && <ModelComparison />}
+      {activeTab === 'leaderboard' && <Leaderboard />}
     </div>
   );
 }

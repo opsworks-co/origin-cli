@@ -1,7 +1,9 @@
 import chalk from 'chalk';
+import { requirePlatform } from '../config.js';
 import { api } from '../api.js';
 
 export async function auditCommand(opts: { action?: string; limit?: string }) {
+  if (!requirePlatform('audit')) return;
   try {
     const params: Record<string, string> = {};
     if (opts.action) params.action = opts.action;

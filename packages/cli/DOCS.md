@@ -67,7 +67,7 @@ Authenticate with your Origin server.
 ```bash
 origin login
 # Prompts for:
-#   API URL (default: https://origin-platform.fly.dev)
+#   API URL (default: https://getorigin.io)
 #   API Key (from your Origin dashboard)
 ```
 
@@ -490,7 +490,7 @@ origin config set telemetry true
 
 | Key | Values | Default | Description |
 |-----|--------|---------|-------------|
-| `apiUrl` | URL | `https://origin-platform.fly.dev` | Origin API URL |
+| `apiUrl` | URL | `https://getorigin.io` | Origin API URL |
 | `apiKey` | string | — | API key (use `origin login`) |
 | `commitLinking` | `always` \| `prompt` \| `never` | `always` | Add Origin-Session trailers to commits |
 | `pushStrategy` | `auto` \| `prompt` \| `false` | `auto` | When to push origin-sessions branch |
@@ -826,7 +826,7 @@ Each AI-assisted commit gets a note under `refs/notes/origin`:
   "durationMs": 120000,
   "linesAdded": 89,
   "linesRemoved": 12,
-  "originUrl": "https://origin-platform.fly.dev/sessions/abc-123"
+  "originUrl": "https://getorigin.io/sessions/abc-123"
 }
 ```
 

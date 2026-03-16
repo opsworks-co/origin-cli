@@ -1,6 +1,6 @@
 # API Reference
 
-Base URL: `http://localhost:4002/api` (local) or `https://origin-platform.fly.dev/api` (production)
+Base URL: `http://localhost:4002/api` (local) or `https://getorigin.io/api` (production)
 
 All endpoints except auth require a `Authorization: Bearer TOKEN` header.
 MCP endpoints use `x-api-key: YOUR_API_KEY` header instead.

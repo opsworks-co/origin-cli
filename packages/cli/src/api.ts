@@ -32,7 +32,16 @@ export const api = {
   getMe: () => request('/api/auth/me'),
 
   // Session lifecycle (MCP API — used by hooks)
-  startSession: (data: any) =>
+  startSession: (data: {
+    machineId: string;
+    prompt: string;
+    model: string;
+    repoPath: string;
+    repoUrl?: string;
+    agentSlug?: string;
+    branch?: string;
+    hostname?: string;
+  }) =>
     request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) }),
   updateSession: (id: string, data: any) =>
     request(`/api/mcp/session/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -40,6 +49,8 @@ export const api = {
     request(`/api/mcp/session/${id}/resume`, { method: 'POST' }),
   endSession: (data: any) =>
     request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(data) }),
+  pingSession: (id: string) =>
+    request(`/api/mcp/session/${id}/ping`, { method: 'POST' }),
 
   // Sessions (web API)
   getSessions: (params?: Record<string, string>) => {

@@ -4,7 +4,6 @@ import ChatWidget from '../components/ChatWidget';
 type Section =
   | 'overview'
   | 'workflow'
-  | 'quickstart'
   | 'integrations'
   | 'session-tracking'
   | 'repos'
@@ -38,7 +37,6 @@ type Section =
 const SECTIONS: { key: Section; label: string; group?: string }[] = [
   { key: 'overview', label: 'Overview', group: 'Getting Started' },
   { key: 'workflow', label: 'How It Works' },
-  { key: 'quickstart', label: 'Quick Start' },
   { key: 'session-tracking', label: 'Session Tracking', group: 'Setup Guides' },
   { key: 'integrations', label: 'GitHub Integration' },
   { key: 'repos', label: 'Repositories' },
@@ -233,15 +231,6 @@ export default function Docs() {
               </Li>
             </ul>
 
-            <H2>Architecture</H2>
-            <P>Origin is a monorepo with four packages:</P>
-            <ul className="space-y-2 mb-4">
-              <Li><code className="text-indigo-400">apps/api</code> &mdash; Express + Prisma backend (REST API, SQLite)</Li>
-              <Li><code className="text-indigo-400">apps/web</code> &mdash; React + Vite + Tailwind dashboard</Li>
-              <Li><code className="text-indigo-400">packages/cli</code> &mdash; Command-line tool for developers</Li>
-              <Li><code className="text-indigo-400">packages/mcp-server</code> &mdash; MCP server for real-time policy enforcement in Claude Code / Cursor</Li>
-            </ul>
-
             <H2>Recommended Setup Order</H2>
             <P>Follow this order for the smoothest onboarding experience:</P>
             <div className="space-y-1 mb-4">
@@ -282,7 +271,7 @@ export default function Docs() {
             </ul>
 
             <H2>2. Developer installs CLI (one-time per machine)</H2>
-            <CodeBlock title="Terminal">{`npm i -g @origin/cli
+            <CodeBlock title="Terminal">{`npm i -g ${window.location.origin}/cli/origin-cli-latest.tgz
 origin login         # authenticate with your Origin server
 origin init          # registers machine, detects tools, installs global hooks`}</CodeBlock>
             <P>
@@ -354,91 +343,6 @@ origin init          # registers machine, detects tools, installs global hooks`}
           </div>
         )}
 
-        {/* ─── QUICK START ─────────────────────────────────────── */}
-        {active === 'quickstart' && (
-          <div>
-            <h1 className="text-2xl font-bold mb-2">Quick Start</h1>
-            <P>Get Origin running locally in under 5 minutes.</P>
-
-            <H3>Prerequisites</H3>
-            <ul className="space-y-2 mb-4">
-              <Li>Node.js 18+</Li>
-              <Li>pnpm 8+</Li>
-              <Li>Git</Li>
-            </ul>
-
-            <H3>1. Clone and install</H3>
-            <CodeBlock>{`git clone https://github.com/dolobanko/origin-v2.git
-cd origin-v2
-pnpm install`}</CodeBlock>
-
-            <H3>2. Set up the database</H3>
-            <CodeBlock>{`cd apps/api
-cp .env.example .env
-npx prisma db push
-npx tsx prisma/seed.ts`}</CodeBlock>
-            <P>
-              This creates an SQLite database with demo data including a sample organization,
-              users, repositories, sessions, and policies.
-            </P>
-
-            <H3>3. Start the dev servers</H3>
-            <CodeBlock>{`# Terminal 1 — API server (port 4002)
-cd apps/api && npm run dev
-
-# Terminal 2 — Web dashboard (port 5176)
-cd apps/web && npm run dev`}</CodeBlock>
-
-            <H3>4. Sign in</H3>
-            <P>
-              Open <code className="text-indigo-400">http://localhost:5176</code> and sign in
-              with the demo credentials:
-            </P>
-            <CodeBlock>{`Email:    artem@origin.dev
-Password: password123`}</CodeBlock>
-            <P>Other demo users:</P>
-            <CodeBlock>{`sarah@origin.dev   (ADMIN)
-marcus@origin.dev  (MEMBER)
-elena@origin.dev   (MEMBER)
-david@origin.dev   (VIEWER)
-All passwords: password123`}</CodeBlock>
-
-            <H3>5. Connect GitHub (Recommended)</H3>
-            <P>
-              Go to <strong className="text-gray-200">Settings &rarr; Integrations</strong> and add a GitHub
-              Personal Access Token. Then go to <strong className="text-gray-200">Repositories &rarr; Import from GitHub</strong> to
-              auto-import repos with webhooks. See the <strong className="text-gray-200">GitHub Integration</strong> guide for full details.
-            </P>
-
-            <H3>6. Enable Session Tracking (Recommended)</H3>
-            <P>
-              To capture AI coding sessions (prompts, transcripts, diffs, cost), install the Origin CLI and
-              enable hooks for your AI agent:
-            </P>
-            <CodeBlock>{`npm i -g @origin/cli
-origin login
-origin init          # detects tools, registers machine, installs global hooks`}</CodeBlock>
-            <P>
-              That&apos;s it. <code className="text-indigo-400">origin init</code> automatically detects installed AI tools,
-              registers your machine, and installs global hooks for all repos. Tools are re-detected on every session start.
-              See the <strong className="text-gray-200">Session Tracking</strong> guide for details.
-            </P>
-
-            <H3>Production Deployment</H3>
-            <P>
-              Origin ships with a Dockerfile and Fly.io configuration. To deploy:
-            </P>
-            <CodeBlock>{`# Install flyctl and authenticate
-fly auth login
-
-# Deploy (first time: fly launch)
-fly deploy`}</CodeBlock>
-            <P>
-              The deployment runs <code className="text-indigo-400">prisma db push</code> automatically
-              before starting the server. SQLite data is persisted on a Fly volume at <code className="text-indigo-400">/data</code>.
-            </P>
-          </div>
-        )}
 
         {/* ─── SESSION TRACKING ────────────────────────────────── */}
         {active === 'session-tracking' && (
@@ -459,7 +363,7 @@ fly deploy`}</CodeBlock>
             <H2>Prerequisites</H2>
             <P>Before session tracking works, make sure you have:</P>
             <ul className="space-y-1 ml-4 mb-4">
-              <Li>Installed the Origin CLI: <code className="text-indigo-400">npm i -g @origin/cli</code></Li>
+              <Li>Installed the Origin CLI (see CLI Reference for install command)</Li>
               <Li>Logged in: <code className="text-indigo-400">origin login</code></Li>
               <Li>Initialized: <code className="text-indigo-400">origin init</code> (registers machine, detects tools, installs global hooks)</Li>
             </ul>
@@ -497,6 +401,8 @@ origin enable --agent gemini`}</CodeBlock>
             <ul className="space-y-1 ml-4 mb-3">
               <Li><code className="text-indigo-400">SessionStart</code> — session created in Origin, tracking begins</Li>
               <Li><code className="text-indigo-400">UserPromptSubmit</code> — captures the actual user prompt</Li>
+              <Li><code className="text-indigo-400">PreToolUse</code> — enforces FILE_RESTRICTION policies, blocks restricted file access in real-time</Li>
+              <Li><code className="text-indigo-400">PostToolUse</code> — tracks branch changes mid-session</Li>
               <Li><code className="text-indigo-400">Stop</code> — parses transcript, extracts files &amp; tokens, sends incremental update</Li>
               <Li><code className="text-indigo-400">SessionEnd</code> — finalizes session with duration, cost estimate, and full transcript</Li>
             </ul>
@@ -504,6 +410,12 @@ origin enable --agent gemini`}</CodeBlock>
   "hooks": {
     "SessionStart": [
       { "hooks": [{ "type": "command", "command": "origin hooks claude-code session-start" }] }
+    ],
+    "PreToolUse": [
+      { "hooks": [{ "type": "command", "command": "origin hooks claude-code pre-tool-use" }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "origin hooks claude-code post-tool-use" }] }
     ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "origin hooks claude-code stop" }] }
@@ -896,18 +808,6 @@ origin stats`}</CodeBlock>
               When you delete an imported repo from Origin, the webhook is also removed from GitHub automatically.
             </Callout>
 
-            <H2>Adding a Repository Manually</H2>
-            <P>Click &ldquo;Add Repository&rdquo; and fill in:</P>
-            <ul className="space-y-2 mb-4">
-              <Li><strong className="text-gray-200">Name</strong> &mdash; A display name for the repo</Li>
-              <Li><strong className="text-gray-200">Path</strong> &mdash; Local filesystem path (e.g. <code className="text-indigo-400">/home/user/my-project</code>) or GitHub URL (e.g. <code className="text-indigo-400">github.com/org/repo</code>)</Li>
-              <Li><strong className="text-gray-200">Provider</strong> &mdash; &ldquo;Local&rdquo; for filesystem repos, &ldquo;GitHub&rdquo; for remote</Li>
-            </ul>
-            <P>
-              Manual repos require you to set up webhooks separately if you want push/PR event tracking.
-              See the <strong className="text-gray-200">Webhooks</strong> section for details.
-            </P>
-
             <H2>Syncing</H2>
             <P>
               Click &ldquo;Sync Now&rdquo; on any repo to scan for new commits. Origin looks for
@@ -1064,8 +964,9 @@ Description: Codeium's AI IDE agent`}</CodeBlock>
             <H2>How Enforcement Works</H2>
             <P>Policies are enforced at multiple points:</P>
             <ul className="space-y-2 mb-4">
-              <Li><strong className="text-gray-200">Session start (server)</strong> &mdash; MODEL_ALLOWLIST policies are checked. If the model is not allowed and action is &ldquo;block&rdquo;, the session is rejected with HTTP 403.</Li>
-              <Li><strong className="text-gray-200">During session (MCP client)</strong> &mdash; FILE_RESTRICTION policies are checked when the agent calls <code className="text-indigo-400">check_file_access</code>. Blocked files return <code className="text-indigo-400">allowed: false</code>.</Li>
+              <Li><strong className="text-gray-200">Session start (server)</strong> &mdash; MODEL_ALLOWLIST policies are checked. If the model is not allowed and action is &ldquo;block&rdquo;, the session is rejected with HTTP 403. Active enforcement rules are sent to the CLI for client-side enforcement.</Li>
+              <Li><strong className="text-gray-200">During session (CLI hooks)</strong> &mdash; FILE_RESTRICTION policies are enforced in real-time via the <code className="text-indigo-400">pre-tool-use</code> hook. When an agent tries to read, edit, or execute a command involving a restricted file, the CLI blocks the tool call before it executes. This works with all supported agents (Claude Code, Gemini CLI, Cursor).</Li>
+              <Li><strong className="text-gray-200">During session (MCP server)</strong> &mdash; FILE_RESTRICTION policies are also checked when the agent calls <code className="text-indigo-400">check_file_access</code> via the MCP server.</Li>
               <Li><strong className="text-gray-200">Session end (server)</strong> &mdash; REQUIRE_REVIEW, COST_LIMIT, and FILE_RESTRICTION policies are evaluated against the session&apos;s final data. Violations auto-flag the session for review and notify admins.</Li>
             </ul>
 
@@ -1245,8 +1146,15 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               <p>Pass the key via the <code className="text-indigo-400">X-API-Key</code> header in API requests, or configure it in the CLI / MCP server.</p>
             </Step>
 
+            <H3>API Key Scoping</H3>
+            <P>
+              Each API key can be scoped to specific <strong className="text-gray-200">agents</strong> and <strong className="text-gray-200">repositories</strong>.
+              This controls which agents the key can create sessions for and which repos it can access. Keys without any agent
+              assignments cannot start sessions. Assign agents and repos when creating or editing an API key.
+            </P>
+
             <Callout type="warning">
-              API keys provide full access to your org&apos;s data. Treat them like passwords. Rotate keys regularly and delete unused ones.
+              API keys authenticate CLI and MCP connections. Treat them like passwords. Rotate keys regularly and delete unused ones.
             </Callout>
 
             <H2>Integrations</H2>
@@ -1261,12 +1169,6 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               <Li><strong className="text-gray-200">Post session summary comments</strong> &mdash; Adds a detailed AI governance report as a PR comment</Li>
               <Li><strong className="text-gray-200">Update checks on review</strong> &mdash; Auto-refreshes PR status when sessions are reviewed in Origin</Li>
             </ul>
-
-            <H2>Agent Setup Tab</H2>
-            <P>
-              The Agent Setup tab provides copy-paste configuration for integrating Origin with AI tools.
-              It shows the MCP server config for Claude Code and Cursor, plus CLI installation commands.
-            </P>
 
             <H2>Organization Info</H2>
             <P>
@@ -1752,7 +1654,7 @@ git fetch origin refs/notes/origin:refs/notes/origin
   "linesAdded": 156,
   "linesRemoved": 23,
   "filesChanged": ["src/auth.ts", "src/middleware.ts", "src/routes/login.ts"],
-  "originUrl": "https://origin-platform.fly.dev/sessions/ea74b665..."
+  "originUrl": "https://getorigin.io/sessions/ea74b665..."
 }`}</CodeBlock>
 
             <Callout type="tip">
@@ -2594,7 +2496,7 @@ GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
             </P>
 
             <H3>Installation</H3>
-            <CodeBlock>{`npm install -g @origin/cli`}</CodeBlock>
+            <CodeBlock>{`npm i -g ${window.location.origin}/cli/origin-cli-latest.tgz`}</CodeBlock>
 
             <H3>Commands</H3>
 
@@ -2734,12 +2636,12 @@ origin audit --limit 50`}</CodeBlock>
 
             <Callout type="info">
               Replace the URL with your Origin instance address. For local development, use <code className="text-indigo-400">http://localhost:4002</code>.
-              For production, use your Fly.io URL (e.g. <code className="text-indigo-400">https://origin-platform.fly.dev</code>).
+              For production, use your Fly.io URL (e.g. <code className="text-indigo-400">https://getorigin.io</code>).
             </Callout>
 
             <H3>Prerequisites</H3>
             <ul className="space-y-2 mb-4">
-              <Li>Origin CLI installed globally (<code className="text-indigo-400">npm install -g @origin/cli</code>)</Li>
+              <Li>Origin CLI installed globally (<code className="text-indigo-400">npm i -g ${window.location.origin}/cli/origin-cli-latest.tgz</code>)</Li>
               <Li>Authenticated via <code className="text-indigo-400">origin login</code></Li>
               <Li>Machine registered via <code className="text-indigo-400">origin init</code></Li>
             </ul>

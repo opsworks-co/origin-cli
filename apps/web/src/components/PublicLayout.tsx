@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 const NAV_LINKS = [
   { to: '/', label: 'Home' },
   { to: '/docs', label: 'Docs' },
+  { to: '/cli', label: 'CLI' },
   { to: '/pricing', label: 'Pricing' },
 ];
 
@@ -75,6 +76,7 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
             </div>
             <div className="flex items-center gap-6 text-xs text-gray-600">
               <Link to="/docs" className="hover:text-gray-400 transition-colors">Documentation</Link>
+              <Link to="/cli" className="hover:text-gray-400 transition-colors">CLI</Link>
               <Link to="/pricing" className="hover:text-gray-400 transition-colors">Pricing</Link>
               <span>AI Agent Governance Platform</span>
               <span>&copy; {new Date().getFullYear()} Origin</span>

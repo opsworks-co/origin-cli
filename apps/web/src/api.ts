@@ -242,6 +242,12 @@ export interface SessionReview {
   id: string;
   status: string;
   note: string | null;
+  score: number | null;
+  riskLevel: string | null;
+  concerns: string[];
+  suggestions: string[];
+  categories: { security: number; scope: number; quality: number; cost: number } | null;
+  isAutoReview: boolean;
   reviewerName: string | null;
   createdAt: string;
 }
@@ -280,6 +286,10 @@ export function reviewSession(id: string, status: string, note?: string) {
     method: 'POST',
     body: JSON.stringify({ status, note }),
   });
+}
+
+export function triggerAIReview(id: string) {
+  return request<any>(`/api/sessions/${id}/ai-review`, { method: 'POST' });
 }
 
 export function getSessionDiff(id: string) {
@@ -589,6 +599,10 @@ export function getMachines() {
   return request<Machine[]>('/api/machines');
 }
 
+export function deleteMachine(id: string) {
+  return request<{ success: boolean }>(`/api/machines/${id}`, { method: 'DELETE' });
+}
+
 export interface MachineDetail extends Machine {
   policyRules: Array<PolicyRule & {
     policy: { id: string; name: string; type: string; active: boolean };
@@ -813,6 +827,24 @@ export function getGitHubAppStatus() {
     installationId?: string;
     appSlug?: string;
   }>('/api/github-app/status');
+}
+
+export function detectGitHubApp(installationId?: string) {
+  return request<{
+    linked: boolean;
+    installationId?: string;
+    account?: string;
+    message?: string;
+    installations?: Array<{
+      installationId: string;
+      account: string;
+      accountType: string;
+      avatarUrl: string | null;
+    }>;
+  }>('/api/github-app/detect', {
+    method: 'POST',
+    body: JSON.stringify(installationId ? { installationId } : {}),
+  });
 }
 
 export function testGitHubApp() {

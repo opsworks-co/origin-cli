@@ -266,22 +266,18 @@ export default function Repos() {
             {repos.length} {repos.length === 1 ? 'repo' : 'repos'} &middot; {totalCommits} commits &middot; {totalSessions} sessions
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {hasGitHub && (
-            <button
-              onClick={showImport ? () => setShowImport(false) : handleDiscover}
-              className="btn-secondary text-sm"
-            >
-              {showImport ? 'Close' : 'Import from GitHub'}
-            </button>
-          )}
-          <button
-            onClick={() => { setShowForm(!showForm); setShowImport(false); }}
-            className="btn-primary text-sm"
-          >
-            {showForm ? 'Cancel' : 'Add Repository'}
-          </button>
-        </div>
+        {repos.length > 0 && (
+          <div className="flex items-center gap-2">
+            {hasGitHub && (
+              <button
+                onClick={showImport ? () => setShowImport(false) : handleDiscover}
+                className="btn-primary text-sm"
+              >
+                {showImport ? 'Close' : 'Import from GitHub'}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {error && (
@@ -444,15 +440,59 @@ export default function Repos() {
       )}
 
       {/* Repos List */}
-      {repos.length === 0 && !showImport ? (
-        <div className="card text-center py-16 text-gray-500">
-          <div className="text-4xl mb-3">{'\u{1F4E6}'}</div>
-          <p className="text-lg mb-1">No repositories connected</p>
-          <p className="text-sm">
-            {hasGitHub
-              ? 'Click "Import from GitHub" to get started, or add a repository manually.'
-              : 'Connect your first repository to start tracking AI coding sessions.'}
-          </p>
+      {repos.length === 0 && !showImport && !showForm ? (
+        <div className="card py-14 space-y-8">
+          <div className="text-center">
+            <div className="text-4xl mb-3">{'\u{1F4E6}'}</div>
+            <p className="text-lg font-medium text-gray-200 mb-1">No repositories yet</p>
+            <p className="text-sm text-gray-500">
+              Agents can only run sessions in registered repositories.
+            </p>
+          </div>
+
+          <div className="grid sm:grid-cols-2 gap-4 max-w-2xl mx-auto">
+            {/* GitHub import option */}
+            <button
+              onClick={() => {
+                if (hasGitHub) {
+                  handleDiscover();
+                } else {
+                  navigate('/settings?tab=integrations');
+                }
+              }}
+              className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-indigo-500/50 hover:bg-gray-800/50 transition-all group text-left"
+            >
+              <svg className="w-8 h-8 text-gray-400 group-hover:text-white transition-colors" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+              </svg>
+              <div className="text-center">
+                <p className="font-medium text-gray-200 group-hover:text-white transition-colors">
+                  {hasGitHub ? 'Import from GitHub' : 'Connect GitHub'}
+                </p>
+                <p className="text-xs text-gray-500 mt-1">
+                  {hasGitHub
+                    ? 'Select repos from your GitHub org, including private ones'
+                    : 'Connect your GitHub account to import repos automatically'}
+                </p>
+              </div>
+            </button>
+
+            {/* Manual add option */}
+            <button
+              onClick={() => { setShowForm(true); setShowImport(false); }}
+              className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-indigo-500/50 hover:bg-gray-800/50 transition-all group text-left"
+            >
+              <svg className="w-8 h-8 text-gray-400 group-hover:text-white transition-colors" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              <div className="text-center">
+                <p className="font-medium text-gray-200 group-hover:text-white transition-colors">Add Manually</p>
+                <p className="text-xs text-gray-500 mt-1">
+                  Enter a repository path or GitHub URL directly
+                </p>
+              </div>
+            </button>
+          </div>
         </div>
       ) : (
         <div className="space-y-4">

@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
 import { execSync } from 'child_process';
-import { loadConfig, saveRepoConfig } from '../config.js';
+import { loadConfig, saveRepoConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 
@@ -459,8 +459,10 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
     console.log(chalk.gray('    • Turn end — files, tokens, tool calls'));
   }
 
-  // Install git hooks (only for per-repo mode, not global)
-  if (!isGlobal) {
+  // Install git hooks
+  if (isGlobal) {
+    installGlobalGitHooks();
+  } else {
     installGitPostCommitHook(basePath);
     installGitPrePushHook(basePath);
   }
@@ -487,19 +489,119 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
 
   console.log(chalk.bold('\n📋 Next steps:\n'));
   const firstAgent = AGENTS[agentsToEnable[0]];
+  const connected = isConnectedMode();
   if (isGlobal) {
     console.log(chalk.white('  1. Open any repo and start coding with ') + chalk.cyan(firstAgent.command));
     console.log(chalk.white('  2. Sessions are captured automatically for ALL repos'));
     console.log(chalk.white('  3. View sessions: ') + chalk.cyan('origin sessions'));
-    console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
+    if (connected && config?.apiUrl) {
+      console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
+    }
   } else {
     console.log(chalk.white('  1. Start coding: ') + chalk.cyan(firstAgent.command));
     console.log(chalk.white('  2. Work normally — Origin captures everything automatically'));
     console.log(chalk.white('  3. View sessions: ') + chalk.cyan('origin sessions'));
-    console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
+    if (connected && config?.apiUrl) {
+      console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
+    }
   }
 
   console.log(chalk.green(`\n✓ Origin session tracking enabled${isGlobal ? ' globally' : ''}.\n`));
+}
+
+// ─── Global Git Hooks (core.hooksPath) ────────────────────────────────────
+
+function installGlobalGitHooks(): void {
+  const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
+
+  // Create global hooks directory
+  if (!fs.existsSync(globalHooksDir)) {
+    fs.mkdirSync(globalHooksDir, { recursive: true });
+  }
+
+  // Resolve full path to origin binary
+  let originBin = 'origin';
+  try {
+    originBin = execSync('which origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  } catch { /* fallback to bare name */ }
+
+  // Post-commit hook that also chains to local repo hooks
+  const postCommitPath = path.join(globalHooksDir, 'post-commit');
+  const postCommitContent = `#!/bin/sh
+# origin-global-post-commit
+# Installed by: origin enable --global
+
+# Ensure PATH includes common npm/node locations
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
+
+# Use full path to origin (resolve from common locations)
+ORIGIN_BIN=""
+if [ -x "${originBin}" ]; then
+  ORIGIN_BIN="${originBin}"
+elif command -v origin >/dev/null 2>&1; then
+  ORIGIN_BIN="origin"
+elif [ -x "/opt/homebrew/bin/origin" ]; then
+  ORIGIN_BIN="/opt/homebrew/bin/origin"
+elif [ -x "/usr/local/bin/origin" ]; then
+  ORIGIN_BIN="/usr/local/bin/origin"
+fi
+
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-post-commit &
+fi
+
+# Chain to local repo hooks if they exist
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-commit"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+`;
+  fs.writeFileSync(postCommitPath, postCommitContent);
+  fs.chmodSync(postCommitPath, '755');
+
+  // Pre-push hook that also chains to local repo hooks
+  const prePushPath = path.join(globalHooksDir, 'pre-push');
+  const prePushContent = `#!/bin/sh
+# origin-global-pre-push
+# Installed by: origin enable --global
+
+# Ensure PATH includes common npm/node locations
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
+
+# Use full path to origin
+ORIGIN_BIN=""
+if [ -x "${originBin}" ]; then
+  ORIGIN_BIN="${originBin}"
+elif command -v origin >/dev/null 2>&1; then
+  ORIGIN_BIN="origin"
+elif [ -x "/opt/homebrew/bin/origin" ]; then
+  ORIGIN_BIN="/opt/homebrew/bin/origin"
+elif [ -x "/usr/local/bin/origin" ]; then
+  ORIGIN_BIN="/usr/local/bin/origin"
+fi
+
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-pre-push
+fi
+
+# Chain to local repo hooks if they exist
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/pre-push"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+`;
+  fs.writeFileSync(prePushPath, prePushContent);
+  fs.chmodSync(prePushPath, '755');
+
+  // Set git config to use our global hooks directory
+  try {
+    execSync(`git config --global core.hooksPath ${globalHooksDir}`, { stdio: 'pipe' });
+    console.log(chalk.green('\n  ✓ Global git hooks installed'));
+    console.log(chalk.gray(`    Hooks directory: ${globalHooksDir}`));
+    console.log(chalk.gray('    Local repo hooks are chained automatically'));
+  } catch (err: any) {
+    console.log(chalk.yellow(`\n  ⚠ Could not set global git hooks: ${err.message}`));
+  }
 }
 
 // ─── Git Post-Commit Hook ─────────────────────────────────────────────────

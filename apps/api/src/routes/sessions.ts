@@ -13,6 +13,7 @@ import {
 } from '../services/github-integration.js';
 import { onSessionEvent, SessionEvent, emitSessionEvent } from '../services/session-events.js';
 import { callClaude } from './chat.js';
+import { runAIReview } from '../services/ai-review.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -56,6 +57,12 @@ function mapSession(s: any, pullRequests?: any[]) {
           id: s.review.id,
           status: s.review.status,
           note: s.review.note,
+          score: s.review.score ?? null,
+          riskLevel: s.review.riskLevel ?? null,
+          concerns: s.review.concerns ? JSON.parse(s.review.concerns) : [],
+          suggestions: s.review.suggestions ? JSON.parse(s.review.suggestions) : [],
+          categories: s.review.categories ? JSON.parse(s.review.categories) : null,
+          isAutoReview: s.review.isAutoReview ?? false,
           reviewerName: s.review.user?.name || null,
           createdAt: s.review.createdAt,
         }
@@ -508,7 +515,7 @@ router.post('/:id/review', async (req: AuthRequest, res: Response) => {
           });
 
           const parsed = parseRepoFullName(commit.repo.path);
-          const originBaseUrl = process.env.ORIGIN_WEB_URL || 'https://origin-platform.fly.dev';
+          const originBaseUrl = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
 
           for (const pr of linkedPRs) {
             let commitShas: string[];
@@ -576,6 +583,91 @@ router.post('/:id/review', async (req: AuthRequest, res: Response) => {
     res.json({ ...review, githubUpdated, prsUpdated });
   } catch (err) {
     console.error('Review session error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/ai-review — trigger AI review on an existing session
+router.post('/:id/ai-review', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+
+    const session = await prisma.codingSession.findFirst({
+      where: {
+        id,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+      include: {
+        commit: { include: { repo: true } },
+        agent: true,
+        sessionDiff: true,
+      },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Delete existing AI review if present (allow re-run)
+    const existing = await prisma.sessionReview.findUnique({
+      where: { sessionId: id },
+    });
+    if (existing?.isAutoReview) {
+      await prisma.sessionReview.delete({ where: { sessionId: id } });
+    }
+
+    let filesChanged: string[] = [];
+    try { filesChanged = JSON.parse(session.filesChanged); } catch {}
+
+    const result = await runAIReview({
+      sessionId: id,
+      orgId: req.user!.orgId,
+      model: session.model,
+      prompt: session.prompt || '',
+      filesChanged,
+      tokensUsed: session.tokensUsed,
+      toolCalls: session.toolCalls,
+      linesAdded: session.linesAdded,
+      linesRemoved: session.linesRemoved,
+      costUsd: session.costUsd,
+      durationMs: session.durationMs,
+      transcript: session.transcript || undefined,
+      diff: session.sessionDiff?.diff || undefined,
+    });
+
+    if (!result) {
+      return res.status(500).json({ error: 'AI review failed — check ANTHROPIC_API_KEY' });
+    }
+
+    // Fetch the updated review
+    const review = await prisma.sessionReview.findUnique({
+      where: { sessionId: id },
+      include: { user: true },
+    });
+
+    res.json({
+      score: result.score,
+      status: result.status,
+      riskLevel: result.riskLevel,
+      categories: result.categories,
+      concerns: result.concerns,
+      suggestions: result.suggestions,
+      review: review ? {
+        id: review.id,
+        status: review.status,
+        note: review.note,
+        score: review.score,
+        riskLevel: review.riskLevel,
+        concerns: review.concerns ? JSON.parse(review.concerns) : [],
+        suggestions: review.suggestions ? JSON.parse(review.suggestions) : [],
+        categories: review.categories ? JSON.parse(review.categories) : null,
+        isAutoReview: review.isAutoReview,
+        reviewerName: review.user?.name || null,
+        createdAt: review.createdAt,
+      } : null,
+    });
+  } catch (err) {
+    console.error('AI review trigger error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

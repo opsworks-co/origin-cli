@@ -4,12 +4,12 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile"
   [build.args]
-    VITE_API_URL = "https://origin-platform.fly.dev"
+    VITE_API_URL = "https://getorigin.io"
 
 [env]
   PORT = "8080"
   NODE_ENV = "production"
-  ORIGIN_WEB_URL = "https://origin-platform.fly.dev"
+  ORIGIN_WEB_URL = "https://getorigin.io"
   # JWT_SECRET must be set via `fly secrets set JWT_SECRET=<value>` — never commit secrets
 
 [http_service]

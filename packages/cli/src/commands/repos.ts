@@ -1,7 +1,9 @@
 import chalk from 'chalk';
+import { requirePlatform } from '../config.js';
 import { api } from '../api.js';
 
 export async function reposCommand() {
+  if (!requirePlatform('repos')) return;
   try {
     const repos = await api.getRepos() as any[];
 

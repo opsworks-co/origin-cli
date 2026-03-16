@@ -70,10 +70,9 @@ async function syncAllRepos() {
 
 // ─── Stale Session Cleanup ─────────────────────────────────────────────────
 
-// Auto-close sessions stuck in RUNNING for more than 8 hours.
-// This happens when SessionEnd hooks don't fire (e.g., context switch, Gemini, crashed agents).
-// Note: checks startedAt not last activity, so must be generous to avoid killing active sessions.
-const STALE_SESSION_MS = 8 * 60 * 60 * 1000; // 8 hours
+// Backup stale session cleanup. CLI pings every 30s — 5 min no update = dead.
+// Primary cleanup is in index.ts (2 min). This is a safety net.
+const STALE_SESSION_MS = 5 * 60 * 1000; // 5 min without any update
 
 async function closeStaleSession() {
   try {
@@ -82,7 +81,7 @@ async function closeStaleSession() {
     const staleSessions = await prisma.codingSession.findMany({
       where: {
         status: 'RUNNING',
-        startedAt: { lt: cutoff },
+        updatedAt: { lt: cutoff },
       },
       select: { id: true, startedAt: true },
     });

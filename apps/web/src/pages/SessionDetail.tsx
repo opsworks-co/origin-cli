@@ -37,6 +37,9 @@ export default function SessionDetail() {
   const [showAskPanel, setShowAskPanel] = useState(false);
   const [askContext, setAskContext] = useState<{ file?: string; lineNumber?: number; lineContent?: string; promptIndex?: number } | undefined>();
 
+  // AI Review
+  const [aiReviewLoading, setAiReviewLoading] = useState(false);
+
   // Delete
   const [deleting, setDeleting] = useState(false);
 
@@ -106,6 +109,23 @@ export default function SessionDetail() {
       setError(err.message);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleAIReview = async () => {
+    if (!id) return;
+    setAiReviewLoading(true);
+    try {
+      const result = await api.triggerAIReview(id);
+      if (result.review) {
+        setSession((prev) => prev ? { ...prev, review: result.review } : prev);
+        setReviewFeedback(`AI Review complete — Score: ${result.score}/100 (${result.riskLevel} risk)`);
+        setTimeout(() => setReviewFeedback(''), 8000);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setAiReviewLoading(false);
     }
   };
 
@@ -202,8 +222,100 @@ export default function SessionDetail() {
         </div>
       </div>
 
-      {/* ── Review Reason Banner (always visible for flagged/rejected) ── */}
-      {session.review && ['flagged', 'rejected'].includes(session.review.status?.toLowerCase()) && (
+      {/* ── AI Quality Score Card ── */}
+      {session.review?.score != null && (
+        <div className={`rounded-lg px-5 py-4 flex-shrink-0 border ${
+          session.review.score >= 80 ? 'bg-green-900/10 border-green-800/30' :
+          session.review.score >= 50 ? 'bg-amber-900/10 border-amber-800/30' :
+          'bg-red-900/10 border-red-800/30'
+        }`}>
+          <div className="flex items-start gap-5">
+            {/* Big score number */}
+            <div className="flex-shrink-0 text-center">
+              <div className={`text-4xl font-bold tabular-nums ${
+                session.review.score >= 80 ? 'text-green-400' :
+                session.review.score >= 50 ? 'text-amber-400' : 'text-red-400'
+              }`}>
+                {session.review.score}
+              </div>
+              <div className="text-[10px] text-gray-500 uppercase tracking-wider mt-0.5">
+                {session.review.isAutoReview ? 'AI Score' : 'Score'}
+              </div>
+            </div>
+
+            {/* Category breakdown bars */}
+            {session.review.categories && (
+              <div className="flex-1 grid grid-cols-2 gap-x-6 gap-y-2 min-w-0">
+                {(['security', 'scope', 'quality', 'cost'] as const).map((cat) => {
+                  const val = (session.review!.categories as any)?.[cat] ?? 0;
+                  return (
+                    <div key={cat}>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-xs text-gray-400 capitalize">{cat}</span>
+                        <span className={`text-xs font-medium tabular-nums ${
+                          val >= 80 ? 'text-green-400' : val >= 50 ? 'text-amber-400' : 'text-red-400'
+                        }`}>{val}</span>
+                      </div>
+                      <div className="w-full bg-gray-800 rounded-full h-1.5">
+                        <div className={`h-1.5 rounded-full transition-all ${
+                          val >= 80 ? 'bg-green-500/70' : val >= 50 ? 'bg-amber-500/70' : 'bg-red-500/70'
+                        }`} style={{ width: `${val}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Concerns & suggestions */}
+            <div className="flex-1 min-w-0 space-y-2">
+              {session.review.concerns && session.review.concerns.length > 0 && (
+                <div>
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Concerns</p>
+                  <ul className="space-y-0.5">
+                    {session.review.concerns.slice(0, 4).map((c: string, i: number) => (
+                      <li key={i} className="text-xs text-gray-300 flex items-start gap-1.5">
+                        <span className="text-amber-400 mt-0.5 flex-shrink-0">&#8226;</span>
+                        {c}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {session.review.suggestions && session.review.suggestions.length > 0 && (
+                <div>
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Suggestions</p>
+                  <ul className="space-y-0.5">
+                    {session.review.suggestions.slice(0, 3).map((s: string, i: number) => (
+                      <li key={i} className="text-xs text-gray-400 flex items-start gap-1.5">
+                        <span className="text-indigo-400 mt-0.5 flex-shrink-0">&#8250;</span>
+                        {s}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {session.review.riskLevel && (
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wider ${
+                    session.review.riskLevel === 'low' ? 'bg-green-500/20 text-green-400' :
+                    session.review.riskLevel === 'medium' ? 'bg-amber-500/20 text-amber-400' :
+                    session.review.riskLevel === 'high' ? 'bg-orange-500/20 text-orange-400' :
+                    'bg-red-500/20 text-red-400'
+                  }`}>{session.review.riskLevel} risk</span>
+                  <span className="text-[10px] text-gray-600">
+                    {session.review.isAutoReview ? 'AI review' : `by ${session.review.reviewerName ?? 'unknown'}`}
+                    {session.review.createdAt && ` \u00B7 ${new Date(session.review.createdAt).toLocaleString()}`}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Review Reason Banner (for flagged/rejected without score) ── */}
+      {session.review && session.review.score == null && ['flagged', 'rejected'].includes(session.review.status?.toLowerCase()) && (
         <div className={`rounded-lg px-4 py-3 flex-shrink-0 border ${
           session.review.status?.toLowerCase() === 'rejected'
             ? 'bg-red-900/20 border-red-800/40'
@@ -223,13 +335,13 @@ export default function SessionDetail() {
                   Session {session.review.status?.toLowerCase() === 'rejected' ? 'Rejected' : 'Flagged'}
                 </span>
                 <span className="text-xs text-gray-500">
-                  by {session.review.note?.includes('**AI Auto-Review**') ? 'Origin AI' : (session.review.reviewerName ?? 'unknown')}
+                  by {session.review.reviewerName ?? 'unknown'}
                   {session.review.createdAt && ` \u00B7 ${new Date(session.review.createdAt).toLocaleString()}`}
                 </span>
               </div>
               {session.review.note ? (
                 <div className="text-sm text-gray-300 space-y-1">
-                  {session.review.note.split('\n').filter((l: string) => l.trim() && !l.includes('**AI Auto-Review**')).slice(0, 8).map((line: string, i: number) => (
+                  {session.review.note.split('\n').filter((l: string) => l.trim()).slice(0, 8).map((line: string, i: number) => (
                     <p key={i} className="leading-relaxed">{line.replace(/\*\*/g, '')}</p>
                   ))}
                 </div>
@@ -344,7 +456,7 @@ export default function SessionDetail() {
 
           {/* Review */}
           {session.review && (() => {
-            const isAI = session.review.note?.includes('**AI Auto-Review**') ?? false;
+            const isAI = session.review.isAutoReview;
             return (
               <div className={`card space-y-2 flex-1 min-w-[250px] ${isAI ? 'border border-purple-500/30' : ''}`}>
                 <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
@@ -358,13 +470,19 @@ export default function SessionDetail() {
                 <div className="text-sm space-y-1">
                   <div className="flex items-center gap-2">
                     {statusBadge(session.review.status)}
+                    {session.review.score != null && (
+                      <span className={`text-xs font-semibold ${
+                        session.review.score >= 80 ? 'text-green-400' :
+                        session.review.score >= 50 ? 'text-amber-400' : 'text-red-400'
+                      }`}>{session.review.score}/100</span>
+                    )}
                     <span className="text-gray-500 text-xs">
                       by {isAI ? 'Origin AI' : (session.review.reviewerName ?? 'unknown')}
                     </span>
                   </div>
                   {session.review.note && (
                     <div className="text-gray-400 text-xs bg-gray-800/50 rounded p-2 max-h-24 overflow-y-auto">
-                      {session.review.note.split('\n').filter(l => l.trim()).slice(0, 5).map((line, i) => (
+                      {session.review.note.split('\n').filter((l: string) => l.trim()).slice(0, 5).map((line: string, i: number) => (
                         <p key={i}>{line.replace(/\*\*/g, '')}</p>
                       ))}
                     </div>
@@ -557,11 +675,11 @@ export default function SessionDetail() {
       )}
 
       {/* Review bar */}
-      {(!session.review || session.review.note?.includes('**AI Auto-Review**')) && (
+      {(!session.review || session.review.isAutoReview) && (
         <div className="card flex-shrink-0">
           <div className="flex flex-col sm:flex-row gap-3 items-center">
             <span className="text-sm text-gray-400 whitespace-nowrap">
-              {session.review?.note?.includes('**AI Auto-Review**') ? 'Override AI Review' : 'Review'}
+              {session.review?.isAutoReview ? 'Override AI Review' : 'Review'}
             </span>
             <input
               type="text"
@@ -571,6 +689,24 @@ export default function SessionDetail() {
               className="input flex-1"
             />
             <div className="flex gap-2">
+              {/* AI Review trigger */}
+              <button
+                onClick={handleAIReview}
+                disabled={aiReviewLoading || submitting}
+                className="bg-purple-600 hover:bg-purple-500 text-white font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {aiReviewLoading ? (
+                  <>
+                    <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" />
+                    Scoring...
+                  </>
+                ) : (
+                  <>
+                    <span className="text-xs">&#9733;</span>
+                    {session.review?.isAutoReview ? 'Re-run AI' : 'AI Review'}
+                  </>
+                )}
+              </button>
               <button
                 onClick={() => handleReview('approved')}
                 disabled={submitting}

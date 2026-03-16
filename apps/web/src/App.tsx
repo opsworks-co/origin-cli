@@ -34,6 +34,7 @@ import TrailDetail from './pages/TrailDetail';
 import Prompts from './pages/Prompts';
 import ComplianceDashboard from './pages/Compliance';
 import PublicPolicies from './pages/PublicPolicies';
+import CLI from './pages/CLI';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -60,6 +61,7 @@ export default function App() {
       <Route path="/" element={<PublicLayout><Landing /></PublicLayout>} />
       <Route path="/docs" element={<PublicLayout><Docs /></PublicLayout>} />
       <Route path="/pricing" element={<PublicLayout><Pricing /></PublicLayout>} />
+      <Route path="/cli" element={<PublicLayout><CLI /></PublicLayout>} />
       <Route path="/org/:orgSlug/policies" element={<PublicLayout><PublicPolicies /></PublicLayout>} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
@@ -223,13 +225,11 @@ export default function App() {
       />
       <Route
         path="/leaderboard"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <Leaderboard />
-            </Layout>
-          </ProtectedRoute>
-        }
+        element={<Navigate to="/settings?tab=leaderboard" replace />}
+      />
+      <Route
+        path="/api-keys"
+        element={<Navigate to="/settings" replace />}
       />
       <Route
         path="/trails"

@@ -1,7 +1,9 @@
 import chalk from 'chalk';
+import { requirePlatform } from '../config.js';
 import { api } from '../api.js';
 
 export async function agentsCommand() {
+  if (!requirePlatform('agents')) return;
   try {
     const agents = await api.getAgents() as any[];
 

@@ -180,7 +180,7 @@ router.post('/:id/recheck', requireRole('ADMIN'), async (req: AuthRequest, res: 
       return res.status(400).json({ error: 'No commits linked to this PR' });
     }
 
-    const originBaseUrl = process.env.ORIGIN_WEB_URL || 'https://origin-platform.fly.dev';
+    const originBaseUrl = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
 
     await updatePRGitHubStatus(
       req.user!.orgId,

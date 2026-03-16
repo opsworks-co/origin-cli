@@ -189,14 +189,20 @@ model PromptChange {
 }
 
 model SessionReview {
-  id        String        @id @default(uuid())
-  sessionId String        @unique
-  session   CodingSession @relation(fields: [sessionId], references: [id])
-  userId    String
-  user      User          @relation(fields: [userId], references: [id])
-  status    String        @default("APPROVED")
-  note      String?
-  createdAt DateTime      @default(now())
+  id           String        @id @default(uuid())
+  sessionId    String        @unique
+  session      CodingSession @relation(fields: [sessionId], references: [id])
+  userId       String
+  user         User          @relation(fields: [userId], references: [id])
+  status       String        @default("APPROVED")
+  note         String?
+  score        Int?                          // 0-100 quality score
+  riskLevel    String?                       // "low" | "medium" | "high" | "critical"
+  concerns     String?                       // JSON array of concern strings
+  suggestions  String?                       // JSON array of suggestion strings
+  categories   String?                       // JSON: { security: 90, scope: 85, quality: 70, cost: 95 }
+  isAutoReview Boolean       @default(false) // true = AI review, false = human review
+  createdAt    DateTime      @default(now())
 }
 
 // ── Agents ──────────────────────────────────────────────────────

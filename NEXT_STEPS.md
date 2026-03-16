@@ -2,7 +2,7 @@
 
 ## What's Built & Deployed
 
-Everything below is live at **https://origin-platform.fly.dev**
+Everything below is live at **https://getorigin.io**
 
 ### Core Platform
 - [x] Session tracking (start/update/end via CLI hooks + MCP)
@@ -44,7 +44,7 @@ This is the most impactful feature to demo. Here's exactly what to do:
 
 ```bash
 # a) Create a test policy that will trigger easily
-#    Go to https://origin-platform.fly.dev/policies
+#    Go to https://getorigin.io/policies
 #    Create a COST_LIMIT policy with max_cost: 0.01
 #    (any session will exceed $0.01)
 
@@ -81,7 +81,7 @@ For each repo you want to enforce:
 
 ### 3. Invite Your Team
 
-1. Go to https://origin-platform.fly.dev/settings?tab=team
+1. Go to https://getorigin.io/settings?tab=team
 2. Enter team member's email → select role → "Send Invite"
 3. Share the invite link
 4. They create an account and get their own API key
@@ -92,7 +92,7 @@ For each repo you want to enforce:
 Each developer needs:
 
 ```bash
-curl -fsSL https://origin-platform.fly.dev/install.sh | sh
+curl -fsSL https://getorigin.io/install.sh | sh
 origin login
 origin init
 origin enable   # install hooks in their repo
@@ -194,10 +194,10 @@ Completed. CLI now supports: Claude Code, Cursor, Gemini, Windsurf, and Aider. A
 
 | Resource | URL |
 |----------|-----|
-| Production | https://origin-platform.fly.dev |
+| Production | https://getorigin.io |
 | GitHub Repo | https://github.com/dolobanko/origin-v2 |
-| API Docs | https://origin-platform.fly.dev/docs (select "API Reference") |
-| PR Checks | https://origin-platform.fly.dev/pull-requests |
+| API Docs | https://getorigin.io/docs (select "API Reference") |
+| PR Checks | https://getorigin.io/pull-requests |
 
 ## Key Credentials
 

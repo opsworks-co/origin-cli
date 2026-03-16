@@ -17,6 +17,7 @@ import { disableCommand } from './commands/disable.js';
 import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit, handlePrePush } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
+import { askCommand } from './commands/ask.js';
 import { doctorCommand } from './commands/doctor.js';
 import { resetCommand } from './commands/reset.js';
 import { cleanCommand } from './commands/clean.js';
@@ -35,18 +36,28 @@ import { analyzeCommand } from './commands/analyze.js';
 import { dbImportCommand, dbStatsCommand } from './commands/db.js';
 import { proxyInstallCommand, proxyUninstallCommand, proxyStatusCommand } from './commands/proxy.js';
 import { checkForUpdate } from './version-check.js';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
 
 const program = new Command();
 
 program
   .name('origin')
   .description('Origin — AI Coding Agent Governance CLI')
-  .version('0.1.0');
+  .version(pkg.version);
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
 program.command('login').description('Login to Origin').action(loginCommand);
-program.command('init').description('Register this machine as an agent host').action(initCommand);
+program.command('init')
+  .description('Register this machine as an agent host')
+  .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
+  .action(initCommand);
 program.command('enable')
   .description('Install Origin hooks for session tracking')
   .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, windsurf, aider). Auto-detects if omitted.')
@@ -74,6 +85,14 @@ program.command('explain [sessionId]')
   .option('--summarize', 'Generate AI-powered summary (intent, outcome, learnings, friction)')
   .option('--json', 'Output as JSON')
   .action(explainCommand);
+program.command('ask <query>')
+  .description('Ask about AI-generated code — find the session and prompts behind any file or change')
+  .option('-f, --file <path>', 'Ask about a specific file')
+  .option('-l, --line <n>', 'Focus on a specific line number')
+  .option('-s, --session <id>', 'Search within a specific session')
+  .option('--limit <n>', 'Max results', '5')
+  .action(askCommand);
+
 program.command('doctor')
   .description('Scan for and fix stuck/orphaned sessions')
   .option('-f, --fix', 'Auto-fix issues found')
@@ -241,7 +260,6 @@ proxy.command('status')
 
 program.command('upgrade')
   .description('Upgrade Origin CLI to latest version')
-  .option('-c, --channel <channel>', 'Release channel (stable, beta, canary)', 'stable')
   .option('--check', 'Only check for updates, do not install')
   .action(upgradeCommand);
 

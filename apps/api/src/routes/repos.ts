@@ -60,8 +60,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST / — create repo (MEMBER+)
-router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
+// POST / — create repo (ADMIN+ only)
+router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const { name, path, provider } = req.body;
 

@@ -152,7 +152,7 @@ The note contains structured JSON:
     "durationMs": 45000,
     "linesAdded": 120,
     "linesRemoved": 15,
-    "originUrl": "https://origin-platform.fly.dev/sessions/uuid",
+    "originUrl": "https://getorigin.io/sessions/uuid",
     "timestamp": "2026-03-06T10:30:00Z"
   }
 }

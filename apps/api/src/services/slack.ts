@@ -27,7 +27,7 @@ const EVENT_SETTINGS_MAP: Record<string, keyof SlackSettings> = {
   REVIEW_COMPLETED: 'notifyReviews',
 };
 
-const ORIGIN_WEB_URL = process.env.ORIGIN_WEB_URL || 'https://origin-platform.fly.dev';
+const ORIGIN_WEB_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
 
 // ── Emoji map for notification types ───────────────────────────────
 

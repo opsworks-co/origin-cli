@@ -113,7 +113,7 @@ Origin posts a status check and a comment on every PR:
 
 The PR comment includes a table of all AI sessions linked to the PR, with cost, tokens, model, and review status. If violations exist, a dedicated "Policy Violations" section shows exactly what triggered.
 
-Links in PR comments ("View in Origin", "View" per session) point to the production URL configured via the `ORIGIN_WEB_URL` environment variable (defaults to `https://origin-platform.fly.dev` in production).
+Links in PR comments ("View in Origin", "View" per session) point to the production URL configured via the `ORIGIN_WEB_URL` environment variable (defaults to `https://getorigin.io` in production).
 
 ---
 

@@ -82,4 +82,31 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// DELETE /:id — delete a machine
+router.delete('/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const machine = await prisma.machine.findFirst({
+      where: { id: req.params.id as string, orgId: req.user!.orgId },
+    });
+    if (!machine) return res.status(404).json({ error: 'Machine not found' });
+
+    await prisma.machine.delete({ where: { id: machine.id } });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'MACHINE_DELETED',
+        resource: machine.id,
+        metadata: JSON.stringify({ hostname: machine.hostname, machineId: machine.machineId }),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete machine error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

@@ -64,6 +64,31 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
 
 router.use(authByApiKey);
 
+// GET /whoami — verify API key and return org info
+router.get('/whoami', async (req: McpRequest, res: Response) => {
+  try {
+    const org = await prisma.org.findUnique({ where: { id: req.orgId as string } });
+    if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+    const agentCount = await prisma.agent.count({ where: { orgId: org.id, status: 'ACTIVE' } });
+    const repoCount = await prisma.repo.count({ where: { orgId: org.id, archived: false } });
+
+    res.json({
+      orgId: org.id,
+      orgName: org.name,
+      orgSlug: org.slug,
+      apiKeyName: req.apiKeyName,
+      repoScopes: req.repoScopes || [],
+      agentScopes: req.agentScopes || [],
+      agentCount,
+      repoCount,
+    });
+  } catch (err) {
+    console.error('Whoami error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET /policies — load active policies for the org
 router.get('/policies', async (req: McpRequest, res: Response) => {
   try {
@@ -109,13 +134,14 @@ router.get('/policies', async (req: McpRequest, res: Response) => {
 // POST /session/start — start a coding session
 router.post('/session/start', async (req: McpRequest, res: Response) => {
   try {
-    const { machineId, prompt, model, repoPath, agentSlug, branch } = req.body;
+    const { machineId, prompt, model, repoPath, repoUrl, agentSlug, branch } = req.body;
 
     if (!machineId || !model || !repoPath) {
       return res.status(400).json({ error: 'Missing required fields: machineId, model, repoPath' });
     }
 
     const orgId = req.orgId as string;
+    console.log('[session/start]', { orgId, repoPath, repoUrl: repoUrl || '(none)', agentSlug, machineId });
 
     // Check budget before allowing session
     const budgetCheck = await checkBudget(orgId);
@@ -128,60 +154,147 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       });
     }
 
-    // Find or create repo from repoPath
+    // Look up repo — try exact path, then remote URL slug, then fuzzy directory name
     let repo = await prisma.repo.findFirst({
       where: { orgId, path: repoPath },
     });
 
+    // If no exact match and repoUrl provided, extract owner/repo slug and match against repo.path
+    if (!repo && repoUrl) {
+      let slug: string | null = null;
+      // Handle HTTPS URLs: https://github.com/owner/repo.git
+      const httpsMatch = repoUrl.match(/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/);
+      if (httpsMatch) {
+        slug = httpsMatch[1].toLowerCase();
+      }
+      // Handle SSH URLs: git@github.com:owner/repo.git
+      if (!slug) {
+        const sshMatch = repoUrl.match(/github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
+        if (sshMatch) {
+          slug = sshMatch[1].toLowerCase();
+        }
+      }
+      if (slug) {
+        const orgRepos = await prisma.repo.findMany({ where: { orgId } });
+        repo = orgRepos.find((r) => {
+          const rLower = r.path.toLowerCase();
+          return rLower === slug
+            || rLower === `https://github.com/${slug}`
+            || rLower === `https://github.com/${slug}.git`
+            || rLower.endsWith(`/${slug}`)
+            || rLower.endsWith(`/${slug}.git`);
+        }) || null;
+      }
+    }
+
+    // Fall back to matching by directory name (includes partial match)
     if (!repo) {
-      const repoName = repoPath.split('/').filter(Boolean).pop() || repoPath;
-      repo = await prisma.repo.create({
-        data: {
-          orgId,
-          name: repoName,
-          path: repoPath,
-          provider: 'local',
-        },
+      const dirName = repoPath.split('/').filter(Boolean).pop()?.toLowerCase();
+      if (dirName) {
+        const orgRepos = await prisma.repo.findMany({ where: { orgId } });
+        repo = orgRepos.find((r) => {
+          const repoName = r.path.split('/').pop()?.toLowerCase();
+          // Exact match or one contains the other (worktrust-test ↔ worktrust)
+          return repoName === dirName
+            || dirName.includes(repoName || '')
+            || (repoName || '').includes(dirName);
+        }) || null;
+      }
+    }
+
+    if (!repo) {
+      const orgRepos = await prisma.repo.findMany({ where: { orgId }, select: { path: true } });
+      console.log('[session/start] REPO NOT FOUND', { repoPath, repoUrl, orgRepoPaths: orgRepos.map(r => r.path) });
+      return res.status(403).json({
+        error: 'Repository not registered',
+        message: `"${repoPath}" is not registered in Origin. Ask your admin to add it first.`,
       });
     }
 
-    // Enforce repo-scoped API key access
-    if (req.repoScopes && req.repoScopes.length > 0 && !req.repoScopes.includes(repo.id)) {
+    // Enforce repo-scoped API key access — no scopes = no access
+    if (!req.repoScopes || req.repoScopes.length === 0 || !req.repoScopes.includes(repo.id)) {
       return res.status(403).json({
         error: 'Access denied',
-        message: `This API key does not have access to repo "${repo.name}"`,
+        message: `This API key does not have access to repo "${repo.name}". Assign repo access in Settings → API Keys.`,
       });
     }
 
-    // Look up machine DB id for policy scoping
-    const machine = await prisma.machine.findFirst({
+    // Look up machine DB id for policy scoping — auto-register if missing
+    let machine = await prisma.machine.findFirst({
       where: { machineId },
     });
+    if (!machine) {
+      try {
+        const hostname = req.body.hostname || machineId.slice(0, 8);
+        machine = await prisma.machine.upsert({
+          where: { machineId },
+          create: { orgId, hostname, machineId, detectedTools: '[]', lastSeenAt: new Date() },
+          update: { lastSeenAt: new Date() },
+        });
+        console.log('[session/start] auto-registered machine', { machineId, hostname });
+      } catch { /* non-fatal */ }
+    } else {
+      // Update lastSeenAt
+      prisma.machine.update({ where: { id: machine.id }, data: { lastSeenAt: new Date() } }).catch(() => {});
+    }
 
-    // Resolve agent slug to Agent record (for policy scoping & session linking)
-    let agent: { id: string; systemPrompt?: string | null; versions?: { version: number }[] } | null = null;
-    if (agentSlug) {
-      agent = await prisma.agent.findFirst({
-        where: { orgId, slug: agentSlug, status: 'ACTIVE' },
-        select: { id: true, systemPrompt: true, versions: { orderBy: { version: 'desc' }, take: 1, select: { version: true } } },
+    // Resolve agent from API key scopes + tool type
+    // The API key is already assigned to specific agents — use those, no slug guessing needed
+    let agent: { id: string; systemPrompt?: string | null; slug?: string; name?: string; versions?: { version: number }[] } | null = null;
+    const agentSelect = { id: true, systemPrompt: true, slug: true, name: true, versions: { orderBy: { version: 'desc' as const }, take: 1, select: { version: true } } };
+
+    // Enforce API key → agent scope: no scopes = no access
+    if (!req.agentScopes || req.agentScopes.length === 0) {
+      return res.status(403).json({
+        error: 'No agent access',
+        message: 'This API key has no agent assignments. Assign agents in Settings → API Keys.',
       });
-      // Strict mode: reject unknown agents (admins must create them in the dashboard first)
-      if (!agent) {
-        return res.status(403).json({
-          error: 'Unknown agent',
-          message: `Agent "${agentSlug}" is not registered. Ask your admin to create it in the Origin dashboard under Agents.`,
-          agentSlug,
-        });
-      }
+    }
 
-      // Enforce API key → agent scope: key must be assigned to this agent
-      if (req.agentScopes && !req.agentScopes.includes(agent.id)) {
-        return res.status(403).json({
-          error: 'Agent not allowed',
-          message: `This API key does not have access to agent "${agentSlug}". Update the key's agent assignments in Settings.`,
-          agentSlug,
-        });
+    // Get all agents this API key has access to
+    const allowedAgents = await prisma.agent.findMany({
+      where: { orgId, id: { in: req.agentScopes }, status: 'ACTIVE' },
+      select: agentSelect,
+    });
+
+    if (allowedAgents.length === 0) {
+      return res.status(403).json({
+        error: 'No active agents',
+        message: 'This API key is assigned to agents that no longer exist or are inactive.',
+      });
+    }
+
+    if (agentSlug) {
+      // Try to match the tool type (claude-code, gemini, etc.) to an allowed agent
+      const slugLower = agentSlug.toLowerCase();
+      const prefix = slugLower.split('-')[0]; // "claude-code" → "claude"
+      // Exact match first
+      agent = allowedAgents.find((a) => {
+        const n = (a.name || '').toLowerCase();
+        const s = (a.slug || '').toLowerCase();
+        return s === slugLower || s === prefix || n === slugLower || n === prefix;
+      }) || null;
+      // Fuzzy: name or slug contains the tool prefix
+      if (!agent) {
+        agent = allowedAgents.find((a) => {
+          const n = (a.name || '').toLowerCase();
+          const s = (a.slug || '').toLowerCase();
+          return n.includes(prefix) || s.includes(prefix);
+        }) || null;
       }
+    }
+
+    // If no match by slug, and key has exactly one agent, use that
+    if (!agent && allowedAgents.length === 1) {
+      agent = allowedAgents[0];
+    }
+
+    // If still no match and multiple agents, pick the best match or reject
+    if (!agent) {
+      return res.status(400).json({
+        error: 'Ambiguous agent',
+        message: `Could not determine which agent to use for tool "${agentSlug || 'unknown'}". This API key has access to: ${allowedAgents.map((a) => a.name).join(', ')}. Ensure agent names match the tool type (e.g. "Claude" for claude-code, "Gemini" for gemini).`,
+      });
     }
 
     // Check model allowlist policies (with agent/machine/repo scope)
@@ -197,6 +310,51 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         message: violation?.message || 'Model is not in the allowed list',
         policy: violation?.policyName,
       });
+    }
+
+    // ── Server-side dedup: reject if a RUNNING session already exists for this
+    //    machine + agent + repo, created within the last 60 seconds.
+    //    Claude Code fires session-start when the app opens (idle) AND when user
+    //    starts working, each with a different session_id. This catches that.
+    const recentCutoff = new Date(Date.now() - 60_000);
+    const existingRunning = await prisma.codingSession.findFirst({
+      where: {
+        status: 'RUNNING',
+        agentId: agent?.id || null,
+        commit: { repoId: repo.id },
+        startedAt: { gte: recentCutoff },
+      },
+      include: { commit: { select: { repoId: true } } },
+      orderBy: { startedAt: 'desc' },
+    });
+
+    if (existingRunning) {
+      // Check machine match via audit log (machineId is stored in metadata)
+      const existingAudit = await prisma.auditLog.findFirst({
+        where: {
+          resource: existingRunning.id,
+          action: 'SESSION_STARTED',
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      const existingMachineId = existingAudit?.metadata
+        ? JSON.parse(existingAudit.metadata as string)?.machineId
+        : null;
+
+      if (existingMachineId === machineId) {
+        console.log('[session/start] DEDUP: returning existing session', {
+          existingId: existingRunning.id,
+          machineId,
+          agentId: agent?.id,
+          repoId: repo.id,
+        });
+        // Return the existing session instead of creating a duplicate
+        return res.json({
+          sessionId: existingRunning.id,
+          agentSystemPrompt: existingRunning.agentSystemPrompt || undefined,
+          activePolicies: [],
+        });
+      }
     }
 
     // Generate a placeholder SHA (random 40-char hex)
@@ -260,24 +418,24 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       timestamp: new Date().toISOString(),
     });
 
-    // Build active policy summary for system message
+    // Build active policy summary for system message + raw rules for CLI enforcement
     let activePolicies: string[] = [];
+    let enforcementRules: Array<{ type: string; condition: string; action: string; severity: string }> = [];
     try {
       const allPolicies = await loadOrgPolicies(orgId);
       const scope = { agentId: agent?.id ?? null, machineId: machine?.id ?? null, repoId: repo.id };
-      activePolicies = allPolicies
-        .filter(p => !shouldSkipPolicy(p, scope))
-        .flatMap(p =>
-          p.rules
-            .filter(r => !shouldSkipRule(r, scope))
-            .map(r => {
-              const desc = describeCondition(p.type, r.condition);
-              return `${p.name}: ${desc.summary} (${describeAction(r.action)})`;
-            })
-        );
+      for (const p of allPolicies) {
+        if (shouldSkipPolicy(p, scope)) continue;
+        for (const r of p.rules) {
+          if (shouldSkipRule(r, scope)) continue;
+          const desc = describeCondition(p.type, r.condition);
+          activePolicies.push(`${p.name}: ${desc.summary} (${describeAction(r.action)})`);
+          enforcementRules.push({ type: p.type, condition: r.condition, action: r.action, severity: r.severity });
+        }
+      }
     } catch { /* non-critical */ }
 
-    res.json({ sessionId: codingSession.id, activePolicies, agentSystemPrompt: agent?.systemPrompt || null });
+    res.json({ sessionId: codingSession.id, activePolicies, enforcementRules, agentSystemPrompt: agent?.systemPrompt || null });
   } catch (err) {
     console.error('Start session error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -296,6 +454,14 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
+    // Re-activate session on resume
+    if (session.status !== 'RUNNING') {
+      await prisma.codingSession.update({
+        where: { id },
+        data: { status: 'RUNNING', endedAt: null },
+      });
+    }
+
     // Fetch the latest agent system prompt (not the snapshot — the live version)
     const agentSystemPrompt = session.agent?.systemPrompt || session.agentSystemPrompt || null;
 
@@ -311,6 +477,20 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
   } catch (err) {
     console.error('Resume session error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /session/:id/ping — lightweight keepalive heartbeat
+router.post('/session/:id/ping', async (req: McpRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    await prisma.codingSession.updateMany({
+      where: { id, status: 'RUNNING' },
+      data: { updatedAt: new Date() },
+    });
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'ping failed' });
   }
 });
 

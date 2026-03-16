@@ -102,20 +102,19 @@ export default function Infrastructure() {
                 try { return JSON.parse(m.detectedTools); } catch { return []; }
               })();
               return (
-                <Link
+                <div
                   key={m.id}
-                  to={`/machines/${m.id}`}
-                  className="card hover:border-gray-700 transition-colors block"
+                  className="card hover:border-gray-700 transition-colors"
                 >
                   <div className="flex items-center gap-4">
                     {/* Status + hostname */}
-                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <Link to={`/machines/${m.id}`} className="flex items-center gap-2 min-w-0 flex-1">
                       <span className={`h-2 w-2 rounded-full flex-shrink-0 ${online ? 'bg-green-500' : 'bg-gray-600'}`} />
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-gray-200 truncate">{m.hostname}</p>
                         <p className="text-xs text-gray-500 font-mono truncate">{m.machineId}</p>
                       </div>
-                    </div>
+                    </Link>
 
                     {/* Tools */}
                     <div className="hidden sm:flex flex-wrap gap-1 max-w-[300px]">
@@ -135,8 +134,28 @@ export default function Infrastructure() {
                         {online ? 'Online' : timeAgo(m.lastSeenAt)}
                       </span>
                     </div>
+
+                    {/* Delete */}
+                    <button
+                      onClick={async (e) => {
+                        e.preventDefault();
+                        if (!confirm(`Remove machine "${m.hostname}"?`)) return;
+                        try {
+                          await api.deleteMachine(m.id);
+                          setMachines(prev => prev.filter(x => x.id !== m.id));
+                        } catch (err: any) {
+                          setError(err.message || 'Failed to delete machine');
+                        }
+                      }}
+                      className="text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 p-1"
+                      title="Remove machine"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
                   </div>
-                </Link>
+                </div>
               );
             })}
           </div>
