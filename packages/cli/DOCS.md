@@ -29,7 +29,8 @@ Origin is an AI coding governance platform that tracks, attributes, and governs 
 ## Installation
 
 ```bash
-npm install -g @origin/cli
+# Install from Origin platform
+npm i -g https://origin-platform.fly.dev/cli/origin-cli-latest.tgz
 ```
 
 Verify:
@@ -38,7 +39,25 @@ Verify:
 origin --version
 ```
 
-## Quick Start
+## Quick Start (Standalone — no server required)
+
+```bash
+# 1. Enable global hooks (tracks all repos automatically)
+origin enable --global
+
+# 2. Code with any AI agent (Claude Code, Gemini CLI, Cursor, etc.)
+
+# 3. View attribution
+origin blame src/index.ts    # Line-level AI/human tags
+origin stats                 # AI vs human breakdown
+origin diff                  # Annotated diff
+origin sessions              # List all AI sessions
+origin session <id>          # Full session transcript
+```
+
+No login, no API keys. All data stored locally in git notes and `origin-sessions` branch.
+
+## Quick Start (Connected — with Origin server)
 
 ```bash
 # 1. Login to your Origin instance
@@ -243,11 +262,13 @@ Show AI vs human attribution per line, like `git blame` but for AI authorship.
 ```bash
 origin blame src/index.ts
 # Output:
-#   Line  Tag   Model             Content
-#   ───────────────────────────────────────
-#     1  [HU]                    #!/usr/bin/env node
-#     2  [AI]  claude-sonnet-4   import express from 'express';
-#     3  [MX]  claude-sonnet-4   const port = 8080;
+#   Line  Tag   Author/Model              Content
+#   ─────────────────────────────────────────────────
+#     1  [AI]  gemini-3-flash-preview     hello world
+#     2  [AI]  claude-sonnet-4            import express from 'express';
+#     3  [HU]  Artem Dolobanko            const port = 8080;
+#
+# Summary: AI: 2 (67%)  Human: 1 (33%)  Mixed: 0 (0%)
 
 # Show specific line range
 origin blame src/index.ts --line 10-20
@@ -257,8 +278,8 @@ origin blame src/index.ts --json
 ```
 
 Tags:
-- `[AI]` (green) — Line written by AI agent
-- `[HU]` (white) — Line written by human
+- `[AI]` (green) — Line written by AI agent (shows model name)
+- `[HU]` (white) — Line written by human (shows git author)
 - `[MX]` (yellow) — AI wrote initial version, human modified
 
 ### `origin diff [range]`
@@ -817,16 +838,17 @@ Each AI-assisted commit gets a note under `refs/notes/origin`:
 
 ```json
 {
-  "sessionId": "abc-123",
-  "model": "claude-sonnet-4",
-  "promptCount": 5,
-  "promptSummary": "Add authentication middleware...",
-  "tokensUsed": 15000,
-  "costUsd": 0.45,
-  "durationMs": 120000,
-  "linesAdded": 89,
-  "linesRemoved": 12,
-  "originUrl": "https://getorigin.io/sessions/abc-123"
+  "origin": {
+    "sessionId": "local-f7a2b3",
+    "model": "gemini-3-flash-preview",
+    "promptCount": 5,
+    "promptSummary": "Add authentication middleware...",
+    "tokensUsed": 15000,
+    "costUsd": 0.45,
+    "durationMs": 120000,
+    "linesAdded": 89,
+    "linesRemoved": 12
+  }
 }
 ```
 
