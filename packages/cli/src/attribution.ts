@@ -521,18 +521,38 @@ export function computeAttributionStats(
   let totalLinesAdded = 0, aiLinesAdded = 0, humanLinesAdded = 0, mixedLinesAdded = 0;
 
   try {
+    // Use --all if default range to handle repos with fewer than 50 commits
+    const logRange = commitRange ? range : '';
+    const logCmd = logRange
+      ? `git log --format=%H ${logRange}`
+      : `git log --format=%H -50`;
     const commits = execSync(
-      `git log --format=%H ${range}`,
+      logCmd,
       execOpts(repoPath),
     ).trim().split('\n').filter(Boolean);
 
     for (const sha of commits) {
       totalCommits++;
-      const note = readOriginNote(repoPath, sha);
+      const rawNote = readOriginNote(repoPath, sha);
+      // Unwrap { origin: { ... } } nesting
+      const note = rawNote?.origin || rawNote;
 
-      if (note?.sessionId) {
+      // Also check commit message trailers as fallback
+      let isAi = !!note?.sessionId && note.sessionId !== 'unknown';
+      if (!isAi) {
+        const detected = detectAiFromCommit(repoPath, sha);
+        if (detected?.isAi) {
+          isAi = true;
+          if (!note) {
+            // Create a synthetic note for tool/model detection below
+            Object.assign(rawNote || {}, { model: detected.model });
+          }
+        }
+      }
+
+      if (isAi) {
         aiCommits++;
-        const model = note.model || 'unknown';
+        const model = note?.model || 'unknown';
         const tool = model.includes('claude') ? 'claude-code'
           : model.includes('gemini') ? 'gemini'
           : model.includes('gpt') ? 'cursor'
