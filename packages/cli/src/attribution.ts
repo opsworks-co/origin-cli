@@ -1,5 +1,24 @@
 import { execSync } from 'child_process';
 
+// ─── Tool Detection ──────────────────────────────────────────────────────
+
+function detectToolFromModel(model: string, fallbackTool?: string): string {
+  if (model.includes('claude')) return 'claude-code';
+  if (model.includes('gemini')) return 'gemini-cli';
+  if (model.includes('gpt')) return 'cursor';
+  if (model.includes('codex')) return 'codex';
+  if (model.includes('windsurf')) return 'windsurf';
+  if (model.includes('copilot')) return 'copilot';
+  if (model.includes('continue')) return 'continue';
+  if (model.includes('amp')) return 'amp';
+  if (model.includes('junie')) return 'junie';
+  if (model.includes('opencode')) return 'opencode';
+  if (model.includes('aider')) return 'aider';
+  if (model.includes('rovo')) return 'rovo';
+  if (model.includes('droid')) return 'droid';
+  return fallbackTool || 'ai';
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────
 
 export type LineAuthorship = 'ai' | 'human' | 'mixed';
@@ -229,13 +248,7 @@ export function getLineBlame(repoPath: string, filePath: string): LineAttributio
         }
       }
 
-      const tool = model
-        ? (model.includes('claude') ? 'claude-code'
-          : model.includes('gemini') ? 'gemini-cli'
-          : model.includes('gpt') ? 'cursor'
-          : model.includes('codex') ? 'codex'
-          : note?.tool || 'ai')
-        : undefined;
+      const tool = model ? detectToolFromModel(model, note?.tool) : undefined;
       return {
         lineNumber,
         authorship: isAi ? 'ai' as const : 'human' as const,
@@ -553,10 +566,7 @@ export function computeAttributionStats(
       if (isAi) {
         aiCommits++;
         const model = note?.model || 'unknown';
-        const tool = model.includes('claude') ? 'claude-code'
-          : model.includes('gemini') ? 'gemini'
-          : model.includes('gpt') ? 'cursor'
-          : 'unknown';
+        const tool = detectToolFromModel(model);
 
         // Count lines from this commit
         try {

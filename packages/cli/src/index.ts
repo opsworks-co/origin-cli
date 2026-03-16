@@ -273,6 +273,33 @@ hooks.command('windsurf <event>').description('Handle Windsurf hook event').acti
 hooks.command('aider <event>').description('Handle Aider hook event').action((event) => hooksCommand(event, 'aider'));
 hooks.command('git-post-commit').description('Handle git post-commit hook').action(() => handlePostCommit());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
+hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (rebase/amend)').action(async () => {
+  const { preserveAttributionBatch, parseRewriteInput, handleCherryPick } = await import('./history-preservation.js');
+  const { getGitRoot } = await import('./session-state.js');
+  const repoPath = getGitRoot(process.cwd());
+  if (!repoPath) return;
+  // Read old-sha new-sha pairs from stdin
+  let input = '';
+  try {
+    input = require('fs').readFileSync(0, 'utf-8');
+  } catch { /* no stdin */ }
+  if (input) {
+    const mappings = parseRewriteInput(input);
+    preserveAttributionBatch(repoPath, mappings);
+  }
+  // Also check for cherry-pick context
+  handleCherryPick(repoPath);
+});
+hooks.command('git-post-checkout').description('Handle git post-checkout hook').action(async () => {
+  const { handlePostCheckout } = await import('./history-preservation.js');
+  const { getGitRoot } = await import('./session-state.js');
+  const repoPath = getGitRoot(process.cwd());
+  if (!repoPath) return;
+  const args = process.argv.slice(process.argv.indexOf('git-post-checkout') + 1);
+  const prevHead = args[0] || '';
+  const newHead = args[1] || '';
+  handlePostCheckout(repoPath, prevHead, newHead);
+});
 
 // ─── Sessions ────────────────────────────────────────────────────────────
 

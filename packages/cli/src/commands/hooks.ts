@@ -1024,6 +1024,14 @@ export async function handlePostCommit(): Promise<void> {
         { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
         { cmd: 'pgrep -f "codex"', model: 'codex' },
         { cmd: 'pgrep -f "aider"', model: 'aider' },
+        { cmd: 'pgrep -f "windsurf"', model: 'windsurf' },
+        { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
+        { cmd: 'pgrep -f "continue.*dev"', model: 'continue' },
+        { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
+        { cmd: 'pgrep -f "junie|jetbrains.*ai"', model: 'junie' },
+        { cmd: 'pgrep -f "opencode"', model: 'opencode' },
+        { cmd: 'pgrep -f "rovo.*dev"', model: 'rovo' },
+        { cmd: 'pgrep -f "droid"', model: 'droid' },
       ];
       for (const check of checks) {
         try {

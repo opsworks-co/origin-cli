@@ -465,6 +465,12 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
   } else {
     installGitPostCommitHook(basePath);
     installGitPrePushHook(basePath);
+    // Install rewrite hooks for attribution preservation through rebase/amend/cherry-pick
+    try {
+      const { installRewriteHooks } = await import('../history-preservation.js');
+      installRewriteHooks(basePath);
+      console.log(chalk.green('  ✓ Attribution preservation hooks installed (rebase/amend/cherry-pick)'));
+    } catch { /* non-fatal */ }
   }
 
   // If --link provided, validate agent and write .origin.json
@@ -593,12 +599,47 @@ fi
   fs.writeFileSync(prePushPath, prePushContent);
   fs.chmodSync(prePushPath, '755');
 
+  // Post-rewrite hook for attribution preservation through rebase/amend
+  const postRewritePath = path.join(globalHooksDir, 'post-rewrite');
+  const postRewriteContent = `#!/bin/sh
+# origin-global-post-rewrite
+# Installed by: origin enable --global
+# Preserves AI attribution notes through rebase/amend
+
+# Ensure PATH includes common npm/node locations
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
+
+ORIGIN_BIN=""
+if [ -x "${originBin}" ]; then
+  ORIGIN_BIN="${originBin}"
+elif command -v origin >/dev/null 2>&1; then
+  ORIGIN_BIN="origin"
+elif [ -x "/opt/homebrew/bin/origin" ]; then
+  ORIGIN_BIN="/opt/homebrew/bin/origin"
+elif [ -x "/usr/local/bin/origin" ]; then
+  ORIGIN_BIN="/usr/local/bin/origin"
+fi
+
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-post-rewrite "$@" &
+fi
+
+# Chain to local repo hooks if they exist
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-rewrite"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+`;
+  fs.writeFileSync(postRewritePath, postRewriteContent);
+  fs.chmodSync(postRewritePath, '755');
+
   // Set git config to use our global hooks directory
   try {
     execSync(`git config --global core.hooksPath ${globalHooksDir}`, { stdio: 'pipe' });
     console.log(chalk.green('\n  ✓ Global git hooks installed'));
     console.log(chalk.gray(`    Hooks directory: ${globalHooksDir}`));
     console.log(chalk.gray('    Local repo hooks are chained automatically'));
+    console.log(chalk.gray('    Attribution preserved through rebase/amend/cherry-pick'));
   } catch (err: any) {
     console.log(chalk.yellow(`\n  ⚠ Could not set global git hooks: ${err.message}`));
   }
