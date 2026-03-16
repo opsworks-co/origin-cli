@@ -28,19 +28,23 @@ function displayLocalStats(stats: AttributionStats): void {
   console.log(`  ${chalk.gray('AI commits:')}       ${chalk.green(String(stats.aiCommits))} (${stats.totalCommits > 0 ? Math.round((stats.aiCommits / stats.totalCommits) * 100) : 0}%)`);
   console.log(`  ${chalk.gray('Human commits:')}    ${chalk.white(String(stats.humanCommits))} (${stats.totalCommits > 0 ? Math.round((stats.humanCommits / stats.totalCommits) * 100) : 0}%)`);
   console.log('');
-  console.log(`  ${chalk.gray('Total lines added:')} ${chalk.white(String(stats.totalLinesAdded))}`);
-  console.log(`  ${chalk.gray('AI lines:')}          ${chalk.green(String(stats.aiLinesAdded))} (${stats.totalLinesAdded > 0 ? Math.round((stats.aiLinesAdded / stats.totalLinesAdded) * 100) : 0}%)`);
-  console.log(`  ${chalk.gray('Human lines:')}       ${chalk.white(String(stats.humanLinesAdded))} (${stats.totalLinesAdded > 0 ? Math.round((stats.humanLinesAdded / stats.totalLinesAdded) * 100) : 0}%)`);
+  const totalLines = stats.totalLinesAdded || 0;
+  const aiLines = stats.aiLinesAdded || 0;
+  const humanLines = stats.humanLinesAdded || 0;
+  console.log(`  ${chalk.gray('Total lines added:')} ${chalk.white(String(totalLines))}`);
+  console.log(`  ${chalk.gray('AI lines:')}          ${chalk.green(String(aiLines))} (${totalLines > 0 ? Math.round((aiLines / totalLines) * 100) : 0}%)`);
+  console.log(`  ${chalk.gray('Human lines:')}       ${chalk.white(String(humanLines))} (${totalLines > 0 ? Math.round((humanLines / totalLines) * 100) : 0}%)`);
 
   // Tool breakdown with bar graphs
   if (stats.byTool.size > 0) {
     console.log(chalk.bold('\n  By Tool\n'));
-    const maxToolLines = Math.max(...Array.from(stats.byTool.values()).map(v => v.linesAdded));
+    const maxToolLines = Math.max(...Array.from(stats.byTool.values()).map(v => v.linesAdded || 0));
     for (const [tool, data] of stats.byTool) {
-      const pct = stats.totalLinesAdded > 0 ? Math.round((data.linesAdded / stats.totalLinesAdded) * 100) : 0;
-      const bar = renderBar(data.linesAdded, maxToolLines, 20);
+      const toolLines = data.linesAdded || 0;
+      const pct = totalLines > 0 ? Math.round((toolLines / totalLines) * 100) : 0;
+      const bar = renderBar(toolLines, maxToolLines, 20);
       console.log(
-        `  ${chalk.cyan(tool.padEnd(16))} ${bar} ${chalk.white(String(pct) + '%').padStart(5)}  ${chalk.gray(`${data.commits} commits, ${data.linesAdded} lines`)}`,
+        `  ${chalk.cyan(tool.padEnd(16))} ${bar} ${chalk.white(String(pct) + '%').padStart(5)}  ${chalk.gray(`${data.commits} commits, ${toolLines} lines`)}`,
       );
     }
   }
