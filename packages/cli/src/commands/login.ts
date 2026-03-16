@@ -7,11 +7,11 @@ export async function loginCommand() {
 
   console.log(chalk.bold('\n🔑 Origin Login\n'));
 
-  const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
+  const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://origin-platform.fly.dev): '));
   const apiKey = await rl.question(chalk.gray('API Key: '));
   rl.close();
 
-  const url = apiUrl.trim() || 'https://getorigin.io';
+  const url = apiUrl.trim() || 'https://origin-platform.fly.dev';
   const key = apiKey.trim();
 
   if (!key) {

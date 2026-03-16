@@ -28,12 +28,14 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 - **AI Blame** — `origin blame <file>` shows `[AI]`/`[HU]` tag per line with model name
 - **AI Diff** — `origin diff` annotates diffs with AI/human attribution per line
 - **Stats** — `origin stats` shows AI vs human commit/line breakdown with tool and model charts
+- **Ask the Author** — `origin ask "query" --file src/auth.ts` finds which AI session and prompt generated specific code
 - **Session Tracking** — full transcript of every AI session stored in git (`origin-sessions` branch)
 - **Session Resume** — `origin resume` rebuilds context from previous sessions for handoff between agents
 - **Search** — `origin search <query>` searches all AI prompt history locally
 - **Prompt Analytics** — `origin analyze` detects prompting patterns and metrics
 - **Trail System** — branch-centric work tracking linking sessions to features
-- **Auto-Detection** — detects Claude Code, Gemini CLI, Cursor, Aider, Codex via process detection
+- **Attribution Preservation** — AI tags survive `git rebase`, `git commit --amend`, `git cherry-pick`, and stash operations
+- **Auto-Detection** — 13 agents: Claude Code, Gemini CLI, Cursor, Codex, Aider, Windsurf, Copilot, Continue, Amp, Junie, OpenCode, Rovo, Droid
 - **Git Notes** — per-commit AI metadata stored in `refs/notes/origin`
 
 ### Connected (with Origin server)
@@ -161,6 +163,7 @@ Attribution:
   origin diff [range]             Annotated diff with AI/human attribution
   origin stats                    AI vs human commit/line breakdown with charts
   origin search <query>           Search AI prompt history
+  origin ask <query>              Query which AI session wrote specific code
   origin analyze                  Prompt pattern analytics
 
 Sessions:
@@ -207,8 +210,16 @@ origin blame / stats / diff read notes for attribution
 | Claude Code | Session hooks + process detection | Claude Code hooks API | Stable |
 | Gemini CLI | Process detection (`pgrep`) | Global post-commit hook | Stable |
 | Cursor | Session hooks | Cursor hooks API | Stable |
+| Codex CLI | Session hooks + process detection | Codex hooks API | Stable |
 | Aider | Process detection | Global post-commit hook | Stable |
-| Codex | Process detection | Global post-commit hook | Preview |
+| Windsurf | Session hooks + process detection | Windsurf hooks API | Preview |
+| GitHub Copilot | Process detection | Global post-commit hook | Preview |
+| Continue | Process detection | Global post-commit hook | Preview |
+| Amp | Process detection | Global post-commit hook | Preview |
+| Junie | Process detection | Global post-commit hook | Preview |
+| OpenCode | Process detection | Global post-commit hook | Preview |
+| Rovo Dev | Process detection | Global post-commit hook | Preview |
+| Droid | Process detection | Global post-commit hook | Preview |
 
 ### Data Storage
 

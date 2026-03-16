@@ -86,7 +86,7 @@ Authenticate with your Origin server.
 ```bash
 origin login
 # Prompts for:
-#   API URL (default: https://getorigin.io)
+#   API URL (default: https://origin-platform.fly.dev)
 #   API Key (from your Origin dashboard)
 ```
 
@@ -333,6 +333,31 @@ origin search "API" --repo /path/to/repo    # Filter by repo
 
 Searches the local prompt database. Run `origin db import` first to populate from the `origin-sessions` branch.
 
+### `origin ask <query>`
+
+Query the context behind AI-generated code. Find which session and prompts generated a specific file or line.
+
+```bash
+# Ask about a specific file
+origin ask "auth" --file src/auth.ts
+# Shows: sessions that modified this file, matching prompts
+
+# Ask about a specific line
+origin ask "why" --file src/index.ts --line 42
+
+# Search within a specific session
+origin ask "refactor" --session local-f7a2b3
+
+# Global prompt search
+origin ask "authentication"
+```
+
+How it works:
+1. If `--file` is given, looks up sessions via git notes on commits touching that file
+2. If `--session` is given, searches that session's prompts
+3. Otherwise, searches all prompts matching the query
+4. Falls back to searching the `origin-sessions` branch directly
+
 ### `origin analyze`
 
 Analyze AI prompting patterns and metrics.
@@ -511,7 +536,7 @@ origin config set telemetry true
 
 | Key | Values | Default | Description |
 |-----|--------|---------|-------------|
-| `apiUrl` | URL | `https://getorigin.io` | Origin API URL |
+| `apiUrl` | URL | `https://origin-platform.fly.dev` | Origin API URL |
 | `apiKey` | string | — | API key (use `origin login`) |
 | `commitLinking` | `always` \| `prompt` \| `never` | `always` | Add Origin-Session trailers to commits |
 | `pushStrategy` | `auto` \| `prompt` \| `false` | `auto` | When to push origin-sessions branch |
@@ -766,6 +791,8 @@ Origin uses a multi-layer hook system:
 | `post-tool-use` | AI finished using a tool | Tool result, subagent tracking |
 | `git-post-commit` | After every git commit | Commit SHA, message, files, diff |
 | `git-pre-push` | Before git push | Pushes origin-sessions branch alongside |
+| `git-post-rewrite` | After rebase/amend | Copies attribution notes to new SHAs |
+| `git-post-checkout` | After branch checkout/stash | Preserves attribution through stash ops |
 
 ### Data Flow
 
@@ -859,13 +886,21 @@ Push notes: `git push origin refs/notes/origin`
 
 ## Supported Agents
 
-| Agent | Transcript Format | Hook System | Status |
-|-------|-------------------|-------------|--------|
-| Claude Code | JSONL | Claude Code hooks API | Stable |
-| Cursor | JSONL | Cursor hooks API | Stable |
-| Gemini CLI | JSON | Gemini lifecycle hooks | Stable |
-| Windsurf | JSONL | Windsurf hooks API | Preview |
-| Aider | Git-based | aider.conf.yml | Preview |
+| Agent | Detection | Hook System | Status |
+|-------|-----------|-------------|--------|
+| Claude Code | Session hooks + process detection | Claude Code hooks API | Stable |
+| Gemini CLI | Process detection (`pgrep`) | Global post-commit hook | Stable |
+| Cursor | Session hooks | Cursor hooks API | Stable |
+| Codex CLI | Session hooks + process detection | Codex hooks API | Stable |
+| Aider | Process detection | Global post-commit hook | Stable |
+| Windsurf | Session hooks + process detection | Windsurf hooks API | Preview |
+| GitHub Copilot | Process detection | Global post-commit hook | Preview |
+| Continue | Process detection | Global post-commit hook | Preview |
+| Amp | Process detection | Global post-commit hook | Preview |
+| Junie | Process detection | Global post-commit hook | Preview |
+| OpenCode | Process detection | Global post-commit hook | Preview |
+| Rovo Dev | Process detection | Global post-commit hook | Preview |
+| Droid | Process detection | Global post-commit hook | Preview |
 
 ### Cost Estimation
 
