@@ -561,14 +561,15 @@ export function computeAttributionStats(
         // Count lines from this commit
         try {
           const stat = execSync(
-            `git diff-tree --numstat ${sha}`,
+            `git diff-tree --root --numstat ${sha}`,
             execOpts(repoPath),
           ).trim();
           let commitLines = 0;
           for (const line of stat.split('\n')) {
             const parts = line.split('\t');
-            if (parts[0] && parts[0] !== '-') {
-              commitLines += parseInt(parts[0], 10);
+            const added = parseInt(parts[0], 10);
+            if (!isNaN(added)) {
+              commitLines += added;
             }
           }
           aiLinesAdded += commitLines;
@@ -590,14 +591,15 @@ export function computeAttributionStats(
         humanCommits++;
         try {
           const stat = execSync(
-            `git diff-tree --numstat ${sha}`,
+            `git diff-tree --root --numstat ${sha}`,
             execOpts(repoPath),
           ).trim();
           let commitLines = 0;
           for (const line of stat.split('\n')) {
             const parts = line.split('\t');
-            if (parts[0] && parts[0] !== '-') {
-              commitLines += parseInt(parts[0], 10);
+            const added = parseInt(parts[0], 10);
+            if (!isNaN(added)) {
+              commitLines += added;
             }
           }
           humanLinesAdded += commitLines;
