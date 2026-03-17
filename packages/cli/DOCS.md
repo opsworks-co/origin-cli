@@ -433,6 +433,23 @@ The assistant automatically gathers context from:
 - Local prompt database
 - Commit log and authors
 
+### `origin web`
+
+Launch a local web dashboard in your browser. Shows AI attribution stats, commit history, sessions, and prompts — no server or login required.
+
+```bash
+origin web              # Opens http://localhost:3141
+origin web --port 8080  # Custom port
+```
+
+The dashboard includes:
+- **Overview** — stats cards (total commits, AI ratio, lines added), bar charts by tool and model
+- **Commits** — full commit list with [AI]/[HU] badges, model names, line counts
+- **Sessions** — all tracked AI sessions with model, tokens, cost
+- **Prompts** — prompt database browser with file change tracking
+
+Data is gathered from git notes, the `origin-sessions` branch, and the local prompt database. The browser opens automatically.
+
 ### `origin analyze`
 
 Analyze AI prompting patterns and metrics.

@@ -20,6 +20,7 @@ import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
 import { promptsCommand } from './commands/prompts.js';
 import { chatCommand } from './commands/chat.js';
+import { webCommand } from './commands/web.js';
 import { doctorCommand } from './commands/doctor.js';
 import { resetCommand } from './commands/reset.js';
 import { cleanCommand } from './commands/clean.js';
@@ -105,6 +106,11 @@ program.command('chat')
   .description('Interactive AI assistant — ask questions about your AI-authored code in natural language')
   .option('-q, --question <text>', 'Ask a single question (non-interactive)')
   .action(chatCommand);
+
+program.command('web')
+  .description('Launch local web dashboard — AI attribution, sessions, and prompts in the browser')
+  .option('-p, --port <n>', 'Port number', '3141')
+  .action(webCommand);
 
 program.command('doctor')
   .description('Scan for and fix stuck/orphaned sessions')

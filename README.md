@@ -31,6 +31,7 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 - **Ask the Author** — `origin ask "query" --file src/auth.ts` finds which AI session and prompt generated specific code
 - **Prompt History** — `origin prompts <file>` shows every AI prompt that touched a file, with diffs (`--expand`)
 - **AI Chat** — `origin chat` interactive assistant to ask questions about your AI-authored code in natural language
+- **Web Dashboard** — `origin web` launches a local browser UI with stats, commits, sessions, and prompts — no server needed
 - **Session Tracking** — full transcript of every AI session stored in git (`origin-sessions` branch)
 - **Session Resume** — `origin resume` rebuilds context from previous sessions for handoff between agents
 - **Search** — `origin search <query>` searches all AI prompt history locally
@@ -81,6 +82,7 @@ origin diff                  # Annotated diff with attribution
 origin sessions              # List all AI sessions
 origin session <id>          # Full session transcript with prompts
 origin prompts src/index.ts  # AI prompts that touched this file
+origin web                   # Local dashboard in the browser
 origin chat                  # Ask questions about your AI code in natural language
 ```
 
@@ -187,6 +189,7 @@ Attribution:
   origin ask <query>              Query which AI session wrote specific code
   origin prompts <file>           Show AI prompts that touched a file (--expand for diffs)
   origin chat                     Interactive AI assistant — ask questions in natural language
+  origin web                      Local web dashboard in the browser (no server needed)
   origin analyze                  Prompt pattern analytics
 
 Sessions:
