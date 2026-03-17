@@ -29,6 +29,8 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 - **AI Diff** — `origin diff` annotates diffs with AI/human attribution per line
 - **Stats** — `origin stats` shows AI vs human commit/line breakdown with tool and model charts
 - **Ask the Author** — `origin ask "query" --file src/auth.ts` finds which AI session and prompt generated specific code
+- **Prompt History** — `origin prompts <file>` shows every AI prompt that touched a file, with diffs (`--expand`)
+- **AI Chat** — `origin chat` interactive assistant to ask questions about your AI-authored code in natural language
 - **Session Tracking** — full transcript of every AI session stored in git (`origin-sessions` branch)
 - **Session Resume** — `origin resume` rebuilds context from previous sessions for handoff between agents
 - **Search** — `origin search <query>` searches all AI prompt history locally
@@ -78,9 +80,28 @@ origin stats                 # AI vs human breakdown
 origin diff                  # Annotated diff with attribution
 origin sessions              # List all AI sessions
 origin session <id>          # Full session transcript with prompts
+origin prompts src/index.ts  # AI prompts that touched this file
+origin chat                  # Ask questions about your AI code in natural language
 ```
 
 > **That's it.** No server, no login, no API keys. Everything is stored locally in git notes and the `origin-sessions` branch.
+
+### 5. Enable AI Chat (optional)
+
+To use `origin chat` — the interactive AI assistant that answers questions about your AI-authored code:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...    # Add to ~/.zshrc or ~/.bashrc
+origin chat
+```
+
+```
+  you > who wrote the auth module?
+  Claude 3.5 Sonnet wrote src/auth.ts across 3 sessions...
+
+  you > how much have I spent on AI this month?
+  $4.32 across 23 sessions. Claude: $3.18 (74%), Gemini: $1.14 (26%)
+```
 
 ---
 
@@ -164,6 +185,8 @@ Attribution:
   origin stats                    AI vs human commit/line breakdown with charts
   origin search <query>           Search AI prompt history
   origin ask <query>              Query which AI session wrote specific code
+  origin prompts <file>           Show AI prompts that touched a file (--expand for diffs)
+  origin chat                     Interactive AI assistant — ask questions in natural language
   origin analyze                  Prompt pattern analytics
 
 Sessions:

@@ -18,6 +18,8 @@ import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit, handlePrePush } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
+import { promptsCommand } from './commands/prompts.js';
+import { chatCommand } from './commands/chat.js';
 import { doctorCommand } from './commands/doctor.js';
 import { resetCommand } from './commands/reset.js';
 import { cleanCommand } from './commands/clean.js';
@@ -92,6 +94,17 @@ program.command('ask <query>')
   .option('-s, --session <id>', 'Search within a specific session')
   .option('--limit <n>', 'Max results', '5')
   .action(askCommand);
+
+program.command('prompts <file>')
+  .description('Show AI prompts that led to changes in a file — like git log but for AI prompts')
+  .option('-e, --expand', 'Show the actual code diff for each prompt')
+  .option('--limit <n>', 'Max entries to show', '10')
+  .action(promptsCommand);
+
+program.command('chat')
+  .description('Interactive AI assistant — ask questions about your AI-authored code in natural language')
+  .option('-q, --question <text>', 'Ask a single question (non-interactive)')
+  .action(chatCommand);
 
 program.command('doctor')
   .description('Scan for and fix stuck/orphaned sessions')

@@ -3,19 +3,20 @@ import { execSync } from 'child_process';
 // ─── Tool Detection ──────────────────────────────────────────────────────
 
 function detectToolFromModel(model: string, fallbackTool?: string): string {
-  if (model.includes('claude')) return 'claude-code';
-  if (model.includes('gemini')) return 'gemini-cli';
-  if (model.includes('gpt')) return 'cursor';
-  if (model.includes('codex')) return 'codex';
-  if (model.includes('windsurf')) return 'windsurf';
-  if (model.includes('copilot')) return 'copilot';
-  if (model.includes('continue')) return 'continue';
-  if (model.includes('amp')) return 'amp';
-  if (model.includes('junie')) return 'junie';
-  if (model.includes('opencode')) return 'opencode';
-  if (model.includes('aider')) return 'aider';
-  if (model.includes('rovo')) return 'rovo';
-  if (model.includes('droid')) return 'droid';
+  const m = (model || '').toLowerCase();
+  if (m.includes('claude') || m.includes('sonnet') || m.includes('opus') || m.includes('haiku')) return 'claude-code';
+  if (m.includes('gemini') || m.includes('gemma')) return 'gemini-cli';
+  if (m.includes('gpt') || m.includes('o1-') || m.includes('o3-') || m.includes('o4-')) return 'cursor';
+  if (m.includes('codex')) return 'codex';
+  if (m.includes('windsurf')) return 'windsurf';
+  if (m.includes('copilot')) return 'copilot';
+  if (m.includes('continue')) return 'continue';
+  if (m.includes('amp')) return 'amp';
+  if (m.includes('junie')) return 'junie';
+  if (m.includes('opencode')) return 'opencode';
+  if (m.includes('aider')) return 'aider';
+  if (m.includes('rovo')) return 'rovo';
+  if (m.includes('droid')) return 'droid';
   return fallbackTool || 'ai';
 }
 

@@ -358,6 +358,81 @@ How it works:
 3. Otherwise, searches all prompts matching the query
 4. Falls back to searching the `origin-sessions` branch directly
 
+### `origin prompts <file>`
+
+Show all AI prompts that led to changes in a specific file — like `git log` but for AI prompts. Shows which prompts, models, and sessions touched each file.
+
+```bash
+# See which AI prompts touched a file
+origin prompts src/auth.ts
+
+# See prompts + the actual code diff per prompt
+origin prompts src/auth.ts --expand
+
+# Limit results
+origin prompts src/auth.ts --limit 5
+```
+
+Output:
+
+```
+  src/auth.ts — 3 AI sessions touched this file
+
+  Mar 16, 19:42  Claude 3.5 Sonnet      (a1b2c3d4)
+  > "add JWT validation middleware"
+    feat: add JWT auth middleware
+
+  Mar 16, 18:15  Gemini 2.5 Pro         (d4e5f6a7)
+  > "refactor auth to use async/await"
+    refactor: async auth handlers
+
+  Mar 15, 14:30  Claude 3.5 Sonnet      (g7h8i9j0)
+  > "implement login endpoint"
+    feat: login endpoint
+```
+
+With `--expand`, each entry includes the full colored diff showing exactly what lines that prompt added/removed in the file.
+
+### `origin chat`
+
+Interactive AI assistant for your repo's AI context. Ask natural language questions about your AI-authored code, sessions, costs, and attribution.
+
+Requires `ANTHROPIC_API_KEY` environment variable.
+
+```bash
+# Interactive mode — ongoing conversation
+origin chat
+
+# Single question mode
+origin chat -q "how much AI code is in this repo?"
+origin chat -q "which model wrote the auth module?"
+origin chat -q "what did AI touch last week?"
+origin chat -q "show me the most expensive sessions"
+```
+
+Interactive session example:
+
+```
+  Origin Chat — ask anything about your AI-authored code
+
+  you > who wrote src/auth.ts?
+  3 AI sessions touched src/auth.ts. Claude 3.5 Sonnet wrote the initial
+  login endpoint (session local-g7h8i9, Mar 15), then Gemini 2.5 Pro
+  refactored it to async/await (session local-d4e5f6, Mar 16).
+
+  you > how much have I spent on AI this month?
+  Based on tracked sessions: $4.32 across 23 sessions.
+  Claude 3.5 Sonnet: $3.18 (74%), Gemini 2.5 Pro: $1.14 (26%).
+
+  you > exit
+```
+
+The assistant automatically gathers context from:
+- Git notes (AI commit metadata)
+- Session history (origin-sessions branch)
+- Local prompt database
+- Commit log and authors
+
 ### `origin analyze`
 
 Analyze AI prompting patterns and metrics.

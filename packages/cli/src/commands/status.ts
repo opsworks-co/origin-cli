@@ -20,15 +20,17 @@ export async function statusCommand() {
 
   console.log(chalk.bold('\n  Origin Status\n'));
 
-  // Login status
-  if (!config) {
-    console.log(chalk.red('  ✗ Not logged in'));
-    console.log(chalk.gray('    Run: origin login'));
-    return;
+  // Mode status
+  const connected = config?.apiKey && config?.apiUrl;
+  if (connected) {
+    console.log(chalk.green('  ✓ Connected mode'));
+    console.log(chalk.gray(`    API: ${config.apiUrl}`));
+    console.log(chalk.gray(`    Org: ${config.orgId || 'unknown'}`));
+  } else {
+    console.log(chalk.green('  ✓ Standalone mode'));
+    console.log(chalk.gray('    Sessions tracked locally in git notes'));
+    console.log(chalk.gray('    Run `origin login` to connect to Origin platform'));
   }
-  console.log(chalk.green('  ✓ Logged in'));
-  console.log(chalk.gray(`    API: ${config.apiUrl}`));
-  console.log(chalk.gray(`    Org: ${config.orgId || 'unknown'}`));
 
   // Agent status
   if (!agentConfig) {
@@ -125,27 +127,29 @@ export async function statusCommand() {
     } catch { /* ignore */ }
   }
 
-  // ── Policies & API Health ───────────────────────────────────────
-  try {
-    const data = await api.getPolicies() as any;
-    const policies = data.policies ?? data;
-    const count = Array.isArray(policies) ? policies.length : 0;
-    console.log(chalk.green(`\n  ✓ ${count} active ${count === 1 ? 'policy' : 'policies'}`));
-  } catch (err: any) {
-    console.log(chalk.yellow(`\n  ⚠ Could not fetch policies: ${err.message}`));
-  }
-
-  try {
-    const res = await fetch(`${config.apiUrl}/api/mcp/policies`, {
-      headers: { 'X-API-Key': config.apiKey },
-    });
-    if (res.ok) {
-      console.log(chalk.green('  ✓ API connection healthy'));
-    } else {
-      console.log(chalk.red(`  ✗ API returned ${res.status}`));
+  // ── Policies & API Health (connected mode only) ────────────────
+  if (connected) {
+    try {
+      const data = await api.getPolicies() as any;
+      const policies = data.policies ?? data;
+      const count = Array.isArray(policies) ? policies.length : 0;
+      console.log(chalk.green(`\n  ✓ ${count} active ${count === 1 ? 'policy' : 'policies'}`));
+    } catch (err: any) {
+      console.log(chalk.yellow(`\n  ⚠ Could not fetch policies: ${err.message}`));
     }
-  } catch {
-    console.log(chalk.red('  ✗ Cannot reach Origin API'));
+
+    try {
+      const res = await fetch(`${config!.apiUrl}/api/mcp/policies`, {
+        headers: { 'X-API-Key': config!.apiKey },
+      });
+      if (res.ok) {
+        console.log(chalk.green('  ✓ API connection healthy'));
+      } else {
+        console.log(chalk.red(`  ✗ API returned ${res.status}`));
+      }
+    } catch {
+      console.log(chalk.red('  ✗ Cannot reach Origin API'));
+    }
   }
 
   console.log('');

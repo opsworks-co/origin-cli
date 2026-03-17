@@ -1084,11 +1084,33 @@ export async function handlePostCommit(): Promise<void> {
   }
 
   // Write git notes on this commit immediately
+  // If model is missing/unknown, try pgrep detection as fallback
+  let noteModel = state?.model || '';
+  if (!noteModel || noteModel === 'unknown') {
+    try {
+      const fallbackChecks = [
+        { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
+        { cmd: 'pgrep -f "gemini.*cli|/gemini "', model: 'gemini' },
+        { cmd: 'pgrep -f "codex"', model: 'codex' },
+        { cmd: 'pgrep -f "aider"', model: 'aider' },
+        { cmd: 'pgrep -f "windsurf"', model: 'windsurf' },
+        { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
+        { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
+      ];
+      for (const check of fallbackChecks) {
+        try {
+          execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+          noteModel = check.model;
+          break;
+        } catch { /* no match */ }
+      }
+    } catch { /* ignore */ }
+  }
 
   try {
     writeGitNotes(repoPath, [commitSha], {
       sessionId: state?.sessionId || 'unknown',
-      model: state?.model || 'unknown',
+      model: noteModel || 'unknown',
       promptCount: state?.prompts?.length || 0,
       promptSummary: state?.prompts?.[state.prompts.length - 1] || '',
       tokensUsed: 0,

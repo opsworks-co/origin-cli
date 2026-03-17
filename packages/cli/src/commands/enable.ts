@@ -381,11 +381,8 @@ function detectAgents(gitRoot: string): AgentType[] {
 const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'windsurf', 'codex'];
 
 export async function enableCommand(opts: { agent?: string; global?: boolean; link?: string }): Promise<void> {
+  // Standalone mode doesn't require login
   const config = loadConfig();
-  if (!config) {
-    console.log(chalk.red('Not logged in. Run: origin login'));
-    process.exit(1);
-  }
 
   const isGlobal = !!opts.global;
   let basePath: string;
