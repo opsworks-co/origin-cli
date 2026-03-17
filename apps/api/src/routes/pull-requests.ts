@@ -6,6 +6,7 @@ import {
   computeCheckStatus,
   updatePRGitHubStatus,
 } from '../services/github-integration.js';
+import { updateMRGitLabStatus } from '../services/gitlab-integration.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -182,13 +183,24 @@ router.post('/:id/recheck', requireRole('ADMIN'), async (req: AuthRequest, res: 
 
     const originBaseUrl = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
 
-    await updatePRGitHubStatus(
-      req.user!.orgId,
-      pr.repoId,
-      pr.number,
-      headSha,
-      originBaseUrl,
-    );
+    // Update status on the correct provider
+    if (repo.provider === 'gitlab') {
+      await updateMRGitLabStatus(
+        req.user!.orgId,
+        pr.repoId,
+        pr.number,
+        headSha,
+        originBaseUrl,
+      );
+    } else {
+      await updatePRGitHubStatus(
+        req.user!.orgId,
+        pr.repoId,
+        pr.number,
+        headSha,
+        originBaseUrl,
+      );
+    }
 
     // Re-fetch status
     const sessions = await getSessionsForPR(pr.repoId, commitShas);

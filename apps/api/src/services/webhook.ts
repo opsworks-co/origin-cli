@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { updatePRGitHubStatus, listPRCommits, getIntegrationConfig, parseRepoFullName } from './github-integration.js';
+import { updateMRGitLabStatus, listMRCommits, getGitLabIntegrationConfig, parseGitLabProjectPath } from './gitlab-integration.js';
 import { detectAITool } from './ai-commit-detector.js';
 
 export function generateWebhookSecret(): string {
@@ -204,6 +205,207 @@ export async function processGitHubPR(repoId: string, payload: GitHubPRPayload) 
     action,
     prId: prRecord.id,
     number: payload.number,
+    state,
+    commitShas: commitShas.length,
+  };
+}
+
+// ── GitLab Webhook Support ────────────────────────────────────────
+
+/**
+ * GitLab uses a plain-text token header (X-Gitlab-Token) instead of HMAC.
+ */
+export function verifyGitLabToken(headerToken: string, secret: string): boolean {
+  if (!headerToken || !secret) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(headerToken), Buffer.from(secret));
+  } catch {
+    return false;
+  }
+}
+
+// ── GitLab Push Events ────────────────────────────────────────────
+
+interface GitLabCommit {
+  id: string;
+  message: string;
+  author: { name: string; email: string };
+  timestamp: string;
+  added: string[];
+  modified: string[];
+  removed: string[];
+}
+
+interface GitLabPushPayload {
+  ref: string;
+  commits: GitLabCommit[];
+  project: { path_with_namespace: string };
+}
+
+export async function processGitLabPush(repoId: string, payload: GitLabPushPayload) {
+  const results = { created: 0, skipped: 0 };
+  const branch = payload.ref?.replace('refs/heads/', '') || null;
+
+  for (const commit of payload.commits) {
+    const existing = await prisma.commit.findFirst({
+      where: { repoId, sha: commit.id },
+    });
+
+    if (existing) {
+      if (!existing.branch && branch) {
+        await prisma.commit.update({
+          where: { id: existing.id },
+          data: { branch },
+        });
+      }
+      results.skipped++;
+      continue;
+    }
+
+    const detection = detectAITool(commit.message, commit.author.name);
+    await prisma.commit.create({
+      data: {
+        repoId,
+        sha: commit.id,
+        message: commit.message,
+        author: commit.author.name,
+        aiToolDetected: detection.aiToolDetected,
+        aiDetectionMethod: detection.aiDetectionMethod,
+        branch,
+        committedAt: new Date(commit.timestamp),
+      },
+    });
+    results.created++;
+  }
+
+  await prisma.repo.update({
+    where: { id: repoId },
+    data: { syncedAt: new Date() },
+  });
+
+  return results;
+}
+
+// ── GitLab Merge Request Events ──────────────────────────────────
+
+interface GitLabMRPayload {
+  object_kind: string;
+  object_attributes: {
+    iid: number;
+    title: string;
+    url: string;
+    state: string;
+    action: string;
+    source_branch: string;
+    target_branch: string;
+    last_commit: { id: string };
+    author_id: number;
+  };
+  user: { username: string };
+  project: { path_with_namespace: string };
+}
+
+/** Map GitLab MR action to a normalized state */
+function mapGitLabMRState(action: string, state: string): string {
+  if (action === 'merge') return 'merged';
+  if (action === 'close') return 'closed';
+  return state === 'merged' ? 'merged' : state === 'closed' ? 'closed' : 'open';
+}
+
+export async function processGitLabMR(repoId: string, payload: GitLabMRPayload) {
+  const attrs = payload.object_attributes;
+  const action = attrs.action;
+  const state = mapGitLabMRState(action, attrs.state);
+
+  const existing = await prisma.pullRequest.findFirst({
+    where: { repoId, number: attrs.iid },
+  });
+
+  let commitShas: string[] = [];
+  if (existing) {
+    try {
+      commitShas = JSON.parse(existing.commitShas);
+    } catch {
+      commitShas = [];
+    }
+  }
+
+  // Fetch full MR commit list from GitLab API
+  const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+  if (repo) {
+    const integration = await getGitLabIntegrationConfig(repo.orgId);
+    const projectPath = parseGitLabProjectPath(repo.path);
+    if (integration && projectPath) {
+      const mrCommits = await listMRCommits(
+        integration.token,
+        projectPath,
+        attrs.iid,
+        integration.apiBaseUrl,
+      );
+      if (mrCommits.success && mrCommits.shas) {
+        for (const sha of mrCommits.shas) {
+          if (!commitShas.includes(sha)) {
+            commitShas.push(sha);
+          }
+        }
+      }
+    }
+  }
+
+  // Add head SHA if not present
+  const headSha = attrs.last_commit?.id;
+  if (headSha && !commitShas.includes(headSha)) {
+    commitShas.push(headSha);
+  }
+
+  const mrRecord = existing
+    ? await prisma.pullRequest.update({
+        where: { id: existing.id },
+        data: {
+          title: attrs.title,
+          url: attrs.url,
+          state,
+          author: payload.user.username,
+          baseBranch: attrs.target_branch,
+          headBranch: attrs.source_branch,
+          commitShas: JSON.stringify(commitShas),
+        },
+      })
+    : await prisma.pullRequest.create({
+        data: {
+          repoId,
+          number: attrs.iid,
+          title: attrs.title,
+          url: attrs.url,
+          state,
+          author: payload.user.username,
+          baseBranch: attrs.target_branch,
+          headBranch: attrs.source_branch,
+          commitShas: JSON.stringify(commitShas),
+        },
+      });
+
+  // Post status check + comment to GitLab
+  const repoForStatus = repo || await prisma.repo.findUnique({ where: { id: repoId } });
+  if (repoForStatus && (action === 'open' || action === 'update' || action === 'reopen')) {
+    const originBaseUrl = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
+    try {
+      await updateMRGitLabStatus(
+        repoForStatus.orgId,
+        repoId,
+        attrs.iid,
+        headSha,
+        originBaseUrl,
+      );
+    } catch (err) {
+      console.error('Failed to update GitLab MR status:', err);
+    }
+  }
+
+  return {
+    action,
+    mrId: mrRecord.id,
+    number: attrs.iid,
     state,
     commitShas: commitShas.length,
   };

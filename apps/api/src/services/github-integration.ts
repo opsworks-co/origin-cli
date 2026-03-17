@@ -406,7 +406,7 @@ export async function listPRCommits(
 
 // ── Session Summary Comment Builder ───────────────────────────────
 
-interface SessionForComment {
+export interface SessionForComment {
   id: string;
   agentName: string | null;
   model: string;

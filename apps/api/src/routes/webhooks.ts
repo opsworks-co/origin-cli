@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
-import { verifyGitHubSignature, processGitHubPush, processGitHubPR } from '../services/webhook.js';
+import { verifyGitHubSignature, processGitHubPush, processGitHubPR, verifyGitLabToken, processGitLabPush, processGitLabMR } from '../services/webhook.js';
 
 const router = Router();
 
@@ -232,6 +232,92 @@ router.post('/github-app', async (req: Request, res: Response) => {
     res.json({ message: `Event '${event}' ignored` });
   } catch (err) {
     console.error('[github-app-webhook] Error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /gitlab/:repoId — receive GitLab webhook events (public, authenticated via token) ──
+
+router.post('/gitlab/:repoId', async (req: Request, res: Response) => {
+  try {
+    const repoId = req.params.repoId as string;
+    const gitlabToken = req.headers['x-gitlab-token'] as string;
+    const event = req.headers['x-gitlab-event'] as string;
+
+    if (!gitlabToken) {
+      return res.status(401).json({ error: 'Missing token' });
+    }
+
+    // Find webhook for this repo
+    const webhook = await prisma.webhook.findFirst({
+      where: { repoId, active: true },
+    });
+
+    if (!webhook) {
+      return res.status(404).json({ error: 'No active webhook for this repo' });
+    }
+
+    // Verify token (GitLab uses plain string comparison)
+    if (!verifyGitLabToken(gitlabToken, webhook.secret)) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const payload = req.body;
+
+    // Get repo for audit log
+    const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+
+    // ── Handle push events ──
+    if (event === 'Push Hook') {
+      const result = await processGitLabPush(repoId, payload);
+
+      await prisma.auditLog.create({
+        data: {
+          orgId: repo?.orgId || '',
+          action: 'WEBHOOK_RECEIVED',
+          resource: repoId,
+          metadata: JSON.stringify({
+            event,
+            ref: payload.ref,
+            commitsCreated: result.created,
+            commitsSkipped: result.skipped,
+            repository: payload.project?.path_with_namespace,
+            source: 'gitlab',
+          }),
+        },
+      });
+
+      return res.json({ success: true, ...result });
+    }
+
+    // ── Handle merge request events ──
+    if (event === 'Merge Request Hook') {
+      const result = await processGitLabMR(repoId, payload);
+
+      await prisma.auditLog.create({
+        data: {
+          orgId: repo?.orgId || '',
+          action: 'WEBHOOK_MR_RECEIVED',
+          resource: repoId,
+          metadata: JSON.stringify({
+            event,
+            action: result.action,
+            mrNumber: result.number,
+            state: result.state,
+            commitShas: result.commitShas,
+            repository: payload.project?.path_with_namespace,
+            source: 'gitlab',
+          }),
+        },
+      });
+
+      return res.json({ success: true, ...result });
+    }
+
+    // Ignore other events
+    res.json({ message: `GitLab event '${event}' ignored` });
+  } catch (err) {
+    console.error('GitLab webhook error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

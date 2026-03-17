@@ -8,6 +8,7 @@ import { emitSessionEvent } from '../services/session-events.js';
 import { enforceSessionStart, enforceSessionEnd, applyEnforcementActions, enforceAgentLimits, loadOrgPolicies, shouldSkipRule, shouldSkipPolicy } from '../services/policy-engine.js';
 import { describeCondition, describeAction } from '../utils/policy-descriptions.js';
 import { updateSessionPRChecks } from '../services/github-integration.js';
+import { updateSessionMRChecks } from '../services/gitlab-integration.js';
 import { scanForSecrets } from '../services/secret-scanner.js';
 import { detectAITool } from '../services/ai-commit-detector.js';
 
@@ -981,6 +982,11 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       if (prsUpdated > 0) {
         console.log(`[pr-checks] Updated ${prsUpdated} PR(s) after session ${sessionId} enforcement`);
       }
+      // Also update GitLab MR status checks
+      const mrsUpdated = await updateSessionMRChecks(sessionId, orgId);
+      if (mrsUpdated > 0) {
+        console.log(`[mr-checks] Updated ${mrsUpdated} MR(s) after session ${sessionId} enforcement`);
+      }
     }).catch(err => console.error('[policy-engine] Background error:', err));
 
     // Run agent-level limits enforcement in background
@@ -999,9 +1005,10 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       machineId: endMachineId,
       repoId: sessionRepoId,
     }).then(async (result) => {
-      // If agent limits were violated, also update PR checks
+      // If agent limits were violated, also update PR/MR checks
       if (result.violations.length > 0) {
         await updateSessionPRChecks(sessionId, orgId);
+        await updateSessionMRChecks(sessionId, orgId);
       }
     }).catch(err => console.error('[agent-limits] Background error:', err));
 

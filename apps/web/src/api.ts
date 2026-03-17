@@ -179,6 +179,37 @@ export function importGitHubRepos(repos: Array<{ fullName: string; name?: string
   });
 }
 
+// ---- GitLab Auto-Discovery -----------------------------------------------
+
+export interface GitLabDiscoveredRepo {
+  id: number;
+  name: string;
+  fullPath: string;
+  private: boolean;
+  url: string;
+  defaultBranch: string;
+  alreadyImported: boolean;
+  originRepoId?: string;
+}
+
+export interface GitLabImportResult {
+  fullPath: string;
+  success: boolean;
+  repoId?: string;
+  error?: string;
+}
+
+export function discoverGitLabRepos() {
+  return request<{ repos: GitLabDiscoveredRepo[] }>('/api/repos/gitlab/discover');
+}
+
+export function importGitLabRepos(repos: Array<{ fullPath: string; name?: string }>) {
+  return request<{ results: GitLabImportResult[] }>('/api/repos/gitlab/import', {
+    method: 'POST',
+    body: JSON.stringify({ repos, originBaseUrl: window.location.origin }),
+  });
+}
+
 // ---- Sessions ------------------------------------------------------------
 
 export interface SessionDiff {

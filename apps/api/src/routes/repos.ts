@@ -10,6 +10,13 @@ import {
   deleteGitHubWebhook,
   parseRepoFullName,
 } from '../services/github-integration.js';
+import {
+  getGitLabIntegrationConfig,
+  listGitLabRepos,
+  createGitLabWebhook,
+  deleteGitLabWebhook,
+  parseGitLabProjectPath,
+} from '../services/gitlab-integration.js';
 import { detectAITool } from '../services/ai-commit-detector.js';
 import { parseGitHubUrl } from '../services/github.js';
 
@@ -259,6 +266,159 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
     res.json({ results });
   } catch (err) {
     console.error('GitHub import error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GitLab Repo Discovery & Import ──────────────────────────────────
+
+// GET /gitlab/discover — list GitLab projects available to org's token
+router.get('/gitlab/discover', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const integration = await getGitLabIntegrationConfig(req.user!.orgId);
+    if (!integration) {
+      return res.status(400).json({ error: 'GitLab not connected. Add a GitLab token in Settings → Integrations.' });
+    }
+
+    const result = await listGitLabRepos(integration.token, integration.apiBaseUrl);
+    if (!result.success || !result.repos) {
+      return res.status(502).json({ error: result.error || 'Failed to fetch repos from GitLab' });
+    }
+
+    const existingRepos = await prisma.repo.findMany({
+      where: { orgId: req.user!.orgId, provider: 'gitlab' },
+      select: { id: true, path: true },
+    });
+
+    const discoveredRepos = result.repos.map((glRepo) => {
+      const match = existingRepos.find((r) => {
+        const rPath = parseGitLabProjectPath(r.path);
+        return rPath && rPath.toLowerCase() === glRepo.fullPath.toLowerCase();
+      });
+      return {
+        ...glRepo,
+        alreadyImported: !!match,
+        originRepoId: match?.id || undefined,
+      };
+    });
+
+    res.json({ repos: discoveredRepos });
+  } catch (err) {
+    console.error('GitLab discover error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /gitlab/import — import selected GitLab repos with auto-webhook creation
+router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { repos: reposToImport, originBaseUrl } = req.body as {
+      repos: Array<{ fullPath: string; name?: string }>;
+      originBaseUrl: string;
+    };
+
+    if (!reposToImport || !Array.isArray(reposToImport) || reposToImport.length === 0) {
+      return res.status(400).json({ error: 'No repos specified for import' });
+    }
+    if (!originBaseUrl) {
+      return res.status(400).json({ error: 'Missing originBaseUrl' });
+    }
+
+    const integration = await getGitLabIntegrationConfig(req.user!.orgId);
+    if (!integration) {
+      return res.status(400).json({ error: 'GitLab not connected' });
+    }
+
+    const existingRepos = await prisma.repo.findMany({
+      where: { orgId: req.user!.orgId, provider: 'gitlab' },
+      select: { id: true, path: true },
+    });
+
+    const results: Array<{ fullPath: string; success: boolean; repoId?: string; error?: string }> = [];
+
+    for (const item of reposToImport) {
+      const projectPath = parseGitLabProjectPath(item.fullPath);
+      if (!projectPath) {
+        results.push({ fullPath: item.fullPath, success: false, error: 'Invalid project path' });
+        continue;
+      }
+
+      const alreadyExists = existingRepos.find((r) => {
+        const rPath = parseGitLabProjectPath(r.path);
+        return rPath && rPath.toLowerCase() === projectPath.toLowerCase();
+      });
+
+      if (alreadyExists) {
+        results.push({ fullPath: item.fullPath, success: true, repoId: alreadyExists.id, error: 'Already imported' });
+        continue;
+      }
+
+      try {
+        const repoName = item.name || projectPath.split('/').pop() || projectPath;
+        const repo = await prisma.repo.create({
+          data: {
+            orgId: req.user!.orgId,
+            name: repoName,
+            path: `gitlab.com/${projectPath}`,
+            provider: 'gitlab',
+          },
+        });
+
+        // Create webhook on GitLab
+        let webhookCreated = false;
+        const secret = generateWebhookSecret();
+        const webhookUrl = `${originBaseUrl}/api/webhooks/gitlab/${repo.id}`;
+
+        const webhook = await prisma.webhook.create({
+          data: { repoId: repo.id, secret },
+        });
+
+        const glResult = await createGitLabWebhook(
+          integration.token,
+          projectPath,
+          webhookUrl,
+          secret,
+          integration.apiBaseUrl,
+        );
+
+        webhookCreated = glResult.success;
+        if (glResult.success && glResult.hookId) {
+          await prisma.webhook.update({
+            where: { id: webhook.id },
+            data: { githubWebhookId: glResult.hookId }, // reuse field for GitLab hook ID
+          });
+        }
+
+        await prisma.auditLog.create({
+          data: {
+            orgId: req.user!.orgId,
+            userId: req.user!.id,
+            action: 'REPO_IMPORTED',
+            resource: repo.id,
+            metadata: JSON.stringify({
+              name: repoName,
+              fullPath: item.fullPath,
+              webhookCreated,
+              provider: 'gitlab',
+            }),
+          },
+        });
+
+        results.push({
+          fullPath: item.fullPath,
+          success: true,
+          repoId: repo.id,
+          error: webhookCreated ? undefined : 'Repo created but webhook failed',
+        });
+      } catch (importErr: any) {
+        console.error(`Failed to import ${item.fullPath}:`, importErr.message);
+        results.push({ fullPath: item.fullPath, success: false, error: importErr.message });
+      }
+    }
+
+    res.json({ results });
+  } catch (err) {
+    console.error('GitLab import error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -749,20 +909,33 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     });
     if (!existing) return res.status(404).json({ error: 'Repo not found' });
 
-    // Clean up GitHub webhooks if auto-created
+    // Clean up provider webhooks if auto-created
     const webhooks = await prisma.webhook.findMany({ where: { repoId: id } });
     for (const wh of webhooks) {
       if (wh.githubWebhookId) {
-        const integration = await getIntegrationConfig(req.user!.orgId, 'github');
-        const parsed = parseRepoFullName(existing.path);
-        if (integration && parsed) {
-          await deleteGitHubWebhook(
-            integration.token,
-            parsed.owner,
-            parsed.repo,
-            wh.githubWebhookId,
-            integration.apiBaseUrl,
-          );
+        if (existing.provider === 'gitlab') {
+          const glIntegration = await getGitLabIntegrationConfig(req.user!.orgId);
+          const projectPath = parseGitLabProjectPath(existing.path);
+          if (glIntegration && projectPath) {
+            await deleteGitLabWebhook(
+              glIntegration.token,
+              projectPath,
+              wh.githubWebhookId,
+              glIntegration.apiBaseUrl,
+            );
+          }
+        } else {
+          const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+          const parsed = parseRepoFullName(existing.path);
+          if (integration && parsed) {
+            await deleteGitHubWebhook(
+              integration.token,
+              parsed.owner,
+              parsed.repo,
+              wh.githubWebhookId,
+              integration.apiBaseUrl,
+            );
+          }
         }
       }
     }

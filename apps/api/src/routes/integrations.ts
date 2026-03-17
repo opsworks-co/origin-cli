@@ -3,6 +3,7 @@ import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { testGitHubConnection } from '../services/github-integration.js';
 import { testGitHubAppConnection } from '../services/github-app.js';
+import { testGitLabConnection } from '../services/gitlab-integration.js';
 import { testSlackWebhook } from '../services/slack.js';
 
 const router = Router();
@@ -202,6 +203,10 @@ router.post('/:id/test', requireRole('ADMIN'), async (req: AuthRequest, res: Res
       }
 
       const result = await testGitHubConnection(integration.token, apiBase);
+      res.json(result);
+    } else if (integration.provider === 'gitlab') {
+      const apiBase = integration.baseUrl || 'https://gitlab.com/api/v4';
+      const result = await testGitLabConnection(integration.token, apiBase);
       res.json(result);
     } else if (integration.provider === 'slack') {
       const result = await testSlackWebhook(integration.token);
