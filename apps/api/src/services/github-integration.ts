@@ -543,6 +543,140 @@ export function buildSessionSummaryComment(
   return parts.join('\n');
 }
 
+// ── Check Runs (Commit Annotations) ──────────────────────────────
+
+interface CheckRunAnnotation {
+  path: string;
+  start_line: number;
+  end_line: number;
+  annotation_level: 'notice' | 'warning' | 'failure';
+  message: string;
+  title: string;
+}
+
+/**
+ * Create a GitHub Check Run with annotations showing AI attribution.
+ * Shows [AI 73%] badge on each commit in the GitHub PR view.
+ *
+ * @see https://docs.github.com/en/rest/checks/runs#create-a-check-run
+ */
+export async function createCheckRun(
+  token: string,
+  owner: string,
+  repo: string,
+  headSha: string,
+  opts: {
+    conclusion: 'success' | 'failure' | 'neutral' | 'action_required';
+    title: string;
+    summary: string;
+    annotations?: CheckRunAnnotation[];
+    detailsUrl?: string;
+  },
+  baseUrl: string = GITHUB_API,
+): Promise<{ success: boolean; checkRunId?: number; error?: string }> {
+  const url = `${baseUrl}/repos/${owner}/${repo}/check-runs`;
+
+  const body: Record<string, any> = {
+    name: 'Origin AI Attribution',
+    head_sha: headSha,
+    status: 'completed',
+    conclusion: opts.conclusion,
+    output: {
+      title: opts.title,
+      summary: opts.summary,
+      annotations: opts.annotations || [],
+    },
+  };
+  if (opts.detailsUrl) body.details_url = opts.detailsUrl;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...githubHeaders(token),
+        Accept: 'application/vnd.github+json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`GitHub check-run API error (${res.status}):`, err);
+      return { success: false, error: err };
+    }
+    const data = (await res.json()) as { id: number };
+    return { success: true, checkRunId: data.id };
+  } catch (err: any) {
+    console.error('Failed to create check run:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Build AI attribution check run for a PR.
+ * Computes per-commit AI percentage and creates a check run with a summary table.
+ */
+export async function postAIAttributionCheckRun(
+  token: string,
+  owner: string,
+  repo: string,
+  headSha: string,
+  sessions: SessionForComment[],
+  commitShas: string[],
+  repoId: string,
+  originBaseUrl: string,
+  baseUrl: string = GITHUB_API,
+) {
+  // Calculate overall AI stats
+  const totalAILines = sessions.reduce((sum, s) => sum + s.linesAdded, 0);
+
+  // Fetch all commits from DB to check which are AI-authored
+  const commits = await prisma.commit.findMany({
+    where: { repoId, sha: { in: commitShas } },
+    select: { sha: true, aiToolDetected: true, message: true, author: true },
+  });
+
+  const totalCommits = commitShas.length;
+  const aiCommits = commits.filter((c) => c.aiToolDetected).length;
+  const aiPercent = totalCommits > 0 ? Math.round((aiCommits / totalCommits) * 100) : 0;
+
+  // Build summary markdown table
+  const summaryLines = [
+    `### AI Attribution Report`,
+    '',
+    `| Metric | Value |`,
+    `|--------|-------|`,
+    `| AI Commits | ${aiCommits}/${totalCommits} (${aiPercent}%) |`,
+    `| AI Sessions | ${sessions.length} |`,
+    `| AI Lines Added | +${totalAILines.toLocaleString()} |`,
+    `| Models | ${[...new Set(sessions.map((s) => s.model))].join(', ') || '—'} |`,
+    `| Agents | ${[...new Set(sessions.map((s) => s.agentName).filter(Boolean))].join(', ') || '—'} |`,
+    '',
+  ];
+
+  // Per-commit breakdown
+  if (commits.length > 0) {
+    summaryLines.push('### Per-Commit Breakdown', '');
+    summaryLines.push('| Commit | Author | AI | Tool |');
+    summaryLines.push('|--------|--------|----|------|');
+    for (const c of commits) {
+      const tag = c.aiToolDetected ? `**[AI]**` : `[Human]`;
+      const tool = c.aiToolDetected || '—';
+      const msg = (c.message || '').slice(0, 60);
+      summaryLines.push(`| \`${c.sha.slice(0, 8)}\` ${msg} | ${c.author || '—'} | ${tag} | ${tool} |`);
+    }
+  }
+
+  const title = `[AI ${aiPercent}%] ${aiCommits} of ${totalCommits} commits are AI-authored`;
+  const conclusion = aiPercent > 0 ? 'neutral' : 'success';
+
+  return createCheckRun(token, owner, repo, headSha, {
+    conclusion,
+    title,
+    summary: summaryLines.join('\n'),
+    detailsUrl: `${originBaseUrl}/sessions`,
+  }, baseUrl);
+}
+
 // ── Compute Check Status from Sessions ────────────────────────────
 
 export function computeCheckStatus(sessions: SessionForComment[]): {
@@ -737,6 +871,23 @@ export async function updatePRGitHubStatus(
       integration.apiBaseUrl,
     );
 
+    // Post AI attribution check run (shows [AI 73%] on commits)
+    try {
+      await postAIAttributionCheckRun(
+        integration.token,
+        parsed.owner,
+        parsed.repo,
+        headSha,
+        sessions,
+        commitShas,
+        repoId,
+        originBaseUrl,
+        integration.apiBaseUrl,
+      );
+    } catch (err) {
+      console.error('Failed to post AI attribution check run:', err);
+    }
+
     await prisma.pullRequest.update({
       where: { id: pr.id },
       data: { checkStatus: state },
@@ -855,6 +1006,23 @@ export async function updateSessionPRChecks(
           `${originBaseUrl}/sessions`,
           integration.apiBaseUrl,
         );
+
+        // Post AI attribution check run
+        try {
+          await postAIAttributionCheckRun(
+            integration.token,
+            parsed.owner,
+            parsed.repo,
+            headSha,
+            sessions,
+            prShas,
+            repoId,
+            originBaseUrl,
+            integration.apiBaseUrl,
+          );
+        } catch (err) {
+          console.error('Failed to post AI attribution check run:', err);
+        }
       }
 
       // Update comment

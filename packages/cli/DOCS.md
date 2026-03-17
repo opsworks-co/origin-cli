@@ -730,6 +730,24 @@ jobs:
 
 ---
 
+## GitHub Commit Annotations (Connected Mode)
+
+When using Origin with the GitHub App integration, PRs automatically get:
+
+- **Status Checks** — `origin/ai-governance` check that blocks or allows merges based on session review status
+- **PR Comments** — detailed AI governance report table with sessions, costs, tokens, and policy violations
+- **Commit Annotations** — `[AI 73%]` badge via GitHub Check Runs API showing per-commit AI attribution breakdown
+
+The Check Run appears as "Origin AI Attribution" on the PR Checks tab and includes:
+- Overall AI percentage across all PR commits
+- Number of AI sessions and total AI lines added
+- Models and agents used
+- Per-commit table showing which commits are `[AI]` vs `[Human]`
+
+This is automatic when the GitHub App is installed and `postChecks` is enabled in integration settings.
+
+---
+
 ## Plugin System
 
 Extend Origin with external agent plugins.

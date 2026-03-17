@@ -45,6 +45,7 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 - **Session Replay** — full transcript of every AI coding session in the dashboard
 - **Policy Enforcement** — rules enforced inside Claude Code and Cursor via MCP server
 - **PR Blocking** — GitHub status checks that block merges when AI sessions violate policies
+- **Commit Annotations** — `[AI 73%]` badge on GitHub PRs via Check Runs API with per-commit breakdown
 - **Intent Review** — approve, reject, or flag AI sessions before they ship
 - **Compliance Dashboard** — compliance score, policy violation trends, exportable reports
 - **Model Comparison** — cost, token usage, and approval rates across AI models
