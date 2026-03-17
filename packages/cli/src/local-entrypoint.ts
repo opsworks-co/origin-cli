@@ -200,11 +200,13 @@ export function writeSessionFiles(repoPath: string, data: SessionWriteData): voi
         execOpts,
       ).trim();
       const existing = JSON.parse(existingMeta) as SessionMetadata;
-      const existingPromptCount = existing.filesChanged?.length || 0;
-      const newPromptCount = data.prompts.length;
-      // Skip if existing data is richer (more prompts or higher cost)
-      if (existingPromptCount > 0 && newPromptCount === 0 && existing.cost.usd > data.costUsd) {
-        return; // Don't downgrade — existing data is better
+      // Always let 'ended' status overwrite 'running' — session-end has final data
+      if (data.status === 'running' && existing.status === 'ended') {
+        return; // Don't downgrade ended → running
+      }
+      // For same status, skip if existing data is richer
+      if (data.status === existing.status && existing.cost.usd > data.costUsd && data.prompts.length === 0) {
+        return;
       }
     } catch {
       // No existing data for this session — proceed with write

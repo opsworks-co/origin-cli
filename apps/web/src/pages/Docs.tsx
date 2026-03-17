@@ -2723,6 +2723,34 @@ origin audit --limit 50`}</CodeBlock>
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin mcp serve</code>
                 <P>Start the MCP server for real-time policy enforcement. Usually configured as an MCP server in AI tools rather than run directly.</P>
               </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin upgrade</code>
+                <P>Upgrade the Origin CLI to the latest version. Checks for updates and installs the newest release automatically.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin trail</code>
+                <P>Manage work trails &mdash; units of work (features, bug fixes) that span multiple AI sessions. Trails are tied to git branches and automatically link sessions.</P>
+                <CodeBlock>{`origin trail                     # show current trail for this branch
+origin trail create <name>       # create a new trail
+origin trail list                # list all trails
+origin trail update --status review  # update trail status
+origin trail assign <user>       # add a reviewer
+origin trail label <label>       # add a label`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin rewind</code>
+                <P>View and restore checkpoints (commits) from your current AI session. Lists commits with timestamps, files changed, and model info. Optionally rewind your working directory to a specific checkpoint.</P>
+                <CodeBlock>{`origin rewind                    # list checkpoints interactively
+origin rewind --to <sha>         # restore to a specific commit`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin doctor</code>
+                <P>Diagnose issues with your Origin setup. Checks configuration, hooks, API connectivity, and agent integrations.</P>
+              </div>
             </div>
           </div>
         )}

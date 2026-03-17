@@ -254,8 +254,8 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
       console.log(chalk.red(`  ✗ Cannot reach Origin API at ${config.apiUrl}`));
     }
   } else {
-    issues++;
-    console.log(chalk.yellow(`  ⚠ Not logged in — run: origin login`));
+    console.log(chalk.green(`  ✓ Standalone mode — sessions tracked locally in git`));
+    console.log(chalk.gray(`    Run ${chalk.white('origin login')} to connect to Origin platform`));
   }
 
   // Summary

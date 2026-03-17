@@ -50,7 +50,9 @@ export async function initCommand(opts: { standalone?: boolean } = {}) {
       await api.registerMachine({ hostname, machineId, detectedTools });
       console.log(chalk.green('\n✓ Machine registered with Origin'));
     } catch (err: any) {
-      console.log(chalk.yellow(`\n⚠ Could not register machine: ${err.message}`));
+      // Non-fatal — init continues in standalone-like mode
+      console.log(chalk.gray(`\n  Machine registration skipped (${err.message})`));
+      console.log(chalk.gray('  Sessions will still be tracked locally.'));
     }
   }
 
