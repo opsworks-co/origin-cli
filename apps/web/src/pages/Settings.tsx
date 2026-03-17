@@ -105,6 +105,15 @@ export default function Settings() {
   const [testingGitlab, setTestingGitlab] = useState(false);
   const [glTestResult, setGlTestResult] = useState<{ success: boolean; login?: string; error?: string } | null>(null);
 
+  // GitLab OAuth
+  const [gitlabOAuthStatus, setGitlabOAuthStatus] = useState<{
+    connected: boolean;
+    authType: string | null;
+    serverConfigured: boolean;
+    username?: string;
+  } | null>(null);
+  const [connectingGitlabOAuth, setConnectingGitlabOAuth] = useState(false);
+
   // GitHub App
   const [githubAppStatus, setGithubAppStatus] = useState<{
     installed: boolean;
@@ -213,13 +222,12 @@ export default function Settings() {
   }, [fetchOrg, fetchInvites]);
 
   // Fetch integrations/budget when tab is active
-  // Handle GitHub App callback URL params
+  // Handle GitHub App / GitLab OAuth callback URL params
   useEffect(() => {
     const githubAppResult = searchParams.get('github_app');
     if (githubAppResult === 'success') {
       setIntegrationSuccess('GitHub App installed successfully!');
       setActiveTabState('integrations');
-      // Clean up URL params
       const newParams = new URLSearchParams(searchParams);
       newParams.delete('github_app');
       newParams.set('tab', 'integrations');
@@ -237,6 +245,25 @@ export default function Settings() {
       setIntegrationSuccess('GitHub App installation requested. Your organization owner needs to approve it.');
       setActiveTabState('integrations');
     }
+
+    const gitlabOAuthResult = searchParams.get('gitlab_oauth');
+    if (gitlabOAuthResult === 'success') {
+      setIntegrationSuccess('GitLab connected via OAuth successfully!');
+      setActiveTabState('integrations');
+      const newParams = new URLSearchParams(searchParams);
+      newParams.delete('gitlab_oauth');
+      newParams.set('tab', 'integrations');
+      setSearchParams(newParams);
+    } else if (gitlabOAuthResult === 'error') {
+      const msg = searchParams.get('msg') || 'Unknown error';
+      setIntegrationError(`GitLab OAuth failed: ${msg}`);
+      setActiveTabState('integrations');
+      const newParams = new URLSearchParams(searchParams);
+      newParams.delete('gitlab_oauth');
+      newParams.delete('msg');
+      newParams.set('tab', 'integrations');
+      setSearchParams(newParams);
+    }
   }, []);
 
   useEffect(() => {
@@ -253,12 +280,14 @@ export default function Settings() {
   const fetchIntegrations = async () => {
     setLoadingIntegrations(true);
     try {
-      const [data, appStatus] = await Promise.all([
+      const [data, appStatus, glOAuthStatus] = await Promise.all([
         api.getIntegrations(),
         api.getGitHubAppStatus().catch(() => null),
+        api.getGitLabOAuthStatus().catch(() => null),
       ]);
       setIntegrations(data);
       if (appStatus) setGithubAppStatus(appStatus);
+      if (glOAuthStatus) setGitlabOAuthStatus(glOAuthStatus);
       // Populate form with existing GitHub integration
       const gh = data.find((i) => i.provider === 'github');
       if (gh) {
@@ -304,7 +333,7 @@ export default function Settings() {
   const fetchChatConfig = async () => {
     setChatLoading(true);
     try {
-      const res = await fetch('/api/settings/chat', { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+      const res = await fetch('/api/settings/chat', { headers: { Authorization: `Bearer ${localStorage.getItem('origin_token')}` } });
       const data = await res.json();
       setChatConfigured(data.configured || data.hasKey);
       setChatModel(data.model || 'claude-sonnet-4-20250514');
@@ -320,7 +349,7 @@ export default function Settings() {
     try {
       const res = await fetch('/api/settings/chat', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('origin_token')}` },
         body: JSON.stringify({ apiKey: chatApiKey, model: chatModel }),
       });
       const data = await res.json();
@@ -344,7 +373,7 @@ export default function Settings() {
     try {
       const res = await fetch('/api/settings/chat/test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('origin_token')}` },
         body: JSON.stringify({ apiKey: chatApiKey || undefined }),
       });
       const data = await res.json();
@@ -1744,7 +1773,9 @@ export default function Settings() {
                   <p className="text-sm text-gray-500">Post commit statuses and comments on merge requests</p>
                 </div>
               </div>
-              {integrations.find((i) => i.provider === 'gitlab') ? (
+              {gitlabOAuthStatus?.connected ? (
+                <span className="badge-green text-xs">Connected (OAuth)</span>
+              ) : integrations.find((i) => i.provider === 'gitlab') ? (
                 <span className="badge-green text-xs">Connected (PAT)</span>
               ) : (
                 <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded-full">Not Connected</span>
@@ -1755,7 +1786,77 @@ export default function Settings() {
               <p className="text-sm text-gray-500">Loading...</p>
             ) : (
               <div className="space-y-6">
+                {/* GitLab OAuth Section */}
+                {gitlabOAuthStatus?.serverConfigured && (
+                  <div className="space-y-3 pb-4 border-b border-gray-700">
+                    <p className="text-sm font-medium text-gray-300">OAuth App</p>
+                    {gitlabOAuthStatus.connected ? (
+                      <div className="flex items-center gap-3">
+                        <span className="text-sm text-gray-300">
+                          Connected as <strong className="text-white">@{gitlabOAuthStatus.username || 'unknown'}</strong>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              const result = await api.testGitLabOAuth();
+                              setGlTestResult(result);
+                            } catch (err: any) {
+                              setGlTestResult({ success: false, error: err.message });
+                            }
+                          }}
+                          className="btn-secondary text-sm"
+                        >
+                          Test
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await api.disconnectGitLabOAuth();
+                              setGitlabOAuthStatus({ ...gitlabOAuthStatus, connected: false, username: undefined });
+                              await fetchIntegrations();
+                              setIntegrationSuccess('GitLab OAuth disconnected.');
+                            } catch (err: any) {
+                              setIntegrationError(err.message);
+                            }
+                          }}
+                          className="text-sm text-red-400 hover:text-red-300"
+                        >
+                          Disconnect
+                        </button>
+                      </div>
+                    ) : (
+                      <div>
+                        <button
+                          type="button"
+                          disabled={connectingGitlabOAuth}
+                          onClick={async () => {
+                            setConnectingGitlabOAuth(true);
+                            try {
+                              const { authorizeUrl } = await api.getGitLabOAuthInstallUrl();
+                              window.location.href = authorizeUrl;
+                            } catch (err: any) {
+                              setIntegrationError(err.message);
+                              setConnectingGitlabOAuth(false);
+                            }
+                          }}
+                          className="btn-primary text-sm"
+                        >
+                          {connectingGitlabOAuth ? 'Redirecting...' : 'Connect with GitLab'}
+                        </button>
+                        <p className="text-xs text-gray-600 mt-1">Authorize via GitLab OAuth — no PAT needed</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* PAT Section (hidden when OAuth is active) */}
+                {!gitlabOAuthStatus?.connected && (
                 <form onSubmit={handleSaveGitlab} className="space-y-4">
+                  {gitlabOAuthStatus?.serverConfigured && (
+                    <p className="text-xs text-gray-500">Or connect with a Personal Access Token:</p>
+                  )}
                   <div>
                     <label className="block text-sm text-gray-400 mb-1">
                       Personal Access Token {integrations.find((i) => i.provider === 'gitlab') && (
@@ -1816,6 +1917,7 @@ export default function Settings() {
                     )}
                   </div>
                 </form>
+                )}
 
                 {/* Feature Toggles */}
                 {integrations.find((i) => i.provider === 'gitlab') && (

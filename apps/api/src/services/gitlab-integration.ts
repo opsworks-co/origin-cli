@@ -10,12 +10,173 @@ import {
 
 const GITLAB_API = 'https://gitlab.com/api/v4';
 
-function gitlabHeaders(token: string) {
-  return {
-    'PRIVATE-TOKEN': token,
+function gitlabHeaders(token: string, authType?: string) {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'User-Agent': 'Origin-AI-Governance/1.0',
   };
+  if (authType === 'gitlab_oauth') {
+    headers['Authorization'] = `Bearer ${token}`;
+  } else {
+    headers['PRIVATE-TOKEN'] = token;
+  }
+  return headers;
+}
+
+// ── GitLab OAuth Token Management ────────────────────────────────
+
+const oauthTokenCache = new Map<string, { token: string; expiresAt: Date }>();
+
+export function getGitLabOAuthConfig() {
+  const clientId = process.env.GITLAB_APP_ID;
+  const clientSecret = process.env.GITLAB_APP_SECRET;
+  const redirectUri = process.env.GITLAB_APP_REDIRECT_URI;
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    return { configured: false } as const;
+  }
+  return { configured: true, clientId, clientSecret, redirectUri } as const;
+}
+
+/** Strip /api/v4 from a GitLab API base URL to get the instance root for OAuth endpoints. */
+export function getGitLabOAuthBaseUrl(apiBaseUrl: string): string {
+  return apiBaseUrl.replace(/\/api\/v4\/?$/, '') || 'https://gitlab.com';
+}
+
+export async function exchangeGitLabOAuthCode(
+  code: string,
+  baseUrl: string = 'https://gitlab.com',
+): Promise<{ access_token: string; refresh_token: string; expires_in: number; created_at: number }> {
+  const config = getGitLabOAuthConfig();
+  if (!config.configured) throw new Error('GitLab OAuth not configured');
+
+  const res = await fetch(`${baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      code,
+      grant_type: 'authorization_code',
+      redirect_uri: config.redirectUri,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`GitLab OAuth token exchange failed (${res.status}): ${err}`);
+  }
+
+  return res.json() as any;
+}
+
+export async function refreshGitLabOAuthToken(
+  refreshToken: string,
+  baseUrl: string = 'https://gitlab.com',
+): Promise<{ access_token: string; refresh_token: string; expires_in: number; created_at: number }> {
+  const config = getGitLabOAuthConfig();
+  if (!config.configured) throw new Error('GitLab OAuth not configured');
+
+  const res = await fetch(`${baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+      redirect_uri: config.redirectUri,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`GitLab OAuth token refresh failed (${res.status}): ${err}`);
+  }
+
+  return res.json() as any;
+}
+
+/**
+ * Get a valid GitLab OAuth token, refreshing if expired.
+ * Mirrors getValidInstallationToken from github-app.ts.
+ */
+export async function getValidGitLabOAuthToken(config: {
+  id: string;
+  token: string;
+  settings: string;
+  baseUrl: string;
+}): Promise<string> {
+  const SAFETY_MARGIN_MS = 5 * 60 * 1000; // 5 minutes
+
+  // 1. Check in-memory cache
+  const cached = oauthTokenCache.get(config.id);
+  if (cached && cached.expiresAt.getTime() - Date.now() > SAFETY_MARGIN_MS) {
+    return cached.token;
+  }
+
+  // 2. Parse settings
+  let settings: { refreshToken?: string; tokenExpiresAt?: string; [key: string]: any };
+  try {
+    settings = JSON.parse(config.settings);
+  } catch {
+    throw new Error('Invalid GitLab OAuth settings in IntegrationConfig');
+  }
+
+  // 3. Check if DB-stored token is still valid
+  if (settings.tokenExpiresAt && config.token) {
+    const expiresAt = new Date(settings.tokenExpiresAt);
+    if (expiresAt.getTime() - Date.now() > SAFETY_MARGIN_MS) {
+      oauthTokenCache.set(config.id, { token: config.token, expiresAt });
+      return config.token;
+    }
+  }
+
+  // 4. Token expired — refresh
+  if (!settings.refreshToken) {
+    throw new Error('No refresh token stored — user needs to re-authorize GitLab OAuth');
+  }
+
+  const oauthBaseUrl = getGitLabOAuthBaseUrl(config.baseUrl || GITLAB_API);
+  const result = await refreshGitLabOAuthToken(settings.refreshToken, oauthBaseUrl);
+
+  // 5. Update cache
+  const expiresAt = new Date((result.created_at + result.expires_in) * 1000);
+  oauthTokenCache.set(config.id, { token: result.access_token, expiresAt });
+
+  // 6. Update DB (async, non-blocking)
+  const updatedSettings = {
+    ...settings,
+    refreshToken: result.refresh_token, // GitLab may rotate refresh tokens
+    tokenExpiresAt: expiresAt.toISOString(),
+  };
+  prisma.integrationConfig
+    .update({
+      where: { id: config.id },
+      data: {
+        token: result.access_token,
+        settings: JSON.stringify(updatedSettings),
+      },
+    })
+    .catch((err) => console.error('[gitlab-oauth] Failed to persist refreshed token:', err));
+
+  return result.access_token;
+}
+
+/** Get a valid token for a GitLab integration, handling both PAT and OAuth. */
+export async function getValidGitLabToken(integration: {
+  id: string;
+  token: string;
+  settings: string;
+  baseUrl: string;
+  authType?: string;
+}): Promise<{ token: string; authType: string }> {
+  const authType = (integration as any).authType || 'pat';
+  if (authType === 'gitlab_oauth') {
+    const token = await getValidGitLabOAuthToken(integration);
+    return { token, authType };
+  }
+  return { token: integration.token, authType: 'pat' };
 }
 
 /**
@@ -69,6 +230,7 @@ export async function postCommitStatus(
   description: string,
   targetUrl?: string,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ) {
   const url = `${baseUrl}/projects/${encodeProjectPath(projectPath)}/statuses/${sha}`;
   const body: Record<string, string> = {
@@ -82,7 +244,7 @@ export async function postCommitStatus(
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: gitlabHeaders(token),
+      headers: gitlabHeaders(token, authType),
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -105,13 +267,14 @@ export async function postMRComment(
   mrIid: number,
   body: string,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ): Promise<{ success: boolean; noteId?: string; error?: string }> {
   const url = `${baseUrl}/projects/${encodeProjectPath(projectPath)}/merge_requests/${mrIid}/notes`;
 
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: gitlabHeaders(token),
+      headers: gitlabHeaders(token, authType),
       body: JSON.stringify({ body }),
     });
     if (!res.ok) {
@@ -134,13 +297,14 @@ export async function updateMRComment(
   noteId: string,
   body: string,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const url = `${baseUrl}/projects/${encodeProjectPath(projectPath)}/merge_requests/${mrIid}/notes/${noteId}`;
 
   try {
     const res = await fetch(url, {
       method: 'PUT',
-      headers: gitlabHeaders(token),
+      headers: gitlabHeaders(token, authType),
       body: JSON.stringify({ body }),
     });
     if (!res.ok) {
@@ -160,10 +324,11 @@ export async function updateMRComment(
 export async function testGitLabConnection(
   token: string,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ): Promise<{ success: boolean; login?: string; error?: string }> {
   try {
     const res = await fetch(`${baseUrl}/user`, {
-      headers: gitlabHeaders(token),
+      headers: gitlabHeaders(token, authType),
     });
     if (!res.ok) {
       return { success: false, error: `HTTP ${res.status}` };
@@ -189,6 +354,7 @@ export interface GitLabRepoInfo {
 export async function listGitLabRepos(
   token: string,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ): Promise<{ success: boolean; repos?: GitLabRepoInfo[]; error?: string }> {
   const allRepos: GitLabRepoInfo[] = [];
   let page = 1;
@@ -197,7 +363,7 @@ export async function listGitLabRepos(
     while (true) {
       const res = await fetch(
         `${baseUrl}/projects?membership=true&per_page=100&page=${page}&order_by=updated_at`,
-        { headers: gitlabHeaders(token) },
+        { headers: gitlabHeaders(token, authType) },
       );
 
       if (!res.ok) {
@@ -249,13 +415,14 @@ export async function createGitLabWebhook(
   webhookUrl: string,
   secret: string,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ): Promise<{ success: boolean; hookId?: number; error?: string }> {
   const url = `${baseUrl}/projects/${encodeProjectPath(projectPath)}/hooks`;
 
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: gitlabHeaders(token),
+      headers: gitlabHeaders(token, authType),
       body: JSON.stringify({
         url: webhookUrl,
         token: secret,
@@ -286,13 +453,14 @@ export async function deleteGitLabWebhook(
   projectPath: string,
   hookId: number,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ): Promise<{ success: boolean; error?: string }> {
   const url = `${baseUrl}/projects/${encodeProjectPath(projectPath)}/hooks/${hookId}`;
 
   try {
     const res = await fetch(url, {
       method: 'DELETE',
-      headers: gitlabHeaders(token),
+      headers: gitlabHeaders(token, authType),
     });
 
     if (!res.ok && res.status !== 404) {
@@ -316,7 +484,7 @@ export async function getGitLabIntegrationConfig(orgId: string) {
   });
   if (!config) return null;
 
-  let settings: { postChecks: boolean; postComments: boolean; checkOnReview: boolean };
+  let settings: { postChecks: boolean; postComments: boolean; checkOnReview: boolean; [key: string]: any };
   try {
     settings = {
       postChecks: true,
@@ -328,8 +496,11 @@ export async function getGitLabIntegrationConfig(orgId: string) {
     settings = { postChecks: true, postComments: true, checkOnReview: true };
   }
 
+  const authType = (config as any).authType || 'pat';
+
   return {
     ...config,
+    authType,
     parsedSettings: settings,
     apiBaseUrl: config.baseUrl || GITLAB_API,
   };
@@ -342,12 +513,13 @@ export async function listMRCommits(
   projectPath: string,
   mrIid: number,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ): Promise<{ success: boolean; shas?: string[]; error?: string }> {
   const url = `${baseUrl}/projects/${encodeProjectPath(projectPath)}/merge_requests/${mrIid}/commits`;
 
   try {
     const res = await fetch(url, {
-      headers: gitlabHeaders(token),
+      headers: gitlabHeaders(token, authType),
     });
 
     if (!res.ok) {
@@ -375,6 +547,7 @@ export async function postAIAttributionNote(
   repoId: string,
   originBaseUrl: string,
   baseUrl: string = GITLAB_API,
+  authType?: string,
 ) {
   // Fetch all commits from DB to check which are AI-authored
   const commits = await prisma.commit.findMany({
@@ -415,7 +588,7 @@ export async function postAIAttributionNote(
 
   lines.push('', `[View in Origin](${originBaseUrl}/sessions)`);
 
-  return postMRComment(token, projectPath, mrIid, lines.join('\n'), baseUrl);
+  return postMRComment(token, projectPath, mrIid, lines.join('\n'), baseUrl, authType);
 }
 
 // ── Post Status + Comment for a MR ────────────────────────────────
@@ -429,6 +602,9 @@ export async function updateMRGitLabStatus(
 ) {
   const integration = await getGitLabIntegrationConfig(orgId);
   if (!integration) return;
+
+  // Get valid token (handles OAuth refresh)
+  const { token, authType } = await getValidGitLabToken(integration);
 
   const repo = await prisma.repo.findUnique({ where: { id: repoId } });
   if (!repo) return;
@@ -455,19 +631,20 @@ export async function updateMRGitLabStatus(
   if (integration.parsedSettings.postChecks) {
     const { state, description } = computeCheckStatus(sessions);
     await postCommitStatus(
-      integration.token,
+      token,
       projectPath,
       headSha,
       state,
       description,
       `${originBaseUrl}/sessions`,
       integration.apiBaseUrl,
+      authType,
     );
 
     // Post AI attribution as a MR note (GitLab has no check runs)
     try {
       await postAIAttributionNote(
-        integration.token,
+        token,
         projectPath,
         mrIid,
         sessions,
@@ -475,6 +652,7 @@ export async function updateMRGitLabStatus(
         repoId,
         originBaseUrl,
         integration.apiBaseUrl,
+        authType,
       );
     } catch (err) {
       console.error('Failed to post AI attribution note:', err);
@@ -492,20 +670,22 @@ export async function updateMRGitLabStatus(
 
     if (mr.commentId) {
       await updateMRComment(
-        integration.token,
+        token,
         projectPath,
         mrIid,
         mr.commentId,
         commentBody,
         integration.apiBaseUrl,
+        authType,
       );
     } else {
       const result = await postMRComment(
-        integration.token,
+        token,
         projectPath,
         mrIid,
         commentBody,
         integration.apiBaseUrl,
+        authType,
       );
       if (result.noteId) {
         await prisma.pullRequest.update({
@@ -525,6 +705,9 @@ export async function updateSessionMRChecks(
 ): Promise<number> {
   const integration = await getGitLabIntegrationConfig(orgId);
   if (!integration) return 0;
+
+  // Get valid token (handles OAuth refresh)
+  const { token, authType } = await getValidGitLabToken(integration);
 
   const session = await prisma.codingSession.findUnique({
     where: { id: sessionId },
@@ -578,13 +761,14 @@ export async function updateSessionMRChecks(
 
       if (integration.parsedSettings.postChecks) {
         await postCommitStatus(
-          integration.token,
+          token,
           projectPath,
           headSha,
           state,
           description,
           `${originBaseUrl}/sessions`,
           integration.apiBaseUrl,
+          authType,
         );
       }
 
@@ -592,20 +776,22 @@ export async function updateSessionMRChecks(
         const commentBody = buildSessionSummaryComment(sessions, originBaseUrl, org?.slug);
         if (mr.commentId) {
           await updateMRComment(
-            integration.token,
+            token,
             projectPath,
             mr.number,
             mr.commentId,
             commentBody,
             integration.apiBaseUrl,
+            authType,
           );
         } else {
           const result = await postMRComment(
-            integration.token,
+            token,
             projectPath,
             mr.number,
             commentBody,
             integration.apiBaseUrl,
+            authType,
           );
           if (result.noteId) {
             await prisma.pullRequest.update({

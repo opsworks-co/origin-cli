@@ -888,6 +888,33 @@ export function testGitHubApp() {
   }>('/api/github-app/test', { method: 'POST' });
 }
 
+// ---- GitLab OAuth -----------------------------------------------------------
+
+export function getGitLabOAuthInstallUrl() {
+  return request<{ authorizeUrl: string }>('/api/gitlab-oauth/install');
+}
+
+export function getGitLabOAuthStatus() {
+  return request<{
+    connected: boolean;
+    authType: string | null;
+    serverConfigured: boolean;
+    username?: string;
+  }>('/api/gitlab-oauth/status');
+}
+
+export function testGitLabOAuth() {
+  return request<{
+    success: boolean;
+    login?: string;
+    error?: string;
+  }>('/api/gitlab-oauth/test', { method: 'POST' });
+}
+
+export function disconnectGitLabOAuth() {
+  return request<{ success: boolean }>('/api/gitlab-oauth/disconnect', { method: 'POST' });
+}
+
 // ---- Pull Requests -----------------------------------------------------------
 
 export interface PullRequestInfo {

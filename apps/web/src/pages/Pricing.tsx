@@ -29,7 +29,7 @@ const TIERS = [
       'Up to 25 users',
       'AI Auto-Review',
       'Policy enforcement',
-      'GitHub integration',
+      'GitHub & GitLab integration',
       'Budget & cost controls',
       'Real-time streaming',
       'Priority support',

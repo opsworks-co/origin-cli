@@ -19,7 +19,7 @@ const FEATURES = [
   },
   {
     title: 'Repository Integration',
-    desc: 'Connect local or GitHub repos. Auto-sync commits, identify AI-authored code, and track authorship percentages.',
+    desc: 'Connect GitHub or GitLab repos. Auto-sync commits, identify AI-authored code, and track authorship percentages.',
     icon: '\uD83D\uDCC1',
   },
   {
@@ -214,7 +214,7 @@ export default function Landing() {
                 },
                 {
                   step: '3',
-                  title: 'Developer pushes to GitHub',
+                  title: 'Developer pushes to GitHub/GitLab',
                   desc: 'Origin\'s webhook receives the push event and links commits to AI sessions. It knows exactly which code was AI-authored and which session produced it.',
                   accent: 'bg-cyan-600',
                 },
@@ -287,7 +287,7 @@ export default function Landing() {
           {[
             { step: '1', title: 'Code with AI', desc: 'Developers use Claude Code, Cursor, or any AI agent. Origin hooks capture every prompt, tool call, and file change automatically.' },
             { step: '2', title: 'Origin evaluates', desc: 'Policy engine checks file restrictions, model allowlists, and cost limits. Secret scanner flags leaked credentials. Sessions are linked to PRs.' },
-            { step: '3', title: 'Team reviews', desc: 'Admin reviews AI sessions, approves or rejects. GitHub check updates automatically. PR can merge only when governance passes.' },
+            { step: '3', title: 'Team reviews', desc: 'Admin reviews AI sessions, approves or rejects. PR/MR checks update automatically. Code can merge only when governance passes.' },
           ].map((item) => (
             <div key={item.step} className="card relative">
               <div className="absolute -top-3 -left-3 w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
@@ -336,7 +336,7 @@ origin init           # register machine, detect tools, install hooks
                 ['Prompt & transcript capture', true, true, true],
                 ['AI blame (line-level attribution)', true, false, true],
                 ['Policy enforcement (file, model, cost)', true, false, false],
-                ['PR merge gating (GitHub checks)', true, false, false],
+                ['PR/MR merge gating (GitHub & GitLab)', true, false, false],
                 ['Secret & PII scanning', true, false, false],
                 ['Budget & cost controls', true, false, false],
                 ['Human review workflow', true, false, false],
@@ -344,7 +344,7 @@ origin init           # register machine, detect tools, install hooks
                 ['MCP server (real-time enforcement)', true, false, false],
                 ['CLI with 30+ commands', true, false, true],
                 ['Self-hosted / open-source', true, false, true],
-                ['GitHub App integration', true, false, false],
+                ['GitHub & GitLab integration', true, false, false],
                 ['Team roles & RBAC', true, false, false],
                 ['Model comparison analytics', true, false, false],
               ].map(([feature, origin, entire, gitai], i) => (

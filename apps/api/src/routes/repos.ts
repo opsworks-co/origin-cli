@@ -12,6 +12,7 @@ import {
 } from '../services/github-integration.js';
 import {
   getGitLabIntegrationConfig,
+  getValidGitLabToken,
   listGitLabRepos,
   createGitLabWebhook,
   deleteGitLabWebhook,
@@ -280,7 +281,8 @@ router.get('/gitlab/discover', requireRole('MEMBER'), async (req: AuthRequest, r
       return res.status(400).json({ error: 'GitLab not connected. Add a GitLab token in Settings → Integrations.' });
     }
 
-    const result = await listGitLabRepos(integration.token, integration.apiBaseUrl);
+    const { token, authType } = await getValidGitLabToken(integration);
+    const result = await listGitLabRepos(token, integration.apiBaseUrl, authType);
     if (!result.success || !result.repos) {
       return res.status(502).json({ error: result.error || 'Failed to fetch repos from GitLab' });
     }
@@ -329,6 +331,8 @@ router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res
       return res.status(400).json({ error: 'GitLab not connected' });
     }
 
+    const { token: glToken, authType: glAuthType } = await getValidGitLabToken(integration);
+
     const existingRepos = await prisma.repo.findMany({
       where: { orgId: req.user!.orgId, provider: 'gitlab' },
       select: { id: true, path: true },
@@ -374,11 +378,12 @@ router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res
         });
 
         const glResult = await createGitLabWebhook(
-          integration.token,
+          glToken,
           projectPath,
           webhookUrl,
           secret,
           integration.apiBaseUrl,
+          glAuthType,
         );
 
         webhookCreated = glResult.success;
@@ -917,11 +922,13 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
           const glIntegration = await getGitLabIntegrationConfig(req.user!.orgId);
           const projectPath = parseGitLabProjectPath(existing.path);
           if (glIntegration && projectPath) {
+            const { token: glTok, authType: glAt } = await getValidGitLabToken(glIntegration);
             await deleteGitLabWebhook(
-              glIntegration.token,
+              glTok,
               projectPath,
               wh.githubWebhookId,
               glIntegration.apiBaseUrl,
+              glAt,
             );
           }
         } else {

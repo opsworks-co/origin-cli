@@ -5,6 +5,7 @@ type Section =
   | 'overview'
   | 'workflow'
   | 'integrations'
+  | 'gitlab-integration'
   | 'session-tracking'
   | 'repos'
   | 'sessions'
@@ -39,6 +40,7 @@ const SECTIONS: { key: Section; label: string; group?: string }[] = [
   { key: 'workflow', label: 'How It Works' },
   { key: 'session-tracking', label: 'Session Tracking', group: 'Setup Guides' },
   { key: 'integrations', label: 'GitHub Integration' },
+  { key: 'gitlab-integration', label: 'GitLab Integration' },
   { key: 'repos', label: 'Repositories' },
   { key: 'agents', label: 'Agents' },
   { key: 'policies', label: 'Policies' },
@@ -222,8 +224,8 @@ export default function Docs() {
                 review requirements.
               </Li>
               <Li>
-                <strong className="text-gray-200">Integrations</strong> &mdash; Connect to GitHub for auto-discovery
-                of repos, automatic webhook setup, PR status checks, and session summary comments.
+                <strong className="text-gray-200">Integrations</strong> &mdash; Connect to GitHub or GitLab for auto-discovery
+                of repos, automatic webhook setup, PR/MR status checks, and session summary comments.
               </Li>
               <Li>
                 <strong className="text-gray-200">Reviews</strong> &mdash; Every AI session can be
@@ -234,11 +236,11 @@ export default function Docs() {
             <H2>Recommended Setup Order</H2>
             <P>Follow this order for the smoothest onboarding experience:</P>
             <div className="space-y-1 mb-4">
-              <Step n={1} title="Connect GitHub Integration">
-                Go to Settings &rarr; Integrations and add your GitHub Personal Access Token.
+              <Step n={1} title="Connect GitHub or GitLab">
+                Go to Settings &rarr; Integrations and connect via OAuth or Personal Access Token.
               </Step>
               <Step n={2} title="Import Repositories">
-                Go to Repositories &rarr; &ldquo;Import from GitHub&rdquo; to auto-discover and import repos with one click.
+                Go to Repositories &rarr; &ldquo;Import from GitHub&rdquo; or &ldquo;Import from GitLab&rdquo; to auto-discover and import repos with one click.
               </Step>
               <Step n={3} title="Register Agents">
                 Go to Agents and register the AI tools your team uses (Claude Code, Cursor, Copilot, etc.).
@@ -264,8 +266,8 @@ export default function Docs() {
 
             <H2>1. Setup (one-time)</H2>
             <ul className="space-y-2 mb-4">
-              <Li>Admin creates an org, connects GitHub (PAT or GitHub App) in Settings &rarr; Integrations</Li>
-              <Li>Import repos from GitHub &mdash; auto-creates webhooks on each repo</Li>
+              <Li>Admin creates an org, connects GitHub or GitLab (PAT, GitHub App, or GitLab OAuth) in Settings &rarr; Integrations</Li>
+              <Li>Import repos from GitHub or GitLab &mdash; auto-creates webhooks on each repo</Li>
               <Li>Create policies: block payments files, require review for infra, set cost limits, restrict models</Li>
               <Li>Register agents (Claude Code, Cursor, Copilot, Gemini CLI, Aider, etc.)</Li>
             </ul>
@@ -779,6 +781,141 @@ origin stats`}</CodeBlock>
           </div>
         )}
 
+        {/* ─── GITLAB INTEGRATION ────────────────────────────────────── */}
+        {active === 'gitlab-integration' && (
+          <div>
+            <h1 className="text-2xl font-bold mb-2">GitLab Integration</h1>
+            <P>
+              Connect GitLab to enable automatic repo discovery, one-click import with webhook setup,
+              MR commit statuses, and AI governance comments on merge requests.
+              Origin supports both <strong className="text-gray-200">OAuth App</strong> (recommended) and
+              <strong className="text-gray-200">Personal Access Token</strong> authentication.
+            </P>
+
+            <H2>Option A: Connect via OAuth (Recommended)</H2>
+            <P>
+              OAuth is the easiest way to connect &mdash; no token to copy, just authorize with one click.
+              This requires the Origin server to have a GitLab OAuth Application configured.
+            </P>
+
+            <Step n={1} title="Click Connect with GitLab">
+              <p>
+                Navigate to <strong className="text-gray-200">Settings &rarr; Integrations &rarr; GitLab</strong>.
+                If OAuth is available, you&apos;ll see a <strong className="text-gray-200">Connect with GitLab</strong> button.
+                Click it to be redirected to GitLab.
+              </p>
+            </Step>
+
+            <Step n={2} title="Authorize the Application">
+              <p>
+                On GitLab, review the permissions and click <strong className="text-gray-200">Authorize</strong>.
+                Origin requests the <code className="text-indigo-400">api</code> scope for full access to the GitLab API.
+              </p>
+            </Step>
+
+            <Step n={3} title="Done!">
+              <p>
+                You&apos;ll be redirected back to Origin with a success message.
+                Your GitLab username will be displayed, and the access token is automatically managed
+                (refreshed every 2 hours without any action from you).
+              </p>
+            </Step>
+
+            <H2>Option B: Connect via Personal Access Token</H2>
+            <P>
+              Use this method for self-hosted GitLab instances or when OAuth is not configured.
+            </P>
+
+            <Step n={1} title="Generate a GitLab Personal Access Token">
+              <p className="mb-2">
+                Go to <strong className="text-gray-200">GitLab &rarr; User Settings &rarr; Access Tokens</strong> and
+                click &ldquo;Add new token&rdquo;.
+              </p>
+              <p className="mb-2">Required scopes:</p>
+              <ul className="space-y-1 ml-4">
+                <Li><code className="text-indigo-400">api</code> &mdash; Full API access (needed for commit statuses, MR comments, webhooks, and repo listing)</Li>
+              </ul>
+              <p className="mt-2">Set an expiration date (or leave blank for no expiry on self-hosted instances).</p>
+            </Step>
+
+            <Step n={2} title="Add the Token in Origin">
+              <p className="mb-2">
+                Navigate to <strong className="text-gray-200">Settings &rarr; Integrations</strong> in Origin.
+                In the GitLab section:
+              </p>
+              <ul className="space-y-1 ml-4">
+                <Li>Paste your token in the <strong className="text-gray-200">Personal Access Token</strong> field</Li>
+                <Li>(Optional) Set the <strong className="text-gray-200">API Base URL</strong> for self-hosted GitLab (e.g. <code className="text-indigo-400">https://gitlab.yourcompany.com/api/v4</code>)</Li>
+                <Li>Toggle the features you want: commit statuses, MR comments, update on review</Li>
+                <Li>Click <strong className="text-gray-200">Connect GitLab</strong></Li>
+              </ul>
+            </Step>
+
+            <Step n={3} title="Test the Connection">
+              <p>
+                Click <strong className="text-gray-200">Test Connection</strong>. If successful, you&apos;ll see your
+                GitLab username confirming the token is valid.
+              </p>
+            </Step>
+
+            <Step n={4} title="Import Repositories">
+              <p className="mb-2">
+                Go to <strong className="text-gray-200">Repositories</strong> and click <strong className="text-gray-200">Import from GitLab</strong>.
+                Origin fetches all projects your token has access to, shows them in a list, and lets you
+                select which to monitor. Click &ldquo;Import Selected&rdquo; and Origin will:
+              </p>
+              <ul className="space-y-1 ml-4">
+                <Li>Create each repository in Origin</Li>
+                <Li>Generate a webhook secret</Li>
+                <Li>Automatically create a webhook on the GitLab project (push + merge request events)</Li>
+              </ul>
+              <p className="mt-2">No manual webhook configuration needed.</p>
+            </Step>
+
+            <H2>Features</H2>
+
+            <H3>MR Commit Statuses</H3>
+            <P>
+              When enabled, Origin posts a commit status (<code className="text-indigo-400">origin/ai-governance</code>)
+              on every merge request that contains AI-authored commits. The status reflects the review state:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><span className="text-green-400">Success</span> &mdash; All linked AI sessions are approved</Li>
+              <Li><span className="text-amber-400">Pending</span> &mdash; Sessions awaiting human review</Li>
+              <Li><span className="text-red-400">Failed</span> &mdash; One or more sessions rejected or flagged</Li>
+            </ul>
+
+            <H3>MR Summary Comments</H3>
+            <P>
+              When enabled, Origin posts (or updates) an AI Attribution Report on each MR showing:
+              AI commit percentage, models used, agents used, per-commit breakdown, and session costs.
+            </P>
+
+            <H3>Differences from GitHub</H3>
+            <ul className="space-y-2 mb-4">
+              <Li>
+                <strong className="text-gray-200">No Check Runs</strong> &mdash; GitLab does not have a Check Runs
+                equivalent. Origin posts AI attribution as a merge request note instead.
+              </Li>
+              <Li>
+                <strong className="text-gray-200">Webhook Auth</strong> &mdash; GitLab uses a plain secret token
+                (compared via <code className="text-indigo-400">X-Gitlab-Token</code> header) instead of HMAC signatures.
+              </Li>
+              <Li>
+                <strong className="text-gray-200">Self-Hosted</strong> &mdash; Set the API Base URL to your instance&apos;s
+                API endpoint, e.g. <code className="text-indigo-400">https://gitlab.yourcompany.com/api/v4</code>.
+              </Li>
+            </ul>
+
+            <H2>Disconnecting</H2>
+            <P>
+              Click <strong className="text-gray-200">Disconnect</strong> in Settings &rarr; Integrations.
+              For OAuth connections, Origin will also revoke the token on GitLab.
+              Note: delete imported repos in Origin first to auto-remove GitLab webhooks.
+            </P>
+          </div>
+        )}
+
         {/* ─── REPOSITORIES ────────────────────────────────────── */}
         {active === 'repos' && (
           <div>
@@ -1159,8 +1296,8 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
 
             <H2>Integrations</H2>
             <P>
-              The Integrations tab manages connections to external services. Currently supports GitHub
-              (GitLab coming soon). See the <strong className="text-gray-200">GitHub Integration</strong> guide for setup details.
+              The Integrations tab manages connections to external services. Supports GitHub
+              (PAT or GitHub App) and GitLab (PAT or OAuth). See the <strong className="text-gray-200">GitHub Integration</strong> and <strong className="text-gray-200">GitLab Integration</strong> guides for setup details.
             </P>
 
             <H3>Integration Features</H3>
@@ -2265,7 +2402,7 @@ GET /api/pull-requests
 POST /api/pull-requests/:id/recheck`}</CodeBlock>
 
             <Callout type="warning">
-              PR checks require a GitHub integration (PAT or GitHub App) configured in Settings &rarr; Integrations
+              PR/MR checks require a GitHub or GitLab integration configured in Settings &rarr; Integrations
               with &ldquo;Post Checks&rdquo; and &ldquo;Post Comments&rdquo; enabled. Webhooks must be active on the repo.
             </Callout>
           </div>
