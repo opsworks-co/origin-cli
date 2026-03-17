@@ -143,9 +143,10 @@ program.command('diff [range]')
   .action(diffCommand);
 
 program.command('stats')
-  .description('View dashboard statistics with attribution breakdown')
-  .option('--local', 'Compute stats from local git data')
-  .option('-r, --range <range>', 'Commit range for local stats (e.g., HEAD~50..HEAD)')
+  .description('View attribution statistics for the current repo')
+  .option('--local', 'Compute stats from local git data (default when in a repo)')
+  .option('--dashboard', 'Show org-wide dashboard stats from Origin API')
+  .option('-r, --range <range>', 'Commit range (e.g., HEAD~50..HEAD)')
   .action(statsCommand);
 
 // ─── Search & Analysis ───────────────────────────────────────────────────

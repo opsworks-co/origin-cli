@@ -561,11 +561,10 @@ export function computeAttributionStats(
   let totalLinesAdded = 0, aiLinesAdded = 0, humanLinesAdded = 0, mixedLinesAdded = 0;
 
   try {
-    // Use --all if default range to handle repos with fewer than 50 commits
-    const logRange = commitRange ? range : '';
-    const logCmd = logRange
-      ? `git log --format=%H ${logRange}`
-      : `git log --format=%H -50`;
+    // Scope to current branch only (--first-parent avoids counting merged-in history)
+    const logCmd = commitRange
+      ? `git log --first-parent --format=%H ${range}`
+      : `git log --first-parent --format=%H -50`;
     const commits = execSync(
       logCmd,
       execOpts(repoPath),

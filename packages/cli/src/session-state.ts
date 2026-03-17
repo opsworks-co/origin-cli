@@ -189,6 +189,11 @@ export function listActiveSessions(cwd?: string): SessionState[] {
         if (entry.startsWith('origin-session') && entry.endsWith('.json')) {
           try {
             const state = JSON.parse(fs.readFileSync(path.join(resolvedGitDir, entry), 'utf-8'));
+            // Extract sessionTag from filename: origin-session-TAG.json or origin-session.json
+            if (!state.sessionTag) {
+              const tagMatch = entry.match(/^origin-session-(.+)\.json$/);
+              if (tagMatch) state.sessionTag = tagMatch[1];
+            }
             sessions.push(state);
           } catch { /* skip corrupt files */ }
         }

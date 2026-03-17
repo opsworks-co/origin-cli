@@ -79,27 +79,26 @@ function displayLocalStats(stats: AttributionStats): void {
 
 // ─── Command ──────────────────────────────────────────────────────────────
 
-export async function statsCommand(opts?: { local?: boolean; range?: string }) {
-  // Auto-set local mode if not connected to platform
-  if (!isConnectedMode() && !opts?.local) {
-    opts = { ...opts, local: true };
-  }
-  // Local stats mode
-  if (opts?.local) {
-    const cwd = process.cwd();
-    const repoPath = getGitRoot(cwd);
-    if (!repoPath) {
-      console.error(chalk.red('Error: Not in a git repository. --local requires a git repo.'));
-      return;
-    }
+export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean; range?: string }) {
+  // Default to local stats when in a git repo (per-repo, not global)
+  // Use --dashboard to see org-wide API stats
+  const cwd = process.cwd();
+  const repoPath = getGitRoot(cwd);
 
+  if (opts?.dashboard && isConnectedMode()) {
+    // Skip local — go straight to API dashboard stats
+  } else if (repoPath) {
+    // Always show per-repo local stats when in a git repo
     try {
-      const range = opts.range || undefined;
+      const range = opts?.range || undefined;
       const stats = computeAttributionStats(repoPath, range);
       displayLocalStats(stats);
     } catch (err: any) {
       console.error(chalk.red(`Error computing local stats: ${err.message}`));
     }
+    return;
+  } else if (!isConnectedMode()) {
+    console.error(chalk.red('Error: Not in a git repository.'));
     return;
   }
 

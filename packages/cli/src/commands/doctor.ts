@@ -5,6 +5,8 @@ import os from 'os';
 import { execSync } from 'child_process';
 import { loadConfig } from '../config.js';
 import { loadSessionState, clearSessionState, getGitRoot, getGitDir, listActiveSessions } from '../session-state.js';
+import { captureGitState } from '../git-capture.js';
+import { writeSessionFiles } from '../local-entrypoint.js';
 
 /**
  * origin doctor
@@ -71,6 +73,37 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
       }
       if (opts?.fix) {
         for (const s of stuckSessions) {
+          // Finalize session: write ended metadata with git capture data
+          try {
+            const gitCapture = captureGitState(s.repoPath || repoPath!, s.headShaAtStart);
+            const durationMs = Date.now() - new Date(s.startedAt).getTime();
+            writeSessionFiles(s.repoPath || repoPath!, {
+              sessionId: s.sessionId,
+              model: s.model,
+              startedAt: s.startedAt,
+              endedAt: new Date().toISOString(),
+              durationMs,
+              status: 'ended',
+              costUsd: 0,
+              tokensUsed: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              toolCalls: 0,
+              linesAdded: gitCapture.linesAdded || 0,
+              linesRemoved: gitCapture.linesRemoved || 0,
+              prompts: s.prompts?.map((text, i) => ({ index: i, text, filesChanged: [] })) || [],
+              filesChanged: gitCapture.commitDetails?.flatMap(c => c.filesChanged) || [],
+              git: {
+                branch: s.branch || '',
+                headBefore: s.headShaAtStart || '',
+                headAfter: gitCapture.headAfter || '',
+                commitShas: gitCapture.commitShas || [],
+              },
+              summary: '',
+              originUrl: '',
+              changes: [],
+            });
+          } catch { /* best effort */ }
           clearSessionState(cwd, s.sessionTag);
           fixed++;
         }
