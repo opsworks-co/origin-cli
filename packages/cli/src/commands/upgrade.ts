@@ -6,7 +6,7 @@ import os from 'os';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-const SERVER_URL = 'https://origin-platform.fly.dev';
+const SERVER_URL = 'https://getorigin.io';
 const VERSION_URL = `${SERVER_URL}/cli/version.json`;
 const TARBALL_URL = `${SERVER_URL}/cli/origin-cli-latest.tgz`;
 

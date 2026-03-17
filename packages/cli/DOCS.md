@@ -30,7 +30,7 @@ Origin is an AI coding governance platform that tracks, attributes, and governs 
 
 ```bash
 # Install from Origin platform
-npm i -g https://origin-platform.fly.dev/cli/origin-cli-latest.tgz
+npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ```
 
 Verify:
@@ -86,7 +86,7 @@ Authenticate with your Origin server.
 ```bash
 origin login
 # Prompts for:
-#   API URL (default: https://origin-platform.fly.dev)
+#   API URL (default: https://getorigin.io)
 #   API Key (from your Origin dashboard)
 ```
 
@@ -611,7 +611,7 @@ origin config set telemetry true
 
 | Key | Values | Default | Description |
 |-----|--------|---------|-------------|
-| `apiUrl` | URL | `https://origin-platform.fly.dev` | Origin API URL |
+| `apiUrl` | URL | `https://getorigin.io` | Origin API URL |
 | `apiKey` | string | — | API key (use `origin login`) |
 | `commitLinking` | `always` \| `prompt` \| `never` | `always` | Add Origin-Session trailers to commits |
 | `pushStrategy` | `auto` \| `prompt` \| `false` | `auto` | When to push origin-sessions branch |

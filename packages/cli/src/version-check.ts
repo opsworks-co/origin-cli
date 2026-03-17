@@ -5,7 +5,7 @@ import os from 'os';
 const CACHE_PATH = path.join(os.homedir(), '.origin', 'last-update-check.json');
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const FETCH_TIMEOUT_MS = 3000;
-const VERSION_URL = 'https://origin-platform.fly.dev/cli/version.json';
+const VERSION_URL = 'https://getorigin.io/cli/version.json';
 
 interface UpdateCheckResult {
   current: string;

@@ -59,7 +59,7 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 ### 1. Install the CLI
 
 ```bash
-npm i -g https://origin-platform.fly.dev/cli/origin-cli-latest.tgz
+npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ```
 
 ### 2. Enable tracking
@@ -122,7 +122,7 @@ Open **http://localhost:5176** — Demo login: `artem@origin.dev` / `password123
 ### 2. Install CLI and connect
 
 ```bash
-npm i -g https://origin-platform.fly.dev/cli/origin-cli-latest.tgz
+npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 origin login       # authenticate with your Origin instance
 origin init        # register machine, auto-detect AI tools, install global hooks
 ```
@@ -165,7 +165,7 @@ origin-v2/
 **Ports:**
 - API: `http://localhost:4002`
 - Web: `http://localhost:5176`
-- Production: `https://origin-platform.fly.dev`
+- Production: `https://getorigin.io`
 
 ---
 

@@ -503,7 +503,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
     // Start background heartbeat daemon (only in connected mode)
     if (connected && config) {
-      startHeartbeat(sessionId, config.apiUrl || 'https://origin-platform.fly.dev', config.apiKey);
+      startHeartbeat(sessionId, config.apiUrl || 'https://getorigin.io', config.apiKey);
       debugLog('session-start', 'heartbeat started', { sessionId });
     }
 
@@ -774,7 +774,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     }
 
     // Write session files to origin-sessions branch + push on every Stop
-    const apiUrl = config?.apiUrl || 'https://origin-platform.fly.dev';
+    const apiUrl = config?.apiUrl || 'https://getorigin.io';
     const gitCapture = captureGitState(state.repoPath, state.headShaAtStart);
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings, gitCapture,
@@ -878,7 +878,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     }
 
     // Write session files to origin-sessions branch (directory per session)
-    const apiUrl = config?.apiUrl || 'https://origin-platform.fly.dev';
+    const apiUrl = config?.apiUrl || 'https://getorigin.io';
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings, gitCapture,
       status: 'ended', apiUrl,
@@ -1004,7 +1004,7 @@ export async function handlePostCommit(): Promise<void> {
   const currentBranch = getBranch(hookCwd);
 
   // Add Origin-Session trailer to commit message (like Entire's Entire-Checkpoint trailer)
-  const apiUrl = config?.apiUrl || 'https://origin-platform.fly.dev';
+  const apiUrl = config?.apiUrl || 'https://getorigin.io';
 
   // Get ALL active sessions for this repo (concurrent session support)
   const activeSessions = listActiveSessions(hookCwd);

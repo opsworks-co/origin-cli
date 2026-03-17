@@ -330,7 +330,7 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
 
     // Dashboard link (connected only)
     if (connected && config) {
-      const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+      const apiUrl = config.apiUrl || 'https://getorigin.io';
       console.log(chalk.gray(`\n    ${chalk.blue(`${apiUrl}/sessions/${session.id}`)}`));
     }
 

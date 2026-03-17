@@ -84,7 +84,7 @@ export async function statusCommand() {
     }
 
     // Origin dashboard link
-    const apiUrl = config?.apiUrl || 'https://origin-platform.fly.dev';
+    const apiUrl = config?.apiUrl || 'https://getorigin.io';
     console.log(chalk.gray(`    Dashboard:   ${chalk.blue(`${apiUrl}/sessions/${state.sessionId}`)}`));
   } else if (repoPath) {
     console.log(chalk.gray('\n  No active session in this repo'));
