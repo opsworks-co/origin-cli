@@ -22,6 +22,7 @@ export default function Prompts() {
   const [query, setQuery] = useState('');
   const [model, setModel] = useState('');
   const [repoId, setRepoId] = useState('');
+  const [file, setFile] = useState('');
   const [offset, setOffset] = useState(0);
   const LIMIT = 20;
 
@@ -34,11 +35,11 @@ export default function Prompts() {
 
   const fetchPrompts = useCallback(() => {
     setLoading(true);
-    api.searchPrompts({ q: query || undefined, model: model || undefined, repoId: repoId || undefined, limit: LIMIT, offset })
+    api.searchPrompts({ q: query || undefined, model: model || undefined, repoId: repoId || undefined, file: file || undefined, limit: LIMIT, offset })
       .then((r) => { setPrompts(r.prompts); setTotal(r.total); })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [query, model, repoId, offset]);
+  }, [query, model, repoId, file, offset]);
 
   const fetchPatterns = useCallback(() => {
     setLoading(true);
@@ -53,7 +54,7 @@ export default function Prompts() {
     else fetchPatterns();
   }, [viewMode, fetchPrompts, fetchPatterns]);
 
-  useEffect(() => { setOffset(0); }, [query, model, repoId]);
+  useEffect(() => { setOffset(0); }, [query, model, repoId, file]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -97,25 +98,33 @@ export default function Prompts() {
       {viewMode === 'search' ? (
         <>
           {/* Search & Filters */}
-          <form onSubmit={handleSearch} className="flex items-center gap-3">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              className="input flex-1"
-              placeholder="Search prompts by text..."
-            />
-            <select value={model} onChange={(e) => setModel(e.target.value)} className="select w-40">
-              <option value="">All Models</option>
-              <option value="claude-sonnet-4-20250514">Sonnet 4</option>
-              <option value="claude-opus-4-20250514">Opus 4</option>
-              <option value="gpt-4o">GPT-4o</option>
-              <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-            </select>
-            <select value={repoId} onChange={(e) => setRepoId(e.target.value)} className="select w-40">
-              <option value="">All Repos</option>
-              {repos.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-            </select>
-            <button type="submit" className="btn-primary">Search</button>
+          <form onSubmit={handleSearch} className="space-y-3">
+            <div className="flex items-center gap-3">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                className="input flex-1"
+                placeholder="Search prompts by text..."
+              />
+              <input
+                value={file}
+                onChange={(e) => setFile(e.target.value)}
+                className="input w-56"
+                placeholder="Filter by file path..."
+              />
+              <select value={model} onChange={(e) => setModel(e.target.value)} className="select w-40">
+                <option value="">All Models</option>
+                <option value="claude-sonnet-4-20250514">Sonnet 4</option>
+                <option value="claude-opus-4-20250514">Opus 4</option>
+                <option value="gpt-4o">GPT-4o</option>
+                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+              </select>
+              <select value={repoId} onChange={(e) => setRepoId(e.target.value)} className="select w-40">
+                <option value="">All Repos</option>
+                {repos.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+              </select>
+              <button type="submit" className="btn-primary">Search</button>
+            </div>
           </form>
 
           {/* Results */}

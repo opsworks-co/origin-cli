@@ -337,4 +337,152 @@ router.put('/org', requireRole('ADMIN'), async (req: AuthRequest, res: Response)
   }
 });
 
+// ── AI Chat Configuration ────────────────────────────────────────────────────
+
+// GET /api/settings/chat — get chat config
+router.get('/chat', async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const config = await prisma.integrationConfig.findFirst({
+      where: { orgId, provider: 'llm' },
+    });
+
+    if (!config) {
+      return res.json({
+        configured: false,
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        hasKey: !!process.env.ANTHROPIC_API_KEY,
+        source: process.env.ANTHROPIC_API_KEY ? 'environment' : 'none',
+      });
+    }
+
+    let settings: Record<string, any> = {};
+    try { settings = JSON.parse(config.settings); } catch {}
+
+    res.json({
+      configured: true,
+      provider: 'anthropic',
+      model: settings.model || 'claude-sonnet-4-20250514',
+      hasKey: true,
+      source: 'org',
+    });
+  } catch (err) {
+    console.error('Get chat config error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/settings/chat — save chat config
+router.put('/chat', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const { apiKey, model } = req.body;
+
+    if (!apiKey) {
+      return res.status(400).json({ error: 'API key is required' });
+    }
+
+    const validModels = [
+      'claude-sonnet-4-20250514',
+      'claude-opus-4-20250514',
+      'claude-haiku-4-5-20251001',
+    ];
+    const selectedModel = validModels.includes(model) ? model : 'claude-sonnet-4-20250514';
+
+    const settings = JSON.stringify({ model: selectedModel });
+
+    const existing = await prisma.integrationConfig.findFirst({
+      where: { orgId, provider: 'llm' },
+    });
+
+    if (existing) {
+      await prisma.integrationConfig.update({
+        where: { id: existing.id },
+        data: { token: apiKey, settings },
+      });
+    } else {
+      await prisma.integrationConfig.create({
+        data: { orgId, provider: 'llm', token: apiKey, settings },
+      });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        userId: req.user!.id,
+        action: 'CHAT_CONFIG_UPDATED',
+        resource: 'llm',
+        metadata: JSON.stringify({ model: selectedModel }),
+      },
+    });
+
+    res.json({ ok: true, model: selectedModel });
+  } catch (err) {
+    console.error('Save chat config error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/settings/chat/test — test chat config
+router.post('/chat/test', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const { apiKey } = req.body;
+
+    const keyToTest = apiKey || (await getOrgLLMKey(orgId)) || process.env.ANTHROPIC_API_KEY;
+    if (!keyToTest) {
+      return res.status(400).json({ error: 'No API key provided or configured' });
+    }
+
+    // Make a minimal API call to verify the key
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': keyToTest,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 10,
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      return res.json({ success: false, error: `API returned ${response.status}` });
+    }
+
+    res.json({ success: true });
+  } catch (err: any) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Get the org-level LLM API key, or null if not configured.
+ * Exported for use by chat.ts
+ */
+export async function getOrgLLMKey(orgId: string): Promise<string | null> {
+  const config = await prisma.integrationConfig.findFirst({
+    where: { orgId, provider: 'llm' },
+  });
+  return config?.token || null;
+}
+
+export async function getOrgLLMModel(orgId: string): Promise<string> {
+  const config = await prisma.integrationConfig.findFirst({
+    where: { orgId, provider: 'llm' },
+  });
+  if (!config) return 'claude-sonnet-4-20250514';
+  try {
+    const settings = JSON.parse(config.settings);
+    return settings.model || 'claude-sonnet-4-20250514';
+  } catch {
+    return 'claude-sonnet-4-20250514';
+  }
+}
+
 export default router;

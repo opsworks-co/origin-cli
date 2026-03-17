@@ -13,6 +13,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const model = req.query.model as string | undefined;
     const repoId = req.query.repoId as string | undefined;
     const userId = req.query.userId as string | undefined;
+    const file = req.query.file as string | undefined;
     const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
     const offset = parseInt(req.query.offset as string) || 0;
 
@@ -48,6 +49,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     if (userId) {
       where.session.userId = userId;
+    }
+
+    if (file) {
+      where.filesChanged = { contains: file };
     }
 
     const [prompts, total] = await Promise.all([

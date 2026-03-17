@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
 import { getDocsContext, getOrgContext } from '../services/chat-context.js';
+import { getOrgLLMKey, getOrgLLMModel } from './settings.js';
 
 const router = Router();
 
@@ -41,16 +42,18 @@ export async function callClaude(
   systemPrompt: string,
   messages: Array<{ role: string; content: string }>,
   maxTokens: number = 1024,
+  opts?: { apiKey?: string; model?: string },
 ): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = opts?.apiKey || process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error('AI chat is not configured');
   }
 
+  const model = opts?.model || 'claude-sonnet-4-20250514';
   const client = new Anthropic({ apiKey });
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model,
     max_tokens: maxTokens,
     system: systemPrompt,
     messages: messages.map(m => ({
@@ -144,7 +147,16 @@ router.post('/assistant', requireAuth, async (req: AuthRequest, res: Response) =
     const orgContext = await getOrgContext(orgId);
     const systemPrompt = ASSISTANT_SYSTEM_PROMPT + orgContext;
 
-    const responseText = await callClaude(systemPrompt, trimmedMessages, 2048);
+    // Use org-level LLM config if available, fall back to env var
+    const [orgKey, orgModel] = await Promise.all([
+      getOrgLLMKey(orgId),
+      getOrgLLMModel(orgId),
+    ]);
+
+    const responseText = await callClaude(systemPrompt, trimmedMessages, 2048, {
+      apiKey: orgKey || undefined,
+      model: orgModel,
+    });
     return res.json({ message: responseText });
   } catch (err: any) {
     console.error('[chat/assistant] Error:', err.message);

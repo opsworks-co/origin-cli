@@ -1301,7 +1301,7 @@ export interface PromptPattern {
   approvalRate: number;
 }
 
-export function searchPrompts(params?: { q?: string; model?: string; repoId?: string; userId?: string; limit?: number; offset?: number }) {
+export function searchPrompts(params?: { q?: string; model?: string; repoId?: string; userId?: string; file?: string; limit?: number; offset?: number }) {
   const q = new URLSearchParams();
   if (params) Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== '') q.set(k, String(v)); });
   const qs = q.toString();
