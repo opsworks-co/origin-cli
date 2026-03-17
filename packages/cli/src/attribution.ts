@@ -561,10 +561,16 @@ export function computeAttributionStats(
   let totalLinesAdded = 0, aiLinesAdded = 0, humanLinesAdded = 0, mixedLinesAdded = 0;
 
   try {
-    // Scope to current branch only (--first-parent avoids counting merged-in history)
+    // Scope to current branch (HEAD) only
+    // Check if origin-sessions branch exists to exclude it (it has session metadata, not code)
+    let excludeOriginSessions = '';
+    try {
+      execSync('git rev-parse --verify refs/heads/origin-sessions', execOpts(repoPath));
+      excludeOriginSessions = ' --not refs/heads/origin-sessions';
+    } catch { /* branch doesn't exist, nothing to exclude */ }
     const logCmd = commitRange
       ? `git log --first-parent --format=%H ${range}`
-      : `git log --first-parent --format=%H -50`;
+      : `git log --first-parent --format=%H -50 HEAD${excludeOriginSessions}`;
     const commits = execSync(
       logCmd,
       execOpts(repoPath),
