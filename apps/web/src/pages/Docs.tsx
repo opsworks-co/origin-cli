@@ -393,6 +393,14 @@ origin enable --agent gemini`}</CodeBlock>
               track sessions across all your projects. Copy the hook config shown below into your global settings file.
             </Callout>
 
+            <Callout type="info">
+              <strong className="text-gray-200">Important:</strong> Origin only tracks code changes made <em>after</em> installation.
+              Pre-existing code in your repository will appear as human-authored (<code className="text-indigo-400">[HU]</code>) in{' '}
+              <code className="text-indigo-400">origin blame</code> and <code className="text-indigo-400">origin stats</code>,
+              even if it was originally written by AI. Retroactive attribution is not possible because Origin
+              needs to observe the session in real-time to link code to AI prompts.
+            </Callout>
+
             <H2>Supported Agents</H2>
 
             <H3>Claude Code</H3>
@@ -1578,6 +1586,11 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               the code changes it produced (via <strong className="text-gray-200">PromptChanges</strong> with unified diffs).
               AI Blame parses these diffs to build a line-by-line attribution map for every file.
             </P>
+            <Callout type="info">
+              Origin only attributes code written <em>after</em> installation. Lines that existed before{' '}
+              <code className="text-indigo-400">origin init</code> will show as <code className="text-indigo-400">[HU]</code> (human),
+              even if they were originally AI-generated.
+            </Callout>
             <P>
               The algorithm walks through prompts in chronological order. For each prompt, it parses
               the unified diff to determine which lines were added. Later prompts override earlier ones
