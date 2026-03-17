@@ -39,6 +39,7 @@ export interface SessionState {
   agentSystemPrompt?: string; // Cached agent system prompt for session resume
   activePolicies?: string[];  // Cached active policies for session resume
   enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
+  trailId?: string;           // Trail ID if session is linked to an active trail
 }
 
 // ─── Git Directory ─────────────────────────────────────────────────────────

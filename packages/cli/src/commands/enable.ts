@@ -493,15 +493,19 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
   console.log(chalk.bold('\n📋 Next steps:\n'));
   const firstAgent = AGENTS[agentsToEnable[0]];
   const connected = isConnectedMode();
+  const agentNames = agentsToEnable.map(a => AGENTS[a].command);
+  const agentList = agentNames.length > 1
+    ? agentNames.slice(0, -1).join(', ') + ' or ' + agentNames[agentNames.length - 1]
+    : agentNames[0];
   if (isGlobal) {
-    console.log(chalk.white('  1. Open any repo and start coding with ') + chalk.cyan(firstAgent.command));
+    console.log(chalk.white('  1. Open any repo and start coding with ') + chalk.cyan(agentList));
     console.log(chalk.white('  2. Sessions are captured automatically for ALL repos'));
     console.log(chalk.white('  3. View sessions: ') + chalk.cyan('origin sessions'));
     if (connected && config?.apiUrl) {
       console.log(chalk.white('  4. Or check the dashboard: ') + chalk.cyan(config.apiUrl));
     }
   } else {
-    console.log(chalk.white('  1. Start coding: ') + chalk.cyan(firstAgent.command));
+    console.log(chalk.white('  1. Start coding with ') + chalk.cyan(agentList));
     console.log(chalk.white('  2. Work normally — Origin captures everything automatically'));
     console.log(chalk.white('  3. View sessions: ') + chalk.cyan('origin sessions'));
     if (connected && config?.apiUrl) {

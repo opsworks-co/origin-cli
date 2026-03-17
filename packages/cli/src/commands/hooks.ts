@@ -23,6 +23,7 @@ import { captureGitState } from '../git-capture.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
+import { findTrailByBranch, addSessionToTrail } from '../trail-state.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -501,6 +502,21 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     saveSessionState(state, repoPath, sessionTag);
     debugLog('session-start', 'state saved', { sessionId, sessionTag });
 
+    // Auto-attach session to active trail on the current branch
+    if (branch) {
+      try {
+        const trail = findTrailByBranch(repoPath, branch);
+        if (trail && (trail.status === 'active' || trail.status === 'review')) {
+          addSessionToTrail(repoPath, trail.id, sessionId);
+          state.trailId = trail.id;
+          saveSessionState(state, repoPath, sessionTag);
+          debugLog('session-start', 'auto-attached to trail', { trailId: trail.id, trailName: trail.name });
+        }
+      } catch (trailErr: any) {
+        debugLog('session-start', 'trail auto-attach failed (non-fatal)', { message: trailErr.message });
+      }
+    }
+
     // Start background heartbeat daemon (only in connected mode)
     if (connected && config) {
       startHeartbeat(sessionId, config.apiUrl || 'https://getorigin.io', config.apiKey);
@@ -875,6 +891,22 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         branch: getBranch(hookCwd) || undefined,
       });
       debugLog('session-end', 'api.endSession complete');
+    }
+
+    // Auto-attach session to active trail (safety net for auto-created sessions)
+    if (!state.trailId) {
+      try {
+        const endBranch = getBranch(hookCwd) || state.branch;
+        if (endBranch) {
+          const trail = findTrailByBranch(state.repoPath, endBranch);
+          if (trail && (trail.status === 'active' || trail.status === 'review')) {
+            addSessionToTrail(state.repoPath, trail.id, state.sessionId);
+            debugLog('session-end', 'auto-attached to trail (late)', { trailId: trail.id });
+          }
+        }
+      } catch (trailErr: any) {
+        debugLog('session-end', 'trail auto-attach failed (non-fatal)', { message: trailErr.message });
+      }
     }
 
     // Write session files to origin-sessions branch (directory per session)

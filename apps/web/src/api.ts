@@ -890,6 +890,26 @@ export function testGitHubApp() {
 
 // ---- GitLab OAuth -----------------------------------------------------------
 
+export function getGitLabOAuthConfig() {
+  return request<{
+    configured: boolean;
+    source: 'environment' | 'database' | 'none';
+    clientId?: string;
+    redirectUri?: string;
+  }>('/api/gitlab-oauth/config');
+}
+
+export function saveGitLabOAuthConfig(data: { clientId: string; clientSecret: string; redirectUri: string }) {
+  return request<{ success: boolean }>('/api/gitlab-oauth/config', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteGitLabOAuthConfig() {
+  return request<{ success: boolean }>('/api/gitlab-oauth/config', { method: 'DELETE' });
+}
+
 export function getGitLabOAuthInstallUrl() {
   return request<{ authorizeUrl: string }>('/api/gitlab-oauth/install');
 }

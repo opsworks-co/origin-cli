@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -24,6 +24,10 @@ export default function ChatWidget({ endpoint, title, placeholder, requireAuth, 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Resize state
+  const [size, setSize] = useState({ w: 384, h: 512 }); // w-96 = 384px, h-[32rem] = 512px
+  const resizingRef = useRef<{ startX: number; startY: number; startW: number; startH: number } | null>(null);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -31,6 +35,35 @@ export default function ChatWidget({ endpoint, title, placeholder, requireAuth, 
   useEffect(() => {
     if (isOpen) inputRef.current?.focus();
   }, [isOpen]);
+
+  // Resize handlers
+  const onResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startW: size.w,
+      startH: size.h,
+    };
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const { startX, startY, startW, startH } = resizingRef.current;
+      // Dragging top-left corner: moving left increases width, moving up increases height
+      const newW = Math.max(320, Math.min(800, startW - (ev.clientX - startX)));
+      const newH = Math.max(400, Math.min(900, startH - (ev.clientY - startY)));
+      setSize({ w: newW, h: newH });
+    };
+
+    const onMouseUp = () => {
+      resizingRef.current = null;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [size]);
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,7 +125,23 @@ export default function ChatWidget({ endpoint, title, placeholder, requireAuth, 
 
       {/* Chat panel */}
       {isOpen && (
-        <div className="fixed bottom-6 right-6 z-50 w-96 h-[32rem] flex flex-col bg-gray-900 border border-gray-800 rounded-xl shadow-2xl shadow-black/40 overflow-hidden">
+        <div
+          className="fixed bottom-6 right-6 z-50 flex flex-col bg-gray-900 border border-gray-800 rounded-xl shadow-2xl shadow-black/40 overflow-hidden"
+          style={{ width: size.w, height: size.h }}
+        >
+          {/* Resize handle — top-left corner */}
+          <div
+            onMouseDown={onResizeMouseDown}
+            className="absolute top-0 left-0 w-4 h-4 cursor-nw-resize z-10 group"
+            title="Drag to resize"
+          >
+            <svg className="w-3 h-3 m-0.5 text-gray-600 group-hover:text-gray-400 transition-colors" viewBox="0 0 6 6" fill="currentColor">
+              <circle cx="1" cy="1" r="0.8" />
+              <circle cx="3.5" cy="1" r="0.8" />
+              <circle cx="1" cy="3.5" r="0.8" />
+            </svg>
+          </div>
+
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 bg-gray-900">
             <div className="flex items-center gap-2">

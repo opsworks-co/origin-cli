@@ -38,6 +38,44 @@ export function getGitLabOAuthConfig() {
   return { configured: true, clientId, clientSecret, redirectUri } as const;
 }
 
+/**
+ * Get GitLab OAuth config for a specific org.
+ * Checks env vars first, then falls back to per-org DB config.
+ */
+export async function getGitLabOAuthConfigForOrg(orgId: string): Promise<
+  | { configured: true; clientId: string; clientSecret: string; redirectUri: string }
+  | { configured: false }
+> {
+  // 1. Check env vars first (global config)
+  const envConfig = getGitLabOAuthConfig();
+  if (envConfig.configured) return envConfig;
+
+  // 2. Fall back to per-org DB config
+  const dbConfig = await prisma.integrationConfig.findFirst({
+    where: { orgId, provider: 'gitlab_oauth_app' },
+  });
+
+  if (!dbConfig) return { configured: false };
+
+  let settings: { clientId?: string; clientSecret?: string; redirectUri?: string };
+  try {
+    settings = JSON.parse(dbConfig.settings);
+  } catch {
+    return { configured: false };
+  }
+
+  if (!settings.clientId || !settings.clientSecret || !settings.redirectUri) {
+    return { configured: false };
+  }
+
+  return {
+    configured: true,
+    clientId: settings.clientId,
+    clientSecret: settings.clientSecret,
+    redirectUri: settings.redirectUri,
+  };
+}
+
 /** Strip /api/v4 from a GitLab API base URL to get the instance root for OAuth endpoints. */
 export function getGitLabOAuthBaseUrl(apiBaseUrl: string): string {
   return apiBaseUrl.replace(/\/api\/v4\/?$/, '') || 'https://gitlab.com';
@@ -46,9 +84,10 @@ export function getGitLabOAuthBaseUrl(apiBaseUrl: string): string {
 export async function exchangeGitLabOAuthCode(
   code: string,
   baseUrl: string = 'https://gitlab.com',
+  oauthConfig?: { clientId: string; clientSecret: string; redirectUri: string },
 ): Promise<{ access_token: string; refresh_token: string; expires_in: number; created_at: number }> {
-  const config = getGitLabOAuthConfig();
-  if (!config.configured) throw new Error('GitLab OAuth not configured');
+  const config = oauthConfig || getGitLabOAuthConfig();
+  if (!('clientId' in config) || !config.clientId) throw new Error('GitLab OAuth not configured');
 
   const res = await fetch(`${baseUrl}/oauth/token`, {
     method: 'POST',
@@ -73,9 +112,10 @@ export async function exchangeGitLabOAuthCode(
 export async function refreshGitLabOAuthToken(
   refreshToken: string,
   baseUrl: string = 'https://gitlab.com',
+  oauthConfig?: { clientId: string; clientSecret: string; redirectUri: string },
 ): Promise<{ access_token: string; refresh_token: string; expires_in: number; created_at: number }> {
-  const config = getGitLabOAuthConfig();
-  if (!config.configured) throw new Error('GitLab OAuth not configured');
+  const config = oauthConfig || getGitLabOAuthConfig();
+  if (!('clientId' in config) || !config.clientId) throw new Error('GitLab OAuth not configured');
 
   const res = await fetch(`${baseUrl}/oauth/token`, {
     method: 'POST',
@@ -103,6 +143,7 @@ export async function refreshGitLabOAuthToken(
  */
 export async function getValidGitLabOAuthToken(config: {
   id: string;
+  orgId?: string;
   token: string;
   settings: string;
   baseUrl: string;
@@ -137,8 +178,15 @@ export async function getValidGitLabOAuthToken(config: {
     throw new Error('No refresh token stored — user needs to re-authorize GitLab OAuth');
   }
 
+  // Resolve OAuth app config (env vars or per-org DB config)
+  let oauthAppConfig: { clientId: string; clientSecret: string; redirectUri: string } | undefined;
+  if (config.orgId) {
+    const resolved = await getGitLabOAuthConfigForOrg(config.orgId);
+    if (resolved.configured) oauthAppConfig = resolved;
+  }
+
   const oauthBaseUrl = getGitLabOAuthBaseUrl(config.baseUrl || GITLAB_API);
-  const result = await refreshGitLabOAuthToken(settings.refreshToken, oauthBaseUrl);
+  const result = await refreshGitLabOAuthToken(settings.refreshToken, oauthBaseUrl, oauthAppConfig);
 
   // 5. Update cache
   const expiresAt = new Date((result.created_at + result.expires_in) * 1000);

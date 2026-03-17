@@ -113,6 +113,11 @@ export default function Settings() {
     username?: string;
   } | null>(null);
   const [connectingGitlabOAuth, setConnectingGitlabOAuth] = useState(false);
+  const [glOAuthAppId, setGlOAuthAppId] = useState('');
+  const [glOAuthAppSecret, setGlOAuthAppSecret] = useState('');
+  const [glOAuthRedirectUri, setGlOAuthRedirectUri] = useState('');
+  const [glOAuthConfigSource, setGlOAuthConfigSource] = useState<'none' | 'environment' | 'database'>('none');
+  const [savingGlOAuthConfig, setSavingGlOAuthConfig] = useState(false);
 
   // GitHub App
   const [githubAppStatus, setGithubAppStatus] = useState<{
@@ -280,14 +285,20 @@ export default function Settings() {
   const fetchIntegrations = async () => {
     setLoadingIntegrations(true);
     try {
-      const [data, appStatus, glOAuthStatus] = await Promise.all([
+      const [data, appStatus, glOAuthStatus, glOAuthConfig] = await Promise.all([
         api.getIntegrations(),
         api.getGitHubAppStatus().catch(() => null),
         api.getGitLabOAuthStatus().catch(() => null),
+        api.getGitLabOAuthConfig().catch(() => null),
       ]);
       setIntegrations(data);
       if (appStatus) setGithubAppStatus(appStatus);
       if (glOAuthStatus) setGitlabOAuthStatus(glOAuthStatus);
+      if (glOAuthConfig) {
+        setGlOAuthConfigSource(glOAuthConfig.source);
+        if (glOAuthConfig.clientId) setGlOAuthAppId(glOAuthConfig.clientId);
+        if (glOAuthConfig.redirectUri) setGlOAuthRedirectUri(glOAuthConfig.redirectUri);
+      }
       // Populate form with existing GitHub integration
       const gh = data.find((i) => i.provider === 'github');
       if (gh) {
@@ -1626,139 +1637,6 @@ export default function Settings() {
             )}
           </section>
 
-          {/* Slack Integration */}
-          <section className="card space-y-5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center">
-                  <svg viewBox="0 0 24 24" className="w-6 h-6 fill-current">
-                    <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z" fill="#E01E5A"/>
-                  </svg>
-                </div>
-                <div>
-                  <h2 className="text-lg font-semibold">Slack</h2>
-                  <p className="text-sm text-gray-500">Get notified about policy violations and reviews</p>
-                </div>
-              </div>
-              {integrations.find((i) => i.provider === 'slack') ? (
-                <span className="badge-green text-xs">Connected</span>
-              ) : (
-                <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded-full">Not Connected</span>
-              )}
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Webhook URL</label>
-              <input
-                type="url"
-                value={slackWebhookUrl}
-                onChange={(e) => setSlackWebhookUrl(e.target.value)}
-                placeholder={integrations.find((i) => i.provider === 'slack') ? '••••••• (saved)' : 'https://hooks.slack.com/services/...'}
-                className="input w-full"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Create one at{' '}
-                <a href="https://api.slack.com/apps" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300">
-                  api.slack.com/apps
-                </a>{' '}
-                → Incoming Webhooks
-              </p>
-            </div>
-
-            <div className="space-y-3 border-t border-gray-700/50 pt-4">
-              <h3 className="text-sm font-medium text-gray-300">Notification Events</h3>
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={slackNotifyViolations}
-                  onChange={(e) => setSlackNotifyViolations(e.target.checked)}
-                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
-                />
-                <div>
-                  <div className="text-sm font-medium text-gray-200">Policy violations</div>
-                  <div className="text-xs text-gray-500">When sessions trigger policy rules or agent limits</div>
-                </div>
-              </label>
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={slackNotifySessionFlags}
-                  onChange={(e) => setSlackNotifySessionFlags(e.target.checked)}
-                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
-                />
-                <div>
-                  <div className="text-sm font-medium text-gray-200">Session flags</div>
-                  <div className="text-xs text-gray-500">When sessions are auto-flagged for manual review</div>
-                </div>
-              </label>
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={slackNotifyReviews}
-                  onChange={(e) => setSlackNotifyReviews(e.target.checked)}
-                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
-                />
-                <div>
-                  <div className="text-sm font-medium text-gray-200">Review updates</div>
-                  <div className="text-xs text-gray-500">When sessions are approved, rejected, or need review</div>
-                </div>
-              </label>
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={slackNotifyBudget}
-                  onChange={(e) => setSlackNotifyBudget(e.target.checked)}
-                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
-                />
-                <div>
-                  <div className="text-sm font-medium text-gray-200">Budget alerts</div>
-                  <div className="text-xs text-gray-500">When spending approaches or exceeds monthly limits</div>
-                </div>
-              </label>
-            </div>
-
-            <div className="flex items-center gap-3 border-t border-gray-700/50 pt-4">
-              <button
-                onClick={handleSaveSlack}
-                disabled={savingSlack}
-                className="btn-primary text-sm"
-              >
-                {savingSlack ? 'Saving...' : integrations.find((i) => i.provider === 'slack') ? 'Update' : 'Connect'}
-              </button>
-              {integrations.find((i) => i.provider === 'slack') && (
-                <>
-                  <button
-                    onClick={handleTestSlack}
-                    disabled={testingSlack}
-                    className="btn-secondary text-sm"
-                  >
-                    {testingSlack ? 'Testing...' : 'Test'}
-                  </button>
-                  <button
-                    onClick={() => handleDeleteIntegration(integrations.find((i) => i.provider === 'slack')!.id)}
-                    className="btn-secondary text-sm text-red-400 hover:text-red-300"
-                  >
-                    Disconnect
-                  </button>
-                </>
-              )}
-            </div>
-
-            {slackTestResult && (
-              <div
-                className={`text-sm p-3 rounded-lg ${
-                  slackTestResult.success
-                    ? 'bg-green-900/20 text-green-400 border border-green-800/30'
-                    : 'bg-red-900/20 text-red-400 border border-red-800/30'
-                }`}
-              >
-                {slackTestResult.success
-                  ? 'Test message sent successfully! Check your Slack channel.'
-                  : `Connection failed: ${slackTestResult.error}`}
-              </div>
-            )}
-          </section>
-
           {/* GitLab Integration */}
           <section className="card space-y-5">
             <div className="flex items-center justify-between">
@@ -1787,69 +1665,147 @@ export default function Settings() {
             ) : (
               <div className="space-y-6">
                 {/* GitLab OAuth Section */}
-                {gitlabOAuthStatus?.serverConfigured && (
-                  <div className="space-y-3 pb-4 border-b border-gray-700">
-                    <p className="text-sm font-medium text-gray-300">OAuth App</p>
-                    {gitlabOAuthStatus.connected ? (
-                      <div className="flex items-center gap-3">
-                        <span className="text-sm text-gray-300">
-                          Connected as <strong className="text-white">@{gitlabOAuthStatus.username || 'unknown'}</strong>
-                        </span>
+                <div className="space-y-3 pb-4 border-b border-gray-700">
+                  <p className="text-sm font-medium text-gray-300">OAuth App</p>
+                  {gitlabOAuthStatus?.connected ? (
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm text-gray-300">
+                        Connected as <strong className="text-white">@{gitlabOAuthStatus.username || 'unknown'}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const result = await api.testGitLabOAuth();
+                            setGlTestResult(result);
+                          } catch (err: any) {
+                            setGlTestResult({ success: false, error: err.message });
+                          }
+                        }}
+                        className="btn-secondary text-sm"
+                      >
+                        Test
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await api.disconnectGitLabOAuth();
+                            setGitlabOAuthStatus({ ...gitlabOAuthStatus, connected: false, username: undefined });
+                            await fetchIntegrations();
+                            setIntegrationSuccess('GitLab OAuth disconnected.');
+                          } catch (err: any) {
+                            setIntegrationError(err.message);
+                          }
+                        }}
+                        className="text-sm text-red-400 hover:text-red-300"
+                      >
+                        Disconnect
+                      </button>
+                    </div>
+                  ) : gitlabOAuthStatus?.serverConfigured ? (
+                    <div>
+                      <button
+                        type="button"
+                        disabled={connectingGitlabOAuth}
+                        onClick={async () => {
+                          setConnectingGitlabOAuth(true);
+                          try {
+                            const { authorizeUrl } = await api.getGitLabOAuthInstallUrl();
+                            window.location.href = authorizeUrl;
+                          } catch (err: any) {
+                            setIntegrationError(err.message);
+                            setConnectingGitlabOAuth(false);
+                          }
+                        }}
+                        className="btn-primary text-sm"
+                      >
+                        {connectingGitlabOAuth ? 'Redirecting...' : 'Connect with GitLab'}
+                      </button>
+                      <p className="text-xs text-gray-600 mt-1">Authorize via GitLab OAuth — no PAT needed</p>
+                      {glOAuthConfigSource === 'database' && (
                         <button
                           type="button"
                           onClick={async () => {
                             try {
-                              const result = await api.testGitLabOAuth();
-                              setGlTestResult(result);
-                            } catch (err: any) {
-                              setGlTestResult({ success: false, error: err.message });
-                            }
-                          }}
-                          className="btn-secondary text-sm"
-                        >
-                          Test
-                        </button>
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            try {
-                              await api.disconnectGitLabOAuth();
-                              setGitlabOAuthStatus({ ...gitlabOAuthStatus, connected: false, username: undefined });
-                              await fetchIntegrations();
-                              setIntegrationSuccess('GitLab OAuth disconnected.');
+                              await api.deleteGitLabOAuthConfig();
+                              setGlOAuthConfigSource('none');
+                              setGlOAuthAppId('');
+                              setGlOAuthAppSecret('');
+                              setGlOAuthRedirectUri('');
+                              setGitlabOAuthStatus((prev) => prev ? { ...prev, serverConfigured: false } : null);
+                              setIntegrationSuccess('GitLab OAuth app config removed.');
                             } catch (err: any) {
                               setIntegrationError(err.message);
                             }
                           }}
-                          className="text-sm text-red-400 hover:text-red-300"
+                          className="text-xs text-gray-500 hover:text-gray-400 mt-2 underline"
                         >
-                          Disconnect
+                          Remove OAuth app config
                         </button>
-                      </div>
-                    ) : (
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <p className="text-xs text-gray-500">
+                        Register a GitLab OAuth Application at <strong className="text-gray-400">GitLab → Preferences → Applications</strong>, then enter the credentials below.
+                      </p>
                       <div>
-                        <button
-                          type="button"
-                          disabled={connectingGitlabOAuth}
-                          onClick={async () => {
-                            setConnectingGitlabOAuth(true);
-                            try {
-                              const { authorizeUrl } = await api.getGitLabOAuthInstallUrl();
-                              window.location.href = authorizeUrl;
-                            } catch (err: any) {
-                              setIntegrationError(err.message);
-                              setConnectingGitlabOAuth(false);
-                            }
-                          }}
-                          className="btn-primary text-sm"
-                        >
-                          {connectingGitlabOAuth ? 'Redirecting...' : 'Connect with GitLab'}
-                        </button>
-                        <p className="text-xs text-gray-600 mt-1">Authorize via GitLab OAuth — no PAT needed</p>
+                        <label className="block text-sm text-gray-400 mb-1">Application ID</label>
+                        <input
+                          value={glOAuthAppId}
+                          onChange={(e) => setGlOAuthAppId(e.target.value)}
+                          className="input w-full"
+                          placeholder="GitLab Application ID"
+                        />
                       </div>
-                    )}
-                  </div>
-                )}
+                      <div>
+                        <label className="block text-sm text-gray-400 mb-1">Secret</label>
+                        <input
+                          type="password"
+                          value={glOAuthAppSecret}
+                          onChange={(e) => setGlOAuthAppSecret(e.target.value)}
+                          className="input w-full"
+                          placeholder="GitLab Application Secret"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-gray-400 mb-1">Redirect URI</label>
+                        <input
+                          value={glOAuthRedirectUri}
+                          onChange={(e) => setGlOAuthRedirectUri(e.target.value)}
+                          className="input w-full"
+                          placeholder={`${window.location.origin}/api/gitlab-oauth/callback`}
+                        />
+                        <p className="text-xs text-gray-600 mt-1">Must match the redirect URI in your GitLab application</p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={savingGlOAuthConfig || !glOAuthAppId || !glOAuthAppSecret || !glOAuthRedirectUri}
+                        onClick={async () => {
+                          setSavingGlOAuthConfig(true);
+                          try {
+                            await api.saveGitLabOAuthConfig({
+                              clientId: glOAuthAppId,
+                              clientSecret: glOAuthAppSecret,
+                              redirectUri: glOAuthRedirectUri,
+                            });
+                            setGlOAuthConfigSource('database');
+                            setGitlabOAuthStatus((prev) => prev ? { ...prev, serverConfigured: true } : { connected: false, authType: null, serverConfigured: true });
+                            setIntegrationSuccess('GitLab OAuth app configured! Click "Connect with GitLab" to authorize.');
+                          } catch (err: any) {
+                            setIntegrationError(err.message);
+                          } finally {
+                            setSavingGlOAuthConfig(false);
+                          }
+                        }}
+                        className="btn-primary text-sm"
+                      >
+                        {savingGlOAuthConfig ? 'Saving...' : 'Save OAuth App Config'}
+                      </button>
+                    </div>
+                  )}
+                </div>
 
                 {/* PAT Section (hidden when OAuth is active) */}
                 {!gitlabOAuthStatus?.connected && (
@@ -2003,86 +1959,138 @@ export default function Settings() {
             )}
           </section>
 
-          {/* Branch Protection Setup */}
-          {integrations.find((i) => i.provider === 'github') && (
-            <section className="card space-y-4">
-              <div>
-                <h2 className="text-lg font-semibold">Branch Protection</h2>
-                <p className="text-sm text-gray-500 mt-0.5">
-                  Block merges to protected branches when AI sessions have policy violations
-                </p>
-              </div>
-
-              <div className="bg-gray-800/50 rounded-lg p-4 space-y-4">
-                <div className="flex items-start gap-3">
-                  <span className="text-xl mt-0.5">🛡️</span>
-                  <div className="space-y-3 text-sm text-gray-300">
-                    <p>
-                      Origin posts a <code className="bg-gray-700 px-1.5 py-0.5 rounded text-xs text-indigo-300">origin/ai-governance</code> status
-                      check on every PR. Configure GitHub to require this check before merging:
-                    </p>
-
-                    <ol className="list-decimal list-inside space-y-2 text-gray-400">
-                      <li>Go to your GitHub repository → <strong className="text-gray-300">Settings</strong> → <strong className="text-gray-300">Branches</strong></li>
-                      <li>Click <strong className="text-gray-300">Add branch protection rule</strong> (or edit existing)</li>
-                      <li>Set <strong className="text-gray-300">Branch name pattern</strong> to <code className="bg-gray-700 px-1 rounded text-xs">main</code> (or your default branch)</li>
-                      <li>Enable <strong className="text-gray-300">"Require status checks to pass before merging"</strong></li>
-                      <li>Search for <code className="bg-gray-700 px-1 rounded text-xs text-indigo-300">origin/ai-governance</code> and select it</li>
-                      <li>Click <strong className="text-gray-300">Create</strong> (or <strong className="text-gray-300">Save changes</strong>)</li>
-                    </ol>
-
-                    <div className="bg-indigo-900/20 border border-indigo-800/30 rounded-lg p-3 text-xs text-indigo-300">
-                      <strong>Result:</strong> PRs with flagged or rejected AI sessions will show a failing check and
-                      cannot be merged until an admin approves the session in Origin.
-                    </div>
-                  </div>
+          {/* Slack Integration */}
+          <section className="card space-y-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center">
+                  <svg viewBox="0 0 24 24" className="w-6 h-6 fill-current">
+                    <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z" fill="#E01E5A"/>
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold">Slack</h2>
+                  <p className="text-sm text-gray-500">Get notified about policy violations and reviews</p>
                 </div>
               </div>
+              {integrations.find((i) => i.provider === 'slack') ? (
+                <span className="badge-green text-xs">Connected</span>
+              ) : (
+                <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded-full">Not Connected</span>
+              )}
+            </div>
 
-              <div className="flex items-center gap-3">
-                <a
-                  href="/pull-requests"
-                  className="text-sm text-indigo-400 hover:text-indigo-300"
-                >
-                  View PR Checks Dashboard →
-                </a>
-              </div>
-            </section>
-          )}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Webhook URL</label>
+              <input
+                type="url"
+                value={slackWebhookUrl}
+                onChange={(e) => setSlackWebhookUrl(e.target.value)}
+                placeholder={integrations.find((i) => i.provider === 'slack') ? '••••••• (saved)' : 'https://hooks.slack.com/services/...'}
+                className="input w-full"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Create one at{' '}
+                <a href="https://api.slack.com/apps" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300">
+                  api.slack.com/apps
+                </a>{' '}
+                → Incoming Webhooks
+              </p>
+            </div>
 
-          {/* Webhook Activity */}
-          {webhookEvents.length > 0 && (
-            <section className="card space-y-4">
-              <div>
-                <h2 className="text-lg font-semibold">Recent Webhook Activity</h2>
-                <p className="text-sm text-gray-500 mt-0.5">Last 10 webhook events received</p>
+            <div className="space-y-3 border-t border-gray-700/50 pt-4">
+              <h3 className="text-sm font-medium text-gray-300">Notification Events</h3>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={slackNotifyViolations}
+                  onChange={(e) => setSlackNotifyViolations(e.target.checked)}
+                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
+                />
+                <div>
+                  <div className="text-sm font-medium text-gray-200">Policy violations</div>
+                  <div className="text-xs text-gray-500">When sessions trigger policy rules or agent limits</div>
+                </div>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={slackNotifySessionFlags}
+                  onChange={(e) => setSlackNotifySessionFlags(e.target.checked)}
+                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
+                />
+                <div>
+                  <div className="text-sm font-medium text-gray-200">Session flags</div>
+                  <div className="text-xs text-gray-500">When sessions are auto-flagged for manual review</div>
+                </div>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={slackNotifyReviews}
+                  onChange={(e) => setSlackNotifyReviews(e.target.checked)}
+                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
+                />
+                <div>
+                  <div className="text-sm font-medium text-gray-200">Review updates</div>
+                  <div className="text-xs text-gray-500">When sessions are approved, rejected, or need review</div>
+                </div>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={slackNotifyBudget}
+                  onChange={(e) => setSlackNotifyBudget(e.target.checked)}
+                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
+                />
+                <div>
+                  <div className="text-sm font-medium text-gray-200">Budget alerts</div>
+                  <div className="text-xs text-gray-500">When spending approaches or exceeds monthly limits</div>
+                </div>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-3 border-t border-gray-700/50 pt-4">
+              <button
+                onClick={handleSaveSlack}
+                disabled={savingSlack}
+                className="btn-primary text-sm"
+              >
+                {savingSlack ? 'Saving...' : integrations.find((i) => i.provider === 'slack') ? 'Update' : 'Connect'}
+              </button>
+              {integrations.find((i) => i.provider === 'slack') && (
+                <>
+                  <button
+                    onClick={handleTestSlack}
+                    disabled={testingSlack}
+                    className="btn-secondary text-sm"
+                  >
+                    {testingSlack ? 'Testing...' : 'Test'}
+                  </button>
+                  <button
+                    onClick={() => handleDeleteIntegration(integrations.find((i) => i.provider === 'slack')!.id)}
+                    className="btn-secondary text-sm text-red-400 hover:text-red-300"
+                  >
+                    Disconnect
+                  </button>
+                </>
+              )}
+            </div>
+
+            {slackTestResult && (
+              <div
+                className={`text-sm p-3 rounded-lg ${
+                  slackTestResult.success
+                    ? 'bg-green-900/20 text-green-400 border border-green-800/30'
+                    : 'bg-red-900/20 text-red-400 border border-red-800/30'
+                }`}
+              >
+                {slackTestResult.success
+                  ? 'Test message sent successfully! Check your Slack channel.'
+                  : `Connection failed: ${slackTestResult.error}`}
               </div>
-              <div className="space-y-2">
-                {webhookEvents.map((evt) => {
-                  let meta: Record<string, any> = {};
-                  try { meta = JSON.parse(evt.metadata); } catch { /* ignore */ }
-                  const isPR = evt.action === 'WEBHOOK_PR_RECEIVED';
-                  return (
-                    <div key={evt.id} className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${isPR ? 'bg-purple-500/20 text-purple-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                          {isPR ? 'pull_request' : 'push'}
-                        </span>
-                        <span className="text-sm text-gray-300">
-                          {meta.repository || '—'}
-                          {isPR && meta.prNumber ? ` #${meta.prNumber}` : ''}
-                          {!isPR && meta.commitsCreated ? ` (${meta.commitsCreated} commits)` : ''}
-                        </span>
-                      </div>
-                      <span className="text-xs text-gray-500">
-                        {new Date(evt.createdAt).toLocaleString()}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-          )}
+            )}
+          </section>
 
           {/* AI Chat Configuration */}
           <section className="card space-y-5">

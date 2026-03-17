@@ -1,15 +1,18 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
-import type { Repo, GitHubDiscoveredRepo, ImportResult, IntegrationConfig } from '../api';
+import type { Repo, GitHubDiscoveredRepo, GitLabDiscoveredRepo, ImportResult, GitLabImportResult, IntegrationConfig } from '../api';
 import { timeAgo } from '../utils';
 
 /** Extract org/owner from repo path, e.g. "github.com/dolobanko/origin" → "dolobanko" */
 function extractOrg(repo: Repo): string {
   const path = repo.path;
   // GitHub: "github.com/owner/repo" or "https://github.com/owner/repo"
-  const match = path.match(/github\.com\/([^/]+)/);
-  if (match) return match[1];
+  const ghMatch = path.match(/github\.com\/([^/]+)/);
+  if (ghMatch) return ghMatch[1];
+  // GitLab: "gitlab.com/owner/repo" or "https://gitlab.com/owner/repo"
+  const glMatch = path.match(/gitlab\.com\/([^/]+)/);
+  if (glMatch) return glMatch[1];
   // Local: group under path prefix or "Local"
   if (repo.provider === 'local') return 'Local';
   return 'Other';
@@ -84,6 +87,16 @@ export default function Repos() {
   const [importResults, setImportResults] = useState<ImportResult[]>([]);
   const [searchFilter, setSearchFilter] = useState('');
 
+  // GitLab import state
+  const [hasGitLab, setHasGitLab] = useState(false);
+  const [showGitLabImport, setShowGitLabImport] = useState(false);
+  const [discoveringGitLab, setDiscoveringGitLab] = useState(false);
+  const [gitlabRepos, setGitlabRepos] = useState<GitLabDiscoveredRepo[]>([]);
+  const [selectedGitLabRepos, setSelectedGitLabRepos] = useState<Set<string>>(new Set());
+  const [importingGitLab, setImportingGitLab] = useState(false);
+  const [gitlabImportResults, setGitlabImportResults] = useState<GitLabImportResult[]>([]);
+  const [gitlabSearchFilter, setGitlabSearchFilter] = useState('');
+
   const fetchRepos = useCallback(() => {
     setLoading(true);
     api
@@ -98,6 +111,8 @@ export default function Repos() {
     api.getIntegrations().then((configs) => {
       const gh = configs.find((c: IntegrationConfig) => c.provider === 'github' && c.hasToken);
       setHasGitHub(!!gh);
+      const gl = configs.find((c: IntegrationConfig) => c.provider === 'gitlab' && c.hasToken);
+      setHasGitLab(!!gl);
     }).catch(() => {});
   }, [fetchRepos]);
 
@@ -244,6 +259,70 @@ export default function Repos() {
 
   const availableCount = filteredGhRepos.filter((r) => !r.alreadyImported).length;
 
+  // GitLab import handlers
+  const handleDiscoverGitLab = async () => {
+    setShowGitLabImport(true);
+    setShowImport(false);
+    setShowForm(false);
+    setDiscoveringGitLab(true);
+    setError('');
+    setGitlabImportResults([]);
+    setSelectedGitLabRepos(new Set());
+    setGitlabSearchFilter('');
+    try {
+      const result = await api.discoverGitLabRepos();
+      setGitlabRepos(result.repos);
+    } catch (err: any) {
+      setError(err.message);
+      setShowGitLabImport(false);
+    } finally {
+      setDiscoveringGitLab(false);
+    }
+  };
+
+  const toggleGitLabSelect = (fullPath: string) => {
+    setSelectedGitLabRepos((prev) => {
+      const next = new Set(prev);
+      if (next.has(fullPath)) next.delete(fullPath);
+      else next.add(fullPath);
+      return next;
+    });
+  };
+
+  const filteredGlRepos = gitlabRepos.filter((r) =>
+    r.fullPath.toLowerCase().includes(gitlabSearchFilter.toLowerCase()),
+  );
+  const availableGlCount = filteredGlRepos.filter((r) => !r.alreadyImported).length;
+
+  const toggleGitLabSelectAll = () => {
+    const available = filteredGlRepos.filter((r) => !r.alreadyImported);
+    if (selectedGitLabRepos.size === available.length) {
+      setSelectedGitLabRepos(new Set());
+    } else {
+      setSelectedGitLabRepos(new Set(available.map((r) => r.fullPath)));
+    }
+  };
+
+  const handleGitLabImport = async () => {
+    if (selectedGitLabRepos.size === 0) return;
+    setImportingGitLab(true);
+    setError('');
+    try {
+      const result = await api.importGitLabRepos(
+        Array.from(selectedGitLabRepos).map((fullPath) => ({ fullPath })),
+      );
+      setGitlabImportResults(result.results);
+      setSelectedGitLabRepos(new Set());
+      fetchRepos();
+      const updated = await api.discoverGitLabRepos();
+      setGitlabRepos(updated.repos);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setImportingGitLab(false);
+    }
+  };
+
   const orgGroups = groupByOrg(repos);
   const totalCommits = repos.reduce((sum, r) => sum + (r._count?.commits ?? 0), 0);
   const totalSessions = repos.reduce((sum, r) => sum + (r._count?.sessions ?? 0), 0);
@@ -270,10 +349,19 @@ export default function Repos() {
           <div className="flex items-center gap-2">
             {hasGitHub && (
               <button
-                onClick={showImport ? () => setShowImport(false) : handleDiscover}
+                onClick={showImport ? () => setShowImport(false) : () => { handleDiscover(); setShowGitLabImport(false); }}
                 className="btn-primary text-sm"
               >
                 {showImport ? 'Close' : 'Import from GitHub'}
+              </button>
+            )}
+            {hasGitLab && (
+              <button
+                onClick={showGitLabImport ? () => setShowGitLabImport(false) : () => { handleDiscoverGitLab(); setShowImport(false); }}
+                className="btn-primary text-sm"
+                style={{ background: '#FC6D26' }}
+              >
+                {showGitLabImport ? 'Close' : 'Import from GitLab'}
               </button>
             )}
           </div>
@@ -396,6 +484,125 @@ export default function Repos() {
         </div>
       )}
 
+      {/* GitLab Import Panel */}
+      {showGitLabImport && (
+        <div className="card space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold flex items-center gap-2">
+              <svg className="w-5 h-5" viewBox="0 0 32 32" fill="#FC6D26">
+                <path d="M16 28.896L21.323 12.576H10.677L16 28.896Z" />
+                <path d="M16 28.896L10.677 12.576H2.867L16 28.896Z" fill="#FC6D26" opacity="0.7" />
+                <path d="M2.867 12.576L1.164 17.821C1.005 18.31 1.172 18.847 1.578 19.142L16 28.896L2.867 12.576Z" fill="#FC6D26" opacity="0.5" />
+                <path d="M2.867 12.576H10.677L7.334 2.279C7.155 1.736 6.393 1.736 6.214 2.279L2.867 12.576Z" />
+                <path d="M16 28.896L21.323 12.576H29.133L16 28.896Z" fill="#FC6D26" opacity="0.7" />
+                <path d="M29.133 12.576L30.836 17.821C30.995 18.31 30.828 18.847 30.422 19.142L16 28.896L29.133 12.576Z" fill="#FC6D26" opacity="0.5" />
+                <path d="M29.133 12.576H21.323L24.666 2.279C24.845 1.736 25.607 1.736 25.786 2.279L29.133 12.576Z" />
+              </svg>
+              Import from GitLab
+            </h3>
+            {!discoveringGitLab && gitlabRepos.length > 0 && (
+              <span className="text-sm text-gray-400">
+                {gitlabRepos.length} repos found
+              </span>
+            )}
+          </div>
+
+          {discoveringGitLab ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="flex items-center gap-3 text-gray-400">
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-orange-400" />
+                Fetching repos from GitLab...
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-3">
+                <input
+                  type="text"
+                  value={gitlabSearchFilter}
+                  onChange={(e) => setGitlabSearchFilter(e.target.value)}
+                  className="input flex-1"
+                  placeholder="Filter repos..."
+                />
+                <button
+                  onClick={toggleGitLabSelectAll}
+                  className="text-sm text-orange-400 hover:text-orange-300 whitespace-nowrap"
+                >
+                  {selectedGitLabRepos.size === availableGlCount && availableGlCount > 0
+                    ? 'Deselect All'
+                    : `Select All (${availableGlCount})`}
+                </button>
+              </div>
+
+              <div className="max-h-80 overflow-y-auto border border-gray-800 rounded-lg divide-y divide-gray-800">
+                {filteredGlRepos.length === 0 ? (
+                  <div className="text-center py-8 text-gray-500 text-sm">
+                    {gitlabSearchFilter ? 'No repos match your filter' : 'No repos found'}
+                  </div>
+                ) : (
+                  filteredGlRepos.map((repo) => (
+                    <label
+                      key={repo.fullPath}
+                      className={`flex items-center gap-3 px-4 py-2.5 hover:bg-gray-800/50 transition-colors ${
+                        repo.alreadyImported ? 'opacity-50' : 'cursor-pointer'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={repo.alreadyImported || selectedGitLabRepos.has(repo.fullPath)}
+                        disabled={repo.alreadyImported}
+                        onChange={() => toggleGitLabSelect(repo.fullPath)}
+                        className="rounded border-gray-600 text-orange-500 focus:ring-orange-500 bg-gray-800"
+                      />
+                      <span className="text-sm text-gray-200 truncate flex-1">{repo.fullPath}</span>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        {repo.private && <span className="badge badge-amber text-xs">private</span>}
+                        {repo.alreadyImported && <span className="badge badge-green text-xs">imported</span>}
+                      </div>
+                    </label>
+                  ))
+                )}
+              </div>
+
+              {gitlabImportResults.length > 0 && (
+                <div className="space-y-1">
+                  {gitlabImportResults.map((r) => (
+                    <div
+                      key={r.fullPath}
+                      className={`text-xs px-3 py-1.5 rounded ${
+                        r.success ? 'bg-green-900/20 text-green-400' : 'bg-red-900/20 text-red-400'
+                      }`}
+                    >
+                      {r.success ? '\u2713' : '\u2717'} {r.fullPath}
+                      {r.error && ` — ${r.error}`}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-gray-500">Webhooks created automatically</p>
+                <button
+                  onClick={handleGitLabImport}
+                  disabled={selectedGitLabRepos.size === 0 || importingGitLab}
+                  className="btn-primary text-sm"
+                  style={{ background: '#FC6D26' }}
+                >
+                  {importingGitLab ? (
+                    <span className="flex items-center gap-2">
+                      <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
+                      Importing...
+                    </span>
+                  ) : (
+                    `Import ${selectedGitLabRepos.size} Selected`
+                  )}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Add Repo Form */}
       {showForm && (
         <form onSubmit={handleCreate} className="card space-y-4">
@@ -430,6 +637,7 @@ export default function Repos() {
               >
                 <option value="local">Local</option>
                 <option value="github">GitHub</option>
+                <option value="gitlab">GitLab</option>
               </select>
             </div>
           </div>
@@ -440,7 +648,7 @@ export default function Repos() {
       )}
 
       {/* Repos List */}
-      {repos.length === 0 && !showImport && !showForm ? (
+      {repos.length === 0 && !showImport && !showGitLabImport && !showForm ? (
         <div className="card py-14 space-y-8">
           <div className="text-center">
             <div className="text-4xl mb-3">{'\u{1F4E6}'}</div>
@@ -450,7 +658,7 @@ export default function Repos() {
             </p>
           </div>
 
-          <div className="grid sm:grid-cols-2 gap-4 max-w-2xl mx-auto">
+          <div className="grid sm:grid-cols-3 gap-4 max-w-3xl mx-auto">
             {/* GitHub import option */}
             <button
               onClick={() => {
@@ -471,15 +679,47 @@ export default function Repos() {
                 </p>
                 <p className="text-xs text-gray-500 mt-1">
                   {hasGitHub
-                    ? 'Select repos from your GitHub org, including private ones'
-                    : 'Connect your GitHub account to import repos automatically'}
+                    ? 'Select repos from your GitHub org'
+                    : 'Connect GitHub to import repos'}
+                </p>
+              </div>
+            </button>
+
+            {/* GitLab import option */}
+            <button
+              onClick={() => {
+                if (hasGitLab) {
+                  handleDiscoverGitLab();
+                } else {
+                  navigate('/settings?tab=integrations');
+                }
+              }}
+              className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-orange-500/50 hover:bg-gray-800/50 transition-all group text-left"
+            >
+              <svg className="w-8 h-8 text-gray-400 group-hover:text-orange-400 transition-colors" viewBox="0 0 32 32" fill="currentColor">
+                <path d="M16 28.896L21.323 12.576H10.677L16 28.896Z" />
+                <path d="M16 28.896L10.677 12.576H2.867L16 28.896Z" opacity="0.7" />
+                <path d="M2.867 12.576L1.164 17.821C1.005 18.31 1.172 18.847 1.578 19.142L16 28.896L2.867 12.576Z" opacity="0.5" />
+                <path d="M2.867 12.576H10.677L7.334 2.279C7.155 1.736 6.393 1.736 6.214 2.279L2.867 12.576Z" />
+                <path d="M16 28.896L21.323 12.576H29.133L16 28.896Z" opacity="0.7" />
+                <path d="M29.133 12.576L30.836 17.821C30.995 18.31 30.828 18.847 30.422 19.142L16 28.896L29.133 12.576Z" opacity="0.5" />
+                <path d="M29.133 12.576H21.323L24.666 2.279C24.845 1.736 25.607 1.736 25.786 2.279L29.133 12.576Z" />
+              </svg>
+              <div className="text-center">
+                <p className="font-medium text-gray-200 group-hover:text-white transition-colors">
+                  {hasGitLab ? 'Import from GitLab' : 'Connect GitLab'}
+                </p>
+                <p className="text-xs text-gray-500 mt-1">
+                  {hasGitLab
+                    ? 'Select repos from your GitLab'
+                    : 'Connect GitLab to import repos'}
                 </p>
               </div>
             </button>
 
             {/* Manual add option */}
             <button
-              onClick={() => { setShowForm(true); setShowImport(false); }}
+              onClick={() => { setShowForm(true); setShowImport(false); setShowGitLabImport(false); }}
               className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-indigo-500/50 hover:bg-gray-800/50 transition-all group text-left"
             >
               <svg className="w-8 h-8 text-gray-400 group-hover:text-white transition-colors" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
@@ -488,7 +728,7 @@ export default function Repos() {
               <div className="text-center">
                 <p className="font-medium text-gray-200 group-hover:text-white transition-colors">Add Manually</p>
                 <p className="text-xs text-gray-500 mt-1">
-                  Enter a repository path or GitHub URL directly
+                  Enter a repository path or URL directly
                 </p>
               </div>
             </button>
@@ -504,6 +744,14 @@ export default function Repos() {
                   {group.provider === 'github' ? (
                     <svg className="w-4 h-4 text-gray-400" viewBox="0 0 16 16" fill="currentColor">
                       <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                    </svg>
+                  ) : group.provider === 'gitlab' ? (
+                    <svg className="w-4 h-4 text-orange-400" viewBox="0 0 32 32" fill="currentColor">
+                      <path d="M16 28.896L21.323 12.576H10.677L16 28.896Z" />
+                      <path d="M16 28.896L10.677 12.576H2.867L16 28.896Z" opacity="0.7" />
+                      <path d="M2.867 12.576H10.677L7.334 2.279C7.155 1.736 6.393 1.736 6.214 2.279L2.867 12.576Z" />
+                      <path d="M16 28.896L21.323 12.576H29.133L16 28.896Z" opacity="0.7" />
+                      <path d="M29.133 12.576H21.323L24.666 2.279C24.845 1.736 25.607 1.736 25.786 2.279L29.133 12.576Z" />
                     </svg>
                   ) : (
                     <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">

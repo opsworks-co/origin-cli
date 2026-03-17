@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import { loadConfig, loadAgentConfig, loadRepoConfig } from '../config.js';
 import { api } from '../api.js';
-import { loadSessionState, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
+import { loadSessionState, listActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
 import { execSync } from 'child_process';
 
 function formatDuration(ms: number): string {
@@ -42,50 +42,57 @@ export async function statusCommand() {
     console.log(chalk.gray(`    Tools: ${agentConfig.detectedTools.length > 0 ? agentConfig.detectedTools.join(', ') : 'none'}`));
   }
 
-  // ── Active Session ──────────────────────────────────────────────
+  // ── Active Sessions ─────────────────────────────────────────────
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
-  const state = loadSessionState(cwd);
+  const activeSessions = listActiveSessions(cwd);
 
-  if (state) {
-    const durationMs = Date.now() - new Date(state.startedAt).getTime();
-    const branch = state.branch || getBranch(cwd);
-    const headSha = getHeadSha(cwd);
+  if (activeSessions.length > 0) {
+    const label = activeSessions.length === 1 ? 'Active Session' : `Active Sessions (${activeSessions.length})`;
+    console.log(chalk.magenta(`\n  ● ${label}`));
 
-    console.log(chalk.magenta('\n  ● Active Session'));
-    console.log(chalk.gray(`    Session ID:  ${chalk.white(state.sessionId)}`));
-    console.log(chalk.gray(`    Model:       ${chalk.cyan(state.model)}`));
-    console.log(chalk.gray(`    Duration:    ${chalk.white(formatDuration(durationMs))}`));
-    if (branch) {
-      console.log(chalk.gray(`    Branch:      ${chalk.yellow(branch)}`));
-    }
-    if (headSha) {
-      console.log(chalk.gray(`    HEAD:        ${chalk.white(headSha.slice(0, 8))}`));
-    }
-    if (state.headShaAtStart) {
-      console.log(chalk.gray(`    Start HEAD:  ${chalk.white(state.headShaAtStart.slice(0, 8))}`));
-    }
-    console.log(chalk.gray(`    Prompts:     ${chalk.white(String(state.prompts.length))}`));
-    console.log(chalk.gray(`    Repo:        ${chalk.white(state.repoPath)}`));
+    for (const state of activeSessions) {
+      const durationMs = Date.now() - new Date(state.startedAt).getTime();
+      const branch = state.branch || getBranch(cwd);
+      const headSha = getHeadSha(cwd);
 
-    if (state.transcriptPath) {
-      console.log(chalk.gray(`    Transcript:  ${chalk.white(state.transcriptPath)}`));
-    }
+      if (activeSessions.length > 1) {
+        console.log(chalk.gray('    ─────────────────────────────'));
+      }
+      console.log(chalk.gray(`    Session ID:  ${chalk.white(state.sessionId)}`));
+      console.log(chalk.gray(`    Model:       ${chalk.cyan(state.model)}`));
+      console.log(chalk.gray(`    Duration:    ${chalk.white(formatDuration(durationMs))}`));
+      if (branch) {
+        console.log(chalk.gray(`    Branch:      ${chalk.yellow(branch)}`));
+      }
+      if (headSha) {
+        console.log(chalk.gray(`    HEAD:        ${chalk.white(headSha.slice(0, 8))}`));
+      }
+      if (state.headShaAtStart) {
+        console.log(chalk.gray(`    Start HEAD:  ${chalk.white(state.headShaAtStart.slice(0, 8))}`));
+      }
+      console.log(chalk.gray(`    Prompts:     ${chalk.white(String(state.prompts.length))}`));
+      console.log(chalk.gray(`    Repo:        ${chalk.white(state.repoPath)}`));
 
-    // Show new commits since session started
-    if (state.headShaAtStart && headSha && state.headShaAtStart !== headSha) {
-      try {
-        const commitCount = execSync(
-          `git rev-list --count ${state.headShaAtStart}..${headSha}`,
-          { encoding: 'utf-8', cwd: repoPath || cwd, stdio: ['pipe', 'pipe', 'pipe'] }
-        ).trim();
-        console.log(chalk.gray(`    New commits: ${chalk.green(commitCount)}`));
-      } catch { /* ignore */ }
-    }
+      if (state.transcriptPath) {
+        console.log(chalk.gray(`    Transcript:  ${chalk.white(state.transcriptPath)}`));
+      }
 
-    // Origin dashboard link
-    const apiUrl = config?.apiUrl || 'https://getorigin.io';
-    console.log(chalk.gray(`    Dashboard:   ${chalk.blue(`${apiUrl}/sessions/${state.sessionId}`)}`));
+      // Show new commits since session started
+      if (state.headShaAtStart && headSha && state.headShaAtStart !== headSha) {
+        try {
+          const commitCount = execSync(
+            `git rev-list --count ${state.headShaAtStart}..${headSha}`,
+            { encoding: 'utf-8', cwd: repoPath || cwd, stdio: ['pipe', 'pipe', 'pipe'] }
+          ).trim();
+          console.log(chalk.gray(`    New commits: ${chalk.green(commitCount)}`));
+        } catch { /* ignore */ }
+      }
+
+      // Origin dashboard link
+      const apiUrl = config?.apiUrl || 'https://getorigin.io';
+      console.log(chalk.gray(`    Dashboard:   ${chalk.blue(`${apiUrl}/sessions/${state.sessionId}`)}`));
+    }
   } else if (repoPath) {
     console.log(chalk.gray('\n  No active session in this repo'));
   }

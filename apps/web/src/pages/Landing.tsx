@@ -56,9 +56,9 @@ const CAPABILITIES = [
   {
     category: 'For Developers',
     items: [
-      'CLI with 15 commands \u2014 sessions, agents, repos, policies, stats',
-      'MCP server with 12 tools for Claude Code and Cursor',
-      'Automatic session tracking with zero config',
+      'origin login, origin sessions, origin stats \u2014 manage everything from terminal',
+      'MCP server auto-captures sessions from Claude Code and Cursor',
+      'Git hooks track AI-authored commits \u2014 zero manual work',
       'Review, approve, or flag AI sessions from CLI or dashboard',
     ],
   },
@@ -127,9 +127,35 @@ export default function Landing() {
             </span>
           </h1>
           <p className="mt-6 text-lg md:text-xl text-gray-400 max-w-2xl mx-auto leading-relaxed">
-            Origin gives CTOs and CSOs full visibility into every AI coding session
-            &mdash; what was prompted, what was built, and whether it followed the rules.
+            AI agents write thousands of lines of code daily &mdash; but nobody tracks where it comes from.
+            Origin records every AI session, links code to its source, and enforces your policies before merge.
           </p>
+
+          {/* Two-part value prop */}
+          <div className="mt-10 grid sm:grid-cols-2 gap-4 max-w-2xl mx-auto text-left">
+            <div className="bg-gray-900/80 border border-gray-800 rounded-xl px-5 py-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-green-400 font-mono text-sm">$</span>
+                <span className="text-sm font-semibold text-gray-200">Origin CLI</span>
+                <span className="text-xs text-gray-600">&mdash; open source, free</span>
+              </div>
+              <p className="text-sm text-gray-400 leading-relaxed">
+                Runs on your machine. Captures every AI coding session &mdash; prompts, tool calls, files changed, model, cost.
+                Works with Claude Code, Cursor, Copilot, and more. Zero config.
+              </p>
+            </div>
+            <div className="bg-gray-900/80 border border-gray-800 rounded-xl px-5 py-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-indigo-400 text-sm">&#9670;</span>
+                <span className="text-sm font-semibold text-gray-200">Origin Platform</span>
+                <span className="text-xs text-gray-600">&mdash; dashboard for teams</span>
+              </div>
+              <p className="text-sm text-gray-400 leading-relaxed">
+                Web dashboard for CTOs and security leads. Review AI sessions, set policies, track costs, block PRs with violations, and audit every line of AI code.
+              </p>
+            </div>
+          </div>
+
           {/* Install one-liner */}
           <InstallCommand />
 

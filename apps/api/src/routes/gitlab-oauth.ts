@@ -4,6 +4,7 @@ import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import {
   getGitLabOAuthConfig,
+  getGitLabOAuthConfigForOrg,
   getGitLabOAuthBaseUrl,
   exchangeGitLabOAuthCode,
   getValidGitLabOAuthToken,
@@ -14,14 +15,120 @@ const router = Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'origin-v2-dev-secret';
 
+// ── GET /config — get GitLab OAuth app config for this org ──
+
+router.get('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+
+    // Check env vars first
+    const envConfig = getGitLabOAuthConfig();
+    if (envConfig.configured) {
+      return res.json({
+        configured: true,
+        source: 'environment',
+        clientId: envConfig.clientId,
+        redirectUri: envConfig.redirectUri,
+        // Never expose secret
+      });
+    }
+
+    // Check per-org DB config
+    const dbConfig = await prisma.integrationConfig.findFirst({
+      where: { orgId, provider: 'gitlab_oauth_app' },
+    });
+
+    if (!dbConfig) {
+      return res.json({ configured: false, source: 'none' });
+    }
+
+    let settings: any = {};
+    try { settings = JSON.parse(dbConfig.settings); } catch {}
+
+    res.json({
+      configured: !!(settings.clientId && settings.clientSecret && settings.redirectUri),
+      source: 'database',
+      clientId: settings.clientId || null,
+      redirectUri: settings.redirectUri || null,
+    });
+  } catch (err) {
+    console.error('[gitlab-oauth] Config error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── PUT /config — save GitLab OAuth app credentials for this org ──
+
+router.put('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const { clientId, clientSecret, redirectUri } = req.body;
+
+    if (!clientId || !clientSecret || !redirectUri) {
+      return res.status(400).json({ error: 'clientId, clientSecret, and redirectUri are required' });
+    }
+
+    const settings = JSON.stringify({ clientId, clientSecret, redirectUri });
+
+    const existing = await prisma.integrationConfig.findFirst({
+      where: { orgId, provider: 'gitlab_oauth_app' },
+    });
+
+    if (existing) {
+      await prisma.integrationConfig.update({
+        where: { id: existing.id },
+        data: { settings },
+      });
+    } else {
+      await prisma.integrationConfig.create({
+        data: { orgId, provider: 'gitlab_oauth_app', token: '', settings },
+      });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        userId: req.user!.id,
+        action: 'GITLAB_OAUTH_APP_CONFIGURED',
+        resource: 'gitlab_oauth_app',
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[gitlab-oauth] Config save error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── DELETE /config — remove GitLab OAuth app credentials ──
+
+router.delete('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const existing = await prisma.integrationConfig.findFirst({
+      where: { orgId, provider: 'gitlab_oauth_app' },
+    });
+
+    if (existing) {
+      await prisma.integrationConfig.delete({ where: { id: existing.id } });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[gitlab-oauth] Config delete error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ── GET /install — redirect user to GitLab OAuth authorization page ──
 
 router.get('/install', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
-  const oauthConfig = getGitLabOAuthConfig();
+  const oauthConfig = await getGitLabOAuthConfigForOrg(req.user!.orgId);
 
   if (!oauthConfig.configured) {
     return res.status(500).json({
-      error: 'GitLab OAuth not configured on this server. Set GITLAB_APP_ID, GITLAB_APP_SECRET, and GITLAB_APP_REDIRECT_URI environment variables.',
+      error: 'GitLab OAuth not configured. Add your GitLab Application credentials in Settings or set GITLAB_APP_ID, GITLAB_APP_SECRET, and GITLAB_APP_REDIRECT_URI environment variables.',
     });
   }
 
@@ -42,8 +149,8 @@ router.get('/install', requireAuth, requireRole('ADMIN'), async (req: AuthReques
   );
 
   const authorizeUrl = `${gitlabBaseUrl}/oauth/authorize?` + new URLSearchParams({
-    client_id: oauthConfig.clientId!,
-    redirect_uri: oauthConfig.redirectUri!,
+    client_id: oauthConfig.clientId,
+    redirect_uri: oauthConfig.redirectUri,
     response_type: 'code',
     state,
     scope: 'api',
@@ -79,6 +186,12 @@ router.get('/callback', async (req: Request, res: Response) => {
       return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=no_code');
     }
 
+    // Resolve OAuth config for this org
+    const oauthConfig = await getGitLabOAuthConfigForOrg(statePayload.orgId);
+    if (!oauthConfig.configured) {
+      return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=oauth_not_configured');
+    }
+
     // Determine GitLab instance URL
     let gitlabBaseUrl = 'https://gitlab.com';
     const existingConfig = await prisma.integrationConfig.findFirst({
@@ -91,7 +204,7 @@ router.get('/callback', async (req: Request, res: Response) => {
     // Exchange authorization code for tokens
     let tokenResult: { access_token: string; refresh_token: string; expires_in: number; created_at: number };
     try {
-      tokenResult = await exchangeGitLabOAuthCode(code as string, gitlabBaseUrl);
+      tokenResult = await exchangeGitLabOAuthCode(code as string, gitlabBaseUrl, oauthConfig);
     } catch (err: any) {
       console.error('[gitlab-oauth] Token exchange failed:', err.message);
       return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=token_exchange_failed');
@@ -171,10 +284,11 @@ router.get('/callback', async (req: Request, res: Response) => {
 
 router.get('/status', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const oauthConfig = getGitLabOAuthConfig();
+    const orgId = req.user!.orgId;
+    const oauthConfig = await getGitLabOAuthConfigForOrg(orgId);
 
     const config = await prisma.integrationConfig.findFirst({
-      where: { orgId: req.user!.orgId, provider: 'gitlab' },
+      where: { orgId, provider: 'gitlab' },
     });
 
     const authType = (config as any)?.authType || 'pat';
@@ -215,7 +329,7 @@ router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest,
     }
 
     // Get valid token (auto-refresh if expired)
-    const token = await getValidGitLabOAuthToken(config);
+    const token = await getValidGitLabOAuthToken({ ...config, orgId: req.user!.orgId });
     const apiBase = config.baseUrl || 'https://gitlab.com/api/v4';
     const result = await testGitLabConnection(token, apiBase, 'gitlab_oauth');
 
@@ -240,7 +354,7 @@ router.post('/disconnect', requireAuth, requireRole('ADMIN'), async (req: AuthRe
 
     // Try to revoke the token on GitLab
     try {
-      const oauthConfig = getGitLabOAuthConfig();
+      const oauthConfig = await getGitLabOAuthConfigForOrg(req.user!.orgId);
       const gitlabBaseUrl = getGitLabOAuthBaseUrl(config.baseUrl || 'https://gitlab.com/api/v4');
       if (oauthConfig.configured) {
         await fetch(`${gitlabBaseUrl}/oauth/revoke`, {
@@ -256,13 +370,6 @@ router.post('/disconnect', requireAuth, requireRole('ADMIN'), async (req: AuthRe
     } catch (err) {
       console.error('[gitlab-oauth] Token revocation failed (non-fatal):', err);
     }
-
-    // Remove OAuth fields from settings, keep feature toggles
-    let settings: any = {};
-    try { settings = JSON.parse(config.settings); } catch { /* */ }
-    delete settings.refreshToken;
-    delete settings.tokenExpiresAt;
-    delete settings.oauthUsername;
 
     // Delete the integration (user can re-add via PAT or OAuth)
     await prisma.integrationConfig.delete({ where: { id: config.id } });
