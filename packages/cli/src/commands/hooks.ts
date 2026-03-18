@@ -59,7 +59,7 @@ function buildSessionWriteData(opts: {
   state: SessionState;
   parsed: ParsedTranscript;
   promptMappings: PromptFileMapping[];
-  gitCapture: { headBefore: string; headAfter: string; commitShas: string[]; linesAdded: number; linesRemoved: number };
+  gitCapture: { headBefore: string; headAfter: string; commitShas: string[]; linesAdded: number; linesRemoved: number; commitDetails?: Array<{ filesChanged: string[] }> };
   status: 'running' | 'ended';
   apiUrl: string;
   extraFiles?: string[];
@@ -72,9 +72,18 @@ function buildSessionWriteData(opts: {
   const branch = getBranch(state.repoPath) || state.branch || '';
 
   // Merge file lists and make paths relative to repo root
+  // Fall back to git-captured files if transcript parsing found none
   const repoRoot = state.repoPath || '';
+  let transcriptFiles = parsed.filesChanged;
+  if (transcriptFiles.length === 0 && gitCapture.commitDetails) {
+    const gitFiles = new Set<string>();
+    for (const commit of gitCapture.commitDetails) {
+      for (const f of commit.filesChanged) gitFiles.add(f);
+    }
+    transcriptFiles = Array.from(gitFiles);
+  }
   const allFiles = Array.from(new Set([
-    ...parsed.filesChanged,
+    ...transcriptFiles,
     ...(extraFiles || []),
   ])).map(f => f.startsWith(repoRoot) ? f.slice(repoRoot.length + 1) : f);
 
@@ -800,6 +809,18 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     const promptMappings = extractPromptFileMappings(state.transcriptPath);
     debugLog('stop', 'prompt mappings', { count: promptMappings.length });
 
+    // Fall back to git-captured files if transcript parsing didn't find any
+    const gitCapture = captureGitState(state.repoPath, state.headShaAtStart);
+    let filesChanged = parsed.filesChanged;
+    if (filesChanged.length === 0 && gitCapture.commitDetails.length > 0) {
+      const gitFiles = new Set<string>();
+      for (const commit of gitCapture.commitDetails) {
+        for (const f of commit.filesChanged) gitFiles.add(f);
+      }
+      filesChanged = Array.from(gitFiles);
+      debugLog('stop', 'using git-captured files (transcript had none)', { count: filesChanged.length });
+    }
+
     if (connected) {
       debugLog('stop', 'calling api.updateSession', {
         sessionId: state.sessionId,
@@ -817,7 +838,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         prompt: joinedPrompt || undefined,
         transcript: displayTranscript || undefined,
         model: model !== 'unknown' ? model : undefined,
-        filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
+        filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
         tokensUsed: parsed.tokensUsed || undefined,
         inputTokens: parsed.inputTokens || undefined,
         outputTokens: parsed.outputTokens || undefined,
@@ -831,7 +852,6 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
     // Write session files to origin-sessions branch + push on every Stop
     const apiUrl = config?.apiUrl || 'https://getorigin.io';
-    const gitCapture = captureGitState(state.repoPath, state.headShaAtStart);
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings, gitCapture,
       status: 'running', apiUrl,
@@ -901,11 +921,22 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     // Extract prompt → file change mappings from transcript
     const promptMappings = extractPromptFileMappings(state.transcriptPath);
 
+    // Fall back to git-captured files if transcript parsing didn't find any
+    let filesChanged = parsed.filesChanged;
+    if (filesChanged.length === 0 && gitCapture.commitDetails.length > 0) {
+      const gitFiles = new Set<string>();
+      for (const commit of gitCapture.commitDetails) {
+        for (const f of commit.filesChanged) gitFiles.add(f);
+      }
+      filesChanged = Array.from(gitFiles);
+      debugLog('session-end', 'using git-captured files (transcript had none)', { count: filesChanged.length });
+    }
+
     if (connected) {
       debugLog('session-end', 'calling api.endSession', {
         sessionId: state.sessionId,
         promptCount: prompts.length,
-        filesCount: parsed.filesChanged.length,
+        filesCount: filesChanged.length,
         tokensUsed: parsed.tokensUsed,
         inputTokens: parsed.inputTokens,
         outputTokens: parsed.outputTokens,
@@ -919,7 +950,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         prompt: joinedPrompt || undefined,
         summary: parsed.summary || undefined,
         transcript: displayTranscript || undefined,
-        filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
+        filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
         tokensUsed: parsed.tokensUsed || undefined,
         inputTokens: parsed.inputTokens || undefined,
         outputTokens: parsed.outputTokens || undefined,
