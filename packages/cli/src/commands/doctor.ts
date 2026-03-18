@@ -115,7 +115,7 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
       console.log(chalk.green(`  ✓ No stuck sessions`));
     }
 
-    // 1c. Orphaned origin-sessions entries (referencing non-existent commits)
+    // 1c. Fix stale "running" sessions on origin-sessions branch + orphaned entries
     try {
       const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
       // Check if origin-sessions branch exists
@@ -127,6 +127,10 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
       ).trim();
       const sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
       let orphanedEntries = 0;
+      let staleRunning = 0;
+
+      // Get active session IDs to avoid marking the current session as ended
+      const activeIds = new Set(activeSessions.map(s => s.sessionId));
 
       for (const dir of sessionDirs) {
         try {
@@ -135,6 +139,50 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
             execOpts,
           ).trim();
           const metadata = JSON.parse(metaRaw);
+
+          // Check for "running" sessions that are no longer active (no state file)
+          if (metadata.status === 'running' && !activeIds.has(metadata.sessionId)) {
+            const ageMs = Date.now() - new Date(metadata.startedAt).getTime();
+            if (ageMs > 60 * 60 * 1000) { // >1hr old
+              staleRunning++;
+              if (opts?.verbose) {
+                const ageHrs = ageMs / (1000 * 60 * 60);
+                console.log(chalk.gray(`    Stale running: ${dir} — ${metadata.model} — ${ageHrs.toFixed(1)}h`));
+              }
+              if (opts?.fix) {
+                // Rewrite metadata with status: 'ended' and capture git data
+                try {
+                  const gitCapture = captureGitState(repoPath, metadata.git?.headBefore || null);
+                  writeSessionFiles(repoPath, {
+                    sessionId: metadata.sessionId,
+                    model: metadata.model,
+                    startedAt: metadata.startedAt,
+                    endedAt: new Date().toISOString(),
+                    durationMs: ageMs,
+                    status: 'ended',
+                    costUsd: metadata.cost?.usd || 0,
+                    tokensUsed: metadata.tokens?.total || 0,
+                    inputTokens: metadata.tokens?.input || 0,
+                    outputTokens: metadata.tokens?.output || 0,
+                    toolCalls: metadata.toolCalls || 0,
+                    linesAdded: metadata.lines?.added || gitCapture.linesAdded || 0,
+                    linesRemoved: metadata.lines?.removed || gitCapture.linesRemoved || 0,
+                    prompts: [],
+                    filesChanged: metadata.filesChanged?.length > 0
+                      ? metadata.filesChanged
+                      : (gitCapture.commitDetails?.flatMap(c => c.filesChanged) || []),
+                    git: metadata.git || { branch: '', headBefore: '', headAfter: '', commitShas: [] },
+                    summary: metadata.summary || '',
+                    originUrl: metadata.originUrl || '',
+                    changes: [],
+                  });
+                } catch { /* best effort */ }
+                fixed++;
+              }
+            }
+          }
+
+          // Check for orphaned entries (referencing non-existent commits)
           const headAfter = metadata.git?.headAfter;
           if (headAfter) {
             try {
@@ -147,6 +195,16 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
             }
           }
         } catch { /* skip unreadable */ }
+      }
+
+      if (staleRunning > 0) {
+        issues += staleRunning;
+        console.log(chalk.yellow(`  ⚠ ${staleRunning} session${staleRunning !== 1 ? 's' : ''} stuck as "running" on origin-sessions branch`));
+        if (opts?.fix) {
+          console.log(chalk.green(`    ✓ Marked ${staleRunning} as ended`));
+        } else {
+          console.log(chalk.gray(`    Run with --fix to mark as ended`));
+        }
       }
 
       if (orphanedEntries > 0) {
