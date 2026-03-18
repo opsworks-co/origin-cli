@@ -38,6 +38,10 @@ import { upgradeCommand } from './commands/upgrade.js';
 import { analyzeCommand } from './commands/analyze.js';
 import { dbImportCommand, dbStatsCommand } from './commands/db.js';
 import { proxyInstallCommand, proxyUninstallCommand, proxyStatusCommand } from './commands/proxy.js';
+import { verifyCommand } from './commands/verify.js';
+import { ignoreListCommand, ignoreAddCommand, ignoreRemoveCommand, ignoreTestCommand } from './commands/ignore.js';
+import { exportCommand } from './commands/export.js';
+import { compareCommand } from './commands/compare.js';
 import { checkForUpdate } from './version-check.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -148,6 +152,30 @@ program.command('stats')
   .option('--dashboard', 'Show org-wide dashboard stats from Origin API')
   .option('-r, --range <range>', 'Commit range (e.g., HEAD~50..HEAD)')
   .action(statsCommand);
+
+program.command('verify')
+  .description('Health check — show agent config, repo config, mode, sessions, attribution')
+  .option('--json', 'Output as JSON')
+  .action(verifyCommand);
+
+program.command('compare <arg1> [arg2]')
+  .description('Compare AI attribution between branches or commit ranges')
+  .option('--json', 'Output as JSON')
+  .action(compareCommand);
+
+program.command('export')
+  .description('Export session data as CSV or JSON')
+  .option('-f, --format <format>', 'Output format (json, csv)', 'json')
+  .option('-o, --output <file>', 'Write to file instead of stdout')
+  .option('-l, --limit <n>', 'Limit number of sessions')
+  .option('-m, --model <name>', 'Filter by model')
+  .action(exportCommand);
+
+const ignoreCmd = program.command('ignore').description('Manage file ignore patterns for Origin tracking');
+ignoreCmd.action(ignoreListCommand);
+ignoreCmd.command('add <pattern>').description('Add an ignore pattern to .origin.json').action(ignoreAddCommand);
+ignoreCmd.command('remove <pattern>').description('Remove an ignore pattern').action(ignoreRemoveCommand);
+ignoreCmd.command('test <filepath>').description('Test if a file would be ignored').action(ignoreTestCommand);
 
 // ─── Search & Analysis ───────────────────────────────────────────────────
 
