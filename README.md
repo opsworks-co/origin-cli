@@ -37,6 +37,7 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 - **Search** — `origin search <query>` searches all AI prompt history locally
 - **Prompt Analytics** — `origin analyze` detects prompting patterns and metrics
 - **Trail System** — branch-centric work tracking linking sessions to features
+- **Secret Scanner** — pre-commit hook blocks commits containing hardcoded secrets, API keys, and credentials
 - **Attribution Preservation** — AI tags survive `git rebase`, `git commit --amend`, `git cherry-pick`, and stash operations
 - **Auto-Detection** — 13 agents: Claude Code, Gemini CLI, Cursor, Codex, Aider, Windsurf, Copilot, Continue, Amp, Junie, OpenCode, Rovo, Droid
 - **Git Notes** — per-commit AI metadata stored in `refs/notes/origin`
@@ -50,6 +51,7 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 - **Compliance Dashboard** — compliance score, policy violation trends, exportable reports
 - **Model Comparison** — cost, token usage, and approval rates across AI models
 - **Leaderboard** — rank team members by AI usage, lines written, cost, quality score
+- **Secret Detection** — real-time secret scanning with Security tab, pre-commit blocking, admin notifications
 - **Slack Notifications** — real-time alerts for violations, reviews, and budget
 - **GitHub App** — one-click install with bot identity on status checks
 - **MCP Server** — native integration with Claude Code and Cursor
@@ -176,7 +178,7 @@ origin-v2/
 
 ```
 Setup:
-  origin enable [--global]        Install hooks (standalone or connected)
+  origin enable [--global]        Install hooks + secret scanner (standalone or connected)
   origin disable [--global]       Remove hooks
   origin login                    Authenticate with Origin server (connected mode)
   origin init                     Register machine + detect AI tools
@@ -203,6 +205,9 @@ Sessions:
   origin share <id>               Create shareable session bundle
 
 Configuration:
+  origin config set <key> <val>   Set CLI config (secretScan, secretRedaction, etc.)
+  origin config get <key>         Get CLI config value
+  origin config list              List all config values
   origin ignore                   List all ignore patterns (default + custom)
   origin ignore add <pattern>     Add ignore pattern to .origin.json
   origin ignore remove <pattern>  Remove ignore pattern
@@ -226,9 +231,13 @@ Maintenance:
 ### Attribution Pipeline
 
 ```
-AI Agent commits code
+AI Agent stages code
         ↓
-Global post-commit hook fires
+Pre-commit hook scans for secrets → blocks if found
+        ↓
+Commit goes through
+        ↓
+Post-commit hook fires
         ↓
 Origin detects AI process (pgrep) or active session
         ↓
