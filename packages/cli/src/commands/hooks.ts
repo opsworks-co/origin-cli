@@ -1190,14 +1190,18 @@ export async function handlePostCommit(): Promise<void> {
   }
 
   // Write full session entrypoint to origin-sessions branch on every commit
-  // Parse transcript now (not just at session-end) so we capture tokens, cost, prompts, files
-  // Skip for detected (synthetic) sessions — they don't have transcripts
-  if (state && state.transcriptPath) {
+  // Parse transcript for full metrics (if available) so we capture tokens, cost, prompts, files
+  // For agents without transcripts (e.g. Gemini), still write git data (files, lines)
+  if (state && !state.sessionId.startsWith('detected-')) {
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
 
-    // Parse transcript for full metrics and write session files
-    const parsed = parseTranscript(state.transcriptPath || '');
-    const promptMappings = extractPromptFileMappings(state.transcriptPath || '');
+    // Parse transcript for full metrics (or use empty defaults for agents without transcripts)
+    const parsed = state.transcriptPath
+      ? parseTranscript(state.transcriptPath)
+      : { prompts: [], filesChanged: [], tokensUsed: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0, summary: '', model: '', transcript: '' };
+    const promptMappings = state.transcriptPath
+      ? extractPromptFileMappings(state.transcriptPath)
+      : [];
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings,
       gitCapture: {
