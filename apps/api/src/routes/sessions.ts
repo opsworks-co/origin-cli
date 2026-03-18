@@ -1215,4 +1215,84 @@ router.post('/:id/ask', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// POST /:id/secrets — Report secret findings from pre-commit hook
+// ---------------------------------------------------------------------------
+
+router.post('/:id/secrets', async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = req.params.id as string;
+    const { findings, source } = req.body;
+
+    if (!findings || !Array.isArray(findings) || findings.length === 0) {
+      return res.status(400).json({ error: 'findings array is required' });
+    }
+
+    // Verify session exists and belongs to user's org
+    const session = await prisma.codingSession.findFirst({
+      where: {
+        id: sessionId,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Store each finding
+    for (const f of findings) {
+      await prisma.secretFinding.create({
+        data: {
+          sessionId,
+          type: f.type || 'GENERIC_SECRET',
+          severity: f.severity || 'medium',
+          filePath: f.filePath || '',
+          lineNumber: f.lineNumber || 0,
+          match: f.match || '',
+          ruleName: f.ruleName || 'pre-commit',
+        },
+      });
+    }
+
+    // Audit log
+    const orgId = req.user!.orgId;
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        action: 'SECRET_DETECTED',
+        resource: sessionId,
+        metadata: JSON.stringify({
+          sessionId,
+          source: source || 'pre-commit',
+          findingsCount: findings.length,
+          types: [...new Set(findings.map((f: any) => f.type))],
+          severities: [...new Set(findings.map((f: any) => f.severity))],
+        }),
+      },
+    });
+
+    // Notify admins for critical/high findings
+    const criticalFindings = findings.filter(
+      (f: any) => f.severity === 'critical' || f.severity === 'high',
+    );
+    if (criticalFindings.length > 0) {
+      const typesSummary = [...new Set(criticalFindings.map((f: any) => f.ruleName))].join(', ');
+      await notifyOrgAdmins(
+        orgId,
+        'SECRET_DETECTED',
+        `Secret Detected (pre-commit): ${criticalFindings.length} finding${criticalFindings.length !== 1 ? 's' : ''}`,
+        `${typesSummary} found — commit blocked`,
+        `/sessions/${sessionId}`,
+        { sessionId, findingsCount: criticalFindings.length, types: [...new Set(criticalFindings.map((f: any) => f.type))] },
+      );
+    }
+
+    console.log(`[secrets] Session ${sessionId}: ${findings.length} finding(s) from ${source || 'pre-commit'}`);
+    res.json({ stored: findings.length });
+  } catch (err: any) {
+    console.error('Store secret findings error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

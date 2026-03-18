@@ -13,12 +13,12 @@ export interface OriginConfig {
   userId: string;
   machineId?: string;
   // Feature flags
-  mode?: 'auto' | 'standalone' | 'connected'; // Force standalone even when logged in
   commitLinking?: 'always' | 'prompt' | 'never';
   pushStrategy?: 'auto' | 'prompt' | 'false';
   telemetry?: boolean;
   autoUpdate?: boolean;
   secretRedaction?: boolean;
+  secretScan?: boolean;        // Pre-commit secret scanning (default: true)
   hookChaining?: boolean;
 }
 
@@ -59,6 +59,7 @@ export interface RepoConfig {
   agent?: string;  // Origin agent slug to link sessions to
   ignorePatterns?: string[];
   trackTabCompletions?: boolean;
+  secretScan?: boolean;  // Pre-commit secret scanning (default: true)
 }
 
 export function loadRepoConfig(repoPath: string): RepoConfig | null {
@@ -82,11 +83,9 @@ export function clearRepoConfig(repoPath: string) {
 /**
  * Returns true if CLI is connected to the Origin platform (has API key configured).
  * When false, CLI operates in standalone/local-only mode.
- * Respects `mode: 'standalone'` config to force local-only even when logged in.
  */
 export function isConnectedMode(): boolean {
   const config = loadConfig();
-  if (config?.mode === 'standalone') return false;
   return !!(config?.apiKey);
 }
 

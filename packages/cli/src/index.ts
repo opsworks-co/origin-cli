@@ -15,7 +15,7 @@ import { statsCommand } from './commands/stats.js';
 import { enableCommand } from './commands/enable.js';
 import { disableCommand } from './commands/disable.js';
 import { linkCommand } from './commands/link.js';
-import { hooksCommand, handlePostCommit, handlePrePush } from './commands/hooks.js';
+import { hooksCommand, handlePostCommit, handlePrePush, handlePreCommit } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
 import { promptsCommand } from './commands/prompts.js';
@@ -319,6 +319,7 @@ hooks.command('cursor <event>').description('Handle Cursor hook event').action((
 hooks.command('gemini <event>').description('Handle Gemini CLI hook event').action((event) => hooksCommand(event, 'gemini'));
 hooks.command('windsurf <event>').description('Handle Windsurf hook event').action((event) => hooksCommand(event, 'windsurf'));
 hooks.command('aider <event>').description('Handle Aider hook event').action((event) => hooksCommand(event, 'aider'));
+hooks.command('git-pre-commit').description('Handle git pre-commit hook (secret scan)').action(() => handlePreCommit());
 hooks.command('git-post-commit').description('Handle git post-commit hook').action(() => handlePostCommit());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
 hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (rebase/amend)').action(async () => {

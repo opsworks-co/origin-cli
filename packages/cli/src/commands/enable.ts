@@ -460,6 +460,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
   if (isGlobal) {
     installGlobalGitHooks();
   } else {
+    installGitPreCommitHook(basePath);
     installGitPostCommitHook(basePath);
     installGitPrePushHook(basePath);
     // Install rewrite hooks for attribution preservation through rebase/amend/cherry-pick
@@ -491,12 +492,11 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
   }
 
   console.log(chalk.bold('\n📋 Next steps:\n'));
-  const firstAgent = AGENTS[agentsToEnable[0]];
-  const connected = isConnectedMode();
   const agentNames = agentsToEnable.map(a => AGENTS[a].command);
   const agentList = agentNames.length > 1
     ? agentNames.slice(0, -1).join(', ') + ' or ' + agentNames[agentNames.length - 1]
     : agentNames[0];
+  const connected = isConnectedMode();
   if (isGlobal) {
     console.log(chalk.white('  1. Open any repo and start coding with ') + chalk.cyan(agentList));
     console.log(chalk.white('  2. Sessions are captured automatically for ALL repos'));
@@ -531,6 +531,44 @@ function installGlobalGitHooks(): void {
   try {
     originBin = execSync('which origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
   } catch { /* fallback to bare name */ }
+
+  // Pre-commit hook — secret scanning (blocks commit on secrets found)
+  const preCommitPath = path.join(globalHooksDir, 'pre-commit');
+  const preCommitContent = `#!/bin/sh
+# origin-global-pre-commit
+# Installed by: origin enable --global
+# Scans staged changes for secrets — blocks commit if found
+
+# Ensure PATH includes common npm/node locations
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
+
+ORIGIN_BIN=""
+if [ -x "${originBin}" ]; then
+  ORIGIN_BIN="${originBin}"
+elif command -v origin >/dev/null 2>&1; then
+  ORIGIN_BIN="origin"
+elif [ -x "/opt/homebrew/bin/origin" ]; then
+  ORIGIN_BIN="/opt/homebrew/bin/origin"
+elif [ -x "/usr/local/bin/origin" ]; then
+  ORIGIN_BIN="/usr/local/bin/origin"
+fi
+
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-pre-commit
+  RESULT=$?
+  if [ $RESULT -ne 0 ]; then
+    exit $RESULT
+  fi
+fi
+
+# Chain to local repo hooks if they exist
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/pre-commit"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+`;
+  fs.writeFileSync(preCommitPath, preCommitContent);
+  fs.chmodSync(preCommitPath, '755');
 
   // Post-commit hook that also chains to local repo hooks
   const postCommitPath = path.join(globalHooksDir, 'post-commit');
@@ -644,6 +682,38 @@ fi
   } catch (err: any) {
     console.log(chalk.yellow(`\n  ⚠ Could not set global git hooks: ${err.message}`));
   }
+}
+
+// ─── Git Pre-Commit Hook (Secret Scan) ────────────────────────────────
+
+function installGitPreCommitHook(gitRoot: string): void {
+  const hooksDir = path.join(gitRoot, '.git', 'hooks');
+  const hookPath = path.join(hooksDir, 'pre-commit');
+
+  if (!fs.existsSync(hooksDir)) {
+    fs.mkdirSync(hooksDir, { recursive: true });
+  }
+
+  const ORIGIN_MARKER = '# origin-pre-commit';
+  const hookScript = `origin hooks git-pre-commit`;
+
+  if (fs.existsSync(hookPath)) {
+    const existing = fs.readFileSync(hookPath, 'utf-8');
+    if (existing.includes(ORIGIN_MARKER)) {
+      console.log(chalk.gray('  ✓ Git pre-commit hook already installed'));
+      return;
+    }
+    backupExistingHooks(hookPath);
+    // Pre-commit must run synchronously (not &) — exit code blocks commit
+    const append = `\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    fs.appendFileSync(hookPath, append);
+  } else {
+    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    fs.writeFileSync(hookPath, content);
+  }
+
+  fs.chmodSync(hookPath, '755');
+  console.log(chalk.green('  ✓ Git pre-commit hook installed (secret scanning)'));
 }
 
 // ─── Git Post-Commit Hook ─────────────────────────────────────────────────

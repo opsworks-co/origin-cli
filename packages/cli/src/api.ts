@@ -104,4 +104,11 @@ export const api = {
 
   // Pricing
   getPricing: () => request('/api/pricing'),
+
+  // Secret findings (pre-commit hook)
+  reportSecrets: (sessionId: string, findings: any[]) =>
+    request(`/api/sessions/${sessionId}/secrets`, {
+      method: 'POST',
+      body: JSON.stringify({ findings, source: 'pre-commit' }),
+    }),
 };

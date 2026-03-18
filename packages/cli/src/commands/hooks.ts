@@ -158,6 +158,40 @@ function escapeShellArg(arg: string): string {
   return "'" + arg.replace(/'/g, "'\\''") + "'";
 }
 
+// ─── Agent-Model Mapping ──────────────────────────────────────────────────
+
+/**
+ * Maps agent slugs to regex patterns that match their model strings.
+ * Used for reliable agent-to-session matching instead of fragile substring checks.
+ */
+const AGENT_MODEL_PATTERNS: Record<string, RegExp> = {
+  'claude': /claude|anthropic|sonnet|opus|haiku/i,
+  'gemini': /gemini|google/i,
+  'cursor': /cursor|gpt|openai/i,
+  'codex': /codex/i,
+  'aider': /aider/i,
+  'windsurf': /windsurf|codeium/i,
+  'copilot': /copilot/i,
+  'continue': /continue/i,
+  'amp': /amp/i,
+  'junie': /junie|jetbrains/i,
+  'opencode': /opencode/i,
+  'rovo': /rovo/i,
+  'droid': /droid/i,
+};
+
+/**
+ * Check if a session's model field matches the given agent slug.
+ */
+function sessionMatchesAgent(session: SessionState, agentSlug: string): boolean {
+  const model = (session.model || '').toLowerCase();
+  const slug = agentSlug.toLowerCase();
+  const pattern = AGENT_MODEL_PATTERNS[slug];
+  if (pattern) return pattern.test(model);
+  // Fallback for unknown agents: exact substring match
+  return model.includes(slug) || slug.includes(model);
+}
+
 // ─── Concurrent Session State Lookup ──────────────────────────────────────
 
 /**
@@ -166,8 +200,10 @@ function escapeShellArg(arg: string): string {
  * With concurrent session support, each Claude Code window has its own
  * state file (tagged by sessionTag). This helper finds the right one by:
  * 1. Exact match on claudeSessionId (current or stored in state)
- * 2. Most recently started session (fallback for agent subprocesses
- *    that have a different session_id from the parent)
+ * 2. Agent-filtered match using model patterns (when agentSlug is provided)
+ * 3. Single active session (unambiguous — safe to use)
+ * 4. Returns null when multiple sessions exist and no reliable match is found,
+ *    to avoid misattributing commits to the wrong session.
  *
  * Returns the state and the resolved cwd to use for saving.
  */
@@ -184,10 +220,7 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
     }
   }
 
-  // 2. Fall back to most recently started session for this repo
-  //    (handles agent subprocesses with unknown session IDs)
-  //    When agentSlug is provided, prefer sessions matching that agent's model
-  //    to avoid closing Claude's session when Gemini ends (and vice versa).
+  // 2. Fall back to active sessions for this repo
   let sessions = listActiveSessions(hookCwd);
   if (sessions.length === 0 && repoPath !== hookCwd) {
     sessions = listActiveSessions(repoPath);
@@ -196,30 +229,37 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
   if (sessions.length > 0) {
     sessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
 
-    // If we know the agent type, prefer sessions matching that model
-    let best = sessions[0];
-    if (agentSlug && sessions.length > 1) {
-      const slugLower = agentSlug.toLowerCase();
-      const modelMatch = sessions.find(s => {
-        const m = (s.model || '').toLowerCase();
-        return m.includes(slugLower) || slugLower.includes(m);
-      });
-      if (modelMatch) {
-        best = modelMatch;
-        debugLog('findStateForHook', 'agent-filtered match', { agentSlug, model: best.model, sessionId: best.sessionId });
+    // Single session — no ambiguity, safe to use
+    if (sessions.length === 1) {
+      const best = sessions[0];
+      debugLog('findStateForHook', 'single active session', { sessionId: best.sessionId, model: best.model, tag: best.sessionTag });
+      return { state: best, saveCwd: best.repoPath || repoPath };
+    }
+
+    // Multiple sessions — require agent match to avoid misattribution
+    if (agentSlug) {
+      const matching = sessions.filter(s => sessionMatchesAgent(s, agentSlug));
+      if (matching.length > 0) {
+        const best = matching[0]; // already sorted by startedAt desc
+        debugLog('findStateForHook', 'agent-filtered match', {
+          agentSlug,
+          model: best.model,
+          sessionId: best.sessionId,
+          tag: best.sessionTag,
+          candidateCount: matching.length,
+        });
+        return { state: best, saveCwd: best.repoPath || repoPath };
       }
     }
 
-    debugLog('findStateForHook', 'fallback to most recent', {
+    // Multiple sessions, no reliable match — return null to avoid misattribution
+    debugLog('findStateForHook', 'ambiguous: multiple sessions, no reliable match', {
       claudeSessionId,
       agentSlug,
-      matchedSessionId: best.sessionId,
-      matchedClaudeId: best.claudeSessionId,
-      matchedModel: best.model,
-      tag: best.sessionTag,
       totalSessions: sessions.length,
+      sessionModels: sessions.map(s => ({ id: s.sessionId, model: s.model })),
     });
-    return { state: best, saveCwd: best.repoPath || repoPath };
+    return null;
   }
 
   // 3. Legacy: try untagged state file (backward compat before concurrent support)
@@ -1040,10 +1080,53 @@ export async function handlePostCommit(): Promise<void> {
 
   // Get ALL active sessions for this repo (concurrent session support)
   const activeSessions = listActiveSessions(hookCwd);
-  // Pick the most recent session for trailer/notes (or null)
-  let state = activeSessions.length > 0
-    ? activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0]
-    : null;
+  activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+
+  // Pick the correct session — use process detection to disambiguate when multiple are active
+  let state: SessionState | null = null;
+  if (activeSessions.length === 1) {
+    state = activeSessions[0];
+  } else if (activeSessions.length > 1) {
+    // Detect which agent made this commit via process detection
+    let detectedSlug: string | null = null;
+    const agentChecks = [
+      { cmd: 'pgrep -f "claude.*stream-json"', slug: 'claude' },
+      { cmd: 'pgrep -f "gemini.*cli|/gemini "', slug: 'gemini' },
+      { cmd: 'pgrep -f "codex"', slug: 'codex' },
+      { cmd: 'pgrep -f "aider"', slug: 'aider' },
+      { cmd: 'pgrep -f "windsurf"', slug: 'windsurf' },
+      { cmd: 'pgrep -f "copilot.*cli|github-copilot"', slug: 'copilot' },
+      { cmd: 'pgrep -f "continue.*dev"', slug: 'continue' },
+      { cmd: 'pgrep -f "amp.*cli|/amp "', slug: 'amp' },
+      { cmd: 'pgrep -f "junie|jetbrains.*ai"', slug: 'junie' },
+      { cmd: 'pgrep -f "opencode"', slug: 'opencode' },
+      { cmd: 'pgrep -f "rovo.*dev"', slug: 'rovo' },
+      { cmd: 'pgrep -f "droid"', slug: 'droid' },
+    ];
+    for (const check of agentChecks) {
+      try {
+        execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+        detectedSlug = check.slug;
+        break;
+      } catch { /* no match */ }
+    }
+
+    if (detectedSlug) {
+      const match = activeSessions.find(s => sessionMatchesAgent(s, detectedSlug!));
+      if (match) {
+        state = match;
+        debugLog('post-commit', 'matched session via process detection', { detectedSlug, sessionId: match.sessionId, model: match.model });
+      }
+    }
+
+    // If process detection didn't narrow it down, don't guess
+    if (!state) {
+      debugLog('post-commit', 'multiple sessions active, could not disambiguate', {
+        totalSessions: activeSessions.length,
+        sessionModels: activeSessions.map(s => ({ id: s.sessionId, model: s.model })),
+      });
+    }
+  }
 
   // If no active session, detect if an AI agent CLI process is running
   // This handles cases where agent hooks didn't fire (e.g., Gemini CLI)
@@ -1399,6 +1482,232 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
   } catch {
     // non-fatal
   }
+}
+
+// ─── Git Hook: Pre-Commit (Secret Scan) ──────────────────────────────────
+
+/**
+ * Called by .git/hooks/pre-commit.
+ * Scans staged diff for hardcoded secrets, API keys, and credentials.
+ * Exits with code 1 to block the commit if secrets are found.
+ */
+export async function handlePreCommit(): Promise<void> {
+  debugLog('pre-commit', '=== GIT HOOK INVOKED ===', { pid: process.pid, cwd: process.cwd() });
+
+  const config = loadConfig();
+  const hookCwd = process.cwd();
+  const repoPath = getGitRoot(hookCwd);
+  if (!repoPath) {
+    debugLog('pre-commit', 'SKIP: not a git repo');
+    return;
+  }
+
+  // Check if secret scanning is disabled globally
+  if (config?.secretScan === false) {
+    debugLog('pre-commit', 'SKIP: secretScan disabled in config');
+    return;
+  }
+
+  // Check if disabled per-repo
+  const repoConfig = loadRepoConfig(repoPath);
+  if (repoConfig?.secretScan === false) {
+    debugLog('pre-commit', 'SKIP: secretScan disabled in .origin.json');
+    return;
+  }
+
+  const execOpts = {
+    encoding: 'utf-8' as const,
+    cwd: repoPath,
+    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 10 * 1024 * 1024, // 10MB for large diffs
+  };
+
+  // Get staged diff
+  let stagedDiff: string;
+  try {
+    stagedDiff = execSync('git diff --cached --unified=0', execOpts).trim();
+  } catch (err: any) {
+    debugLog('pre-commit', 'ERROR: cannot read staged diff', { message: err.message });
+    return; // Don't block on error
+  }
+
+  if (!stagedDiff) {
+    debugLog('pre-commit', 'SKIP: empty staged diff');
+    return;
+  }
+
+  // Parse added lines from the diff
+  const addedLines = parseStagedDiffLines(stagedDiff);
+  if (addedLines.length === 0) {
+    debugLog('pre-commit', 'SKIP: no added lines');
+    return;
+  }
+
+  // Scan for secrets using redaction engine patterns
+  const findings: Array<{ file: string; line: number; type: string; match: string }> = [];
+  const seen = new Set<string>();
+
+  for (const entry of addedLines) {
+    // Skip short lines and comments
+    const trimmed = entry.content.trim();
+    if (trimmed.length < 5) continue;
+    if (trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('*') || trimmed.startsWith('<!--')) continue;
+
+    for (const pattern of PRE_COMMIT_PATTERNS) {
+      pattern.regex.lastIndex = 0;
+      const match = pattern.regex.exec(entry.content);
+      if (match) {
+        const matchedValue = match[1] || match[0];
+        // Deduplicate by file + matched value (avoid specific + generic pattern duplicates)
+        const key = `${entry.file}:${entry.line}:${matchedValue}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        // Redact for display
+        const redacted = matchedValue.length <= 8
+          ? '****'
+          : matchedValue.slice(0, 4) + '****' + matchedValue.slice(-4);
+
+        findings.push({
+          file: entry.file,
+          line: entry.line,
+          type: pattern.name,
+          match: redacted,
+        });
+      }
+    }
+  }
+
+  if (findings.length === 0) {
+    debugLog('pre-commit', 'PASS: no secrets found');
+    return;
+  }
+
+  // Report to API if connected (so findings appear in Security tab in real-time)
+  const connected = isConnectedMode();
+  if (connected) {
+    try {
+      // Find active session for this repo
+      const sessions = listActiveSessions(repoPath);
+      const activeSession = sessions[0]; // Most recent active session
+      const sessionId = activeSession?.sessionId;
+
+      if (sessionId) {
+        await api.reportSecrets(sessionId, findings.map(f => ({
+          type: mapFindingType(f.type),
+          severity: mapFindingSeverity(f.type),
+          filePath: f.file,
+          lineNumber: f.line,
+          match: f.match,
+          ruleName: f.type,
+        }))).catch(() => {}); // Best effort — don't block on API failure
+        debugLog('pre-commit', 'reported findings to API', { sessionId, count: findings.length });
+      }
+    } catch (err: any) {
+      debugLog('pre-commit', 'API report failed (non-fatal)', { message: err.message });
+    }
+  }
+
+  // Block the commit
+  debugLog('pre-commit', 'BLOCKED: secrets found', { count: findings.length });
+
+  process.stderr.write('\n');
+  process.stderr.write('\x1b[1;31m  ✗ Origin: secrets detected in staged changes\x1b[0m\n');
+  process.stderr.write('\n');
+
+  for (const f of findings) {
+    process.stderr.write(`\x1b[31m    ${f.type}\x1b[0m\n`);
+    process.stderr.write(`    ${f.file}:${f.line}  ${f.match}\n\n`);
+  }
+
+  process.stderr.write(`\x1b[33m  ${findings.length} secret${findings.length !== 1 ? 's' : ''} found. Commit blocked.\x1b[0m\n`);
+  process.stderr.write('\n');
+  process.stderr.write('\x1b[2m  To bypass: git commit --no-verify\x1b[0m\n');
+  process.stderr.write('\x1b[2m  To disable: origin config set secretScan false\x1b[0m\n');
+  process.stderr.write('\n');
+
+  process.exit(1);
+}
+
+// Map finding type names to API types
+function mapFindingType(name: string): string {
+  const map: Record<string, string> = {
+    'AWS Access Key': 'AWS_SECRET', 'AWS Secret Key': 'AWS_SECRET',
+    'Private Key': 'PRIVATE_KEY', 'GitHub Token': 'API_KEY', 'GitHub PAT': 'API_KEY',
+    'OpenAI Key': 'API_KEY', 'Anthropic Key': 'API_KEY', 'Stripe Key': 'API_KEY',
+    'Slack Token': 'API_KEY', 'JWT Token': 'JWT_TOKEN',
+    'Connection String': 'CONNECTION_STRING', 'API Key': 'API_KEY',
+    'Hardcoded Password': 'PASSWORD', 'npm Token': 'API_KEY', 'Bearer Token': 'API_KEY',
+  };
+  return map[name] || 'GENERIC_SECRET';
+}
+
+function mapFindingSeverity(name: string): string {
+  const critical = ['AWS Access Key', 'AWS Secret Key', 'Private Key', 'GitHub Token', 'GitHub PAT', 'Connection String'];
+  const high = ['OpenAI Key', 'Anthropic Key', 'Stripe Key', 'Slack Token', 'JWT Token', 'API Key', 'Hardcoded Password'];
+  if (critical.includes(name)) return 'critical';
+  if (high.includes(name)) return 'high';
+  return 'medium';
+}
+
+// Patterns for pre-commit scanning (non-global flags for single match per line)
+const PRE_COMMIT_PATTERNS = [
+  { name: 'AWS Access Key', regex: /AKIA[0-9A-Z]{16}/ },
+  { name: 'AWS Secret Key', regex: /(?:aws_secret_access_key|secret_key)\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})/i },
+  { name: 'Private Key', regex: /-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/ },
+  { name: 'GitHub Token', regex: /(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}/ },
+  { name: 'GitHub PAT', regex: /github_pat_[A-Za-z0-9_]{50,}/ },
+  { name: 'OpenAI Key', regex: /sk-[A-Za-z0-9]{32,}/ },
+  { name: 'Anthropic Key', regex: /sk-ant-[A-Za-z0-9-]{32,}/ },
+  { name: 'Stripe Key', regex: /sk_(?:live|test)_[A-Za-z0-9]{24,}/ },
+  { name: 'Slack Token', regex: /xox[bpors]-[0-9]{10,}-[a-zA-Z0-9-]+/ },
+  { name: 'JWT Token', regex: /eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/ },
+  { name: 'Connection String', regex: /(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp):\/\/[^\s'"]{10,}/i },
+  { name: 'API Key', regex: /(?:api[_-]?key|apikey|api[_-]?secret|api[_-]?token)\s*[:=]\s*['"]([a-zA-Z0-9_\-]{20,})['"]/ },
+  { name: 'Hardcoded Password', regex: /(?:password|passwd|pwd|db_password)\s*[:=]\s*['"]?([^'"\s]{8,})['"]?/i },
+  { name: 'npm Token', regex: /npm_[A-Za-z0-9]{36,}/ },
+  { name: 'Bearer Token', regex: /Bearer\s+[A-Za-z0-9_\-.]{20,}/ },
+  // Generic *_TOKEN=, *_SECRET=, *_KEY=, *_PASSWORD= assignments
+  { name: 'Token Assignment', regex: /\w+_TOKEN\s*[:=]\s*['"]?([A-Za-z0-9_\-/.+=]{10,})['"]?/i },
+  { name: 'Secret Assignment', regex: /\w+_SECRET\s*[:=]\s*['"]?([A-Za-z0-9_\-/.+=]{10,})['"]?/i },
+  { name: 'Key Assignment', regex: /\w+_(?:API_?)?KEY\s*[:=]\s*['"]?([A-Za-z0-9_\-/.+=]{10,})['"]?/i },
+  { name: 'Password Assignment', regex: /\w+_PASSWORD\s*[:=]\s*['"]?([^\s'"]{8,})['"]?/i },
+];
+
+// Parse staged diff into file + line + content entries
+function parseStagedDiffLines(diff: string): Array<{ file: string; line: number; content: string }> {
+  const lines = diff.split('\n');
+  const result: Array<{ file: string; line: number; content: string }> = [];
+  let currentFile = '';
+  let currentLine = 0;
+
+  for (const line of lines) {
+    if (line.startsWith('+++ b/')) {
+      currentFile = line.slice(6);
+      continue;
+    }
+    if (line.startsWith('+++ ') || line.startsWith('--- ')) continue;
+
+    const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunkMatch) {
+      currentLine = parseInt(hunkMatch[1], 10);
+      continue;
+    }
+
+    if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('Binary ')) continue;
+
+    if (line.startsWith('+') && !line.startsWith('++')) {
+      result.push({ file: currentFile, line: currentLine, content: line.slice(1) });
+      currentLine++;
+      continue;
+    }
+
+    if (!line.startsWith('-')) {
+      currentLine++;
+    }
+  }
+
+  return result;
 }
 
 // ─── Git Hook: Pre-Push (F14) ─────────────────────────────────────────────
