@@ -71,104 +71,114 @@ function listLocalSessions(repoPath: string): LocalSession[] {
 }
 
 export async function sessionsCommand(opts: { status?: string; model?: string; limit?: string }) {
-  if (isConnectedMode()) {
-    // ── Connected mode: use API ──
-    try {
-      const params: Record<string, string> = {};
-      if (opts.status) params.status = opts.status;
-      if (opts.model) params.model = opts.model;
-      if (opts.limit) params.limit = opts.limit;
-      else params.limit = '20';
+  const repoPath = getGitRoot(process.cwd());
+  const limit = parseInt(opts.limit || '20', 10);
 
-      const data = await api.getSessions(params) as any;
-      const sessions = data.sessions || [];
-
-      if (sessions.length === 0) {
-        console.log(chalk.gray('No sessions found.'));
-        return;
-      }
-
-      console.log(chalk.bold(`\nSessions (${data.total} total)\n`));
-
-      for (const s of sessions) {
-        // Show session status (RUNNING/COMPLETED) first, then review status
-        let status: string;
-        let statusColor: (s: string) => string;
-        if (s.status === 'RUNNING') {
-          status = 'RUNNING';
-          statusColor = chalk.green;
-        } else if (s.review?.status === 'APPROVED') {
-          status = 'APPROVED';
-          statusColor = chalk.green;
-        } else if (s.review?.status === 'REJECTED') {
-          status = 'REJECTED';
-          statusColor = chalk.red;
-        } else if (s.review?.status === 'FLAGGED') {
-          status = 'FLAGGED';
-          statusColor = chalk.yellow;
-        } else {
-          status = 'UNREVIEWED';
-          statusColor = chalk.gray;
-        }
-
-        const files = (() => { try { const f = JSON.parse(s.filesChanged); return Array.isArray(f) ? f.length : 0; } catch { return 0; } })();
-        const lines = (s.linesAdded || 0) + (s.linesRemoved || 0);
-        const fileDisplay = files > 0 ? `${String(files).padStart(3)} files` : lines > 0 ? `${chalk.green('+' + s.linesAdded)}${chalk.red('-' + s.linesRemoved)}` : `  0 files`;
-        const age = timeAgo(s.createdAt || s.startedAt);
-
-        console.log(
-          `  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.cyan(s.model.padEnd(25))}  ${statusColor(status.padEnd(12))}  ${fileDisplay.padEnd(12)}  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}`
-        );
-        if (s.commitMessage) {
-          console.log(`           ${chalk.gray(s.commitMessage.slice(0, 60))}`);
-        }
-      }
-      console.log('');
-    } catch (err: any) {
-      console.error(chalk.red('Error:'), err.message);
-    }
-  } else {
-    // ── Standalone mode: read from origin-sessions git branch ──
-    const repoPath = getGitRoot(process.cwd());
-    if (!repoPath) {
-      console.log(chalk.gray('Not in a git repository.'));
-      return;
-    }
-
-    let sessions = listLocalSessions(repoPath);
-    const limit = parseInt(opts.limit || '20', 10);
+  // Always read local sessions from origin-sessions git branch
+  let localSessions: LocalSession[] = [];
+  if (repoPath) {
+    localSessions = listLocalSessions(repoPath);
 
     // Apply filters
     if (opts.model) {
       const m = opts.model.toLowerCase();
-      sessions = sessions.filter(s => s.model.toLowerCase().includes(m));
+      localSessions = localSessions.filter(s => s.model.toLowerCase().includes(m));
     }
     if (opts.status) {
       const st = opts.status.toLowerCase();
-      sessions = sessions.filter(s => s.status.toLowerCase() === st);
+      localSessions = localSessions.filter(s => s.status.toLowerCase() === st);
     }
+  }
 
-    sessions = sessions.slice(0, limit);
+  // In connected mode, also fetch user's platform sessions and merge
+  let platformSessions: any[] = [];
+  if (isConnectedMode()) {
+    try {
+      const params: Record<string, string> = { limit: String(limit) };
+      if (opts.status) params.status = opts.status;
+      if (opts.model) params.model = opts.model;
 
-    if (sessions.length === 0) {
-      console.log(chalk.gray('No local sessions found. Start an AI coding session to begin tracking.'));
-      return;
+      const data = await api.getSessions(params) as any;
+      platformSessions = data.sessions || [];
+    } catch {
+      // Platform unavailable — fall back to local only
     }
+  }
 
-    console.log(chalk.bold(`\nLocal Sessions (${sessions.length})\n`));
+  // Merge: local sessions first, then platform sessions not already in local
+  const localIds = new Set(localSessions.map(s => s.sessionId.slice(0, 8)));
+  const merged: Array<{ type: 'local'; data: LocalSession } | { type: 'platform'; data: any }> = [];
 
-    for (const s of sessions) {
-      const statusColor = s.status === 'ended' ? chalk.gray : chalk.green;
+  for (const s of localSessions) {
+    merged.push({ type: 'local', data: s });
+  }
+  for (const s of platformSessions) {
+    if (!localIds.has(s.id.slice(0, 8))) {
+      merged.push({ type: 'platform', data: s });
+    }
+  }
+
+  // Sort by time descending
+  merged.sort((a, b) => {
+    const ta = a.type === 'local' ? a.data.startedAt : (a.data.createdAt || a.data.startedAt);
+    const tb = b.type === 'local' ? b.data.startedAt : (b.data.createdAt || b.data.startedAt);
+    return new Date(tb).getTime() - new Date(ta).getTime();
+  });
+
+  const display = merged.slice(0, limit);
+
+  if (display.length === 0) {
+    console.log(chalk.gray('No sessions found. Start an AI coding session to begin tracking.'));
+    return;
+  }
+
+  console.log(chalk.bold(`\nSessions (${display.length} total)\n`));
+
+  for (const entry of display) {
+    if (entry.type === 'local') {
+      const s = entry.data;
+      const statusColor = s.status === 'running' ? chalk.green : chalk.gray;
+      const statusLabel = s.status === 'running' ? 'RUNNING' : 'ENDED';
       const files = s.filesChanged.length;
       const age = s.startedAt ? timeAgo(s.startedAt) : '—';
-      const branch = s.git?.branch || '';
 
       console.log(
-        `  ${chalk.dim(s.sessionId.slice(0, 8))}  ${chalk.cyan(s.model.padEnd(20))}  ${statusColor(s.status.padEnd(10))}  ${chalk.white(String(files).padStart(3))} files  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}${branch ? '  ' + chalk.dim(branch) : ''}`
+        `  ${chalk.dim(s.sessionId.slice(0, 8))}  ${chalk.cyan(s.model.padEnd(25))}  ${statusColor(statusLabel.padEnd(12))}  ${chalk.white(String(files).padStart(3))} files  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}`
       );
+    } else {
+      const s = entry.data;
+      let status: string;
+      let statusColor: (s: string) => string;
+      if (s.status === 'RUNNING') {
+        status = 'RUNNING';
+        statusColor = chalk.green;
+      } else if (s.review?.status === 'APPROVED') {
+        status = 'APPROVED';
+        statusColor = chalk.green;
+      } else if (s.review?.status === 'REJECTED') {
+        status = 'REJECTED';
+        statusColor = chalk.red;
+      } else if (s.review?.status === 'FLAGGED') {
+        status = 'FLAGGED';
+        statusColor = chalk.yellow;
+      } else {
+        status = 'UNREVIEWED';
+        statusColor = chalk.gray;
+      }
+
+      const files = (() => { try { const f = JSON.parse(s.filesChanged); return Array.isArray(f) ? f.length : 0; } catch { return 0; } })();
+      const fileDisplay = files > 0 ? `${String(files).padStart(3)} files` : `  0 files`;
+      const age = timeAgo(s.createdAt || s.startedAt);
+
+      console.log(
+        `  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.cyan(s.model.padEnd(25))}  ${statusColor(status.padEnd(12))}  ${fileDisplay.padEnd(12)}  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}`
+      );
+      if (s.commitMessage) {
+        console.log(`           ${chalk.gray(s.commitMessage.slice(0, 60))}`);
+      }
     }
-    console.log('');
   }
+  console.log('');
 }
 
 export async function sessionDetailCommand(id: string) {
