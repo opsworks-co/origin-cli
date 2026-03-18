@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { getBudgetConfig, saveBudgetConfig, getMonthlySpend, getDailySpend, getSpendByModel, getSpendByUser } from '../services/budget.js';
+import { sendTestEmail } from '../services/email.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -484,5 +485,88 @@ export async function getOrgLLMModel(orgId: string): Promise<string> {
     return 'claude-sonnet-4-20250514';
   }
 }
+
+// ---- Email Report Settings ------------------------------------------------
+
+// GET /api/settings/email — get email preferences
+router.get('/email', async (req: AuthRequest, res: Response) => {
+  try {
+    const config = await prisma.integrationConfig.findFirst({
+      where: { orgId: req.user!.orgId, provider: 'email' },
+    });
+
+    const defaults = { enabled: false, recipients: [] as string[], sendDay: 'monday' };
+    if (!config) return res.json(defaults);
+
+    try {
+      const settings = JSON.parse(config.settings);
+      res.json({ ...defaults, ...settings });
+    } catch {
+      res.json(defaults);
+    }
+  } catch (err) {
+    console.error('Get email settings error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/settings/email — save email preferences
+router.put('/email', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { enabled, recipients, sendDay } = req.body;
+    const orgId = req.user!.orgId;
+
+    const settings = {
+      enabled: enabled ?? false,
+      recipients: recipients ?? [],
+      sendDay: sendDay ?? 'monday',
+    };
+
+    const existing = await prisma.integrationConfig.findFirst({
+      where: { orgId, provider: 'email' },
+    });
+
+    if (existing) {
+      await prisma.integrationConfig.update({
+        where: { id: existing.id },
+        data: { settings: JSON.stringify(settings) },
+      });
+    } else {
+      await prisma.integrationConfig.create({
+        data: { orgId, provider: 'email', token: '', settings: JSON.stringify(settings) },
+      });
+    }
+
+    res.json(settings);
+  } catch (err) {
+    console.error('Save email settings error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/settings/email/test — send a test email
+router.post('/email/test', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { to } = req.body;
+    const recipient = to || req.user!.orgId; // Will be resolved to user email
+
+    // Get user email if no explicit recipient
+    let email = to;
+    if (!email) {
+      const user = await prisma.user.findUnique({ where: { id: req.user!.id } });
+      email = user?.email;
+    }
+
+    if (!email) {
+      return res.status(400).json({ error: 'No email address provided' });
+    }
+
+    const result = await sendTestEmail(email);
+    res.json(result);
+  } catch (err) {
+    console.error('Test email error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 export default router;

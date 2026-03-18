@@ -9,6 +9,7 @@ import { enforceSessionStart, enforceSessionEnd, applyEnforcementActions, enforc
 import { describeCondition, describeAction } from '../utils/policy-descriptions.js';
 import { updateSessionPRChecks } from '../services/github-integration.js';
 import { updateSessionMRChecks } from '../services/gitlab-integration.js';
+import { sendSlackNotification } from '../services/slack.js';
 import { scanForSecrets } from '../services/secret-scanner.js';
 import { detectAITool } from '../services/ai-commit-detector.js';
 
@@ -911,6 +912,18 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     // Trigger AI auto-review in background (don't block response)
     let parsedFiles: string[] = [];
     try { parsedFiles = Array.isArray(filesChanged) ? filesChanged : JSON.parse(filesChanged || '[]'); } catch {}
+
+    // Send Slack notification for session completion (fire-and-forget)
+    const sessionCost = costUsd ?? 0;
+    const sessionDuration = durationMs ? `${Math.round(durationMs / 60000)}min` : 'unknown';
+    const fileCount = parsedFiles.length || 0;
+    sendSlackNotification({
+      orgId,
+      type: 'SESSION_COMPLETED',
+      title: 'AI Session Completed',
+      message: `*${codingSession.model}* session finished — $${sessionCost.toFixed(2)} • ${fileCount} file${fileCount !== 1 ? 's' : ''} • ${sessionDuration}`,
+      link: `/sessions/${sessionId}`,
+    }).catch(() => {});
 
     runAIReview({
       sessionId,

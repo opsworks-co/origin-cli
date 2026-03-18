@@ -22,6 +22,7 @@ try {
 
 import { authMiddleware } from './middleware/auth.js';
 import { startAutoSync } from './services/auto-sync.js';
+import { startScheduler } from './services/scheduler.js';
 import authRoutes from './routes/auth.js';
 import repoRoutes from './routes/repos.js';
 import sessionRoutes from './routes/sessions.js';
@@ -48,6 +49,7 @@ import leaderboardRoutes from './routes/leaderboard.js';
 import promptRoutes from './routes/prompts.js';
 import modelRoutes from './routes/models.js';
 import pricingRoutes, { seedDefaultPricing } from './routes/pricing.js';
+import forecastRoutes from './routes/forecast.js';
 
 const app = express();
 
@@ -108,6 +110,7 @@ app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/prompts', promptRoutes);
 app.use('/api/models', modelRoutes);
 app.use('/api/pricing', pricingRoutes);
+app.use('/api/forecast', forecastRoutes);
 
 // Serve CLI install script
 app.get('/install.sh', (_req, res) => {
@@ -181,6 +184,7 @@ app.listen(Number(PORT), HOST, () => {
   console.log(`Origin v2 running on http://${HOST}:${PORT}`);
   startAutoSync();
   seedDefaultPricing();
+  startScheduler();
 
   // Auto-complete stale RUNNING sessions periodically.
   // CLI sends heartbeat pings every 30s. No ping for 2 min = session is dead.

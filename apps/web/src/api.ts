@@ -1010,6 +1010,46 @@ export function updateBudget(data: Partial<BudgetConfig>) {
   });
 }
 
+// ---- Cost Forecast -----------------------------------------------------------
+
+export interface ForecastData {
+  projectedMonthly: number;
+  trend: 'up' | 'down' | 'flat';
+  confidence: number;
+  daily: Array<{ date: string; actual: number | null; projected: number | null }>;
+  byModel: Array<{ model: string; currentMonthly: number; projectedMonthly: number; trend: 'up' | 'down' | 'flat' }>;
+}
+
+export function getForecast() {
+  return request<ForecastData>('/api/forecast');
+}
+
+// ---- Email Report Settings ---------------------------------------------------
+
+export interface EmailSettings {
+  enabled: boolean;
+  recipients: string[];
+  sendDay: string;
+}
+
+export function getEmailSettings() {
+  return request<EmailSettings>('/api/settings/email');
+}
+
+export function updateEmailSettings(data: Partial<EmailSettings>) {
+  return request<EmailSettings>('/api/settings/email', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function testEmail(to?: string) {
+  return request<{ success: boolean; error?: string }>('/api/settings/email/test', {
+    method: 'POST',
+    body: JSON.stringify({ to }),
+  });
+}
+
 // ---- Organization Settings ---------------------------------------------------
 
 export interface OrgSettings {

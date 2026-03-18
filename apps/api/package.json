@@ -20,6 +20,8 @@
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
+    "node-cron": "^4.2.1",
+    "resend": "^6.9.4",
     "simple-git": "^3.27.0"
   },
   "devDependencies": {
@@ -28,6 +30,7 @@
     "@types/express": "^5.0.2",
     "@types/jsonwebtoken": "^9.0.9",
     "@types/node": "^22.14.1",
+    "@types/node-cron": "^3.0.11",
     "@types/supertest": "^7.2.0",
     "prisma": "^6.8.2",
     "supertest": "^7.2.2",

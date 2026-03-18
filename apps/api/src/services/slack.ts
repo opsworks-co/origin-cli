@@ -16,6 +16,8 @@ export interface SlackSettings {
   notifyReviews: boolean;
   notifyBudget: boolean;
   notifySessionFlags: boolean;
+  notifySessionComplete: boolean;
+  notifyWeeklyDigest: boolean;
 }
 
 // Map notification types to settings keys
@@ -25,6 +27,8 @@ const EVENT_SETTINGS_MAP: Record<string, keyof SlackSettings> = {
   SESSION_FLAGGED: 'notifySessionFlags',
   REVIEW_NEEDED: 'notifyReviews',
   REVIEW_COMPLETED: 'notifyReviews',
+  SESSION_COMPLETED: 'notifySessionComplete',
+  WEEKLY_DIGEST: 'notifyWeeklyDigest',
 };
 
 const ORIGIN_WEB_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
@@ -43,6 +47,10 @@ function getTypeEmoji(type: string): string {
       return '📋';
     case 'REVIEW_COMPLETED':
       return '✅';
+    case 'SESSION_COMPLETED':
+      return '🏁';
+    case 'WEEKLY_DIGEST':
+      return '📊';
     default:
       return '📌';
   }
@@ -60,6 +68,10 @@ function getTypeLabel(type: string): string {
       return 'Review Needed';
     case 'REVIEW_COMPLETED':
       return 'Review Completed';
+    case 'SESSION_COMPLETED':
+      return 'Session Completed';
+    case 'WEEKLY_DIGEST':
+      return 'Weekly Digest';
     default:
       return type;
   }
@@ -146,6 +158,8 @@ export async function sendSlackNotification(payload: SlackNotificationPayload): 
         notifyReviews: true,
         notifyBudget: true,
         notifySessionFlags: true,
+        notifySessionComplete: false,
+        notifyWeeklyDigest: true,
       };
     }
 

@@ -91,6 +91,8 @@ export default function Settings() {
   const [slackNotifyReviews, setSlackNotifyReviews] = useState(true);
   const [slackNotifyBudget, setSlackNotifyBudget] = useState(true);
   const [slackNotifySessionFlags, setSlackNotifySessionFlags] = useState(true);
+  const [slackNotifySessionComplete, setSlackNotifySessionComplete] = useState(false);
+  const [slackNotifyWeeklyDigest, setSlackNotifyWeeklyDigest] = useState(true);
   const [savingSlack, setSavingSlack] = useState(false);
   const [testingSlack, setTestingSlack] = useState(false);
   const [slackTestResult, setSlackTestResult] = useState<{ success: boolean; error?: string } | null>(null);
@@ -147,6 +149,16 @@ export default function Settings() {
   const [budgetBlock, setBudgetBlock] = useState(false);
   const [savingBudget, setSavingBudget] = useState(false);
   const [budgetMsg, setBudgetMsg] = useState('');
+  const [forecastData, setForecastData] = useState<api.ForecastData | null>(null);
+  const [forecastLoading, setForecastLoading] = useState(false);
+
+  // Email report
+  const [emailEnabled, setEmailEnabled] = useState(false);
+  const [emailRecipients, setEmailRecipients] = useState('');
+  const [emailSendDay, setEmailSendDay] = useState('monday');
+  const [savingEmail, setSavingEmail] = useState(false);
+  const [testingEmail, setTestingEmail] = useState(false);
+  const [emailMsg, setEmailMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // AI Chat config
   const [chatApiKey, setChatApiKey] = useState('');
@@ -201,6 +213,16 @@ export default function Settings() {
       // ignore — might not have data yet
     } finally {
       setBudgetLoading(false);
+    }
+    // Also fetch forecast
+    setForecastLoading(true);
+    try {
+      const forecast = await api.getForecast();
+      setForecastData(forecast);
+    } catch {
+      // ignore
+    } finally {
+      setForecastLoading(false);
     }
   }, []);
 
@@ -276,6 +298,7 @@ export default function Settings() {
       fetchIntegrations();
       fetchWebhookEvents();
       fetchChatConfig();
+      fetchEmailSettings();
     }
     if (activeTab === 'budget') {
       fetchBudget();
@@ -322,6 +345,8 @@ export default function Settings() {
         setSlackNotifyReviews(slack.settings?.notifyReviews ?? true);
         setSlackNotifyBudget(slack.settings?.notifyBudget ?? true);
         setSlackNotifySessionFlags(slack.settings?.notifySessionFlags ?? true);
+        setSlackNotifySessionComplete(slack.settings?.notifySessionComplete ?? false);
+        setSlackNotifyWeeklyDigest(slack.settings?.notifyWeeklyDigest ?? true);
       }
     } catch (err: any) {
       setIntegrationError(err.message);
@@ -519,6 +544,8 @@ export default function Settings() {
       notifyReviews: slackNotifyReviews,
       notifyBudget: slackNotifyBudget,
       notifySessionFlags: slackNotifySessionFlags,
+      notifySessionComplete: slackNotifySessionComplete,
+      notifyWeeklyDigest: slackNotifyWeeklyDigest,
     };
 
     try {
@@ -561,6 +588,48 @@ export default function Settings() {
       setSlackTestResult({ success: false, error: err.message });
     } finally {
       setTestingSlack(false);
+    }
+  };
+
+  // ---- Email Report Handlers ----
+  const fetchEmailSettings = async () => {
+    try {
+      const data = await api.getEmailSettings();
+      setEmailEnabled(data.enabled);
+      setEmailRecipients((data.recipients || []).join(', '));
+      setEmailSendDay(data.sendDay || 'monday');
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSaveEmail = async () => {
+    setSavingEmail(true);
+    setEmailMsg(null);
+    try {
+      const recipients = emailRecipients.split(',').map(e => e.trim()).filter(Boolean);
+      await api.updateEmailSettings({ enabled: emailEnabled, recipients, sendDay: emailSendDay });
+      setEmailMsg({ type: 'success', text: 'Email settings saved' });
+    } catch (err: any) {
+      setEmailMsg({ type: 'error', text: err.message });
+    } finally {
+      setSavingEmail(false);
+    }
+  };
+
+  const handleTestEmail = async () => {
+    setTestingEmail(true);
+    setEmailMsg(null);
+    try {
+      const result = await api.testEmail();
+      setEmailMsg(result.success
+        ? { type: 'success', text: 'Test email sent! Check your inbox.' }
+        : { type: 'error', text: result.error || 'Failed to send' }
+      );
+    } catch (err: any) {
+      setEmailMsg({ type: 'error', text: err.message });
+    } finally {
+      setTestingEmail(false);
     }
   };
 
@@ -2048,6 +2117,30 @@ export default function Settings() {
                   <div className="text-xs text-gray-500">When spending approaches or exceeds monthly limits</div>
                 </div>
               </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={slackNotifySessionComplete}
+                  onChange={(e) => setSlackNotifySessionComplete(e.target.checked)}
+                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
+                />
+                <div>
+                  <div className="text-sm font-medium text-gray-200">Session completed</div>
+                  <div className="text-xs text-gray-500">When an AI coding session finishes (model, cost, files)</div>
+                </div>
+              </label>
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={slackNotifyWeeklyDigest}
+                  onChange={(e) => setSlackNotifyWeeklyDigest(e.target.checked)}
+                  className="mt-0.5 rounded bg-gray-700 border-gray-600"
+                />
+                <div>
+                  <div className="text-sm font-medium text-gray-200">Weekly digest</div>
+                  <div className="text-xs text-gray-500">Weekly summary of AI sessions, costs, and team activity</div>
+                </div>
+              </label>
             </div>
 
             <div className="flex items-center gap-3 border-t border-gray-700/50 pt-4">
@@ -2090,6 +2183,77 @@ export default function Settings() {
                   : `Connection failed: ${slackTestResult.error}`}
               </div>
             )}
+          </section>
+
+          {/* Email Reports */}
+          <section className="card space-y-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-gray-800 flex items-center justify-center text-xl">📧</div>
+                <div>
+                  <h2 className="text-lg font-semibold">Weekly Email Report</h2>
+                  <p className="text-sm text-gray-500">Automated weekly summary sent to your team</p>
+                </div>
+              </div>
+              <span className={`badge ${emailEnabled ? 'badge-green' : 'badge-gray'}`}>{emailEnabled ? 'Enabled' : 'Disabled'}</span>
+            </div>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={emailEnabled}
+                onChange={(e) => setEmailEnabled(e.target.checked)}
+                className="rounded bg-gray-700 border-gray-600"
+              />
+              <div>
+                <div className="text-sm font-medium text-gray-200">Enable weekly email reports</div>
+                <div className="text-xs text-gray-500">Sends every Monday at 9 AM with session/cost summary</div>
+              </div>
+            </label>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Recipients (comma-separated)</label>
+              <input
+                type="text"
+                value={emailRecipients}
+                onChange={(e) => setEmailRecipients(e.target.value)}
+                className="input"
+                placeholder="cto@company.com, lead@company.com (leave empty for all admins)"
+              />
+              <p className="text-xs text-gray-600 mt-1">Leave empty to send to all org admins</p>
+            </div>
+
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">Send day</label>
+              <select
+                value={emailSendDay}
+                onChange={(e) => setEmailSendDay(e.target.value)}
+                className="select"
+              >
+                <option value="monday">Monday</option>
+                <option value="tuesday">Tuesday</option>
+                <option value="wednesday">Wednesday</option>
+                <option value="thursday">Thursday</option>
+                <option value="friday">Friday</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-3 border-t border-gray-700/50 pt-4">
+              <button onClick={handleSaveEmail} disabled={savingEmail} className="btn-primary text-sm">
+                {savingEmail ? 'Saving...' : 'Save'}
+              </button>
+              <button onClick={handleTestEmail} disabled={testingEmail} className="btn-secondary text-sm">
+                {testingEmail ? 'Sending...' : 'Send Test Email'}
+              </button>
+            </div>
+
+            {emailMsg && (
+              <div className={`text-sm p-3 rounded-lg ${emailMsg.type === 'success' ? 'bg-green-900/20 text-green-400 border border-green-800/30' : 'bg-red-900/20 text-red-400 border border-red-800/30'}`}>
+                {emailMsg.text}
+              </div>
+            )}
+
+            <p className="text-xs text-gray-600">Requires RESEND_API_KEY environment variable on the server.</p>
           </section>
 
           {/* AI Chat Configuration */}
@@ -2277,6 +2441,84 @@ export default function Settings() {
                       </div>
                     )}
                   </div>
+                )}
+
+                {/* Cost Forecast */}
+                {forecastData && (
+                  <div className="space-y-4 pt-4 border-t border-gray-800">
+                    <h3 className="text-sm font-medium text-gray-300">Cost Forecast</h3>
+                    <div className="grid grid-cols-3 gap-4">
+                      <div className="card p-3">
+                        <div className="text-xs text-gray-500">Projected Monthly</div>
+                        <div className="text-xl font-bold text-gray-100">${forecastData.projectedMonthly.toFixed(2)}</div>
+                      </div>
+                      <div className="card p-3">
+                        <div className="text-xs text-gray-500">Trend</div>
+                        <div className={`text-xl font-bold ${forecastData.trend === 'up' ? 'text-red-400' : forecastData.trend === 'down' ? 'text-green-400' : 'text-gray-400'}`}>
+                          {forecastData.trend === 'up' ? '📈 Up' : forecastData.trend === 'down' ? '📉 Down' : '→ Flat'}
+                        </div>
+                      </div>
+                      <div className="card p-3">
+                        <div className="text-xs text-gray-500">Confidence</div>
+                        <div className="text-xl font-bold text-gray-100">{Math.round(forecastData.confidence * 100)}%</div>
+                      </div>
+                    </div>
+
+                    {/* Actual + Projected daily chart */}
+                    {forecastData.daily.length > 0 && (
+                      <div>
+                        <h4 className="text-xs text-gray-500 mb-2">Daily Spend: Actual + Projected (14 days)</h4>
+                        <div className="flex items-end gap-0.5 h-24">
+                          {(() => {
+                            const allValues = forecastData.daily.map(d => d.actual ?? d.projected ?? 0);
+                            const maxVal = Math.max(...allValues, 0.01);
+                            return forecastData.daily.map((d) => {
+                              const val = d.actual ?? d.projected ?? 0;
+                              const isProjected = d.actual === null;
+                              return (
+                                <div
+                                  key={d.date}
+                                  className={`flex-1 rounded-t transition-colors group relative ${isProjected ? 'bg-indigo-500/30 border border-dashed border-indigo-500/50' : 'bg-indigo-500/60 hover:bg-indigo-400/60'}`}
+                                  style={{ height: `${(val / maxVal) * 100}%`, minHeight: val > 0 ? '2px' : '0' }}
+                                  title={`${d.date}: $${val.toFixed(2)}${isProjected ? ' (projected)' : ''}`}
+                                >
+                                  <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 bg-gray-900 text-xs text-gray-200 px-2 py-1 rounded hidden group-hover:block whitespace-nowrap z-10">
+                                    {d.date.slice(5)}: ${val.toFixed(2)}{isProjected ? ' ⟶' : ''}
+                                  </div>
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                        <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                          <span>30 days ago</span>
+                          <span>today</span>
+                          <span>+14 days</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Per-model forecast */}
+                    {forecastData.byModel.length > 0 && (
+                      <div>
+                        <h4 className="text-xs text-gray-500 mb-2">By Model</h4>
+                        <div className="space-y-2">
+                          {forecastData.byModel.map((m) => (
+                            <div key={m.model} className="flex items-center justify-between text-sm">
+                              <span className="text-gray-300">{m.model}</span>
+                              <div className="text-gray-400">
+                                <span className="text-gray-500">${m.currentMonthly.toFixed(2)} →</span>{' '}
+                                <span className="text-gray-200 font-medium">${m.projectedMonthly.toFixed(2)}/mo</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {forecastLoading && (
+                  <div className="text-sm text-gray-500 py-2">Loading forecast...</div>
                 )}
 
                 {/* Budget Settings Form */}
