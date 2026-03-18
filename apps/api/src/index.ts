@@ -187,9 +187,10 @@ app.listen(Number(PORT), HOST, () => {
   startScheduler();
 
   // Auto-complete stale RUNNING sessions periodically.
-  // CLI sends heartbeat pings every 30s. No ping for 2 min = session is dead.
-  const STALE_SESSION_CHECK_MS = 1 * 60 * 1000;    // check every 1 min
-  const STALE_THRESHOLD_MS = 2 * 60 * 1000;         // 2 min without update
+  // CLI sends heartbeat pings every 30s. 30 min without update = session is dead.
+  // (Claude sessions can idle for long periods while user reads/thinks)
+  const STALE_SESSION_CHECK_MS = 5 * 60 * 1000;    // check every 5 min
+  const STALE_THRESHOLD_MS = 30 * 60 * 1000;        // 30 min without update
   setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS);

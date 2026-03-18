@@ -70,9 +70,9 @@ async function syncAllRepos() {
 
 // ─── Stale Session Cleanup ─────────────────────────────────────────────────
 
-// Backup stale session cleanup. CLI pings every 30s — 5 min no update = dead.
-// Primary cleanup is in index.ts (2 min). This is a safety net.
-const STALE_SESSION_MS = 5 * 60 * 1000; // 5 min without any update
+// Backup stale session cleanup. Primary cleanup is in index.ts (30 min).
+// This is a safety net with a longer threshold (45 min).
+const STALE_SESSION_MS = 45 * 60 * 1000; // 45 min without any update
 
 async function closeStaleSession() {
   try {

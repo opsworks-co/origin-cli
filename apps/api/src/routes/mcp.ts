@@ -314,27 +314,27 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       });
     }
 
-    // ── Server-side dedup: reject if a RUNNING session already exists for this
-    //    machine + agent + repo, created within the last 60 seconds.
-    //    Claude Code fires session-start when the app opens (idle) AND when user
-    //    starts working, each with a different session_id. This catches that.
-    const recentCutoff = new Date(Date.now() - 60_000);
-    const existingRunning = await prisma.codingSession.findFirst({
+    // ── Server-side dedup: if a RUNNING or recently-ended session already exists
+    //    for this machine + agent + repo, reuse it instead of creating a new one.
+    //    Claude Code fires session-start on open AND on resume from idle, and the
+    //    stale cleanup may have ended the session during idle. Reopen it.
+    const dedupCutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 hour window
+    const existingSession = await prisma.codingSession.findFirst({
       where: {
-        status: 'RUNNING',
         agentId: agent?.id || null,
         commit: { repoId: repo.id },
-        startedAt: { gte: recentCutoff },
+        startedAt: { gte: dedupCutoff },
+        status: { in: ['RUNNING', 'COMPLETED'] },
       },
       include: { commit: { select: { repoId: true } } },
       orderBy: { startedAt: 'desc' },
     });
 
-    if (existingRunning) {
+    if (existingSession) {
       // Check machine match via audit log (machineId is stored in metadata)
       const existingAudit = await prisma.auditLog.findFirst({
         where: {
-          resource: existingRunning.id,
+          resource: existingSession.id,
           action: 'SESSION_STARTED',
         },
         orderBy: { createdAt: 'desc' },
@@ -344,16 +344,24 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         : null;
 
       if (existingMachineId === machineId) {
-        console.log('[session/start] DEDUP: returning existing session', {
-          existingId: existingRunning.id,
-          machineId,
-          agentId: agent?.id,
-          repoId: repo.id,
-        });
+        // Reopen the session if it was auto-ended
+        if (existingSession.status === 'COMPLETED') {
+          await prisma.codingSession.update({
+            where: { id: existingSession.id },
+            data: { status: 'RUNNING', endedAt: null },
+          });
+          console.log('[session/start] REOPEN: reopening auto-ended session', {
+            existingId: existingSession.id, machineId,
+          });
+        } else {
+          console.log('[session/start] DEDUP: returning existing running session', {
+            existingId: existingSession.id, machineId,
+          });
+        }
         // Return the existing session instead of creating a duplicate
         return res.json({
-          sessionId: existingRunning.id,
-          agentSystemPrompt: existingRunning.agentSystemPrompt || undefined,
+          sessionId: existingSession.id,
+          agentSystemPrompt: existingSession.agentSystemPrompt || undefined,
           activePolicies: [],
         });
       }
@@ -613,6 +621,15 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
               linesRemoved: { increment: gitCapture.linesRemoved || 0 },
             },
           });
+        }
+
+        // Scan incremental diff for secrets (fire-and-forget)
+        if (gitCapture.diff && session?.commit?.repoId) {
+          const commitOrgId = (await prisma.repo.findUnique({ where: { id: session.commit.repoId }, select: { orgId: true } }))?.orgId;
+          if (commitOrgId) {
+            scanForSecrets(id, gitCapture.diff, commitOrgId)
+              .catch(err => console.error('[secret-scanner] Incremental scan error:', err));
+          }
         }
       }
     }
@@ -946,9 +963,19 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     }).catch(err => console.error('[ai-review] Background error:', err));
 
     // Run secret/PII scanner on the diff in background
-    if (gitCapture?.diff) {
-      scanForSecrets(sessionId, gitCapture.diff, orgId)
+    // Use gitCapture.diff if available, otherwise read stored diff from sessionDiff
+    const scanDiff = gitCapture?.diff || null;
+    if (scanDiff) {
+      scanForSecrets(sessionId, scanDiff, orgId)
         .catch(err => console.error('[secret-scanner] Background error:', err));
+    } else {
+      // No diff in session-end payload — scan the incrementally stored diff
+      prisma.sessionDiff.findUnique({ where: { sessionId } }).then(stored => {
+        if (stored?.diff) {
+          scanForSecrets(sessionId, stored.diff, orgId)
+            .catch(err => console.error('[secret-scanner] Background error:', err));
+        }
+      }).catch(err => console.error('[secret-scanner] Diff lookup error:', err));
     }
 
     // Look up machine DB id for policy scoping at session end
