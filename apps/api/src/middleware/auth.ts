@@ -46,13 +46,12 @@ export async function authMiddleware(req: AuthRequest, _res: Response, next: Nex
           },
         });
         if (found) {
-          // Standalone key (no userId): use key's own id + role
           // Linked key (has userId): use the linked user's identity + role
-          const resolvedUser = found.user ?? found.org.users[0];
+          // Standalone key (no userId): use key's own id + explicit role, default to MEMBER (never escalate to OWNER)
           req.user = {
             id: found.user?.id ?? found.id,
             orgId: found.orgId,
-            role: found.role ?? resolvedUser?.role ?? 'MEMBER',
+            role: found.user?.role ?? found.role ?? 'MEMBER',
           };
           req.apiKeyRepoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
         }

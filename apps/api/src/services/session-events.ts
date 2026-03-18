@@ -9,6 +9,7 @@ export interface SessionEvent {
   type: SessionEventType;
   sessionId: string;
   orgId: string;
+  userId?: string;
   data?: Record<string, unknown>;
   timestamp: string;
 }

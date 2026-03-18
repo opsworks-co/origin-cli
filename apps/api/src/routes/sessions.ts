@@ -2,6 +2,20 @@ import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { notifyOrgAdmins, notifyOrgMembers } from '../services/notifications.js';
+
+/** Check if user has admin/owner role */
+function isAdminUser(req: AuthRequest): boolean {
+  const role = (req.user!.role || '').toUpperCase();
+  return role === 'ADMIN' || role === 'OWNER';
+}
+
+/** Build session where-clause scoped to user (non-admins see only own sessions) */
+function scopedSessionWhere(req: AuthRequest, base: any = {}): any {
+  if (!isAdminUser(req)) {
+    base.userId = req.user!.id;
+  }
+  return base;
+}
 import {
   getIntegrationConfig,
   getSessionsForPR,
@@ -144,6 +158,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       };
     }
 
+    // User-level scoping: non-admin users only see their own sessions
+    // Admin/Owner can see all org sessions, or pass ?mine=true to see only theirs
+    const userRole = (req.user!.role || '').toUpperCase();
+    const isAdmin = userRole === 'ADMIN' || userRole === 'OWNER';
+    if (!isAdmin || req.query.mine === 'true') {
+      where.userId = req.user!.id;
+    }
+
     const status = req.query.status as string;
     if (status === 'reviewed') {
       where.review = { isNot: null };
@@ -188,11 +210,20 @@ router.get('/active', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
 
+    const activeWhere: any = {
+      status: 'RUNNING',
+      commit: { repo: { orgId } },
+    };
+
+    // Non-admin users only see their own active sessions
+    const activeRole = (req.user!.role || '').toUpperCase();
+    const activeIsAdmin = activeRole === 'ADMIN' || activeRole === 'OWNER';
+    if (!activeIsAdmin) {
+      activeWhere.userId = req.user!.id;
+    }
+
     const sessions = await prisma.codingSession.findMany({
-      where: {
-        status: 'RUNNING',
-        commit: { repo: { orgId } },
-      },
+      where: activeWhere,
       include: {
         commit: { include: { repo: true } },
         agent: true,
@@ -322,8 +353,11 @@ router.get('/stream', async (req: AuthRequest, res: Response) => {
 
   res.write('data: {"type":"connected"}\n\n');
 
+  const streamIsAdmin = isAdminUser(req);
+  const streamUserId = req.user!.id;
+
   const unsubscribe = onSessionEvent((event: SessionEvent) => {
-    if (event.orgId === orgId) {
+    if (event.orgId === orgId && (streamIsAdmin || event.userId === streamUserId)) {
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
   });
@@ -344,11 +378,20 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
 
+    const detailWhere: any = {
+      id,
+      commit: { repo: { orgId: req.user!.orgId } },
+    };
+
+    // Non-admin users can only view their own sessions
+    const detailRole = (req.user!.role || '').toUpperCase();
+    const detailIsAdmin = detailRole === 'ADMIN' || detailRole === 'OWNER';
+    if (!detailIsAdmin) {
+      detailWhere.userId = req.user!.id;
+    }
+
     const session = await prisma.codingSession.findFirst({
-      where: {
-        id,
-        commit: { repo: { orgId: req.user!.orgId } },
-      },
+      where: detailWhere,
       include: {
         commit: { include: { repo: true } },
         agent: true,
@@ -391,10 +434,10 @@ router.get('/:id/diff', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const session = await prisma.codingSession.findFirst({
-      where: {
+      where: scopedSessionWhere(req, {
         id,
         commit: { repo: { orgId: req.user!.orgId } },
-      },
+      }),
       include: { sessionDiff: true },
     });
 
@@ -422,7 +465,7 @@ router.get('/:id/diff', async (req: AuthRequest, res: Response) => {
 });
 
 // POST /:id/review — create or update review
-router.post('/:id/review', async (req: AuthRequest, res: Response) => {
+router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const { status, note } = req.body;
@@ -896,10 +939,10 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
     }
 
     const session = await prisma.codingSession.findFirst({
-      where: {
+      where: scopedSessionWhere(req, {
         id,
         commit: { repo: { orgId: req.user!.orgId } },
-      },
+      }),
       include: {
         promptChanges: { orderBy: { promptIndex: 'asc' } },
         sessionDiff: true,
@@ -1058,10 +1101,10 @@ router.post('/:id/ask', async (req: AuthRequest, res: Response) => {
     }
 
     const session = await prisma.codingSession.findFirst({
-      where: {
+      where: scopedSessionWhere(req, {
         id,
         commit: { repo: { orgId: req.user!.orgId } },
-      },
+      }),
       include: {
         commit: true,
         promptChanges: { orderBy: { promptIndex: 'asc' } },
