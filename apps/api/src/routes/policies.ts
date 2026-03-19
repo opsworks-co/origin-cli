@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { createPolicyVersion } from '../services/versioning.js';
+import { getOrgLLMKey } from './settings.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -348,25 +349,31 @@ router.get('/:id/assignments', async (req: AuthRequest, res: Response) => {
 
 const NL_SYSTEM_PROMPT = `You are a policy engine for Origin, an AI code governance platform. Your job is to convert natural language policy descriptions into structured policy objects.
 
-Available policy types:
-- MODEL_ALLOWLIST: Restrict which AI models can be used
-- COST_LIMIT: Per-session cost/token thresholds
-- FILE_RESTRICTION: Block or flag file access patterns
-- REQUIRE_REVIEW: Auto-flag sessions for review based on conditions
+IMPORTANT: You can ONLY create policies that the engine supports. Do NOT invent new policy types or conditions.
+
+Available policy types (these 6 exist):
+- MODEL_ALLOWLIST: Restrict which AI models can be used. Use when the user wants to allow/block specific models.
+- COST_LIMIT: Per-session cost/token thresholds. Use for budget limits.
+- FILE_RESTRICTION: Block or flag when specific file paths are touched. Uses glob patterns on file paths only (NOT file contents).
+- REQUIRE_REVIEW: Auto-flag sessions for review based on cost, files changed, lines added, duration, or file path patterns.
+- CONTENT_FILTER: Block or flag when diff content contains a regex pattern. Use when the user wants to block specific words, patterns, or code in commits. Matches against the unified diff of the session.
+- COMMIT_MESSAGE: Validate commit message format or block specific patterns. Use "pattern" to require a format (commits not matching are flagged), or "blocked_pattern" to block commits whose message matches.
 
 Available actions for rules:
-- BLOCK: Prevent the session from starting (MODEL_ALLOWLIST only)
+- BLOCK: Prevent/flag the action (MODEL_ALLOWLIST, FILE_RESTRICTION, CONTENT_FILTER, COMMIT_MESSAGE)
 - WARN: Log a warning but allow
 - REQUIRE_REVIEW: Flag the session for human review
 - NOTIFY: Notify admins
 
 Available severity levels: LOW, MEDIUM, HIGH
 
-Condition format (JSON) depends on policy type:
+Condition format (JSON) — ONLY these conditions are supported:
 - MODEL_ALLOWLIST: { "models": ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"] }
 - COST_LIMIT: { "max_cost": 5.0 } or { "max_tokens": 100000 }
-- FILE_RESTRICTION: { "path": "**/.env" }
+- FILE_RESTRICTION: { "path": "**/.env" } — glob pattern on file PATH only
 - REQUIRE_REVIEW: { "cost_above": 2.0 } or { "files_above": 20 } or { "max_lines": 500 } or { "max_duration_minutes": 30 } or { "path": "**/auth/**" }
+- CONTENT_FILTER: { "pattern": "TODO|FIXME" } — regex match against diff content. Optional: { "pattern": "secret", "caseSensitive": false }
+- COMMIT_MESSAGE: { "pattern": "^(feat|fix|chore|docs|refactor|test):" } — require format. Or { "blocked_pattern": "WIP|DO NOT MERGE" } — block matching. Optional: { "blocked_pattern": "wip", "caseSensitive": false }
 
 You MUST respond with valid JSON only. No markdown, no explanation. The response must be an array of policy objects:
 [
@@ -410,7 +417,11 @@ router.post('/from-natural-language', requireRole('MEMBER'), async (req: AuthReq
       `Available repos: ${repos.map(r => r.name).join(', ') || 'none'}`,
     ].join('\n');
 
-    const anthropic = new Anthropic();
+    const apiKey = await getOrgLLMKey(orgId);
+    if (!apiKey) {
+      return res.status(400).json({ error: 'Anthropic API key not configured. Add it in Settings → AI Chat.' });
+    }
+    const anthropic = new Anthropic({ apiKey });
     const message = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 2000,

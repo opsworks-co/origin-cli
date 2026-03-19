@@ -8,6 +8,8 @@ const TYPE_BADGE: Record<string, string> = {
   REQUIRE_REVIEW: 'badge-amber',
   MODEL_ALLOWLIST: 'badge-blue',
   COST_LIMIT: 'badge-purple',
+  CONTENT_FILTER: 'badge-green',
+  COMMIT_MESSAGE: 'badge-cyan',
 };
 
 const TYPE_DESCRIPTIONS: Record<string, string> = {
@@ -19,6 +21,10 @@ const TYPE_DESCRIPTIONS: Record<string, string> = {
     'Restrict which AI models can be used. Sessions with non-allowed models are blocked at startup.',
   COST_LIMIT:
     'Set per-session cost or token limits. Violations are logged and sessions are flagged for review.',
+  CONTENT_FILTER:
+    'Block or flag when diff content contains specific patterns (regex). Matches against the unified diff of the session at session end.',
+  COMMIT_MESSAGE:
+    'Validate commit message format or block specific patterns. Require conventional commits or block WIP/draft messages.',
 };
 
 const CONDITION_HELP: Record<string, { placeholder: string; examples: string[] }> = {
@@ -55,6 +61,23 @@ const CONDITION_HELP: Record<string, { placeholder: string; examples: string[] }
     examples: [
       '{"max_cost": 5.0} — Limit $5 per session',
       '{"max_tokens": 100000} — Limit 100k tokens per session',
+    ],
+  },
+  CONTENT_FILTER: {
+    placeholder: '{"pattern": "TODO|FIXME"}',
+    examples: [
+      '{"pattern": "TODO|FIXME"} — Flag TODOs left in code',
+      '{"pattern": "baran"} — Block specific word in diff',
+      '{"pattern": "password\\\\s*=", "caseSensitive": false} — Flag hardcoded passwords',
+      '{"pattern": "console\\\\.log"} — Flag console.log statements',
+    ],
+  },
+  COMMIT_MESSAGE: {
+    placeholder: '{"pattern": "^(feat|fix|chore):"}',
+    examples: [
+      '{"pattern": "^(feat|fix|chore|docs|refactor|test):"} — Require conventional commits',
+      '{"blocked_pattern": "WIP|DO NOT MERGE"} — Block WIP commits',
+      '{"blocked_pattern": "fixup!|squash!"} — Block fixup commits',
     ],
   },
 };
@@ -355,6 +378,8 @@ export default function Policies() {
                 <option value="REQUIRE_REVIEW">Require Review</option>
                 <option value="MODEL_ALLOWLIST">Model Allowlist</option>
                 <option value="COST_LIMIT">Cost Limit</option>
+                <option value="CONTENT_FILTER">Content Filter</option>
+                <option value="COMMIT_MESSAGE">Commit Message</option>
               </select>
             </div>
             <div>

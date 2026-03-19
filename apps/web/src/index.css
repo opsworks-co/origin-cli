@@ -68,6 +68,10 @@
     @apply badge bg-green-900/50 text-green-400 border border-green-800;
   }
 
+  .badge-cyan {
+    @apply badge bg-cyan-900/50 text-cyan-400 border border-cyan-800;
+  }
+
   .badge-amber {
     @apply badge bg-amber-900/50 text-amber-400 border border-amber-800;
   }

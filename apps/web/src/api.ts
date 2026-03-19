@@ -387,6 +387,8 @@ export interface Agent {
   model: string;
   status: string;
   systemPrompt: string | null;
+  securityRulesEnabled: boolean;
+  securityRules: string | null;
   allowedTools: string;        // JSON array string
   maxCostPerSession: number | null;
   maxTokensPerSession: number | null;
@@ -407,6 +409,8 @@ export interface AgentCreateData {
   model: string;
   description?: string;
   systemPrompt?: string;
+  securityRulesEnabled?: boolean;
+  securityRules?: string;
   allowedTools?: string[];
   maxCostPerSession?: number;
   maxTokensPerSession?: number;
@@ -419,6 +423,8 @@ export interface AgentUpdateData {
   model?: string;
   status?: string;
   systemPrompt?: string;
+  securityRulesEnabled?: boolean;
+  securityRules?: string;
   allowedTools?: string[];
   maxCostPerSession?: number | null;
   maxTokensPerSession?: number | null;

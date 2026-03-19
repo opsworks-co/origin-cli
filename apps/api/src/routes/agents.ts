@@ -26,7 +26,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 // POST / — create agent (MEMBER+)
 router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
-    const { name, slug, description, model, systemPrompt, allowedTools, maxCostPerSession, maxTokensPerSession, permissions } = req.body;
+    const { name, slug, description, model, systemPrompt, securityRulesEnabled, securityRules, allowedTools, maxCostPerSession, maxTokensPerSession, permissions } = req.body;
 
     if (!name || !slug || !model) {
       return res.status(400).json({ error: 'Missing required fields: name, slug, model' });
@@ -40,6 +40,8 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
         description: description || null,
         model,
         systemPrompt: systemPrompt || null,
+        securityRulesEnabled: securityRulesEnabled === true, // default false
+        securityRules: securityRules || null,
         allowedTools: allowedTools ? JSON.stringify(allowedTools) : '[]',
         maxCostPerSession: maxCostPerSession ?? null,
         maxTokensPerSession: maxTokensPerSession ?? null,
@@ -114,7 +116,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { name, description, model, status, systemPrompt, allowedTools, maxCostPerSession, maxTokensPerSession, permissions } = req.body;
+    const { name, description, model, status, systemPrompt, securityRulesEnabled, securityRules, allowedTools, maxCostPerSession, maxTokensPerSession, permissions } = req.body;
 
     const existing = await prisma.agent.findFirst({
       where: { id, orgId: req.user!.orgId },
@@ -144,6 +146,8 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
         ...(model !== undefined && { model }),
         ...(status !== undefined && { status }),
         ...(systemPrompt !== undefined && { systemPrompt: systemPrompt || null }),
+        ...(securityRulesEnabled !== undefined && { securityRulesEnabled: !!securityRulesEnabled }),
+        ...(securityRules !== undefined && { securityRules: securityRules || null }),
         ...(allowedTools !== undefined && { allowedTools: JSON.stringify(allowedTools) }),
         ...(maxCostPerSession !== undefined && { maxCostPerSession }),
         ...(maxTokensPerSession !== undefined && { maxTokensPerSession }),
@@ -203,6 +207,8 @@ router.post('/:id/restore/:versionId', requireRole('ADMIN'), async (req: AuthReq
         model: snapshot.model ?? existing.model,
         status: snapshot.status ?? existing.status,
         systemPrompt: snapshot.systemPrompt ?? null,
+        securityRulesEnabled: snapshot.securityRulesEnabled ?? existing.securityRulesEnabled,
+        securityRules: snapshot.securityRules ?? existing.securityRules,
         allowedTools: snapshot.allowedTools ? JSON.stringify(snapshot.allowedTools) : existing.allowedTools,
         maxCostPerSession: snapshot.maxCostPerSession ?? null,
         maxTokensPerSession: snapshot.maxTokensPerSession ?? null,

@@ -217,6 +217,8 @@ model Agent {
   model             String
   status            String          @default("ACTIVE")
   systemPrompt      String?         // Custom system instructions for this agent
+  securityRulesEnabled Boolean      @default(false) // Inject security rules into system prompt
+  securityRules     String?         // Custom security rules (default rules used if empty)
   allowedTools      String          @default("[]")  // JSON array of allowed tool names
   maxCostPerSession Float?          // Max cost in USD per session for this agent
   maxTokensPerSession Int?          // Max tokens per session

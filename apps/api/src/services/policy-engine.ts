@@ -6,6 +6,8 @@
  *   REQUIRE_REVIEW    — Auto-flag sessions for review based on conditions
  *   MODEL_ALLOWLIST   — Restrict which AI models can be used
  *   COST_LIMIT        — Per-session cost thresholds
+ *   CONTENT_FILTER    — Block or flag when diff contains matching patterns
+ *   COMMIT_MESSAGE    — Validate commit message format or block patterns
  *
  * Condition format (JSON):
  *   { "path": "**\/.env" }                      — glob match on file path
@@ -15,6 +17,9 @@
  *   { "max_files": 20 }                         — max files changed
  *   { "max_lines": 500 }                        — max lines added
  *   { "max_duration_minutes": 30 }              — max session duration
+ *   { "pattern": "TODO|FIXME" }                 — regex match in diff content
+ *   { "pattern": "^(feat|fix):" }               — require commit message format
+ *   { "blocked_pattern": "WIP" }                — block matching commit messages
  */
 
 import { prisma } from '../db.js';
@@ -50,6 +55,8 @@ export interface SessionContext {
   linesRemoved: number;
   durationMs: number;
   filesChanged: string[];
+  diffContent?: string | null;
+  commitMessages?: string[];
   agentId?: string | null;
   machineId?: string | null;
   repoId?: string | null;
@@ -304,6 +311,58 @@ export async function enforceSessionEnd(ctx: SessionContext): Promise<Enforcemen
                 break;
               }
             }
+          }
+          break;
+        }
+
+        case 'CONTENT_FILTER': {
+          const pattern = cond.pattern as string | undefined;
+          if (pattern && ctx.diffContent) {
+            try {
+              const flags = (cond.caseSensitive === false) ? 'gi' : 'g';
+              const regex = new RegExp(pattern, flags);
+              const matches = ctx.diffContent.match(regex);
+              if (matches && matches.length > 0) {
+                matched = true;
+                message = `Diff content matches pattern "${pattern}" (${matches.length} match${matches.length !== 1 ? 'es' : ''})`;
+              }
+            } catch {
+              // Invalid regex — skip
+            }
+          }
+          break;
+        }
+
+        case 'COMMIT_MESSAGE': {
+          const requiredPattern = cond.pattern as string | undefined;
+          const blockedPattern = cond.blocked_pattern as string | undefined;
+          const messages = ctx.commitMessages || [];
+
+          if (requiredPattern && messages.length > 0) {
+            try {
+              const regex = new RegExp(requiredPattern);
+              for (const msg of messages) {
+                if (!regex.test(msg)) {
+                  matched = true;
+                  message = `Commit message "${msg.slice(0, 80)}" does not match required format "${requiredPattern}"`;
+                  break;
+                }
+              }
+            } catch { /* invalid regex */ }
+          }
+
+          if (blockedPattern && messages.length > 0) {
+            try {
+              const flags = (cond.caseSensitive === false) ? 'i' : '';
+              const regex = new RegExp(blockedPattern, flags);
+              for (const msg of messages) {
+                if (regex.test(msg)) {
+                  matched = true;
+                  message = `Commit message "${msg.slice(0, 80)}" matches blocked pattern "${blockedPattern}"`;
+                  break;
+                }
+              }
+            } catch { /* invalid regex */ }
           }
           break;
         }

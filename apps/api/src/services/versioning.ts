@@ -52,6 +52,8 @@ export async function createAgentVersion(agentId: string, changedBy: string | nu
     model: agent.model,
     status: agent.status,
     systemPrompt: agent.systemPrompt,
+    securityRulesEnabled: agent.securityRulesEnabled,
+    securityRules: agent.securityRules,
     allowedTools: safeParseJson(agent.allowedTools, []),
     maxCostPerSession: agent.maxCostPerSession,
     maxTokensPerSession: agent.maxTokensPerSession,

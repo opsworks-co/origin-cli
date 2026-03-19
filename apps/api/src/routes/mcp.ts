@@ -15,6 +15,17 @@ import { detectAITool } from '../services/ai-commit-detector.js';
 
 const router = Router();
 
+const DEFAULT_SECURITY_RULES = `CRITICAL: Follow these security rules at all times.
+
+1. NEVER commit, write, or output secrets, API keys, tokens, passwords, or credentials in code, config files, or logs.
+2. NEVER create or modify .env files with real secret values. Use placeholder values like "your-api-key-here" instead.
+3. NEVER hardcode database connection strings, private keys, or authentication tokens.
+4. Always use environment variables for secrets — never inline them in source code.
+5. If you encounter existing secrets in the codebase, do NOT copy, move, or expose them further.
+6. Redact any sensitive values when producing logs, error messages, or output.
+7. NEVER add secrets to git — if a secret was accidentally staged, alert the user immediately.
+8. When writing configuration examples, always use clearly fake placeholder values.`;
+
 interface McpRequest extends Request {
   orgId?: string;
   mcpUserId?: string;  // User ID resolved from the API key (for per-member attribution)
@@ -242,8 +253,8 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
 
     // Resolve agent from API key scopes + tool type
     // The API key is already assigned to specific agents — use those, no slug guessing needed
-    let agent: { id: string; systemPrompt?: string | null; slug?: string; name?: string; versions?: { version: number }[] } | null = null;
-    const agentSelect = { id: true, systemPrompt: true, slug: true, name: true, versions: { orderBy: { version: 'desc' as const }, take: 1, select: { version: true } } };
+    let agent: { id: string; systemPrompt?: string | null; securityRulesEnabled?: boolean; securityRules?: string | null; slug?: string; name?: string; versions?: { version: number }[] } | null = null;
+    const agentSelect = { id: true, systemPrompt: true, securityRulesEnabled: true, securityRules: true, slug: true, name: true, versions: { orderBy: { version: 'desc' as const }, take: 1, select: { version: true } } };
 
     // Enforce API key → agent scope: no scopes = no access
     if (!req.agentScopes || req.agentScopes.length === 0) {
@@ -358,10 +369,25 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
             existingId: existingSession.id, machineId,
           });
         }
+        // Re-evaluate system prompt from live agent settings (not stale snapshot)
+        let dedupPrompt = agent?.systemPrompt || existingSession.agentSystemPrompt || null;
+        if (agent?.securityRulesEnabled === true) {
+          const securityBlock = agent?.securityRules?.trim() || DEFAULT_SECURITY_RULES;
+          dedupPrompt = dedupPrompt
+            ? `${dedupPrompt}\n\n<security-rules>\n${securityBlock}\n</security-rules>`
+            : `<security-rules>\n${securityBlock}\n</security-rules>`;
+        }
+        // Update the snapshot so future resumes also get the latest prompt
+        if (dedupPrompt !== existingSession.agentSystemPrompt) {
+          await prisma.codingSession.update({
+            where: { id: existingSession.id },
+            data: { agentSystemPrompt: dedupPrompt },
+          });
+        }
         // Return the existing session instead of creating a duplicate
         return res.json({
           sessionId: existingSession.id,
-          agentSystemPrompt: existingSession.agentSystemPrompt || undefined,
+          agentSystemPrompt: dedupPrompt || undefined,
           activePolicies: [],
         });
       }
@@ -385,6 +411,15 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       },
     });
 
+    // Build the full system prompt: custom prompt + security rules (if enabled)
+    let fullSystemPrompt = agent?.systemPrompt || null;
+    if (agent?.securityRulesEnabled === true) {
+      const securityBlock = agent?.securityRules?.trim() || DEFAULT_SECURITY_RULES;
+      fullSystemPrompt = fullSystemPrompt
+        ? `${fullSystemPrompt}\n\n<security-rules>\n${securityBlock}\n</security-rules>`
+        : `<security-rules>\n${securityBlock}\n</security-rules>`;
+    }
+
     // Create the coding session (link to agent if resolved, snapshot system prompt)
     const codingSession = await prisma.codingSession.create({
       data: {
@@ -397,7 +432,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         startedAt: new Date(),
         userId: req.mcpUserId || null,
         agentId: agent?.id || null,
-        agentSystemPrompt: agent?.systemPrompt || null,
+        agentSystemPrompt: fullSystemPrompt,
         agentVersion: agent?.versions?.[0]?.version || null,
         branch: branch || null,
       },
@@ -445,7 +480,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     } catch { /* non-critical */ }
 
-    res.json({ sessionId: codingSession.id, activePolicies, enforcementRules, agentSystemPrompt: agent?.systemPrompt || null });
+    res.json({ sessionId: codingSession.id, activePolicies, enforcementRules, agentSystemPrompt: fullSystemPrompt });
   } catch (err) {
     console.error('Start session error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -472,8 +507,14 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
       });
     }
 
-    // Fetch the latest agent system prompt (not the snapshot — the live version)
-    const agentSystemPrompt = session.agent?.systemPrompt || session.agentSystemPrompt || null;
+    // Fetch the latest agent system prompt (not the snapshot — the live version) with security rules
+    let agentSystemPrompt = session.agent?.systemPrompt || session.agentSystemPrompt || null;
+    if (session.agent && (session.agent as any).securityRulesEnabled === true) {
+      const securityBlock = (session.agent as any).securityRules?.trim() || DEFAULT_SECURITY_RULES;
+      agentSystemPrompt = agentSystemPrompt
+        ? `${agentSystemPrompt}\n\n<security-rules>\n${securityBlock}\n</security-rules>`
+        : `<security-rules>\n${securityBlock}\n</security-rules>`;
+    }
 
     // Fetch active policies
     let activePolicies: string[] = [];
@@ -984,6 +1025,17 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       : null;
     const sessionRepoId = codingSession.commit?.repoId ?? null;
 
+    // Collect commit messages from gitCapture for COMMIT_MESSAGE policy
+    const commitMessages: string[] = [];
+    if (gitCapture?.commitDetails && Array.isArray(gitCapture.commitDetails)) {
+      for (const d of gitCapture.commitDetails) {
+        if (d.message) commitMessages.push(d.message);
+      }
+    }
+
+    // Get diff content for CONTENT_FILTER policy
+    const diffContentForPolicy: string | null = gitCapture?.diff || null;
+
     // Run policy engine enforcement in background
     enforceSessionEnd({
       sessionId,
@@ -996,6 +1048,8 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       linesRemoved: linesRemoved ?? codingSession.linesRemoved ?? 0,
       durationMs: durationMs ?? codingSession.durationMs ?? 0,
       filesChanged: parsedFiles,
+      diffContent: diffContentForPolicy,
+      commitMessages,
       agentId: codingSession.agentId,
       machineId: endMachineId,
       repoId: sessionRepoId,
@@ -1092,6 +1146,32 @@ router.post('/violations', async (req: McpRequest, res: Response) => {
     res.json({ logged: true });
   } catch (err) {
     console.error('Report violation error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /policies/:id/rules — add a rule to a policy (MCP auth)
+router.post('/policies/:id/rules', async (req: McpRequest, res: Response) => {
+  try {
+    const policyId = req.params.id as string;
+    const { condition, action, severity } = req.body;
+    const orgId = req.orgId as string;
+
+    const policy = await prisma.policy.findFirst({ where: { id: policyId, orgId } });
+    if (!policy) return res.status(404).json({ error: 'Policy not found' });
+
+    const rule = await prisma.policyRule.create({
+      data: {
+        policyId,
+        condition: typeof condition === 'string' ? condition : JSON.stringify(condition),
+        action: action || 'BLOCK',
+        severity: severity || 'HIGH',
+      },
+    });
+
+    res.status(201).json(rule);
+  } catch (err) {
+    console.error('Create MCP policy rule error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

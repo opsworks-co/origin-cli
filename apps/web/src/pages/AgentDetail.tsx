@@ -39,6 +39,8 @@ export default function AgentDetail() {
   const [editMaxCost, setEditMaxCost] = useState('');
   const [editMaxTokens, setEditMaxTokens] = useState('');
   const [editPermissions, setEditPermissions] = useState('');
+  const [editSecurityRulesEnabled, setEditSecurityRulesEnabled] = useState(false);
+  const [editSecurityRules, setEditSecurityRules] = useState('');
 
   const loadData = () => {
     if (!id) return;
@@ -60,6 +62,8 @@ export default function AgentDetail() {
     setEditDescription(a.description || '');
     setEditModel(a.model);
     setEditSystemPrompt(a.systemPrompt || '');
+    setEditSecurityRulesEnabled(a.securityRulesEnabled === true);
+    setEditSecurityRules(a.securityRules || '');
     const tools = safeParseJson(a.allowedTools, []);
     setEditAllowedTools(tools.length > 0 ? tools.join('\n') : '');
     setEditMaxCost(a.maxCostPerSession != null ? String(a.maxCostPerSession) : '');
@@ -99,6 +103,8 @@ export default function AgentDetail() {
         description: editDescription || undefined,
         model: editModel,
         systemPrompt: editSystemPrompt || undefined,
+        securityRulesEnabled: editSecurityRulesEnabled,
+        securityRules: editSecurityRules || undefined,
         allowedTools: toolsList,
         maxCostPerSession: editMaxCost ? parseFloat(editMaxCost) : null,
         maxTokensPerSession: editMaxTokens ? parseInt(editMaxTokens) : null,
@@ -343,6 +349,40 @@ export default function AgentDetail() {
               rows={6}
               placeholder="You are a senior developer. Always write tests for new code. Follow the project's existing patterns..."
             />
+          </div>
+
+          {/* Security Rules */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-gray-300">Security Rules</h3>
+              <button
+                type="button"
+                onClick={() => setEditSecurityRulesEnabled(!editSecurityRulesEnabled)}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                  editSecurityRulesEnabled ? 'bg-indigo-600' : 'bg-gray-700'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    editSecurityRulesEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-3">
+              {editSecurityRulesEnabled
+                ? 'Security rules are injected into the agent system prompt to prevent credential leaks and unsafe operations.'
+                : 'Security rules are disabled. The agent will not receive credential protection instructions.'}
+            </p>
+            {editSecurityRulesEnabled && (
+              <textarea
+                value={editSecurityRules}
+                onChange={e => setEditSecurityRules(e.target.value)}
+                className="input w-full font-mono text-sm"
+                rows={6}
+                placeholder={`Leave empty to use default rules:\n\n• Never commit secrets, API keys, tokens, or credentials\n• Never write .env files or hardcode passwords\n• Never expose database connection strings\n• Redact sensitive values in logs and output\n• Use environment variables for all secrets`}
+              />
+            )}
           </div>
 
           {/* Limits */}

@@ -61,6 +61,24 @@ export function describeCondition(type: string, conditionJson: string): Conditio
       };
       return { summary: 'Review required', fixHint: 'This session will require human review' };
     }
+    case 'CONTENT_FILTER': {
+      const p = cond.pattern || '(unknown pattern)';
+      return {
+        summary: `Block diff content matching: ${p}`,
+        fixHint: `Do not include content matching "${p}" in your changes`,
+      };
+    }
+    case 'COMMIT_MESSAGE': {
+      if (cond.pattern) return {
+        summary: `Require commit format: ${cond.pattern}`,
+        fixHint: `Use commit messages matching format "${cond.pattern}"`,
+      };
+      if (cond.blocked_pattern) return {
+        summary: `Block commits matching: ${cond.blocked_pattern}`,
+        fixHint: `Do not use "${cond.blocked_pattern}" in commit messages`,
+      };
+      return { summary: 'Commit message policy', fixHint: 'Check commit message format' };
+    }
     default:
       return { summary: conditionJson, fixHint: 'Check with your admin' };
   }
@@ -82,6 +100,8 @@ export function policyTypeLabel(type: string): string {
     case 'COST_LIMIT': return 'Cost Limit';
     case 'FILE_RESTRICTION': return 'File Restriction';
     case 'REQUIRE_REVIEW': return 'Require Review';
+    case 'CONTENT_FILTER': return 'Content Filter';
+    case 'COMMIT_MESSAGE': return 'Commit Message';
     default: return type;
   }
 }
