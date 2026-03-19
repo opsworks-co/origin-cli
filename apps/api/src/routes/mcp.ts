@@ -775,6 +775,12 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     // transcript field: prefer full transcript if provided, fall back to summary
     const transcriptValue = transcript || summary;
 
+    // Check session exists first
+    const existingSession = await prisma.codingSession.findUnique({ where: { id: sessionId } });
+    if (!existingSession) {
+      return res.status(404).json({ error: 'Session not found', sessionId });
+    }
+
     const codingSession = await prisma.codingSession.update({
       where: { id: sessionId },
       data: {
@@ -903,10 +909,20 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         }
       }
 
-      // Create SessionDiff record with full diff
-      await prisma.sessionDiff.create({
-        data: {
+      // Create or update SessionDiff record with full diff
+      await prisma.sessionDiff.upsert({
+        where: { sessionId },
+        create: {
           sessionId,
+          headBefore: gitCapture.headBefore || '',
+          headAfter: gitCapture.headAfter || '',
+          commitShas: JSON.stringify(gitCapture.commitShas || []),
+          diff: gitCapture.diff || '',
+          diffTruncated: gitCapture.diffTruncated || false,
+          linesAdded: gitCapture.linesAdded || 0,
+          linesRemoved: gitCapture.linesRemoved || 0,
+        },
+        update: {
           headBefore: gitCapture.headBefore || '',
           headAfter: gitCapture.headAfter || '',
           commitShas: JSON.stringify(gitCapture.commitShas || []),
@@ -1107,9 +1123,10 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     }).catch(err => console.error('[agent-limits] Background error:', err));
 
     res.json({ success: true });
-  } catch (err) {
-    console.error('End session error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+  } catch (err: any) {
+    console.error('End session error:', err?.message || err, err?.code, err?.meta);
+    // Return more detail so CLI can debug
+    res.status(500).json({ error: 'Internal server error', detail: err?.message || 'unknown' });
   }
 });
 
