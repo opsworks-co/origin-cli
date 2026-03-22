@@ -266,14 +266,33 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
       return res.json({ linked: false, installations: [], message: 'No installations found. Install the GitHub App first.' });
     }
 
+    // Filter out installations already claimed by OTHER orgs
+    const claimedByOthers = await prisma.integrationConfig.findMany({
+      where: {
+        provider: 'github',
+        authType: 'github_app',
+        orgId: { not: req.user!.orgId },
+      },
+      select: { settings: true },
+    });
+    const claimedInstallationIds = new Set<string>();
+    for (const cfg of claimedByOthers) {
+      try {
+        const s = JSON.parse(cfg.settings);
+        if (s.installationId) claimedInstallationIds.add(String(s.installationId));
+      } catch { /* ignore */ }
+    }
+
     // If exactly one installation, auto-link it
     // If multiple, return the list so frontend can let admin pick
-    const installationList = installations.map((inst: any) => ({
-      installationId: String(inst.id),
-      account: inst.account?.login || 'unknown',
-      accountType: inst.account?.type || 'unknown', // User or Organization
-      avatarUrl: inst.account?.avatar_url || null,
-    }));
+    const installationList = installations
+      .filter((inst: any) => !claimedInstallationIds.has(String(inst.id)))
+      .map((inst: any) => ({
+        installationId: String(inst.id),
+        account: inst.account?.login || 'unknown',
+        accountType: inst.account?.type || 'unknown', // User or Organization
+        avatarUrl: inst.account?.avatar_url || null,
+      }));
 
     // Only auto-link if a specific installationId was explicitly passed by the admin
     const targetId = req.body?.installationId || null;

@@ -49,36 +49,82 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: hostname, machineId' });
     }
 
-    const machine = await prisma.machine.upsert({
-      where: { machineId },
-      create: {
-        orgId: req.user!.orgId,
-        hostname,
-        machineId,
-        detectedTools: detectedTools ? JSON.stringify(detectedTools) : '[]',
-        lastSeenAt: new Date(),
-      },
-      update: {
-        hostname,
-        detectedTools: detectedTools ? JSON.stringify(detectedTools) : '[]',
-        lastSeenAt: new Date(),
-      },
+    // Dedup: find existing machines with same hostname in same org and merge
+    const existingByHostname = await prisma.machine.findMany({
+      where: { orgId: req.user!.orgId, hostname },
     });
 
-    await prisma.auditLog.create({
-      data: {
-        orgId: req.user!.orgId,
-        userId: req.user!.id,
-        action: 'MACHINE_REGISTERED',
-        resource: machine.id,
-        metadata: JSON.stringify({ hostname, machineId }),
-      },
-    });
+    let machine;
+    if (existingByHostname.length > 0) {
+      // Keep the first one, delete extras (dedup)
+      const keep = existingByHostname[0];
+      if (existingByHostname.length > 1) {
+        const extraIds = existingByHostname.slice(1).map(m => m.id);
+        // Reassign any policy rules from extras to the kept machine
+        await prisma.policyRule.updateMany({
+          where: { machineId: { in: extraIds } },
+          data: { machineId: keep.id },
+        });
+        await prisma.machine.deleteMany({ where: { id: { in: extraIds } } });
+      }
+      // Update the kept machine
+      machine = await prisma.machine.update({
+        where: { id: keep.id },
+        data: {
+          machineId,
+          detectedTools: detectedTools ? JSON.stringify(detectedTools) : '[]',
+          lastSeenAt: new Date(),
+        },
+      });
+    } else {
+      // No existing by hostname — upsert by machineId
+      machine = await prisma.machine.upsert({
+        where: { machineId },
+        create: {
+          orgId: req.user!.orgId,
+          hostname,
+          machineId,
+          detectedTools: detectedTools ? JSON.stringify(detectedTools) : '[]',
+          lastSeenAt: new Date(),
+        },
+        update: {
+          hostname,
+          detectedTools: detectedTools ? JSON.stringify(detectedTools) : '[]',
+          lastSeenAt: new Date(),
+        },
+      });
+    }
+
+    // Audit log — userId may not be a valid User for standalone API keys, so wrap in try
+    try {
+      await prisma.auditLog.create({
+        data: {
+          orgId: req.user!.orgId,
+          userId: req.user!.id,
+          action: 'MACHINE_REGISTERED',
+          resource: machine.id,
+          metadata: JSON.stringify({ hostname, machineId }),
+        },
+      });
+    } catch {
+      // FK constraint fails for standalone API keys — log without userId
+      await prisma.auditLog.create({
+        data: {
+          orgId: req.user!.orgId,
+          action: 'MACHINE_REGISTERED',
+          resource: machine.id,
+          metadata: JSON.stringify({ hostname, machineId }),
+        },
+      });
+    }
 
     res.json(machine);
-  } catch (err) {
+  } catch (err: any) {
     console.error('Register machine error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    const message = err?.code === 'P2003'
+      ? 'Organization not found — your API key may be linked to a deleted org.'
+      : 'Failed to register machine. Check server logs for details.';
+    res.status(500).json({ error: 'Internal server error', message });
   }
 });
 
@@ -92,15 +138,26 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 
     await prisma.machine.delete({ where: { id: machine.id } });
 
-    await prisma.auditLog.create({
-      data: {
-        orgId: req.user!.orgId,
-        userId: req.user!.id,
-        action: 'MACHINE_DELETED',
-        resource: machine.id,
-        metadata: JSON.stringify({ hostname: machine.hostname, machineId: machine.machineId }),
-      },
-    });
+    try {
+      await prisma.auditLog.create({
+        data: {
+          orgId: req.user!.orgId,
+          userId: req.user!.id,
+          action: 'MACHINE_DELETED',
+          resource: machine.id,
+          metadata: JSON.stringify({ hostname: machine.hostname, machineId: machine.machineId }),
+        },
+      });
+    } catch {
+      await prisma.auditLog.create({
+        data: {
+          orgId: req.user!.orgId,
+          action: 'MACHINE_DELETED',
+          resource: machine.id,
+          metadata: JSON.stringify({ hostname: machine.hostname, machineId: machine.machineId }),
+        },
+      });
+    }
 
     res.json({ success: true });
   } catch (err) {

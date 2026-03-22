@@ -807,6 +807,7 @@ export default function Settings() {
         >
           General
         </button>
+        {(user?.role === 'ADMIN' || user?.role === 'OWNER') && (
         <button
           onClick={() => setActiveTab('integrations')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
@@ -817,6 +818,7 @@ export default function Settings() {
         >
           Integrations
         </button>
+        )}
         <button
           onClick={() => setActiveTab('budget')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
@@ -913,7 +915,8 @@ export default function Settings() {
 
       {activeTab === 'general' && (
         <>
-          {/* API Keys Section */}
+          {/* API Keys Section — ADMIN/OWNER only */}
+          {(user?.role === 'ADMIN' || user?.role === 'OWNER') && (
           <section className="card space-y-4">
             <div>
               <h2 className="text-lg font-semibold">API Keys</h2>
@@ -1141,6 +1144,7 @@ export default function Settings() {
               </p>
             </form>
           </section>
+          )}
 
           {/* Team Section */}
           <section className="card space-y-4">

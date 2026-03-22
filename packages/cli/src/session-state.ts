@@ -128,7 +128,7 @@ export function getBranch(cwd?: string): string | null {
  * Prefers .git/origin-session.json if in a git repo.
  * Falls back to ~/.origin/sessions/<cwd-hash>.json otherwise.
  */
-function getStatePath(cwd?: string, sessionTag?: string): string {
+export function getStatePath(cwd?: string, sessionTag?: string): string {
   const suffix = sessionTag ? `origin-session-${sessionTag}.json` : 'origin-session.json';
 
   // Try git dir first
@@ -247,10 +247,37 @@ function getHeartbeatPidFile(sessionId: string): string {
 }
 
 /**
+ * Walk up the process tree to find an ancestor whose command matches a pattern.
+ * Returns the PID of the matching ancestor, or 0 if not found.
+ * Used to find the actual agent process (e.g. Codex, Gemini) since hooks are
+ * spawned via shell wrappers that die immediately after the hook exits.
+ */
+function findAncestorPid(pattern: RegExp, maxDepth = 10): number {
+  try {
+    let pid = process.ppid || 0;
+    for (let i = 0; i < maxDepth && pid > 1; i++) {
+      // Get the command and parent of this PID
+      const info = execSync(`ps -p ${pid} -o ppid=,command=`, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (pattern.test(info)) return pid;
+      // Move to parent
+      const ppid = parseInt(info.trim().split(/\s+/)[0], 10);
+      if (isNaN(ppid) || ppid <= 1 || ppid === pid) break;
+      pid = ppid;
+    }
+  } catch { /* ignore */ }
+  return 0;
+}
+
+/**
  * Spawn a detached background process that pings the API every 30s.
  * Keeps the session marked as RUNNING even when idle between prompts.
+ * Passes the parent PID and session state file path so the daemon can
+ * self-terminate when the agent process dies or the session ends.
  */
-export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string): void {
+export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string, stateFile?: string, agentSlug?: string): void {
   const pidFile = getHeartbeatPidFile(sessionId);
 
   // Kill any existing heartbeat for this session
@@ -267,7 +294,26 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
       return;
     }
 
-    const child = spawn(process.execPath, [heartbeatScript, sessionId, apiUrl, apiKey, pidFile], {
+    // For long-running agents (Claude Code, Windsurf), process.ppid IS the agent.
+    // For IDE/fire-and-forget agents (Cursor, Codex, Gemini, Aider), hooks are
+    // spawned via shell wrappers — process.ppid dies immediately. Walk up the
+    // process tree to find the actual agent process so the heartbeat can detect
+    // when it exits and end the session.
+    const AGENT_PROCESS_PATTERNS: Record<string, RegExp> = {
+      'cursor': /Cursor/,       // /Applications/Cursor.app or "Cursor Helper"
+      'codex': /codex/i,        // node .../codex or native codex binary
+      'gemini': /gemini/i,
+      'aider': /aider/i,
+    };
+    const pattern = agentSlug ? AGENT_PROCESS_PATTERNS[agentSlug] : undefined;
+    let parentPid: number;
+    if (pattern) {
+      parentPid = findAncestorPid(pattern);
+    } else {
+      parentPid = process.ppid || process.pid;
+    }
+
+    const child = spawn(process.execPath, [heartbeatScript, sessionId, apiUrl, apiKey, pidFile, String(parentPid), stateFile || ''], {
       detached: true,
       stdio: 'ignore',
     });
@@ -292,6 +338,23 @@ export function stopHeartbeat(sessionId: string): void {
     }
   } catch {
     // Ignore
+  }
+}
+
+/**
+ * Check if the heartbeat daemon is still alive for a session.
+ */
+export function isHeartbeatAlive(sessionId: string): boolean {
+  const pidFile = getHeartbeatPidFile(sessionId);
+  try {
+    if (!fs.existsSync(pidFile)) return false;
+    const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+    if (pid <= 0) return false;
+    // signal 0 checks if process exists without actually sending a signal
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 

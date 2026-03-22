@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
 import PublicLayout from './components/PublicLayout';
+import { ToastProvider } from './components/Toast';
 import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Register from './pages/Register';
@@ -35,6 +36,7 @@ import Prompts from './pages/Prompts';
 import ComplianceDashboard from './pages/Compliance';
 import PublicPolicies from './pages/PublicPolicies';
 import CLI from './pages/CLI';
+import SharedSession from './pages/SharedSession';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -56,6 +58,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
+    <ToastProvider>
     <Routes>
       {/* Public routes — wrapped in PublicLayout */}
       <Route path="/" element={<PublicLayout><Landing /></PublicLayout>} />
@@ -63,6 +66,7 @@ export default function App() {
       <Route path="/pricing" element={<PublicLayout><Pricing /></PublicLayout>} />
       <Route path="/cli" element={<PublicLayout><CLI /></PublicLayout>} />
       <Route path="/org/:orgSlug/policies" element={<PublicLayout><PublicPolicies /></PublicLayout>} />
+      <Route path="/s/:slug" element={<SharedSession />} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
       <Route path="/invite/:token" element={<AcceptInvite />} />
@@ -261,5 +265,6 @@ export default function App() {
       {/* Catch-all */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </ToastProvider>
   );
 }

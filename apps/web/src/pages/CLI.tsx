@@ -261,7 +261,8 @@ origin config set mode auto`}</CodeBlock>
                   ['Session history', '✓ origin sessions', '✓ Web dashboard', '—'],
                   ['Session explain', '✓ origin explain --summarize', '✓ entire explain', '—'],
                   ['Ask about code', '✓ origin ask (file/session/query)', '—', '✓ /ask (query author)'],
-                  ['Session sharing', '✓ origin share (bundle/clipboard)', '—', '—'],
+                  ['Session sharing', '✓ origin share (bundle/clipboard/public URL)', '—', '—'],
+                  ['PR analysis', '✓ origin review-pr (sessions per PR)', '—', '—'],
                   ['Session resume', '✓ origin resume (restore context)', '—', '—'],
                   ['', '', '', ''],
                   ['ATTRIBUTION & BLAME', '', '', ''],
@@ -638,7 +639,7 @@ origin resume --json`}</CodeBlock>
           <p className="text-gray-400 text-sm mt-3">With <code className="text-indigo-400">--launch</code>, Origin detects the installed agent and launches it with session context (Claude Code: pipes to <code className="text-gray-300">claude --resume</code>, Cursor/Gemini: writes context file).</p>
 
           <h3 className="text-lg font-semibold text-gray-200 mt-8 mb-2"><code className="text-indigo-400">origin share &lt;sessionId&gt;</code></h3>
-          <p className="text-gray-400 text-sm mb-2">Create a shareable prompt bundle from a session.</p>
+          <p className="text-gray-400 text-sm mb-2">Create a shareable prompt bundle from a session. With <code className="text-indigo-400">--public</code>, generates a public URL on the Origin platform.</p>
           <CodeBlock>{`# Share entire session (copies to clipboard)
 origin share abc123
 
@@ -646,7 +647,15 @@ origin share abc123
 origin share abc123 --prompt 3
 
 # Write to file
-origin share abc123 --output session-bundle.md`}</CodeBlock>
+origin share abc123 --output session-bundle.md
+
+# Generate a public share link (requires platform connection)
+origin share abc123 --public
+# → https://getorigin.io/s/k7x9m2p4`}</CodeBlock>
+
+          <h3 className="text-lg font-semibold text-gray-200 mt-8 mb-2"><code className="text-indigo-400">origin review-pr &lt;pr-url&gt;</code></h3>
+          <p className="text-gray-400 text-sm mb-2">Analyze all AI coding sessions linked to a GitHub pull request. Shows a summary table with agent, model, cost, turns, and lines changed.</p>
+          <CodeBlock>{`origin review-pr https://github.com/org/repo/pull/42`}</CodeBlock>
         </div>
       );
 

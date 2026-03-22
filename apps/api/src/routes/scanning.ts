@@ -50,6 +50,15 @@ router.get('/session/:sessionId', async (req: AuthRequest, res: Response) => {
   try {
     const sessionId = req.params.sessionId as string;
 
+    // Verify the session belongs to this user's org
+    const session = await prisma.codingSession.findFirst({
+      where: { id: sessionId },
+      include: { commit: { include: { repo: { select: { orgId: true } } } } },
+    });
+    if (!session || session.commit?.repo?.orgId !== req.user!.orgId) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
     const findings = await prisma.secretFinding.findMany({
       where: { sessionId },
       orderBy: [{ severity: 'desc' }, { createdAt: 'desc' }],

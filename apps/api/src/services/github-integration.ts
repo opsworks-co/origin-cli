@@ -416,6 +416,10 @@ export interface SessionForComment {
   linesRemoved: number;
   reviewStatus: string | null;
   reviewNote: string | null;
+  promptCount: number;
+  promptDescription: string | null;
+  durationMs: number;
+  filesChangedCount: number;
   violations?: Array<{
     policyName: string;
     policyType: string;
@@ -423,6 +427,16 @@ export interface SessionForComment {
     action: string;
     message: string;
   }>;
+}
+
+function formatDuration(ms: number): string {
+  if (!ms || ms <= 0) return '—';
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${totalSeconds}s`;
 }
 
 function statusEmoji(status: string | null): string {
@@ -458,13 +472,17 @@ export function buildSessionSummaryComment(
     ].join('\n');
   }
 
+  const totalTurns = sessions.reduce((sum, s) => sum + (s.promptCount || 0), 0);
+  const humanCorrections = sessions.filter(s => s.reviewStatus?.toUpperCase() === 'FLAGGED').length;
+
   const rows = sessions.map((s) => {
     const agent = s.agentName || '—';
     const cost = `$${s.costUsd.toFixed(2)}`;
     const tokens = s.tokensUsed >= 1000 ? `${(s.tokensUsed / 1000).toFixed(1)}k` : String(s.tokensUsed);
     const status = `${statusEmoji(s.reviewStatus)} ${statusLabel(s.reviewStatus)}`;
     const link = `[View](${originBaseUrl}/sessions/${s.id})`;
-    return `| ${link} | ${agent} | ${s.model} | ${cost} | ${tokens} | ${status} |`;
+    const turns = s.promptCount || 0;
+    return `| ${link} | ${agent} | ${s.model} | ${turns} | ${cost} | ${tokens} | ${status} |`;
   });
 
   const totalCost = sessions.reduce((sum, s) => sum + s.costUsd, 0);
@@ -478,17 +496,60 @@ export function buildSessionSummaryComment(
   else if (anyRejected) overallStatus = '❌ Session(s) rejected';
   else if (anyFlagged) overallStatus = '⚠️ Session(s) flagged';
 
+  const totalFilesChanged = sessions.reduce((sum, s) => sum + (s.filesChangedCount || 0), 0);
+  const totalDurationMs = sessions.reduce((sum, s) => sum + (s.durationMs || 0), 0);
+
   const parts = [
     '## 🔍 Origin — AI Governance Report',
     '',
-    '| Session | Agent | Model | Cost | Tokens | Status |',
-    '|---------|-------|-------|------|--------|--------|',
+    `> **${sessions.length} session${sessions.length > 1 ? 's' : ''}** · **${totalTurns} agent turns**${humanCorrections > 0 ? ` · **${humanCorrections} flagged**` : ''}`,
+    '',
+    '| Session | Agent | Model | Turns | Cost | Tokens | Status |',
+    '|---------|-------|-------|-------|------|--------|--------|',
     ...rows,
     '',
     `**Summary:** ${sessions.length} AI session${sessions.length > 1 ? 's' : ''} linked to this PR · $${totalCost.toFixed(2)} total cost · +${totalLines.toLocaleString()} lines added`,
     '',
     `**Overall:** ${overallStatus}`,
   ];
+
+  // Session Details section — per-session breakdown with duration, files, and key decisions
+  if (sessions.length > 0) {
+    parts.push('', '<details>', '<summary>Session Details</summary>', '');
+    for (const s of sessions) {
+      const agent = s.agentName || 'Unknown Agent';
+      const duration = formatDuration(s.durationMs);
+      const files = s.filesChangedCount || 0;
+      const turns = s.promptCount || 0;
+      parts.push(`#### ${agent} — ${s.model}`);
+      parts.push(`- **Turns:** ${turns} · **Duration:** ${duration} · **Files changed:** ${files}`);
+      parts.push(`- **Lines:** +${s.linesAdded.toLocaleString()} / -${s.linesRemoved.toLocaleString()} · **Cost:** $${s.costUsd.toFixed(2)}`);
+
+      // Extract key decisions from review notes
+      if (s.reviewNote) {
+        const decisionLines = s.reviewNote
+          .split('\n')
+          .filter((l) => /considered|decided|chose|opted|selected|reasoning|because/i.test(l))
+          .slice(0, 3);
+        if (decisionLines.length > 0) {
+          parts.push('- **Key decisions:**');
+          for (const line of decisionLines) {
+            const cleaned = line.replace(/^[-*]\s*/, '').trim();
+            parts.push(`  - ${cleaned}`);
+          }
+        }
+      }
+
+      parts.push('');
+    }
+
+    if (totalDurationMs > 0 || totalFilesChanged > 0) {
+      parts.push(`**Totals:** ${formatDuration(totalDurationMs)} total duration · ${totalFilesChanged} files changed`);
+      parts.push('');
+    }
+
+    parts.push('</details>');
+  }
 
   // Collect policy violations — prefer structured data, fall back to review notes
   const hasStructuredViolations = sessions.some(s => s.violations && s.violations.length > 0);
@@ -752,6 +813,7 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
         include: {
           agent: true,
           review: true,
+          _count: { select: { promptChanges: true } },
         },
       },
       // "sessionCommits" relation: Commit.sessionId → CodingSession.id
@@ -760,6 +822,7 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
         include: {
           agent: true,
           review: true,
+          _count: { select: { promptChanges: true } },
         },
       },
     },
@@ -768,8 +831,15 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
   // Deduplicate sessions (multiple commits can link to same session)
   const sessionMap = new Map<string, SessionForComment>();
 
-  function addSession(s: { id: string; agent?: { name: string } | null; model: string; costUsd: number; tokensUsed: number; linesAdded: number; linesRemoved: number; review?: { status: string; note?: string | null } | null }) {
+  function addSession(s: { id: string; agent?: { name: string } | null; model: string; prompt?: string | null; costUsd: number; tokensUsed: number; linesAdded: number; linesRemoved: number; durationMs?: number | null; filesChanged?: string | null; review?: { status: string; note?: string | null } | null }) {
     if (!sessionMap.has(s.id)) {
+      let filesChangedCount = 0;
+      if (s.filesChanged) {
+        try {
+          const parsed = JSON.parse(s.filesChanged);
+          filesChangedCount = Array.isArray(parsed) ? parsed.length : 0;
+        } catch { /* ignore */ }
+      }
       sessionMap.set(s.id, {
         id: s.id,
         agentName: s.agent?.name || null,
@@ -780,6 +850,10 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
         linesRemoved: s.linesRemoved,
         reviewStatus: s.review?.status || null,
         reviewNote: s.review?.note || null,
+        promptCount: (s as any)._count?.promptChanges || 0,
+        promptDescription: s.prompt ? (s.prompt.length > 60 ? s.prompt.slice(0, 60) + '...' : s.prompt) : null,
+        durationMs: s.durationMs || 0,
+        filesChangedCount,
       });
     }
   }

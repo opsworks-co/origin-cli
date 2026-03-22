@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Repo, GitHubDiscoveredRepo, GitLabDiscoveredRepo, ImportResult, GitLabImportResult, IntegrationConfig } from '../api';
 import { timeAgo } from '../utils';
+import { Package, Plus, RefreshCw, Archive, Trash2, GitFork } from 'lucide-react';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useToast } from '../components/Toast';
 
 /** Extract org/owner from repo path, e.g. "github.com/dolobanko/origin" → "dolobanko" */
 function extractOrg(repo: Repo): string {
@@ -71,6 +74,8 @@ export default function Repos() {
 
   // Delete state
   const [deleting, setDeleting] = useState<Record<string, boolean>>({});
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const { toast } = useToast();
 
   // Archive state
   const [archiving, setArchiving] = useState<Record<string, boolean>>({});
@@ -134,15 +139,16 @@ export default function Repos() {
     }
   };
 
-  const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Delete ${name}? All commits and sessions will be removed.`)) return;
+  const handleDelete = async (id: string) => {
+    setDeleteTarget(null);
     setDeleting((prev) => ({ ...prev, [id]: true }));
     try {
       await api.deleteRepo(id);
+      toast('success', 'Repository deleted');
       fetchRepos();
       if (showArchived) fetchArchivedRepos();
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     } finally {
       setDeleting((prev) => ({ ...prev, [id]: false }));
     }
@@ -651,7 +657,9 @@ export default function Repos() {
       {repos.length === 0 && !showImport && !showGitLabImport && !showForm ? (
         <div className="card py-14 space-y-8">
           <div className="text-center">
-            <div className="text-4xl mb-3">{'\u{1F4E6}'}</div>
+            <div className="w-12 h-12 rounded-xl bg-indigo-500/10 flex items-center justify-center mx-auto mb-3">
+              <Package className="w-6 h-6 text-indigo-400" />
+            </div>
             <p className="text-lg font-medium text-gray-200 mb-1">No repositories yet</p>
             <p className="text-sm text-gray-500">
               Agents can only run sessions in registered repositories.
@@ -814,13 +822,7 @@ export default function Repos() {
                         className="text-xs text-gray-400 hover:text-indigo-400 transition-colors px-2 py-1 rounded hover:bg-gray-800"
                         title="Fetch commits"
                       >
-                        {syncing[repo.id] ? (
-                          <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-indigo-400" />
-                        ) : (
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
-                          </svg>
-                        )}
+                        <RefreshCw className={`w-3.5 h-3.5 ${syncing[repo.id] ? 'animate-spin' : ''}`} />
                       </button>
                       <button
                         onClick={(e) => {
@@ -831,9 +833,7 @@ export default function Repos() {
                         className="text-xs text-gray-400 hover:text-amber-400 transition-colors px-2 py-1 rounded hover:bg-gray-800"
                         title="Archive repo"
                       >
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
-                        </svg>
+                        <Archive className="w-3.5 h-3.5" />
                       </button>
                     </div>
 
@@ -900,11 +900,12 @@ export default function Repos() {
                       Restore
                     </button>
                     <button
-                      onClick={() => handleDelete(repo.id, repo.name)}
+                      onClick={() => setDeleteTarget({ id: repo.id, name: repo.name })}
                       disabled={deleting[repo.id]}
-                      className="text-xs text-red-400/60 hover:text-red-400 transition-colors px-2 py-1"
+                      className="text-xs text-red-400/60 hover:text-red-400 transition-colors px-2 py-1 flex items-center gap-1"
                       title="Permanently delete"
                     >
+                      <Trash2 className="w-3 h-3" />
                       Delete
                     </button>
                   </div>
@@ -918,6 +919,16 @@ export default function Repos() {
           <p className="mt-2 text-xs text-gray-600 ml-5">No archived repositories</p>
         )}
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete Repository"
+        message={`Delete "${deleteTarget?.name}"? All commits and sessions will be removed.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={() => deleteTarget && handleDelete(deleteTarget.id)}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

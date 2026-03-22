@@ -61,13 +61,10 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     req.apiKeyName = found.name;
     req.repoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
     req.agentScopes = found.agentScopes.map((s: { agentId: string }) => s.agentId);
-    // Standalone key (has role, no userId): no user attribution
-    // Linked key: use the key's userId, fall back to org owner
-    if (found.role && !found.userId) {
-      req.mcpUserId = undefined;
-    } else {
-      req.mcpUserId = found.userId ?? found.org.users[0]?.id ?? undefined;
-    }
+    // Resolve user for session attribution:
+    // Linked key: use the key's userId
+    // Standalone key (has role, no userId): fall back to org owner so sessions are visible
+    req.mcpUserId = found.userId ?? found.org.users[0]?.id ?? undefined;
     next();
   } catch (err) {
     console.error('API key auth error:', err);
@@ -329,8 +326,12 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     //    for this machine + agent + repo, reuse it instead of creating a new one.
     //    Claude Code fires session-start on open AND on resume from idle, and the
     //    stale cleanup may have ended the session during idle. Reopen it.
+    //    Skip dedup for agents that fire session-start per-prompt (Cursor, Codex) —
+    //    for those, the CLI handles session continuity via local state files.
+    const agentsWithPerPromptSessionStart = ['cursor', 'codex'];
+    const skipDedup = agentsWithPerPromptSessionStart.includes(agentSlug || '');
     const dedupCutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 hour window
-    const existingSession = await prisma.codingSession.findFirst({
+    const existingSession = skipDedup ? null : await prisma.codingSession.findFirst({
       where: {
         agentId: agent?.id || null,
         commit: { repoId: repo.id },

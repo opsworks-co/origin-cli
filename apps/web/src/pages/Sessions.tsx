@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent } from '../api';
 import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../utils';
+import { Archive, ArchiveRestore, GitBranch } from 'lucide-react';
+import { useToast } from '../components/Toast';
 
 function statusBadge(status: string) {
   return <span className={getStatusBadgeClass(status)}>{status}</span>;
@@ -16,11 +18,13 @@ const LIMIT = 20;
 
 export default function Sessions() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [total, setTotal] = useState(0);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
 
   // View mode
   const [viewMode, setViewMode] = useState<ViewMode>('list');
@@ -56,7 +60,7 @@ export default function Sessions() {
     setError('');
     setSelectedIds(new Set());
     try {
-      const res = await api.getSessions({ model, status, repoId, agentId, branch, limit: LIMIT, offset });
+      const res = await api.getSessions({ model, status, repoId, agentId, branch, archived: showArchived ? 'true' : undefined, limit: LIMIT, offset });
       setSessions(res.sessions);
       setTotal(res.total);
     } catch (err: any) {
@@ -64,7 +68,7 @@ export default function Sessions() {
     } finally {
       setLoading(false);
     }
-  }, [model, status, repoId, agentId, branch, offset]);
+  }, [model, status, repoId, agentId, branch, offset, showArchived]);
 
   useEffect(() => {
     fetchSessions();
@@ -159,12 +163,8 @@ export default function Sessions() {
   }, [sessions]);
 
   // Sessions eligible for bulk review (no existing review / pending)
-  const pendingSessions = sessions.filter(
-    (s) => !s.review?.status || s.review.status.toLowerCase() === 'pending'
-  );
-
-  const allPendingSelected =
-    pendingSessions.length > 0 && pendingSessions.every((s) => selectedIds.has(s.id));
+  const allSelected =
+    sessions.length > 0 && sessions.every((s) => selectedIds.has(s.id));
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
@@ -176,10 +176,25 @@ export default function Sessions() {
   };
 
   const toggleSelectAll = () => {
-    if (allPendingSelected) {
+    if (allSelected) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(pendingSessions.map((s) => s.id)));
+      setSelectedIds(new Set(sessions.map((s) => s.id)));
+    }
+  };
+
+  const handleBulkArchive = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkLoading(true);
+    try {
+      await api.bulkArchiveSessions(Array.from(selectedIds), !showArchived);
+      toast('success', showArchived ? 'Sessions restored' : 'Sessions archived');
+      setSelectedIds(new Set());
+      fetchSessions();
+    } catch (err: any) {
+      toast('error', err.message);
+    } finally {
+      setBulkLoading(false);
     }
   };
 
@@ -209,6 +224,11 @@ export default function Sessions() {
   const sortedSessions = useMemo(() => {
     const list = [...sessions];
     list.sort((a, b) => {
+      // RUNNING sessions always float to the top
+      const aRunning = a.status === 'RUNNING' ? 1 : 0;
+      const bRunning = b.status === 'RUNNING' ? 1 : 0;
+      if (aRunning !== bRunning) return bRunning - aRunning;
+
       let cmp = 0;
       switch (sortBy) {
         case 'cost':
@@ -323,6 +343,19 @@ export default function Sessions() {
               By PR
             </button>
           </div>
+
+          {/* Archive toggle */}
+          <button
+            onClick={() => setShowArchived(!showArchived)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              showArchived
+                ? 'bg-amber-600/20 text-amber-400 border border-amber-700/50'
+                : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700'
+            }`}
+          >
+            {showArchived ? <ArchiveRestore className="w-3.5 h-3.5" /> : <Archive className="w-3.5 h-3.5" />}
+            {showArchived ? 'Archived' : 'Archive'}
+          </button>
         </div>
       </div>
 
@@ -486,6 +519,14 @@ export default function Sessions() {
             >
               {bulkLoading ? 'Processing...' : 'Flag Selected'}
             </button>
+            <button
+              onClick={handleBulkArchive}
+              disabled={bulkLoading}
+              className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5"
+            >
+              {showArchived ? <ArchiveRestore className="w-3 h-3" /> : <Archive className="w-3 h-3" />}
+              {bulkLoading ? 'Processing...' : showArchived ? 'Restore' : 'Archive'}
+            </button>
           </div>
         </div>
       )}
@@ -616,11 +657,11 @@ export default function Sessions() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
+                <tr className="text-left text-[11px] text-gray-500 uppercase tracking-wider border-b border-white/[0.06]">
                   <th className="px-3 py-3 w-10">
                     <input
                       type="checkbox"
-                      checked={allPendingSelected}
+                      checked={allSelected}
                       onChange={toggleSelectAll}
                       className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500 cursor-pointer"
                       title="Select all pending sessions"
@@ -650,7 +691,7 @@ export default function Sessions() {
                   </SortHeader>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-800/50">
+              <tbody className="divide-y divide-white/[0.04]">
                 {loading ? (
                   <tr>
                     <td colSpan={13} className="px-6 py-12 text-center">
@@ -668,20 +709,15 @@ export default function Sessions() {
                     <tr
                       key={s.id}
                       onClick={() => navigate(`/sessions/${s.id}`)}
-                      className="hover:bg-gray-800/30 transition-colors cursor-pointer"
+                      className="hover:bg-white/[0.02] transition-colors duration-100 cursor-pointer"
                     >
                       <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
-                        {!s.review?.status ||
-                        s.review.status.toLowerCase() === 'pending' ? (
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.has(s.id)}
-                            onChange={() => toggleSelect(s.id)}
-                            className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500 cursor-pointer"
-                          />
-                        ) : (
-                          <span className="block w-4" />
-                        )}
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(s.id)}
+                          onChange={() => toggleSelect(s.id)}
+                          className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500 cursor-pointer"
+                        />
                       </td>
                       <td className="px-6 py-3">
                         <span className="badge-blue">{s.model}</span>
@@ -713,7 +749,7 @@ export default function Sessions() {
                       <td className="px-6 py-3 text-gray-400 text-xs max-w-[140px] truncate">
                         {s.branch ? (
                           <span className="inline-flex items-center gap-1">
-                            <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+                            <GitBranch className="w-3 h-3 text-gray-500" />
                             {s.branch}
                           </span>
                         ) : (

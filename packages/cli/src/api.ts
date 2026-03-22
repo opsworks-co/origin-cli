@@ -17,8 +17,12 @@ async function request(path: string, opts: RequestInit = {}) {
     },
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error((body as any)?.error ?? res.statusText);
+    const body = await res.json().catch(() => ({})) as any;
+    const err = new Error(body?.message || body?.error || res.statusText) as any;
+    err.status = res.status;
+    err.serverError = body?.error;
+    err.serverMessage = body?.message;
+    throw err;
   }
   return res.json();
 }
@@ -60,6 +64,10 @@ export const api = {
   getSession: (id: string) => request(`/api/sessions/${id}`),
   reviewSession: (id: string, status: string, note?: string) =>
     request(`/api/sessions/${id}/review`, { method: 'POST', body: JSON.stringify({ status, note }) }),
+  shareSession: (id: string) =>
+    request(`/api/sessions/${id}/share`, { method: 'POST' }),
+  endSessionById: (id: string) =>
+    request(`/api/sessions/${id}/end`, { method: 'POST' }),
 
   // Agents
   getMyAgents: () => request('/api/agents/my'),
@@ -76,6 +84,9 @@ export const api = {
   // Policies (CRUD)
   createPolicy: (data: any) => request('/api/policies', { method: 'POST', body: JSON.stringify(data) }),
   deletePolicy: (id: string) => request(`/api/policies/${id}`, { method: 'DELETE' }),
+
+  // PR Review (CLI)
+  reviewPR: (url: string) => request(`/api/pull-requests/review?url=${encodeURIComponent(url)}`),
 
   // Audit
   getAuditLogs: (params?: Record<string, string>) => {
@@ -110,5 +121,11 @@ export const api = {
     request(`/api/sessions/${sessionId}/secrets`, {
       method: 'POST',
       body: JSON.stringify({ findings, source: 'pre-commit' }),
+    }),
+
+  reportViolation: (data: { machineId: string; policyId: string; description: string; filepath?: string }) =>
+    request('/api/mcp/violations', {
+      method: 'POST',
+      body: JSON.stringify(data),
     }),
 };

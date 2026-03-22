@@ -6,8 +6,9 @@ import { statusCommand } from './commands/status.js';
 import { policiesCommand } from './commands/policies.js';
 import { syncCommand } from './commands/sync.js';
 import { whoamiCommand } from './commands/whoami.js';
-import { sessionsCommand, sessionDetailCommand } from './commands/sessions.js';
+import { sessionsCommand, sessionDetailCommand, sessionEndCommand } from './commands/sessions.js';
 import { reviewCommand } from './commands/review.js';
+import { reviewPRCommand } from './commands/review-pr.js';
 import { agentsCommand, agentCreateCommand } from './commands/agents.js';
 import { reposCommand, repoAddCommand } from './commands/repos.js';
 import { auditCommand } from './commands/audit.js';
@@ -213,6 +214,7 @@ program.command('share <sessionId>')
   .description('Create a shareable prompt bundle from a session')
   .option('-p, --prompt <index>', 'Share a specific prompt by index')
   .option('-o, --output <path>', 'Write to file instead of clipboard')
+  .option('--public', 'Create a public share URL (requires platform connection)')
   .action(shareCommand);
 
 // ─── Trail System ────────────────────────────────────────────────────────
@@ -317,6 +319,7 @@ const hooks = program.command('hooks').description('Internal hook handlers (used
 hooks.command('claude-code <event>').description('Handle Claude Code hook event').action((event) => hooksCommand(event, 'claude-code'));
 hooks.command('cursor <event>').description('Handle Cursor hook event').action((event) => hooksCommand(event, 'cursor'));
 hooks.command('gemini <event>').description('Handle Gemini CLI hook event').action((event) => hooksCommand(event, 'gemini'));
+hooks.command('codex <event>').description('Handle Codex CLI hook event').action((event) => hooksCommand(event, 'codex'));
 hooks.command('windsurf <event>').description('Handle Windsurf hook event').action((event) => hooksCommand(event, 'windsurf'));
 hooks.command('aider <event>').description('Handle Aider hook event').action((event) => hooksCommand(event, 'aider'));
 hooks.command('git-pre-commit').description('Handle git pre-commit hook (secret scan)').action(() => handlePreCommit());
@@ -361,6 +364,8 @@ sessions
 
 program.command('session <id>').description('View session detail').action(sessionDetailCommand);
 
+sessions.command('end <sessionId>').description('End a running session').action(sessionEndCommand);
+
 program.command('review <sessionId>')
   .description('Review a coding session')
   .option('--approve', 'Approve the session')
@@ -368,6 +373,10 @@ program.command('review <sessionId>')
   .option('--flag', 'Flag the session for review')
   .option('-n, --note <note>', 'Review note')
   .action(reviewCommand);
+
+program.command('review-pr <url>')
+  .description('Analyze AI sessions behind a GitHub PR')
+  .action(reviewPRCommand);
 
 // ─── Repos ───────────────────────────────────────────────────────────────
 

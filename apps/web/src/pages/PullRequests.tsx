@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
+import { Check, X, Loader2, Minus } from 'lucide-react';
 
 type PRFilter = 'all' | 'open' | 'passing' | 'failing' | 'pending';
 
@@ -9,28 +10,28 @@ function CheckBadge({ status }: { status: string }) {
     case 'success':
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-900/30 text-green-400 border border-green-800/50">
-          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+          <Check className="w-3 h-3" />
           Passed
         </span>
       );
     case 'failure':
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-900/30 text-red-400 border border-red-800/50">
-          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+          <X className="w-3 h-3" />
           Failed
         </span>
       );
     case 'pending':
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-900/30 text-yellow-400 border border-yellow-800/50">
-          <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>
+          <Loader2 className="w-3 h-3 animate-spin" />
           Pending
         </span>
       );
     default:
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400 border border-gray-700">
-          —
+          <Minus className="w-3 h-3" />
         </span>
       );
   }
@@ -153,7 +154,9 @@ export default function PullRequests() {
       {/* PR list */}
       {filtered.length === 0 ? (
         <div className="card text-center py-12">
-          <div className="text-4xl mb-3">🔀</div>
+          <div className="w-12 h-12 rounded-xl bg-indigo-500/10 flex items-center justify-center mx-auto mb-3">
+            <svg className="w-6 h-6 text-indigo-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /></svg>
+          </div>
           <h2 className="text-lg font-semibold text-gray-200">No pull requests</h2>
           <p className="text-sm text-gray-500 mt-1">
             {prs.length === 0

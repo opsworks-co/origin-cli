@@ -50,6 +50,7 @@ import promptRoutes from './routes/prompts.js';
 import modelRoutes from './routes/models.js';
 import pricingRoutes, { seedDefaultPricing } from './routes/pricing.js';
 import forecastRoutes from './routes/forecast.js';
+import shareRoutes from './routes/share.js';
 
 const app = express();
 
@@ -82,6 +83,10 @@ app.use('/api/webhooks', express.raw({ type: '*/*', limit: '10mb' }), (req, _res
 }, webhookRoutes);
 
 app.use(express.json({ limit: '10mb' }));
+
+// Public routes (no auth required) — mount BEFORE authMiddleware
+app.use('/api/share', shareRoutes);
+
 app.use(authMiddleware);
 
 app.use('/api/auth', authRoutes);
@@ -187,10 +192,12 @@ app.listen(Number(PORT), HOST, () => {
   startScheduler();
 
   // Auto-complete stale RUNNING sessions periodically.
-  // CLI sends heartbeat pings every 30s. 30 min without update = session is dead.
-  // (Claude sessions can idle for long periods while user reads/thinks)
-  const STALE_SESSION_CHECK_MS = 5 * 60 * 1000;    // check every 5 min
-  const STALE_THRESHOLD_MS = 30 * 60 * 1000;        // 30 min without update
+  // CLI sends heartbeat pings every 30s, but the daemon can die when the
+  // machine sleeps. Use a generous threshold — developers take long breaks,
+  // read docs, etc. The session-end hook handles normal completion; this
+  // only catches truly orphaned sessions.
+  const STALE_SESSION_CHECK_MS = 1 * 60 * 1000;    // check every 1 min
+  const STALE_THRESHOLD_MS = 2 * 60 * 1000;        // 2 min without heartbeat ping
   setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS);

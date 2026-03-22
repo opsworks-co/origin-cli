@@ -47,9 +47,10 @@ export async function authMiddleware(req: AuthRequest, _res: Response, next: Nex
         });
         if (found) {
           // Linked key (has userId): use the linked user's identity + role
-          // Standalone key (no userId): use key's own id + explicit role, default to MEMBER (never escalate to OWNER)
+          // Standalone key (no userId): use org owner's id so sessions created by
+          // this key (via mcpUserId) match the userId filter when listing.
           req.user = {
-            id: found.user?.id ?? found.id,
+            id: found.user?.id ?? found.org.users[0]?.id ?? found.id,
             orgId: found.orgId,
             role: found.user?.role ?? found.role ?? 'MEMBER',
           };

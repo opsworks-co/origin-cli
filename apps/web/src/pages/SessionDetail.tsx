@@ -5,6 +5,7 @@ import type { Session } from '../api';
 import UnifiedSessionView from '../components/UnifiedSessionView';
 import AiBlameView from '../components/AiBlameView';
 import AskAuthorPanel from '../components/AskAuthorPanel';
+import TurnTimeline from '../components/TurnTimeline';
 import { formatCost, formatDuration, getStatusBadgeClass } from '../utils';
 
 function statusBadge(status: string) {
@@ -19,7 +20,7 @@ export default function SessionDetail() {
   const [error, setError] = useState('');
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'session' | 'security' | 'blame'>('session');
+  const [activeTab, setActiveTab] = useState<'session' | 'security' | 'blame' | 'turns'>('session');
 
   // Review state
   const [reviewNote, setReviewNote] = useState('');
@@ -42,6 +43,9 @@ export default function SessionDetail() {
 
   // Delete
   const [deleting, setDeleting] = useState(false);
+
+  // End session
+  const [ending, setEnding] = useState(false);
 
   // Real-time watch
   const [elapsed, setElapsed] = useState(0);
@@ -75,6 +79,14 @@ export default function SessionDetail() {
     const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
   }, [session?.status, session?.startedAt]);
+
+  // Deep-link tab from URL params
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('tab');
+    if (tab === 'blame') setActiveTab('blame');
+    else if (tab === 'turns') setActiveTab('turns');
+  }, []);
 
   // Poll for updates when session is running
   useEffect(() => {
@@ -126,6 +138,21 @@ export default function SessionDetail() {
       setError(err.message);
     } finally {
       setAiReviewLoading(false);
+    }
+  };
+
+  const handleEnd = async () => {
+    if (!id || !confirm('End this running session?')) return;
+    setEnding(true);
+    try {
+      await api.endSession(id);
+      // Refresh session data
+      const updated = await api.getSession(id);
+      setSession(updated);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setEnding(false);
     }
   };
 
@@ -211,6 +238,16 @@ export default function SessionDetail() {
           >
             {showMeta ? 'Hide details' : 'Details'}
           </button>
+          {session.status === 'RUNNING' && (
+            <button
+              onClick={handleEnd}
+              disabled={ending}
+              className="text-amber-500/60 hover:text-amber-400 transition-colors ml-1 disabled:opacity-50"
+              title="End session"
+            >
+              {ending ? 'Ending...' : 'End'}
+            </button>
+          )}
           <button
             onClick={handleDelete}
             disabled={deleting}
@@ -534,6 +571,16 @@ export default function SessionDetail() {
             AI Blame
           </button>
           <button
+            onClick={() => setActiveTab('turns')}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              activeTab === 'turns'
+                ? 'bg-indigo-600/20 text-indigo-400 font-medium'
+                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
+            }`}
+          >
+            Turns
+          </button>
+          <button
             onClick={() => setActiveTab('security')}
             className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
               activeTab === 'security'
@@ -579,6 +626,12 @@ export default function SessionDetail() {
                 setAskContext({ file, lineNumber, lineContent: content });
                 setShowAskPanel(true);
               }}
+            />
+          )}
+          {activeTab === 'turns' && session && (
+            <TurnTimeline
+              promptChanges={session.promptChanges || []}
+              model={session.model}
             />
           )}
           {activeTab === 'security' && (

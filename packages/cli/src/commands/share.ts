@@ -4,15 +4,65 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { getGitRoot } from '../session-state.js';
+import { loadConfig } from '../config.js';
+import { api } from '../api.js';
 
 const BRANCH = 'origin-sessions';
 
 /**
- * origin share <session-id> [--prompt <index>]
+ * origin share <session-id> [--prompt <index>] [--public]
  *
  * Generate markdown bundle from a session. Copy to clipboard (pbcopy/xclip).
+ * With --public (or when connected to platform): create a public share URL.
  */
-export async function shareCommand(sessionId: string, opts?: { prompt?: string; output?: string }): Promise<void> {
+export async function shareCommand(sessionId: string, opts?: { prompt?: string; output?: string; public?: boolean }): Promise<void> {
+  const config = loadConfig();
+  const isConnected = !!config?.apiUrl && !!config?.apiKey;
+
+  // If --public flag or connected to platform, create a public share link
+  if (opts?.public || (isConnected && !opts?.output && !opts?.prompt)) {
+    if (!isConnected) {
+      console.error(chalk.red('Not connected to Origin platform. Run: origin login'));
+      process.exit(1);
+    }
+
+    try {
+      const result = await api.shareSession(sessionId) as { url: string; slug: string; expiresAt: string | null };
+      console.log('');
+      console.log(chalk.green('  Public share link created!'));
+      console.log('');
+      console.log(`  ${chalk.cyan(result.url)}`);
+      console.log('');
+      if (result.expiresAt) {
+        console.log(chalk.gray(`  Expires: ${new Date(result.expiresAt).toLocaleDateString()}`));
+      } else {
+        console.log(chalk.gray('  Link never expires'));
+      }
+      console.log('');
+
+      // Also copy to clipboard
+      try {
+        if (process.platform === 'darwin') {
+          execSync('pbcopy', { input: result.url, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+          console.log(chalk.gray('  (copied to clipboard)'));
+        } else if (process.platform === 'linux') {
+          try {
+            execSync('xclip -selection clipboard', { input: result.url, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+          } catch {
+            execSync('xsel --clipboard --input', { input: result.url, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+          }
+          console.log(chalk.gray('  (copied to clipboard)'));
+        }
+      } catch { /* clipboard not available */ }
+
+      return;
+    } catch (err: any) {
+      console.error(chalk.red(`Failed to create share link: ${err.message}`));
+      process.exit(1);
+    }
+  }
+
+  // Fall back to local markdown bundle share
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
 

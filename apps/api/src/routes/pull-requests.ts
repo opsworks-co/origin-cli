@@ -148,6 +148,126 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /review — CLI review endpoint: fetch sessions for a PR by its GitHub/GitLab URL
+router.get('/review', async (req: AuthRequest, res: Response) => {
+  try {
+    const url = req.query.url as string;
+    if (!url) {
+      return res.status(400).json({ error: 'Missing url query parameter' });
+    }
+
+    // Parse PR URL: https://github.com/owner/repo/pull/123
+    const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    if (!match) {
+      return res.status(400).json({ error: 'Invalid PR URL. Expected: https://github.com/owner/repo/pull/123' });
+    }
+    const [, owner, repoName, numberStr] = match;
+    const prNumber = parseInt(numberStr, 10);
+
+    const orgId = req.user!.orgId;
+
+    // Find repo by name within this org
+    const repo = await prisma.repo.findFirst({
+      where: {
+        orgId,
+        OR: [
+          { name: repoName },
+          { name: `${owner}/${repoName}` },
+          { path: { contains: repoName } },
+        ],
+      },
+    });
+
+    if (!repo) {
+      return res.status(404).json({ error: `Repo "${owner}/${repoName}" not found in your org` });
+    }
+
+    // Find the PR by number + repo
+    const pr = await prisma.pullRequest.findFirst({
+      where: { repoId: repo.id, number: prNumber },
+    });
+
+    if (!pr) {
+      return res.status(404).json({ error: `PR #${prNumber} not found for ${owner}/${repoName}` });
+    }
+
+    let commitShas: string[];
+    try {
+      commitShas = JSON.parse(pr.commitShas);
+    } catch {
+      commitShas = [];
+    }
+
+    const sessions = await getSessionsForPR(pr.repoId, commitShas);
+
+    // Enrich sessions with extra fields (durationMs, toolCalls, branch) from CodingSession
+    const sessionIds = sessions.map(s => s.id);
+    const fullSessions = sessionIds.length > 0
+      ? await prisma.codingSession.findMany({
+          where: { id: { in: sessionIds } },
+          select: { id: true, durationMs: true, toolCalls: true, branch: true },
+        })
+      : [];
+    const extraMap = new Map(fullSessions.map(s => [s.id, s]));
+
+    const enrichedSessions = sessions.map(s => {
+      const extra = extraMap.get(s.id);
+      return {
+        id: s.id,
+        model: s.model,
+        agentName: s.agentName,
+        costUsd: s.costUsd,
+        tokensUsed: s.tokensUsed,
+        durationMs: extra?.durationMs ?? 0,
+        linesAdded: s.linesAdded,
+        linesRemoved: s.linesRemoved,
+        toolCalls: extra?.toolCalls ?? 0,
+        reviewStatus: s.reviewStatus,
+        reviewNote: s.reviewNote,
+        promptCount: s.promptCount,
+        branch: extra?.branch ?? null,
+        violations: s.violations ?? [],
+      };
+    });
+
+    const totalCost = enrichedSessions.reduce((sum, s) => sum + s.costUsd, 0);
+    const totalTokens = enrichedSessions.reduce((sum, s) => sum + s.tokensUsed, 0);
+    const totalTurns = enrichedSessions.reduce((sum, s) => sum + s.promptCount, 0);
+    const flaggedCount = enrichedSessions.filter(
+      s => s.reviewStatus?.toUpperCase() === 'FLAGGED' || s.reviewStatus?.toUpperCase() === 'REJECTED',
+    ).length;
+
+    const anyRejected = enrichedSessions.some(s => s.reviewStatus?.toUpperCase() === 'REJECTED');
+    const anyFlagged = enrichedSessions.some(s => s.reviewStatus?.toUpperCase() === 'FLAGGED');
+    const allApproved = enrichedSessions.length > 0 && enrichedSessions.every(s => s.reviewStatus?.toUpperCase() === 'APPROVED');
+    let overallStatus = 'pending';
+    if (anyRejected) overallStatus = 'rejected';
+    else if (anyFlagged) overallStatus = 'flagged';
+    else if (allApproved) overallStatus = 'approved';
+
+    res.json({
+      pr: {
+        number: pr.number,
+        title: pr.title,
+        state: pr.state,
+        author: pr.author,
+      },
+      sessions: enrichedSessions,
+      summary: {
+        totalSessions: enrichedSessions.length,
+        totalCost,
+        totalTokens,
+        totalTurns,
+        flaggedCount,
+        overallStatus,
+      },
+    });
+  } catch (err) {
+    console.error('Review PR error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /:id/recheck — manually re-run policy check and update GitHub
 router.post('/:id/recheck', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {

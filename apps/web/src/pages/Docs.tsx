@@ -264,12 +264,29 @@ export default function Docs() {
               Team reviews &rarr; PR gets approved or blocked.
             </P>
 
-            <H2>1. Setup (one-time)</H2>
+            <H2>1. Admin setup (one-time, in the web UI)</H2>
             <ul className="space-y-2 mb-4">
               <Li>Admin creates an org, connects GitHub or GitLab (PAT, GitHub App, or GitLab OAuth) in Settings &rarr; Integrations</Li>
               <Li>Import repos from GitHub or GitLab &mdash; auto-creates webhooks on each repo</Li>
+              <Li><strong className="text-gray-200">Register agents</strong> &mdash; go to Agents page and create one agent per AI tool (Claude Code, Cursor, Codex, Gemini, etc.). Use the correct slug:</Li>
+            </ul>
+            <div className="ml-8 mb-4">
+              <table className="w-full text-sm">
+                <thead><tr className="border-b border-gray-700"><th className="px-3 py-2 text-left text-gray-400">Tool</th><th className="px-3 py-2 text-left text-gray-400">Slug (must match exactly)</th></tr></thead>
+                <tbody className="text-gray-300">
+                  <tr className="border-b border-gray-800"><td className="px-3 py-2">Claude Code</td><td className="px-3 py-2"><code className="text-indigo-400">claude-code</code></td></tr>
+                  <tr className="border-b border-gray-800"><td className="px-3 py-2">Cursor</td><td className="px-3 py-2"><code className="text-indigo-400">cursor</code></td></tr>
+                  <tr className="border-b border-gray-800"><td className="px-3 py-2">OpenAI Codex CLI</td><td className="px-3 py-2"><code className="text-indigo-400">codex</code></td></tr>
+                  <tr className="border-b border-gray-800"><td className="px-3 py-2">Gemini CLI</td><td className="px-3 py-2"><code className="text-indigo-400">gemini</code></td></tr>
+                  <tr className="border-b border-gray-800"><td className="px-3 py-2">Windsurf</td><td className="px-3 py-2"><code className="text-indigo-400">windsurf</code></td></tr>
+                  <tr className="border-b border-gray-800"><td className="px-3 py-2">Aider</td><td className="px-3 py-2"><code className="text-indigo-400">aider</code></td></tr>
+                  <tr><td className="px-3 py-2">GitHub Copilot</td><td className="px-3 py-2"><code className="text-indigo-400">copilot</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Create API key &amp; assign agents</strong> &mdash; go to Settings &rarr; API Keys, create a key, and assign the agents it can use. Keys without agent assignments cannot start sessions.</Li>
               <Li>Create policies: block payments files, require review for infra, set cost limits, restrict models</Li>
-              <Li>Register agents (Claude Code, Cursor, Copilot, Gemini CLI, Aider, etc.)</Li>
             </ul>
 
             <H2>2. Developer installs CLI (one-time per machine)</H2>
@@ -278,9 +295,34 @@ origin login         # authenticate with your Origin server
 origin init          # registers machine, detects tools, installs global hooks`}</CodeBlock>
             <P>
               That&apos;s it &mdash; two commands. <code className="text-indigo-400">origin init</code> auto-detects
-              installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, etc.), registers the machine,
+              installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Codex, etc.), registers the machine,
               and installs global hooks. Tools are re-scanned on every session start, so new installations are picked up
               automatically without re-running init.
+            </P>
+
+            <Callout type="info">
+              If you install a new AI tool after running <code className="text-indigo-400">origin init</code>, run <code className="text-indigo-400">origin enable --agent &lt;slug&gt; --global</code> to add hooks for it. For example: <code className="text-indigo-400">origin enable --agent cursor --global</code>.
+            </Callout>
+
+            <H3>Codex CLI setup</H3>
+            <P>
+              Running <code className="text-indigo-400">origin init</code> automatically enables the Codex hooks feature flag in <code className="text-indigo-400">~/.codex/config.toml</code> and installs hooks in <code className="text-indigo-400">~/.codex/hooks.json</code>.
+            </P>
+            <CodeBlock title="Terminal">{`# Install hooks + enable codex_hooks feature flag (one-time setup)
+origin init`}</CodeBlock>
+            <P>
+              If you previously had to pass <code className="text-indigo-400">-c features.codex_hooks=true</code> each time, re-run <code className="text-indigo-400">origin init</code> to make it permanent.
+              After setup, all Codex sessions will be tracked with prompts, code changes, and AI Blame attribution.
+            </P>
+
+            <H3>Cursor setup</H3>
+            <P>
+              <code className="text-indigo-400">origin init</code> auto-detects Cursor and installs hooks to <code className="text-indigo-400">~/.cursor/hooks.json</code>.
+              If Cursor was installed after init, run:
+            </P>
+            <CodeBlock title="Terminal">{`origin enable --agent cursor --global`}</CodeBlock>
+            <P>
+              Restart Cursor after installing hooks. Make sure you have a <strong className="text-gray-200">Cursor</strong> agent (slug: <code className="text-indigo-400">cursor</code>) created in the web UI and assigned to your API key.
             </P>
 
             <H2>3. Daily workflow (automatic)</H2>
@@ -1039,7 +1081,7 @@ origin stats`}</CodeBlock>
 
             <ul className="space-y-2 mb-4 ml-12">
               <Li><strong className="text-gray-200">Name</strong> &mdash; Human-readable name. Examples: &ldquo;Claude Code&rdquo;, &ldquo;Cursor AI&rdquo;, &ldquo;GitHub Copilot&rdquo;, &ldquo;Windsurf&rdquo;</Li>
-              <Li><strong className="text-gray-200">Slug</strong> &mdash; Unique machine-readable identifier. Examples: <code className="text-indigo-400">claude-code</code>, <code className="text-indigo-400">cursor-ai</code>, <code className="text-indigo-400">copilot</code>. This is used in API calls and policy rules.</Li>
+              <Li><strong className="text-gray-200">Slug</strong> &mdash; Unique machine-readable identifier. Must match the tool name exactly: <code className="text-indigo-400">claude-code</code>, <code className="text-indigo-400">cursor</code>, <code className="text-indigo-400">codex</code>, <code className="text-indigo-400">gemini</code>, <code className="text-indigo-400">windsurf</code>, <code className="text-indigo-400">aider</code>, <code className="text-indigo-400">copilot</code>. Used in API calls and policy rules.</Li>
               <Li><strong className="text-gray-200">Model</strong> &mdash; The default AI model this agent uses. Examples: <code className="text-indigo-400">claude-sonnet-4-20250514</code>, <code className="text-indigo-400">gpt-4o</code>, <code className="text-indigo-400">claude-opus-4-20250514</code></Li>
               <Li><strong className="text-gray-200">Description</strong> (optional) &mdash; A brief description of the agent&apos;s purpose or team.</Li>
             </ul>
@@ -1052,8 +1094,8 @@ Slug:        claude-code
 Model:       claude-sonnet-4-20250514
 Description: Primary AI coding assistant for backend team`}</CodeBlock>
 
-            <CodeBlock title="Example: Cursor">{`Name:        Cursor AI
-Slug:        cursor-ai
+            <CodeBlock title="Example: Cursor">{`Name:        Cursor
+Slug:        cursor
 Model:       gpt-4o
 Description: IDE-integrated coding assistant`}</CodeBlock>
 
@@ -1567,6 +1609,48 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               to approve, reject, or flag all selected sessions at once. The select-all checkbox
               applies only to sessions that haven&apos;t been reviewed yet.
             </P>
+
+            <H2>Archiving Sessions</H2>
+            <P>
+              Sessions can be archived to declutter your active session list without permanently
+              deleting data. Archived sessions are hidden from the default view but remain fully
+              accessible.
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Archive</strong> &mdash; Click the archive icon on any session row, or select multiple sessions and use the bulk archive button. Admin role required.</Li>
+              <Li><strong className="text-gray-200">View Archived</strong> &mdash; Toggle the &ldquo;Show Archived&rdquo; button in the session list header to switch between active and archived sessions.</Li>
+              <Li><strong className="text-gray-200">Restore</strong> &mdash; From the archived view, select sessions and use the bulk restore button to move them back to the active list.</Li>
+            </ul>
+            <CodeBlock title="API">{`# Archive a session
+PATCH /api/sessions/:id/archive  { "archived": true }
+
+# Restore a session
+PATCH /api/sessions/:id/archive  { "archived": false }
+
+# Bulk archive/restore
+PATCH /api/sessions/bulk/archive  { "sessionIds": [...], "archived": true }`}</CodeBlock>
+
+            <H2>Sharing Sessions</H2>
+            <P>
+              Generate public share links for any session. Shared sessions are accessible without
+              authentication &mdash; anyone with the link can view the full session replay, review status,
+              diffs, and prompt timeline. Like CodePen, but for agent sessions.
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Create Share Link</strong> &mdash; Click the share icon on a session detail page. Origin generates a unique short URL.</Li>
+              <Li><strong className="text-gray-200">Expiry</strong> &mdash; Share links can optionally expire. By default, links have no expiry.</Li>
+              <Li><strong className="text-gray-200">Public Page</strong> &mdash; Shared sessions live at <code className="text-indigo-400">/s/:slug</code> and show the full session including metadata, transcript, diffs, prompt timeline, and review status.</Li>
+            </ul>
+            <CodeBlock title="API">{`# Create a share link
+POST /api/sessions/:id/share
+# Returns: { slug, url, expiresAt }
+
+# View shared session (public, no auth)
+GET /api/share/:slug`}</CodeBlock>
+            <Callout type="tip">
+              Use <code className="text-indigo-400">origin share &lt;sessionId&gt; --public</code> from the CLI
+              to generate a public share link directly from the terminal.
+            </Callout>
           </div>
         )}
 
@@ -2395,10 +2479,18 @@ GET /api/prompts/patterns`}</CodeBlock>
               <Li>Link to each session in Origin (View button)</Li>
               <Li>Agent name and model used</Li>
               <Li>Cost and token count per session</Li>
+              <Li>Turn count &mdash; number of prompts/turns in each session</Li>
+              <Li>Duration and files changed per session</Li>
               <Li>Review status (approved, flagged, pending)</Li>
               <Li>Total cost and lines added across all sessions</Li>
+              <Li>Human corrections count &mdash; commits not linked to any AI session</Li>
               <Li>Policy violation details with fix hints</Li>
             </ul>
+            <P>
+              The comment header shows an aggregate summary:
+              <code className="text-indigo-400 text-xs"> 3 sessions · 47 agent turns · 2 human corrections</code>.
+              Below the table, a per-session breakdown shows prompt counts and line contributions.
+            </P>
 
             <H2>Dashboard View</H2>
             <P>
@@ -2412,7 +2504,10 @@ GET /api/prompts/patterns`}</CodeBlock>
 GET /api/pull-requests
 
 # Recheck a PR (recompute status after review changes)
-POST /api/pull-requests/:id/recheck`}</CodeBlock>
+POST /api/pull-requests/:id/recheck
+
+# Analyze a PR by URL (used by origin review-pr CLI command)
+GET /api/pull-requests/review?url=https://github.com/org/repo/pull/42`}</CodeBlock>
 
             <Callout type="warning">
               PR/MR checks require a GitHub or GitLab integration configured in Settings &rarr; Integrations
@@ -2659,6 +2754,7 @@ GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin init</code>
                 <P>Register the current machine with Origin. Auto-detects installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, etc.) via CLI checks, IDE extension scanning, and MCP config inspection. Installs global hooks so all repos are tracked automatically. Tools are re-detected on every session start.</P>
+                <P>Use <code className="text-indigo-400">origin init --standalone</code> to run without the Origin platform. Sessions are tracked locally via git notes and a local database &mdash; no API key or server needed. To reconnect later, run <code className="text-indigo-400">origin login</code> followed by <code className="text-indigo-400">origin init</code>.</P>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -2678,7 +2774,11 @@ GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin sessions</code>
-                <P>List recent AI coding sessions from the server.</P>
+                <P>List and manage AI coding sessions.</P>
+                <CodeBlock>{`origin sessions                  # list recent sessions
+origin sessions --limit 20       # show more sessions
+origin sessions --status running # filter by status
+origin sessions end <sessionId>  # end a running session`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -2751,6 +2851,38 @@ origin trail list                # list all trails
 origin trail update --status review  # update trail status
 origin trail assign <user>       # add a reviewer
 origin trail label <label>       # add a label`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin review-pr &lt;pr-url&gt;</code>
+                <P>Analyze all AI coding sessions behind a GitHub pull request. Shows a summary table with agent, model, cost, tokens, lines changed, and turn count for each session linked to the PR&apos;s commits.</P>
+                <CodeBlock>{`origin review-pr https://github.com/org/repo/pull/42
+
+# Output:
+# PR #42: Add authentication middleware
+# ┌──────────┬──────────┬────────┬────────┬───────┬───────┐
+# │ Session  │ Agent    │ Model  │ Cost   │ Turns │ Lines │
+# ├──────────┼──────────┼────────┼────────┼───────┼───────┤
+# │ abc123   │ claude   │ opus   │ $1.23  │ 7     │ +342  │
+# │ def456   │ cursor   │ sonnet │ $0.45  │ 3     │ +89   │
+# └──────────┴──────────┴────────┴────────┴───────┴───────┘`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin share &lt;sessionId&gt;</code>
+                <P>Create a shareable bundle from a session. By default copies a Markdown bundle to clipboard. With <code className="text-indigo-400">--public</code>, generates a public URL on the Origin platform that anyone can view.</P>
+                <CodeBlock>{`# Copy session as markdown to clipboard
+origin share abc123
+
+# Share specific prompt only
+origin share abc123 --prompt 3
+
+# Write to file
+origin share abc123 --output session-bundle.md
+
+# Generate a public share link (requires platform connection)
+origin share abc123 --public
+# → https://getorigin.io/s/k7x9m2p4`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">

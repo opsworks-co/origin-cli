@@ -266,6 +266,20 @@ export async function sessionDetailCommand(id: string) {
   }
 }
 
+export async function sessionEndCommand(id: string) {
+  if (!isConnectedMode()) {
+    console.error(chalk.red('Error: End session requires connected mode. Run: origin login'));
+    return;
+  }
+
+  try {
+    await api.endSessionById(id);
+    console.log(chalk.green(`Session ${id} ended successfully.`));
+  } catch (err: any) {
+    console.error(chalk.red('Error:'), err.message);
+  }
+}
+
 function timeAgo(dateStr: string): string {
   const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (seconds < 60) return 'just now';

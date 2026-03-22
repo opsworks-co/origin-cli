@@ -150,6 +150,7 @@ model CodingSession {
   costUsd      Float          @default(0)
   branch       String?                        // Git branch at session start
   status       String         @default("COMPLETED") // RUNNING or COMPLETED
+  archived     Boolean        @default(false)
   agentSystemPrompt String?                    // Snapshot of agent system prompt active during session
   agentVersion      Int?                        // Agent version number at session start
   startedAt    DateTime?                       // When session actually started (from session/start)
@@ -161,6 +162,7 @@ model CodingSession {
   promptChanges  PromptChange[]
   secretFindings SecretFinding[]
   trailSessions  TrailSession[]
+  sharedSessions SharedSession[]
 }
 
 model SessionDiff {
@@ -437,4 +439,16 @@ model TrailSession {
   addedAt   DateTime      @default(now())
 
   @@unique([trailId, sessionId])
+}
+
+// ── Shared Sessions (public share links) ─────────────────────────────
+
+model SharedSession {
+  id          String        @id @default(uuid())
+  sessionId   String
+  session     CodingSession @relation(fields: [sessionId], references: [id])
+  slug        String        @unique  // short random slug for URL
+  expiresAt   DateTime?              // null = never expires
+  createdAt   DateTime      @default(now())
+  createdById String?
 }

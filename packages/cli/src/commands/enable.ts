@@ -218,8 +218,10 @@ function installCodexHooks(gitRoot: string): void {
 
   if (!config.hooks) config.hooks = {};
 
+  // Codex supports: SessionStart, Stop, UserPromptSubmit (no SessionEnd/BeforeAgent/AfterAgent)
   const hooks: Record<string, any[]> = {
     SessionStart: [{ hooks: [{ type: 'command', command: 'origin hooks codex session-start', timeout: 10 }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'origin hooks codex user-prompt-submit', timeout: 10 }] }],
     Stop: [{ hooks: [{ type: 'command', command: 'origin hooks codex stop', timeout: 10 }] }],
   };
 
@@ -232,7 +234,38 @@ function installCodexHooks(gitRoot: string): void {
   fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
   const codexLabel = gitRoot === os.homedir() ? `~/.codex/hooks.json` : `.codex/hooks.json`;
   console.log(chalk.green(`  ✓ Hooks installed in ${codexLabel}`));
-  console.log(chalk.gray('    Note: Enable hooks in Codex with: codex -c features.codex_hooks=true'));
+
+  // Auto-enable codex_hooks feature flag in ~/.codex/config.toml so the user
+  // doesn't need to pass -c features.codex_hooks=true every time.
+  const globalCodexDir = path.join(os.homedir(), '.codex');
+  const configTomlPath = path.join(globalCodexDir, 'config.toml');
+  try {
+    if (!fs.existsSync(globalCodexDir)) {
+      fs.mkdirSync(globalCodexDir, { recursive: true });
+    }
+    let toml = '';
+    if (fs.existsSync(configTomlPath)) {
+      toml = fs.readFileSync(configTomlPath, 'utf-8');
+    }
+    // Check if codex_hooks is already set
+    if (/codex_hooks\s*=\s*true/i.test(toml)) {
+      console.log(chalk.green(`  ✓ Codex hooks feature flag already enabled in ~/.codex/config.toml`));
+    } else {
+      // Add or update the [features] section
+      if (/\[features\]/i.test(toml)) {
+        // Section exists — append the flag after it
+        toml = toml.replace(/(\[features\]\s*\n)/, '$1codex_hooks = true\n');
+      } else {
+        // No [features] section — add it at the end
+        toml = toml.trimEnd() + '\n\n[features]\ncodex_hooks = true\n';
+      }
+      fs.writeFileSync(configTomlPath, toml);
+      console.log(chalk.green(`  ✓ Codex hooks feature flag enabled in ~/.codex/config.toml`));
+    }
+  } catch {
+    // Non-fatal — user can still enable manually
+    console.log(chalk.yellow('    ⚠ Could not auto-enable codex_hooks. Run: codex -c features.codex_hooks=true'));
+  }
 }
 
 // ── Aider Hooks ───────────────────────────────────────────────────────────
@@ -356,6 +389,19 @@ const AGENTS: Record<AgentType, AgentConfig> = {
   },
 };
 
+function isInNpxCache(name: string): boolean {
+  try {
+    const npxCache = path.join(os.homedir(), '.npm', '_npx');
+    if (!fs.existsSync(npxCache)) return false;
+    const dirs = fs.readdirSync(npxCache);
+    for (const d of dirs) {
+      const bin = path.join(npxCache, d, 'node_modules', '.bin', name);
+      if (fs.existsSync(bin)) return true;
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
 function detectAgents(gitRoot: string): AgentType[] {
   const detected: AgentType[] = [];
   for (const [type, agent] of Object.entries(AGENTS) as [AgentType, AgentConfig][]) {
@@ -364,12 +410,15 @@ function detectAgents(gitRoot: string): AgentType[] {
       detected.push(type);
       continue;
     }
-    // For agents without a config dir (aider), check if binary exists
-    if (!agent.detectDir) {
-      try {
-        execSync(`which ${agent.command}`, { stdio: 'ignore' });
-        detected.push(type);
-      } catch { /* not installed */ }
+    // Check if binary exists on PATH
+    try {
+      execSync(`which ${agent.command}`, { stdio: 'ignore' });
+      detected.push(type);
+      continue;
+    } catch { /* not on PATH */ }
+    // Check npx cache (e.g. codex installed via npx)
+    if (isInNpxCache(agent.command)) {
+      detected.push(type);
     }
   }
   return detected;
@@ -420,12 +469,19 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
     agentsToEnable = [agent];
   } else {
     if (isGlobal) {
-      // In global mode, detect which agent binaries are installed
+      // In global mode, detect which agent binaries are installed or config dirs exist
       agentsToEnable = GLOBAL_CAPABLE_AGENTS.filter((type) => {
+        // Check CLI availability
         try {
           execSync(`which ${AGENTS[type].command}`, { stdio: 'ignore' });
           return true;
-        } catch { return false; }
+        } catch { /* not in PATH */ }
+        // Fall back to config directory detection (e.g. Cursor may not install CLI to PATH)
+        const detectDir = AGENTS[type].detectDir;
+        if (detectDir && fs.existsSync(path.join(os.homedir(), detectDir))) {
+          return true;
+        }
+        return false;
       });
       if (agentsToEnable.length === 0) {
         // Default to claude-code

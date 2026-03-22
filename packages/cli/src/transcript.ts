@@ -46,11 +46,23 @@ export interface ParsedTranscript {
 
 // Tools that modify files — we extract file paths from these
 const FILE_MODIFICATION_TOOLS = new Set([
+  // Claude Code
   'Write',
   'Edit',
   'NotebookEdit',
   'mcp__acp__Write',
   'mcp__acp__Edit',
+  // Gemini CLI
+  'write_file',
+  'replace',
+  'WriteFile',
+  // Codex CLI
+  'write',
+  'edit',
+  'create',
+  'apply_diff',
+  'insert',
+  'patch',
 ]);
 
 // ─── Parser ────────────────────────────────────────────────────────────────
@@ -454,7 +466,7 @@ function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input
     parts.push(`diff --git a/${shortPath} b/${shortPath}`);
 
     for (const edit of fileEdits) {
-      if (edit.toolName === 'Edit' || edit.toolName === 'mcp__acp__Edit') {
+      if (edit.toolName === 'Edit' || edit.toolName === 'mcp__acp__Edit' || edit.toolName === 'replace' || edit.toolName === 'edit') {
         const oldStr = edit.input.old_string || '';
         const newStr = edit.input.new_string || '';
         if (oldStr || newStr) {
@@ -470,7 +482,7 @@ function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input
             parts.push(`+${line}`);
           }
         }
-      } else if (edit.toolName === 'Write' || edit.toolName === 'mcp__acp__Write') {
+      } else if (edit.toolName === 'Write' || edit.toolName === 'mcp__acp__Write' || edit.toolName === 'write_file' || edit.toolName === 'WriteFile' || edit.toolName === 'write' || edit.toolName === 'create') {
         const content = edit.input.content || '';
         parts.push(`--- /dev/null`);
         parts.push(`+++ b/${shortPath}`);

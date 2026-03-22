@@ -9,6 +9,7 @@ import {
   AreaChart, Area, PieChart, Pie, Cell,
   Tooltip, ResponsiveContainer,
 } from 'recharts';
+import { Activity, CalendarDays, DollarSign, AlertCircle, ShieldCheck } from 'lucide-react';
 
 function statusBadge(status: string) {
   return <span className={getStatusBadgeClass(status)}>{status}</span>;
@@ -261,39 +262,44 @@ export default function Dashboard() {
 
       {/* ── Key Metrics ───────────────────────────────────────────────────── */}
       <div>
-        <h2 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Overview</h2>
-        <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <h2 className="section-title mb-3">Overview</h2>
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
           <KpiCard
             label="Active Now"
             value={stats.activeSessions ?? activeSessions.length}
             color={stats.activeSessions > 0 ? 'purple' : undefined}
-            subtext="sessions currently running"
+            subtext="sessions running"
+            icon={Activity}
             to="/sessions"
           />
           <KpiCard
-            label="Sessions This Week"
+            label="This Week"
             value={stats.sessionsThisWeek}
-            subtext="AI coding sessions tracked"
+            subtext="sessions tracked"
+            icon={CalendarDays}
             to="/sessions"
           />
           <KpiCard
-            label="Est. Cost This Month"
+            label="Cost This Month"
             value={`$${stats.estimatedCostThisMonth.toFixed(2)}`}
-            subtext={`across ${stats.totalSessions} total sessions`}
+            subtext={`${stats.totalSessions} total sessions`}
+            icon={DollarSign}
             to="/insights"
           />
           <KpiCard
             label="Unreviewed"
             value={stats.unreviewed}
             color={stats.unreviewed > 0 ? 'red' : 'green'}
-            subtext="sessions awaiting human review"
+            subtext="awaiting review"
+            icon={AlertCircle}
             to="/sessions?status=pending"
           />
           <KpiCard
-            label="Compliance Score"
+            label="Compliance"
             value={complianceScore !== null ? complianceScore : '\u2014'}
             color={complianceScore !== null ? (complianceScore >= 80 ? 'green' : complianceScore >= 60 ? undefined : 'red') : undefined}
-            subtext="policy adherence rating"
+            subtext="adherence score"
+            icon={ShieldCheck}
             to="/reports"
           />
         </div>

@@ -72,6 +72,31 @@ export function detectTools(): string[] {
     found.add('copilot');
   } catch { /* not installed */ }
 
+  // Check npx cache for tools installed via npx (e.g. codex)
+  if (!found.has('codex')) {
+    try {
+      const npxCache = path.join(os.homedir(), '.npm', '_npx');
+      if (fs.existsSync(npxCache)) {
+        const dirs = fs.readdirSync(npxCache);
+        for (const d of dirs) {
+          const bin = path.join(npxCache, d, 'node_modules', '.bin', 'codex');
+          if (fs.existsSync(bin)) { found.add('codex'); break; }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // ── Layer 1.5: Config directory detection (IDE may not install CLI to PATH)
+  const CONFIG_DIR_TOOLS: Record<string, string> = {
+    '.cursor': 'cursor',
+    '.windsurf': 'windsurf',
+  };
+  for (const [dir, tool] of Object.entries(CONFIG_DIR_TOOLS)) {
+    if (!found.has(tool) && fs.existsSync(path.join(os.homedir(), dir))) {
+      found.add(tool);
+    }
+  }
+
   // ── Layer 2: IDE extension lists ───────────────────────────────────────────
   const extensionTools = detectIDEExtensions();
   for (const tool of extensionTools) found.add(tool);

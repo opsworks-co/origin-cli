@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Policy, Agent, Machine, Repo } from '../api';
+import { Shield, Plus, Sparkles, Trash2, FileWarning, Eye, Cpu, DollarSign, Hash, FolderOpen, FileText, Clock, ClipboardList, Filter, MessageSquare, ChevronDown, ChevronRight } from 'lucide-react';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useToast } from '../components/Toast';
 
 const TYPE_BADGE: Record<string, string> = {
   FILE_RESTRICTION: 'badge-red',
@@ -109,19 +112,19 @@ function parseCondition(conditionJson: string): string {
   }
 }
 
-function conditionIcon(conditionJson: string): string {
+function ConditionIcon({ conditionJson }: { conditionJson: string }) {
   try {
     const parsed = JSON.parse(conditionJson);
-    if (parsed.path) return '📁';
-    if (parsed.models) return '🤖';
-    if (parsed.max_cost || parsed.cost_above) return '💰';
-    if (parsed.max_tokens || parsed.tokens_above) return '🔢';
-    if (parsed.files_above) return '📂';
-    if (parsed.max_lines) return '📝';
-    if (parsed.max_duration_minutes) return '⏱️';
-    return '📋';
+    if (parsed.path) return <FileWarning className="w-3.5 h-3.5 text-gray-400" />;
+    if (parsed.models) return <Cpu className="w-3.5 h-3.5 text-gray-400" />;
+    if (parsed.max_cost || parsed.cost_above) return <DollarSign className="w-3.5 h-3.5 text-gray-400" />;
+    if (parsed.max_tokens || parsed.tokens_above) return <Hash className="w-3.5 h-3.5 text-gray-400" />;
+    if (parsed.files_above) return <FolderOpen className="w-3.5 h-3.5 text-gray-400" />;
+    if (parsed.max_lines) return <FileText className="w-3.5 h-3.5 text-gray-400" />;
+    if (parsed.max_duration_minutes) return <Clock className="w-3.5 h-3.5 text-gray-400" />;
+    return <ClipboardList className="w-3.5 h-3.5 text-gray-400" />;
   } catch {
-    return '📋';
+    return <ClipboardList className="w-3.5 h-3.5 text-gray-400" />;
   }
 }
 
@@ -130,6 +133,8 @@ export default function Policies() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string; type: 'policy' | 'rule'; policyId?: string } | null>(null);
+  const { toast } = useToast();
 
   // Natural language input
   const [nlPrompt, setNlPrompt] = useState('');
@@ -183,13 +188,14 @@ export default function Policies() {
         type: formType,
         description: formDesc || undefined,
       });
+      toast('success', 'Policy created');
       setFormName('');
       setFormType('REQUIRE_REVIEW');
       setFormDesc('');
       setShowForm(false);
       fetchPolicies();
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     } finally {
       setSubmitting(false);
     }
@@ -205,20 +211,24 @@ export default function Policies() {
   };
 
   const handleDeletePolicy = async (id: string) => {
+    setDeleteTarget(null);
     try {
       await api.deletePolicy(id);
+      toast('success', 'Policy deleted');
       fetchPolicies();
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     }
   };
 
   const handleDeleteRule = async (policyId: string, ruleId: string) => {
+    setDeleteTarget(null);
     try {
       await api.deletePolicyRule(policyId, ruleId);
+      toast('success', 'Rule deleted');
       fetchPolicies();
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     }
   };
 
@@ -303,8 +313,8 @@ export default function Policies() {
             Governance rules enforced on AI coding sessions
           </p>
         </div>
-        <button onClick={() => setShowForm(!showForm)} className="btn-primary text-sm">
-          {showForm ? 'Cancel' : 'Add Policy'}
+        <button onClick={() => setShowForm(!showForm)} className={`${showForm ? 'btn-secondary' : 'btn-primary'} text-sm flex items-center gap-2`}>
+          {showForm ? 'Cancel' : (<><Plus className="w-4 h-4" />Add Policy</>)}
         </button>
       </div>
 
@@ -320,7 +330,7 @@ export default function Policies() {
       {/* Natural language policy creation */}
       <form onSubmit={handleNaturalLanguage} className="card space-y-3">
         <div className="flex items-center gap-2">
-          <span className="text-base">✨</span>
+          <Sparkles className="w-4 h-4 text-indigo-400" />
           <h3 className="text-sm font-semibold text-gray-200">Create with Natural Language</h3>
         </div>
         <div className="flex gap-2">
@@ -465,6 +475,22 @@ export default function Policies() {
       )}
 
       {/* Policy rendering is done via renderPolicy() above */}
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title={deleteTarget?.type === 'policy' ? 'Delete Policy' : 'Delete Rule'}
+        message={deleteTarget?.type === 'policy'
+          ? `Are you sure you want to delete "${deleteTarget?.name}"? All rules will be removed.`
+          : `Delete rule "${deleteTarget?.name}"?`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={() => {
+          if (!deleteTarget) return;
+          if (deleteTarget.type === 'policy') handleDeletePolicy(deleteTarget.id);
+          else if (deleteTarget.policyId) handleDeleteRule(deleteTarget.policyId, deleteTarget.id);
+        }}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 
@@ -477,9 +503,7 @@ export default function Policies() {
                   className="flex items-center gap-3 px-5 py-4 cursor-pointer hover:bg-gray-800/30 transition-colors"
                   onClick={() => setExpandedId(expanded ? null : policy.id)}
                 >
-                  <span className="text-gray-500 text-xs select-none">
-                    {expanded ? '\u25BC' : '\u25B6'}
-                  </span>
+                  {expanded ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <Link
@@ -562,7 +586,7 @@ export default function Policies() {
                             key={rule.id}
                             className="flex items-center gap-2 text-sm bg-gray-800/50 rounded-lg px-3 py-2.5 flex-wrap"
                           >
-                            <span className="text-base">{conditionIcon(rule.condition)}</span>
+                            <ConditionIcon conditionJson={rule.condition} />
                             <span className="text-gray-500 text-xs">IF</span>
                             <code className="text-indigo-400 text-xs">
                               {parseCondition(rule.condition)}
@@ -612,11 +636,11 @@ export default function Policies() {
                               <span className="text-xs text-gray-600">org-wide</span>
                             )}
                             <button
-                              onClick={() => handleDeleteRule(policy.id, rule.id)}
-                              className="ml-auto text-red-500 hover:text-red-400 hover:bg-red-900/30 rounded px-1.5 py-0.5 text-xs font-bold transition-colors"
+                              onClick={() => setDeleteTarget({ id: rule.id, name: parseCondition(rule.condition), type: 'rule', policyId: policy.id })}
+                              className="ml-auto text-gray-500 hover:text-red-400 hover:bg-red-900/30 rounded p-1 transition-colors"
                               title="Delete rule"
                             >
-                              &times;
+                              <Trash2 className="w-3 h-3" />
                             </button>
                           </div>
                         ))}
@@ -795,9 +819,10 @@ export default function Policies() {
                           Add Rule
                         </button>
                         <button
-                          onClick={() => handleDeletePolicy(policy.id)}
-                          className="btn-danger text-xs py-1.5"
+                          onClick={() => setDeleteTarget({ id: policy.id, name: policy.name, type: 'policy' })}
+                          className="btn-danger text-xs py-1.5 flex items-center gap-1.5"
                         >
+                          <Trash2 className="w-3 h-3" />
                           Delete Policy
                         </button>
                       </div>

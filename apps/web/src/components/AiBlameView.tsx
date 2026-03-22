@@ -70,6 +70,9 @@ export default function AiBlameView({ sessionId, filesChanged, onAskAboutLine }:
   const [hoveredPrompt, setHoveredPrompt] = useState<number | null>(null);
   const [expandedPrompt, setExpandedPrompt] = useState<number | null>(null);
 
+  // Prompt refs for scroll-to-prompt
+  const promptRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
   // File search state
   const [fileSearch, setFileSearch] = useState('');
   const [fileDropdownOpen, setFileDropdownOpen] = useState(false);
@@ -248,6 +251,7 @@ export default function AiBlameView({ sessionId, filesChanged, onAskAboutLine }:
             return (
               <div
                 key={p.promptIndex}
+                ref={(el) => { if (el) promptRefs.current.set(p.promptIndex, el); }}
                 className={`px-4 py-2.5 border-b border-gray-800/40 last:border-b-0 transition-all cursor-pointer ${
                   isHovered ? `${color.bg}` : isCollapsed ? 'opacity-60 hover:opacity-100' : 'hover:bg-gray-800/30'
                 }`}
@@ -347,11 +351,19 @@ export default function AiBlameView({ sessionId, filesChanged, onAskAboutLine }:
                       : isHumanLine
                         ? 'bg-transparent'
                         : 'hover:bg-gray-800/30'
-                  } transition-colors group`}
+                  } transition-colors group ${attr ? 'cursor-pointer' : ''}`}
                   onMouseEnter={() =>
                     attr && setHoveredPrompt(attr.promptIndex)
                   }
                   onMouseLeave={() => setHoveredPrompt(null)}
+                  onClick={() => {
+                    if (attr) {
+                      setExpandedPrompt(expandedPrompt === attr.promptIndex ? null : attr.promptIndex);
+                      // Scroll prompt into view
+                      const el = promptRefs.current.get(attr.promptIndex);
+                      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }
+                  }}
                 >
                   {/* Line number */}
                   <span

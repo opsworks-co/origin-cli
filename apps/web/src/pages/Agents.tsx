@@ -3,6 +3,9 @@ import { Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Agent } from '../api';
 import { timeAgo } from '../utils';
+import { Bot, Plus, Settings, Trash2, Power } from 'lucide-react';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useToast } from '../components/Toast';
 
 export default function Agents() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -19,15 +22,18 @@ export default function Agents() {
 
   const [deleting, setDeleting] = useState<Record<string, boolean>>({});
   const [toggling, setToggling] = useState<Record<string, boolean>>({});
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const { toast } = useToast();
 
-  const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Are you sure you want to delete ${name}? Sessions will be unlinked but not deleted.`)) return;
+  const handleDelete = async (id: string) => {
+    setDeleteTarget(null);
     setDeleting((prev) => ({ ...prev, [id]: true }));
     try {
       await api.deleteAgent(id);
+      toast('success', 'Agent deleted');
       fetchAgents();
     } catch (err: any) {
-      setError(err.message);
+      toast('error', err.message);
     } finally {
       setDeleting((prev) => ({ ...prev, [id]: false }));
     }
@@ -108,8 +114,15 @@ export default function Agents() {
           <h1 className="text-2xl font-bold">Agents</h1>
           <p className="text-sm text-gray-500 mt-1">Manage your AI coding agents and their configurations</p>
         </div>
-        <button onClick={() => setShowForm(!showForm)} className="btn-primary text-sm">
-          {showForm ? 'Cancel' : 'Add Agent'}
+        <button onClick={() => setShowForm(!showForm)} className={`${showForm ? 'btn-secondary' : 'btn-primary'} text-sm flex items-center gap-2`}>
+          {showForm ? (
+            'Cancel'
+          ) : (
+            <>
+              <Plus className="w-4 h-4" />
+              Add Agent
+            </>
+          )}
         </button>
       </div>
 
@@ -185,66 +198,73 @@ export default function Agents() {
           {agents.map((agent) => {
             const isActive = agent.status.toUpperCase() === 'ACTIVE';
             return (
-              <div key={agent.id} className="card hover:border-gray-700 transition-colors">
+              <div key={agent.id} className="card hover:border-white/[0.1] transition-all duration-150 group/card">
                 <div className="flex items-start justify-between mb-3">
-                  <Link to={`/agents/${agent.id}`} className="group flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span
-                        className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isActive ? 'bg-green-500' : 'bg-gray-600'}`}
-                      />
-                      <h3 className="font-semibold text-gray-100 group-hover:text-indigo-400 transition-colors">{agent.name}</h3>
+                  <Link to={`/agents/${agent.id}`} className="group flex-1 min-w-0">
+                    <div className="flex items-center gap-3 mb-1">
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                        isActive ? 'bg-indigo-500/10 text-indigo-400' : 'bg-white/[0.04] text-gray-500'
+                      }`}>
+                        <Bot className="w-[18px] h-[18px]" />
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="font-semibold text-gray-100 group-hover:text-indigo-400 transition-colors truncate">{agent.name}</h3>
+                        <p className="text-[11px] text-gray-500 font-mono truncate">{agent.slug}</p>
+                      </div>
                     </div>
-                    <p className="text-xs text-gray-500 font-mono ml-[18px]">{agent.slug}</p>
                   </Link>
                   <button
                     onClick={() => handleToggleStatus(agent)}
                     disabled={toggling[agent.id]}
-                    className={`text-xs px-2 py-0.5 rounded-full transition-colors ${
+                    className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-md transition-all duration-150 ${
                       isActive
-                        ? 'bg-green-500/10 text-green-400 hover:bg-green-500/20'
-                        : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                        ? 'bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/20 hover:bg-emerald-500/20'
+                        : 'bg-white/[0.04] text-gray-500 ring-1 ring-white/[0.08] hover:bg-white/[0.08]'
                     }`}
                     title={isActive ? 'Deactivate agent' : 'Activate agent'}
                   >
+                    <Power className="w-3 h-3" />
                     {toggling[agent.id] ? '...' : isActive ? 'Active' : 'Inactive'}
                   </button>
                 </div>
 
                 {agent.description && (
-                  <p className="text-xs text-gray-400 mb-3 line-clamp-2">{agent.description}</p>
+                  <p className="text-xs text-gray-400 mb-3 line-clamp-2 ml-12">{agent.description}</p>
                 )}
 
-                <div className="mb-3">
+                <div className="mb-3 ml-12">
                   <span className="badge-blue">{agent.model}</span>
                 </div>
 
-                <div className="grid grid-cols-3 gap-3 text-sm border-t border-gray-800 pt-3">
+                <div className="grid grid-cols-3 gap-3 text-sm border-t border-white/[0.06] pt-3 mt-1">
                   <div>
-                    <p className="text-gray-500 text-xs">Sessions</p>
+                    <p className="text-[11px] text-gray-500">Sessions</p>
                     <p className="text-gray-200 font-medium">{agent._count?.sessions ?? 0}</p>
                   </div>
                   <div>
-                    <p className="text-gray-500 text-xs">Versions</p>
+                    <p className="text-[11px] text-gray-500">Versions</p>
                     <p className="text-gray-200 font-medium">{agent._count?.versions ?? 0}</p>
                   </div>
                   <div>
-                    <p className="text-gray-500 text-xs">Updated</p>
+                    <p className="text-[11px] text-gray-500">Updated</p>
                     <p className="text-gray-200 font-medium">{timeAgo(agent.updatedAt)}</p>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-800">
+                <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/[0.06]">
                   <Link
                     to={`/agents/${agent.id}`}
-                    className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+                    className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
                   >
-                    Configure &rarr;
+                    <Settings className="w-3.5 h-3.5" />
+                    Configure
                   </Link>
                   <button
-                    onClick={() => handleDelete(agent.id, agent.name)}
+                    onClick={() => setDeleteTarget({ id: agent.id, name: agent.name })}
                     disabled={deleting[agent.id]}
-                    className="text-xs text-red-400 hover:text-red-300 transition-colors"
+                    className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-red-400 transition-colors opacity-0 group-hover/card:opacity-100"
                   >
+                    <Trash2 className="w-3.5 h-3.5" />
                     {deleting[agent.id] ? 'Deleting...' : 'Delete'}
                   </button>
                 </div>
@@ -253,6 +273,16 @@ export default function Agents() {
           })}
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete Agent"
+        message={`Are you sure you want to delete "${deleteTarget?.name}"? Sessions will be unlinked but not deleted.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={() => deleteTarget && handleDelete(deleteTarget.id)}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { notifyOrgAdmins, notifyOrgMembers } from '../services/notifications.js';
@@ -21,6 +22,7 @@ import {
   getSessionsForPR,
   computeCheckStatus,
   postCommitStatus,
+  postPRComment,
   updatePRComment,
   buildSessionSummaryComment,
   parseRepoFullName,
@@ -61,6 +63,7 @@ function mapSession(s: any, pullRequests?: any[]) {
     costUsd: s.costUsd,
     branch: s.branch || null,
     status: s.status || 'COMPLETED',
+    archived: s.archived || false,
     startedAt: s.startedAt || null,
     endedAt: s.endedAt || null,
     agentSystemPrompt: s.agentSystemPrompt || null,
@@ -129,6 +132,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       commit: {
         repo: { orgId },
       },
+      archived: req.query.archived === 'true' ? true : false,
     };
 
     if (req.query.model) {
@@ -188,7 +192,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
           user: true,
           review: { include: { user: true } },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [
+          { status: 'desc' },   // RUNNING sorts before COMPLETED alphabetically
+          { createdAt: 'desc' },
+        ],
         take: limit,
         skip: offset,
       }),
@@ -340,6 +347,72 @@ router.get('/by-pr', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /by-commit — find session linked to a specific commit SHA
+router.get('/by-commit', async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const sha = req.query.sha as string;
+
+    if (!sha) {
+      return res.status(400).json({ error: 'sha query parameter required' });
+    }
+
+    // Find commits matching this SHA in org's repos
+    const repos = await prisma.repo.findMany({
+      where: { orgId },
+      select: { id: true },
+    });
+    const repoIds = repos.map((r) => r.id);
+
+    const commit = await prisma.commit.findFirst({
+      where: {
+        sha,
+        repoId: { in: repoIds },
+      },
+      include: {
+        session: {
+          include: {
+            agent: true,
+            _count: { select: { promptChanges: true } },
+          },
+        },
+        codingSession: {
+          include: {
+            agent: true,
+            _count: { select: { promptChanges: true } },
+          },
+        },
+      },
+    });
+
+    if (!commit) {
+      return res.status(404).json({ error: 'No session found for this commit' });
+    }
+
+    const session = commit.session || commit.codingSession;
+    if (!session) {
+      return res.status(404).json({ error: 'No session found for this commit' });
+    }
+
+    let filesChanged: string[] = [];
+    try {
+      filesChanged = JSON.parse(session.filesChanged || '[]');
+    } catch {}
+
+    res.json({
+      sessionId: session.id,
+      model: session.model,
+      agentName: session.agent?.name || null,
+      costUsd: session.costUsd,
+      promptCount: (session as any)._count?.promptChanges || 0,
+      filesChanged,
+    });
+  } catch (err) {
+    console.error('Get session by commit error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET /stream — SSE real-time session events
 router.get('/stream', async (req: AuthRequest, res: Response) => {
   const orgId = req.user!.orgId;
@@ -371,6 +444,30 @@ router.get('/stream', async (req: AuthRequest, res: Response) => {
     unsubscribe();
     clearInterval(heartbeat);
   });
+});
+
+// PATCH /bulk/archive — bulk archive sessions
+router.patch('/bulk/archive', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { sessionIds, archived } = req.body;
+    if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
+      return res.status(400).json({ error: 'sessionIds array required' });
+    }
+
+    const orgId = req.user!.orgId;
+    await prisma.codingSession.updateMany({
+      where: {
+        id: { in: sessionIds },
+        commit: { repo: { orgId } },
+      },
+      data: { archived: archived !== false },
+    });
+
+    res.json({ success: true, count: sessionIds.length });
+  } catch (err) {
+    console.error('Bulk archive error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /:id — single session
@@ -585,17 +682,35 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
               );
             }
 
-            // Update PR comment
-            if (integration.parsedSettings.postComments && pr.commentId && parsed) {
-              const commentBody = buildSessionSummaryComment(sessions, originBaseUrl);
-              await updatePRComment(
-                integration.token,
-                parsed.owner,
-                parsed.repo,
-                pr.commentId,
-                commentBody,
-                integration.apiBaseUrl,
-              );
+            // Update or create PR comment
+            if (integration.parsedSettings.postComments && parsed) {
+              const org = await prisma.org.findUnique({ where: { id: req.user!.orgId }, select: { slug: true } });
+              const commentBody = buildSessionSummaryComment(sessions, originBaseUrl, org?.slug);
+              if (pr.commentId) {
+                await updatePRComment(
+                  integration.token,
+                  parsed.owner,
+                  parsed.repo,
+                  pr.commentId,
+                  commentBody,
+                  integration.apiBaseUrl,
+                );
+              } else {
+                const result = await postPRComment(
+                  integration.token,
+                  parsed.owner,
+                  parsed.repo,
+                  pr.number,
+                  commentBody,
+                  integration.apiBaseUrl,
+                );
+                if (result.commentId) {
+                  await prisma.pullRequest.update({
+                    where: { id: pr.id },
+                    data: { commentId: result.commentId },
+                  });
+                }
+              }
             }
 
             // Update check status on PR record
@@ -715,7 +830,103 @@ router.post('/:id/ai-review', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// POST /:id/end — mark a running session as completed (admin or session owner)
+router.post('/:id/end', async (req: AuthRequest, res: Response) => {
+  try {
+    const idParam = req.params.id as string;
+
+    // Support both full UUID and short prefix (e.g. "4f39c580")
+    const session = await prisma.codingSession.findFirst({
+      where: {
+        id: idParam.length < 36 ? { startsWith: idParam } : idParam,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Only admin/owner or the session owner can end a session
+    if (!isAdminUser(req) && session.userId !== req.user!.id) {
+      return res.status(403).json({ error: 'Only admins or the session owner can end a session' });
+    }
+
+    if (session.status !== 'RUNNING') {
+      return res.status(400).json({ error: 'Session is not running' });
+    }
+
+    const now = new Date();
+    const durationMs = session.startedAt
+      ? now.getTime() - new Date(session.startedAt).getTime()
+      : session.durationMs;
+
+    await prisma.codingSession.update({
+      where: { id: session.id },
+      data: {
+        status: 'COMPLETED',
+        endedAt: now,
+        durationMs,
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'SESSION_ENDED',
+        resource: session.id,
+        metadata: JSON.stringify({ sessionId: session.id }),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('End session error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // DELETE /:id — delete a session and its related data (ADMIN+)
+// PATCH /:id/archive — archive or unarchive a session
+router.patch('/:id/archive', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { archived } = req.body;
+
+    const session = await prisma.codingSession.findFirst({
+      where: {
+        id,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    await prisma.codingSession.update({
+      where: { id },
+      data: { archived: archived !== false },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: archived !== false ? 'SESSION_ARCHIVED' : 'SESSION_UNARCHIVED',
+        resource: id,
+        metadata: JSON.stringify({ sessionId: id }),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Archive session error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
@@ -1291,6 +1502,62 @@ router.post('/:id/secrets', async (req: AuthRequest, res: Response) => {
     res.json({ stored: findings.length });
   } catch (err: any) {
     console.error('Store secret findings error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/share — create a public share link for a session
+router.post('/:id/share', async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = req.params.id as string;
+    const { expiresAt } = req.body || {};
+
+    // Verify the session exists and belongs to user's org
+    const session = await prisma.codingSession.findFirst({
+      where: {
+        id: sessionId,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Check if already shared — return existing link
+    const existing = await prisma.sharedSession.findFirst({
+      where: { sessionId },
+    });
+
+    if (existing) {
+      const baseUrl = process.env.PUBLIC_URL || 'https://getorigin.io';
+      return res.json({
+        url: `${baseUrl}/s/${existing.slug}`,
+        slug: existing.slug,
+        expiresAt: existing.expiresAt,
+      });
+    }
+
+    // Generate random 8-char alphanumeric slug
+    const slug = crypto.randomBytes(6).toString('base64url').slice(0, 8);
+
+    const shared = await prisma.sharedSession.create({
+      data: {
+        sessionId,
+        slug,
+        expiresAt: expiresAt ? new Date(expiresAt) : null,
+        createdById: req.user!.id,
+      },
+    });
+
+    const baseUrl = process.env.PUBLIC_URL || 'https://getorigin.io';
+    res.json({
+      url: `${baseUrl}/s/${shared.slug}`,
+      slug: shared.slug,
+      expiresAt: shared.expiresAt,
+    });
+  } catch (err) {
+    console.error('Share session error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

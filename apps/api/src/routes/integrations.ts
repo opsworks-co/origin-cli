@@ -9,8 +9,8 @@ import { testSlackWebhook } from '../services/slack.js';
 const router = Router();
 router.use(requireAuth);
 
-// GET / — list org integrations (never expose tokens)
-router.get('/', async (req: AuthRequest, res: Response) => {
+// GET / — list org integrations (ADMIN+ only, never expose tokens)
+router.get('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const integrations = await prisma.integrationConfig.findMany({
       where: { orgId: req.user!.orgId },

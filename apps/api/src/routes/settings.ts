@@ -12,8 +12,8 @@ interface AuthRequest extends Request {
   user?: { id: string; orgId: string; role: string };
 }
 
-// GET /api/settings/api-keys
-router.get('/api-keys', async (req: AuthRequest, res: Response) => {
+// GET /api/settings/api-keys (ADMIN+ only)
+router.get('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const keys = await prisma.apiKey.findMany({
       where: { orgId: req.user!.orgId },
@@ -37,8 +37,8 @@ router.get('/api-keys', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /api/settings/api-keys
-router.post('/api-keys', async (req: AuthRequest, res: Response) => {
+// POST /api/settings/api-keys (ADMIN+ only)
+router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const { name, role, repoIds, agentIds } = req.body;
 
@@ -107,8 +107,8 @@ router.post('/api-keys', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// PUT /api/settings/api-keys/:id — update agent/repo scopes on an existing key
-router.put('/api-keys/:id', async (req: AuthRequest, res: Response) => {
+// PUT /api/settings/api-keys/:id — update agent/repo scopes on an existing key (ADMIN+)
+router.put('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const { agentIds, repoIds } = req.body;
@@ -174,8 +174,8 @@ router.put('/api-keys/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// DELETE /api/settings/api-keys/:id
-router.delete('/api-keys/:id', async (req: AuthRequest, res: Response) => {
+// DELETE /api/settings/api-keys/:id (ADMIN+)
+router.delete('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     await prisma.apiKey.deleteMany({
@@ -191,7 +191,7 @@ router.delete('/api-keys/:id', async (req: AuthRequest, res: Response) => {
 // ── Budget / Cost Controls ──────────────────────────────────────────────────
 
 // GET /api/settings/budget — get budget config + current spend
-router.get('/budget', async (req: AuthRequest, res: Response) => {
+router.get('/budget', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
     const [config, spent, dailySpend, spendByModel, spendByUser] = await Promise.all([
@@ -221,7 +221,7 @@ router.get('/budget', async (req: AuthRequest, res: Response) => {
 });
 
 // PUT /api/settings/budget — update budget config
-router.put('/budget', async (req: AuthRequest, res: Response) => {
+router.put('/budget', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     if (req.user!.role !== 'ADMIN') {
       return res.status(403).json({ error: 'Admin access required' });

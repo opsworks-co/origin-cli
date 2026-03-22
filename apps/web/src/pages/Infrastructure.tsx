@@ -3,6 +3,10 @@ import { Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Machine, Agent, IntegrationConfig } from '../api';
 import { timeAgo } from '../utils';
+import { Server, Bot, Plug, HeartPulse, Trash2, RefreshCw } from 'lucide-react';
+import KpiCard from '../components/KpiCard';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useToast } from '../components/Toast';
 
 export default function Infrastructure() {
   const [machines, setMachines] = useState<Machine[]>([]);
@@ -10,6 +14,8 @@ export default function Infrastructure() {
   const [integrations, setIntegrations] = useState<IntegrationConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const { toast } = useToast();
 
   useEffect(() => {
     Promise.all([
@@ -39,6 +45,17 @@ export default function Infrastructure() {
 
   const onlineCount = machines.filter(m => isOnline(m.lastSeenAt)).length;
 
+  const handleDeleteMachine = async (id: string) => {
+    setDeleteTarget(null);
+    try {
+      await api.deleteMachine(id);
+      toast('success', 'Machine removed');
+      setMachines(prev => prev.filter(x => x.id !== id));
+    } catch (err: any) {
+      toast('error', err.message || 'Failed to delete machine');
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -54,34 +71,10 @@ export default function Infrastructure() {
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <div className="card">
-          <p className="text-xs text-gray-500 mb-1">Machines</p>
-          <p className="text-2xl font-bold text-gray-100">{machines.length}</p>
-          <p className="text-xs text-gray-500 mt-0.5">{onlineCount} online</p>
-        </div>
-        <div className="card">
-          <p className="text-xs text-gray-500 mb-1">Agents</p>
-          <p className="text-2xl font-bold text-gray-100">{agents.length}</p>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {agents.filter(a => a.status === 'ACTIVE').length} active
-          </p>
-        </div>
-        <div className="card">
-          <p className="text-xs text-gray-500 mb-1">Integrations</p>
-          <p className="text-2xl font-bold text-gray-100">{integrations.length}</p>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {integrations.some(i => i.provider === 'github') ? 'GitHub connected' : 'None connected'}
-          </p>
-        </div>
-        <div className="card">
-          <p className="text-xs text-gray-500 mb-1">Status</p>
-          <p className="text-2xl font-bold text-green-400">
-            {onlineCount > 0 ? 'Healthy' : 'Idle'}
-          </p>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {onlineCount > 0 ? `${onlineCount} machine${onlineCount !== 1 ? 's' : ''} reporting` : 'No recent activity'}
-          </p>
-        </div>
+        <KpiCard label="Machines" value={machines.length} icon={Server} subtext={`${onlineCount} online`} />
+        <KpiCard label="Agents" value={agents.length} icon={Bot} color="purple" subtext={`${agents.filter(a => a.status === 'ACTIVE').length} active`} />
+        <KpiCard label="Integrations" value={integrations.length} icon={Plug} subtext={integrations.some(i => i.provider === 'github') ? 'GitHub connected' : 'None connected'} />
+        <KpiCard label="Status" value={onlineCount > 0 ? 'Healthy' : 'Idle'} icon={HeartPulse} color={onlineCount > 0 ? 'green' : 'default'} subtext={onlineCount > 0 ? `${onlineCount} machine${onlineCount !== 1 ? 's' : ''} reporting` : 'No recent activity'} />
       </div>
 
       {/* Machines */}
@@ -137,22 +130,14 @@ export default function Infrastructure() {
 
                     {/* Delete */}
                     <button
-                      onClick={async (e) => {
+                      onClick={(e) => {
                         e.preventDefault();
-                        if (!confirm(`Remove machine "${m.hostname}"?`)) return;
-                        try {
-                          await api.deleteMachine(m.id);
-                          setMachines(prev => prev.filter(x => x.id !== m.id));
-                        } catch (err: any) {
-                          setError(err.message || 'Failed to delete machine');
-                        }
+                        setDeleteTarget({ id: m.id, name: m.hostname });
                       }}
                       className="text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 p-1"
                       title="Remove machine"
                     >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
+                      <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
                 </div>
@@ -232,6 +217,16 @@ export default function Infrastructure() {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Remove Machine"
+        message={`Remove "${deleteTarget?.name}" from your organization?`}
+        confirmLabel="Remove"
+        variant="danger"
+        onConfirm={() => deleteTarget && handleDeleteMachine(deleteTarget.id)}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

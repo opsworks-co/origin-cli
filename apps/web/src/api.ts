@@ -258,6 +258,7 @@ export interface Session {
   costUsd: number;
   branch: string | null;
   status: string;
+  archived: boolean;
   startedAt: string | null;
   endedAt: string | null;
   agentSystemPrompt: string | null;
@@ -289,6 +290,7 @@ export interface SessionListParams {
   agentId?: string;
   repoId?: string;
   branch?: string;
+  archived?: string;
   limit?: number;
   offset?: number;
 }
@@ -684,6 +686,24 @@ export function deleteApiKey(id: string) {
 
 export function deleteSession(id: string) {
   return request<void>(`/api/sessions/${id}`, { method: 'DELETE' });
+}
+
+export function endSession(id: string) {
+  return request<{ success: boolean }>(`/api/sessions/${id}/end`, { method: 'POST' });
+}
+
+export function archiveSession(id: string, archived = true) {
+  return request<{ success: boolean }>(`/api/sessions/${id}/archive`, {
+    method: 'PATCH',
+    body: JSON.stringify({ archived }),
+  });
+}
+
+export function bulkArchiveSessions(sessionIds: string[], archived = true) {
+  return request<{ success: boolean; count: number }>(`/api/sessions/bulk/archive`, {
+    method: 'PATCH',
+    body: JSON.stringify({ sessionIds, archived }),
+  });
 }
 
 export function deleteRepo(id: string) {
@@ -1474,4 +1494,18 @@ export interface RepoHealth {
 
 export function getRepoHealth(id: string) {
   return request<RepoHealth>(`/api/repos/${id}/health`);
+}
+
+// ---- Sharing ----------------------------------------------------------------
+
+export function shareSession(id: string) {
+  return request<{ url: string; slug: string; expiresAt: string | null }>(`/api/sessions/${id}/share`, { method: 'POST' });
+}
+
+export function getSharedSession(slug: string) {
+  // No auth needed — public endpoint
+  return fetch(`${BASE}/api/share/${slug}`).then((r) => {
+    if (!r.ok) throw new Error(r.status === 410 ? 'This shared session link has expired' : 'Shared session not found');
+    return r.json();
+  });
 }
