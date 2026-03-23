@@ -21,6 +21,7 @@ export default function Sessions() {
   const { toast } = useToast();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [total, setTotal] = useState(0);
+  const [aggregates, setAggregates] = useState<any>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -63,6 +64,7 @@ export default function Sessions() {
       const res = await api.getSessions({ model, status, repoId, agentId, branch, archived: showArchived ? 'true' : undefined, limit: LIMIT, offset });
       setSessions(res.sessions);
       setTotal(res.total);
+      if (res.aggregates) setAggregates(res.aggregates);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -128,39 +130,42 @@ export default function Sessions() {
   const models = Array.from(new Set(sessions.map((s) => s.model).filter(Boolean)));
   const branches = Array.from(new Set(sessions.map((s) => s.branch).filter(Boolean))) as string[];
 
-  // Analytics summary computed from current page sessions
+  // Analytics summary from API aggregates (across ALL matching sessions, not just current page)
   const analytics = useMemo(() => {
-    if (sessions.length === 0) return null;
+    if (!aggregates && sessions.length === 0) return null;
+    if (aggregates) {
+      return {
+        totalCost: aggregates.totalCost || 0,
+        totalTokens: aggregates.totalTokens || 0,
+        avgCost: aggregates.avgCost || 0,
+        avgDuration: aggregates.avgDuration || 0,
+        totalTools: aggregates.totalTools || 0,
+        avgScore: aggregates.avgScore,
+        flaggedCount: aggregates.flaggedCount || 0,
+      };
+    }
+    // Fallback to page-level calculation if API doesn't return aggregates
     const totalCost = sessions.reduce((sum, s) => sum + s.costUsd, 0);
     const totalTokens = sessions.reduce((sum, s) => sum + s.tokensUsed, 0);
     const totalDuration = sessions.reduce((sum, s) => sum + s.durationMs, 0);
     const totalTools = sessions.reduce((sum, s) => sum + s.toolCalls, 0);
-    const avgCost = totalCost / sessions.length;
-    const avgDuration = totalDuration / sessions.length;
-    const reviewed = sessions.filter((s) => s.review?.status).length;
-    const approved = sessions.filter(
-      (s) => s.review?.status?.toLowerCase() === 'approved'
+    const flaggedCount = sessions.filter(
+      (s) => s.review?.status?.toLowerCase() === 'flagged' || s.review?.status?.toLowerCase() === 'rejected'
     ).length;
     const scoredSessions = sessions.filter((s) => s.review?.score != null);
     const avgScore = scoredSessions.length > 0
       ? Math.round(scoredSessions.reduce((sum, s) => sum + (s.review?.score ?? 0), 0) / scoredSessions.length)
       : null;
-    const flaggedCount = sessions.filter(
-      (s) => s.review?.status?.toLowerCase() === 'flagged' || s.review?.status?.toLowerCase() === 'rejected'
-    ).length;
     return {
       totalCost,
       totalTokens,
-      avgCost,
-      avgDuration,
+      avgCost: sessions.length > 0 ? totalCost / sessions.length : 0,
+      avgDuration: sessions.length > 0 ? totalDuration / sessions.length : 0,
       totalTools,
-      reviewed,
-      approved,
       avgScore,
       flaggedCount,
-      approvalRate: reviewed > 0 ? ((approved / reviewed) * 100).toFixed(0) : '—',
     };
-  }, [sessions]);
+  }, [aggregates, sessions]);
 
   // Sessions eligible for bulk review (no existing review / pending)
   const allSelected =

@@ -192,7 +192,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where.review = { status: 'REJECTED' };
     }
 
-    const [sessions, total] = await Promise.all([
+    const [sessions, total, aggregates] = await Promise.all([
       prisma.codingSession.findMany({
         where,
         include: {
@@ -209,6 +209,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         skip: offset,
       }),
       prisma.codingSession.count({ where }),
+      prisma.codingSession.aggregate({
+        where,
+        _sum: { costUsd: true, tokensUsed: true, durationMs: true, toolCalls: true },
+        _avg: { costUsd: true, durationMs: true },
+        _count: true,
+      }),
     ]);
 
     // Auto-expire stale RUNNING sessions (no heartbeat ping in 5 minutes)
@@ -233,9 +239,37 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       }).catch(() => {});
     }
 
+    // Count flagged/rejected sessions across all matching (not just current page)
+    const flaggedCount = await prisma.sessionReview.count({
+      where: {
+        session: where,
+        status: { in: ['FLAGGED', 'REJECTED'] },
+      },
+    }).catch(() => 0);
+
+    // Count scored reviews for avg score
+    const scoreAgg = await prisma.sessionReview.aggregate({
+      where: {
+        session: where,
+        score: { not: null },
+      },
+      _avg: { score: true },
+      _count: true,
+    }).catch(() => ({ _avg: { score: null }, _count: 0 }));
+
     res.json({
       sessions: sessions.map((s) => mapSession(s)),
       total,
+      aggregates: {
+        totalCost: aggregates._sum.costUsd || 0,
+        totalTokens: aggregates._sum.tokensUsed || 0,
+        totalDuration: aggregates._sum.durationMs || 0,
+        totalTools: aggregates._sum.toolCalls || 0,
+        avgCost: aggregates._avg.costUsd || 0,
+        avgDuration: aggregates._avg.durationMs || 0,
+        avgScore: scoreAgg._avg.score != null ? Math.round(scoreAgg._avg.score) : null,
+        flaggedCount,
+      },
     });
   } catch (err) {
     console.error('List sessions error:', err);
