@@ -46,7 +46,7 @@ Register this machine as an agent host in Origin.
 origin init
 ```
 
-- Detects installed AI coding tools (claude, cursor, aider, gemini)
+- Detects installed AI coding tools (Claude Code, Cursor, Codex CLI, Gemini CLI)
 - Registers the machine with your org
 - Prints step-by-step MCP server setup instructions for each detected tool
 
