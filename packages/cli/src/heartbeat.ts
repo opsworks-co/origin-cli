@@ -29,17 +29,34 @@ if (!sessionId || !apiUrl || !apiKey || !pidFile) {
 fs.writeFileSync(pidFile, String(process.pid));
 
 const PING_INTERVAL_MS = 30_000; // 30 seconds
+const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes without state file update = stale
 
 /**
  * Check if a process is still alive (signal 0 = existence check).
  */
 function isProcessAlive(pid: number): boolean {
-  if (pid <= 0) return true; // unknown parent — assume alive
+  if (pid <= 0) return false; // unknown parent — can't verify, use stale check instead
   try {
     process.kill(pid, 0);
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Check if the session state file was recently updated.
+ * Each prompt submission updates the state file, so if it hasn't been
+ * touched in 5 minutes, the agent is likely dead.
+ */
+function isStateFileStale(): boolean {
+  if (!stateFile) return false; // can't check without state file
+  try {
+    const stat = fs.statSync(stateFile);
+    const age = Date.now() - stat.mtimeMs;
+    return age > STALE_THRESHOLD_MS;
+  } catch {
+    return true; // file gone = session ended
   }
 }
 
@@ -74,6 +91,13 @@ async function ping() {
 
     // If parent agent process died, end the session and exit
     if (parentPid > 0 && !isProcessAlive(parentPid)) {
+      await endSession();
+      process.exit(0);
+    }
+
+    // If we couldn't find the parent PID (common for Codex/Cursor), fall back
+    // to state file freshness — if no prompt activity for 5 minutes, agent is dead
+    if (parentPid <= 0 && isStateFileStale()) {
       await endSession();
       process.exit(0);
     }

@@ -1577,10 +1577,10 @@ router.post('/:id/share', async (req: AuthRequest, res: Response) => {
     const sessionId = req.params.id as string;
     const { expiresAt } = req.body || {};
 
-    // Verify the session exists and belongs to user's org
+    // Verify the session exists and belongs to user's org (support short ID prefix)
     const session = await prisma.codingSession.findFirst({
       where: {
-        id: sessionId,
+        id: sessionId.length < 36 ? { startsWith: sessionId } : sessionId,
         commit: { repo: { orgId: req.user!.orgId } },
       },
     });
@@ -1589,9 +1589,9 @@ router.post('/:id/share', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Check if already shared — return existing link
+    // Check if already shared — return existing link (use resolved full ID)
     const existing = await prisma.sharedSession.findFirst({
-      where: { sessionId },
+      where: { sessionId: session.id },
     });
 
     if (existing) {
@@ -1608,7 +1608,7 @@ router.post('/:id/share', async (req: AuthRequest, res: Response) => {
 
     const shared = await prisma.sharedSession.create({
       data: {
-        sessionId,
+        sessionId: session.id,
         slug,
         expiresAt: expiresAt ? new Date(expiresAt) : null,
         createdById: req.user!.id,
