@@ -995,6 +995,41 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       // Non-fatal — don't block the agent
     }
   }
+
+  // ── Output system message for agents that read it from beforeSubmitPrompt (e.g. Cursor) ──
+  // Cursor doesn't reliably consume systemMessage from sessionStart, so we also
+  // inject it here on every prompt submission.
+  try {
+    let systemMsg = '';
+    if (state.agentSystemPrompt) {
+      systemMsg += state.agentSystemPrompt + '\n\n';
+    }
+    systemMsg += 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
+    if (!isConnectedMode()) {
+      systemMsg += ' (standalone mode)';
+    }
+    if (state.activePolicies && Array.isArray(state.activePolicies) && state.activePolicies.length > 0) {
+      systemMsg += '\n\nActive policies for this session:\n' +
+        state.activePolicies.map((p: string) => `- ${p}`).join('\n');
+    }
+
+    // Inject repo-level attribution context
+    const repoPath = state.repoPath || hookCwd;
+    try {
+      const attributionCtx = buildAttributionContext(repoPath);
+      if (attributionCtx) {
+        systemMsg += '\n\n' + attributionCtx;
+      }
+    } catch {}
+
+    if (systemMsg) {
+      const output = JSON.stringify({ systemMessage: systemMsg });
+      process.stdout.write(output);
+      debugLog('user-prompt-submit', 'systemMessage injected', { length: systemMsg.length });
+    }
+  } catch (sysErr: any) {
+    debugLog('user-prompt-submit', 'systemMessage injection failed (non-fatal)', { message: sysErr.message });
+  }
 }
 
 async function handleStop(input: Record<string, any>, agentSlug?: string): Promise<void> {
