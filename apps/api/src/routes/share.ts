@@ -3,6 +3,11 @@ import { prisma } from '../db.js';
 
 const router = Router();
 
+function safeParse(val: string | null | undefined, fallback: any = []) {
+  if (!val) return fallback;
+  try { return JSON.parse(val); } catch { return fallback; }
+}
+
 // GET /:slug — public endpoint (NO auth) — returns full session data for the share page
 router.get('/:slug', async (req: Request, res: Response) => {
   try {
@@ -75,9 +80,9 @@ router.get('/:slug', async (req: Request, res: Response) => {
             note: session.review.note,
             score: session.review.score ?? null,
             riskLevel: session.review.riskLevel ?? null,
-            concerns: session.review.concerns ? JSON.parse(session.review.concerns) : [],
-            suggestions: session.review.suggestions ? JSON.parse(session.review.suggestions) : [],
-            categories: session.review.categories ? JSON.parse(session.review.categories) : null,
+            concerns: safeParse(session.review.concerns, []),
+            suggestions: safeParse(session.review.suggestions, []),
+            categories: safeParse(session.review.categories, null),
             isAutoReview: session.review.isAutoReview ?? false,
             reviewerName: session.review.user?.name || null,
             createdAt: session.review.createdAt,
@@ -87,7 +92,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
         ? {
             headBefore: session.sessionDiff.headBefore,
             headAfter: session.sessionDiff.headAfter,
-            commitShas: JSON.parse(session.sessionDiff.commitShas || '[]'),
+            commitShas: safeParse(session.sessionDiff.commitShas, []),
             diff: session.sessionDiff.diff,
             diffTruncated: session.sessionDiff.diffTruncated,
             linesAdded: session.sessionDiff.linesAdded,
@@ -98,7 +103,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
         ? session.promptChanges.map((pc: any) => ({
             promptIndex: pc.promptIndex,
             promptText: pc.promptText,
-            filesChanged: JSON.parse(pc.filesChanged || '[]'),
+            filesChanged: safeParse(pc.filesChanged, []),
             diff: pc.diff || '',
             createdAt: pc.createdAt,
           }))

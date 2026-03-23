@@ -417,7 +417,8 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
     // Validate repoPath basename to prevent SQL/shell injection
     const repoBasename = path.basename(repoPath);
     if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
-    const threadQuery = `SELECT model, tokens_used, first_user_message FROM threads WHERE cwd LIKE '%${repoBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
+    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const threadQuery = `SELECT model, tokens_used, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
     const raw = execSync(`sqlite3 "${dbPath}" "${threadQuery}"`, {
       encoding: 'utf-8',
       timeout: 3000,
@@ -1829,7 +1830,7 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
   // Initialize subagents array if needed
   if (!state.subagents) state.subagents = [];
 
-  const toolCallId = input.tool_call_id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const toolCallId = input.tool_call_id || `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
   const record: SubagentRecord = {
     toolCallId,
     toolName: input.tool_name || 'unknown',
