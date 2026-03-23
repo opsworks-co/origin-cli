@@ -297,11 +297,19 @@ Shows: profile, role, stats (sessions, reviews, cost, lines written), and recent
 
 ### `origin stats`
 
-View dashboard statistics.
+View attribution statistics. Scoped to the current repo by default.
 
 ```bash
-origin stats
+origin stats                    # Local git attribution for current repo
+origin stats --dashboard        # API dashboard stats for current repo
+origin stats --dashboard --global  # API dashboard stats across all repos
 ```
+
+Options:
+- `--local` — Compute stats from local git data (default when in a repo)
+- `--dashboard` — Show dashboard stats from Origin API
+- `-g, --global` — Show stats across all repos (default: current repo only)
+- `-r, --range <range>` — Commit range (e.g., `HEAD~50..HEAD`)
 
 Shows:
 - Sessions this week
@@ -374,5 +382,5 @@ Delete this file to log out.
 | `origin notifications` | View notifications |
 | `origin team` | List team members |
 | `origin user <id>` | View user detail |
-| `origin stats` | View dashboard statistics |
+| `origin stats` | View stats for current repo (--dashboard, --global) |
 | `origin audit` | View audit log |
