@@ -305,7 +305,7 @@ export function getSessions(params?: SessionListParams) {
     });
   }
   const qs = q.toString();
-  return request<{ sessions: Session[]; total: number }>(`/api/sessions${qs ? `?${qs}` : ''}`);
+  return request<{ sessions: Session[]; total: number; aggregates?: { totalCost: number; totalTokens: number; totalDuration: number; totalTools: number; avgCost: number; avgDuration: number; avgScore: number | null; flaggedCount: number } }>(`/api/sessions${qs ? `?${qs}` : ''}`);
 }
 
 export function getSession(id: string) {
