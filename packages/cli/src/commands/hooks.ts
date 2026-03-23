@@ -1221,6 +1221,44 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       debugLog('stop', 'update complete');
     }
 
+    // Write git notes on any commits that don't have them yet
+    // This is critical for agents like Codex that may bypass .git/hooks/post-commit
+    try {
+      const noteCommits = gitCapture.commitDetails
+        .map(c => c.sha)
+        .filter(sha => /^[a-fA-F0-9]+$/.test(sha));
+      if (noteCommits.length > 0) {
+        const execOptsNotes = { cwd: state.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+        // Only write notes for commits that don't already have them
+        const missingNotes = noteCommits.filter(sha => {
+          try {
+            execSync(`git notes --ref=origin show ${sha}`, execOptsNotes);
+            return false; // already has a note
+          } catch {
+            return true; // no note yet
+          }
+        });
+        if (missingNotes.length > 0) {
+          writeGitNotes(state.repoPath, missingNotes, {
+            sessionId: state.sessionId,
+            model: model || state.model || 'unknown',
+            agentSlug: agentSlug || undefined,
+            promptCount: prompts.length,
+            promptSummary: prompts[prompts.length - 1] || '',
+            tokensUsed: parsed.tokensUsed,
+            costUsd,
+            durationMs: durationMs > 0 ? durationMs : 0,
+            linesAdded: gitCapture.linesAdded || 0,
+            linesRemoved: gitCapture.linesRemoved || 0,
+            originUrl: state.sessionId ? `${config?.apiUrl || 'https://getorigin.io'}/sessions/${state.sessionId}` : '',
+          });
+          debugLog('stop', 'git notes written for missing commits', { count: missingNotes.length });
+        }
+      }
+    } catch (notesErr: any) {
+      debugLog('stop', 'git notes error (non-fatal)', { message: notesErr.message });
+    }
+
     // Write session files to origin-sessions branch + push on every Stop
     const apiUrl = config?.apiUrl || 'https://getorigin.io';
     const writeData = buildSessionWriteData({
@@ -1565,7 +1603,7 @@ export async function handlePostCommit(): Promise<void> {
       const checks = [
         { cmd: 'pgrep -f "gemini.*cli|bin/gemini"', model: 'gemini' },
         { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
-        { cmd: 'pgrep -f "bin/codex|@openai/codex"', model: 'codex' },
+        { cmd: 'pgrep -f "codex"', model: 'codex' },
         { cmd: 'pgrep -f "bin/aider|aider.*--model"', model: 'aider' },
         { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
         { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
