@@ -18,6 +18,7 @@ import Policies from './pages/Policies';
 import AuditLog from './pages/AuditLog';
 import Insights from './pages/Insights';
 import Settings from './pages/Settings';
+import BudgetPage from './pages/Budget';
 import Docs from './pages/Docs';
 import PolicyDetail from './pages/PolicyDetail';
 import AgentDetail from './pages/AgentDetail';
@@ -213,6 +214,16 @@ export default function App() {
           <ProtectedRoute>
             <Layout>
               <MachineDetail />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/budget"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <BudgetPage />
             </Layout>
           </ProtectedRoute>
         }

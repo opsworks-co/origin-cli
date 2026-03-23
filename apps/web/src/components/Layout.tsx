@@ -12,6 +12,7 @@ import {
   GitPullRequest,
   Server,
   Key,
+  DollarSign,
   Settings,
   LogOut,
   Menu,
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { to: '/pull-requests', label: 'PR Checks', icon: GitPullRequest },
   { to: '/infrastructure', label: 'Infrastructure', icon: Server },
   { to: '/api-keys', label: 'API Keys', icon: Key },
+  { to: '/budget', label: 'Budget', icon: DollarSign },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 

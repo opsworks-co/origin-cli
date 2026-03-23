@@ -51,6 +51,7 @@ import modelRoutes from './routes/models.js';
 import pricingRoutes, { seedDefaultPricing } from './routes/pricing.js';
 import forecastRoutes from './routes/forecast.js';
 import shareRoutes from './routes/share.js';
+import budgetRoutes from './routes/budget.js';
 
 const app = express();
 
@@ -128,6 +129,7 @@ app.use('/api/prompts', promptRoutes);
 app.use('/api/models', modelRoutes);
 app.use('/api/pricing', pricingRoutes);
 app.use('/api/forecast', forecastRoutes);
+app.use('/api/budget', budgetRoutes);
 
 // Serve CLI install script
 app.get('/install.sh', (_req, res) => {
