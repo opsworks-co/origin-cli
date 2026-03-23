@@ -11,7 +11,7 @@ export async function loginCommand() {
   const apiKey = await rl.question(chalk.gray('API Key: '));
   rl.close();
 
-  const url = apiUrl.trim() || 'https://getorigin.io';
+  const url = (apiUrl.trim() || 'https://getorigin.io').replace(/\/+$/, '');
   const key = apiKey.trim();
 
   if (!key) {
@@ -22,17 +22,28 @@ export async function loginCommand() {
   // Verify connection via whoami endpoint
   console.log(chalk.gray('\nVerifying connection...'));
   try {
-    const res = await fetch(`${url}/api/mcp/whoami`, {
+    const whoamiUrl = `${url}/api/mcp/whoami`;
+    const res = await fetch(whoamiUrl, {
       headers: { 'X-API-Key': key },
     });
+
+    // Check if response is HTML (wrong URL or SPA catch-all)
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      throw new Error(`Server returned HTML instead of JSON. Check your API URL: ${url}`);
+    }
+
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({})) as any;
+      if (res.status === 401) {
+        throw new Error('Invalid API key. Make sure you copied the full key (shown only once at creation time). The key prefix in Settings is not the full key.');
+      }
       throw new Error(errBody.error || `HTTP ${res.status}`);
     }
     const data = await res.json() as any;
 
     saveConfig({
-      apiUrl: url,
+      apiUrl: url.replace(/\/+$/, ''),
       apiKey: key,
       orgId: data.orgId || '',
       userId: '',

@@ -95,7 +95,10 @@ export const api = {
   },
 
   // Stats
-  getStats: () => request('/api/stats'),
+  getStats: (params?: Record<string, string>) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/api/stats${q ? `?${q}` : ''}`);
+  },
 
   // Versioning
   getPolicyVersions: (id: string) => request(`/api/policies/${id}/versions`),

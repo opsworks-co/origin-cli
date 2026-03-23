@@ -151,6 +151,7 @@ program.command('stats')
   .description('View attribution statistics for the current repo')
   .option('--local', 'Compute stats from local git data (default when in a repo)')
   .option('--dashboard', 'Show org-wide dashboard stats from Origin API')
+  .option('-g, --global', 'Show stats across all repos (default: current repo only)')
   .option('-r, --range <range>', 'Commit range (e.g., HEAD~50..HEAD)')
   .action(statsCommand);
 
@@ -360,6 +361,7 @@ sessions
   .option('-s, --status <status>', 'Filter by status (unreviewed, approved, rejected, flagged)')
   .option('-m, --model <model>', 'Filter by model')
   .option('-l, --limit <n>', 'Max results', '20')
+  .option('-a, --all', 'Show sessions from all repos (default: current repo only)')
   .action(sessionsCommand);
 
 program.command('session <id>').description('View session detail').action(sessionDetailCommand);

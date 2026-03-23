@@ -26,6 +26,7 @@ import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChan
 import { writeGitNotes } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
 import { findTrailByBranch, addSessionToTrail } from '../trail-state.js';
+import { buildAttributionContext } from '../attribution.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -748,7 +749,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       debugLog('session-start', 'heartbeat started', { sessionId, stateFile, agentSlug: finalAgentSlug });
     }
 
-    // Build system message: agent system prompt first, then tracking notice + policies
+    // Build system message: agent system prompt first, then tracking notice + policies + attribution
     let systemMsg = '';
     if (agentSystemPrompt) {
       systemMsg += agentSystemPrompt + '\n\n';
@@ -760,6 +761,17 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     if (activePolicies && Array.isArray(activePolicies) && activePolicies.length > 0) {
       systemMsg += '\n\nActive policies for this session:\n' +
         activePolicies.map((p: string) => `- ${p}`).join('\n');
+    }
+
+    // Inject AI attribution context so the agent knows what other agents have done
+    try {
+      const attributionCtx = buildAttributionContext(repoPath);
+      if (attributionCtx) {
+        systemMsg += '\n\n' + attributionCtx;
+        debugLog('session-start', 'attribution context injected', { length: attributionCtx.length });
+      }
+    } catch {
+      // Non-fatal — skip attribution context if it fails
     }
 
     const output = JSON.stringify({ systemMessage: systemMsg });

@@ -5,7 +5,7 @@ import os from 'os';
 const CACHE_PATH = path.join(os.homedir(), '.origin', 'last-update-check.json');
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const FETCH_TIMEOUT_MS = 3000;
-const VERSION_URL = 'https://getorigin.io/cli/version.json';
+const PACKAGE_NAME = '@anthropic/origin-cli';
 
 interface UpdateCheckResult {
   current: string;
@@ -19,14 +19,15 @@ interface CacheEntry {
 }
 
 /**
- * Check if a newer version of the Origin CLI is available.
+ * Check if a newer version of the Origin CLI is available on npm.
  * Returns null if the check fails (network error, timeout, etc.).
  *
  * Uses a 24h cache at ~/.origin/last-update-check.json to avoid
- * hitting the server on every invocation.
+ * hitting the npm registry on every invocation.
  */
 export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
   try {
+    // Get current version from package.json
     const current = getCurrentVersion();
     if (!current) return null;
 
@@ -40,12 +41,12 @@ export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
       };
     }
 
-    // Fetch from Origin server
+    // Fetch from npm registry
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
     try {
-      const res = await fetch(VERSION_URL, {
+      const res = await fetch(`https://registry.npmjs.org/${PACKAGE_NAME}/latest`, {
         signal: controller.signal,
         headers: { Accept: 'application/json' },
       });
@@ -58,6 +59,7 @@ export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
       const latest = data.version;
       if (!latest) return null;
 
+      // Write cache
       writeCache({ latest, checkedAt: new Date().toISOString() });
 
       return {
@@ -79,16 +81,17 @@ export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
  */
 export function formatUpdateBanner(result: UpdateCheckResult): string {
   if (!result.updateAvailable) return '';
-  return `\n  Update available: ${result.current} → ${result.latest}\n  Run: origin upgrade\n`;
+  return `\n  Update available: ${result.current} -> ${result.latest}\n  Run: npm install -g ${PACKAGE_NAME}\n`;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function getCurrentVersion(): string | null {
   try {
+    // Try reading from package.json relative to this module
     const candidates = [
-      path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'package.json'),
-      path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'package.json'),
+      path.join(__dirname, '..', 'package.json'),
+      path.join(__dirname, '..', '..', 'package.json'),
     ];
     for (const candidate of candidates) {
       try {
@@ -96,7 +99,7 @@ function getCurrentVersion(): string | null {
         if (pkg.version) return pkg.version;
       } catch { /* try next */ }
     }
-    return '0.1.0';
+    return '0.1.0'; // fallback
   } catch {
     return null;
   }
@@ -108,7 +111,7 @@ function readCache(): CacheEntry | null {
     const entry: CacheEntry = JSON.parse(raw);
     const age = Date.now() - new Date(entry.checkedAt).getTime();
     if (age < CACHE_TTL_MS) return entry;
-    return null;
+    return null; // expired
   } catch {
     return null;
   }

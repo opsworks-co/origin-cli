@@ -70,7 +70,7 @@ function listLocalSessions(repoPath: string): LocalSession[] {
   return sessions;
 }
 
-export async function sessionsCommand(opts: { status?: string; model?: string; limit?: string }) {
+export async function sessionsCommand(opts: { status?: string; model?: string; limit?: string; all?: boolean }) {
   const repoPath = getGitRoot(process.cwd());
   const limit = parseInt(opts.limit || '20', 10);
 
@@ -97,6 +97,18 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
       const params: Record<string, string> = { limit: String(limit) };
       if (opts.status) params.status = opts.status;
       if (opts.model) params.model = opts.model;
+
+      // Scope to current repo unless --all flag is passed
+      if (!opts.all && repoPath) {
+        try {
+          const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          // Extract repo name from URL: git@github.com:org/repo.git → org/repo
+          const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+          if (match) params.repoName = match[1];
+        } catch {
+          // No remote — skip repo filter
+        }
+      }
 
       const data = await api.getSessions(params) as any;
       platformSessions = data.sessions || [];
@@ -132,7 +144,18 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     return;
   }
 
-  console.log(chalk.bold(`\nSessions (${display.length} total)\n`));
+  // Show header with repo context
+  if (!opts.all && repoPath) {
+    let repoName = '';
+    try {
+      const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+      if (match) repoName = match[1];
+    } catch {}
+    console.log(chalk.bold(`\nSessions${repoName ? ` — ${repoName}` : ''} (${display.length} total)\n`));
+  } else {
+    console.log(chalk.bold(`\nSessions — all repos (${display.length} total)\n`));
+  }
 
   for (const entry of display) {
     if (entry.type === 'local') {
@@ -170,8 +193,14 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
       const fileDisplay = files > 0 ? `${String(files).padStart(3)} files` : `  0 files`;
       const age = timeAgo(s.createdAt || s.startedAt);
 
+      // Clean up model display — replace "default"/"cursor" with agent name if available
+      let displayModel = s.model || 'unknown';
+      if (/^(default|unknown|cursor)$/i.test(displayModel) && s.agentName) {
+        displayModel = s.agentName;
+      }
+
       console.log(
-        `  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.cyan(s.model.padEnd(25))}  ${statusColor(status.padEnd(12))}  ${fileDisplay.padEnd(12)}  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}`
+        `  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.cyan(displayModel.padEnd(25))}  ${statusColor(status.padEnd(12))}  ${fileDisplay.padEnd(12)}  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}`
       );
       if (s.commitMessage) {
         console.log(`           ${chalk.gray(s.commitMessage.slice(0, 60))}`);

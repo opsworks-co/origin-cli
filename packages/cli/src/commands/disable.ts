@@ -136,6 +136,14 @@ export async function disableCommand(opts?: { global?: boolean }): Promise<void>
     filterClaudeOrGeminiHooks
   );
 
+  // Codex CLI — .codex/hooks.json (same nested format as Claude/Gemini)
+  const codexLabel = isGlobal ? '~/.codex/hooks.json' : '.codex/hooks.json';
+  removedCount += removeOriginHooksFromFile(
+    path.join(basePath, '.codex', 'hooks.json'),
+    codexLabel,
+    filterClaudeOrGeminiHooks
+  );
+
   // Windsurf — .windsurf/hooks.json (same format as Cursor)
   const windsurfLabel = isGlobal ? '~/.windsurf/hooks.json' : '.windsurf/hooks.json';
   removedCount += removeOriginHooksFromFile(

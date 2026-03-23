@@ -39,9 +39,10 @@ interface LocalSessionData {
 function loadLocalSession(sessionId: string, repoPath: string): LocalSessionData | null {
   const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
   try {
-    execSync('git rev-parse refs/heads/origin-sessions', execOpts);
+    const dir = resolveSessionDir(sessionId, repoPath);
+    if (!dir) return null;
     const metadataJson = execSync(
-      `git show origin-sessions:sessions/${sessionId}/metadata.json`,
+      `git show origin-sessions:sessions/${dir}/metadata.json`,
       execOpts
     ).trim();
     return JSON.parse(metadataJson);
@@ -50,11 +51,31 @@ function loadLocalSession(sessionId: string, repoPath: string): LocalSessionData
   }
 }
 
+function resolveSessionDir(sessionId: string, repoPath: string): string | null {
+  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  // Try exact match
+  try {
+    execSync(`git show origin-sessions:sessions/${sessionId}/metadata.json`, execOpts);
+    return sessionId;
+  } catch {}
+  // Short ID prefix match
+  try {
+    const raw = execSync('git ls-tree --name-only origin-sessions sessions/', execOpts).trim();
+    if (!raw) return null;
+    const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
+    return dirs.find(d => d.startsWith(sessionId)) || null;
+  } catch {
+    return null;
+  }
+}
+
 function loadLocalPromptsMarkdown(sessionId: string, repoPath: string): string | null {
   const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
   try {
+    const dir = resolveSessionDir(sessionId, repoPath);
+    if (!dir) return null;
     return execSync(
-      `git show origin-sessions:sessions/${sessionId}/prompts.md`,
+      `git show origin-sessions:sessions/${dir}/prompts.md`,
       execOpts
     ).trim();
   } catch {

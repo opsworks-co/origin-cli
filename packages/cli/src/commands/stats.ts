@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { execSync } from 'child_process';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { computeAttributionStats, type AttributionStats } from '../attribution.js';
@@ -28,23 +29,19 @@ function displayLocalStats(stats: AttributionStats): void {
   console.log(`  ${chalk.gray('AI commits:')}       ${chalk.green(String(stats.aiCommits))} (${stats.totalCommits > 0 ? Math.round((stats.aiCommits / stats.totalCommits) * 100) : 0}%)`);
   console.log(`  ${chalk.gray('Human commits:')}    ${chalk.white(String(stats.humanCommits))} (${stats.totalCommits > 0 ? Math.round((stats.humanCommits / stats.totalCommits) * 100) : 0}%)`);
   console.log('');
-  const totalLines = stats.totalLinesAdded || 0;
-  const aiLines = stats.aiLinesAdded || 0;
-  const humanLines = stats.humanLinesAdded || 0;
-  console.log(`  ${chalk.gray('Total lines added:')} ${chalk.white(String(totalLines))}`);
-  console.log(`  ${chalk.gray('AI lines:')}          ${chalk.green(String(aiLines))} (${totalLines > 0 ? Math.round((aiLines / totalLines) * 100) : 0}%)`);
-  console.log(`  ${chalk.gray('Human lines:')}       ${chalk.white(String(humanLines))} (${totalLines > 0 ? Math.round((humanLines / totalLines) * 100) : 0}%)`);
+  console.log(`  ${chalk.gray('Total lines added:')} ${chalk.white(String(stats.totalLinesAdded))}`);
+  console.log(`  ${chalk.gray('AI lines:')}          ${chalk.green(String(stats.aiLinesAdded))} (${stats.totalLinesAdded > 0 ? Math.round((stats.aiLinesAdded / stats.totalLinesAdded) * 100) : 0}%)`);
+  console.log(`  ${chalk.gray('Human lines:')}       ${chalk.white(String(stats.humanLinesAdded))} (${stats.totalLinesAdded > 0 ? Math.round((stats.humanLinesAdded / stats.totalLinesAdded) * 100) : 0}%)`);
 
   // Tool breakdown with bar graphs
   if (stats.byTool.size > 0) {
     console.log(chalk.bold('\n  By Tool\n'));
-    const maxToolLines = Math.max(...Array.from(stats.byTool.values()).map(v => v.linesAdded || 0));
+    const maxToolLines = Math.max(...Array.from(stats.byTool.values()).map(v => v.linesAdded));
     for (const [tool, data] of stats.byTool) {
-      const toolLines = data.linesAdded || 0;
-      const pct = totalLines > 0 ? Math.round((toolLines / totalLines) * 100) : 0;
-      const bar = renderBar(toolLines, maxToolLines, 20);
+      const pct = stats.totalLinesAdded > 0 ? Math.round((data.linesAdded / stats.totalLinesAdded) * 100) : 0;
+      const bar = renderBar(data.linesAdded, maxToolLines, 20);
       console.log(
-        `  ${chalk.cyan(tool.padEnd(16))} ${bar} ${chalk.white(String(pct) + '%').padStart(5)}  ${chalk.gray(`${data.commits} commits, ${toolLines} lines`)}`,
+        `  ${chalk.cyan(tool.padEnd(16))} ${bar} ${chalk.white(String(pct) + '%').padStart(5)}  ${chalk.gray(`${data.commits} commits, ${data.linesAdded} lines`)}`,
       );
     }
   }
@@ -79,9 +76,9 @@ function displayLocalStats(stats: AttributionStats): void {
 
 // ─── Command ──────────────────────────────────────────────────────────────
 
-export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean; range?: string }) {
+export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean; range?: string; global?: boolean }) {
   // Default to local stats when in a git repo (per-repo, not global)
-  // Use --dashboard to see org-wide API stats
+  // Use --dashboard to see org-wide API stats, --global for all repos
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
 
@@ -102,11 +99,25 @@ export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean
     return;
   }
 
-  // Remote (API) stats — original behavior
-  try {
-    const s = await api.getStats() as any;
+  // Remote (API) stats — scoped to current repo unless --global
+  const params: Record<string, string> = {};
+  let repoName = '';
+  if (!opts?.global && repoPath) {
+    try {
+      const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+      if (match) {
+        repoName = match[1];
+        params.repoName = repoName;
+      }
+    } catch {}
+  }
 
-    console.log(chalk.bold('\nOrigin Dashboard Stats\n'));
+  try {
+    const s = await api.getStats(params) as any;
+
+    const headerSuffix = repoName ? ` — ${repoName}` : opts?.global ? ' — all repos' : '';
+    console.log(chalk.bold(`\nOrigin Dashboard Stats${headerSuffix}\n`));
     console.log(`  ${chalk.gray('Sessions this week:')}   ${chalk.white(s.sessionsThisWeek)}`);
     console.log(`  ${chalk.gray('Active agents:')}        ${chalk.white(s.activeAgents)}`);
     console.log(`  ${chalk.gray('AI authorship:')}        ${chalk.cyan(s.aiPercentage + '%')}`);

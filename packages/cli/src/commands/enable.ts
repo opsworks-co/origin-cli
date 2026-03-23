@@ -402,9 +402,12 @@ function isInNpxCache(name: string): boolean {
   return false;
 }
 
+// Only auto-detect the 4 officially supported agents
+const SUPPORTED_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex'];
+
 function detectAgents(gitRoot: string): AgentType[] {
   const detected: AgentType[] = [];
-  for (const [type, agent] of Object.entries(AGENTS) as [AgentType, AgentConfig][]) {
+  for (const [type, agent] of Object.entries(AGENTS).filter(([t]) => SUPPORTED_AGENTS.includes(t as AgentType)) as [AgentType, AgentConfig][]) {
     // Check for config directory
     if (agent.detectDir && fs.existsSync(path.join(gitRoot, agent.detectDir))) {
       detected.push(type);
@@ -427,7 +430,8 @@ function detectAgents(gitRoot: string): AgentType[] {
 // ─── Main Command ──────────────────────────────────────────────────────────
 
 // Agents that support global (~/) hook installation
-const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'windsurf', 'codex'];
+// Only the 4 officially supported agents — Windsurf/Aider coming soon
+const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex'];
 
 export async function enableCommand(opts: { agent?: string; global?: boolean; link?: string }): Promise<void> {
   // Standalone mode doesn't require login

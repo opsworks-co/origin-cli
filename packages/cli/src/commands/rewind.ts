@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import { execSync } from 'child_process';
 import readline from 'readline';
-import { getGitRoot, loadSessionState, listActiveSessions } from '../session-state.js';
+import { getGitRoot, loadSessionState } from '../session-state.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -139,17 +139,12 @@ export async function rewindCommand(
   }
 
   // Determine commit range from session state or use last 20 commits
-  // Check all active sessions (not just default), pick the most recent one
-  const activeSessions = listActiveSessions(cwd);
-  const state = activeSessions.length > 0
-    ? activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0]
-    : loadSessionState(cwd);
+  const state = loadSessionState(cwd);
   let range: string;
   if (state?.headShaAtStart) {
     range = `${state.headShaAtStart}..HEAD`;
   } else {
-    // Fallback: use all commits up to 50
-    range = 'HEAD~50..HEAD';
+    range = 'HEAD~20..HEAD';
   }
 
   const checkpoints = getCheckpoints(repoPath, range);

@@ -664,3 +664,116 @@ export function computeAttributionStats(
     acceptance: computeAcceptanceMetrics(repoPath, range),
   };
 }
+
+/**
+ * Build a concise AI attribution context string for injection into agent system prompts.
+ * Designed to be fast (lightweight git operations, limited commit range).
+ * Returns null if no meaningful AI activity found.
+ */
+export function buildAttributionContext(repoPath: string): string | null {
+  try {
+    const opts = execOpts(repoPath);
+
+    // Get last 30 commits quickly
+    let logOutput: string;
+    try {
+      let excludeOriginSessions = '';
+      try {
+        execSync('git rev-parse --verify refs/heads/origin-sessions', opts);
+        excludeOriginSessions = ' --not refs/heads/origin-sessions';
+      } catch {}
+      logOutput = execSync(
+        `git log --first-parent --format="%H|%an|%aI|%s" -30 HEAD${excludeOriginSessions}`,
+        { ...opts, timeout: 3000 },
+      ).trim();
+    } catch {
+      return null;
+    }
+
+    if (!logOutput) return null;
+
+    const commits = logOutput.split('\n').filter(Boolean);
+    let totalCommits = 0;
+    let aiCommits = 0;
+    const recentAiActivity: Array<{ model: string; tool: string; date: string; files: string[] }> = [];
+    const aiFileHits = new Map<string, number>(); // file → AI commit count
+
+    for (const line of commits) {
+      const [sha, , dateStr] = line.split('|');
+      if (!sha) continue;
+      totalCommits++;
+
+      const rawNote = readOriginNote(repoPath, sha);
+      const note = rawNote?.origin || rawNote;
+
+      let isAi = !!note?.sessionId && note.sessionId !== 'unknown';
+      let model = note?.model || '';
+
+      if (!isAi) {
+        const detected = detectAiFromCommit(repoPath, sha);
+        if (detected?.isAi) {
+          isAi = true;
+          model = detected.model || 'unknown';
+        }
+      }
+
+      if (!isAi) continue;
+      aiCommits++;
+
+      // Get files changed in this commit (lightweight)
+      let changedFiles: string[] = [];
+      try {
+        const filesRaw = execSync(
+          `git diff-tree --no-commit-id --name-only -r ${sha}`,
+          { ...opts, timeout: 1000 },
+        ).trim();
+        changedFiles = filesRaw.split('\n').filter(Boolean).slice(0, 10);
+      } catch {}
+
+      const tool = detectToolFromModel(model, note?.agent || undefined);
+      const date = dateStr ? dateStr.split('T')[0] : '';
+
+      // Track recent AI activity (first 3 only)
+      if (recentAiActivity.length < 3) {
+        recentAiActivity.push({ model: model || tool, tool, date, files: changedFiles.slice(0, 3) });
+      }
+
+      // Count AI hits per file
+      for (const f of changedFiles) {
+        aiFileHits.set(f, (aiFileHits.get(f) || 0) + 1);
+      }
+    }
+
+    if (aiCommits === 0) return null;
+
+    const aiPct = Math.round((aiCommits / totalCommits) * 100);
+
+    // Build context string
+    const parts: string[] = [];
+
+    parts.push(`Repository AI context: ${aiPct}% of recent commits (${aiCommits}/${totalCommits}) are AI-generated.`);
+
+    // Recent AI activity
+    if (recentAiActivity.length > 0) {
+      const activityLines = recentAiActivity.map(a => {
+        const fileStr = a.files.length > 0 ? a.files.join(', ') : 'multiple files';
+        return `  - ${a.tool} wrote ${fileStr} on ${a.date} (${a.model})`;
+      });
+      parts.push('Recent AI activity:\n' + activityLines.join('\n'));
+    }
+
+    // Top AI-modified files
+    if (aiFileHits.size > 0) {
+      const topFiles = Array.from(aiFileHits.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([file, count]) => `  - ${file} (${count} AI commits)`)
+        .join('\n');
+      parts.push('Top AI-modified files:\n' + topFiles);
+    }
+
+    return parts.join('\n');
+  } catch {
+    return null;
+  }
+}

@@ -20,7 +20,7 @@ export interface OriginConfig {
   secretRedaction?: boolean;
   secretScan?: boolean;        // Pre-commit secret scanning (default: true)
   hookChaining?: boolean;
-  mode?: 'auto' | 'standalone'; // Force standalone mode even when connected
+  mode?: 'standalone' | 'auto'; // Force standalone even when logged in
 }
 
 export interface AgentConfig {

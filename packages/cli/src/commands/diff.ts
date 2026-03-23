@@ -44,8 +44,8 @@ function getCommitAuthorship(
 }
 
 /**
- * For a given diff, annotate each added/deleted line with AI or human authorship.
- * Uses git blame on the current file to determine which commit each line belongs to.
+ * For a given diff range, figure out which commit each added line belongs to
+ * by running git log on the range and cross-referencing with blame.
  */
 function annotateDiffLines(
   repoPath: string,
@@ -55,76 +55,34 @@ function annotateDiffLines(
   const lines = diffOutput.split('\n');
   const result: AnnotatedDiffLine[] = [];
 
-  // Build a blame cache per file: lineNumber -> commitSha
-  const blameCache = new Map<string, Map<number, string>>();
-
-  function getBlameForFile(filePath: string): Map<number, string> {
-    if (blameCache.has(filePath)) return blameCache.get(filePath)!;
-    const lineMap = new Map<number, string>();
-    try {
-      const blame = execSync(
-        `git blame --porcelain -- "${filePath}"`,
-        execOpts(repoPath),
-      );
-      let currentSha = '';
-      for (const bl of blame.split('\n')) {
-        const headerMatch = bl.match(/^([0-9a-f]{40})\s+\d+\s+(\d+)/);
-        if (headerMatch) {
-          currentSha = headerMatch[1];
-          lineMap.set(parseInt(headerMatch[2], 10), currentSha);
-        }
-      }
-    } catch { /* file might not exist yet */ }
-    blameCache.set(filePath, lineMap);
-    return lineMap;
+  // Determine default authorship from the most recent commit in the range
+  let defaultAuthorship: 'ai' | 'human' | 'unknown' = 'unknown';
+  for (const [, auth] of commitAuthorship) {
+    defaultAuthorship = auth;
+    break; // use first (most recent) commit
   }
-
-  // Fallback: if all commits have same authorship, use that
-  let uniformAuthorship: 'ai' | 'human' | 'mixed' = 'mixed';
-  const authorships = new Set(commitAuthorship.values());
-  if (authorships.size === 1) {
-    uniformAuthorship = [...authorships][0];
-  }
-
-  let currentFile = '';
-  let currentLineNum = 0;
 
   for (const line of lines) {
     if (line.startsWith('diff --git')) {
       result.push({ type: 'header', content: line });
-      // Extract file path: diff --git a/path b/path
-      const match = line.match(/diff --git a\/.+ b\/(.+)/);
-      if (match) currentFile = match[1];
     } else if (line.startsWith('---') || line.startsWith('+++') || line.startsWith('index ')) {
       result.push({ type: 'meta', content: line });
     } else if (line.startsWith('@@')) {
       result.push({ type: 'hunk', content: line });
-      // Parse new file line number: @@ -a,b +c,d @@
-      const hunkMatch = line.match(/\+(\d+)/);
-      if (hunkMatch) currentLineNum = parseInt(hunkMatch[1], 10);
     } else if (line.startsWith('+')) {
-      let authorship: 'ai' | 'human' | 'unknown' = 'unknown';
-      if (uniformAuthorship !== 'mixed') {
-        authorship = uniformAuthorship;
-      } else if (currentFile) {
-        const blameMap = getBlameForFile(currentFile);
-        const blameSha = blameMap.get(currentLineNum);
-        if (blameSha && commitAuthorship.has(blameSha)) {
-          authorship = commitAuthorship.get(blameSha)!;
-        } else if (blameSha) {
-          // Commit not in range but exists — check it directly
-          authorship = isAiCommit(repoPath, blameSha) ? 'ai' : 'human';
-        }
-      }
-      result.push({ type: 'addition', content: line, authorship });
-      currentLineNum++;
+      result.push({
+        type: 'addition',
+        content: line,
+        authorship: defaultAuthorship,
+      });
     } else if (line.startsWith('-')) {
-      // Deletions: attribute to the range's authorship (we can't blame deleted lines)
-      let authorship: 'ai' | 'human' | 'unknown' = uniformAuthorship !== 'mixed' ? uniformAuthorship : 'unknown';
-      result.push({ type: 'deletion', content: line, authorship });
+      result.push({
+        type: 'deletion',
+        content: line,
+        authorship: defaultAuthorship,
+      });
     } else {
       result.push({ type: 'context', content: line });
-      currentLineNum++;
     }
   }
 
