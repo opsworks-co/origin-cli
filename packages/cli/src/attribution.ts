@@ -777,3 +777,80 @@ export function buildAttributionContext(repoPath: string): string | null {
     return null;
   }
 }
+
+/**
+ * Build per-file attribution context for injection into pre-tool-use hooks.
+ * Summarizes line-level authorship into compact ranges.
+ * Returns null if no attribution data available.
+ */
+export function buildFileAttributionContext(repoPath: string, filePath: string): string | null {
+  try {
+    const lines = getLineBlame(repoPath, filePath);
+    if (lines.length === 0) return null;
+
+    // Group consecutive lines by the same author/tool
+    interface Range {
+      start: number;
+      end: number;
+      authorship: 'ai' | 'human';
+      tool?: string;
+      model?: string;
+      author: string;
+    }
+
+    const ranges: Range[] = [];
+    let current: Range | null = null;
+
+    for (const line of lines) {
+      const key = `${line.authorship}|${line.tool || ''}|${line.model || ''}|${line.author}`;
+      const prevKey = current
+        ? `${current.authorship}|${current.tool || ''}|${current.model || ''}|${current.author}`
+        : '';
+
+      if (current && key === prevKey && line.lineNumber === current.end + 1) {
+        current.end = line.lineNumber;
+      } else {
+        if (current) ranges.push(current);
+        current = {
+          start: line.lineNumber,
+          end: line.lineNumber,
+          authorship: line.authorship as 'ai' | 'human',
+          tool: line.tool,
+          model: line.model,
+          author: line.author || 'unknown',
+        };
+      }
+    }
+    if (current) ranges.push(current);
+
+    // Build compact summary — limit to top ranges by size
+    const sorted = ranges.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+    const topRanges = sorted.slice(0, 10);
+    // Re-sort by line number for display
+    topRanges.sort((a, b) => a.start - b.start);
+
+    const totalLines = lines.length;
+    const aiLines = lines.filter(l => l.authorship === 'ai').length;
+    const aiPct = Math.round((aiLines / totalLines) * 100);
+
+    const parts: string[] = [];
+    parts.push(`File attribution for ${filePath}: ${aiPct}% AI-generated (${aiLines}/${totalLines} lines).`);
+
+    for (const r of topRanges) {
+      const lineRange = r.start === r.end ? `Line ${r.start}` : `Lines ${r.start}-${r.end}`;
+      if (r.authorship === 'ai') {
+        parts.push(`  ${lineRange}: ${r.tool || 'AI'} (${r.model || 'unknown'})`);
+      } else {
+        parts.push(`  ${lineRange}: human (${r.author})`);
+      }
+    }
+
+    if (ranges.length > 10) {
+      parts.push(`  ... and ${ranges.length - 10} more ranges`);
+    }
+
+    return parts.join('\n');
+  } catch {
+    return null;
+  }
+}

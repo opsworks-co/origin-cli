@@ -26,7 +26,7 @@ import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChan
 import { writeGitNotes } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
 import { findTrailByBranch, addSessionToTrail } from '../trail-state.js';
-import { buildAttributionContext } from '../attribution.js';
+import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -1788,6 +1788,28 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
         // Exit code 2 + stderr blocks the tool for both Claude Code and Gemini CLI
         process.stderr.write(result.reason + '\n');
         process.exit(2);
+      }
+    }
+  }
+
+  // ── File Attribution Context ─────────────────────────────────────────────
+  // When an agent reads or edits a file, inject per-file attribution so
+  // the agent knows who wrote each part before modifying it.
+  const toolName = (input.tool_name || '').toLowerCase();
+  if (['read', 'edit', 'write', 'view'].some(t => toolName.includes(t))) {
+    const toolInput = input.tool_input || {};
+    const filePath = toolInput.file_path || toolInput.path || toolInput.filePath || toolInput.filename || '';
+    if (filePath && state.repoPath) {
+      try {
+        const fileCtx = buildFileAttributionContext(state.repoPath, filePath);
+        if (fileCtx) {
+          // Output as JSON system message — Claude Code reads this from stdout
+          const output = JSON.stringify({ systemMessage: fileCtx });
+          process.stdout.write(output);
+          debugLog('pre-tool-use', 'file attribution injected', { filePath, length: fileCtx.length });
+        }
+      } catch {
+        // Non-fatal
       }
     }
   }
