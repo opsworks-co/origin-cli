@@ -19,6 +19,7 @@ import AuditLog from './pages/AuditLog';
 import Insights from './pages/Insights';
 import Settings from './pages/Settings';
 import BudgetPage from './pages/Budget';
+import IAM from './pages/IAM';
 import Docs from './pages/Docs';
 import PolicyDetail from './pages/PolicyDetail';
 import AgentDetail from './pages/AgentDetail';
@@ -185,7 +186,7 @@ export default function App() {
           </ProtectedRoute>
         }
       />
-      <Route path="/team" element={<Navigate to="/settings?tab=team" replace />} />
+      <Route path="/team" element={<Navigate to="/iam" replace />} />
       <Route
         path="/team/:id"
         element={
@@ -230,6 +231,16 @@ export default function App() {
         }
       />
       <Route
+        path="/iam"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <IAM />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/settings"
         element={
           <ProtectedRoute>
@@ -245,7 +256,7 @@ export default function App() {
       />
       <Route
         path="/api-keys"
-        element={<Navigate to="/settings" replace />}
+        element={<Navigate to="/iam" replace />}
       />
       <Route
         path="/trails"

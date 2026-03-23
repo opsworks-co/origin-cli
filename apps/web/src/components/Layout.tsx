@@ -29,7 +29,7 @@ const NAV_ITEMS = [
   { to: '/sessions', label: 'Sessions', icon: Play },
   { to: '/pull-requests', label: 'PR Checks', icon: GitPullRequest },
   { to: '/infrastructure', label: 'Infrastructure', icon: Server },
-  { to: '/api-keys', label: 'API Keys', icon: Key },
+  { to: '/iam', label: 'IAM', icon: Key },
   { to: '/budget', label: 'Budget', icon: DollarSign },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
