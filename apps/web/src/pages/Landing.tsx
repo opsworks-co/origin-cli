@@ -3,73 +3,82 @@ import { Link } from 'react-router-dom';
 
 const FEATURES = [
   {
+    title: 'AI Blame — Line-Level Attribution',
+    desc: 'Run origin blame on any file. See exactly which AI agent wrote each line, what prompt generated it, the model used, and the full session it came from.',
+    icon: '🔍',
+    tag: 'NEW',
+  },
+  {
+    title: 'Per-File Attribution Context',
+    desc: 'When an agent opens a file, Origin injects line-level authorship context into the system prompt — so every AI knows what other AIs changed before it.',
+    icon: '📄',
+    tag: 'NEW',
+  },
+  {
+    title: 'Live Session Dashboard',
+    desc: 'Watch AI sessions in real-time across your org. See active agents, tokens burned, cost per session, and kill runaway sessions instantly.',
+    icon: '⚡',
+    tag: 'NEW',
+  },
+  {
     title: 'Full Session Replay',
-    desc: 'See every prompt, response, and tool call your AI agents made. Complete transcripts with timestamps, token counts, and cost breakdowns.',
-    icon: '\u25B6',
+    desc: 'Every prompt, response, tool call, and file change — recorded with timestamps, token counts, and cost breakdowns. Replay any session from CLI or dashboard.',
+    icon: '▶',
   },
   {
     title: 'Policy Enforcement',
-    desc: 'Set rules for file access, model usage, cost limits, and review requirements. Enforce them in real-time via MCP.',
-    icon: '\uD83D\uDEE1',
+    desc: 'Block secrets, enforce file restrictions, set cost limits, require human review. Policies evaluate in real-time and block PRs with violations.',
+    icon: '🛡',
   },
   {
-    title: 'Complete Audit Trail',
-    desc: 'Every action logged. Every change tracked. Ready for compliance reviews, security audits, and SOC 2.',
-    icon: '\uD83D\uDCDC',
-  },
-  {
-    title: 'Repository Integration',
-    desc: 'Connect GitHub or GitLab repos. Auto-sync commits, identify AI-authored code, and track authorship percentages.',
-    icon: '\uD83D\uDCC1',
-  },
-  {
-    title: 'Agent Management',
-    desc: 'Register and monitor your AI coding agents. Track sessions, costs, and model usage per agent across your org.',
-    icon: '\uD83E\uDD16',
-  },
-  {
-    title: 'Engineering Insights',
-    desc: 'Visualize AI adoption trends, cost by model, top contributors, and sessions by repository with interactive charts.',
-    icon: '\uD83D\uDCCA',
+    title: 'Cost & Token Tracking',
+    desc: 'Track spend per agent, model, repo, and developer. Set budget limits. See which models deliver the best ROI across your engineering org.',
+    icon: '💰',
+    tag: 'NEW',
   },
 ];
 
 const CAPABILITIES = [
   {
     category: 'For CTOs',
+    icon: '📊',
     items: [
       'See what AI agents are writing across every repo',
-      'Track engineering ROI and hours saved by AI',
-      'Monitor model usage, costs, and token spend',
-      'Identify top AI power users on your team',
+      'Track engineering ROI — cost per session, tokens per commit',
+      'Compare model performance: Claude vs Gemini vs GPT',
+      'Identify top AI power users and adoption trends',
     ],
   },
   {
-    category: 'For CSOs',
+    category: 'For Security Leads',
+    icon: '🔒',
     items: [
       'Enforce file access policies in real-time',
-      'Block agents from touching sensitive files',
-      'Require human review for all AI code',
+      'Secret scanner catches leaked credentials before merge',
+      'Content filter blocks sensitive data in AI outputs',
       'Complete audit trail for SOC 2 and compliance',
     ],
   },
   {
     category: 'For Developers',
+    icon: '⌨️',
     items: [
-      'origin login, origin sessions, origin stats \u2014 manage everything from terminal',
-      'MCP server auto-captures sessions from Claude Code and Cursor',
-      'Git hooks track AI-authored commits \u2014 zero manual work',
-      'Review, approve, or flag AI sessions from CLI or dashboard',
+      'origin init — 30 seconds to set up, zero config after that',
+      'origin blame — see which AI wrote any line of code',
+      'origin explain — replay the conversation behind any commit',
+      'Works with Claude Code, Cursor, Gemini CLI, and Codex',
     ],
   },
 ];
 
-const TOOLS = [
-  { name: 'Claude Code', badge: 'badge-purple' },
-  { name: 'Cursor', badge: 'badge-blue' },
-  { name: 'GitHub Copilot', badge: 'badge-gray' },
-  { name: 'Gemini CLI', badge: 'badge-amber' },
-  { name: 'Aider', badge: 'badge-green' },
+const AGENTS = [
+  { name: 'Claude Code', status: 'Supported', badge: 'bg-purple-600/20 text-purple-400 border-purple-500/30' },
+  { name: 'Cursor', status: 'Supported', badge: 'bg-blue-600/20 text-blue-400 border-blue-500/30' },
+  { name: 'Gemini CLI', status: 'Supported', badge: 'bg-amber-600/20 text-amber-400 border-amber-500/30' },
+  { name: 'Codex', status: 'Supported', badge: 'bg-green-600/20 text-green-400 border-green-500/30' },
+  { name: 'Copilot', status: 'Coming soon', badge: 'bg-gray-800/50 text-gray-500 border-gray-700/50' },
+  { name: 'Windsurf', status: 'Coming soon', badge: 'bg-gray-800/50 text-gray-500 border-gray-700/50' },
+  { name: 'Aider', status: 'Coming soon', badge: 'bg-gray-800/50 text-gray-500 border-gray-700/50' },
 ];
 
 const INSTALL_CMD = 'npm i -g https://getorigin.io/cli/origin-cli-latest.tgz';
@@ -104,6 +113,42 @@ function InstallCommand() {
   );
 }
 
+function TerminalDemo() {
+  return (
+    <div className="mt-16 max-w-3xl mx-auto">
+      <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden shadow-2xl shadow-indigo-900/10">
+        {/* Terminal header */}
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
+          <div className="w-3 h-3 rounded-full bg-red-500/80" />
+          <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+          <div className="w-3 h-3 rounded-full bg-green-500/80" />
+          <span className="ml-2 text-xs text-gray-500 font-mono">origin blame src/api.ts</span>
+        </div>
+        {/* Terminal content */}
+        <pre className="px-5 py-4 text-xs font-mono leading-relaxed overflow-x-auto">
+          <span className="text-gray-500">{'  1 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'import express from \'express\';'}</span>{'\n'}
+          <span className="text-gray-500">{'  2 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'import { prisma } from \'./db\';'}</span>{'\n'}
+          <span className="text-gray-500">{'  3 │ '}</span><span className="text-gray-400">Human     </span><span className="text-gray-600">│ 2d ago  │ </span><span className="text-gray-300">{''}</span>{'\n'}
+          <span className="text-gray-500">{'  4 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'export async function getUsers() {'}</span>{'\n'}
+          <span className="text-gray-500">{'  5 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'  const users = await prisma.user.findMany();'}</span>{'\n'}
+          <span className="text-gray-500">{'  6 │ '}</span><span className="text-blue-400">Cursor    </span><span className="text-gray-600">│ 30m ago │ </span><span className="text-gray-300">{'  return users.filter(u => u.active);'}</span>{'\n'}
+          <span className="text-gray-500">{'  7 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'}'}</span>{'\n'}
+          <span className="text-gray-500">{'  8 │ '}</span><span className="text-gray-400">Human     </span><span className="text-gray-600">│ 2d ago  │ </span><span className="text-gray-300">{''}</span>{'\n'}
+          <span className="text-gray-500">{'  9 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'// retry with exponential backoff'}</span>{'\n'}
+          <span className="text-gray-500">{' 10 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'export async function fetchWithRetry(url: string) {'}</span>{'\n'}
+        </pre>
+        <div className="px-5 py-3 border-t border-gray-800 flex items-center gap-4">
+          <span className="text-xs text-gray-500">10 lines</span>
+          <span className="text-xs"><span className="text-purple-400">●</span> Claude: 40%</span>
+          <span className="text-xs"><span className="text-amber-400">●</span> Gemini: 30%</span>
+          <span className="text-xs"><span className="text-blue-400">●</span> Cursor: 10%</span>
+          <span className="text-xs"><span className="text-gray-400">●</span> Human: 20%</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Landing() {
   return (
     <>
@@ -117,44 +162,40 @@ export default function Landing() {
         <div className="relative max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-600/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-6">
             <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-            AI Agent Governance Platform
+            Open Source &middot; AI Code Attribution &amp; Governance
           </div>
           <h1 className="text-4xl sm:text-5xl md:text-6xl font-bold text-gray-100 leading-tight tracking-tight">
-            Your AI agents build fast.
+            Every line of code
             <br />
             <span className="bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-              Origin keeps them in check.
+              now has a name on it.
             </span>
           </h1>
           <p className="mt-6 text-lg md:text-xl text-gray-400 max-w-2xl mx-auto leading-relaxed">
-            AI agents write thousands of lines of code daily &mdash; but nobody tracks where it comes from.
-            Origin records every AI session, links code to its source, and enforces your policies before merge.
+            Your team uses Claude, Cursor, Gemini, Codex &mdash; but nobody tracks which AI wrote what.
+            Origin records every AI session, attributes every line, and enforces your policies before merge.
           </p>
 
-          {/* Two-part value prop */}
-          <div className="mt-10 grid sm:grid-cols-2 gap-4 max-w-2xl mx-auto text-left">
-            <div className="bg-gray-900/80 border border-gray-800 rounded-xl px-5 py-4">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="text-green-400 font-mono text-sm">$</span>
-                <span className="text-sm font-semibold text-gray-200">Origin CLI</span>
-                <span className="text-xs text-gray-600">&mdash; open source, free</span>
-              </div>
-              <p className="text-sm text-gray-400 leading-relaxed">
-                Runs on your machine. Captures every AI coding session &mdash; prompts, tool calls, files changed, model, cost.
-                Works with Claude Code, Cursor, Copilot, and more. Zero config.
-              </p>
-            </div>
-            <div className="bg-gray-900/80 border border-gray-800 rounded-xl px-5 py-4">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="text-indigo-400 text-sm">&#9670;</span>
-                <span className="text-sm font-semibold text-gray-200">Origin Platform</span>
-                <span className="text-xs text-gray-600">&mdash; dashboard for teams</span>
-              </div>
-              <p className="text-sm text-gray-400 leading-relaxed">
-                Web dashboard for CTOs and security leads. Review AI sessions, set policies, track costs, block PRs with violations, and audit every line of AI code.
-              </p>
+          {/* Top 5 commands — Hero callout */}
+          <div className="mt-10 max-w-2xl mx-auto">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              {[
+                { cmd: 'init', desc: 'Setup in 30s' },
+                { cmd: 'blame', desc: 'AI attribution' },
+                { cmd: 'sessions', desc: 'Track sessions' },
+                { cmd: 'stats', desc: 'Cost & usage' },
+                { cmd: 'explain', desc: 'Session replay' },
+              ].map((c) => (
+                <div key={c.cmd} className="bg-gray-900/80 border border-gray-800 rounded-lg px-3 py-2.5 text-center">
+                  <code className="text-xs font-mono text-indigo-400">origin {c.cmd}</code>
+                  <p className="text-[10px] text-gray-500 mt-1">{c.desc}</p>
+                </div>
+              ))}
             </div>
           </div>
+
+          {/* Terminal demo */}
+          <TerminalDemo />
 
           {/* Install one-liner */}
           <InstallCommand />
@@ -166,41 +207,76 @@ export default function Landing() {
             >
               Get started free
             </Link>
-            <Link
-              to="/login"
+            <a
+              href="https://github.com/dolobanko/origin-cli"
+              target="_blank"
+              rel="noopener noreferrer"
               className="text-sm text-gray-400 hover:text-gray-100 transition-colors"
             >
-              Already have an account? Sign in &rarr;
-            </Link>
+              GitHub &rarr;
+            </a>
           </div>
 
-          {/* Trust bar */}
+          {/* Agent badges */}
           <div className="mt-16 flex flex-wrap items-center justify-center gap-3">
-            {TOOLS.map((tool) => (
-              <span key={tool.name} className={`${tool.badge} text-xs`}>
-                {tool.name}
+            {AGENTS.map((agent) => (
+              <span
+                key={agent.name}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium ${agent.badge}`}
+              >
+                {agent.name}
+                {agent.status === 'Coming soon' && (
+                  <span className="text-[10px] opacity-60">soon</span>
+                )}
               </span>
             ))}
           </div>
-          <p className="text-xs text-gray-600 mt-2">Works with every AI coding tool</p>
+        </div>
+      </section>
+
+      {/* What's New */}
+      <section className="bg-indigo-950/20 border-y border-indigo-500/10">
+        <div className="max-w-4xl mx-auto px-6 py-12">
+          <div className="flex items-center gap-2 mb-6">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-sm font-semibold text-green-400">What&apos;s New</span>
+          </div>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {[
+              { title: 'Per-File Attribution', desc: 'Agents see line-level authorship when reading files' },
+              { title: 'System Prompt Injection', desc: 'AI agents get context about what other AIs changed' },
+              { title: 'Secret Scanner', desc: 'Block credentials from leaking into AI-generated code' },
+              { title: 'Live Sessions', desc: 'Watch your team\'s AI sessions in real-time' },
+            ].map((item) => (
+              <div key={item.title} className="bg-gray-900/60 border border-gray-800 rounded-lg px-4 py-3">
+                <h4 className="text-sm font-semibold text-gray-200">{item.title}</h4>
+                <p className="text-xs text-gray-500 mt-1 leading-relaxed">{item.desc}</p>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
       {/* Features */}
       <section id="features" className="max-w-6xl mx-auto px-6 py-24">
         <div className="text-center mb-16">
-          <h2 className="text-3xl font-bold">Everything you need for AI governance</h2>
+          <h2 className="text-3xl font-bold">Know exactly which AI wrote every line</h2>
           <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-            From session replay to real-time policy enforcement, Origin covers every aspect of
-            managing AI-authored code at scale.
+            From line-level attribution to real-time policy enforcement &mdash;
+            Origin gives you complete visibility into AI-authored code.
           </p>
         </div>
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
           {FEATURES.map((f) => (
             <div
               key={f.title}
-              className="card hover:border-gray-700 transition-colors group"
+              className="card hover:border-gray-700 transition-colors group relative"
             >
+              {f.tag && (
+                <span className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-green-600/20 text-green-400 text-[10px] font-semibold border border-green-500/30">
+                  {f.tag}
+                </span>
+              )}
               <div className="w-10 h-10 rounded-lg bg-indigo-600/10 flex items-center justify-center text-indigo-400 text-xl mb-4 group-hover:bg-indigo-600/20 transition-colors">
                 {f.icon}
               </div>
@@ -211,85 +287,138 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* How It Works */}
-      <section id="how-it-works" className="bg-gray-900/30 border-y border-gray-800/50">
+      {/* Two-Part Value Prop */}
+      <section className="bg-gray-900/30 border-y border-gray-800/50">
         <div className="max-w-5xl mx-auto px-6 py-24">
           <div className="text-center mb-16">
-            <h2 className="text-3xl font-bold">How Origin works</h2>
+            <h2 className="text-3xl font-bold">Free CLI + Team Platform</h2>
             <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-              From code to merge &mdash; Origin tracks every AI coding session and enforces your policies automatically.
+              Start standalone &mdash; no account needed. Add team features when you&apos;re ready.
             </p>
           </div>
-          <div className="relative">
-            {/* Vertical line */}
-            <div className="absolute left-6 top-0 bottom-0 w-px bg-gray-800 hidden md:block" />
-
-            <div className="space-y-12">
-              {[
-                {
-                  step: '1',
-                  title: 'Developer codes with AI',
-                  desc: 'A developer uses Claude Code, Cursor, Copilot, or any AI coding tool. Origin\'s MCP server and git hooks silently track the session \u2014 prompts, files changed, model, cost, and token usage.',
-                  accent: 'bg-indigo-600',
-                },
-                {
-                  step: '2',
-                  title: 'Origin captures the session',
-                  desc: 'Every prompt-to-code-change is recorded as a session with full transcript replay. Policies are evaluated in real-time \u2014 file restrictions, model allowlists, cost limits, and review requirements.',
-                  accent: 'bg-purple-600',
-                },
-                {
-                  step: '3',
-                  title: 'Developer pushes to GitHub/GitLab',
-                  desc: 'Origin\'s webhook receives the push event and links commits to AI sessions. It knows exactly which code was AI-authored and which session produced it.',
-                  accent: 'bg-cyan-600',
-                },
-                {
-                  step: '4',
-                  title: 'PR gets a governance check',
-                  desc: 'Origin posts an origin/ai\u2011governance status check on the pull request with a summary \u2014 sessions linked, total cost, policy violations. If policies are violated, the PR is blocked from merging.',
-                  accent: 'bg-amber-500',
-                },
-                {
-                  step: '5',
-                  title: 'Team lead reviews and approves',
-                  desc: 'Flagged sessions are reviewed in the Origin dashboard or CLI. Once approved, the status check goes green and the PR can be merged. Full audit trail preserved.',
-                  accent: 'bg-green-500',
-                },
-              ].map((s) => (
-                <div key={s.step} className="flex items-start gap-6 relative">
-                  <div className={`${s.accent} w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-lg shrink-0 z-10 shadow-lg`}>
-                    {s.step}
-                  </div>
-                  <div className="pt-1">
-                    <h3 className="text-lg font-semibold text-gray-100">{s.title}</h3>
-                    <p className="mt-1.5 text-sm text-gray-400 leading-relaxed max-w-2xl">{s.desc}</p>
-                  </div>
-                </div>
-              ))}
+          <div className="grid md:grid-cols-2 gap-8">
+            <div className="card border-green-500/20">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-green-400 font-mono text-sm">$</span>
+                <span className="text-lg font-semibold text-gray-200">Origin CLI</span>
+                <span className="px-2 py-0.5 rounded-full bg-green-600/20 text-green-400 text-[10px] font-semibold border border-green-500/30">Free &amp; Open Source</span>
+              </div>
+              <ul className="space-y-2.5 text-sm text-gray-400">
+                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Zero config — <code className="text-indigo-400 text-xs">origin init</code> and you&apos;re done</li>
+                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> AI blame, session replay, stats — all local via git notes</li>
+                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Works offline — no server, no account, no telemetry</li>
+                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Claude Code, Cursor, Gemini CLI, Codex supported</li>
+              </ul>
+              <pre className="mt-4 bg-gray-800 rounded-lg px-4 py-3 text-xs font-mono text-gray-300 overflow-x-auto">
+{`$ origin init           # detect agents, install hooks
+$ origin blame app.ts   # see who wrote what
+$ origin sessions       # list AI sessions
+$ origin explain abc123 # replay a session`}
+              </pre>
+            </div>
+            <div className="card border-indigo-500/20">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="text-indigo-400 text-sm">◆</span>
+                <span className="text-lg font-semibold text-gray-200">Origin Platform</span>
+                <span className="px-2 py-0.5 rounded-full bg-indigo-600/20 text-indigo-400 text-[10px] font-semibold border border-indigo-500/30">Teams</span>
+              </div>
+              <ul className="space-y-2.5 text-sm text-gray-400">
+                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Live dashboard — sessions, costs, agents, repos</li>
+                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Policy enforcement — block secrets, restrict files, set budgets</li>
+                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> PR merge gating — GitHub &amp; GitLab status checks</li>
+                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Compliance reports — SOC 2 ready audit trail</li>
+              </ul>
+              <div className="mt-4 bg-gray-800 rounded-lg px-4 py-3">
+                <p className="text-xs text-gray-400">
+                  <span className="text-indigo-400 font-semibold">getorigin.io</span> — dashboard, policies, PR compliance.
+                </p>
+                <Link to="/register" className="inline-block mt-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors font-medium">
+                  Start free trial &rarr;
+                </Link>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
+      {/* How It Works */}
+      <section id="how-it-works" className="max-w-5xl mx-auto px-6 py-24">
+        <div className="text-center mb-16">
+          <h2 className="text-3xl font-bold">How Origin works</h2>
+          <p className="text-gray-400 mt-3 max-w-xl mx-auto">
+            From code to merge &mdash; Origin tracks every AI coding session and enforces your policies automatically.
+          </p>
+        </div>
+        <div className="relative">
+          <div className="absolute left-6 top-0 bottom-0 w-px bg-gray-800 hidden md:block" />
+          <div className="space-y-12">
+            {[
+              {
+                step: '1',
+                title: 'Developer codes with AI',
+                desc: 'A developer uses Claude Code, Cursor, Gemini, or Codex. Origin\'s hooks silently track the session — prompts, files changed, model, cost, and token usage.',
+                accent: 'bg-indigo-600',
+              },
+              {
+                step: '2',
+                title: 'Origin captures & attributes',
+                desc: 'Every prompt-to-code-change is recorded. Per-file attribution tags each line with its author. Policies evaluate in real-time — file restrictions, model allowlists, cost limits, secret scanning.',
+                accent: 'bg-purple-600',
+              },
+              {
+                step: '3',
+                title: 'AI agents get context',
+                desc: 'When an agent opens a file, Origin injects attribution context — which lines were AI-generated, by which agent, from which prompt. Agents make better decisions with full history.',
+                accent: 'bg-cyan-600',
+              },
+              {
+                step: '4',
+                title: 'PR gets a governance check',
+                desc: 'Origin posts an AI governance status check on the pull request — sessions linked, total cost, policy violations. If policies are violated, the PR is blocked from merging.',
+                accent: 'bg-amber-500',
+              },
+              {
+                step: '5',
+                title: 'Team reviews and ships',
+                desc: 'Flagged sessions are reviewed in the dashboard or CLI. Once approved, the status check goes green and the PR can be merged. Full audit trail preserved.',
+                accent: 'bg-green-500',
+              },
+            ].map((s) => (
+              <div key={s.step} className="flex items-start gap-6 relative">
+                <div className={`${s.accent} w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-lg shrink-0 z-10 shadow-lg`}>
+                  {s.step}
+                </div>
+                <div className="pt-1">
+                  <h3 className="text-lg font-semibold text-gray-100">{s.title}</h3>
+                  <p className="mt-1.5 text-sm text-gray-400 leading-relaxed max-w-2xl">{s.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* Use Cases */}
-      <section id="use-cases" className="bg-gray-950/50 border-b border-gray-800/50">
+      <section id="use-cases" className="bg-gray-950/50 border-y border-gray-800/50">
         <div className="max-w-6xl mx-auto px-6 py-24">
           <div className="text-center mb-16">
             <h2 className="text-3xl font-bold">Built for every stakeholder</h2>
             <p className="text-gray-400 mt-3 max-w-xl mx-auto">
               Whether you&apos;re responsible for engineering velocity, security compliance,
-              or developer experience, Origin has you covered.
+              or developer experience &mdash; Origin has you covered.
             </p>
           </div>
           <div className="grid md:grid-cols-3 gap-8">
             {CAPABILITIES.map((cap) => (
               <div key={cap.category} className="card">
-                <h3 className="text-lg font-semibold text-indigo-400 mb-4">{cap.category}</h3>
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="text-xl">{cap.icon}</span>
+                  <h3 className="text-lg font-semibold text-indigo-400">{cap.category}</h3>
+                </div>
                 <ul className="space-y-3">
                   {cap.items.map((item, i) => (
                     <li key={i} className="flex items-start gap-2 text-sm text-gray-400">
-                      <span className="text-green-400 mt-0.5 flex-shrink-0">&#10003;</span>
+                      <span className="text-green-400 mt-0.5 flex-shrink-0">✓</span>
                       {item}
                     </li>
                   ))}
@@ -297,44 +426,6 @@ export default function Landing() {
               </div>
             ))}
           </div>
-        </div>
-      </section>
-
-      {/* How It Works */}
-      <section id="how-it-works" className="max-w-6xl mx-auto px-6 py-24">
-        <div className="text-center mb-16">
-          <h2 className="text-3xl font-bold">How it works</h2>
-          <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-            Developer codes with AI. Origin captures everything. Policies evaluate.
-            Team reviews. PR merges or gets blocked.
-          </p>
-        </div>
-        <div className="grid md:grid-cols-3 gap-6">
-          {[
-            { step: '1', title: 'Code with AI', desc: 'Developers use Claude Code, Cursor, or any AI agent. Origin hooks capture every prompt, tool call, and file change automatically.' },
-            { step: '2', title: 'Origin evaluates', desc: 'Policy engine checks file restrictions, model allowlists, and cost limits. Secret scanner flags leaked credentials. Sessions are linked to PRs.' },
-            { step: '3', title: 'Team reviews', desc: 'Admin reviews AI sessions, approves or rejects. PR/MR checks update automatically. Code can merge only when governance passes.' },
-          ].map((item) => (
-            <div key={item.step} className="card relative">
-              <div className="absolute -top-3 -left-3 w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
-                {item.step}
-              </div>
-              <h3 className="text-lg font-semibold text-gray-200 mt-2 mb-2">{item.title}</h3>
-              <p className="text-sm text-gray-400 leading-relaxed">{item.desc}</p>
-            </div>
-          ))}
-        </div>
-        <div className="mt-10 card bg-gray-800/30 border-gray-700">
-          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-4">Developer setup (one-time)</p>
-          <pre className="text-sm font-mono text-gray-300 overflow-x-auto">
-{`npm i -g @origin/cli
-origin login          # authenticate with your Origin server
-origin init           # register machine, detect tools, install hooks
-
-# That's it — 2 commands. Everything is automatic from here.
-# Tools are auto-detected (Claude Code, Cursor, Copilot, Gemini, Aider, etc.)
-# Hooks re-scan on every session start — no need to re-run init.`}
-          </pre>
         </div>
       </section>
 
@@ -361,99 +452,28 @@ origin init           # register machine, detect tools, install hooks
                 ['Session recording & replay', true, true, false],
                 ['Prompt & transcript capture', true, true, true],
                 ['AI blame (line-level attribution)', true, false, true],
+                ['Per-file attribution context injection', true, false, false],
+                ['System prompt injection (cross-agent)', true, false, false],
                 ['Policy enforcement (file, model, cost)', true, false, false],
-                ['PR/MR merge gating (GitHub & GitLab)', true, false, false],
-                ['Secret & PII scanning', true, false, false],
-                ['Budget & cost controls', true, false, false],
-                ['Human review workflow', true, false, false],
-                ['Compliance reports', true, false, false],
+                ['Secret & credential scanning', true, false, false],
+                ['PR/MR merge gating', true, false, false],
+                ['Live session dashboard', true, false, false],
+                ['Cost & token tracking', true, false, false],
+                ['Budget controls', true, false, false],
+                ['Multi-agent support (4+ agents)', true, false, false],
                 ['MCP server (real-time enforcement)', true, false, false],
-                ['CLI with 30+ commands', true, false, true],
-                ['Self-hosted / open-source', true, false, true],
+                ['Self-hosted / open-source CLI', true, false, true],
                 ['GitHub & GitLab integration', true, false, false],
-                ['Team roles & RBAC', true, false, false],
-                ['Model comparison analytics', true, false, false],
               ].map(([feature, origin, entire, gitai], i) => (
                 <tr key={i} className={i % 2 === 0 ? 'bg-gray-900/30' : ''}>
                   <td className="px-5 py-2.5 text-gray-300">{feature as string}</td>
-                  <td className="px-5 py-2.5 text-center">{origin ? <span className="text-green-400">&#10003;</span> : <span className="text-gray-600">&mdash;</span>}</td>
-                  <td className="px-5 py-2.5 text-center">{entire ? <span className="text-green-400">&#10003;</span> : <span className="text-gray-600">&mdash;</span>}</td>
-                  <td className="px-5 py-2.5 text-center">{gitai ? <span className="text-green-400">&#10003;</span> : <span className="text-gray-600">&mdash;</span>}</td>
+                  <td className="px-5 py-2.5 text-center">{origin ? <span className="text-green-400">✓</span> : <span className="text-gray-600">&mdash;</span>}</td>
+                  <td className="px-5 py-2.5 text-center">{entire ? <span className="text-green-400">✓</span> : <span className="text-gray-600">&mdash;</span>}</td>
+                  <td className="px-5 py-2.5 text-center">{gitai ? <span className="text-green-400">✓</span> : <span className="text-gray-600">&mdash;</span>}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
-        <div className="grid md:grid-cols-3 gap-6 mt-10">
-          <div className="card border-indigo-500/30">
-            <h3 className="font-semibold text-indigo-400 mb-2">Origin</h3>
-            <p className="text-xs text-gray-400 leading-relaxed">
-              Full governance platform: session tracking, policy enforcement, PR merge gating,
-              secret scanning, budget controls, compliance reports, and team management.
-              Self-hosted with CLI + MCP server.
-            </p>
-          </div>
-          <div className="card">
-            <h3 className="font-semibold text-gray-300 mb-2">Entire</h3>
-            <p className="text-xs text-gray-400 leading-relaxed">
-              Prompt logging and session context capture built by the former GitHub CEO.
-              Focuses on preserving AI coding context for reuse. No policy enforcement or merge gating.
-            </p>
-          </div>
-          <div className="card">
-            <h3 className="font-semibold text-gray-300 mb-2">git-ai</h3>
-            <p className="text-xs text-gray-400 leading-relaxed">
-              Open-source Git extension for AI code attribution. Tracks which lines were AI-authored
-              with blame and ask commands. Local-first, no governance layer or policy enforcement.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* Integrations */}
-      <section id="integrations" className="max-w-6xl mx-auto px-6 py-24">
-        <div className="text-center mb-16">
-          <h2 className="text-3xl font-bold">Works with your stack</h2>
-          <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-            Origin integrates with AI coding tools through the Model Context Protocol (MCP)
-            and supports any Git repository.
-          </p>
-        </div>
-        <div className="grid md:grid-cols-2 gap-8">
-          <div className="card">
-            <h3 className="text-lg font-semibold mb-3">MCP Server &mdash; 12 Tools</h3>
-            <p className="text-sm text-gray-400 mb-4">
-              Full platform access from inside Claude Code and Cursor. Policy enforcement,
-              session tracking, reviews, stats, and audit &mdash; all via MCP tools.
-            </p>
-            <pre className="bg-gray-800 rounded-lg px-4 py-3 text-xs font-mono text-gray-300 overflow-x-auto leading-relaxed">
-{`check_file_access   \u2192 enforce policies
-start/end_session   \u2192 track sessions
-report_violation    \u2192 compliance logging
-list_sessions       \u2192 browse sessions
-review_session      \u2192 approve/reject/flag
-get_stats           \u2192 dashboard stats
-list_agents/repos   \u2192 view platform data
-get_audit_log       \u2192 audit trail`}
-            </pre>
-          </div>
-          <div className="card">
-            <h3 className="text-lg font-semibold mb-3">CLI &mdash; Works Standalone</h3>
-            <p className="text-sm text-gray-400 mb-4">
-              No server needed. Session tracking, AI attribution, blame, search, and stats &mdash;
-              all stored locally in git. Connect to Origin platform for policies and team features.
-            </p>
-            <pre className="bg-gray-800 rounded-lg px-4 py-3 text-xs font-mono text-gray-300 overflow-x-auto leading-relaxed">
-{`$ origin init                  # no login needed
-$ origin sessions              # local session history
-$ origin blame src/app.ts      # AI vs human attribution
-$ origin stats                 # local analytics
-$ origin login                 # optional: unlock policies`}
-            </pre>
-            <Link to="/cli" className="inline-block mt-3 text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
-              Full CLI documentation &rarr;
-            </Link>
-          </div>
         </div>
       </section>
 
@@ -461,10 +481,11 @@ $ origin login                 # optional: unlock policies`}
       <section id="setup" className="bg-gradient-to-b from-gray-950 to-indigo-950/20 border-t border-gray-800/50">
         <div className="max-w-4xl mx-auto px-6 py-24 text-center">
           <h2 className="text-3xl font-bold mb-4">
-            Get started in under 2 minutes
+            Get started in 30 seconds
           </h2>
           <p className="text-gray-400 mb-10 max-w-xl mx-auto">
-            Install the CLI and init. Works standalone — no server, no account. Add <code className="text-indigo-400">origin login</code> later for team features.
+            Install the CLI and run <code className="text-indigo-400">origin init</code>. Works standalone — no server, no account.
+            Add <code className="text-indigo-400">origin login</code> later for team dashboard and policies.
           </p>
 
           <div className="max-w-2xl mx-auto mb-12">
@@ -472,9 +493,9 @@ $ origin login                 # optional: unlock policies`}
 
             <div className="grid sm:grid-cols-3 gap-6 mt-10">
               {[
-                { step: '1', cmd: 'npm i -g ...', title: 'Install CLI', desc: 'One command to install' },
-                { step: '2', cmd: 'origin init', title: 'Initialize', desc: 'Detects tools & installs hooks' },
-                { step: '3', cmd: 'Start coding', title: 'Track sessions', desc: 'Sessions tracked automatically' },
+                { step: '1', title: 'Install CLI', desc: 'One npm command' },
+                { step: '2', title: 'origin init', desc: 'Detects agents & installs hooks' },
+                { step: '3', title: 'Code with AI', desc: 'Everything tracked automatically' },
               ].map((s) => (
                 <div key={s.step} className="text-center">
                   <div className="w-10 h-10 rounded-full bg-indigo-600 text-white font-bold text-sm flex items-center justify-center mx-auto mb-3">
@@ -487,12 +508,22 @@ $ origin login                 # optional: unlock policies`}
             </div>
           </div>
 
-          <Link
-            to="/register"
-            className="btn-primary px-10 py-3 text-base font-semibold rounded-xl shadow-lg shadow-indigo-600/20"
-          >
-            Create your account &rarr;
-          </Link>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+            <Link
+              to="/register"
+              className="btn-primary px-10 py-3 text-base font-semibold rounded-xl shadow-lg shadow-indigo-600/20"
+            >
+              Create your account &rarr;
+            </Link>
+            <a
+              href="https://github.com/dolobanko/origin-cli"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-gray-400 hover:text-gray-100 transition-colors"
+            >
+              Star on GitHub &rarr;
+            </a>
+          </div>
         </div>
       </section>
     </>
