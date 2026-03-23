@@ -50,7 +50,17 @@ export async function upgradeCommand(opts: { check?: boolean }): Promise<void> {
   const success = downloadAndInstall(latest.url);
 
   if (success) {
-    console.log(chalk.green(`\n  ✓ Successfully upgraded to ${latest.version}!\n`));
+    // Verify the upgrade actually took effect
+    const newVersion = getInstalledVersion();
+    if (newVersion && newVersion !== currentVersion) {
+      console.log(chalk.green(`\n  ✓ Successfully upgraded to ${newVersion}!\n`));
+    } else {
+      console.log(chalk.yellow(`\n  ⚠ npm install succeeded but the active origin binary was not updated.`));
+      console.log(chalk.yellow(`    This usually means origin was installed with a different Node/npm.`));
+      console.log(chalk.gray(`\n  Try one of these:`));
+      console.log(chalk.gray(`    npm i -g ${TARBALL_URL}`));
+      console.log(chalk.gray(`    # Or if using nvm, make sure you're on the right Node version first\n`));
+    }
 
     // Clear update check cache so banner disappears
     try {
@@ -74,6 +84,28 @@ function getCurrentVersion(): string {
   } catch {
     return '0.0.0';
   }
+}
+
+/**
+ * Check what version the `origin` binary on PATH actually reports.
+ * This catches cases where npm install -g succeeded but installed to a
+ * different prefix than where `origin` resolves from.
+ */
+function getInstalledVersion(): string | null {
+  try {
+    // Use `which origin` to find the actual binary, then read its package.json
+    const originPath = execSync('which origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    if (!originPath) return null;
+    // Follow symlinks to find the real location
+    const realPath = fs.realpathSync(originPath);
+    const pkgDir = path.resolve(path.dirname(realPath), '..');
+    const pkgJson = path.join(pkgDir, 'package.json');
+    if (fs.existsSync(pkgJson)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgJson, 'utf-8'));
+      return pkg.version || null;
+    }
+  } catch { /* ignore */ }
+  return null;
 }
 
 async function getLatestVersion(): Promise<{ version: string; url: string } | null> {

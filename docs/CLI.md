@@ -78,10 +78,11 @@ origin whoami
 
 ### `origin sessions`
 
-List AI coding sessions with optional filters.
+List AI coding sessions. Scoped to the current repo by default.
 
 ```bash
-origin sessions
+origin sessions                              # Current repo only
+origin sessions --all                        # All repos
 origin sessions --status unreviewed
 origin sessions --model claude-sonnet-4-20250514 --limit 10
 ```
@@ -90,6 +91,17 @@ Options:
 - `-s, --status <status>` — Filter: `unreviewed`, `approved`, `rejected`, `flagged`
 - `-m, --model <model>` — Filter by AI model
 - `-l, --limit <n>` — Max results (default: 20)
+- `-a, --all` — Show sessions from all repos (default: current repo only)
+
+---
+
+### `origin sessions end <id>`
+
+End a running session. Supports short IDs (first 8 chars).
+
+```bash
+origin sessions end abc12345
+```
 
 ---
 
@@ -346,7 +358,9 @@ Delete this file to log out.
 | `origin init` | Register machine as agent host |
 | `origin status` | Show connection status |
 | `origin whoami` | Show user and org info |
-| `origin sessions` | List coding sessions |
+| `origin sessions` | List coding sessions (current repo) |
+| `origin sessions --all` | List sessions across all repos |
+| `origin sessions end <id>` | End a running session |
 | `origin session <id>` | View session detail |
 | `origin review <id>` | Approve/reject/flag session |
 | `origin repos` | List repositories |

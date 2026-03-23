@@ -43,6 +43,8 @@ function mapSession(s: any, pullRequests?: any[]) {
     userId: s.userId || null,
     userName: s.user?.name || null,
     userEmail: s.user?.email || null,
+    apiKeyId: s.apiKeyId || null,
+    apiKeyName: s.apiKeyName || null,
     repoId: s.commit?.repoId || null,
     repoName: s.commit?.repo?.name || null,
     commitSha: s.commit?.sha || null,
@@ -150,6 +152,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       };
     }
 
+    if (req.query.repoName) {
+      where.commit = {
+        ...where.commit,
+        repo: { ...where.commit?.repo, name: req.query.repoName as string },
+      };
+    }
+
     if (req.query.branch) {
       where.branch = req.query.branch as string;
     }
@@ -201,6 +210,28 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       }),
       prisma.codingSession.count({ where }),
     ]);
+
+    // Auto-expire stale RUNNING sessions (no heartbeat ping in 5 minutes)
+    const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+    const now = Date.now();
+    const staleIds: string[] = [];
+    for (const s of sessions) {
+      if (s.status === 'RUNNING') {
+        const lastActivity = new Date(s.updatedAt || s.createdAt).getTime();
+        if (now - lastActivity > STALE_THRESHOLD_MS) {
+          staleIds.push(s.id);
+          s.status = 'COMPLETED';
+          s.endedAt = s.updatedAt || s.createdAt;
+        }
+      }
+    }
+    // Update stale sessions in DB in background
+    if (staleIds.length > 0) {
+      prisma.codingSession.updateMany({
+        where: { id: { in: staleIds } },
+        data: { status: 'COMPLETED', endedAt: new Date() },
+      }).catch(() => {});
+    }
 
     res.json({
       sessions: sessions.map((s) => mapSession(s)),

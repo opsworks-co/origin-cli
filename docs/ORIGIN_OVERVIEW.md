@@ -119,16 +119,18 @@ Organization (Org)
 
 ## 1.3 Policy System
 
-Origin enforces four types of policies. Policies can be org-wide or assigned to specific agents.
+Origin enforces six types of policies. Policies can be org-wide or assigned to specific agents.
 
 ### Policy Types
 
-| Type | Purpose | Example Condition | Actions |
-|------|---------|-------------------|---------|
-| **FILE_RESTRICTION** | Block or flag access to sensitive file paths | `**/.env`, `src/payments/**` | BLOCK, REQUIRE_REVIEW, WARN |
-| **MODEL_ALLOWLIST** | Restrict which AI models can be used | `["claude-sonnet-4", "gpt-4o"]` | BLOCK |
-| **REQUIRE_REVIEW** | Auto-flag sessions that exceed thresholds | `cost_above: 5.0`, `tokens_above: 100000` | FLAG, REQUIRE_REVIEW |
-| **COST_LIMIT** | Per-session cost or token ceilings | `max_cost: 10.0`, `max_tokens: 200000` | BLOCK, FLAG |
+| Type | Purpose | Example Condition | Actions | Enforcement |
+|------|---------|-------------------|---------|-------------|
+| **FILE_RESTRICTION** | Block or flag access to sensitive file paths | `**/.env`, `src/payments/**` | BLOCK, REQUIRE_REVIEW, WARN | Server-side + pre-commit hook |
+| **MODEL_ALLOWLIST** | Restrict which AI models can be used | `["claude-sonnet-4", "gpt-4o"]` | BLOCK | Server-side (session start) |
+| **REQUIRE_REVIEW** | Auto-flag sessions that exceed thresholds | `cost_above: 5.0`, `tokens_above: 100000` | FLAG, REQUIRE_REVIEW | Server-side (session end) |
+| **COST_LIMIT** | Per-session cost or token ceilings | `max_cost: 10.0`, `max_tokens: 200000` | BLOCK, FLAG | Server-side (session end) |
+| **CONTENT_FILTER** | Block commits containing specific patterns | `"baran"`, `"TODO HACK"` | BLOCK, WARN | Pre-commit hook (git level) |
+| **COMMIT_MESSAGE** | Validate commit message format | `"^(feat\|fix\|chore):"` | BLOCK, WARN | Pre-commit hook (git level) |
 
 ### Policy Scoping
 
@@ -261,6 +263,28 @@ Every session is scanned at completion for:
 | GENERIC_SECRET | Other credential patterns |
 
 Findings are stored with severity level, file path, line number, and redacted match. Org admins are notified of critical findings.
+
+### Security Rules Toggle
+
+Each agent has a **Security Rules** toggle in its configuration (default: OFF). When enabled, Origin automatically injects a `<security-rules>` block into the agent's system prompt at session start. This adds 8 default rules covering:
+
+1. Never log, print, or commit secrets, API keys, or credentials
+2. Protect `.env` files, `.git` folder, and system configurations
+3. Never hardcode credentials — use environment variables
+4. Always use environment variables for sensitive data
+5. Never expose sensitive info in logs or error messages
+6. Redact sensitive data before displaying
+7. Never store passwords in plain text
+8. Report security concerns immediately
+
+**How it works:**
+- Toggle ON → `<security-rules>` block appended to system prompt on new sessions
+- Toggle OFF → no security rules injected (default)
+- Custom rules can override the defaults via the Security Rules textarea
+- Changes only apply to **new sessions** — running sessions keep their original prompt
+- Agent version snapshots include the security rules state
+
+**Important:** This is a best-effort AI instruction, not a hard enforcement. The AI agent *should* follow these rules, but model-level compliance varies. For hard enforcement of secret blocking, use a CONTENT_FILTER policy (enforced at the git pre-commit hook level).
 
 ---
 
@@ -512,6 +536,13 @@ loadOrgPolicies(orgId)
 // COST_LIMIT
 { "max_cost": 10.0 }
 { "max_tokens": 200000 }
+
+// CONTENT_FILTER
+{ "pattern": "baran" }
+{ "pattern": "TODO HACK|FIXME" }
+
+// COMMIT_MESSAGE
+{ "pattern": "^(feat|fix|chore|docs|refactor|test):" }
 ```
 
 ### Enforcement Points
@@ -520,8 +551,15 @@ loadOrgPolicies(orgId)
 |------|------|-----|
 | Session start | MODEL_ALLOWLIST | `enforceSessionStart()` blocks if model not allowed |
 | During session | FILE_RESTRICTION | MCP `check_file_access` tool validates file paths |
-| Session end | All policy types | `enforceSessionEnd()` evaluates full session context |
-| PR merge | Violation check | GitHub status check blocks merge if violations exist |
+| Session end | COST_LIMIT, REQUIRE_REVIEW, FILE_RESTRICTION | `enforceSessionEnd()` evaluates full session context |
+| Pre-commit hook | CONTENT_FILTER | `origin hooks git-pre-commit` scans `git diff --cached` |
+| Pre-commit hook | COMMIT_MESSAGE | `origin hooks git-pre-commit` validates commit message |
+| Pre-commit hook | FILE_RESTRICTION | `origin hooks git-pre-commit` checks staged file paths |
+| PR merge | All violations | GitHub status check blocks merge if violations exist |
+
+### Natural Language Policy Creation
+
+Policies can be created from natural language descriptions via `POST /api/policies/from-natural-language`. The AI parses descriptions like "block commits containing the word baran" into structured policy objects with the correct type, conditions, and actions. Available in the UI via the "Create from Natural Language" button on the Policies page.
 
 ---
 
@@ -699,13 +737,14 @@ For CLI command reference, see [CLI.md](CLI.md).
 
 ### System Prompt Injection
 
-When a session starts, Origin returns:
-- **`agentSystemPrompt`**: The agent's custom system prompt (configured in the dashboard)
+When a session starts, Origin builds a `fullSystemPrompt` from multiple sources:
+- **`agent.systemPrompt`**: The agent's custom system prompt (configured in the dashboard)
+- **`<security-rules>`**: Auto-injected security rules block (if Security Rules toggle is ON)
 - **`activePolicies`**: Human-readable policy summaries formatted as text
 
 The CLI or MCP server injects these into the AI agent's context so it's aware of governance rules.
 
-**Important**: System prompt changes only apply to new sessions. Running sessions keep the original prompt. Resumed sessions fetch the latest prompt.
+**Important**: System prompt changes only apply to new sessions. Running sessions keep the original prompt. Resumed sessions fetch the latest prompt. The session dedup logic (reusing active sessions) uses the stored prompt — it does NOT re-evaluate the security rules toggle.
 
 ---
 

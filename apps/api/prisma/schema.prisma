@@ -151,6 +151,8 @@ model CodingSession {
   branch       String?                        // Git branch at session start
   status       String         @default("COMPLETED") // RUNNING or COMPLETED
   archived     Boolean        @default(false)
+  apiKeyId     String?                         // API key that created this session
+  apiKeyName   String?                         // Display name of the API key (e.g. "MacBook Claude", "CI Bot")
   agentSystemPrompt String?                    // Snapshot of agent system prompt active during session
   agentVersion      Int?                        // Agent version number at session start
   startedAt    DateTime?                       // When session actually started (from session/start)

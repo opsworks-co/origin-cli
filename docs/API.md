@@ -173,13 +173,50 @@ Create a policy.
 }
 ```
 
-Types: `FILE_RESTRICTION` | `REQUIRE_REVIEW` | `MODEL_ALLOWLIST` | `COST_LIMIT`
+Types: `FILE_RESTRICTION` | `REQUIRE_REVIEW` | `MODEL_ALLOWLIST` | `COST_LIMIT` | `CONTENT_FILTER` | `COMMIT_MESSAGE`
 
 ### PUT `/policies/:id`
 Update a policy.
 
 ### DELETE `/policies/:id`
 Delete a policy.
+
+### POST `/policies/from-natural-language`
+Create policies from a natural language description. Uses the org's Anthropic API key (configured in Settings) to parse the description.
+
+```json
+{
+  "prompt": "Block any commits that contain the word baran in the diff"
+}
+```
+
+Returns: `{ policies: [{ id, name, type, ... }] }` — array of created policies.
+
+**Supported descriptions:**
+- "Only allow claude and cursor models" → creates MODEL_ALLOWLIST
+- "Block changes to .env files" → creates FILE_RESTRICTION
+- "Flag sessions over $5 for review" → creates REQUIRE_REVIEW
+- "Block commits containing baran" → creates CONTENT_FILTER
+- "Warn when sessions exceed 100k tokens" → creates COST_LIMIT
+
+---
+
+## Agents
+
+### PUT `/agents/:id`
+Update agent configuration including security rules.
+
+```json
+{
+  "name": "Claude Code",
+  "systemPrompt": "You are a senior engineer...",
+  "securityRulesEnabled": true,
+  "securityRules": null
+}
+```
+
+- `securityRulesEnabled` (boolean) — when true, injects `<security-rules>` block into system prompt on new sessions
+- `securityRules` (string|null) — custom security rules text. If null, uses default 8 rules
 
 ---
 
@@ -246,6 +283,32 @@ Returns: `{ sessionId }`
   "summary": "Added Redis-based rate limiting",
   "tokensUsed": 45000,
   "toolCalls": 28
+}
+```
+
+### POST `/mcp/hooks/pre-commit`
+Check staged diff against CONTENT_FILTER, COMMIT_MESSAGE, and FILE_RESTRICTION policies. Called by the git pre-commit hook.
+
+```json
+{
+  "diff": "diff --git a/file.txt ...",
+  "files": ["file.txt", "src/app.ts"],
+  "commitMessage": "Add feature",
+  "branch": "main"
+}
+```
+
+Returns:
+```json
+{
+  "allowed": false,
+  "violations": [
+    {
+      "policyName": "Block commits containing baran",
+      "policyType": "CONTENT_FILTER",
+      "message": "Diff content matches \"baran\" (2 matches)"
+    }
+  ]
 }
 ```
 

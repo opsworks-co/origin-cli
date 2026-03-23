@@ -34,9 +34,42 @@ Alert or block when a single AI session exceeds a cost threshold.
 
 **Example:** Warn when a session exceeds $5. Block when it exceeds $20.
 
+### CONTENT_FILTER
+Block or flag commits when the staged diff matches a pattern (word, regex).
+
+**Use when:** You want to prevent specific content from being committed — banned words, proprietary terms, debug code, etc.
+
+**Enforcement:** Runs in the **git pre-commit hook** via `origin hooks git-pre-commit`. Scans `git diff --cached` against the pattern. Blocks the commit at the git level before the AI agent can proceed.
+
+**Example:** Block any commit containing the word "baran" in the diff.
+
+### COMMIT_MESSAGE
+Validate commit message format or block specific words in commit messages.
+
+**Use when:** You want to enforce commit message conventions (e.g., conventional commits) or block certain words from appearing in commit messages.
+
+**Enforcement:** Runs in the **git pre-commit hook**. Checks the commit message against the pattern.
+
+**Example:** Require commit messages to start with `feat:`, `fix:`, or `chore:`.
+
 ---
 
 ## Creating Policies
+
+### Via Natural Language
+
+The fastest way to create a policy:
+
+1. Go to **Policies** in the sidebar
+2. Click **Create from Natural Language**
+3. Describe what you want in plain English, e.g.:
+   - "Block any commits that contain the word baran"
+   - "Only allow claude and cursor models"
+   - "Flag sessions that cost more than $5 for review"
+   - "Block changes to .env files"
+4. Origin's AI parses your description and creates the correct policy type, conditions, and actions
+
+**Limitations:** The NL engine supports all 6 policy types. For content-based filtering (CONTENT_FILTER), it creates policies enforced by the pre-commit hook. The engine will tell you if a request can't be fully automated.
 
 ### Via the UI
 
@@ -45,7 +78,7 @@ Alert or block when a single AI session exceeds a cost threshold.
 3. Fill in:
    - **Name** — descriptive, e.g. "No AI changes to payments"
    - **Description** — what this policy does and why
-   - **Type** — select from the four types above
+   - **Type** — select from the six types above
    - **Active** — toggle on to enforce immediately
 4. Save
 
@@ -152,5 +185,23 @@ Links in PR comments ("View in Origin", "View" per session) point to the product
   "name": "Session cost limit",
   "type": "COST_LIMIT",
   "rules": [{ "threshold": 5.00, "action": "WARN" }]
+}
+```
+
+### "Block commits containing banned words"
+```json
+{
+  "name": "Block commits containing baran",
+  "type": "CONTENT_FILTER",
+  "rules": [{ "pattern": "baran", "action": "BLOCK" }]
+}
+```
+
+### "Enforce conventional commit messages"
+```json
+{
+  "name": "Require conventional commits",
+  "type": "COMMIT_MESSAGE",
+  "rules": [{ "pattern": "^(feat|fix|chore|docs|refactor|test):", "action": "BLOCK" }]
 }
 ```

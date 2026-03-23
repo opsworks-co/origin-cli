@@ -49,6 +49,40 @@ function debugLog(event: string, message: string, data?: any): void {
   }
 }
 
+// ─── Cursor Model Detection ──────────────────────────────────────────────
+// Cursor always sends model:"default" in hooks. Read the actual model from
+// Cursor's internal SQLite database (~/.cursor/ai-tracking/ai-code-tracking.db).
+
+function getCursorModelFromDb(conversationId: string): string | null {
+  try {
+    const dbPath = path.join(os.homedir(), '.cursor', 'ai-tracking', 'ai-code-tracking.db');
+    if (!fs.existsSync(dbPath)) return null;
+
+    // Use sqlite3 CLI to query — avoids native module dependency
+    const result = execSync(
+      `sqlite3 "${dbPath}" "SELECT model FROM conversation_summaries WHERE conversationId='${conversationId.replace(/'/g, "''")}' LIMIT 1"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
+    ).trim();
+    if (result && result !== 'default' && result !== 'unknown') return result;
+
+    // Fallback: check tracked_file_content or ai_code_hashes for this conversation
+    const result2 = execSync(
+      `sqlite3 "${dbPath}" "SELECT DISTINCT model FROM tracked_file_content WHERE conversationId='${conversationId.replace(/'/g, "''")}' AND model IS NOT NULL AND model != '' LIMIT 1"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
+    ).trim();
+    if (result2 && result2 !== 'default' && result2 !== 'unknown') return result2;
+
+    const result3 = execSync(
+      `sqlite3 "${dbPath}" "SELECT DISTINCT model FROM ai_code_hashes WHERE conversationId='${conversationId.replace(/'/g, "''")}' AND model IS NOT NULL AND model != '' LIMIT 1"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
+    ).trim();
+    if (result3 && result3 !== 'default' && result3 !== 'unknown') return result3;
+  } catch {
+    // sqlite3 not available or DB locked — non-fatal
+  }
+  return null;
+}
+
 // ─── Session Write Helper ─────────────────────────────────────────────────
 
 import type { ParsedTranscript, PromptFileMapping } from '../transcript.js';
@@ -148,7 +182,7 @@ async function readStdin(): Promise<Record<string, any>> {
     process.stdin.on('end', () => {
       try {
         const parsed = JSON.parse(data);
-        debugLog('stdin', 'parsed', { keys: Object.keys(parsed), cwd: parsed.cwd, session_id: parsed.session_id });
+        debugLog('stdin', 'parsed', { keys: Object.keys(parsed), cwd: parsed.cwd, session_id: parsed.session_id, model: parsed.model });
         resolve(parsed);
       } catch {
         debugLog('stdin', 'parse-failed', { dataLength: data.length, preview: data.slice(0, 200) });
@@ -178,7 +212,7 @@ function escapeShellArg(arg: string): string {
 const AGENT_MODEL_PATTERNS: Record<string, RegExp> = {
   'claude': /claude|anthropic|sonnet|opus|haiku/i,
   'gemini': /gemini|google/i,
-  'cursor': /cursor|gpt|openai/i,
+  'cursor': /cursor|composer|gpt|openai/i,
   'codex': /codex/i,
   'aider': /aider/i,
   'windsurf': /windsurf|codeium/i,
@@ -273,10 +307,24 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
       }
     }
 
-    // Multiple sessions, no reliable match — return null to avoid misattribution
-    debugLog('findStateForHook', 'ambiguous: multiple sessions, no reliable match', {
+    // Multiple sessions, no agent-specific match found.
+    // If we know the agent slug, pick the most recent session — it's better than
+    // returning null (which causes auto-create and duplicate sessions).
+    if (agentSlug) {
+      const best = sessions[0]; // already sorted by startedAt desc
+      debugLog('findStateForHook', 'multiple sessions, using most recent', {
+        agentSlug,
+        sessionId: best.sessionId,
+        model: best.model,
+        tag: best.sessionTag,
+        totalSessions: sessions.length,
+      });
+      return { state: best, saveCwd: best.repoPath || repoPath };
+    }
+
+    // No agent slug at all — truly ambiguous
+    debugLog('findStateForHook', 'ambiguous: multiple sessions, no agent slug', {
       claudeSessionId,
-      agentSlug,
       totalSessions: sessions.length,
       sessionModels: sessions.map(s => ({ id: s.sessionId, model: s.model })),
     });
@@ -425,6 +473,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     }
   }
 
+  // Skip background agents (Cursor fires session-start for background indexing agents)
+  if (input.is_background_agent === true || input.is_background_agent === 'true') {
+    debugLog('session-start', 'SKIP: background agent', { is_background_agent: input.is_background_agent });
+    return;
+  }
+
   // Use cwd from hook input (Claude Code passes this), or workspace_roots (Cursor),
   // or fall back to process.cwd()
   let hookCwd = input.cwd || process.cwd();
@@ -501,6 +555,8 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         staleTag: stale.sessionTag,
         agent: finalAgentSlug,
       });
+      // Kill the old heartbeat so it stops pinging
+      stopHeartbeat(stale.sessionId);
       if (connected && stale.sessionId) {
         try {
           const durationMs = Date.now() - new Date(stale.startedAt).getTime();
@@ -549,10 +605,19 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     if (transcriptPath) debugLog('session-start', 'auto-discovered transcript path', { transcriptPath });
   }
 
-  // Resolve model: use stdin value, fall back to agent-specific default
+  // Resolve model: use stdin value, fall back to Cursor DB, then agent default
   let model = input.model || '';
   if (!model || model === 'unknown' || model === 'default') {
-    // Default model name from agent slug so we never store 'unknown'
+    // Cursor always sends model:"default" — try to read real model from its SQLite DB
+    if (finalAgentSlug === 'cursor' && input.conversation_id) {
+      const cursorModel = getCursorModelFromDb(input.conversation_id);
+      if (cursorModel) {
+        model = cursorModel;
+        debugLog('session-start', 'model from Cursor DB', { model: cursorModel, conversationId: input.conversation_id });
+      }
+    }
+  }
+  if (!model || model === 'unknown' || model === 'default') {
     const AGENT_DEFAULT_MODELS: Record<string, string> = {
       'gemini': 'gemini',
       'claude-code': 'claude',
@@ -914,7 +979,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
 }
 
 async function handleStop(input: Record<string, any>, agentSlug?: string): Promise<void> {
-  debugLog('stop', 'begin', { cwd: input.cwd });
+  debugLog('stop', 'begin', { cwd: input.cwd, inputModel: input.model, agentSlug });
 
   const config = loadConfig();
   const connected = isConnectedMode();
@@ -990,9 +1055,17 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
 
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
-    // Prefer: stdin model (Cursor/Codex send real model in stop) → transcript → state
+    // Prefer: stdin model → Cursor DB → transcript → state
     const stdinModel = (input.model && input.model !== 'default' && input.model !== 'unknown') ? input.model : '';
-    const model = stdinModel || parsed.model || state.model;
+    let model = stdinModel || parsed.model || state.model;
+    // If still generic, try Cursor's SQLite DB
+    if ((!model || model === 'cursor' || model === 'default') && agentSlug === 'cursor' && input.conversation_id) {
+      const cursorDbModel = getCursorModelFromDb(input.conversation_id);
+      if (cursorDbModel) {
+        model = cursorDbModel;
+        debugLog('stop', 'model from Cursor DB', { model: cursorDbModel });
+      }
+    }
     const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens);
 
     // Extract prompt → file change mappings

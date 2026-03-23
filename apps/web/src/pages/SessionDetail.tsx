@@ -219,8 +219,8 @@ export default function SessionDetail() {
             )}
             <span className="badge-blue text-[10px] py-0">{session.model}</span>
           </span>
-          {session.userName && (
-            <span>by {session.userName}</span>
+          {(session.apiKeyName || session.userName) && (
+            <span>by {session.apiKeyName || session.userName}</span>
           )}
           <span>{formatDuration(session.durationMs)}</span>
           <span>{session.tokensUsed.toLocaleString()} tokens</span>

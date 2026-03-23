@@ -29,6 +29,7 @@ const DEFAULT_SECURITY_RULES = `CRITICAL: Follow these security rules at all tim
 interface McpRequest extends Request {
   orgId?: string;
   mcpUserId?: string;  // User ID resolved from the API key (for per-member attribution)
+  apiKeyId?: string;   // ID of the API key that created this session
   apiKeyName?: string; // Name of the API key (for standalone key attribution)
   repoScopes?: string[]; // Repo IDs this API key is scoped to (empty = unrestricted)
   agentScopes?: string[]; // Agent IDs this API key is scoped to (empty = no agent access)
@@ -58,6 +59,7 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     }
 
     req.orgId = found.orgId;
+    req.apiKeyId = found.id;
     req.apiKeyName = found.name;
     req.repoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
     req.agentScopes = found.agentScopes.map((s: { agentId: string }) => s.agentId);
@@ -432,6 +434,8 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         status: 'RUNNING',
         startedAt: new Date(),
         userId: req.mcpUserId || null,
+        apiKeyId: req.apiKeyId || null,
+        apiKeyName: req.apiKeyName || null,
         agentId: agent?.id || null,
         agentSystemPrompt: fullSystemPrompt,
         agentVersion: agent?.versions?.[0]?.version || null,

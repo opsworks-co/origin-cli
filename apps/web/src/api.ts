@@ -263,6 +263,8 @@ export interface Session {
   endedAt: string | null;
   agentSystemPrompt: string | null;
   agentVersion: number | null;
+  apiKeyId: string | null;
+  apiKeyName: string | null;
   createdAt: string;
   review: SessionReview | null;
   pullRequests?: PullRequestInfo[];

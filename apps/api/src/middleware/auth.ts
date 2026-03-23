@@ -13,6 +13,8 @@ const JWT_SECRET = requireEnv('JWT_SECRET');
 export interface AuthRequest extends Request {
   user?: { id: string; orgId: string; role: string };
   apiKeyRepoScopes?: string[]; // Repo IDs this API key is scoped to (empty = unrestricted)
+  apiKeyId?: string;           // ID of the API key used for auth
+  apiKeyName?: string;         // Display name of the API key
 }
 
 export async function authMiddleware(req: AuthRequest, _res: Response, next: NextFunction) {
@@ -55,6 +57,8 @@ export async function authMiddleware(req: AuthRequest, _res: Response, next: Nex
             role: found.user?.role ?? found.role ?? 'MEMBER',
           };
           req.apiKeyRepoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
+          req.apiKeyId = found.id;
+          req.apiKeyName = found.name;
         }
       } catch { /* API key lookup failed — continue unauthenticated */ }
     }
