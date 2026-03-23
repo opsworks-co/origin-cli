@@ -222,6 +222,30 @@ function detectAiFromCommit(repoPath: string, commitSha: string): { isAi: boolea
       return { isAi: true, model: 'cursor' };
     }
 
+    // Codex CLI: uses "-" as the default commit message
+    if (message.trim() === '-') {
+      return { isAi: true, model: 'codex' };
+    }
+
+    // Co-Authored-By patterns for other AI agents
+    if (message.includes('Co-Authored-By:') || message.includes('co-authored-by:')) {
+      const coAuthor = message.match(/[Cc]o-[Aa]uthored-[Bb]y:\s*(.+)/);
+      const coAuthorName = coAuthor?.[1]?.toLowerCase() || '';
+      if (coAuthorName.includes('codex') || coAuthorName.includes('openai')) {
+        return { isAi: true, model: 'codex' };
+      }
+      if (coAuthorName.includes('copilot') || coAuthorName.includes('github')) {
+        return { isAi: true, model: 'copilot' };
+      }
+      if (coAuthorName.includes('gemini') || coAuthorName.includes('google')) {
+        return { isAi: true, model: 'gemini' };
+      }
+      // Generic AI co-author
+      if (coAuthorName.includes('ai') || coAuthorName.includes('bot') || coAuthorName.includes('noreply')) {
+        return { isAi: true, model: undefined };
+      }
+    }
+
     return null;
   } catch {
     return null;
