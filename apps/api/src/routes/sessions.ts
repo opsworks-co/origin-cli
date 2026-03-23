@@ -507,7 +507,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     const id = req.params.id as string;
 
     const detailWhere: any = {
-      id,
+      id: id.length < 36 ? { startsWith: id } : id,
       commit: { repo: { orgId: req.user!.orgId } },
     };
 
