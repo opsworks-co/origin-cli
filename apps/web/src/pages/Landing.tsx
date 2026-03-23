@@ -125,18 +125,18 @@ function TerminalDemo() {
           <span className="ml-2 text-xs text-gray-500 font-mono">origin blame src/api.ts</span>
         </div>
         {/* Terminal content */}
-        <pre className="px-5 py-4 text-xs font-mono leading-relaxed overflow-x-auto">
-          <span className="text-gray-500">{'  1 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'import express from \'express\';'}</span>{'\n'}
-          <span className="text-gray-500">{'  2 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'import { prisma } from \'./db\';'}</span>{'\n'}
-          <span className="text-gray-500">{'  3 │ '}</span><span className="text-gray-400">Human     </span><span className="text-gray-600">│ 2d ago  │ </span><span className="text-gray-300">{''}</span>{'\n'}
-          <span className="text-gray-500">{'  4 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'export async function getUsers() {'}</span>{'\n'}
-          <span className="text-gray-500">{'  5 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'  const users = await prisma.user.findMany();'}</span>{'\n'}
-          <span className="text-gray-500">{'  6 │ '}</span><span className="text-blue-400">Cursor    </span><span className="text-gray-600">│ 30m ago │ </span><span className="text-gray-300">{'  return users.filter(u => u.active);'}</span>{'\n'}
-          <span className="text-gray-500">{'  7 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'}'}</span>{'\n'}
-          <span className="text-gray-500">{'  8 │ '}</span><span className="text-gray-400">Human     </span><span className="text-gray-600">│ 2d ago  │ </span><span className="text-gray-300">{''}</span>{'\n'}
-          <span className="text-gray-500">{'  9 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'// retry with exponential backoff'}</span>{'\n'}
-          <span className="text-gray-500">{' 10 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'export async function fetchWithRetry(url: string) {'}</span>{'\n'}
-        </pre>
+        <div className="px-5 py-4 text-xs font-mono leading-relaxed overflow-x-auto whitespace-pre text-left">
+<span className="text-gray-500">{'  1 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{"import express from 'express';"}</span>{'\n'}
+<span className="text-gray-500">{'  2 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{"import { prisma } from './db';"}</span>{'\n'}
+<span className="text-gray-500">{'  3 │ '}</span><span className="text-gray-400">Human     </span><span className="text-gray-600">│ 2d ago  │ </span>{'\n'}
+<span className="text-gray-500">{'  4 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'export async function getUsers() {'}</span>{'\n'}
+<span className="text-gray-500">{'  5 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'  const users = await prisma.user.findMany();'}</span>{'\n'}
+<span className="text-gray-500">{'  6 │ '}</span><span className="text-blue-400">Cursor    </span><span className="text-gray-600">│ 30m ago │ </span><span className="text-gray-300">{'  return users.filter(u => u.active);'}</span>{'\n'}
+<span className="text-gray-500">{'  7 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'}'}</span>{'\n'}
+<span className="text-gray-500">{'  8 │ '}</span><span className="text-gray-400">Human     </span><span className="text-gray-600">│ 2d ago  │ </span>{'\n'}
+<span className="text-gray-500">{'  9 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'// retry with exponential backoff'}</span>{'\n'}
+<span className="text-gray-500">{' 10 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'export async function fetchWithRetry(url: string) {'}</span>
+        </div>
         <div className="px-5 py-3 border-t border-gray-800 flex items-center gap-4">
           <span className="text-xs text-gray-500">10 lines</span>
           <span className="text-xs"><span className="text-purple-400">●</span> Claude: 40%</span>
