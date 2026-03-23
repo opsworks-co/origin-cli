@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
-import type { TeamMember, Invitation } from '../api';
+import type { TeamMember } from '../api';
 import { timeAgo } from '../utils';
 
 const ROLE_COLORS: Record<string, string> = {
@@ -21,28 +21,30 @@ export default function Team() {
   const isAdmin = user?.role === 'ADMIN' || user?.role === 'OWNER';
 
   const [members, setMembers] = useState<TeamMember[]>([]);
-  const [invites, setInvites] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Invite modal state
-  const [showInvite, setShowInvite] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState('MEMBER');
-  const [inviteLink, setInviteLink] = useState('');
-  const [inviting, setInviting] = useState(false);
+  // Add member modal state
+  const [showAdd, setShowAdd] = useState(false);
+  const [addName, setAddName] = useState('');
+  const [addEmail, setAddEmail] = useState('');
+  const [addRole, setAddRole] = useState('MEMBER');
+  const [adding, setAdding] = useState(false);
+  const [generatedKey, setGeneratedKey] = useState('');
+
+  // Regenerate key modal state
+  const [regenKey, setRegenKey] = useState('');
+  const [regenMember, setRegenMember] = useState<TeamMember | null>(null);
 
   // Role edit state
   const [editingRole, setEditingRole] = useState<string | null>(null);
 
+  const [copied, setCopied] = useState(false);
+
   const loadData = async () => {
     try {
-      const [usersRes, invitesRes] = await Promise.all([
-        api.getUsers(),
-        isAdmin ? api.getInvites().catch(() => ({ invites: [] })) : Promise.resolve({ invites: [] }),
-      ]);
+      const usersRes = await api.getUsers();
       setMembers(usersRes.users);
-      setInvites(invitesRes.invites);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -52,19 +54,19 @@ export default function Team() {
 
   useEffect(() => { loadData(); }, []);
 
-  const handleInvite = async (e: React.FormEvent) => {
+  const handleAddMember = async (e: React.FormEvent) => {
     e.preventDefault();
-    setInviting(true);
-    setInviteLink('');
+    if (!addName.trim() || !addEmail.trim()) return;
+    setAdding(true);
+    setGeneratedKey('');
     try {
-      const res = await api.createInvite({ email: inviteEmail || undefined, role: inviteRole });
-      const baseUrl = window.location.origin;
-      setInviteLink(`${baseUrl}/invite/${res.token}`);
+      const res = await api.addMember({ name: addName.trim(), email: addEmail.trim(), role: addRole });
+      setGeneratedKey(res.apiKey);
       loadData();
     } catch (err: any) {
       setError(err.message);
     } finally {
-      setInviting(false);
+      setAdding(false);
     }
   };
 
@@ -88,9 +90,22 @@ export default function Team() {
     }
   };
 
-  const handleCancelInvite = async (id: string) => {
+  const handleRegenerateKey = async (member: TeamMember) => {
+    if (!confirm(`Regenerate API key for ${member.name}? Their current key will stop working immediately.`)) return;
     try {
-      await api.cancelInvite(id);
+      const res = await api.regenerateKey(member.id);
+      setRegenKey(res.apiKey);
+      setRegenMember(member);
+      loadData();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleRevokeKey = async (member: TeamMember) => {
+    if (!confirm(`Revoke all API keys for ${member.name}? They will no longer be able to access Origin.`)) return;
+    try {
+      await api.revokeKey(member.id);
       loadData();
     } catch (err: any) {
       setError(err.message);
@@ -99,6 +114,16 @@ export default function Team() {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const closeAddModal = () => {
+    setShowAdd(false);
+    setGeneratedKey('');
+    setAddName('');
+    setAddEmail('');
+    setAddRole('MEMBER');
   };
 
   return (
@@ -111,10 +136,10 @@ export default function Team() {
         </div>
         {isAdmin && (
           <button
-            onClick={() => { setShowInvite(true); setInviteLink(''); setInviteEmail(''); setInviteRole('MEMBER'); }}
+            onClick={() => { setShowAdd(true); setGeneratedKey(''); setAddName(''); setAddEmail(''); setAddRole('MEMBER'); }}
             className="btn-primary text-sm"
           >
-            + Invite Member
+            + Add Member
           </button>
         )}
       </div>
@@ -126,82 +151,108 @@ export default function Team() {
         </div>
       )}
 
-      {/* Invite Modal */}
-      {showInvite && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowInvite(false)}>
+      {/* Add Member Modal */}
+      {showAdd && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={closeAddModal}>
           <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-lg font-semibold mb-4">Invite Team Member</h2>
-            <form onSubmit={handleInvite} className="space-y-4">
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Email (optional)</label>
-                <input
-                  type="email"
-                  value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  placeholder="teammate@company.com"
-                  className="input w-full"
-                />
-                <p className="text-xs text-gray-600 mt-1">Leave blank to create a generic invite link</p>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">Role</label>
-                <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} className="input w-full">
-                  <option value="VIEWER">Viewer — read-only access</option>
-                  <option value="MEMBER">Member — can create sessions</option>
-                  <option value="ADMIN">Admin — can manage team & policies</option>
-                </select>
-              </div>
-              <button type="submit" disabled={inviting} className="btn-primary w-full text-sm">
-                {inviting ? 'Creating...' : 'Create Invite Link'}
-              </button>
-            </form>
-            {inviteLink && (
-              <div className="mt-4 p-3 bg-gray-800 rounded-lg">
-                <p className="text-xs text-gray-400 mb-2">Share this link with your teammate:</p>
-                <div className="flex items-center gap-2">
-                  <input type="text" readOnly value={inviteLink} className="input flex-1 text-xs font-mono" />
-                  <button onClick={() => copyToClipboard(inviteLink)} className="btn-secondary text-xs px-3 py-2 whitespace-nowrap">
-                    Copy
+            <h2 className="text-lg font-semibold mb-4">Add Team Member</h2>
+
+            {!generatedKey ? (
+              <form onSubmit={handleAddMember} className="space-y-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Name *</label>
+                  <input
+                    type="text"
+                    value={addName}
+                    onChange={(e) => setAddName(e.target.value)}
+                    placeholder="Jane Smith"
+                    className="input w-full"
+                    required
+                    autoFocus
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Email *</label>
+                  <input
+                    type="email"
+                    value={addEmail}
+                    onChange={(e) => setAddEmail(e.target.value)}
+                    placeholder="jane@company.com"
+                    className="input w-full"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Role</label>
+                  <select value={addRole} onChange={(e) => setAddRole(e.target.value)} className="input w-full">
+                    <option value="VIEWER">Viewer — read-only access</option>
+                    <option value="MEMBER">Member — can create sessions</option>
+                    <option value="ADMIN">Admin — can manage team & policies</option>
+                  </select>
+                </div>
+                <button type="submit" disabled={adding} className="btn-primary w-full text-sm">
+                  {adding ? 'Creating...' : 'Add Member'}
+                </button>
+              </form>
+            ) : (
+              <div className="space-y-4">
+                <div className="p-3 bg-green-900/20 border border-green-800 rounded-lg">
+                  <p className="text-sm text-green-400 font-medium mb-1">Member created successfully!</p>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-2">API Key</label>
+                  <div className="p-3 bg-gray-800 rounded-lg font-mono text-sm text-gray-200 break-all select-all">
+                    {generatedKey}
+                  </div>
+                  <button
+                    onClick={() => copyToClipboard(generatedKey)}
+                    className="btn-secondary text-xs mt-2 w-full"
+                  >
+                    {copied ? 'Copied!' : 'Copy to Clipboard'}
                   </button>
                 </div>
-                <p className="text-xs text-gray-600 mt-2">Expires in 7 days</p>
+                <div className="p-3 bg-amber-900/20 border border-amber-800/50 rounded-lg">
+                  <p className="text-xs text-amber-400">
+                    Give this key to the developer. They run <code className="bg-gray-800 px-1.5 py-0.5 rounded text-amber-300">origin login</code> and paste it. This key is shown only once.
+                  </p>
+                </div>
               </div>
             )}
-            <button onClick={() => setShowInvite(false)} className="mt-3 text-sm text-gray-500 hover:text-gray-300 w-full text-center">
+
+            <button onClick={closeAddModal} className="mt-3 text-sm text-gray-500 hover:text-gray-300 w-full text-center">
               Close
             </button>
           </div>
         </div>
       )}
 
-      {/* Pending Invites */}
-      {isAdmin && invites.length > 0 && (
-        <div className="card p-4">
-          <h3 className="text-sm font-medium text-gray-400 mb-3">Pending Invites ({invites.length})</h3>
-          <div className="space-y-2">
-            {invites.map((inv) => (
-              <div key={inv.id} className="flex items-center justify-between bg-gray-800/30 rounded-lg px-4 py-2">
-                <div className="flex items-center gap-3">
-                  <span className="text-sm text-gray-300">{inv.email || 'Open link'}</span>
-                  {roleBadge(inv.role)}
-                  <span className="text-xs text-gray-600">expires {timeAgo(inv.expiresAt).replace(' ago', '')}</span>
+      {/* Regenerated Key Modal */}
+      {regenKey && regenMember && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => { setRegenKey(''); setRegenMember(null); }}>
+          <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold mb-4">New API Key for {regenMember.name}</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs text-gray-400 mb-2">API Key</label>
+                <div className="p-3 bg-gray-800 rounded-lg font-mono text-sm text-gray-200 break-all select-all">
+                  {regenKey}
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => copyToClipboard(`${window.location.origin}/invite/${inv.token}`)}
-                    className="text-xs text-indigo-400 hover:text-indigo-300"
-                  >
-                    Copy link
-                  </button>
-                  <button
-                    onClick={() => handleCancelInvite(inv.id)}
-                    className="text-xs text-red-400 hover:text-red-300"
-                  >
-                    Cancel
-                  </button>
-                </div>
+                <button
+                  onClick={() => copyToClipboard(regenKey)}
+                  className="btn-secondary text-xs mt-2 w-full"
+                >
+                  {copied ? 'Copied!' : 'Copy to Clipboard'}
+                </button>
               </div>
-            ))}
+              <div className="p-3 bg-amber-900/20 border border-amber-800/50 rounded-lg">
+                <p className="text-xs text-amber-400">
+                  Give this key to the developer. They run <code className="bg-gray-800 px-1.5 py-0.5 rounded text-amber-300">origin login</code> and paste it. This key is shown only once.
+                </p>
+              </div>
+            </div>
+            <button onClick={() => { setRegenKey(''); setRegenMember(null); }} className="mt-3 text-sm text-gray-500 hover:text-gray-300 w-full text-center">
+              Close
+            </button>
           </div>
         </div>
       )}
@@ -214,6 +265,7 @@ export default function Team() {
               <tr className="text-left text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
                 <th className="px-6 py-3 font-medium">Member</th>
                 <th className="px-6 py-3 font-medium">Role</th>
+                <th className="px-6 py-3 font-medium">API Key</th>
                 <th className="px-6 py-3 font-medium text-right">Sessions</th>
                 <th className="px-6 py-3 font-medium text-right">Reviews</th>
                 <th className="px-6 py-3 font-medium text-right">Cost</th>
@@ -225,13 +277,13 @@ export default function Team() {
             <tbody className="divide-y divide-gray-800/50">
               {loading ? (
                 <tr>
-                  <td colSpan={isAdmin ? 8 : 7} className="px-6 py-12 text-center">
+                  <td colSpan={isAdmin ? 9 : 8} className="px-6 py-12 text-center">
                     <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-500 mx-auto" />
                   </td>
                 </tr>
               ) : members.length === 0 ? (
                 <tr>
-                  <td colSpan={isAdmin ? 8 : 7} className="px-6 py-12 text-center text-gray-500">
+                  <td colSpan={isAdmin ? 9 : 8} className="px-6 py-12 text-center text-gray-500">
                     No team members found
                   </td>
                 </tr>
@@ -280,6 +332,15 @@ export default function Team() {
                         </span>
                       )}
                     </td>
+                    <td className="px-6 py-3">
+                      {m.keyPrefix ? (
+                        <code className="text-xs font-mono text-gray-400 bg-gray-800 px-2 py-0.5 rounded">
+                          {m.keyPrefix}...
+                        </code>
+                      ) : (
+                        <span className="text-xs text-gray-600">None</span>
+                      )}
+                    </td>
                     <td className="px-6 py-3 text-right text-gray-400">{m.sessions}</td>
                     <td className="px-6 py-3 text-right text-gray-400">{m.reviews}</td>
                     <td className="px-6 py-3 text-right text-gray-300">${m.totalCost.toFixed(2)}</td>
@@ -290,13 +351,29 @@ export default function Team() {
                     {isAdmin && (
                       <td className="px-6 py-3 text-right">
                         {m.id !== user?.id && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleRemove(m); }}
-                            className="text-xs text-red-400/60 hover:text-red-400 transition-colors"
-                            title="Remove member"
-                          >
-                            Remove
-                          </button>
+                          <div className="flex items-center justify-end gap-3">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleRegenerateKey(m); }}
+                              className="text-xs text-indigo-400/70 hover:text-indigo-400 transition-colors"
+                              title="Regenerate API key"
+                            >
+                              Regenerate Key
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleRevokeKey(m); }}
+                              className="text-xs text-amber-400/70 hover:text-amber-400 transition-colors"
+                              title="Revoke API key"
+                            >
+                              Revoke Key
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleRemove(m); }}
+                              className="text-xs text-red-400/60 hover:text-red-400 transition-colors"
+                              title="Remove member"
+                            >
+                              Remove
+                            </button>
+                          </div>
                         )}
                       </td>
                     )}

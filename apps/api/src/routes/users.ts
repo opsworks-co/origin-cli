@@ -21,6 +21,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         email: true,
         role: true,
         createdAt: true,
+        apiKeys: {
+          select: { keyPrefix: true },
+          take: 1,
+          orderBy: { createdAt: 'desc' },
+        },
         _count: {
           select: {
             reviews: true,
@@ -62,6 +67,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         totalCost: parseFloat((costs?._sum.costUsd || 0).toFixed(2)),
         linesAdded: costs?._sum.linesAdded || 0,
         lastActive: lastSessionMap.get(u.id) || u.createdAt,
+        keyPrefix: u.apiKeys[0]?.keyPrefix || null,
       };
     });
 
@@ -283,7 +289,224 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
   }
 });
 
-// ── Invitations ─────────────────────────────────────────────
+// ── Add Member (direct creation with API key) ──────────────
+
+// POST /add-member — create user + API key directly
+router.post('/add-member', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const { name, email, role, repoIds, agentIds } = req.body;
+
+    if (!name || !email) {
+      return res.status(400).json({ error: 'Name and email are required' });
+    }
+
+    const memberRole = (role || 'MEMBER').toUpperCase();
+    if (!['VIEWER', 'MEMBER', 'ADMIN'].includes(memberRole)) {
+      return res.status(400).json({ error: 'Invalid role. Must be VIEWER, MEMBER, or ADMIN.' });
+    }
+
+    // Check if email already exists in org
+    const existing = await prisma.user.findFirst({ where: { email, orgId } });
+    if (existing) {
+      return res.status(409).json({ error: 'User with this email is already a member' });
+    }
+
+    // Check if email is globally taken
+    const globalExisting = await prisma.user.findUnique({ where: { email } });
+    if (globalExisting) {
+      return res.status(409).json({ error: 'A user with this email already exists' });
+    }
+
+    // Validate repoIds belong to this org
+    if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
+      const validRepos = await prisma.repo.findMany({
+        where: { orgId, id: { in: repoIds } },
+        select: { id: true },
+      });
+      if (validRepos.length !== repoIds.length) {
+        return res.status(400).json({ error: 'One or more repos do not belong to your organization' });
+      }
+    }
+
+    // Validate agentIds belong to this org
+    if (agentIds && Array.isArray(agentIds) && agentIds.length > 0) {
+      const validAgents = await prisma.agent.findMany({
+        where: { orgId, id: { in: agentIds } },
+        select: { id: true },
+      });
+      if (validAgents.length !== agentIds.length) {
+        return res.status(400).json({ error: 'One or more agents do not belong to your organization' });
+      }
+    }
+
+    // Create user (no password needed — authenticates via API key only)
+    const placeholderHash = crypto.randomBytes(32).toString('hex');
+    const newUser = await prisma.user.create({
+      data: {
+        orgId,
+        name,
+        email,
+        passwordHash: placeholderHash,
+        role: memberRole,
+      },
+    });
+
+    // Generate API key linked to the new user
+    const rawKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
+    const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
+    const keyPrefix = rawKey.slice(0, 14);
+
+    // If no scopes provided, scope to ALL repos + ALL agents
+    let repoScopeIds: string[] = [];
+    let agentScopeIds: string[] = [];
+
+    if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
+      repoScopeIds = repoIds;
+    } else {
+      const allRepos = await prisma.repo.findMany({ where: { orgId }, select: { id: true } });
+      repoScopeIds = allRepos.map((r) => r.id);
+    }
+
+    if (agentIds && Array.isArray(agentIds) && agentIds.length > 0) {
+      agentScopeIds = agentIds;
+    } else {
+      const allAgents = await prisma.agent.findMany({ where: { orgId }, select: { id: true } });
+      agentScopeIds = allAgents.map((a) => a.id);
+    }
+
+    await prisma.apiKey.create({
+      data: {
+        orgId,
+        userId: newUser.id,
+        name: `${name}'s key`,
+        keyHash,
+        keyPrefix,
+        role: null, // Uses linked user's role
+        repoScopes: {
+          create: repoScopeIds.map((repoId: string) => ({ repoId })),
+        },
+        agentScopes: {
+          create: agentScopeIds.map((agentId: string) => ({ agentId })),
+        },
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        userId: req.user!.id,
+        action: 'MEMBER_ADDED',
+        resource: newUser.id,
+        metadata: JSON.stringify({ email, name, role: memberRole }),
+      },
+    });
+
+    res.status(201).json({
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+        createdAt: newUser.createdAt,
+      },
+      apiKey: rawKey,
+      keyPrefix,
+    });
+  } catch (err) {
+    console.error('Add member error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/regenerate-key — generate new API key, invalidate old ones
+router.post('/:id/regenerate-key', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const targetId = req.params.id as string;
+
+    const target = await prisma.user.findFirst({ where: { id: targetId, orgId } });
+    if (!target) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Delete all existing keys for this user
+    await prisma.apiKey.deleteMany({ where: { userId: targetId, orgId } });
+
+    // Generate new key
+    const rawKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
+    const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
+    const keyPrefix = rawKey.slice(0, 14);
+
+    // Scope to all repos + all agents
+    const allRepos = await prisma.repo.findMany({ where: { orgId }, select: { id: true } });
+    const allAgents = await prisma.agent.findMany({ where: { orgId }, select: { id: true } });
+
+    await prisma.apiKey.create({
+      data: {
+        orgId,
+        userId: targetId,
+        name: `${target.name}'s key`,
+        keyHash,
+        keyPrefix,
+        role: null,
+        repoScopes: {
+          create: allRepos.map((r) => ({ repoId: r.id })),
+        },
+        agentScopes: {
+          create: allAgents.map((a) => ({ agentId: a.id })),
+        },
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        userId: req.user!.id,
+        action: 'MEMBER_KEY_REGENERATED',
+        resource: targetId,
+        metadata: JSON.stringify({ email: target.email, name: target.name }),
+      },
+    });
+
+    res.json({ apiKey: rawKey, keyPrefix });
+  } catch (err) {
+    console.error('Regenerate key error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/revoke-key — delete all API keys for a user
+router.post('/:id/revoke-key', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.user!.orgId;
+    const targetId = req.params.id as string;
+
+    const target = await prisma.user.findFirst({ where: { id: targetId, orgId } });
+    if (!target) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    await prisma.apiKey.deleteMany({ where: { userId: targetId, orgId } });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId,
+        userId: req.user!.id,
+        action: 'MEMBER_KEY_REVOKED',
+        resource: targetId,
+        metadata: JSON.stringify({ email: target.email, name: target.name }),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Revoke key error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Invitations (legacy) ─────────────────────────────────────
 
 // POST /invite — create invitation link
 router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {

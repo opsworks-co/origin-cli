@@ -1112,6 +1112,7 @@ export interface TeamMember {
   totalCost: number;
   linesAdded: number;
   lastActive: string;
+  keyPrefix: string | null;
 }
 
 export interface UserDetail {
@@ -1174,6 +1175,18 @@ export function updateUserRole(id: string, role: string) {
 
 export function removeUser(id: string) {
   return request<{ success: boolean }>(`/api/users/${id}`, { method: 'DELETE' });
+}
+
+export function addMember(data: { name: string; email: string; role?: string; repoIds?: string[]; agentIds?: string[] }) {
+  return request<{ user: { id: string; name: string; email: string; role: string; createdAt: string }; apiKey: string; keyPrefix: string }>('/api/users/add-member', { method: 'POST', body: JSON.stringify(data) });
+}
+
+export function regenerateKey(id: string) {
+  return request<{ apiKey: string; keyPrefix: string }>(`/api/users/${id}/regenerate-key`, { method: 'POST' });
+}
+
+export function revokeKey(id: string) {
+  return request<{ success: boolean }>(`/api/users/${id}/revoke-key`, { method: 'POST' });
 }
 
 export interface Invitation {
