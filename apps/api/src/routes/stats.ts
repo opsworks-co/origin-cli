@@ -10,9 +10,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
 
-    // Get all repo IDs for this org
+    // Get repo IDs — optionally filtered by repoName
+    const repoWhere: any = { orgId };
+    if (req.query.repoName) {
+      repoWhere.name = req.query.repoName as string;
+    }
     const repos = await prisma.repo.findMany({
-      where: { orgId },
+      where: repoWhere,
       select: { id: true, name: true },
     });
     const repoIds = repos.map((r) => r.id);
