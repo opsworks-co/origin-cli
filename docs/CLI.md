@@ -117,6 +117,31 @@ Shows: model, repo, commit, agent, tokens, cost, duration, tool calls, lines cha
 
 ---
 
+### `origin share <sessionId>`
+
+Share a session — create a public link or copy a markdown bundle to clipboard.
+
+```bash
+origin share abc123             # Copy markdown bundle to clipboard
+origin share abc123 --public    # Create public link (getorigin.io/s/<slug>)
+origin share abc123 --prompt 2  # Share a specific prompt only
+origin share abc123 --output session.md  # Save to file
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--public` | Create a public share URL (requires platform connection) |
+| `--prompt <n>` | Include only the specified prompt index |
+| `--output <file>` | Write markdown bundle to file instead of clipboard |
+
+**Public share** (connected mode) returns a URL like `getorigin.io/s/x7k2m9` — full session replay with prompts, files changed, cost, model, and diff. One link, no login required.
+
+**Local share** (standalone mode) generates a markdown bundle with session metadata, prompts, and changes — copied to clipboard for pasting into Slack, GitHub issues, or docs.
+
+---
+
 ### `origin review <sessionId>`
 
 Approve, reject, or flag a coding session.
