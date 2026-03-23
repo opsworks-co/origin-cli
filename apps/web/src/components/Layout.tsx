@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { request } from '../api';
 import NotificationBell from './NotificationBell';
 import ChatWidget from './ChatWidget';
 import {
@@ -8,6 +9,7 @@ import {
   GitFork,
   Bot,
   Shield,
+  ShieldAlert,
   Play,
   GitPullRequest,
   Server,
@@ -32,10 +34,19 @@ const NAV_ITEMS = [
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
+const ADMIN_NAV_ITEM = { to: '/admin', label: 'Admin', icon: ShieldAlert };
+
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+
+  useEffect(() => {
+    request<{ isSuperAdmin: boolean }>('/api/admin/check')
+      .then((res) => setIsSuperAdmin(res.isSuperAdmin))
+      .catch(() => setIsSuperAdmin(false));
+  }, [user?.id]);
 
   const handleLogout = () => {
     logout();
@@ -105,6 +116,23 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               )}
             </NavLink>
           ))}
+          {isSuperAdmin && (
+            <>
+              <div className="border-t border-white/[0.06] my-2" />
+              <NavLink
+                to={ADMIN_NAV_ITEM.to}
+                className={linkClasses}
+                onClick={() => setSidebarOpen(false)}
+              >
+                {({ isActive }) => (
+                  <>
+                    <ADMIN_NAV_ITEM.icon className={iconClasses(isActive)} />
+                    {ADMIN_NAV_ITEM.label}
+                  </>
+                )}
+              </NavLink>
+            </>
+          )}
         </nav>
 
         {/* User footer */}

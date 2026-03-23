@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
-import { getSpendByModel, getSpendByUser } from '../services/budget.js';
+import { getSpendByUser } from '../services/budget.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -11,7 +11,7 @@ interface AuthRequest extends Request {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/budget/agents — per-agent spend + limits for current month
+// GET /api/budget/agents — per-agent spend + limits (grouped by Origin agent, not model)
 // ---------------------------------------------------------------------------
 router.get('/agents', async (req: AuthRequest, res: Response) => {
   try {
@@ -19,31 +19,54 @@ router.get('/agents', async (req: AuthRequest, res: Response) => {
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // Get all agents for this org
+    // Get all registered agents for this org
     const agents = await prisma.agent.findMany({
       where: { orgId },
-      select: { id: true, name: true, slug: true, maxCostPerSession: true },
+      select: { id: true, name: true, slug: true },
     });
+    const agentMap = new Map(agents.map((a) => [a.id, a]));
 
-    // Get per-agent monthly spend
+    // Get ALL sessions this month (with and without agentId)
     const sessions = await prisma.codingSession.findMany({
       where: {
         createdAt: { gte: startOfMonth },
         commit: { repo: { orgId } },
-        agentId: { not: null },
       },
-      select: { agentId: true, costUsd: true },
+      select: { agentId: true, model: true, costUsd: true },
     });
 
+    // Group by registered agent. For sessions without agentId, infer agent from model name.
     const spendByAgent: Record<string, { cost: number; sessions: number }> = {};
+
     for (const s of sessions) {
-      if (!s.agentId) continue;
-      if (!spendByAgent[s.agentId]) spendByAgent[s.agentId] = { cost: 0, sessions: 0 };
-      spendByAgent[s.agentId].cost += s.costUsd;
-      spendByAgent[s.agentId].sessions++;
+      let agentId = s.agentId;
+
+      // If no agentId, try to map model → agent
+      if (!agentId) {
+        const model = (s.model || '').toLowerCase();
+        const matched = agents.find((a) => {
+          const slug = a.slug.toLowerCase();
+          const name = a.name.toLowerCase();
+          return model.includes(slug) || model.includes(name)
+            || (slug === 'codex' && model.includes('codex'))
+            || (slug === 'claude' && (model.includes('claude') || model.includes('opus') || model.includes('sonnet') || model.includes('haiku')))
+            || (slug === 'gemini' && (model.includes('gemini') || model.includes('gemini-pro') || model.includes('flash')))
+            || (slug === 'cursor' && (model === 'cursor' || model === 'default'));
+        });
+        if (matched) agentId = matched.id;
+      }
+
+      if (!agentId) {
+        // Last resort: group as "Other"
+        agentId = '__other__';
+      }
+
+      if (!spendByAgent[agentId]) spendByAgent[agentId] = { cost: 0, sessions: 0 };
+      spendByAgent[agentId].cost += s.costUsd;
+      spendByAgent[agentId].sessions++;
     }
 
-    // Load per-agent monthly limits from IntegrationConfig
+    // Load per-agent monthly limits
     const limitsConfig = await prisma.integrationConfig.findFirst({
       where: { orgId, provider: 'budget_agent_limits' },
     });
@@ -51,6 +74,7 @@ router.get('/agents', async (req: AuthRequest, res: Response) => {
       ? JSON.parse(limitsConfig.settings || '{}')
       : {};
 
+    // Build result: one row per registered agent
     const result = agents.map((a) => ({
       agentId: a.id,
       agentName: a.name,
@@ -60,19 +84,16 @@ router.get('/agents', async (req: AuthRequest, res: Response) => {
       sessions: spendByAgent[a.id]?.sessions || 0,
     }));
 
-    // Also include agents seen in sessions but not registered
-    const modelSpend = await getSpendByModel(orgId);
-    for (const m of modelSpend) {
-      if (!result.find((r) => r.slug === m.model || r.agentName === m.model)) {
-        result.push({
-          agentId: m.model,
-          agentName: m.model,
-          slug: m.model,
-          monthlyLimit: agentLimits[m.model] || 0,
-          currentSpend: m.cost,
-          sessions: m.sessions,
-        });
-      }
+    // Add "Other" bucket if there are unmatched sessions
+    if (spendByAgent['__other__']) {
+      result.push({
+        agentId: '__other__',
+        agentName: 'Other',
+        slug: 'other',
+        monthlyLimit: 0,
+        currentSpend: spendByAgent['__other__'].cost,
+        sessions: spendByAgent['__other__'].sessions,
+      });
     }
 
     res.json(result);

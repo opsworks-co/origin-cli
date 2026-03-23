@@ -1,37 +1,63 @@
 # Origin v2 — Roadmap
 
-## 🔥 High Priority (Core Value)
+## Completed
 
-### 1. Real GitHub PR Integration
-Right now the PR workflow is built but the "View in Origin" link still points to localhost. We need the GitHub App/webhook to actually post status checks and comments on real PRs with the correct production URL.
+### ~~1. Real GitHub PR Integration~~ ✅
+GitHub App deployed. Status checks and PR comments posted with production URLs. Branch protection supported.
 
-### 2. Team Dashboard / Multi-user View
-Right now it's single-user. Engineering leads need to see all developers' sessions, costs, and compliance across the team. Aggregate views: cost per dev, sessions per day, model usage breakdown.
+### ~~2. Alerts & Notifications~~ ✅
+Slack Incoming Webhook integration with event toggles. Policy violations, flags, reviews, budget alerts.
 
-### 3. Alerts & Notifications
-Policy violations should trigger Slack/email alerts. "Developer X touched restricted file", "Cost limit exceeded", "Unreviewed AI code merged."
+### ~~3. AI Code Quality Scoring~~ ✅
+AI auto-review with quality score (0-100), risk level, concerns, suggestions, and category breakdown.
 
-## 🟡 Medium Priority (Differentiation)
+### ~~4. Content Filtering & Pre-commit Hooks~~ ✅
+CONTENT_FILTER and COMMIT_MESSAGE policy types enforced at git pre-commit hook level. Blocks commits before AI agent proceeds.
 
-### 4. AI Code Quality Scoring
-Analyze AI-generated diffs for common issues (security vulnerabilities, test coverage gaps, code smell). Give each session a quality score.
+### ~~5. Security Rules Toggle~~ ✅
+Per-agent toggle that injects `<security-rules>` block into system prompt. Default rules cover secrets, credentials, .env files. Custom rules supported.
 
-### 5. Prompt Library / Templates
-Let teams create approved prompt templates. "Use this prompt for auth changes", "Use this for database migrations." Track which templates produce better outcomes.
+### ~~6. Natural Language Policy Creation~~ ✅
+Create policies from plain English descriptions. AI parses intent into correct policy type, conditions, and actions.
 
-### 6. SSO / SAML Auth
-Enterprise customers need it. Right now it's API key auth only.
+---
 
-### 7. Cost Budgets & Forecasting
+## High Priority (Next Up)
+
+### 1. Team Dashboard / Multi-user View
+Engineering leads need to see all developers' sessions, costs, and compliance across the team. Aggregate views: cost per dev, sessions per day, model usage breakdown.
+
+### 2. SSO / SAML Auth
+Enterprise customers need it. SAML 2.0 IdP integration (Okta, Azure AD, Google Workspace). Auto-provisioning users from IdP groups.
+
+### 3. Compliance Reports (PDF Export)
+Weekly/monthly automated reports for CISOs. AI authorship %, policy compliance rate, cost trends. PDF generation + email delivery.
+
+---
+
+## Medium Priority
+
+### 4. Cost Budgets & Forecasting
 Set monthly budgets per team/developer. Show burn rate, projected monthly cost, alerts when approaching limits.
 
-## 🟢 Nice to Have
+### 5. Prompt Library / Templates
+Let teams create approved prompt templates. Track which templates produce better outcomes.
 
-### 8. VS Code Extension
-Dashboard widget inside the editor instead of a separate web app.
+### 6. Multi-Org Support
+Org switcher in UI, super-admin role, consolidated billing.
 
-### 9. Diff Viewer
-Show the actual AI-generated diff inline in the session view, not just file names.
+---
 
-### 10. Export & Reporting
-PDF/CSV compliance reports for auditors. "Here's everything AI generated in Q1."
+## Nice to Have
+
+### 7. VS Code Extension
+Dashboard widget inside the editor.
+
+### 8. Diff Viewer Improvements
+Inline code review, comments on AI-generated lines, side-by-side view.
+
+### 9. On-Premise / Self-Hosted
+Docker Compose one-liner, Helm chart, PostgreSQL support.
+
+### 10. Custom Webhooks / Event Bus
+Webhooks for Origin events. Zapier/n8n integration.

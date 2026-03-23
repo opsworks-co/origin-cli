@@ -38,6 +38,7 @@ import ComplianceDashboard from './pages/Compliance';
 import PublicPolicies from './pages/PublicPolicies';
 import CLI from './pages/CLI';
 import SharedSession from './pages/SharedSession';
+import Admin from './pages/Admin';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -271,6 +272,17 @@ export default function App() {
       <Route
         path="/models"
         element={<Navigate to="/settings?tab=models" replace />}
+      />
+
+      <Route
+        path="/admin"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Admin />
+            </Layout>
+          </ProtectedRoute>
+        }
       />
 
       {/* Catch-all */}
