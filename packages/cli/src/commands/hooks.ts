@@ -869,6 +869,9 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         } catch { /* no remote — that's fine */ }
 
         let sessionId: string;
+        let agentSystemPrompt: string | undefined;
+        let activePolicies: string[] | undefined;
+        let enforcementRules: any[] | undefined;
         if (isConnectedMode() && autoConfig) {
           const result = await api.startSession({
             machineId: autoAgentConfig.machineId,
@@ -880,6 +883,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             branch: branch || undefined,
           });
           sessionId = result.sessionId;
+          agentSystemPrompt = result.agentSystemPrompt || undefined;
+          activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
+          enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+          debugLog('user-prompt-submit', 'api returned policies', { sessionId, policiesCount: activePolicies?.length || 0, rulesCount: enforcementRules?.length || 0 });
         } else {
           sessionId = `local-${crypto.randomUUID()}`;
         }
@@ -896,6 +903,9 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           headShaAtStart: getHeadSha(hookCwd),
           branch,
           sessionTag: autoTag,
+          agentSystemPrompt,
+          activePolicies,
+          enforcementRules,
         };
         saveSessionState(state, repoPath, autoTag);
 
