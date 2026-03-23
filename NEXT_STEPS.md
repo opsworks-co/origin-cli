@@ -6,7 +6,7 @@ Everything below is live at **https://getorigin.io**
 
 ### Core Platform
 - [x] Session tracking (start/update/end via CLI hooks + MCP)
-- [x] Policy engine (MODEL_ALLOWLIST, FILE_RESTRICTION, REQUIRE_REVIEW, COST_LIMIT)
+- [x] Policy engine (MODEL_ALLOWLIST, FILE_RESTRICTION, REQUIRE_REVIEW, COST_LIMIT, CONTENT_FILTER, COMMIT_MESSAGE)
 - [x] GitHub integration (webhooks, status checks, PR comments)
 - [x] **GitHub App** — one-click install, bot identity on checks, auto-webhooks, token auto-refresh
 - [x] **Slack notifications** — real-time alerts for violations, reviews, budget via Incoming Webhooks
@@ -21,6 +21,11 @@ Everything below is live at **https://getorigin.io**
 - [x] CLI (24 commands) + MCP server (16 tools)
 - [x] Repo archiving (soft delete)
 - [x] Org settings (editable name, slug)
+- [x] **Security Rules toggle** — per-agent, injects `<security-rules>` into system prompt (default OFF)
+- [x] **CONTENT_FILTER policies** — block commits by diff content pattern (enforced at git pre-commit hook)
+- [x] **COMMIT_MESSAGE policies** — validate commit message format (enforced at git pre-commit hook)
+- [x] **Natural language policy creation** — describe policies in plain English, AI generates correct type/conditions
+- [x] **Pre-commit hook policy enforcement** — `origin hooks git-pre-commit` fetches policies from API and blocks commits
 
 ### Analytics & Insights
 - [x] **Leaderboard** — rank team members by sessions, lines, cost, quality score with activity heatmaps
@@ -195,7 +200,7 @@ Completed. CLI now supports: Claude Code, Cursor, Gemini, Windsurf, and Aider. A
 | Resource | URL |
 |----------|-----|
 | Production | https://getorigin.io |
-| GitHub Repo | https://github.com/dolobanko/origin-v2 |
+| GitHub Repo | https://github.com/dolobanko/origin |
 | API Docs | https://getorigin.io/docs (select "API Reference") |
 | PR Checks | https://getorigin.io/pull-requests |
 

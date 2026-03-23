@@ -125,12 +125,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    const rangeFrom = req.query.from
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+    let rangeFrom = req.query.from
       ? new Date(req.query.from as string)
       : thirtyDaysAgo;
-    const rangeTo = req.query.to
+    if (isNaN(rangeFrom.getTime()) || rangeFrom < oneYearAgo) rangeFrom = thirtyDaysAgo;
+
+    let rangeTo = req.query.to
       ? new Date(req.query.to as string)
       : new Date();
+    if (isNaN(rangeTo.getTime()) || rangeTo > new Date()) rangeTo = new Date();
 
     const recentSessions = await prisma.codingSession.findMany({
       where: {

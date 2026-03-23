@@ -142,20 +142,24 @@ export function getStatePath(cwd?: string, sessionTag?: string): string {
   const effectiveCwd = cwd || process.cwd();
   const cwdHash = crypto.createHash('md5').update(effectiveCwd).digest('hex').slice(0, 12);
   const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
-  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
   const basename = sessionTag ? `${cwdHash}-${sessionTag}.json` : `${cwdHash}.json`;
   return path.join(sessionsDir, basename);
 }
 
 export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string): void {
   const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
 }
 
 export function loadSessionState(cwd?: string, sessionTag?: string): SessionState | null {
   const statePath = getStatePath(cwd, sessionTag);
   try {
-    return JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    const parsed = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    if (!parsed || typeof parsed !== 'object' || !parsed.sessionId || !parsed.claudeSessionId) {
+      return null;
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -189,6 +193,7 @@ export function listActiveSessions(cwd?: string): SessionState[] {
         if (entry.startsWith('origin-session') && entry.endsWith('.json')) {
           try {
             const state = JSON.parse(fs.readFileSync(path.join(resolvedGitDir, entry), 'utf-8'));
+            if (!state || typeof state !== 'object' || !state.sessionId) continue;
             // Extract sessionTag from filename: origin-session-TAG.json or origin-session.json
             if (!state.sessionTag) {
               const tagMatch = entry.match(/^origin-session-(.+)\.json$/);
@@ -212,6 +217,7 @@ export function listActiveSessions(cwd?: string): SessionState[] {
       if (entry.startsWith(cwdHash) && entry.endsWith('.json')) {
         try {
           const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
+          if (!state || typeof state !== 'object' || !state.sessionId) continue;
           sessions.push(state);
         } catch { /* skip */ }
       }
@@ -242,7 +248,7 @@ export function findSessionByClaudeId(claudeSessionId: string, cwd?: string): Se
 
 function getHeartbeatPidFile(sessionId: string): string {
   const dir = path.join(os.homedir(), '.origin', 'heartbeats');
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return path.join(dir, `${sessionId}.pid`);
 }
 

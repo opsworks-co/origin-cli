@@ -598,7 +598,7 @@ export function buildSessionSummaryComment(
     `📊 [View in Origin](${originBaseUrl}/dashboard)`,
     '',
     '---',
-    '*Powered by [Origin](https://github.com/dolobanko/origin-v2) — AI Coding Agent Governance*',
+    '*Powered by [Origin](https://github.com/dolobanko/origin) — AI Coding Agent Governance*',
   );
 
   return parts.join('\n');

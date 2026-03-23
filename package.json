@@ -1,5 +1,5 @@
 {
-  "name": "origin-v2",
+  "name": "origin",
   "private": true,
   "scripts": {
     "dev": "bash dev.sh",

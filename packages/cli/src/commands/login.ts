@@ -51,7 +51,7 @@ export async function loginCommand() {
 
     console.log(chalk.green('✓ Connected to Origin'));
     console.log(chalk.gray(`  Organization: ${data.orgName || 'Unknown'}`));
-    console.log(chalk.gray(`  API Key: ${data.apiKeyName || key.slice(0, 12) + '...'}`));
+    console.log(chalk.gray(`  API Key: ${data.apiKeyName || key.slice(0, 4) + '••••••••'}`));
     console.log(chalk.gray(`  Agents: ${data.agentCount || 0} configured`));
     console.log(chalk.gray(`  Repos: ${data.repoCount || 0} registered`));
     if (data.repoScopes?.length === 0) {

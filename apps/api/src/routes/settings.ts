@@ -458,7 +458,8 @@ router.post('/chat/test', requireRole('ADMIN'), async (req: AuthRequest, res: Re
 
     res.json({ success: true });
   } catch (err: any) {
-    res.json({ success: false, error: err.message });
+    console.error('Settings error:', err);
+    res.json({ success: false, error: 'Internal server error' });
   }
 });
 

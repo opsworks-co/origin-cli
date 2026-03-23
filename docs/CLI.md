@@ -8,14 +8,14 @@ The `origin` CLI gives you full command-line access to the Origin platform — m
 
 ```bash
 # From the repo:
-cd /path/to/origin-v2/packages/cli
+cd /path/to/origin/packages/cli
 pnpm install && pnpm build
 
 # Run:
 node dist/index.js <command>
 
 # Or alias it:
-alias origin="node /path/to/origin-v2/packages/cli/dist/index.js"
+alias origin="node /path/to/origin/packages/cli/dist/index.js"
 ```
 
 ---

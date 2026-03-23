@@ -27,7 +27,7 @@ The Origin MCP server runs inside Claude Code and Cursor. It gives AI agents ful
 ### Build the MCP server
 
 ```bash
-cd /path/to/origin-v2/packages/mcp-server
+cd /path/to/origin/packages/mcp-server
 pnpm install && pnpm build
 ```
 
@@ -40,7 +40,7 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "origin": {
       "command": "node",
-      "args": ["/path/to/origin-v2/packages/mcp-server/dist/index.js"],
+      "args": ["/path/to/origin/packages/mcp-server/dist/index.js"],
       "env": {
         "ORIGIN_API_URL": "http://localhost:4002",
         "ORIGIN_API_KEY": "org_sk_your_key_here"
@@ -61,7 +61,7 @@ Add to `.cursor/mcp.json` in your repo root:
   "mcpServers": {
     "origin": {
       "command": "node",
-      "args": ["/path/to/origin-v2/packages/mcp-server/dist/index.js"],
+      "args": ["/path/to/origin/packages/mcp-server/dist/index.js"],
       "env": {
         "ORIGIN_API_URL": "http://localhost:4002",
         "ORIGIN_API_KEY": "org_sk_your_key_here"

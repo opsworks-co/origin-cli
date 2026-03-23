@@ -56,6 +56,9 @@ function debugLog(event: string, message: string, data?: any): void {
 
 function getCursorModelFromDb(conversationId: string): string | null {
   try {
+    // Validate conversationId to prevent SQL injection via shell command
+    if (!/^[a-zA-Z0-9_-]+$/.test(conversationId)) return null;
+
     const dbPath = path.join(os.homedir(), '.cursor', 'ai-tracking', 'ai-code-tracking.db');
     if (!fs.existsSync(dbPath)) return null;
 
@@ -411,7 +414,10 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
     const dbPath = stateFiles[0].path;
 
     // Find the most recent thread matching this repo's cwd
-    const threadQuery = `SELECT model, tokens_used, first_user_message FROM threads WHERE cwd LIKE '%${path.basename(repoPath)}%' ORDER BY updated_at DESC LIMIT 1;`;
+    // Validate repoPath basename to prevent SQL/shell injection
+    const repoBasename = path.basename(repoPath);
+    if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
+    const threadQuery = `SELECT model, tokens_used, first_user_message FROM threads WHERE cwd LIKE '%${repoBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
     const raw = execSync(`sqlite3 "${dbPath}" "${threadQuery}"`, {
       encoding: 'utf-8',
       timeout: 3000,
@@ -1103,7 +1109,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       const getCommitDiff = (shas: string[]): string => {
         if (shas.length === 0) return gitCapture.diff || '';
         try {
-          return shas.map(sha => {
+          return shas.filter(sha => /^[a-fA-F0-9]+$/.test(sha)).map(sha => {
             try {
               return execSync(`git show ${sha} --format="" --patch`, {
                 cwd: state.repoPath, encoding: 'utf-8',
@@ -1422,6 +1428,12 @@ export async function handlePostCommit(): Promise<void> {
   }
 
   debugLog('post-commit', 'commit info', { commitSha, commitMessage, commitAuthor });
+
+  // Validate commitSha is a hex string to prevent shell injection
+  if (!/^[a-fA-F0-9]+$/.test(commitSha)) {
+    debugLog('post-commit', 'SKIP: invalid commit SHA', { commitSha });
+    return;
+  }
 
   // Get files changed in this commit
   let filesChanged: string[] = [];

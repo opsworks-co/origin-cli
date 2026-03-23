@@ -115,8 +115,8 @@ origin chat
 ### 1. Clone and run
 
 ```bash
-git clone https://github.com/dolobanko/origin-v2
-cd origin-v2
+git clone https://github.com/dolobanko/origin
+cd origin
 pnpm install
 cd apps/api && npx prisma db push && npx tsx prisma/seed.ts && cd ../..
 bash dev.sh
@@ -141,7 +141,7 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "origin": {
       "command": "node",
-      "args": ["/path/to/origin-v2/packages/mcp-server/dist/index.js"],
+      "args": ["/path/to/origin/packages/mcp-server/dist/index.js"],
       "env": {
         "ORIGIN_API_URL": "http://localhost:4002",
         "ORIGIN_API_KEY": "your-api-key-from-settings"
@@ -156,7 +156,7 @@ Add to `~/.claude/settings.json`:
 ## Architecture
 
 ```
-origin-v2/
+origin/
 ├── apps/
 │   ├── api/          # Express + TypeScript + Prisma (SQLite)
 │   └── web/          # React + Vite + Tailwind CSS (dark theme)

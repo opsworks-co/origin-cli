@@ -323,7 +323,7 @@ Admins can restore agents to any previous version.
 ## 2.1 Monorepo Structure
 
 ```
-origin-v2/
+origin/
 ├── apps/
 │   ├── api/                 # Express.js REST API
 │   │   ├── prisma/          # Schema + migrations + seed

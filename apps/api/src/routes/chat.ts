@@ -133,8 +133,39 @@ Be concise, specific, and actionable. Format responses in markdown when helpful.
 
 `;
 
+const assistantLimits = new Map<string, { count: number; resetAt: number }>();
+const MAX_ASSISTANT_PER_WINDOW = 20;
+const ASSISTANT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+function checkAssistantRateLimit(userId: string): boolean {
+  const now = Date.now();
+  const entry = assistantLimits.get(userId);
+  if (!entry || now > entry.resetAt) {
+    assistantLimits.set(userId, { count: 1, resetAt: now + ASSISTANT_WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= MAX_ASSISTANT_PER_WINDOW) return false;
+  entry.count++;
+  return true;
+}
+
+// Clean up stale entries every 30 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of assistantLimits) {
+    if (now > entry.resetAt) assistantLimits.delete(key);
+  }
+}, 30 * 60 * 1000);
+
 router.post('/assistant', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
+    const userId = req.user!.id;
+    if (!checkAssistantRateLimit(userId)) {
+      return res.status(429).json({
+        error: 'Rate limit exceeded. Try again in a few minutes.',
+      });
+    }
+
     const { messages } = req.body;
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages array is required' });

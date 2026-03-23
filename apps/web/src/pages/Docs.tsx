@@ -1260,7 +1260,7 @@ Description: Codeium's AI IDE agent`}</CodeBlock>
             <ul className="space-y-2 mb-4">
               <Li><strong>Agent scope</strong> &mdash; Rule only applies to sessions from a specific AI agent (e.g. &ldquo;Claude Code&rdquo;, &ldquo;Cursor Agent&rdquo;)</Li>
               <Li><strong>Machine scope</strong> &mdash; Rule only applies to sessions from a specific registered machine (e.g. &ldquo;ci-runner-01&rdquo;, &ldquo;artem-mbp&rdquo;)</Li>
-              <Li><strong>Repo scope</strong> &mdash; Rule only applies to sessions in a specific repository (e.g. &ldquo;origin-v2&rdquo;, &ldquo;frontend-app&rdquo;)</Li>
+              <Li><strong>Repo scope</strong> &mdash; Rule only applies to sessions in a specific repository (e.g. &ldquo;origin&rdquo;, &ldquo;frontend-app&rdquo;)</Li>
               <Li><strong>No scope</strong> &mdash; Rule applies to all sessions (org-wide)</Li>
               <Li><strong>Multiple scopes</strong> &mdash; If a rule has both a machine and repo scope, <em>both must match</em> for the rule to apply (AND logic)</Li>
             </ul>
