@@ -143,11 +143,14 @@ export default function IAM() {
     }
   };
 
-  const handleGenerateKey = async (member: TeamMember) => {
+  const handleGenerateKey = async (member: TeamMember, keyLabel?: string) => {
+    // Map OWNER → ADMIN for API key roles (API keys only accept VIEWER/MEMBER/ADMIN)
+    const keyRole = member.role === 'OWNER' ? 'ADMIN' : member.role;
+    const label = keyLabel || `${member.name}'s key`;
     try {
       const res = await api.createApiKey({
-        name: member.name,
-        role: member.role,
+        name: label,
+        role: keyRole,
         agentIds: allAgents.map((a) => a.id), // Grant all agents by default
       });
       setKeyModalKey(res.key);
@@ -159,6 +162,17 @@ export default function IAM() {
       loadData();
     } catch (err: any) {
       setError(err.message || 'Failed to generate key');
+    }
+  };
+
+  const handleDeleteKey = async (keyId: string) => {
+    if (!confirm('Delete this API key? It will stop working immediately.')) return;
+    try {
+      await api.deleteApiKey(keyId);
+      const keysRes = await api.getApiKeys();
+      setApiKeys(keysRes);
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete key');
     }
   };
 
@@ -186,8 +200,8 @@ export default function IAM() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Get API key for a member
-  const getMemberKey = (memberId: string) => apiKeys.find((k) => k.userId === memberId);
+  // Get ALL API keys for a member
+  const getMemberKeys = (memberId: string) => apiKeys.filter((k) => k.userId === memberId);
 
   return (
     <div className="space-y-6">
@@ -344,7 +358,7 @@ export default function IAM() {
               <tr className="text-left text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
                 <th className="px-6 py-3 font-medium">Member</th>
                 <th className="px-6 py-3 font-medium">Role</th>
-                <th className="px-6 py-3 font-medium">API Key</th>
+                <th className="px-6 py-3 font-medium">API Keys</th>
                 <th className="px-6 py-3 font-medium text-right">Sessions</th>
                 <th className="px-6 py-3 font-medium text-right">Cost</th>
                 <th className="px-6 py-3 font-medium text-right">Last Active</th>
@@ -366,7 +380,7 @@ export default function IAM() {
                 </tr>
               ) : (
                 members.map((m) => {
-                  const memberKey = getMemberKey(m.id);
+                  const memberKeys = getMemberKeys(m.id);
                   const isExpanded = expandedMember === m.id;
                   return (
                     <>
@@ -416,10 +430,26 @@ export default function IAM() {
                           )}
                         </td>
                         <td className="px-6 py-3" onClick={(e) => e.stopPropagation()}>
-                          {memberKey ? (
-                            <div className="flex items-center gap-1.5">
-                              <Key className="w-3 h-3 text-green-500" />
-                              <code className="text-xs text-gray-400">{memberKey.keyPrefix}...</code>
+                          {memberKeys.length > 0 ? (
+                            <div className="flex items-center gap-2">
+                              <div className="flex flex-col gap-0.5">
+                                {memberKeys.map((k) => (
+                                  <div key={k.id} className="flex items-center gap-1.5">
+                                    <Key className="w-3 h-3 text-green-500 flex-shrink-0" />
+                                    <code className="text-xs text-gray-400">{k.keyPrefix}...</code>
+                                    <span className="text-[9px] text-gray-600">{k.name}</span>
+                                  </div>
+                                ))}
+                              </div>
+                              {isAdmin && (
+                                <button
+                                  onClick={() => handleGenerateKey(m, `${m.name} key ${memberKeys.length + 1}`)}
+                                  className="text-indigo-400/50 hover:text-indigo-400 transition-colors flex-shrink-0"
+                                  title="Add another key"
+                                >
+                                  <Plus className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                             </div>
                           ) : m.keyPrefix ? (
                             <div className="flex items-center gap-1.5">
@@ -474,75 +504,94 @@ export default function IAM() {
                         )}
                       </tr>
 
-                      {/* Expanded: key scopes */}
-                      {isExpanded && isAdmin && memberKey && (
+                      {/* Expanded: all keys with scopes */}
+                      {isExpanded && isAdmin && memberKeys.length > 0 && (
                         <tr key={`${m.id}-scopes`} className="bg-gray-800/10">
                           <td colSpan={isAdmin ? 7 : 6} className="px-6 py-3">
-                            <div className="space-y-2">
-                              {/* Agent scopes */}
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-gray-500 uppercase tracking-wider w-16">Agents</span>
-                                <div className="flex flex-wrap gap-1.5">
-                                  {allAgents.map((a) => {
-                                    const assigned = memberKey.agentScopes?.some((s) => s.agentId === a.id);
-                                    return (
-                                      <label
-                                        key={a.id}
-                                        className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded cursor-pointer transition-colors border ${
-                                          assigned
-                                            ? 'bg-indigo-900/40 text-indigo-300 border-indigo-700'
-                                            : 'bg-gray-800/50 text-gray-600 border-gray-700 hover:border-gray-600'
-                                        }`}
-                                      >
-                                        <input
-                                          type="checkbox"
-                                          checked={assigned}
-                                          onChange={() => handleScopeToggle(
-                                            memberKey.id, 'agent', a.id,
-                                            (memberKey.agentScopes || []).map((s) => s.agentId),
-                                            !!assigned,
-                                          )}
-                                          className="sr-only"
-                                        />
-                                        {assigned ? '✓ ' : ''}{a.name}
-                                      </label>
-                                    );
-                                  })}
-                                  {allAgents.length === 0 && <span className="text-[10px] text-gray-600 italic">No agents configured</span>}
+                            <div className="space-y-4">
+                              {memberKeys.map((mk) => (
+                                <div key={mk.id} className="space-y-2 pb-3 border-b border-gray-800/50 last:border-0 last:pb-0">
+                                  {/* Key header */}
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                      <Key className="w-3 h-3 text-green-500" />
+                                      <code className="text-xs text-indigo-400">{mk.keyPrefix}...</code>
+                                      <span className="text-[10px] text-gray-500">{mk.name}</span>
+                                      <span className="text-[10px] text-gray-600">Created {new Date(mk.createdAt).toLocaleDateString()}</span>
+                                    </div>
+                                    <button
+                                      onClick={() => handleDeleteKey(mk.id)}
+                                      className="text-[10px] text-red-400/60 hover:text-red-400 transition-colors"
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                  {/* Agent scopes */}
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] text-gray-500 uppercase tracking-wider w-16">Agents</span>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {allAgents.map((a) => {
+                                        const assigned = mk.agentScopes?.some((s) => s.agentId === a.id);
+                                        return (
+                                          <label
+                                            key={a.id}
+                                            className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded cursor-pointer transition-colors border ${
+                                              assigned
+                                                ? 'bg-indigo-900/40 text-indigo-300 border-indigo-700'
+                                                : 'bg-gray-800/50 text-gray-600 border-gray-700 hover:border-gray-600'
+                                            }`}
+                                          >
+                                            <input
+                                              type="checkbox"
+                                              checked={assigned}
+                                              onChange={() => handleScopeToggle(
+                                                mk.id, 'agent', a.id,
+                                                (mk.agentScopes || []).map((s) => s.agentId),
+                                                !!assigned,
+                                              )}
+                                              className="sr-only"
+                                            />
+                                            {assigned ? '✓ ' : ''}{a.name}
+                                          </label>
+                                        );
+                                      })}
+                                      {allAgents.length === 0 && <span className="text-[10px] text-gray-600 italic">No agents configured</span>}
+                                    </div>
+                                  </div>
+                                  {/* Repo scopes */}
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] text-gray-500 uppercase tracking-wider w-16">Repos</span>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {allRepos.map((r) => {
+                                        const assigned = mk.repoScopes?.some((s) => s.repoId === r.id);
+                                        return (
+                                          <label
+                                            key={r.id}
+                                            className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded cursor-pointer transition-colors border ${
+                                              assigned
+                                                ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700'
+                                                : 'bg-gray-800/50 text-gray-600 border-gray-700 hover:border-gray-600'
+                                            }`}
+                                          >
+                                            <input
+                                              type="checkbox"
+                                              checked={assigned}
+                                              onChange={() => handleScopeToggle(
+                                                mk.id, 'repo', r.id,
+                                                (mk.repoScopes || []).map((s) => s.repoId),
+                                                !!assigned,
+                                              )}
+                                              className="sr-only"
+                                            />
+                                            {assigned ? '✓ ' : ''}{r.name}
+                                          </label>
+                                        );
+                                      })}
+                                      {allRepos.length === 0 && <span className="text-[10px] text-gray-600 italic">No repos added</span>}
+                                    </div>
+                                  </div>
                                 </div>
-                              </div>
-                              {/* Repo scopes */}
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-gray-500 uppercase tracking-wider w-16">Repos</span>
-                                <div className="flex flex-wrap gap-1.5">
-                                  {allRepos.map((r) => {
-                                    const assigned = memberKey.repoScopes?.some((s) => s.repoId === r.id);
-                                    return (
-                                      <label
-                                        key={r.id}
-                                        className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded cursor-pointer transition-colors border ${
-                                          assigned
-                                            ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700'
-                                            : 'bg-gray-800/50 text-gray-600 border-gray-700 hover:border-gray-600'
-                                        }`}
-                                      >
-                                        <input
-                                          type="checkbox"
-                                          checked={assigned}
-                                          onChange={() => handleScopeToggle(
-                                            memberKey.id, 'repo', r.id,
-                                            (memberKey.repoScopes || []).map((s) => s.repoId),
-                                            !!assigned,
-                                          )}
-                                          className="sr-only"
-                                        />
-                                        {assigned ? '✓ ' : ''}{r.name}
-                                      </label>
-                                    );
-                                  })}
-                                  {allRepos.length === 0 && <span className="text-[10px] text-gray-600 italic">No repos added</span>}
-                                </div>
-                              </div>
+                              ))}
                             </div>
                           </td>
                         </tr>
