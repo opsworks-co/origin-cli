@@ -177,19 +177,21 @@ export default function Landing() {
           </p>
 
           {/* Top 5 commands — Hero callout */}
-          <div className="mt-10 flex flex-wrap justify-center gap-2 max-w-2xl mx-auto">
-            {[
-              { cmd: 'init', desc: 'Setup in 30s' },
-              { cmd: 'blame', desc: 'AI attribution' },
-              { cmd: 'sessions', desc: 'Track sessions' },
-              { cmd: 'stats', desc: 'Cost & usage' },
-              { cmd: 'explain', desc: 'Session replay' },
-            ].map((c) => (
-              <div key={c.cmd} className="bg-gray-900/80 border border-gray-800 rounded-lg px-3 py-1.5 flex items-center gap-2">
-                <code className="text-xs font-mono text-indigo-400 whitespace-nowrap">origin {c.cmd}</code>
-                <span className="text-[10px] text-gray-500">{c.desc}</span>
-              </div>
-            ))}
+          <div className="mt-10 max-w-2xl mx-auto">
+            <div className="grid grid-cols-5 gap-2">
+              {[
+                { cmd: 'init', desc: 'Setup in 30s' },
+                { cmd: 'blame', desc: 'AI attribution' },
+                { cmd: 'sessions', desc: 'Track sessions' },
+                { cmd: 'stats', desc: 'Cost & usage' },
+                { cmd: 'explain', desc: 'Session replay' },
+              ].map((c) => (
+                <div key={c.cmd} className="bg-gray-900/80 border border-gray-800 rounded-lg px-2 py-2 text-center">
+                  <code className="text-xs font-mono text-indigo-400 whitespace-nowrap">origin {c.cmd}</code>
+                  <p className="text-[10px] text-gray-500 mt-0.5">{c.desc}</p>
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* Terminal demo */}
