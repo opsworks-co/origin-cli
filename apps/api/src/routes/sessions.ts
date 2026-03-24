@@ -163,6 +163,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where.branch = req.query.branch as string;
     }
 
+    if (req.query.userId) {
+      where.userId = req.query.userId as string;
+    }
+
     // Enforce repo-scoped API key access
     if (req.apiKeyRepoScopes && req.apiKeyRepoScopes.length > 0) {
       where.commit = {

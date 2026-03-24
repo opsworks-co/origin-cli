@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { request } from '../api';
-import { Shield, Building2, Users, Search, Loader2 } from 'lucide-react';
+import { request, adminUpdateOrg, adminDeleteOrg, adminUpdateUserRole, adminDeleteUser } from '../api';
+import { Shield, Building2, Users, Search, Loader2, Pencil, Trash2, Check, X } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,6 +29,8 @@ interface AdminUser {
 }
 
 type Tab = 'orgs' | 'users';
+
+const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -81,7 +83,18 @@ export default function Admin() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Inline editing state for orgs
+  const [editingOrgId, setEditingOrgId] = useState<string | null>(null);
+  const [editingOrgName, setEditingOrgName] = useState('');
+
+  // Inline editing state for users
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [editingUserRole, setEditingUserRole] = useState('');
+
+  // Action-in-progress indicator
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  const fetchData = () => {
     setLoading(true);
     setError(null);
     const endpoint = tab === 'orgs' ? '/api/admin/orgs' : '/api/admin/users';
@@ -93,7 +106,91 @@ export default function Admin() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, search]);
+
+  // ---- Org actions --------------------------------------------------------
+
+  function startEditOrg(org: AdminOrg) {
+    setEditingOrgId(org.id);
+    setEditingOrgName(org.name);
+  }
+
+  function cancelEditOrg() {
+    setEditingOrgId(null);
+    setEditingOrgName('');
+  }
+
+  async function saveEditOrg(id: string) {
+    if (!editingOrgName.trim()) return;
+    setActionLoading(id);
+    try {
+      const updated = await adminUpdateOrg(id, { name: editingOrgName.trim() });
+      setOrgs((prev) => prev.map((o) => (o.id === id ? { ...o, name: updated.name, slug: updated.slug } : o)));
+      setEditingOrgId(null);
+      setEditingOrgName('');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  async function deleteOrg(org: AdminOrg) {
+    if (!window.confirm(`Delete organization "${org.name}"? This will remove all its data and cannot be undone.`)) return;
+    setActionLoading(org.id);
+    try {
+      await adminDeleteOrg(org.id);
+      setOrgs((prev) => prev.filter((o) => o.id !== org.id));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  // ---- User actions -------------------------------------------------------
+
+  function startEditUser(user: AdminUser) {
+    setEditingUserId(user.id);
+    setEditingUserRole(user.role);
+  }
+
+  function cancelEditUser() {
+    setEditingUserId(null);
+    setEditingUserRole('');
+  }
+
+  async function saveEditUser(id: string) {
+    setActionLoading(id);
+    try {
+      const updated = await adminUpdateUserRole(id, editingUserRole);
+      setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, role: updated.role } : u)));
+      setEditingUserId(null);
+      setEditingUserRole('');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  async function deleteUser(user: AdminUser) {
+    if (!window.confirm(`Delete user "${user.name}" (${user.email})? This cannot be undone.`)) return;
+    setActionLoading(user.id);
+    try {
+      await adminDeleteUser(user.id);
+      setUsers((prev) => prev.filter((u) => u.id !== user.id));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setActionLoading(null);
+    }
+  }
 
   const tabs: { key: Tab; label: string; icon: React.ElementType }[] = [
     { key: 'orgs', label: 'Organizations', icon: Building2 },
@@ -148,8 +245,11 @@ export default function Admin() {
 
       {/* Error */}
       {error && (
-        <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-4 text-sm text-red-400">
-          {error}
+        <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-4 text-sm text-red-400 flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300 ml-4">
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
@@ -182,12 +282,15 @@ export default function Admin() {
                   <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Created
                   </th>
+                  <th className="text-right py-3 px-4 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
                 {orgs.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="text-center py-12 text-gray-500">
+                    <td colSpan={6} className="text-center py-12 text-gray-500">
                       {search ? 'No organizations match your search' : 'No organizations found'}
                     </td>
                   </tr>
@@ -195,10 +298,41 @@ export default function Admin() {
                   orgs.map((o) => (
                     <tr key={o.id} className="hover:bg-white/[0.02] transition-colors">
                       <td className="py-3 px-4">
-                        <div>
-                          <p className="text-gray-200 font-medium">{o.name}</p>
-                          <p className="text-xs text-gray-500">{o.slug}</p>
-                        </div>
+                        {editingOrgId === o.id ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={editingOrgName}
+                              onChange={(e) => setEditingOrgName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') saveEditOrg(o.id);
+                                if (e.key === 'Escape') cancelEditOrg();
+                              }}
+                              autoFocus
+                              className="px-2 py-1 bg-gray-800 border border-indigo-500/40 rounded text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/60 w-48"
+                            />
+                            <button
+                              onClick={() => saveEditOrg(o.id)}
+                              disabled={actionLoading === o.id}
+                              className="p-1 text-green-400 hover:text-green-300 disabled:opacity-50"
+                              title="Save"
+                            >
+                              <Check className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={cancelEditOrg}
+                              className="p-1 text-gray-400 hover:text-gray-300"
+                              title="Cancel"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div>
+                            <p className="text-gray-200 font-medium">{o.name}</p>
+                            <p className="text-xs text-gray-500">{o.slug}</p>
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-right text-gray-300 tabular-nums">
                         {o.memberCount}
@@ -210,6 +344,28 @@ export default function Admin() {
                         {formatCost(o.totalCost)}
                       </td>
                       <td className="py-3 px-4 text-gray-400">{formatDate(o.createdAt)}</td>
+                      <td className="py-3 px-4 text-right">
+                        {editingOrgId !== o.id && (
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={() => startEditOrg(o)}
+                              disabled={actionLoading === o.id}
+                              className="p-1.5 rounded-md text-gray-400 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
+                              title="Edit organization name"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => deleteOrg(o)}
+                              disabled={actionLoading === o.id}
+                              className="p-1.5 rounded-md text-gray-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                              title="Delete organization"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   ))
                 )}
@@ -250,12 +406,15 @@ export default function Admin() {
                   <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Created
                   </th>
+                  <th className="text-right py-3 px-4 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
                 {users.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="text-center py-12 text-gray-500">
+                    <td colSpan={8} className="text-center py-12 text-gray-500">
                       {search ? 'No users match your search' : 'No users found'}
                     </td>
                   </tr>
@@ -266,17 +425,68 @@ export default function Admin() {
                       <td className="py-3 px-4 text-gray-400">{u.email}</td>
                       <td className="py-3 px-4 text-gray-400">{u.orgName}</td>
                       <td className="py-3 px-4">
-                        <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ring-1 ring-inset ${roleBadge(u.role)}`}
-                        >
-                          {u.role}
-                        </span>
+                        {editingUserId === u.id ? (
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={editingUserRole}
+                              onChange={(e) => setEditingUserRole(e.target.value)}
+                              className="px-2 py-1 bg-gray-800 border border-indigo-500/40 rounded text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/60"
+                            >
+                              {ROLES.map((r) => (
+                                <option key={r} value={r}>{r}</option>
+                              ))}
+                            </select>
+                            <button
+                              onClick={() => saveEditUser(u.id)}
+                              disabled={actionLoading === u.id}
+                              className="p-1 text-green-400 hover:text-green-300 disabled:opacity-50"
+                              title="Save"
+                            >
+                              <Check className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={cancelEditUser}
+                              className="p-1 text-gray-400 hover:text-gray-300"
+                              title="Cancel"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ring-1 ring-inset ${roleBadge(u.role)}`}
+                          >
+                            {u.role}
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-right text-gray-300 tabular-nums">
                         {u.sessionCount.toLocaleString()}
                       </td>
                       <td className="py-3 px-4 text-gray-400">{formatRelative(u.lastActive)}</td>
                       <td className="py-3 px-4 text-gray-400">{formatDate(u.createdAt)}</td>
+                      <td className="py-3 px-4 text-right">
+                        {editingUserId !== u.id && (
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={() => startEditUser(u)}
+                              disabled={actionLoading === u.id}
+                              className="p-1.5 rounded-md text-gray-400 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors disabled:opacity-50"
+                              title="Edit user role"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => deleteUser(u)}
+                              disabled={actionLoading === u.id}
+                              className="p-1.5 rounded-md text-gray-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                              title="Delete user"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   ))
                 )}

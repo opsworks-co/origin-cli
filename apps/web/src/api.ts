@@ -292,6 +292,7 @@ export interface SessionListParams {
   agentId?: string;
   repoId?: string;
   branch?: string;
+  userId?: string;
   archived?: string;
   limit?: number;
   offset?: number;
@@ -1523,4 +1524,28 @@ export function getSharedSession(slug: string) {
     if (!r.ok) throw new Error(r.status === 410 ? 'This shared session link has expired' : 'Shared session not found');
     return r.json();
   });
+}
+
+// ---- Super-Admin --------------------------------------------------------
+
+export function adminUpdateOrg(id: string, data: { name: string }) {
+  return request<{ id: string; name: string; slug: string }>(`/api/admin/orgs/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function adminDeleteOrg(id: string) {
+  return request<void>(`/api/admin/orgs/${id}`, { method: 'DELETE' });
+}
+
+export function adminUpdateUserRole(id: string, role: string) {
+  return request<{ id: string; name: string; email: string; role: string }>(`/api/admin/users/${id}/role`, {
+    method: 'PUT',
+    body: JSON.stringify({ role }),
+  });
+}
+
+export function adminDeleteUser(id: string) {
+  return request<void>(`/api/admin/users/${id}`, { method: 'DELETE' });
 }

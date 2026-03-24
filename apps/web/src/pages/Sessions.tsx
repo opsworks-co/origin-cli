@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
-import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent } from '../api';
+import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent, TeamMember } from '../api';
 import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../utils';
 import { Archive, ArchiveRestore, GitBranch } from 'lucide-react';
 import { useToast } from '../components/Toast';
@@ -44,11 +44,15 @@ export default function Sessions() {
   // Agents
   const [agents, setAgents] = useState<Agent[]>([]);
 
+  // Users
+  const [users, setUsers] = useState<TeamMember[]>([]);
+
   // Filters
   const [model, setModel] = useState('');
   const [status, setStatus] = useState('');
   const [repoId, setRepoId] = useState('');
   const [agentId, setAgentId] = useState('');
+  const [userId, setUserId] = useState('');
   const [branch, setBranch] = useState('');
   const [offset, setOffset] = useState(0);
 
@@ -61,7 +65,7 @@ export default function Sessions() {
     setError('');
     setSelectedIds(new Set());
     try {
-      const res = await api.getSessions({ model, status, repoId, agentId, branch, archived: showArchived ? 'true' : undefined, limit: LIMIT, offset });
+      const res = await api.getSessions({ model, status, repoId, agentId, userId, branch, archived: showArchived ? 'true' : undefined, limit: LIMIT, offset });
       setSessions(res.sessions);
       setTotal(res.total);
       if (res.aggregates) setAggregates(res.aggregates);
@@ -70,7 +74,7 @@ export default function Sessions() {
     } finally {
       setLoading(false);
     }
-  }, [model, status, repoId, agentId, branch, offset, showArchived]);
+  }, [model, status, repoId, agentId, userId, branch, offset, showArchived]);
 
   useEffect(() => {
     fetchSessions();
@@ -79,12 +83,13 @@ export default function Sessions() {
   useEffect(() => {
     api.getRepos().then(setRepos).catch(() => {});
     api.getAgents().then(setAgents).catch(() => {});
+    api.getUsers().then((res) => setUsers(res.users)).catch(() => {});
   }, []);
 
   // Reset offset when filters change
   useEffect(() => {
     setOffset(0);
-  }, [model, status, repoId, agentId, branch]);
+  }, [model, status, repoId, agentId, userId, branch]);
 
   // Fetch PR groups when view mode changes
   useEffect(() => {
@@ -468,6 +473,19 @@ export default function Sessions() {
             {agents.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={userId}
+            onChange={(e) => setUserId(e.target.value)}
+            className="select text-sm"
+          >
+            <option value="">All users</option>
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
               </option>
             ))}
           </select>

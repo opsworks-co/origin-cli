@@ -175,6 +175,81 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// PUT /orgs/:id — update organization name
+// ---------------------------------------------------------------------------
+router.put('/orgs/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body as { name?: string };
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+    const org = await prisma.org.update({
+      where: { id },
+      data: { name: name.trim() },
+    });
+    res.json({ id: org.id, name: org.name, slug: org.slug });
+  } catch (err) {
+    console.error('Admin PUT /orgs/:id error:', err);
+    res.status(500).json({ error: 'Failed to update organization' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /orgs/:id — delete an organization and all related data
+// ---------------------------------------------------------------------------
+router.delete('/orgs/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    await prisma.org.delete({ where: { id } });
+    res.status(204).end();
+  } catch (err) {
+    console.error('Admin DELETE /orgs/:id error:', err);
+    res.status(500).json({ error: 'Failed to delete organization' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUT /users/:id/role — update a user's role (super-admin level)
+// ---------------------------------------------------------------------------
+router.put('/users/:id/role', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body as { role?: string };
+    if (!role) {
+      return res.status(400).json({ error: 'Role is required' });
+    }
+    const validRoles = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'];
+    if (!validRoles.includes(role.toUpperCase())) {
+      return res.status(400).json({ error: `Invalid role. Must be one of: ${validRoles.join(', ')}` });
+    }
+    const user = await prisma.user.update({
+      where: { id },
+      data: { role: role.toUpperCase() },
+      select: { id: true, name: true, email: true, role: true },
+    });
+    res.json(user);
+  } catch (err) {
+    console.error('Admin PUT /users/:id/role error:', err);
+    res.status(500).json({ error: 'Failed to update user role' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /users/:id — delete a user (super-admin level)
+// ---------------------------------------------------------------------------
+router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    await prisma.user.delete({ where: { id } });
+    res.status(204).end();
+  } catch (err) {
+    console.error('Admin DELETE /users/:id error:', err);
+    res.status(500).json({ error: 'Failed to delete user' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /check — verify super-admin status (used by frontend to show/hide nav)
 // ---------------------------------------------------------------------------
 router.get('/check', async (_req: AuthRequest, res: Response) => {

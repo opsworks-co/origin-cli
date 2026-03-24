@@ -915,14 +915,26 @@ export default function Settings() {
 
       {activeTab === 'general' && (
         <>
-          {/* API Keys Section — ADMIN/OWNER only */}
+          {/* API Keys + Team moved to IAM */}
           {(user?.role === 'ADMIN' || user?.role === 'OWNER') && (
-          <section className="card space-y-4">
+          <section className="card space-y-3">
             <div>
-              <h2 className="text-lg font-semibold">API Keys</h2>
+              <h2 className="text-lg font-semibold">Team & API Keys</h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                Create API keys for integrating agents with Origin
+                Manage team members, API keys, and access control
               </p>
+            </div>
+            <a href="/iam" className="btn-primary text-sm inline-block w-fit">
+              Open IAM →
+            </a>
+          </section>
+          )}
+
+          {/* REMOVED: old API Keys inline section — now in /iam */}
+          {false && (
+          <section className="card space-y-4 hidden">
+            <div>
+              <h2 className="text-lg font-semibold">API Keys (legacy)</h2>
             </div>
 
             {/* Error message */}
@@ -1146,7 +1158,8 @@ export default function Settings() {
           </section>
           )}
 
-          {/* Team Section */}
+          {/* Team Section - moved to /iam */}
+          {false && (
           <section className="card space-y-4">
             <div>
               <h2 className="text-lg font-semibold">Team</h2>
@@ -1173,7 +1186,7 @@ export default function Settings() {
                     {inviteLink}
                   </code>
                   <button
-                    onClick={() => { navigator.clipboard.writeText(inviteLink); }}
+                    onClick={() => { navigator.clipboard.writeText(inviteLink!); }}
                     className="btn-secondary text-xs whitespace-nowrap"
                   >
                     Copy
@@ -1252,6 +1265,7 @@ export default function Settings() {
               </div>
             )}
           </section>
+          )}
 
           {/* Org Section */}
           <section className="card space-y-4">

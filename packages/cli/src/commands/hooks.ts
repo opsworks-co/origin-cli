@@ -966,8 +966,18 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         }
 
         const model = parsed?.model || state.model;
-        const costUsd = parsed
-          ? estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens)
+        // Estimate tokens from prompt text when no transcript data exists (Codex, etc.)
+        let hbInputTokens = parsed?.inputTokens || 0;
+        let hbOutputTokens = parsed?.outputTokens || 0;
+        let hbTokensUsed = parsed?.tokensUsed || 0;
+        if (hbTokensUsed === 0 && state.prompts.length > 0) {
+          const totalChars = state.prompts.reduce((sum, p) => sum + p.length, 0);
+          hbInputTokens = Math.round(totalChars / 4);
+          hbOutputTokens = hbInputTokens * 3;
+          hbTokensUsed = hbInputTokens + hbOutputTokens;
+        }
+        const costUsd = hbTokensUsed > 0
+          ? estimateCost(model, hbInputTokens, hbOutputTokens, parsed?.cacheReadTokens || 0, parsed?.cacheCreationTokens || 0)
           : 0;
 
         // Redact secrets from prompts
@@ -982,9 +992,9 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           transcript: displayTranscript || undefined,
           model: model && model !== 'unknown' && model !== 'default' ? model : undefined,
           filesChanged: parsed?.filesChanged && parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
-          tokensUsed: parsed?.tokensUsed || undefined,
-          inputTokens: parsed?.inputTokens || undefined,
-          outputTokens: parsed?.outputTokens || undefined,
+          tokensUsed: hbTokensUsed || undefined,
+          inputTokens: hbInputTokens || undefined,
+          outputTokens: hbOutputTokens || undefined,
           toolCalls: parsed?.toolCalls || undefined,
           durationMs: durationMs > 0 ? durationMs : undefined,
           costUsd: costUsd > 0 ? costUsd : undefined,
@@ -1105,6 +1115,18 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       if (codexData.prompt && state.prompts.length === 0) {
         state.prompts.push(codexData.prompt);
       }
+    }
+
+    // Estimate tokens from prompt text when no real token data exists (Codex, agents without transcripts)
+    if (parsed.tokensUsed === 0 && state.prompts.length > 0) {
+      const totalPromptChars = state.prompts.reduce((sum, p) => sum + p.length, 0);
+      // ~4 chars per token for English, assume 3:1 output:input ratio for coding tasks
+      const estimatedInputTokens = Math.round(totalPromptChars / 4);
+      const estimatedOutputTokens = estimatedInputTokens * 3;
+      parsed.inputTokens = estimatedInputTokens;
+      parsed.outputTokens = estimatedOutputTokens;
+      parsed.tokensUsed = estimatedInputTokens + estimatedOutputTokens;
+      debugLog('stop', 'estimated tokens from prompt text', { totalPromptChars, estimatedInputTokens, estimatedOutputTokens });
     }
 
     // Use prompts from transcript if we captured them, else from state
