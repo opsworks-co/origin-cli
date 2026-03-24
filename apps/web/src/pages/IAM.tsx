@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import type { TeamMember } from '../api';
 import { timeAgo } from '../utils';
-import { Key, Users, Shield, RefreshCw, XCircle, Copy, Check, Plus } from 'lucide-react';
+import { Key, Users, Shield, RefreshCw, XCircle, Copy, Check, Plus, ChevronDown } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   OWNER: 'badge-purple',
@@ -560,22 +560,25 @@ export default function IAM() {
                             </span>
                           )}
                         </td>
-                        <td className="px-6 py-3" onClick={(e) => e.stopPropagation()}>
+                        <td className="px-6 py-3">
                           {memberKeys.length > 0 ? (
                             <div className="flex items-center gap-2">
-                              <div className="flex flex-col gap-0.5">
-                                {memberKeys.map((k) => (
-                                  <div key={k.id} className="flex items-center gap-1.5">
-                                    <Key className="w-3 h-3 text-green-500 flex-shrink-0" />
-                                    <code className="text-xs text-gray-400">{k.keyPrefix}...</code>
-                                    <span className="text-[9px] text-gray-600">{k.name}</span>
-                                  </div>
-                                ))}
-                              </div>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); const next = new Set(expandedMembers); if (isExpanded) next.delete(m.id); else next.add(m.id); setExpandedMembers(next); }}
+                                className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md border transition-colors ${
+                                  isExpanded
+                                    ? 'bg-indigo-900/30 text-indigo-300 border-indigo-700'
+                                    : 'bg-gray-800/50 text-gray-300 border-gray-700 hover:border-indigo-600 hover:text-indigo-400'
+                                }`}
+                              >
+                                <Key className="w-3 h-3" />
+                                {memberKeys.length} {memberKeys.length === 1 ? 'key' : 'keys'}
+                                <ChevronDown className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                              </button>
                               {isAdmin && (
                                 <button
-                                  onClick={() => openGenerateKey(m, `${m.name} key ${memberKeys.length + 1}`)}
-                                  className="text-indigo-400/50 hover:text-indigo-400 transition-colors flex-shrink-0"
+                                  onClick={(e) => { e.stopPropagation(); openGenerateKey(m, `${m.name} key ${memberKeys.length + 1}`); }}
+                                  className="text-indigo-400/50 hover:text-indigo-400 transition-colors"
                                   title="Add another key"
                                 >
                                   <Plus className="w-3.5 h-3.5" />
@@ -589,7 +592,7 @@ export default function IAM() {
                             </div>
                           ) : isAdmin ? (
                             <button
-                              onClick={() => openGenerateKey(m)}
+                              onClick={(e) => { e.stopPropagation(); openGenerateKey(m); }}
                               className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors"
                             >
                               <Plus className="w-3 h-3" />
@@ -636,26 +639,39 @@ export default function IAM() {
                       </tr>
 
                       {/* Expanded: all keys with scopes */}
-                      {isExpanded && isAdmin && memberKeys.length > 0 && (
-                        <tr key={`${m.id}-scopes`} className="bg-gray-800/10">
-                          <td colSpan={isAdmin ? 7 : 6} className="px-6 py-3">
-                            <div className="space-y-4">
+                      {isExpanded && memberKeys.length > 0 && (
+                        <tr key={`${m.id}-scopes`}>
+                          <td colSpan={isAdmin ? 7 : 6} className="px-6 py-4 bg-gray-900/50">
+                            <div className="space-y-3">
                               {memberKeys.map((mk) => (
-                                <div key={mk.id} className="space-y-2 pb-3 border-b border-gray-800/50 last:border-0 last:pb-0">
+                                <div key={mk.id} className="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4 space-y-3">
                                   {/* Key header */}
                                   <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-2">
-                                      <Key className="w-3 h-3 text-green-500" />
-                                      <code className="text-xs text-indigo-400">{mk.keyPrefix}...</code>
-                                      <span className="text-[10px] text-gray-500">{mk.name}</span>
-                                      <span className="text-[10px] text-gray-600">Created {new Date(mk.createdAt).toLocaleDateString()}</span>
+                                    <div className="flex items-center gap-3">
+                                      <Key className="w-4 h-4 text-green-500" />
+                                      <div>
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-sm font-medium text-gray-200">{mk.name}</span>
+                                          {mk.role && (
+                                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-900/50 text-indigo-300 uppercase">
+                                              {mk.role}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div className="flex items-center gap-2 mt-0.5">
+                                          <code className="text-xs text-indigo-400 font-mono">{mk.keyPrefix}...</code>
+                                          <span className="text-[10px] text-gray-600">Created {new Date(mk.createdAt).toLocaleDateString()}</span>
+                                        </div>
+                                      </div>
                                     </div>
-                                    <button
-                                      onClick={() => handleDeleteKey(mk.id)}
-                                      className="text-[10px] text-red-400/60 hover:text-red-400 transition-colors"
-                                    >
-                                      Delete
-                                    </button>
+                                    {isAdmin && (
+                                      <button
+                                        onClick={() => handleDeleteKey(mk.id)}
+                                        className="text-xs text-red-400/60 hover:text-red-400 transition-colors px-2 py-1 rounded hover:bg-red-900/20"
+                                      >
+                                        Delete
+                                      </button>
+                                    )}
                                   </div>
                                   {/* Agent scopes */}
                                   <div className="flex items-center gap-2">
