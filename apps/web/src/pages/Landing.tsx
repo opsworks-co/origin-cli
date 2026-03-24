@@ -165,10 +165,10 @@ export default function Landing() {
             Open Source &middot; AI Code Attribution &amp; Governance
           </div>
           <h1 className="text-4xl sm:text-5xl md:text-6xl font-bold text-gray-100 leading-tight tracking-tight">
-            Every line of code
+            Your AI agents build fast.
             <br />
             <span className="bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
-              now has a name on it.
+              Origin keeps them in check.
             </span>
           </h1>
           <p className="mt-6 text-lg md:text-xl text-gray-400 max-w-2xl mx-auto leading-relaxed">
