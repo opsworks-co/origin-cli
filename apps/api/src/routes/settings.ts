@@ -74,11 +74,11 @@ router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Res
     const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
     const keyPrefix = rawKey.slice(0, 14);
 
-    // If role is set → standalone key (no userId). Otherwise → linked to current user.
+    // Always link key to the current user
     const key = await prisma.apiKey.create({
       data: {
         orgId: req.user!.orgId,
-        userId: role ? null : req.user!.id,
+        userId: req.user!.id,
         name: name || 'API Key',
         keyHash,
         keyPrefix,

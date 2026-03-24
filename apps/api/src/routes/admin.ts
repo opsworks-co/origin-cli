@@ -256,4 +256,20 @@ router.get('/check', async (_req: AuthRequest, res: Response) => {
   res.json({ isSuperAdmin: true });
 });
 
+// POST /api/admin/fix-orphaned-keys — assign all userId-null keys to a target user
+router.post('/fix-orphaned-keys', async (req: AuthRequest, res: Response) => {
+  try {
+    const { targetUserId } = req.body as { targetUserId: string };
+    if (!targetUserId) return res.status(400).json({ error: 'targetUserId required' });
+    const result = await prisma.apiKey.updateMany({
+      where: { userId: null },
+      data: { userId: targetUserId },
+    });
+    res.json({ updated: result.count });
+  } catch (err) {
+    console.error('Admin fix-orphaned-keys error:', err);
+    res.status(500).json({ error: 'Failed to fix orphaned keys' });
+  }
+});
+
 export default router;
