@@ -24,8 +24,8 @@ interface ApiKey {
   agentScopes: { agentId: string; agentName: string; agentSlug: string }[];
 }
 
-type SettingsTab = 'general' | 'integrations' | 'budget' | 'team' | 'audit' | 'insights' | 'reports' | 'trails' | 'compliance' | 'models' | 'leaderboard';
-const VALID_TABS: SettingsTab[] = ['general', 'integrations', 'budget', 'team', 'audit', 'insights', 'reports', 'trails', 'compliance', 'models', 'leaderboard'];
+type SettingsTab = 'general' | 'integrations' | 'audit' | 'insights' | 'reports' | 'trails' | 'compliance' | 'models' | 'leaderboard';
+const VALID_TABS: SettingsTab[] = ['general', 'integrations', 'audit', 'insights', 'reports', 'trails', 'compliance', 'models', 'leaderboard'];
 
 export default function Settings() {
   const { user } = useAuth();
@@ -300,7 +300,7 @@ export default function Settings() {
       fetchChatConfig();
       fetchEmailSettings();
     }
-    if (activeTab === 'budget') {
+    if ((activeTab as string) === 'budget') {
       fetchBudget();
     }
   }, [activeTab, fetchBudget]);
@@ -819,27 +819,7 @@ export default function Settings() {
           Integrations
         </button>
         )}
-        <button
-          onClick={() => setActiveTab('budget')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'budget'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Budget
-        </button>
         <div className="w-px h-5 bg-gray-800 self-center mx-1" />
-        <button
-          onClick={() => setActiveTab('team')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'team'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Team
-        </button>
         <button
           onClick={() => setActiveTab('audit')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
@@ -2350,7 +2330,7 @@ export default function Settings() {
         </>
       )}
 
-      {activeTab === 'budget' && (
+      {false && (activeTab as string) === 'budget' && (
         <>
           {/* Budget Overview */}
           <section className="card space-y-5">
@@ -2373,34 +2353,34 @@ export default function Settings() {
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-gray-400">Monthly Spend</span>
                         <span className="text-gray-200 font-medium">
-                          ${budgetData.currentSpend.monthly.toFixed(2)}
-                          {budgetData.config.monthlyLimit > 0 && (
-                            <span className="text-gray-500"> / ${budgetData.config.monthlyLimit.toFixed(2)}</span>
+                          ${budgetData!.currentSpend.monthly.toFixed(2)}
+                          {budgetData!.config.monthlyLimit > 0 && (
+                            <span className="text-gray-500"> / ${budgetData!.config.monthlyLimit.toFixed(2)}</span>
                           )}
                         </span>
                       </div>
-                      {budgetData.config.monthlyLimit > 0 && (
+                      {budgetData!.config.monthlyLimit > 0 && (
                         <div className="w-full bg-gray-800 rounded-full h-3">
                           <div
                             className={`h-3 rounded-full transition-all ${
-                              budgetData.currentSpend.percentage >= 100
+                              budgetData!.currentSpend.percentage >= 100
                                 ? 'bg-red-500'
-                                : budgetData.currentSpend.percentage >= 80
+                                : budgetData!.currentSpend.percentage >= 80
                                   ? 'bg-amber-500'
                                   : 'bg-green-500'
                             }`}
-                            style={{ width: `${Math.min(budgetData.currentSpend.percentage, 100)}%` }}
+                            style={{ width: `${Math.min(budgetData!.currentSpend.percentage, 100)}%` }}
                           />
                         </div>
                       )}
                     </div>
 
                     {/* Spend by Model */}
-                    {budgetData.currentSpend.byModel.length > 0 && (
+                    {budgetData!.currentSpend.byModel.length > 0 && (
                       <div>
                         <h3 className="text-sm font-medium text-gray-400 mb-2">By Model (This Month)</h3>
                         <div className="space-y-1.5">
-                          {budgetData.currentSpend.byModel
+                          {budgetData!.currentSpend.byModel
                             .sort((a, b) => b.cost - a.cost)
                             .map((m) => (
                               <div key={m.model} className="flex items-center justify-between bg-gray-800/50 rounded px-3 py-2 text-sm">
@@ -2416,11 +2396,11 @@ export default function Settings() {
                     )}
 
                     {/* Spend by User */}
-                    {budgetData.currentSpend.byUser.length > 0 && (
+                    {budgetData!.currentSpend.byUser.length > 0 && (
                       <div>
                         <h3 className="text-sm font-medium text-gray-400 mb-2">By User (This Month)</h3>
                         <div className="space-y-1.5">
-                          {budgetData.currentSpend.byUser
+                          {budgetData!.currentSpend.byUser
                             .sort((a, b) => b.cost - a.cost)
                             .map((u) => (
                               <div key={u.userId} className="flex items-center justify-between bg-gray-800/50 rounded px-3 py-2 text-sm">
@@ -2436,13 +2416,13 @@ export default function Settings() {
                     )}
 
                     {/* Daily Spend Chart (simple bar) */}
-                    {budgetData.currentSpend.dailySpend.length > 0 && (
+                    {budgetData!.currentSpend.dailySpend.length > 0 && (
                       <div>
                         <h3 className="text-sm font-medium text-gray-400 mb-2">Daily Spend (Last 30 Days)</h3>
                         <div className="flex items-end gap-0.5 h-24">
                           {(() => {
-                            const maxCost = Math.max(...budgetData.currentSpend.dailySpend.map(d => d.cost), 0.01);
-                            return budgetData.currentSpend.dailySpend.slice(-30).map((d) => (
+                            const maxCost = Math.max(...budgetData!.currentSpend.dailySpend.map(d => d.cost), 0.01);
+                            return budgetData!.currentSpend.dailySpend.slice(-30).map((d) => (
                               <div
                                 key={d.date}
                                 className="flex-1 bg-indigo-500/60 rounded-t hover:bg-indigo-400/60 transition-colors group relative"
@@ -2468,29 +2448,29 @@ export default function Settings() {
                     <div className="grid grid-cols-3 gap-4">
                       <div className="card p-3">
                         <div className="text-xs text-gray-500">Projected Monthly</div>
-                        <div className="text-xl font-bold text-gray-100">${forecastData.projectedMonthly.toFixed(2)}</div>
+                        <div className="text-xl font-bold text-gray-100">${forecastData!.projectedMonthly.toFixed(2)}</div>
                       </div>
                       <div className="card p-3">
                         <div className="text-xs text-gray-500">Trend</div>
-                        <div className={`text-xl font-bold ${forecastData.trend === 'up' ? 'text-red-400' : forecastData.trend === 'down' ? 'text-green-400' : 'text-gray-400'}`}>
-                          {forecastData.trend === 'up' ? '📈 Up' : forecastData.trend === 'down' ? '📉 Down' : '→ Flat'}
+                        <div className={`text-xl font-bold ${forecastData!.trend === 'up' ? 'text-red-400' : forecastData!.trend === 'down' ? 'text-green-400' : 'text-gray-400'}`}>
+                          {forecastData!.trend === 'up' ? '📈 Up' : forecastData!.trend === 'down' ? '📉 Down' : '→ Flat'}
                         </div>
                       </div>
                       <div className="card p-3">
                         <div className="text-xs text-gray-500">Confidence</div>
-                        <div className="text-xl font-bold text-gray-100">{Math.round(forecastData.confidence * 100)}%</div>
+                        <div className="text-xl font-bold text-gray-100">{Math.round(forecastData!.confidence * 100)}%</div>
                       </div>
                     </div>
 
                     {/* Actual + Projected daily chart */}
-                    {forecastData.daily.length > 0 && (
+                    {forecastData!.daily.length > 0 && (
                       <div>
                         <h4 className="text-xs text-gray-500 mb-2">Daily Spend: Actual + Projected (14 days)</h4>
                         <div className="flex items-end gap-0.5 h-24">
                           {(() => {
-                            const allValues = forecastData.daily.map(d => d.actual ?? d.projected ?? 0);
+                            const allValues = forecastData!.daily.map(d => d.actual ?? d.projected ?? 0);
                             const maxVal = Math.max(...allValues, 0.01);
-                            return forecastData.daily.map((d) => {
+                            return forecastData!.daily.map((d) => {
                               const val = d.actual ?? d.projected ?? 0;
                               const isProjected = d.actual === null;
                               return (
@@ -2517,11 +2497,11 @@ export default function Settings() {
                     )}
 
                     {/* Per-model forecast */}
-                    {forecastData.byModel.length > 0 && (
+                    {forecastData!.byModel.length > 0 && (
                       <div>
                         <h4 className="text-xs text-gray-500 mb-2">By Model</h4>
                         <div className="space-y-2">
-                          {forecastData.byModel.map((m) => (
+                          {forecastData!.byModel.map((m) => (
                             <div key={m.model} className="flex items-center justify-between text-sm">
                               <span className="text-gray-300">{m.model}</span>
                               <div className="text-gray-400">
@@ -2598,7 +2578,7 @@ export default function Settings() {
       {/* Agent Setup tab removed — content moved to Docs */}
 
 
-      {activeTab === 'team' && <Team />}
+      {/* Team moved to /iam, Budget moved to /budget */}
       {activeTab === 'audit' && <AuditLog />}
       {activeTab === 'insights' && <Insights />}
       {activeTab === 'reports' && <Reports />}
