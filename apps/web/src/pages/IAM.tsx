@@ -64,8 +64,8 @@ export default function IAM() {
   // Role editing
   const [editingRole, setEditingRole] = useState<string | null>(null);
 
-  // Expanded member (shows key details)
-  const [expandedMember, setExpandedMember] = useState<string | null>(null);
+  // Expanded members (shows key details) — supports multiple expanded at once
+  const [expandedMembers, setExpandedMembers] = useState<Set<string>>(new Set());
 
   const [copied, setCopied] = useState(false);
 
@@ -505,13 +505,17 @@ export default function IAM() {
               ) : (
                 members.map((m) => {
                   const memberKeys = getMemberKeys(m.id);
-                  const isExpanded = expandedMember === m.id;
+                  const isExpanded = expandedMembers.has(m.id);
                   return (
                     <>
                       <tr
                         key={m.id}
                         className={`hover:bg-gray-800/30 transition-colors cursor-pointer ${isExpanded ? 'bg-gray-800/20' : ''}`}
-                        onClick={() => setExpandedMember(isExpanded ? null : m.id)}
+                        onClick={() => {
+                          const next = new Set(expandedMembers);
+                          if (isExpanded) next.delete(m.id); else next.add(m.id);
+                          setExpandedMembers(next);
+                        }}
                       >
                         <td className="px-6 py-3">
                           <Link to={`/team/${m.id}`} className="flex items-center gap-3 group" onClick={(e) => e.stopPropagation()}>
@@ -741,9 +745,14 @@ export default function IAM() {
         <div
           className="card p-4 cursor-pointer hover:border-indigo-700/50 transition-colors"
           onClick={() => {
-            // Expand first member that has keys
-            const memberWithKeys = members.find((m) => getMemberKeys(m.id).length > 0);
-            if (memberWithKeys) setExpandedMember(expandedMember === memberWithKeys.id ? null : memberWithKeys.id);
+            // Toggle expand ALL members that have keys
+            const membersWithKeys = members.filter((m) => getMemberKeys(m.id).length > 0).map((m) => m.id);
+            const allExpanded = membersWithKeys.every((id) => expandedMembers.has(id));
+            if (allExpanded) {
+              setExpandedMembers(new Set());
+            } else {
+              setExpandedMembers(new Set(membersWithKeys));
+            }
           }}
         >
           <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
