@@ -772,6 +772,13 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'o3': { input: 10, output: 40 },
   'o3-mini': { input: 1.10, output: 4.40 },
   'o4-mini': { input: 1.10, output: 4.40 },
+  // OpenAI GPT-5 / Codex models
+  'gpt-5': { input: 2.00, output: 8.00 },
+  'gpt-5.3': { input: 2.00, output: 8.00 },
+  'gpt-5.4': { input: 3.00, output: 12.00 },
+  'codex': { input: 2.00, output: 8.00 },
+  // Cursor Composer models
+  'composer': { input: 2.50, output: 10.00 },
 };
 
 // Dynamic pricing: fetched from API, falls back to defaults

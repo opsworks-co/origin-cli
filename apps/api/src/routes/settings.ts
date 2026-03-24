@@ -191,7 +191,7 @@ router.delete('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, re
 // ── Budget / Cost Controls ──────────────────────────────────────────────────
 
 // GET /api/settings/budget — get budget config + current spend
-router.get('/budget', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.get('/budget', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
     const [config, spent, dailySpend, spendByModel, spendByUser] = await Promise.all([
