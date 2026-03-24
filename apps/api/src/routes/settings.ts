@@ -570,4 +570,18 @@ router.post('/email/test', requireRole('ADMIN'), async (req: AuthRequest, res: R
   }
 });
 
+// POST /api/settings/fix-orphaned-keys — assign unlinked keys to current user (ADMIN+)
+router.post('/fix-orphaned-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await prisma.apiKey.updateMany({
+      where: { orgId: req.user!.orgId, userId: null },
+      data: { userId: req.user!.id },
+    });
+    res.json({ updated: result.count });
+  } catch (err) {
+    console.error('Fix orphaned keys error:', err);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
 export default router;
