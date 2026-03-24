@@ -357,23 +357,9 @@ router.post('/add-member', requireRole('ADMIN'), async (req: AuthRequest, res: R
     const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
     const keyPrefix = rawKey.slice(0, 14);
 
-    // If no scopes provided, scope to ALL repos + ALL agents
-    let repoScopeIds: string[] = [];
-    let agentScopeIds: string[] = [];
-
-    if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
-      repoScopeIds = repoIds;
-    } else {
-      const allRepos = await prisma.repo.findMany({ where: { orgId }, select: { id: true } });
-      repoScopeIds = allRepos.map((r) => r.id);
-    }
-
-    if (agentIds && Array.isArray(agentIds) && agentIds.length > 0) {
-      agentScopeIds = agentIds;
-    } else {
-      const allAgents = await prisma.agent.findMany({ where: { orgId }, select: { id: true } });
-      agentScopeIds = allAgents.map((a) => a.id);
-    }
+    // Only assign scopes that were explicitly provided — default is no access
+    const repoScopeIds: string[] = (repoIds && Array.isArray(repoIds)) ? repoIds : [];
+    const agentScopeIds: string[] = (agentIds && Array.isArray(agentIds)) ? agentIds : [];
 
     await prisma.apiKey.create({
       data: {
