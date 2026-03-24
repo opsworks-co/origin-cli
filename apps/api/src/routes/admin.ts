@@ -179,7 +179,7 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
 // ---------------------------------------------------------------------------
 router.put('/orgs/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { name } = req.body as { name?: string };
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Name is required' });
@@ -200,7 +200,7 @@ router.put('/orgs/:id', async (req: AuthRequest, res: Response) => {
 // ---------------------------------------------------------------------------
 router.delete('/orgs/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     await prisma.org.delete({ where: { id } });
     res.status(204).end();
   } catch (err) {
@@ -214,7 +214,7 @@ router.delete('/orgs/:id', async (req: AuthRequest, res: Response) => {
 // ---------------------------------------------------------------------------
 router.put('/users/:id/role', async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { role } = req.body as { role?: string };
     if (!role) {
       return res.status(400).json({ error: 'Role is required' });
@@ -240,7 +240,7 @@ router.put('/users/:id/role', async (req: AuthRequest, res: Response) => {
 // ---------------------------------------------------------------------------
 router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     await prisma.user.delete({ where: { id } });
     res.status(204).end();
   } catch (err) {
