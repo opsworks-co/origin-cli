@@ -221,6 +221,9 @@ export default function IAM() {
 
   // Get ALL API keys for a member
   const getMemberKeys = (memberId: string) => apiKeys.filter((k) => k.userId === memberId);
+  // Standalone keys not assigned to any user
+  const standaloneKeys = apiKeys.filter((k) => !k.userId);
+  const [showStandaloneKeys, setShowStandaloneKeys] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -733,6 +736,112 @@ export default function IAM() {
         </div>
       </div>
 
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {/* STANDALONE / UNASSIGNED KEYS                                       */}
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {standaloneKeys.length > 0 && (
+        <div className="card">
+          <button
+            onClick={() => setShowStandaloneKeys(!showStandaloneKeys)}
+            className="flex items-center justify-between w-full text-left"
+          >
+            <div>
+              <h2 className="text-sm font-semibold text-gray-200">Unassigned Keys</h2>
+              <p className="text-xs text-gray-500 mt-0.5">{standaloneKeys.length} key{standaloneKeys.length !== 1 ? 's' : ''} not linked to any team member</p>
+            </div>
+            <span className="text-xs text-gray-500">{showStandaloneKeys ? '▲' : '▼'}</span>
+          </button>
+
+          {showStandaloneKeys && (
+            <div className="mt-4 space-y-3">
+              {standaloneKeys.map((sk) => (
+                <div key={sk.id} className="bg-gray-800/30 rounded-lg p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Key className="w-3 h-3 text-amber-500" />
+                      <span className="text-sm text-gray-200">{sk.name}</span>
+                      <code className="text-xs text-indigo-400">{sk.keyPrefix}...</code>
+                      {sk.role && (
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-900/50 text-indigo-300 uppercase">{sk.role}</span>
+                      )}
+                      <span className="text-[10px] text-gray-600">Created {new Date(sk.createdAt).toLocaleDateString()}</span>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteKey(sk.id)}
+                      className="text-xs text-red-400/60 hover:text-red-400 transition-colors"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                  {/* Agent scopes */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-gray-500 uppercase tracking-wider w-16">Agents</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {allAgents.map((a) => {
+                        const assigned = sk.agentScopes?.some((s) => s.agentId === a.id);
+                        return (
+                          <label
+                            key={a.id}
+                            className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded cursor-pointer transition-colors border ${
+                              assigned
+                                ? 'bg-indigo-900/40 text-indigo-300 border-indigo-700'
+                                : 'bg-gray-800/50 text-gray-600 border-gray-700 hover:border-gray-600'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={assigned}
+                              onChange={() => handleScopeToggle(
+                                sk.id, 'agent', a.id,
+                                (sk.agentScopes || []).map((s) => s.agentId),
+                                !!assigned,
+                              )}
+                              className="sr-only"
+                            />
+                            {assigned ? '✓ ' : ''}{a.name}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {/* Repo scopes */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-gray-500 uppercase tracking-wider w-16">Repos</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {allRepos.map((r) => {
+                        const assigned = sk.repoScopes?.some((s) => s.repoId === r.id);
+                        return (
+                          <label
+                            key={r.id}
+                            className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded cursor-pointer transition-colors border ${
+                              assigned
+                                ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700'
+                                : 'bg-gray-800/50 text-gray-600 border-gray-700 hover:border-gray-600'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={assigned}
+                              onChange={() => handleScopeToggle(
+                                sk.id, 'repo', r.id,
+                                (sk.repoScopes || []).map((s) => s.repoId),
+                                !!assigned,
+                              )}
+                              className="sr-only"
+                            />
+                            {assigned ? '✓ ' : ''}{r.name}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Quick stats */}
       <div className="grid grid-cols-3 gap-4">
         <div className="card p-4">
@@ -745,13 +854,15 @@ export default function IAM() {
         <div
           className="card p-4 cursor-pointer hover:border-indigo-700/50 transition-colors"
           onClick={() => {
-            // Toggle expand ALL members that have keys
+            // Toggle expand ALL members that have keys + show standalone keys
             const membersWithKeys = members.filter((m) => getMemberKeys(m.id).length > 0).map((m) => m.id);
-            const allExpanded = membersWithKeys.every((id) => expandedMembers.has(id));
+            const allExpanded = membersWithKeys.every((id) => expandedMembers.has(id)) && (standaloneKeys.length === 0 || showStandaloneKeys);
             if (allExpanded) {
               setExpandedMembers(new Set());
+              setShowStandaloneKeys(false);
             } else {
               setExpandedMembers(new Set(membersWithKeys));
+              setShowStandaloneKeys(true);
             }
           }}
         >
