@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import type { TeamMember } from '../api';
 import { timeAgo } from '../utils';
-import { Key, Users, Shield, RefreshCw, XCircle, Copy, Check } from 'lucide-react';
+import { Key, Users, Shield, RefreshCw, XCircle, Copy, Check, Plus } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   OWNER: 'badge-purple',
@@ -140,6 +140,25 @@ export default function IAM() {
       loadData();
     } catch (err: any) {
       setError(err.message);
+    }
+  };
+
+  const handleGenerateKey = async (member: TeamMember) => {
+    try {
+      const res = await api.createApiKey({
+        name: member.name,
+        role: member.role,
+        agentIds: allAgents.map((a) => a.id), // Grant all agents by default
+      });
+      setKeyModalKey(res.key);
+      setKeyModalName(member.name);
+      setShowKeyModal(true);
+      // Reload to show the new key
+      const keysRes = await api.getApiKeys();
+      setApiKeys(keysRes);
+      loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to generate key');
     }
   };
 
@@ -396,7 +415,7 @@ export default function IAM() {
                             </span>
                           )}
                         </td>
-                        <td className="px-6 py-3">
+                        <td className="px-6 py-3" onClick={(e) => e.stopPropagation()}>
                           {memberKey ? (
                             <div className="flex items-center gap-1.5">
                               <Key className="w-3 h-3 text-green-500" />
@@ -407,6 +426,14 @@ export default function IAM() {
                               <Key className="w-3 h-3 text-green-500" />
                               <code className="text-xs text-gray-400">{m.keyPrefix}...</code>
                             </div>
+                          ) : isAdmin ? (
+                            <button
+                              onClick={() => handleGenerateKey(m)}
+                              className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors"
+                            >
+                              <Plus className="w-3 h-3" />
+                              Generate Key
+                            </button>
                           ) : (
                             <span className="text-xs text-red-400/60">No key</span>
                           )}
@@ -448,7 +475,7 @@ export default function IAM() {
                       </tr>
 
                       {/* Expanded: key scopes */}
-                      {isExpanded && memberKey && isAdmin && (
+                      {isExpanded && isAdmin && memberKey && (
                         <tr key={`${m.id}-scopes`} className="bg-gray-800/10">
                           <td colSpan={isAdmin ? 7 : 6} className="px-6 py-3">
                             <div className="space-y-2">
