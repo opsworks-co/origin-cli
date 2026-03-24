@@ -53,6 +53,14 @@ export default function IAM() {
   const [keyModalKey, setKeyModalKey] = useState('');
   const [keyModalName, setKeyModalName] = useState('');
 
+  // Generate key modal with scope selection
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [genMember, setGenMember] = useState<TeamMember | null>(null);
+  const [genKeyName, setGenKeyName] = useState('');
+  const [genAgentIds, setGenAgentIds] = useState<string[]>([]);
+  const [genRepoIds, setGenRepoIds] = useState<string[]>([]);
+  const [generating, setGenerating] = useState(false);
+
   // Role editing
   const [editingRole, setEditingRole] = useState<string | null>(null);
 
@@ -143,25 +151,36 @@ export default function IAM() {
     }
   };
 
-  const handleGenerateKey = async (member: TeamMember, keyLabel?: string) => {
-    // Map OWNER → ADMIN for API key roles (API keys only accept VIEWER/MEMBER/ADMIN)
-    const keyRole = member.role === 'OWNER' ? 'ADMIN' : member.role;
-    const label = keyLabel || `${member.name}'s key`;
+  const openGenerateKey = (member: TeamMember, keyLabel?: string) => {
+    setGenMember(member);
+    setGenKeyName(keyLabel || `${member.name}'s key`);
+    setGenAgentIds(allAgents.map((a) => a.id)); // All agents selected by default
+    setGenRepoIds([]); // Empty = all repos
+    setShowGenerate(true);
+  };
+
+  const handleGenerateKey = async () => {
+    if (!genMember) return;
+    const keyRole = genMember.role === 'OWNER' ? 'ADMIN' : genMember.role;
+    setGenerating(true);
     try {
       const res = await api.createApiKey({
-        name: label,
+        name: genKeyName,
         role: keyRole,
-        agentIds: allAgents.map((a) => a.id), // Grant all agents by default
+        agentIds: genAgentIds,
+        repoIds: genRepoIds.length > 0 ? genRepoIds : undefined,
       });
+      setShowGenerate(false);
       setKeyModalKey(res.key);
-      setKeyModalName(member.name);
+      setKeyModalName(genMember.name);
       setShowKeyModal(true);
-      // Reload to show the new key
       const keysRes = await api.getApiKeys();
       setApiKeys(keysRes);
       loadData();
     } catch (err: any) {
       setError(err.message || 'Failed to generate key');
+    } finally {
+      setGenerating(false);
     }
   };
 
@@ -317,6 +336,111 @@ export default function IAM() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════════════ */}
+      {/* GENERATE KEY MODAL (with scope selection)                          */}
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {showGenerate && genMember && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowGenerate(false)}>
+          <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-lg shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <Key className="w-5 h-5 text-indigo-400" />
+              Generate Key for {genMember.name}
+            </h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Key Name</label>
+                <input
+                  type="text"
+                  value={genKeyName}
+                  onChange={(e) => setGenKeyName(e.target.value)}
+                  className="input w-full"
+                  placeholder="e.g. MacBook Pro, CI Pipeline"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-2">Agents (required — key won't work without agents)</label>
+                <div className="flex flex-wrap gap-2">
+                  {allAgents.map((a) => {
+                    const selected = genAgentIds.includes(a.id);
+                    return (
+                      <label
+                        key={a.id}
+                        className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded cursor-pointer transition-colors border ${
+                          selected
+                            ? 'bg-indigo-900/40 text-indigo-300 border-indigo-700'
+                            : 'bg-gray-800/50 text-gray-500 border-gray-700 hover:border-gray-600'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => {
+                            setGenAgentIds(selected
+                              ? genAgentIds.filter((id) => id !== a.id)
+                              : [...genAgentIds, a.id]
+                            );
+                          }}
+                          className="sr-only"
+                        />
+                        {selected ? '✓ ' : ''}{a.name}
+                      </label>
+                    );
+                  })}
+                </div>
+                {genAgentIds.length === 0 && (
+                  <p className="text-[10px] text-red-400 mt-1">Select at least one agent</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs text-gray-400 mb-2">Repos (optional — empty = access to all repos)</label>
+                <div className="flex flex-wrap gap-2">
+                  {allRepos.map((r) => {
+                    const selected = genRepoIds.includes(r.id);
+                    return (
+                      <label
+                        key={r.id}
+                        className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded cursor-pointer transition-colors border ${
+                          selected
+                            ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700'
+                            : 'bg-gray-800/50 text-gray-500 border-gray-700 hover:border-gray-600'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => {
+                            setGenRepoIds(selected
+                              ? genRepoIds.filter((id) => id !== r.id)
+                              : [...genRepoIds, r.id]
+                            );
+                          }}
+                          className="sr-only"
+                        />
+                        {selected ? '✓ ' : ''}{r.name}
+                      </label>
+                    );
+                  })}
+                  {allRepos.length === 0 && <span className="text-xs text-gray-600 italic">No repos added yet</span>}
+                </div>
+              </div>
+
+              <button
+                onClick={handleGenerateKey}
+                disabled={generating || genAgentIds.length === 0}
+                className="btn-primary w-full text-sm disabled:opacity-50"
+              >
+                {generating ? 'Generating...' : 'Generate Key'}
+              </button>
+            </div>
+            <button onClick={() => setShowGenerate(false)} className="mt-3 text-sm text-gray-500 hover:text-gray-300 w-full text-center">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════ */}
       {/* KEY REGENERATED MODAL                                              */}
       {/* ═══════════════════════════════════════════════════════════════════ */}
       {showKeyModal && (
@@ -443,7 +567,7 @@ export default function IAM() {
                               </div>
                               {isAdmin && (
                                 <button
-                                  onClick={() => handleGenerateKey(m, `${m.name} key ${memberKeys.length + 1}`)}
+                                  onClick={() => openGenerateKey(m, `${m.name} key ${memberKeys.length + 1}`)}
                                   className="text-indigo-400/50 hover:text-indigo-400 transition-colors flex-shrink-0"
                                   title="Add another key"
                                 >
@@ -458,7 +582,7 @@ export default function IAM() {
                             </div>
                           ) : isAdmin ? (
                             <button
-                              onClick={() => handleGenerateKey(m)}
+                              onClick={() => openGenerateKey(m)}
                               className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors"
                             >
                               <Plus className="w-3 h-3" />
@@ -614,7 +738,14 @@ export default function IAM() {
           </div>
           <div className="text-xl font-bold text-gray-100">{members.length}</div>
         </div>
-        <div className="card p-4">
+        <div
+          className="card p-4 cursor-pointer hover:border-indigo-700/50 transition-colors"
+          onClick={() => {
+            // Expand first member that has keys
+            const memberWithKeys = members.find((m) => getMemberKeys(m.id).length > 0);
+            if (memberWithKeys) setExpandedMember(expandedMember === memberWithKeys.id ? null : memberWithKeys.id);
+          }}
+        >
           <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
             <Key className="w-3.5 h-3.5" />
             Active Keys
