@@ -213,7 +213,7 @@ export default function Landing() {
               rel="noopener noreferrer"
               className="text-sm text-gray-400 hover:text-gray-100 transition-colors"
             >
-              GitHub &rarr;
+              Open Source on GitHub &rarr;
             </a>
           </div>
 
