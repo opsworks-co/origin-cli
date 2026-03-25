@@ -229,6 +229,104 @@ function matchSessionToCommit(
   return bestMatch;
 }
 
+// ─── Strategy 0: Origin Session State Files ────────────────────────────────
+// Origin already tracked sessions — check ~/.origin/sessions/ for state files
+// that contain commit SHAs, agent slugs, and timestamps
+
+interface OriginSessionInfo {
+  sessionId: string;
+  agent: string;
+  model: string;
+  startedAt: number;
+  endedAt: number;
+  repoPath: string;
+  commits: string[]; // SHAs captured during the session
+}
+
+function scanOriginSessions(repoPath: string): OriginSessionInfo[] {
+  const results: OriginSessionInfo[] = [];
+  const homedir = process.env.HOME || process.env.USERPROFILE || '';
+  const sessionsDir = join(homedir, '.origin', 'sessions');
+  if (!existsSync(sessionsDir)) return results;
+
+  try {
+    const walkDir = (dir: string) => {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walkDir(fullPath);
+        } else if (entry.name.endsWith('.json')) {
+          try {
+            const content = readFileSync(fullPath, 'utf-8');
+            const state = JSON.parse(content);
+            if (!state || typeof state !== 'object') continue;
+
+            // Check if this session is for the current repo
+            const sessionRepo = state.repoPath || '';
+            if (sessionRepo && resolve(sessionRepo) !== resolve(repoPath)) continue;
+
+            const agent = state.model?.toLowerCase()?.includes('codex') ? 'codex'
+              : state.model?.toLowerCase()?.includes('gemini') ? 'gemini'
+              : state.model?.toLowerCase()?.includes('cursor') ? 'cursor'
+              : state.model?.toLowerCase()?.includes('claude') ? 'claude'
+              : state.model || 'ai';
+
+            const startMs = state.startedAt ? new Date(state.startedAt).getTime() : 0;
+            // Session end = last prompt time or startedAt + typical session length
+            const stateFile = statSync(fullPath);
+            const endMs = stateFile.mtimeMs;
+
+            // Collect any commit SHAs stored in the state
+            const commits: string[] = [];
+            if (state.headShaAtStart) commits.push(state.headShaAtStart);
+            if (state.gitCapture?.commitDetails) {
+              for (const c of state.gitCapture.commitDetails) {
+                if (c.sha) commits.push(c.sha);
+              }
+            }
+
+            results.push({
+              sessionId: state.sessionId || '',
+              agent,
+              model: state.model || 'unknown',
+              startedAt: startMs,
+              endedAt: endMs,
+              repoPath: sessionRepo,
+              commits,
+            });
+          } catch { /* skip malformed */ }
+        }
+      }
+    };
+    walkDir(sessionsDir);
+  } catch { /* directory read error */ }
+
+  return results;
+}
+
+function matchOriginSession(
+  commit: CommitInfo,
+  sessions: OriginSessionInfo[],
+): OriginSessionInfo | null {
+  const commitMs = commit.timestamp * 1000;
+
+  for (const session of sessions) {
+    // Direct SHA match — highest confidence
+    if (session.commits.includes(commit.sha)) {
+      return session;
+    }
+    // Timestamp match — commit happened during a known session
+    if (session.startedAt > 0 && session.endedAt > 0) {
+      // Allow 2 min buffer before start, 5 min after end
+      if (commitMs >= session.startedAt - 120000 && commitMs <= session.endedAt + 300000) {
+        return session;
+      }
+    }
+  }
+  return null;
+}
+
 // ─── Strategy 2: Commit Message Pattern Detection ─────────────────────────
 
 const CONVENTIONAL_PREFIXES = [
@@ -328,10 +426,35 @@ function detectFromCommitMessage(
     return { agent: 'ai', confidence: 'high', source: 'backfill-trailer' };
   }
 
-  // Conventional commit with AI phrases = medium confidence
-  const hasConventionalPrefix = CONVENTIONAL_PREFIXES.some(p => lowerSubject.startsWith(p));
-  const hasAiPhrase = AI_PHRASES.some(p => lowerMsg.includes(p));
+  // ── Agent-specific commit message style detection ──
 
+  // Claude: very structured, verbose, em-dashes, detailed explanations
+  const hasConventionalPrefix = CONVENTIONAL_PREFIXES.some(p => lowerSubject.startsWith(p));
+  const hasEmDash = message.includes('—') || message.includes('--');
+  const isVerboseSubject = commit.subject.length > 60;
+  const hasDetailedBody = message.split('\n').filter(l => l.trim()).length > 3;
+  const claudeSignals = [hasConventionalPrefix, hasEmDash, isVerboseSubject, hasDetailedBody]
+    .filter(Boolean).length;
+  if (claudeSignals >= 3) {
+    return { agent: 'claude', confidence: 'medium', source: 'backfill-style-claude' };
+  }
+
+  // Codex: short messages, often lowercase, generic "Update file.ts" pattern
+  const isShort = commit.subject.length < 35;
+  const isGenericUpdate = /^(update|add|fix|remove|delete|change|modify|edit)\s+\S+/i.test(commit.subject);
+  const startsLowercase = /^[a-z]/.test(commit.subject);
+  const codexSignals = [isShort, isGenericUpdate, startsLowercase].filter(Boolean).length;
+  if (codexSignals >= 2) {
+    return { agent: 'codex', confidence: 'medium', source: 'backfill-style-codex' };
+  }
+
+  // Gemini: often adds emoji, uses "✨", "🔧" etc in commit messages
+  if (/[\u{1F300}-\u{1F9FF}]/u.test(message)) {
+    return { agent: 'gemini', confidence: 'medium', source: 'backfill-style-gemini' };
+  }
+
+  // Generic AI: conventional prefix + AI phrases
+  const hasAiPhrase = AI_PHRASES.some(p => lowerMsg.includes(p));
   if (hasConventionalPrefix && hasAiPhrase) {
     return { agent: 'ai', confidence: 'medium', source: 'backfill-pattern' };
   }
@@ -403,6 +526,45 @@ function detectFromCodeStyle(
   if (signals >= 2) {
     return { agent: 'ai', confidence: 'low', source: 'backfill-heuristic' };
   }
+
+  return null;
+}
+
+// ─── Strategy 4: File Change Patterns ──────────────────────────────────────
+
+function detectFromFileChanges(
+  repoPath: string,
+  sha: string,
+): { agent: string; confidence: Confidence; source: string } | null {
+  try {
+    const files = execSync(
+      `git diff-tree --no-commit-id --name-only -r ${sha}`,
+      execOpts(repoPath),
+    ).trim().split('\n').filter(Boolean);
+
+    if (files.length === 0) return null;
+
+    // If commit only touches .cursor/ files → Cursor
+    if (files.every(f => f.startsWith('.cursor/'))) {
+      return { agent: 'cursor', confidence: 'high', source: 'backfill-file-pattern' };
+    }
+    // If commit only touches .claude/ files → Claude
+    if (files.every(f => f.startsWith('.claude/'))) {
+      return { agent: 'claude', confidence: 'high', source: 'backfill-file-pattern' };
+    }
+    // If commit touches .cursor/ alongside other files → likely Cursor session
+    if (files.some(f => f.startsWith('.cursor/'))) {
+      return { agent: 'cursor', confidence: 'medium', source: 'backfill-file-pattern' };
+    }
+    // If commit touches .claude/ alongside other files → likely Claude session
+    if (files.some(f => f.startsWith('.claude/'))) {
+      return { agent: 'claude', confidence: 'medium', source: 'backfill-file-pattern' };
+    }
+    // If commit touches .codex/ files → Codex
+    if (files.some(f => f.startsWith('.codex/'))) {
+      return { agent: 'codex', confidence: 'medium', source: 'backfill-file-pattern' };
+    }
+  } catch { /* git command failed */ }
 
   return null;
 }
@@ -479,6 +641,9 @@ export async function backfillCommand(opts: {
 
   console.log(`Scanning ${chalk.bold(String(commits.length))} commits...\n`);
 
+  // Scan Origin session state files (Strategy 0)
+  const originSessions = scanOriginSessions(repoPath);
+
   // Scan local agent history (Strategy 1)
   const sessions = [
     ...scanClaudeSessions(repoPath),
@@ -495,19 +660,36 @@ export async function backfillCommand(opts: {
 
     let result: BackfillResult | null = null;
 
-    // Strategy 1: Session match (highest confidence)
-    const sessionMatch = matchSessionToCommit(commit, sessions);
-    if (sessionMatch) {
+    // Strategy 0: Origin session state match (absolute highest confidence)
+    const originMatch = matchOriginSession(commit, originSessions);
+    if (originMatch) {
       result = {
         sha: commit.sha,
         date: commit.date.split('T')[0],
         subject: commit.subject,
-        agent: sessionMatch.agent,
+        agent: originMatch.agent,
         confidence: 'high',
-        source: 'backfill-session-match',
+        source: 'backfill-origin-session',
         authorName: commit.authorName,
         authorEmail: commit.authorEmail,
       };
+    }
+
+    // Strategy 1: Local agent history session match
+    if (!result) {
+      const sessionMatch = matchSessionToCommit(commit, sessions);
+      if (sessionMatch) {
+        result = {
+          sha: commit.sha,
+          date: commit.date.split('T')[0],
+          subject: commit.subject,
+          agent: sessionMatch.agent,
+          confidence: 'high',
+          source: 'backfill-session-match',
+          authorName: commit.authorName,
+          authorEmail: commit.authorEmail,
+        };
+      }
     }
 
     // Strategy 2: Commit message patterns
@@ -522,6 +704,23 @@ export async function backfillCommand(opts: {
           agent: msgResult.agent,
           confidence: msgResult.confidence,
           source: msgResult.source,
+          authorName: commit.authorName,
+          authorEmail: commit.authorEmail,
+        };
+      }
+    }
+
+    // Strategy 4: File change patterns
+    if (!result) {
+      const fileResult = detectFromFileChanges(repoPath, commit.sha);
+      if (fileResult) {
+        result = {
+          sha: commit.sha,
+          date: commit.date.split('T')[0],
+          subject: commit.subject,
+          agent: fileResult.agent,
+          confidence: fileResult.confidence,
+          source: fileResult.source,
           authorName: commit.authorName,
           authorEmail: commit.authorEmail,
         };
