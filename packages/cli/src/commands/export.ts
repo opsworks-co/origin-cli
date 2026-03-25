@@ -94,11 +94,27 @@ function csvEscape(value: string): string {
   return value;
 }
 
-export async function exportCommand(opts?: { format?: string; output?: string; limit?: string; model?: string }) {
+export async function exportCommand(opts?: { format?: string; output?: string; limit?: string; model?: string; session?: string }) {
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
   if (!repoPath) {
     console.error(chalk.red('Error: Not in a git repository.'));
+    return;
+  }
+
+  // Handle agent-trace format separately
+  const format = (opts?.format || 'json').toLowerCase();
+  if (format === 'agent-trace') {
+    const { exportAgentTrace } = await import('../agent-trace.js');
+    const trace = exportAgentTrace(repoPath, opts?.session);
+    const output = JSON.stringify(trace, null, 2) + '\n';
+
+    if (opts?.output) {
+      fs.writeFileSync(opts.output, output);
+      console.error(chalk.green(`  Exported Agent Trace v0.1.0 (${trace.files.length} files) to ${opts.output}`));
+    } else {
+      process.stdout.write(output);
+    }
     return;
   }
 
@@ -120,7 +136,6 @@ export async function exportCommand(opts?: { format?: string; output?: string; l
   }
 
   // Format output
-  const format = (opts?.format || 'json').toLowerCase();
   let output: string;
 
   if (format === 'csv') {
@@ -132,7 +147,7 @@ export async function exportCommand(opts?: { format?: string; output?: string; l
   // Write to file or stdout
   if (opts?.output) {
     fs.writeFileSync(opts.output, output);
-    console.error(chalk.green(`  ✓ Exported ${sessions.length} session${sessions.length !== 1 ? 's' : ''} to ${opts.output}`));
+    console.error(chalk.green(`  Exported ${sessions.length} session${sessions.length !== 1 ? 's' : ''} to ${opts.output}`));
   } else {
     process.stdout.write(output);
   }

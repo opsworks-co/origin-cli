@@ -105,11 +105,35 @@ function importFromSessionsBranch(repoPath: string): PromptRecord[] {
  *
  * Walks origin-sessions branch and imports all prompts to local database.
  */
-export async function dbImportCommand(): Promise<void> {
+export async function dbImportCommand(opts?: { format?: string; file?: string }): Promise<void> {
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
   if (!repoPath) {
     console.error(chalk.red('Error: Not in a git repository.'));
+    return;
+  }
+
+  // Handle agent-trace format
+  const format = (opts?.format || '').toLowerCase();
+  if (format === 'agent-trace') {
+    const { importAgentTrace } = await import('../agent-trace.js');
+    const fs = await import('fs');
+
+    let input: string;
+    if (opts?.file) {
+      input = fs.readFileSync(opts.file, 'utf-8');
+    } else {
+      // Read from stdin
+      input = fs.readFileSync(0, 'utf-8');
+    }
+
+    try {
+      const traceData = JSON.parse(input);
+      importAgentTrace(repoPath, traceData);
+      console.log(chalk.green(`  Imported Agent Trace v${traceData.version} (${traceData.files?.length || 0} files) as git notes on ${traceData.vcs?.revision?.slice(0, 8) || 'unknown'}.`));
+    } catch (err: any) {
+      console.error(chalk.red(`Failed to import agent trace: ${err.message}`));
+    }
     return;
   }
 

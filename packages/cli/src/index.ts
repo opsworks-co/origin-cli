@@ -166,11 +166,12 @@ program.command('compare <arg1> [arg2]')
   .action(compareCommand);
 
 program.command('export')
-  .description('Export session data as CSV or JSON')
-  .option('-f, --format <format>', 'Output format (json, csv)', 'json')
+  .description('Export session data as CSV, JSON, or Agent Trace v0.1.0')
+  .option('-f, --format <format>', 'Output format (json, csv, agent-trace)', 'json')
   .option('-o, --output <file>', 'Write to file instead of stdout')
   .option('-l, --limit <n>', 'Limit number of sessions')
   .option('-m, --model <name>', 'Filter by model')
+  .option('-s, --session <id>', 'Export only a specific session (agent-trace format)')
   .action(exportCommand);
 
 const ignoreCmd = program.command('ignore').description('Manage file ignore patterns for Origin tracking');
@@ -262,6 +263,8 @@ config.command('list')
 const db = program.command('db').description('Local prompt database management');
 db.command('import')
   .description('Import prompts from origin-sessions branch into local DB')
+  .option('-f, --format <format>', 'Import format (default: origin-sessions, or agent-trace)')
+  .option('--file <path>', 'Input file (for agent-trace format; otherwise reads stdin)')
   .action(dbImportCommand);
 db.command('stats')
   .description('Show local database statistics')
