@@ -481,7 +481,17 @@ export async function reportCommand(opts?: { range?: string; output?: string; fo
 
   try {
     if (isConnectedMode()) {
-      data = await collectConnectedData(repoPath, days);
+      try {
+        data = await collectConnectedData(repoPath, days);
+      } catch {
+        // API failed (401, network, etc) — fall back to local git data
+        if (repoPath) {
+          data = collectLocalGitData(repoPath, days);
+        } else {
+          console.error(chalk.red('Error: API unavailable and not in a git repository.'));
+          return;
+        }
+      }
     } else if (repoPath) {
       data = collectLocalGitData(repoPath, days);
     } else {
