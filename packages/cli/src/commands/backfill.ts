@@ -266,11 +266,14 @@ function scanOriginSessions(repoPath: string): OriginSessionInfo[] {
             const sessionRepo = state.repoPath || '';
             if (sessionRepo && resolve(sessionRepo) !== resolve(repoPath)) continue;
 
-            const agent = state.model?.toLowerCase()?.includes('codex') ? 'codex'
-              : state.model?.toLowerCase()?.includes('gemini') ? 'gemini'
-              : state.model?.toLowerCase()?.includes('cursor') ? 'cursor'
-              : state.model?.toLowerCase()?.includes('claude') ? 'claude'
-              : state.model || 'ai';
+            const m = (state.model || '').toLowerCase();
+            const agent = m.includes('codex') ? 'codex'
+              : m.includes('gemini') ? 'gemini'
+              : m.includes('cursor') ? 'cursor'
+              : m.includes('claude') ? 'claude'
+              : /^gpt-/.test(m) ? 'codex'  // gpt-5.4 etc = Codex CLI
+              : m === 'default' || m === 'unknown' ? 'ai'
+              : m || 'ai';
 
             const startMs = state.startedAt ? new Date(state.startedAt).getTime() : 0;
             // Session end = last prompt time or startedAt + typical session length

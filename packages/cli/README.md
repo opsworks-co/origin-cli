@@ -43,6 +43,7 @@ origin blame <file>              # Line-by-line AI/human attribution
 origin diff                      # Annotated diff — see AI changes in context
 origin stats                     # AI vs human breakdown for the repo
 origin sessions                  # List all AI coding sessions
+origin prompts <file>            # See which AI prompts touched a file
 origin search "auth bug"         # Find the prompt that introduced code
 origin backfill                  # Retroactively tag old commits as AI/human
 ```
