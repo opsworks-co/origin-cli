@@ -4,12 +4,158 @@ import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import type { Stats, Session, Policy, Machine, IntegrationConfig } from '../api';
 import KpiCard from '../components/KpiCard';
+import Sparkline from '../components/Sparkline';
 import { timeAgo, getStatusBadgeClass } from '../utils';
 import {
   AreaChart, Area, PieChart, Pie, Cell,
   Tooltip, ResponsiveContainer,
 } from 'recharts';
-import { Activity, CalendarDays, DollarSign, AlertCircle, ShieldCheck } from 'lucide-react';
+import { Activity, CalendarDays, DollarSign, AlertCircle, ShieldCheck, Sparkles, X } from 'lucide-react';
+
+// ── AI Insight Generation ────────────────────────────────────────────────────
+
+interface InsightResult {
+  headline: string;
+  advice: string;
+}
+
+function generateInsight(stats: Stats): InsightResult {
+  const days = stats.sessionsByDay ?? [];
+  const costByDay = stats.costByDay ?? [];
+
+  // Compute this week vs last week sessions from sessionsByDay
+  const now = new Date();
+  const startOfThisWeek = new Date(now);
+  startOfThisWeek.setDate(now.getDate() - now.getDay());
+  startOfThisWeek.setHours(0, 0, 0, 0);
+  const startOfLastWeek = new Date(startOfThisWeek);
+  startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
+
+  let thisWeekSessions = 0;
+  let lastWeekSessions = 0;
+  for (const d of days) {
+    const date = new Date(d.date);
+    if (date >= startOfThisWeek) thisWeekSessions += d.count;
+    else if (date >= startOfLastWeek && date < startOfThisWeek) lastWeekSessions += d.count;
+  }
+
+  // Compute this week vs last week cost
+  let thisWeekCost = 0;
+  let lastWeekCost = 0;
+  for (const d of costByDay) {
+    const date = new Date(d.date);
+    if (date >= startOfThisWeek) thisWeekCost += d.cost;
+    else if (date >= startOfLastWeek && date < startOfThisWeek) lastWeekCost += d.cost;
+  }
+
+  // Find dominant model
+  const costByModel = stats.costByModel ?? [];
+  const totalModelSessions = costByModel.reduce((s, m) => s + m.count, 0);
+  const topModel = costByModel.length > 0
+    ? costByModel.reduce((a, b) => (a.count > b.count ? a : b))
+    : null;
+  const topModelPct = topModel && totalModelSessions > 0
+    ? Math.round((topModel.count / totalModelSessions) * 100)
+    : 0;
+
+  const violations = stats.policyViolations ?? 0;
+
+  // Daily cost average
+  const daysElapsed = stats.daysElapsed ?? 1;
+  const dailyCostAvg = stats.estimatedCostThisMonth / Math.max(daysElapsed, 1);
+
+  // Pick the most interesting headline
+  let headline: string;
+  let advice: string;
+
+  const sessionPctChange = lastWeekSessions > 0
+    ? Math.round(((thisWeekSessions - lastWeekSessions) / lastWeekSessions) * 100)
+    : 0;
+
+  const costPctChange = lastWeekCost > 0
+    ? Math.round(((thisWeekCost - lastWeekCost) / lastWeekCost) * 100)
+    : 0;
+
+  if (violations > 0) {
+    headline = `\u26A0\uFE0F ${violations} policy violation${violations !== 1 ? 's' : ''} detected this week. Review flagged sessions promptly.`;
+    advice = 'Review flagged sessions in the Sessions page.';
+  } else if (sessionPctChange >= 10) {
+    const modelNote = topModel && topModelPct > 60
+      ? `, with ${topModel.model} driving ${topModelPct}% of activity`
+      : '';
+    headline = `AI sessions are up ${sessionPctChange}% this week${modelNote}. Cost is trending at $${dailyCostAvg.toFixed(2)}/day.`;
+    advice = costPctChange > 20
+      ? 'Consider setting budget limits in Budget settings.'
+      : 'Everything looks healthy. Keep building.';
+  } else if (sessionPctChange <= -10) {
+    headline = `AI activity dropped ${Math.abs(sessionPctChange)}% this week. ${thisWeekSessions} sessions tracked so far.`;
+    advice = 'AI adoption is below target. Check agent setup.';
+  } else if (topModel && topModelPct > 60) {
+    headline = `${topModel.model} is driving ${topModelPct}% of all sessions. $${dailyCostAvg.toFixed(2)}/day average cost.`;
+    advice = costPctChange > 20
+      ? 'Consider setting budget limits in Budget settings.'
+      : 'Everything looks healthy. Keep building.';
+  } else if (costPctChange > 20) {
+    headline = `Spending is up ${costPctChange}% \u2014 $${dailyCostAvg.toFixed(2)}/day average this month.`;
+    advice = 'Consider setting budget limits in Budget settings.';
+  } else {
+    headline = `${stats.totalSessions} sessions across ${stats.activeAgents} agent${stats.activeAgents !== 1 ? 's' : ''} this month, totaling $${stats.estimatedCostThisMonth.toFixed(2)}.`;
+    advice = 'Everything looks healthy. Keep building.';
+  }
+
+  return { headline, advice };
+}
+
+function InsightBanner({ stats }: { stats: Stats }) {
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const storageKey = `origin_insight_dismissed_${todayKey}`;
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(storageKey) === 'true');
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (!dismissed) {
+      const t = requestAnimationFrame(() => setVisible(true));
+      return () => cancelAnimationFrame(t);
+    }
+  }, [dismissed]);
+
+  if (dismissed) return null;
+
+  const { headline, advice } = generateInsight(stats);
+
+  const handleDismiss = () => {
+    localStorage.setItem(storageKey, 'true');
+    setVisible(false);
+    setTimeout(() => setDismissed(true), 300);
+  };
+
+  return (
+    <div
+      className="relative rounded-xl p-[1px] transition-opacity duration-300"
+      style={{
+        opacity: visible ? 1 : 0,
+        background: 'linear-gradient(135deg, rgba(99,102,241,0.4), rgba(168,85,247,0.4), rgba(99,102,241,0.2))',
+      }}
+    >
+      <div className="relative rounded-xl bg-gray-900/95 px-5 py-4 flex items-start gap-4">
+        <div className="flex-shrink-0 mt-0.5">
+          <Sparkles className="h-5 w-5 text-indigo-400" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm text-gray-200 leading-relaxed">{headline}</p>
+          <p className="text-xs text-gray-500 mt-1">{advice}</p>
+        </div>
+        <button
+          onClick={handleDismiss}
+          className="flex-shrink-0 text-gray-600 hover:text-gray-400 transition-colors p-1 -m-1"
+          title="Dismiss"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function statusBadge(status: string) {
   return <span className={getStatusBadgeClass(status)}>{status}</span>;
@@ -130,6 +276,9 @@ export default function Dashboard() {
           {user?.orgName ? ` at ${user.orgName}` : ''}.
         </p>
       </div>
+
+      {/* ── AI Insight Banner ────────────────────────────────────────────── */}
+      <InsightBanner stats={stats} />
 
       {/* ── Onboarding Checklist ─────────────────────────────────────────── */}
       {!allSetUp && !onboardingDismissed && (
@@ -271,6 +420,7 @@ export default function Dashboard() {
             subtext="sessions running"
             icon={Activity}
             to="/sessions"
+            sparkline={stats.sessionsByDay?.length > 1 && <Sparkline data={stats.sessionsByDay.slice(-30).map(d => d.count)} color="#a78bfa" />}
           />
           <KpiCard
             label="This Week"
@@ -278,6 +428,7 @@ export default function Dashboard() {
             subtext="sessions tracked"
             icon={CalendarDays}
             to="/sessions"
+            sparkline={stats.sessionsByDay?.length > 1 && <Sparkline data={stats.sessionsByDay.slice(-30).map(d => d.count)} color="#818cf8" />}
           />
           <KpiCard
             label="Cost This Month"
@@ -285,6 +436,7 @@ export default function Dashboard() {
             subtext={`${stats.totalSessions} total sessions`}
             icon={DollarSign}
             to="/insights"
+            sparkline={stats.costByDay?.length > 1 && <Sparkline data={stats.costByDay.slice(-30).map(d => d.cost)} color="#c084fc" />}
           />
           <KpiCard
             label="Unreviewed"

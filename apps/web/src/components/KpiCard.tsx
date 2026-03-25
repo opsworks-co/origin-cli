@@ -9,6 +9,7 @@ interface KpiCardProps {
   subtext?: string;
   to?: string;
   icon?: LucideIcon;
+  sparkline?: React.ReactNode;
 }
 
 const colorMap = {
@@ -27,12 +28,13 @@ const iconBgMap = {
   default: 'bg-white/[0.04] text-gray-400',
 };
 
-export default function KpiCard({ label, value, color = 'default', subtext, to, icon: Icon }: KpiCardProps) {
+export default function KpiCard({ label, value, color = 'default', subtext, to, icon: Icon, sparkline }: KpiCardProps) {
   const content = (
     <div className="flex items-start justify-between">
       <div className="min-w-0 flex-1">
         <p className="section-title mb-2">{label}</p>
         <p className={`text-2xl font-semibold tracking-tight ${colorMap[color]}`}>{value}</p>
+        {sparkline && <div className="mt-2">{sparkline}</div>}
         {subtext && <p className="text-xs text-gray-500 mt-1.5">{subtext}</p>}
       </div>
       {Icon && (
