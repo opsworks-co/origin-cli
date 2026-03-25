@@ -45,6 +45,7 @@ import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
 import { reworkCommand } from './commands/rework.js';
 import { reportCommand } from './commands/report.js';
+import { backfillCommand } from './commands/backfill.js';
 import { checkForUpdate } from './version-check.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -194,6 +195,16 @@ ignoreCmd.action(ignoreListCommand);
 ignoreCmd.command('add <pattern>').description('Add an ignore pattern to .origin.json').action(ignoreAddCommand);
 ignoreCmd.command('remove <pattern>').description('Remove an ignore pattern').action(ignoreRemoveCommand);
 ignoreCmd.command('test <filepath>').description('Test if a file would be ignored').action(ignoreTestCommand);
+
+// ─── Backfill ─────────────────────────────────────────────────────────────
+
+program.command('backfill')
+  .description('Retroactively tag old commits with AI attribution by matching against agent history and heuristics')
+  .option('-d, --days <n>', 'How far back to scan', '90')
+  .option('--dry-run', 'Show results without tagging (default behavior)')
+  .option('--apply', 'Actually write git notes')
+  .option('--min-confidence <level>', 'Only tag commits above this confidence: high, medium, low', 'medium')
+  .action(backfillCommand);
 
 // ─── Search & Analysis ───────────────────────────────────────────────────
 
