@@ -194,7 +194,19 @@ export default function Landing() {
             </div>
           </div>
 
-          {/* Terminal demo */}
+          {/* Video demo */}
+          <div className="mt-10 max-w-3xl mx-auto rounded-xl overflow-hidden border border-gray-800 shadow-2xl shadow-indigo-900/10">
+            <div style={{ position: 'relative', paddingBottom: '56.25%', height: 0 }}>
+              <iframe
+                src="https://www.loom.com/embed/9916f9b26b5142b399f8e6822bc2ca02?sid=auto&hide_owner=true&hide_share=true&hide_title=true&hideEmbedTopBar=true"
+                frameBorder="0"
+                allowFullScreen
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
+              />
+            </div>
+          </div>
+
+          {/* Terminal demo (below video) */}
           <TerminalDemo />
 
           {/* Install one-liner */}
