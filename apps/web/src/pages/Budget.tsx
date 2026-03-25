@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
 import type { BudgetData, ForecastData } from '../api';
-import { AlertTriangle, TrendingUp, TrendingDown, Minus, DollarSign, Users, Cpu, GitPullRequest, Shield } from 'lucide-react';
+import { AlertTriangle, TrendingUp, TrendingDown, Minus, DollarSign, Users, Cpu, GitPullRequest, Shield, Calculator, Mail } from 'lucide-react';
 
 // ── Types for new features ──────────────────────────────────────────────────
 
@@ -62,6 +62,17 @@ export default function BudgetPage() {
   const [agentLimitValue, setAgentLimitValue] = useState('');
   const [userLimitValue, setUserLimitValue] = useState('');
 
+  // ── ROI Calculator state ────────────────────────────────────────────────
+  const [hourlyRate, setHourlyRate] = useState(() => {
+    const saved = localStorage.getItem('origin_hourly_rate');
+    return saved ? Number(saved) : 75;
+  });
+
+  // ── Digest state ────────────────────────────────────────────────────────
+  const [digestEnabled, setDigestEnabled] = useState(false);
+  const [digestSending, setDigestSending] = useState(false);
+  const [digestMsg, setDigestMsg] = useState('');
+
   // ── Active section tab ───────────────────────────────────────────────────
   const [activeSection, setActiveSection] = useState<'overview' | 'agents' | 'developers' | 'prs' | 'anomalies'>('overview');
 
@@ -69,13 +80,14 @@ export default function BudgetPage() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [budget, forecast, agentsRes, usersRes, anomalyRes, prRes] = await Promise.allSettled([
+      const [budget, forecast, agentsRes, usersRes, anomalyRes, prRes, emailSettings] = await Promise.allSettled([
         api.getBudget(),
         api.getForecast(),
         api.request<AgentBudget[]>('/api/budget/agents'),
         api.request<UserBudget[]>('/api/budget/users'),
         api.request<Anomaly[]>('/api/budget/anomalies'),
         api.request<PRCost[]>('/api/budget/pr-costs'),
+        api.getEmailSettings(),
       ]);
 
       if (budget.status === 'fulfilled') {
@@ -88,6 +100,7 @@ export default function BudgetPage() {
       if (usersRes.status === 'fulfilled') setUserBudgets(usersRes.value);
       if (anomalyRes.status === 'fulfilled') setAnomalies(anomalyRes.value);
       if (prRes.status === 'fulfilled') setPrCosts(prRes.value);
+      if (emailSettings.status === 'fulfilled') setDigestEnabled(emailSettings.value.enabled);
     } catch (err) {
       console.error('Budget fetch error:', err);
     } finally {
@@ -216,6 +229,69 @@ export default function BudgetPage() {
           </div>
         </div>
       </div>
+
+      {/* ROI Calculator */}
+      {budgetData && (() => {
+        const aiSpend = budgetData.currentSpend.monthly;
+        const totalSessions = budgetData.currentSpend.byModel.reduce((sum, m) => sum + m.sessions, 0);
+        const avgDurationMin = 8; // estimated avg session duration in minutes
+        const timeSavedHours = (totalSessions * avgDurationMin * 2) / 60;
+        const costSaved = timeSavedHours * hourlyRate;
+        const roi = aiSpend > 0 ? costSaved / aiSpend : 0;
+        const netSavings = costSaved - aiSpend;
+
+        return (
+          <div className="card p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                <Calculator className="w-4 h-4 text-gray-500" />
+                ROI Calculator
+              </h3>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-gray-500">Avg developer hourly rate:</label>
+                <div className="flex items-center gap-1">
+                  <span className="text-xs text-gray-400">$</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={hourlyRate}
+                    onChange={(e) => {
+                      const val = Number(e.target.value) || 0;
+                      setHourlyRate(val);
+                      localStorage.setItem('origin_hourly_rate', String(val));
+                    }}
+                    className="input text-xs w-20 py-1 px-2"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div className="bg-gray-800/50 rounded-lg p-3">
+                <div className="text-xs text-gray-500">AI Spend</div>
+                <div className="text-lg font-bold text-gray-100">${aiSpend.toFixed(2)}</div>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-3">
+                <div className="text-xs text-gray-500">Time Saved</div>
+                <div className="text-lg font-bold text-gray-100">{timeSavedHours.toFixed(1)} hrs</div>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-3">
+                <div className="text-xs text-gray-500">Developer Cost Saved</div>
+                <div className="text-lg font-bold text-green-400">${costSaved.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</div>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-3">
+                <div className="text-xs text-gray-500">Net Savings</div>
+                <div className={`text-lg font-bold ${netSavings >= 0 ? 'text-green-400' : 'text-red-400'}`}>${netSavings.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</div>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-3">
+                <div className="text-xs text-gray-500">ROI</div>
+                <div className="text-lg font-bold text-indigo-400">{roi.toFixed(0)}x</div>
+              </div>
+            </div>
+            <p className="text-xs text-gray-600">Based on {totalSessions} sessions &times; ~{avgDurationMin}min avg &times; 2x time multiplier (AI is ~3x faster). Adjust hourly rate above.</p>
+          </div>
+        );
+      })()}
 
       {/* Budget Progress Bar */}
       {budgetData && budgetData.config.monthlyLimit > 0 && (
@@ -435,6 +511,71 @@ export default function BudgetPage() {
                   {saving ? 'Saving...' : 'Save Budget Settings'}
                 </button>
               </form>
+            </div>
+
+            {/* Weekly Digest Email */}
+            <div className="card p-4 space-y-4">
+              <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                <Mail className="w-4 h-4 text-gray-500" />
+                Weekly Digest Email
+              </h3>
+
+              <label className="flex items-center gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={digestEnabled}
+                  onChange={async (e) => {
+                    const enabled = e.target.checked;
+                    setDigestEnabled(enabled);
+                    try {
+                      await api.updateEmailSettings({ enabled });
+                    } catch (err: any) {
+                      setDigestEnabled(!enabled);
+                      setDigestMsg(`Error: ${err.message}`);
+                    }
+                  }}
+                  className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-indigo-600 focus:ring-indigo-500"
+                />
+                <div>
+                  <span className="text-sm text-gray-200">Send weekly digest email to admins</span>
+                  <p className="text-xs text-gray-500">Delivers a summary every Monday at 9 AM UTC to all admin and owner users</p>
+                </div>
+              </label>
+
+              {digestMsg && (
+                <div className={`text-sm rounded-lg p-3 ${digestMsg.startsWith('Error') ? 'bg-red-900/20 border border-red-800 text-red-400' : 'bg-green-900/20 border border-green-800 text-green-400'}`}>
+                  {digestMsg}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  onClick={async () => {
+                    setDigestSending(true);
+                    setDigestMsg('');
+                    try {
+                      const res = await api.sendDigest();
+                      setDigestMsg(res.success ? 'Digest sent successfully' : `Error: ${res.error || 'Unknown error'}`);
+                    } catch (err: any) {
+                      setDigestMsg(`Error: ${err.message}`);
+                    } finally {
+                      setDigestSending(false);
+                    }
+                  }}
+                  disabled={digestSending}
+                  className="btn-secondary text-sm"
+                >
+                  {digestSending ? 'Sending...' : 'Send test digest now'}
+                </button>
+                <a
+                  href="/api/settings/digest-preview"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-secondary text-sm inline-flex items-center"
+                >
+                  Preview
+                </a>
+              </div>
             </div>
           </div>
         </div>

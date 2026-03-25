@@ -3,7 +3,8 @@ import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { getBudgetConfig, saveBudgetConfig, getMonthlySpend, getDailySpend, getSpendByModel, getSpendByUser } from '../services/budget.js';
-import { sendTestEmail } from '../services/email.js';
+import { sendTestEmail, sendWeeklyDigest, generateWeeklyDigestData } from '../services/email.js';
+import { buildWeeklyDigestHTML } from '../services/email-templates.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -566,6 +567,40 @@ router.post('/email/test', requireRole('ADMIN'), async (req: AuthRequest, res: R
     res.json(result);
   } catch (err) {
     console.error('Test email error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Weekly Digest ────────────────────────────────────────────────────────────
+
+// POST /api/settings/send-digest — manually trigger the weekly digest (for testing)
+router.post('/send-digest', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await sendWeeklyDigest(req.user!.orgId);
+    res.json(result);
+  } catch (err) {
+    console.error('Send digest error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/settings/digest-preview — returns the HTML preview without sending
+router.get('/digest-preview', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const data = await generateWeeklyDigestData(req.user!.orgId);
+    if (!data) {
+      return res.status(404).json({ error: 'Org not found' });
+    }
+    const html = buildWeeklyDigestHTML(data);
+    // Return as HTML so the browser can render it directly
+    if (req.query.format === 'json') {
+      res.json({ html, data });
+    } else {
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    }
+  } catch (err) {
+    console.error('Digest preview error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

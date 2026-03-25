@@ -407,6 +407,38 @@ function formatMarkdown(data: ReportData): string {
   lines.push(`| Human | ${data.aiVsHuman.humanCommits} | ${data.aiVsHuman.humanPct}% |`);
   lines.push('');
 
+  // ROI Estimate
+  const hourlyRate = 75;
+  const totalSessions = data.summary.totalSessions;
+  // Parse avg duration from agent usage data (fallback 8 min)
+  let avgDurationMin = 8;
+  if (data.agentUsage.length > 0) {
+    const parsed = data.agentUsage
+      .map(a => parseInt(a.avgDuration, 10))
+      .filter(n => !isNaN(n) && n > 0);
+    if (parsed.length > 0) {
+      avgDurationMin = parsed.reduce((a, b) => a + b, 0) / parsed.length;
+    }
+  }
+  const timeSavedHours = (totalSessions * avgDurationMin * 2) / 60;
+  const costSaved = timeSavedHours * hourlyRate;
+  const aiSpend = data.summary.totalCost;
+  const roi = aiSpend > 0 ? costSaved / aiSpend : 0;
+  const netSavings = costSaved - aiSpend;
+
+  lines.push('## ROI Estimate');
+  lines.push('');
+  lines.push(`_Based on $${hourlyRate}/hr developer rate, ${totalSessions} sessions, ~${avgDurationMin.toFixed(0)}min avg duration, 3x AI speed multiplier._`);
+  lines.push('');
+  lines.push('| Metric | Value |');
+  lines.push('| --- | ---: |');
+  lines.push(`| AI Spend | $${aiSpend.toFixed(2)} |`);
+  lines.push(`| Time Saved | ${timeSavedHours.toFixed(1)} hrs |`);
+  lines.push(`| Developer Cost Saved | $${costSaved.toFixed(0)} |`);
+  lines.push(`| Net Savings | $${netSavings.toFixed(0)} |`);
+  lines.push(`| ROI | ${roi.toFixed(0)}x |`);
+  lines.push('');
+
   return lines.join('\n');
 }
 

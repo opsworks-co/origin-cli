@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import { prisma } from '../db.js';
-import { sendWeeklyReport } from './email.js';
+import { sendWeeklyReport, sendWeeklyDigest } from './email.js';
 import { sendSlackNotification } from './slack.js';
 import { resetMonthlyAlerts, getMonthlySpend, getSpendByModel } from './budget.js';
 
@@ -20,6 +20,11 @@ export function startScheduler(): void {
         // Send email report
         await sendWeeklyReport(org.id).catch(err =>
           console.error(`[scheduler] Email report failed for ${org.name}:`, err)
+        );
+
+        // Send manager digest email
+        await sendWeeklyDigest(org.id).catch(err =>
+          console.error(`[scheduler] Weekly digest failed for ${org.name}:`, err)
         );
 
         // Send Slack weekly digest

@@ -43,6 +43,7 @@ import { verifyCommand } from './commands/verify.js';
 import { ignoreListCommand, ignoreAddCommand, ignoreRemoveCommand, ignoreTestCommand } from './commands/ignore.js';
 import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
+import { reworkCommand } from './commands/rework.js';
 import { reportCommand } from './commands/report.js';
 import { checkForUpdate } from './version-check.js';
 import { readFileSync } from 'fs';
@@ -167,6 +168,12 @@ program.command('verify')
   .description('Health check — show agent config, repo config, mode, sessions, attribution')
   .option('--json', 'Output as JSON')
   .action(verifyCommand);
+
+program.command('rework')
+  .description('Detect AI-generated code that was reverted or heavily modified (rework hotspots)')
+  .option('-d, --days <n>', 'Number of days to look back', '7')
+  .option('-l, --limit <n>', 'Max results to show', '20')
+  .action(reworkCommand);
 
 program.command('compare <arg1> [arg2]')
   .description('Compare AI attribution between branches or commit ranges')

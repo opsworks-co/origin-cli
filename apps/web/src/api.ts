@@ -1079,6 +1079,16 @@ export function testEmail(to?: string) {
   });
 }
 
+// ---- Weekly Digest -----------------------------------------------------------
+
+export function sendDigest() {
+  return request<{ success: boolean; html: string; error?: string }>('/api/settings/send-digest', { method: 'POST' });
+}
+
+export function getDigestPreview() {
+  return request<{ html: string }>('/api/settings/digest-preview?format=json');
+}
+
 // ---- Organization Settings ---------------------------------------------------
 
 export interface OrgSettings {
