@@ -350,18 +350,71 @@ Shows:
 
 ---
 
-### `origin audit`
+### `origin report`
 
-View the audit log.
+Generate sprint reports with cost breakdown, agent usage, and daily activity.
 
 ```bash
-origin audit
-origin audit --action AGENT_CREATED --limit 50
+origin report                                  # Default: last 7 days, markdown
+origin report --range 14d --output sprint.md   # Last 14 days, save to file
+origin report --range 30d --format json
 ```
 
 Options:
-- `-a, --action <action>` — Filter by action type (e.g. `AGENT_CREATED`, `POLICY_UPDATED`, `SESSION_REVIEWED`)
-- `-l, --limit <n>` — Max entries (default: 30)
+- `--range <range>` — Time range: `7d`, `14d`, or `30d` (default: `7d`)
+- `--format <format>` — Output format: `md`, `json`, or `csv` (default: `md`)
+- `--output <file>` — Write report to file instead of stdout
+
+---
+
+### `origin audit`
+
+Generate a compliance audit trail. Supports SOC 2 / ISO 27001 reporting.
+
+```bash
+origin audit                                           # Recent audit log
+origin audit --from 2026-01-01 --format csv --output q1.csv
+origin audit --author "Jane" --agent claude --to 2026-03-01
+```
+
+Options:
+- `--from <date>` — Start date (ISO 8601)
+- `--to <date>` — End date (ISO 8601)
+- `--author <name>` — Filter by author name
+- `--agent <name>` — Filter by agent name
+- `--format <format>` — Output format: `md`, `json`, or `csv` (default: `md`)
+- `--output <file>` — Write report to file instead of stdout
+
+---
+
+### `origin search`
+
+Full-text search across prompts and session content.
+
+```bash
+origin search "auth"                            # Search all sessions
+origin search "auth" --agent claude --from 7d   # Scoped search
+origin search "database migration" --limit 5
+```
+
+Options:
+- `--from <date>` — Filter by date (ISO 8601 or relative like `7d`)
+- `--agent <name>` — Filter by agent name
+- `--limit <n>` — Max results (default: 20)
+
+---
+
+### `origin export --format agent-trace`
+
+Export a session in Cursor Agent Trace v0.1.0 format.
+
+```bash
+origin export --format agent-trace --session abc12345
+```
+
+Options:
+- `--format agent-trace` — Use the Cursor Agent Trace v0.1.0 schema
+- `--session <id>` — Session ID to export
 
 ---
 
@@ -408,4 +461,7 @@ Delete this file to log out.
 | `origin team` | List team members |
 | `origin user <id>` | View user detail |
 | `origin stats` | View stats for current repo (--dashboard, --global) |
-| `origin audit` | View audit log |
+| `origin report` | Generate sprint reports (cost, usage, activity) |
+| `origin audit` | Compliance audit trail (SOC 2 / ISO 27001) |
+| `origin search "<query>"` | Full-text search across prompts and sessions |
+| `origin export --format agent-trace` | Export session as Cursor Agent Trace v0.1.0 |
