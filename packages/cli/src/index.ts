@@ -43,6 +43,7 @@ import { verifyCommand } from './commands/verify.js';
 import { ignoreListCommand, ignoreAddCommand, ignoreRemoveCommand, ignoreTestCommand } from './commands/ignore.js';
 import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
+import { reportCommand } from './commands/report.js';
 import { checkForUpdate } from './version-check.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -155,6 +156,13 @@ program.command('stats')
   .option('-r, --range <range>', 'Commit range (e.g., HEAD~50..HEAD)')
   .action(statsCommand);
 
+program.command('report')
+  .description('Generate a markdown sprint report summarizing AI activity')
+  .option('-r, --range <range>', 'Date range: 7d, 14d, or 30d', '7d')
+  .option('-o, --output <file>', 'Write report to file instead of stdout')
+  .option('-f, --format <format>', 'Output format: md, json, or csv', 'md')
+  .action(reportCommand);
+
 program.command('verify')
   .description('Health check — show agent config, repo config, mode, sessions, attribution')
   .option('--json', 'Output as JSON')
@@ -183,10 +191,12 @@ ignoreCmd.command('test <filepath>').description('Test if a file would be ignore
 // ─── Search & Analysis ───────────────────────────────────────────────────
 
 program.command('search <query>')
-  .description('Search across all AI prompt history')
+  .description('Full-text search across all AI prompt history')
+  .option('-l, --limit <n>', 'Max results', '20')
+  .option('--from <date>', 'Filter by date (e.g., 7d, 2w, 1m, or 2025-01-01)')
+  .option('--agent <name>', 'Filter by agent (claude, cursor, gemini, codex, windsurf, aider)')
   .option('-m, --model <model>', 'Filter by model')
   .option('-r, --repo <path>', 'Filter by repo path')
-  .option('-l, --limit <n>', 'Max results', '20')
   .action(searchCommand);
 
 program.command('analyze')
@@ -417,9 +427,13 @@ program.command('policies').description('List active policies').action(policiesC
 // ─── Audit ───────────────────────────────────────────────────────────────
 
 program.command('audit')
-  .description('View audit log')
-  .option('-a, --action <action>', 'Filter by action type')
-  .option('-l, --limit <n>', 'Max results', '30')
+  .description('Generate compliance audit trail (SOC 2, ISO 27001, GDPR)')
+  .option('--from <date>', 'Start date (YYYY-MM-DD, default: 30 days ago)')
+  .option('--to <date>', 'End date (YYYY-MM-DD, default: today)')
+  .option('--author <name>', 'Filter by author name')
+  .option('--agent <name>', 'Filter by agent name')
+  .option('-f, --format <format>', 'Output format: md, json, csv', 'md')
+  .option('-o, --output <file>', 'Write to file instead of stdout')
   .action(auditCommand);
 
 // ─── Versioning ──────────────────────────────────────────────────────────

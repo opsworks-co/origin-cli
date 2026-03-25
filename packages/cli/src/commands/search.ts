@@ -1,13 +1,37 @@
 import chalk from 'chalk';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { execSync } from 'child_process';
 import { searchPrompts, type PromptRecord } from '../local-db.js';
-import { getGitRoot } from '../session-state.js';
+import { getGitRoot, type SessionState } from '../session-state.js';
+import { isConnectedMode } from '../config.js';
+import { api } from '../api.js';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────
 
-/**
- * Highlight matching portions of text with chalk.
- */
+interface SearchResult {
+  sessionId: string;
+  agentName: string;
+  timestamp: string;
+  filesChanged: string[];
+  promptText: string;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────
+
+function timeAgo(dateStr: string): string {
+  if (!dateStr) return '';
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (seconds < 0) return 'just now';
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 function highlightMatch(text: string, query: string): string {
   const lowerText = text.toLowerCase();
   const lowerQuery = query.toLowerCase();
@@ -17,17 +41,20 @@ function highlightMatch(text: string, query: string): string {
   const before = text.slice(0, idx);
   const match = text.slice(idx, idx + query.length);
   const after = text.slice(idx + query.length);
-  return before + chalk.bgYellow.black(match) + after;
+  return before + chalk.bold(match) + after;
 }
 
-/**
- * Extract a snippet around the first match for display.
- */
+function truncatePrompt(text: string, maxLen: number = 200): string {
+  const clean = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxLen) return clean;
+  return clean.slice(0, maxLen) + '...';
+}
+
 function extractSnippet(text: string, query: string, contextChars: number = 80): string {
   const lowerText = text.toLowerCase();
   const lowerQuery = query.toLowerCase();
   const idx = lowerText.indexOf(lowerQuery);
-  if (idx < 0) return text.slice(0, contextChars * 2);
+  if (idx < 0) return text.slice(0, contextChars * 2).replace(/\n/g, ' ');
 
   const start = Math.max(0, idx - contextChars);
   const end = Math.min(text.length, idx + query.length + contextChars);
@@ -37,94 +64,335 @@ function extractSnippet(text: string, query: string, contextChars: number = 80):
   return snippet;
 }
 
-/**
- * Fallback: scan origin-sessions branch for prompts matching query.
- */
-function scanSessionsBranch(repoPath: string, query: string, limit: number): PromptRecord[] {
-  const results: PromptRecord[] = [];
-  try {
-    // List all session directories
-    const listing = execSync(
-      `git ls-tree --name-only refs/heads/origin-sessions sessions/`,
-      {
-        encoding: 'utf-8',
-        cwd: repoPath,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
-    ).trim();
+function parseFromDate(from: string): Date | null {
+  // Support relative dates like "7d", "2w", "1m" and absolute dates
+  const relMatch = from.match(/^(\d+)([dwm])$/);
+  if (relMatch) {
+    const n = parseInt(relMatch[1], 10);
+    const unit = relMatch[2];
+    const now = new Date();
+    if (unit === 'd') now.setDate(now.getDate() - n);
+    else if (unit === 'w') now.setDate(now.getDate() - n * 7);
+    else if (unit === 'm') now.setMonth(now.getMonth() - n);
+    return now;
+  }
+  const d = new Date(from);
+  return isNaN(d.getTime()) ? null : d;
+}
 
+function agentFromModel(model: string): string {
+  const lower = model.toLowerCase();
+  if (lower.includes('claude') || lower.includes('anthropic')) return 'Claude';
+  if (lower.includes('cursor')) return 'Cursor';
+  if (lower.includes('gemini') || lower.includes('google')) return 'Gemini';
+  if (lower.includes('codex') || lower.includes('openai') || lower.includes('gpt')) return 'Codex';
+  if (lower.includes('windsurf')) return 'Windsurf';
+  if (lower.includes('aider')) return 'Aider';
+  return model;
+}
+
+function matchesAgent(model: string, agentName: string | undefined, filterAgent: string): boolean {
+  const filter = filterAgent.toLowerCase();
+  const lowerModel = model.toLowerCase();
+  const lowerAgent = (agentName || '').toLowerCase();
+  return lowerModel.includes(filter) || lowerAgent.includes(filter);
+}
+
+// ─── Data Sources ────────────────────────────────────────────────────────
+
+/**
+ * Search connected mode API sessions.
+ */
+async function searchConnected(
+  query: string,
+  opts: { limit: number; from?: Date; agent?: string },
+): Promise<SearchResult[]> {
+  const results: SearchResult[] = [];
+  try {
+    const params: Record<string, string> = { limit: String(Math.min(opts.limit * 3, 100)) };
+    const data = await api.getSessions(params) as any;
+    const sessions = data.sessions || [];
+    const lowerQuery = query.toLowerCase();
+
+    for (const s of sessions) {
+      if (results.length >= opts.limit) break;
+
+      // Date filter
+      if (opts.from) {
+        const sessionDate = new Date(s.createdAt || s.startedAt);
+        if (sessionDate < opts.from) continue;
+      }
+
+      // Agent filter
+      if (opts.agent && !matchesAgent(s.model || '', s.agentName, opts.agent)) continue;
+
+      // Check prompts field or prompt data
+      const promptTexts: string[] = [];
+      if (s.prompts && Array.isArray(s.prompts)) {
+        for (const p of s.prompts) {
+          const text = typeof p === 'string' ? p : p.text || p.prompt || '';
+          if (text) promptTexts.push(text);
+        }
+      }
+      if (s.prompt) promptTexts.push(s.prompt);
+
+      // If no prompts, try fetching session detail
+      if (promptTexts.length === 0) {
+        try {
+          const detail = await api.getSession(s.id) as any;
+          if (detail.prompts && Array.isArray(detail.prompts)) {
+            for (const p of detail.prompts) {
+              const text = typeof p === 'string' ? p : p.text || p.prompt || '';
+              if (text) promptTexts.push(text);
+            }
+          }
+          if (detail.prompt) promptTexts.push(detail.prompt);
+        } catch { /* skip */ }
+      }
+
+      for (const text of promptTexts) {
+        if (results.length >= opts.limit) break;
+        if (text.toLowerCase().includes(lowerQuery)) {
+          const files = (() => {
+            try { return JSON.parse(s.filesChanged); } catch { return []; }
+          })();
+          results.push({
+            sessionId: s.id,
+            agentName: s.agentName || agentFromModel(s.model || 'unknown'),
+            timestamp: s.createdAt || s.startedAt || '',
+            filesChanged: Array.isArray(files) ? files : [],
+            promptText: text,
+          });
+        }
+      }
+    }
+  } catch { /* API unavailable */ }
+  return results;
+}
+
+/**
+ * Scan ~/.origin/sessions/ state files for prompt matches.
+ */
+function searchSessionStateFiles(
+  query: string,
+  opts: { limit: number; from?: Date; agent?: string },
+): SearchResult[] {
+  const results: SearchResult[] = [];
+  const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+
+  try {
+    if (!fs.existsSync(sessionsDir)) return results;
+    const entries = fs.readdirSync(sessionsDir).filter(e => e.endsWith('.json'));
+    const lowerQuery = query.toLowerCase();
+
+    for (const entry of entries) {
+      if (results.length >= opts.limit) break;
+      try {
+        const raw = fs.readFileSync(path.join(sessionsDir, entry), 'utf-8');
+        const state: SessionState = JSON.parse(raw);
+        if (!state || !state.sessionId || !state.prompts) continue;
+
+        // Date filter
+        if (opts.from && state.startedAt) {
+          if (new Date(state.startedAt) < opts.from) continue;
+        }
+
+        // Agent filter
+        if (opts.agent && !matchesAgent(state.model || '', undefined, opts.agent)) continue;
+
+        for (const prompt of state.prompts) {
+          if (results.length >= opts.limit) break;
+          if (prompt.toLowerCase().includes(lowerQuery)) {
+            results.push({
+              sessionId: state.sessionId,
+              agentName: agentFromModel(state.model || 'unknown'),
+              timestamp: state.startedAt || '',
+              filesChanged: [],
+              promptText: prompt,
+            });
+          }
+        }
+      } catch { /* skip corrupt files */ }
+    }
+  } catch { /* ignore */ }
+  return results;
+}
+
+/**
+ * Check git notes for prompt data.
+ */
+function searchGitNotes(
+  repoPath: string,
+  query: string,
+  opts: { limit: number; from?: Date; agent?: string },
+): SearchResult[] {
+  const results: SearchResult[] = [];
+  const lowerQuery = query.toLowerCase();
+
+  try {
+    const notesList = execSync('git notes --ref=origin list', {
+      encoding: 'utf-8',
+      cwd: repoPath,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    if (!notesList) return results;
+
+    for (const line of notesList.split('\n').filter(Boolean)) {
+      if (results.length >= opts.limit) break;
+      const parts = line.trim().split(/\s+/);
+      const noteBlob = parts[0];
+      if (!noteBlob) continue;
+
+      try {
+        const noteContent = execSync(`git notes --ref=origin show ${parts[1] || noteBlob}`, {
+          encoding: 'utf-8',
+          cwd: repoPath,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+
+        // Try to parse as JSON
+        try {
+          const data = JSON.parse(noteContent);
+          const prompts = data.prompts || (data.prompt ? [data.prompt] : []);
+          for (const p of prompts) {
+            if (results.length >= opts.limit) break;
+            const text = typeof p === 'string' ? p : p.text || p.prompt || '';
+            if (text.toLowerCase().includes(lowerQuery)) {
+              // Date filter
+              if (opts.from && data.startedAt && new Date(data.startedAt) < opts.from) continue;
+              // Agent filter
+              if (opts.agent && !matchesAgent(data.model || '', data.agentName, opts.agent)) continue;
+
+              results.push({
+                sessionId: data.sessionId || parts[1]?.slice(0, 12) || 'unknown',
+                agentName: data.agentName || agentFromModel(data.model || 'unknown'),
+                timestamp: data.startedAt || '',
+                filesChanged: data.filesChanged || [],
+                promptText: text,
+              });
+            }
+          }
+        } catch {
+          // Plain text note — search it directly
+          if (noteContent.toLowerCase().includes(lowerQuery)) {
+            results.push({
+              sessionId: (parts[1] || noteBlob).slice(0, 12),
+              agentName: 'unknown',
+              timestamp: '',
+              filesChanged: [],
+              promptText: noteContent,
+            });
+          }
+        }
+      } catch { /* skip */ }
+    }
+  } catch { /* no git notes */ }
+  return results;
+}
+
+/**
+ * Scan origin-sessions branch for matching prompts.
+ */
+function searchSessionsBranch(
+  repoPath: string,
+  query: string,
+  opts: { limit: number; from?: Date; agent?: string },
+): SearchResult[] {
+  const results: SearchResult[] = [];
+  try {
+    execSync('git rev-parse refs/heads/origin-sessions', {
+      encoding: 'utf-8',
+      cwd: repoPath,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch {
+    return results;
+  }
+
+  try {
+    const listing = execSync(
+      'git ls-tree --name-only refs/heads/origin-sessions sessions/',
+      { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] },
+    ).trim();
     if (!listing) return results;
 
     const dirs = listing.split('\n').filter(Boolean);
     const lowerQuery = query.toLowerCase();
 
     for (const dir of dirs) {
-      if (results.length >= limit) break;
+      if (results.length >= opts.limit) break;
       try {
+        let model = 'unknown';
+        let agentName = '';
+        let startedAt = '';
+        let filesChanged: string[] = [];
+
+        // Read metadata
+        try {
+          const metaRaw = execSync(
+            `git show refs/heads/origin-sessions:${dir}/metadata.json`,
+            { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] },
+          ).trim();
+          const meta = JSON.parse(metaRaw);
+          model = meta.model || 'unknown';
+          agentName = meta.agentName || '';
+          startedAt = meta.startedAt || '';
+          filesChanged = meta.filesChanged || [];
+        } catch { /* ignore */ }
+
+        // Date filter
+        if (opts.from && startedAt && new Date(startedAt) < opts.from) continue;
+        // Agent filter
+        if (opts.agent && !matchesAgent(model, agentName, opts.agent)) continue;
+
         const promptsMd = execSync(
           `git show refs/heads/origin-sessions:${dir}/prompts.md`,
-          {
-            encoding: 'utf-8',
-            cwd: repoPath,
-            stdio: ['pipe', 'pipe', 'pipe'],
-          },
+          { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] },
         ).trim();
 
-        if (promptsMd.toLowerCase().includes(lowerQuery)) {
-          // Parse session ID from directory name
-          const sessionId = dir.replace('sessions/', '');
+        if (!promptsMd.toLowerCase().includes(lowerQuery)) continue;
 
-          // Try to get model from metadata
-          let model = 'unknown';
-          try {
-            const metaRaw = execSync(
-              `git show refs/heads/origin-sessions:${dir}/metadata.json`,
-              {
-                encoding: 'utf-8',
-                cwd: repoPath,
-                stdio: ['pipe', 'pipe', 'pipe'],
-              },
-            ).trim();
-            const meta = JSON.parse(metaRaw);
-            model = meta.model || 'unknown';
-          } catch { /* ignore */ }
+        const sessionId = dir.replace('sessions/', '');
+        const sections = promptsMd.split(/^## Prompt \d+/m).slice(1);
 
-          // Extract individual prompts from the markdown
-          const promptSections = promptsMd.split(/^## Prompt \d+/m).slice(1);
-          for (const section of promptSections) {
-            if (section.toLowerCase().includes(lowerQuery)) {
-              const text = section.split('**Files changed:**')[0].trim();
-              results.push({
-                id: `${sessionId}-branch`,
-                sessionId,
-                promptIndex: results.length,
-                promptText: text,
-                timestamp: '',
-                model,
-                repoPath,
-                filesChanged: [],
-              });
-              if (results.length >= limit) break;
-            }
+        for (const section of sections) {
+          if (results.length >= opts.limit) break;
+          if (section.toLowerCase().includes(lowerQuery)) {
+            const text = section.split('**Files changed:**')[0].trim();
+            results.push({
+              sessionId,
+              agentName: agentName || agentFromModel(model),
+              timestamp: startedAt,
+              filesChanged,
+              promptText: text,
+            });
           }
         }
       } catch { /* skip session */ }
     }
-  } catch { /* branch doesn't exist or other error */ }
+  } catch { /* branch error */ }
   return results;
 }
 
-// ─── Command ──────────────────────────────────────────────────────────────
-
 /**
- * origin search <query> [--model <model>] [--repo <path>] [--limit <n>]
- *
- * Searches the local prompt database for matching prompts.
- * Falls back to scanning the origin-sessions branch if local DB has no results.
+ * Convert local-db PromptRecords to SearchResults.
  */
+function dbToSearchResults(records: PromptRecord[]): SearchResult[] {
+  return records.map(r => ({
+    sessionId: r.sessionId,
+    agentName: agentFromModel(r.model),
+    timestamp: r.timestamp,
+    filesChanged: r.filesChanged,
+    promptText: r.promptText,
+  }));
+}
+
+// ─── Command ─────────────────────────────────────────────────────────────
+
 export async function searchCommand(
   query: string,
-  opts?: { model?: string; repo?: string; limit?: string },
+  opts?: { limit?: string; from?: string; agent?: string; model?: string; repo?: string },
 ): Promise<void> {
   if (!query || query.trim().length === 0) {
     console.error(chalk.red('Error: Search query is required.'));
@@ -132,53 +400,104 @@ export async function searchCommand(
   }
 
   const limit = opts?.limit ? parseInt(opts.limit, 10) : 20;
-  const repoFilter = opts?.repo || undefined;
+  const fromDate = opts?.from ? parseFromDate(opts.from) : undefined;
+  const agentFilter = opts?.agent;
+  const searchOpts = { limit, from: fromDate || undefined, agent: agentFilter };
 
-  // Search local database first
-  let results = searchPrompts(query, {
-    model: opts?.model,
-    repoPath: repoFilter,
-    limit,
-  });
+  const allResults: SearchResult[] = [];
+  const seenKeys = new Set<string>();
 
-  let source = 'local database';
-
-  // Fallback: scan origin-sessions branch
-  if (results.length === 0) {
-    const cwd = process.cwd();
-    const repoPath = repoFilter || getGitRoot(cwd);
-    if (repoPath) {
-      results = scanSessionsBranch(repoPath, query, limit);
-      source = 'origin-sessions branch';
+  function addResults(results: SearchResult[]) {
+    for (const r of results) {
+      const key = `${r.sessionId}:${r.promptText.slice(0, 100)}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      allResults.push(r);
     }
   }
 
-  if (results.length === 0) {
+  // 1. Search local database
+  const dbResults = searchPrompts(query, {
+    model: opts?.model,
+    repoPath: opts?.repo,
+    limit,
+  });
+  addResults(dbToSearchResults(dbResults));
+
+  // 2. Connected mode: search API
+  if (isConnectedMode()) {
+    try {
+      const apiResults = await searchConnected(query, searchOpts);
+      addResults(apiResults);
+    } catch { /* API unavailable */ }
+  }
+
+  // 3. Standalone: scan session state files
+  const stateResults = searchSessionStateFiles(query, searchOpts);
+  addResults(stateResults);
+
+  // 4. Scan git notes and origin-sessions branch
+  const repoPath = opts?.repo || getGitRoot(process.cwd());
+  if (repoPath) {
+    const noteResults = searchGitNotes(repoPath, query, searchOpts);
+    addResults(noteResults);
+    const branchResults = searchSessionsBranch(repoPath, query, searchOpts);
+    addResults(branchResults);
+  }
+
+  // Apply date filter to all results
+  let filtered = allResults;
+  if (fromDate) {
+    filtered = filtered.filter(r => {
+      if (!r.timestamp) return true;
+      return new Date(r.timestamp) >= fromDate;
+    });
+  }
+
+  // Sort by most recent first
+  filtered.sort((a, b) => {
+    if (!a.timestamp && !b.timestamp) return 0;
+    if (!a.timestamp) return 1;
+    if (!b.timestamp) return -1;
+    return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+  });
+
+  // Apply limit
+  filtered = filtered.slice(0, limit);
+
+  if (filtered.length === 0) {
     console.log(chalk.gray(`No prompts found matching "${query}".`));
     return;
   }
 
   console.log(chalk.bold(`\n  Search Results`));
-  console.log(chalk.gray(`  Found ${results.length} match${results.length === 1 ? '' : 'es'} in ${source}\n`));
+  console.log(chalk.gray(`  Found ${filtered.length} match${filtered.length === 1 ? '' : 'es'}\n`));
 
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    const index = chalk.gray(`${i + 1}.`);
-    const session = chalk.blue(r.sessionId.slice(0, 12));
-    const model = chalk.cyan(r.model);
-    const timestamp = r.timestamp ? chalk.gray(new Date(r.timestamp).toLocaleString()) : '';
+  for (const r of filtered) {
+    const shortId = r.sessionId.slice(0, 8);
+    const agent = r.agentName || 'unknown';
+    const age = r.timestamp ? timeAgo(r.timestamp) : '';
+    const fileList = r.filesChanged.length > 0
+      ? r.filesChanged.slice(0, 3).join(', ') + (r.filesChanged.length > 3 ? ` +${r.filesChanged.length - 3} more` : '')
+      : '';
 
-    console.log(`  ${index} ${session}  ${model}  ${timestamp}`);
+    // Header line: Session abc12345 | Claude | 2d ago | src/api.ts, src/auth.ts
+    const parts = [
+      `Session ${chalk.blue(shortId)}`,
+      chalk.cyan(agent),
+      age ? chalk.dim(age) : null,
+      fileList ? chalk.gray(fileList) : null,
+    ].filter(Boolean);
+    console.log(`  ${parts.join(' | ')}`);
 
-    // Show highlighted snippet
+    // Prompt line (truncated)
+    const promptDisplay = truncatePrompt(r.promptText);
+    console.log(`    Prompt: ${chalk.gray('"' + promptDisplay + '"')}`);
+
+    // Match line with highlight
     const snippet = extractSnippet(r.promptText, query);
-    console.log(`     ${highlightMatch(snippet, query)}`);
+    console.log(`    Match: ${highlightMatch(snippet, query)}`);
 
-    if (r.filesChanged.length > 0) {
-      const fileList = r.filesChanged.slice(0, 3).join(', ');
-      const more = r.filesChanged.length > 3 ? ` +${r.filesChanged.length - 3} more` : '';
-      console.log(chalk.gray(`     Files: ${fileList}${more}`));
-    }
     console.log('');
   }
 }
