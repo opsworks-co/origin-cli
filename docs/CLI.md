@@ -404,6 +404,40 @@ Options:
 
 ---
 
+### `origin backfill`
+
+Retroactively tag old commits as AI or human-authored. Scans `.claude/`, `.cursor/`, `.codex/` session history, commit message patterns, and code style heuristics.
+
+```bash
+origin backfill                      # Dry-run — shows what it would tag
+origin backfill --apply              # Actually write the tags
+origin backfill --days 180           # Go back 6 months
+origin backfill --min-confidence high # Only tag high-confidence matches
+```
+
+Options:
+- `--apply` — Write the attribution tags (default is dry-run)
+- `--days <n>` — How far back to scan (default: 90)
+- `--min-confidence <level>` — Minimum confidence: `low`, `medium`, or `high`
+
+---
+
+### `origin rework`
+
+Detect AI-generated code that was subsequently reworked by humans. Useful for understanding how much AI code survives review.
+
+```bash
+origin rework                        # Show reworked AI code in the last 30 days
+origin rework --days 90              # Extend the lookback window
+origin rework --agent cursor         # Filter by agent
+```
+
+Options:
+- `--days <n>` — Lookback period in days (default: 30)
+- `--agent <name>` — Filter by agent name
+
+---
+
 ### `origin export --format agent-trace`
 
 Export a session in Cursor Agent Trace v0.1.0 format.
@@ -464,4 +498,6 @@ Delete this file to log out.
 | `origin report` | Generate sprint reports (cost, usage, activity) |
 | `origin audit` | Compliance audit trail (SOC 2 / ISO 27001) |
 | `origin search "<query>"` | Full-text search across prompts and sessions |
+| `origin backfill` | Retroactive AI tagging (--apply, --days, --min-confidence) |
+| `origin rework` | Detect AI code that got reworked by humans (--days, --agent) |
 | `origin export --format agent-trace` | Export session as Cursor Agent Trace v0.1.0 |

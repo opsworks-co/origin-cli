@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ChatWidget from '../components/ChatWidget';
 
 type Section =
@@ -85,12 +85,12 @@ function CodeBlock({ children, title }: { children: string; title?: string }) {
   );
 }
 
-function H2({ children }: { children: React.ReactNode }) {
-  return <h2 className="text-xl font-bold text-gray-100 mt-8 mb-3">{children}</h2>;
+function H2({ children, id }: { children: React.ReactNode; id?: string }) {
+  return <h2 id={id} className="text-xl font-bold text-gray-100 mt-8 mb-3">{children}</h2>;
 }
 
-function H3({ children }: { children: React.ReactNode }) {
-  return <h3 className="text-lg font-semibold text-gray-200 mt-6 mb-2">{children}</h3>;
+function H3({ children, id }: { children: React.ReactNode; id?: string }) {
+  return <h3 id={id} className="text-lg font-semibold text-gray-200 mt-6 mb-2">{children}</h3>;
 }
 
 function P({ children }: { children: React.ReactNode }) {
@@ -138,6 +138,22 @@ function Callout({ type, children }: { type: 'info' | 'warning' | 'tip'; childre
 export default function Docs() {
   const [active, setActive] = useState<Section>('overview');
 
+  useEffect(() => {
+    if (window.location.hash) {
+      const hash = window.location.hash.slice(1);
+      // Check if hash matches a section key for sidebar navigation
+      const matchedSection = SECTIONS.find((s) => s.key === hash);
+      if (matchedSection) {
+        setActive(matchedSection.key);
+      }
+      // Scroll to the element after a short delay to allow render
+      setTimeout(() => {
+        const el = document.getElementById(hash);
+        if (el) el.scrollIntoView({ behavior: 'smooth' });
+      }, 100);
+    }
+  }, []);
+
   let lastGroup = '';
 
   return (
@@ -161,7 +177,7 @@ export default function Docs() {
                   </p>
                 )}
                 <button
-                  onClick={() => setActive(s.key)}
+                  onClick={() => { setActive(s.key); window.history.replaceState(null, '', `#${s.key}`); }}
                   className={`block w-full text-left px-3 py-1.5 rounded-lg text-sm transition-colors ${
                     active === s.key
                       ? 'bg-indigo-600/20 text-indigo-400 font-medium'
@@ -197,14 +213,14 @@ export default function Docs() {
         {/* ─── OVERVIEW ────────────────────────────────────────── */}
         {active === 'overview' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Origin Documentation</h1>
+            <h1 id="overview" className="text-2xl font-bold mb-2">Origin Documentation</h1>
             <P>
               Origin is the governance platform for AI-authored code. It gives engineering
               leaders full visibility into what AI agents are writing, enforces policies
               around agent behavior, and provides complete audit trails for compliance.
             </P>
 
-            <H2>Core Concepts</H2>
+            <H2 id="core-concepts">Core Concepts</H2>
             <ul className="space-y-2 mb-4">
               <Li>
                 <strong className="text-gray-200">Repositories</strong> &mdash; Connect your Git repos
@@ -233,7 +249,7 @@ export default function Docs() {
               </Li>
             </ul>
 
-            <H2>Recommended Setup Order</H2>
+            <H2 id="recommended-setup-order">Recommended Setup Order</H2>
             <P>Follow this order for the smoothest onboarding experience:</P>
             <div className="space-y-1 mb-4">
               <Step n={1} title="Connect GitHub or GitLab">
@@ -258,7 +274,7 @@ export default function Docs() {
         {/* ─── HOW IT WORKS ────────────────────────────────────── */}
         {active === 'workflow' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">How Origin Works</h1>
+            <h1 id="workflow" className="text-2xl font-bold mb-2">How Origin Works</h1>
             <P>
               Developer codes with AI &rarr; Origin captures everything &rarr; Policies evaluate &rarr;
               Team reviews &rarr; PR gets approved or blocked.
@@ -391,7 +407,7 @@ origin init`}</CodeBlock>
         {/* ─── SESSION TRACKING ────────────────────────────────── */}
         {active === 'session-tracking' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Session Tracking</h1>
+            <h1 id="session-tracking" className="text-2xl font-bold mb-2">Session Tracking</h1>
             <P>
               Origin automatically captures every AI coding session — prompts, files modified, token usage,
               cost, and full transcripts — by installing lightweight hooks into your AI coding agent. Works
@@ -404,7 +420,7 @@ origin init`}</CodeBlock>
               captured in the background and sent to Origin for review.
             </Callout>
 
-            <H2>Prerequisites</H2>
+            <H2 id="prerequisites">Prerequisites</H2>
             <P>Before session tracking works, make sure you have:</P>
             <ul className="space-y-1 ml-4 mb-4">
               <Li>Installed the Origin CLI (see CLI Reference for install command)</Li>
@@ -412,7 +428,7 @@ origin init`}</CodeBlock>
               <Li>Initialized: <code className="text-indigo-400">origin init</code> (registers machine, detects tools, installs global hooks)</Li>
             </ul>
 
-            <H2>Quick Setup</H2>
+            <H2 id="quick-setup">Quick Setup</H2>
             <P>
               <code className="text-indigo-400">origin init</code> installs hooks globally, so all git repos are tracked automatically.
               No per-repo setup is needed. AI tools are auto-detected (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, etc.)
@@ -443,7 +459,7 @@ origin enable --agent gemini`}</CodeBlock>
               needs to observe the session in real-time to link code to AI prompts.
             </Callout>
 
-            <H2>Supported Agents</H2>
+            <H2 id="supported-agents">Supported Agents</H2>
 
             <H3>Claude Code</H3>
             <P>
@@ -543,7 +559,7 @@ origin enable --agent gemini`}</CodeBlock>
   }
 }`}</CodeBlock>
 
-            <H2>What Gets Captured</H2>
+            <H2 id="what-gets-captured">What Gets Captured</H2>
             <P>
               For every AI coding session, Origin captures and stores the following metadata with each change.
               Every field listed below is persisted, auditable, and available in the session detail view and API.
@@ -719,13 +735,13 @@ origin stats`}</CodeBlock>
         {/* ─── GITHUB INTEGRATION ──────────────────────────────── */}
         {active === 'integrations' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">GitHub Integration</h1>
+            <h1 id="integrations" className="text-2xl font-bold mb-2">GitHub Integration</h1>
             <P>
               Connect GitHub to enable automatic repo discovery, one-click import with webhook setup,
               PR status checks, and AI governance comments on pull requests.
             </P>
 
-            <H2>Setup Guide</H2>
+            <H2 id="github-setup-guide">Setup Guide</H2>
 
             <Step n={1} title="Generate a GitHub Personal Access Token">
               <p className="mb-2">
@@ -834,7 +850,7 @@ origin stats`}</CodeBlock>
         {/* ─── GITLAB INTEGRATION ────────────────────────────────────── */}
         {active === 'gitlab-integration' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">GitLab Integration</h1>
+            <h1 id="gitlab-integration" className="text-2xl font-bold mb-2">GitLab Integration</h1>
             <P>
               Connect GitLab to enable automatic repo discovery, one-click import with webhook setup,
               MR commit statuses, and AI governance comments on merge requests.
@@ -969,7 +985,7 @@ origin stats`}</CodeBlock>
         {/* ─── REPOSITORIES ────────────────────────────────────── */}
         {active === 'repos' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Repositories</h1>
+            <h1 id="repos" className="text-2xl font-bold mb-2">Repositories</h1>
             <P>
               Repositories are the foundation of Origin. Each repo represents a Git
               repository where AI agents write code.
@@ -1063,7 +1079,7 @@ origin stats`}</CodeBlock>
         {/* ─── AGENTS ──────────────────────────────────────────── */}
         {active === 'agents' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Agents</h1>
+            <h1 id="agents" className="text-2xl font-bold mb-2">Agents</h1>
             <P>
               Agents represent the AI coding tools your team uses. Registering agents lets you
               track usage per tool, scope policies to specific agents, and understand which AI
@@ -1135,7 +1151,7 @@ Description: Codeium's AI IDE agent`}</CodeBlock>
         {/* ─── POLICIES ────────────────────────────────────────── */}
         {active === 'policies' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Policies</h1>
+            <h1 id="policies" className="text-2xl font-bold mb-2">Policies</h1>
             <P>
               Policies are governance rules that control what AI agents can and cannot do.
               They are enforced at two levels: <strong className="text-gray-200">server-side</strong> (at session start and end) and
@@ -1172,7 +1188,7 @@ Description: Codeium's AI IDE agent`}</CodeBlock>
               <p>The toggle on the right activates/deactivates the policy. Active policies show a green pulse indicator.</p>
             </Step>
 
-            <H2>Policy Types</H2>
+            <H2 id="policy-types">Policy Types</H2>
 
             <H3>FILE_RESTRICTION</H3>
             <P>
@@ -1312,12 +1328,12 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
         {/* ─── SETTINGS & API KEYS ─────────────────────────────── */}
         {active === 'settings' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Settings & API Keys</h1>
+            <h1 id="settings" className="text-2xl font-bold mb-2">Settings & API Keys</h1>
             <P>
               Manage your organization&apos;s API keys, integrations, and account settings.
             </P>
 
-            <H2>API Keys</H2>
+            <H2 id="api-keys">API Keys</H2>
             <P>
               API keys authenticate the CLI tool and MCP server. They are tied to your organization
               and work alongside Bearer token auth.
@@ -1368,13 +1384,13 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
         {/* ─── TEAM & ROLES (RBAC) ─────────────────────────────── */}
         {active === 'rbac' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Team & Roles</h1>
+            <h1 id="rbac" className="text-2xl font-bold mb-2">Team & Roles</h1>
             <P>
               Origin uses Role-Based Access Control (RBAC) to manage permissions. Each user has one role
               within their organization.
             </P>
 
-            <H2>Roles</H2>
+            <H2 id="roles">Roles</H2>
             <div className="space-y-4 mt-4 mb-6">
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <div className="flex items-center gap-2 mb-2">
@@ -1456,7 +1472,7 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
         {/* ─── DASHBOARD ───────────────────────────────────────── */}
         {active === 'dashboard' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Dashboard</h1>
+            <h1 id="dashboard" className="text-2xl font-bold mb-2">Dashboard</h1>
             <P>The dashboard provides a high-level governance overview of your organization&apos;s AI coding activity.</P>
 
             <H3>Active Sessions</H3>
@@ -1493,13 +1509,13 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
         {/* ─── SESSIONS & REVIEWS ──────────────────────────────── */}
         {active === 'sessions' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Sessions & Reviews</h1>
+            <h1 id="sessions" className="text-2xl font-bold mb-2">Sessions & Reviews</h1>
             <P>
               Sessions represent individual AI coding interactions. Every time an agent
               writes code, Origin captures it as a session.
             </P>
 
-            <H2>Session Data</H2>
+            <H2 id="session-data">Session Data</H2>
             <ul className="space-y-2 mb-4">
               <Li><strong className="text-gray-200">Model</strong> &mdash; Which AI model was used (e.g. claude-sonnet-4-20250514)</Li>
               <Li><strong className="text-gray-200">Prompt</strong> &mdash; What the developer asked the agent to do</Li>
@@ -1555,7 +1571,7 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               (reviewed/unreviewed/flagged), agent, and repository.
             </P>
 
-            <H2>Reviewing Sessions</H2>
+            <H2 id="reviewing-sessions">Reviewing Sessions</H2>
             <P>
               Open a session and scroll to the review bar at the bottom. You can:
             </P>
@@ -1630,7 +1646,7 @@ PATCH /api/sessions/:id/archive  { "archived": false }
 # Bulk archive/restore
 PATCH /api/sessions/bulk/archive  { "sessionIds": [...], "archived": true }`}</CodeBlock>
 
-            <H2>Sharing Sessions</H2>
+            <H2 id="sharing-sessions">Sharing Sessions</H2>
             <P>
               Generate public share links for any session. Shared sessions are accessible without
               authentication &mdash; anyone with the link can view the full session replay, review status,
@@ -1657,7 +1673,7 @@ GET /api/share/:slug`}</CodeBlock>
         {/* ─── AI BLAME ─────────────────────────────────────────── */}
         {active === 'ai-blame' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">AI Blame</h1>
+            <h1 id="ai-blame" className="text-2xl font-bold mb-2">AI Blame</h1>
             <P>
               AI Blame provides line-level attribution for AI-generated code. It tells you
               exactly which prompt (and which developer) caused each line of code to be written,
@@ -1737,7 +1753,7 @@ GET /api/sessions/:id/blame?file=src/components/App.tsx
         {/* ─── ASK THE AUTHOR ──────────────────────────────────── */}
         {active === 'ask-author' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Ask the Author</h1>
+            <h1 id="ask-author" className="text-2xl font-bold mb-2">Ask the Author</h1>
             <P>
               Ask the Author lets you ask questions about any coding session and get answers
               grounded in the actual conversation transcript and code changes. It&apos;s like
@@ -1808,7 +1824,7 @@ Content-Type: application/json
         {/* ─── GIT NOTES ──────────────────────────────────────── */}
         {active === 'git-notes' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Git Notes</h1>
+            <h1 id="git-notes" className="text-2xl font-bold mb-2">Git Notes</h1>
             <P>
               Origin writes structured AI metadata as Git Notes on every commit created during
               a coding session. This makes AI authorship information portable and accessible
@@ -1902,7 +1918,7 @@ git fetch origin refs/notes/origin:refs/notes/origin
         {/* ─── AI AUTO-REVIEW ──────────────────────────────────── */}
         {active === 'ai-review' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">AI Auto-Review</h1>
+            <h1 id="ai-review" className="text-2xl font-bold mb-2">AI Auto-Review</h1>
             <P>
               Origin can automatically review AI coding sessions using Claude, providing
               instant risk assessments and flagging sessions that need human attention.
@@ -1973,7 +1989,7 @@ git fetch origin refs/notes/origin:refs/notes/origin
         {/* ─── BUDGET & COST CONTROLS ──────────────────────────── */}
         {active === 'budget' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Budget & Cost Controls</h1>
+            <h1 id="budget" className="text-2xl font-bold mb-2">Budget & Cost Controls</h1>
             <P>
               Origin provides budget management to help organizations control AI coding costs
               with monthly limits, spend alerts, and optional hard blocks.
@@ -2023,7 +2039,7 @@ git fetch origin refs/notes/origin:refs/notes/origin
         {/* ─── REAL-TIME STREAMING ─────────────────────────────── */}
         {active === 'realtime' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Real-Time Streaming</h1>
+            <h1 id="realtime" className="text-2xl font-bold mb-2">Real-Time Streaming</h1>
             <P>
               Origin supports real-time session event streaming using Server-Sent Events (SSE).
               The sessions page automatically connects to the stream and updates live.
@@ -2083,14 +2099,14 @@ data: {"type":"session:ended","sessionId":"abc-123","orgId":"org-1","data":{"cos
         {/* ─── SECRET & PII SCANNING ─────────────────────────── */}
         {active === 'secret-scanning' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Secret & PII Scanning</h1>
+            <h1 id="secret-scanning" className="text-2xl font-bold mb-2">Secret & PII Scanning</h1>
             <P>
               Origin automatically scans code diffs at the end of every coding session for
               hardcoded secrets, API keys, credentials, and personally identifiable information (PII).
               Findings are displayed in the session detail and trigger notifications for critical issues.
             </P>
 
-            <H2>Detection Types</H2>
+            <H2 id="detection-types">Detection Types</H2>
             <P>The scanner checks for the following patterns in added lines:</P>
             <ul className="space-y-2 mb-4">
               <Li><strong className="text-gray-200">AWS_SECRET</strong> &mdash; AWS access keys and secret keys (AKIA... pattern)</Li>
@@ -2147,14 +2163,14 @@ data: {"type":"session:ended","sessionId":"abc-123","orgId":"org-1","data":{"cos
         {/* ─── COMPLIANCE REPORTS ─────────────────────────────── */}
         {active === 'compliance' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Compliance Reports</h1>
+            <h1 id="compliance" className="text-2xl font-bold mb-2">Compliance Reports</h1>
             <P>
               Generate comprehensive compliance reports covering session activity, policy violations,
               review coverage, and security findings. Reports can be filtered by date range and
               exported as JSON.
             </P>
 
-            <H2>Compliance Score</H2>
+            <H2 id="compliance-score">Compliance Score</H2>
             <P>
               The compliance score is a 0-100 metric calculated from four weighted factors:
             </P>
@@ -2210,7 +2226,7 @@ GET /api/reports/compliance/summary
         {/* ─── ENHANCED ANALYTICS ─────────────────────────────── */}
         {active === 'analytics' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Enhanced Analytics</h1>
+            <h1 id="analytics" className="text-2xl font-bold mb-2">Enhanced Analytics</h1>
             <P>
               The Insights page provides comprehensive analytics across all AI coding operations
               with customizable date range filtering and multiple chart types.
@@ -2281,7 +2297,7 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
         {/* ─── LEADERBOARD ──────────────────────────────────── */}
         {active === 'leaderboard' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Leaderboard</h1>
+            <h1 id="leaderboard" className="text-2xl font-bold mb-2">Leaderboard</h1>
             <P>
               The Leaderboard ranks team members by AI coding activity across your organization.
               Use it to identify power users, recognize high-quality contributors, and understand
@@ -2324,7 +2340,7 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
         {/* ─── PROMPT LIBRARY ──────────────────────────────────── */}
         {active === 'prompts' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Prompt Library</h1>
+            <h1 id="prompts" className="text-2xl font-bold mb-2">Prompt Library</h1>
             <P>
               The Prompt Library captures every prompt-to-code-change mapping across your organization.
               Search through prompts, see what files they changed, and analyze patterns in how your
@@ -2386,7 +2402,7 @@ GET /api/prompts/patterns`}</CodeBlock>
         {/* ─── MODEL COMPARISON ────────────────────────────────── */}
         {active === 'model-comparison' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Model Comparison</h1>
+            <h1 id="model-comparison" className="text-2xl font-bold mb-2">Model Comparison</h1>
             <P>
               Compare AI model performance across your organization. See which models
               are most cost-effective, produce the highest-quality code, and best fit
@@ -2434,7 +2450,7 @@ GET /api/prompts/patterns`}</CodeBlock>
         {/* ─── PULL REQUESTS ──────────────────────────────────── */}
         {active === 'pull-requests' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Pull Request Checks</h1>
+            <h1 id="pull-requests" className="text-2xl font-bold mb-2">Pull Request Checks</h1>
             <P>
               Origin integrates with GitHub to post governance status checks on pull requests.
               When a PR contains AI-authored commits, Origin links the relevant coding sessions,
@@ -2519,7 +2535,7 @@ GET /api/pull-requests/review?url=https://github.com/org/repo/pull/42`}</CodeBlo
         {/* ─── TRAILS ─────────────────────────────────────────── */}
         {active === 'trails' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Trails</h1>
+            <h1 id="trails" className="text-2xl font-bold mb-2">Trails</h1>
             <P>
               Trails let you group coding sessions by feature, project, or initiative.
               Track the total cost, effort, and progress of AI-assisted work at the feature level
@@ -2571,7 +2587,7 @@ POST /api/trails/:id/sessions
         {/* ─── MACHINES ───────────────────────────────────────── */}
         {active === 'machines' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Machines</h1>
+            <h1 id="machines" className="text-2xl font-bold mb-2">Machines</h1>
             <P>
               The Machines page shows all client devices registered with Origin.
               Track which developer machines are running AI coding tools, what software
@@ -2617,7 +2633,7 @@ GET /api/machines/:id`}</CodeBlock>
         {/* ─── PERSONAL INSIGHTS ─────────────────────────────── */}
         {active === 'personal-insights' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Personal Insights</h1>
+            <h1 id="personal-insights" className="text-2xl font-bold mb-2">Personal Insights</h1>
             <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg p-4 mb-6">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-indigo-400 text-lg">🚧</span>
@@ -2673,7 +2689,7 @@ GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
         {/* ─── WEBHOOKS ────────────────────────────────────────── */}
         {active === 'webhooks' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Webhooks</h1>
+            <h1 id="webhooks" className="text-2xl font-bold mb-2">Webhooks</h1>
             <P>
               Webhooks allow GitHub to push events (commits, pull requests) to Origin in real-time.
               When you import repos via &ldquo;Import from GitHub&rdquo;, webhooks are created automatically.
@@ -2735,15 +2751,15 @@ GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
         {/* ─── CLI ─────────────────────────────────────────────── */}
         {active === 'cli' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">CLI Reference</h1>
+            <h1 id="cli" className="text-2xl font-bold mb-2">CLI Reference</h1>
             <P>
               The Origin CLI connects developer machines to the Origin platform.
             </P>
 
-            <H3>Installation</H3>
+            <H3 id="cli-installation">Installation</H3>
             <CodeBlock>{`npm i -g ${window.location.origin}/cli/origin-cli-latest.tgz`}</CodeBlock>
 
-            <H3>Commands</H3>
+            <H3 id="cli-commands">Commands</H3>
 
             <div className="space-y-4 mt-4">
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -2826,10 +2842,43 @@ origin review abc123 --flag`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin audit</code>
-                <P>View the audit log. Filter by action type (SESSION_STARTED, SESSION_ENDED, POLICY_VIOLATION, etc.).</P>
+                <P>Generate a compliance audit trail for SOC 2 / ISO 27001 reporting. Filter by date range, author, or agent.</P>
                 <CodeBlock>{`origin audit
-origin audit --action POLICY_VIOLATION
-origin audit --limit 50`}</CodeBlock>
+origin audit --from 2026-01-01 --format csv --output q1.csv
+origin audit --author "Jane" --agent claude --to 2026-03-01`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin backfill</code>
+                <P>Retroactively tag old commits as AI or human-authored. Scans session history, commit message patterns, and code style heuristics to identify AI-generated commits.</P>
+                <CodeBlock>{`origin backfill                      # Dry-run — shows what it would tag
+origin backfill --apply              # Actually write the tags
+origin backfill --days 180           # Go back 6 months
+origin backfill --min-confidence high # Only tag high-confidence matches`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin rework</code>
+                <P>Detect AI-generated code that was subsequently reworked by humans. Useful for understanding how much AI code survives review.</P>
+                <CodeBlock>{`origin rework                        # Show reworked AI code in the last 30 days
+origin rework --days 90              # Extend the lookback window
+origin rework --agent cursor         # Filter by agent`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin report</code>
+                <P>Generate sprint reports with cost breakdown, agent usage, model distribution, and daily activity trends.</P>
+                <CodeBlock>{`origin report                                  # Default: last 7 days, markdown
+origin report --range 14d --output sprint.md   # Last 14 days, save to file
+origin report --range 30d --format json`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin search &lt;query&gt;</code>
+                <P>Full-text search across prompts and session content. Find the prompt that introduced specific code or behavior.</P>
+                <CodeBlock>{`origin search "auth"                            # Search all sessions
+origin search "auth" --agent claude --from 7d   # Scoped search
+origin search "database migration" --limit 5`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -2903,7 +2952,7 @@ origin rewind --to <sha>         # restore to a specific commit`}</CodeBlock>
         {/* ─── MCP SERVER ──────────────────────────────────────── */}
         {active === 'mcp' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">MCP Server</h1>
+            <h1 id="mcp" className="text-2xl font-bold mb-2">MCP Server</h1>
             <P>
               The Origin MCP (Model Context Protocol) server provides real-time policy
               enforcement for AI coding agents. It runs as a sidecar process alongside
@@ -2987,7 +3036,7 @@ origin rewind --to <sha>         # restore to a specific commit`}</CodeBlock>
         {/* ─── API REFERENCE ───────────────────────────────────── */}
         {active === 'api' && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">API Reference</h1>
+            <h1 id="api" className="text-2xl font-bold mb-2">API Reference</h1>
             <P>
               Origin exposes a REST API at <code className="text-indigo-400">/api</code>.
               All authenticated endpoints require either a Bearer token (JWT) or an API key (<code className="text-indigo-400">X-API-Key</code> header).
