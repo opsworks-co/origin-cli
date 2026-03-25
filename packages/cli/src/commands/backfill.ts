@@ -308,6 +308,72 @@ function scanOriginSessions(repoPath: string): OriginSessionInfo[] {
   return results;
 }
 
+function scanOriginSessionsBranch(repoPath: string): OriginSessionInfo[] {
+  const results: OriginSessionInfo[] = [];
+  try {
+    // List all sessions in origin-sessions branch
+    const raw = execSync(
+      'git ls-tree --name-only origin-sessions sessions/',
+      execOpts(repoPath),
+    ).trim();
+    if (!raw) return results;
+
+    const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
+    for (const dir of dirs) {
+      try {
+        const metaJson = execSync(
+          `git show origin-sessions:sessions/${dir}/metadata.json`,
+          execOpts(repoPath),
+        ).trim();
+        const meta = JSON.parse(metaJson);
+        if (!meta) continue;
+
+        const m = (meta.model || '').toLowerCase();
+        const agent = m.includes('codex') ? 'codex'
+          : m.includes('gemini') ? 'gemini'
+          : m.includes('cursor') ? 'cursor'
+          : m.includes('claude') ? 'claude'
+          : /^gpt-/.test(m) ? 'codex'
+          : m || 'ai';
+
+        const startMs = meta.startedAt ? new Date(meta.startedAt).getTime() : 0;
+        const endMs = meta.endedAt ? new Date(meta.endedAt).getTime()
+          : meta.updatedAt ? new Date(meta.updatedAt).getTime()
+          : startMs + 3600000; // default 1hr window
+
+        const commits: string[] = [];
+        if (meta.commitSha) commits.push(meta.commitSha);
+        if (meta.headShaAtStart) commits.push(meta.headShaAtStart);
+        // Try to read commits list
+        try {
+          const commitsJson = execSync(
+            `git show origin-sessions:sessions/${dir}/commits.json`,
+            execOpts(repoPath),
+          ).trim();
+          const commitsList = JSON.parse(commitsJson);
+          if (Array.isArray(commitsList)) {
+            for (const c of commitsList) {
+              const sha = typeof c === 'string' ? c : c?.sha;
+              if (sha) commits.push(sha);
+            }
+          }
+        } catch { /* no commits file */ }
+
+        results.push({
+          sessionId: meta.sessionId || dir,
+          agent,
+          model: meta.model || 'unknown',
+          startedAt: startMs,
+          endedAt: endMs,
+          repoPath,
+          commits,
+        });
+      } catch { /* skip bad session */ }
+    }
+  } catch { /* no origin-sessions branch */ }
+  return results;
+}
+
 function matchOriginSession(
   commit: CommitInfo,
   sessions: OriginSessionInfo[],
@@ -442,11 +508,14 @@ function detectFromCommitMessage(
     return { agent: 'claude', confidence: 'medium', source: 'backfill-style-claude' };
   }
 
-  // Codex: short messages, often lowercase, generic "Update file.ts" pattern
-  const isShort = commit.subject.length < 35;
-  const isGenericUpdate = /^(update|add|fix|remove|delete|change|modify|edit)\s+\S+/i.test(commit.subject);
+  // Codex: short messages, often lowercase, generic "Update/Add file" patterns,
+  // maintenance-style commits, "small" in subject, marker/note patterns
+  const isShort = commit.subject.length < 45;
+  const isGenericUpdate = /^(update|add|fix|remove|delete|change|modify|edit|expand|refine|mention)\s+/i.test(commit.subject);
   const startsLowercase = /^[a-z]/.test(commit.subject);
-  const codexSignals = [isShort, isGenericUpdate, startsLowercase].filter(Boolean).length;
+  const hasMarkerOrNote = /\b(marker|note|maintenance|guidance|follow-?up)\b/i.test(commit.subject);
+  const hasSmallWord = /\bsmall\b/i.test(commit.subject);
+  const codexSignals = [isShort, isGenericUpdate, startsLowercase, hasMarkerOrNote, hasSmallWord].filter(Boolean).length;
   if (codexSignals >= 2) {
     return { agent: 'codex', confidence: 'medium', source: 'backfill-style-codex' };
   }
@@ -644,8 +713,11 @@ export async function backfillCommand(opts: {
 
   console.log(`Scanning ${chalk.bold(String(commits.length))} commits...\n`);
 
-  // Scan Origin session state files (Strategy 0)
-  const originSessions = scanOriginSessions(repoPath);
+  // Scan Origin session state files + origin-sessions branch (Strategy 0)
+  const originSessions = [
+    ...scanOriginSessions(repoPath),
+    ...scanOriginSessionsBranch(repoPath),
+  ];
 
   // Scan local agent history (Strategy 1)
   const sessions = [
