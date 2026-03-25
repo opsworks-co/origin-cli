@@ -206,8 +206,7 @@ export default function Landing() {
             </div>
           </div>
 
-          {/* Terminal demo (below video) */}
-          <TerminalDemo />
+          {/* Terminal demo removed — video is enough */}
 
           {/* Install one-liner */}
           <InstallCommand />
