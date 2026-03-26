@@ -42,6 +42,7 @@ const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum'; values?
   secretRedaction: { type: 'boolean', description: 'Redact secrets before sending to API' },
   hookChaining:    { type: 'boolean', description: 'Chain existing hooks when installing Origin hooks' },
   checkpointRepo:  { type: 'string',  description: 'External git remote URL for session data (origin-sessions branch)' },
+  mode:            { type: 'enum',    values: ['auto', 'standalone'], description: 'Force standalone mode (skip API even when logged in)' },
 };
 
 export async function configGetCommand(rawKey: string): Promise<void> {
