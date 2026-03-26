@@ -1,5 +1,49 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
+
+// ── Animated grid background for hero ──────────────────────────────────────
+function GridBackground() {
+  return (
+    <div className="absolute inset-0 overflow-hidden pointer-events-none">
+      {/* Animated dot grid */}
+      <div className="absolute inset-0" style={{
+        backgroundImage: 'radial-gradient(circle, rgba(99,102,241,0.15) 1px, transparent 1px)',
+        backgroundSize: '32px 32px',
+        maskImage: 'radial-gradient(ellipse at center, black 30%, transparent 70%)',
+        WebkitMaskImage: 'radial-gradient(ellipse at center, black 30%, transparent 70%)',
+      }} />
+      {/* Animated glow pulse */}
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full animate-pulse"
+        style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.08) 0%, transparent 70%)' }} />
+    </div>
+  );
+}
+
+// ── Fade-in on scroll hook ─────────────────────────────────────────────────
+function useFadeIn() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) { setVisible(true); observer.disconnect(); } },
+      { threshold: 0.15 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  return { ref, className: `transition-all duration-700 ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}` };
+}
+
+function FadeIn({ children, delay = 0 }: { children: React.ReactNode; delay?: number }) {
+  const fade = useFadeIn();
+  return (
+    <div ref={fade.ref} className={fade.className} style={{ transitionDelay: `${delay}ms` }}>
+      {children}
+    </div>
+  );
+}
 
 const FEATURES = [
   {
@@ -100,7 +144,7 @@ function InstallCommand() {
       >
         <div className="flex items-center gap-3">
           <span className="text-green-400 text-sm font-mono shrink-0">$</span>
-          <code className="text-sm font-mono text-gray-200 truncate flex-1">
+          <code className="text-sm font-mono text-gray-200 flex-1 whitespace-nowrap">
             {INSTALL_CMD}
           </code>
           <span className="text-xs text-gray-500 group-hover:text-indigo-400 transition-colors shrink-0">
@@ -154,20 +198,21 @@ export default function Landing() {
     <>
       {/* Hero */}
       <section className="relative overflow-hidden">
+        <GridBackground />
         {/* Gradient orbs */}
-        <div className="absolute top-0 left-1/4 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl" />
-        <div className="absolute top-20 right-1/4 w-80 h-80 bg-purple-600/10 rounded-full blur-3xl" />
-        <div className="absolute bottom-0 left-1/2 w-64 h-64 bg-cyan-600/5 rounded-full blur-3xl" />
+        <div className="absolute top-0 left-1/4 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl animate-[pulse_4s_ease-in-out_infinite]" />
+        <div className="absolute top-20 right-1/4 w-80 h-80 bg-purple-600/10 rounded-full blur-3xl animate-[pulse_5s_ease-in-out_infinite_1s]" />
+        <div className="absolute bottom-0 left-1/2 w-64 h-64 bg-cyan-600/5 rounded-full blur-3xl animate-[pulse_6s_ease-in-out_infinite_2s]" />
 
         <div className="relative max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-600/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-6">
             <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-            Open Source &middot; AI Code Attribution &amp; Governance
+            AI Code Attribution &amp; Governance
           </div>
           <h1 className="text-4xl sm:text-5xl md:text-6xl font-bold text-gray-100 leading-tight tracking-tight">
             Your AI agents build fast.
             <br />
-            <span className="bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
+            <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-indigo-400 bg-clip-text text-transparent bg-[length:200%_auto] animate-[shimmer_3s_linear_infinite]">
               Origin keeps them in check.
             </span>
           </h1>
@@ -269,6 +314,7 @@ export default function Landing() {
       </section>
 
       {/* Features */}
+      <FadeIn>
       <section id="features" className="max-w-6xl mx-auto px-6 py-24">
         <div className="text-center mb-16">
           <h2 className="text-3xl font-bold">Know exactly which AI wrote every line</h2>
@@ -281,7 +327,7 @@ export default function Landing() {
           {FEATURES.map((f) => (
             <div
               key={f.title}
-              className="card hover:border-gray-700 transition-colors group relative"
+              className="card hover:border-indigo-500/30 transition-all duration-300 group relative hover:shadow-lg hover:shadow-indigo-500/5 hover:-translate-y-1"
             >
               {f.tag && (
                 <span className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-green-600/20 text-green-400 text-[10px] font-semibold border border-green-500/30">
@@ -297,6 +343,7 @@ export default function Landing() {
           ))}
         </div>
       </section>
+      </FadeIn>
 
       {/* Two-Part Value Prop */}
       <section className="bg-gray-900/30 border-y border-gray-800/50">

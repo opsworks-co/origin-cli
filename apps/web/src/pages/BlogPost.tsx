@@ -119,7 +119,7 @@ const postContent: Record<string, React.ReactNode> = {
       </p>
       <p>It takes 30 seconds to set up:</p>
       <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
-        <div><span className="text-gray-500">$</span> npm install -g @anthropic/origin-cli</div>
+        <div><span className="text-gray-500">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</div>
         <div><span className="text-gray-500">$</span> origin init</div>
         <div className="text-green-400 mt-1">Done. Origin is tracking AI sessions in this repo.</div>
       </div>
@@ -138,7 +138,7 @@ const postContent: Record<string, React.ReactNode> = {
       <h2>Try it now</h2>
       <div className="bg-gray-900 border border-indigo-500/30 rounded-lg p-6 my-6">
         <div className="font-mono text-sm mb-4">
-          <span className="text-gray-500">$</span> npm install -g @anthropic/origin-cli
+          <span className="text-gray-500">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
         </div>
         <div className="flex flex-wrap gap-4">
           <a
