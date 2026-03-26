@@ -12,10 +12,9 @@ RUN pnpm install --frozen-lockfile
 COPY apps/api ./apps/api
 COPY packages ./packages
 RUN cd apps/api && npx prisma generate && pnpm run build
-# Build & pack CLI for download (auto-version from date: 0.YYYYMMDD.HHMM)
+# Build & pack CLI for download (version comes from packages/cli/package.json)
 RUN cd packages/cli && \
-    CLI_VERSION="0.$(date -u +%Y%m%d.%H%M)" && \
-    sed -i "s/\"version\": \".*\"/\"version\": \"$CLI_VERSION\"/" package.json && \
+    CLI_VERSION=$(node -p "require('./package.json').version") && \
     pnpm run build && rm -f origin-cli-*.tgz && npm pack && mv origin-cli-*.tgz origin-cli-latest.tgz && \
     echo "{\"version\":\"$CLI_VERSION\",\"url\":\"https://getorigin.io/cli/origin-cli-latest.tgz\"}" > version.json
 
