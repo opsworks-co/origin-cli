@@ -16,6 +16,8 @@ import {
   Key,
   DollarSign,
   Settings,
+  Lightbulb,
+  Trophy,
   LogOut,
   Menu,
   X,
@@ -31,6 +33,8 @@ const NAV_ITEMS = [
   { to: '/infrastructure', label: 'Infrastructure', icon: Server },
   { to: '/iam', label: 'IAM', icon: Key },
   { to: '/budget', label: 'Budget', icon: DollarSign },
+  { to: '/insights', label: 'Insights', icon: Lightbulb },
+  { to: '/leaderboard', label: 'Leaderboard', icon: Trophy },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 

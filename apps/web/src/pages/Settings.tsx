@@ -24,8 +24,8 @@ interface ApiKey {
   agentScopes: { agentId: string; agentName: string; agentSlug: string }[];
 }
 
-type SettingsTab = 'general' | 'integrations' | 'audit' | 'insights' | 'reports' | 'trails' | 'compliance' | 'models' | 'leaderboard';
-const VALID_TABS: SettingsTab[] = ['general', 'integrations', 'audit', 'insights', 'reports', 'trails', 'compliance', 'models', 'leaderboard'];
+type SettingsTab = 'general' | 'integrations' | 'audit' | 'reports' | 'trails' | 'compliance' | 'models';
+const VALID_TABS: SettingsTab[] = ['general', 'integrations', 'audit', 'reports', 'trails', 'compliance', 'models'];
 
 export default function Settings() {
   const { user } = useAuth();
@@ -831,16 +831,6 @@ export default function Settings() {
           Audit Log
         </button>
         <button
-          onClick={() => setActiveTab('insights')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'insights'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Insights
-        </button>
-        <button
           onClick={() => setActiveTab('reports')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'reports'
@@ -880,16 +870,6 @@ export default function Settings() {
           }`}
         >
           ⚡ Models
-        </button>
-        <button
-          onClick={() => setActiveTab('leaderboard')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'leaderboard'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Leaderboard
         </button>
       </div>
 
@@ -2580,12 +2560,12 @@ export default function Settings() {
 
       {/* Team moved to /iam, Budget moved to /budget */}
       {activeTab === 'audit' && <AuditLog />}
-      {activeTab === 'insights' && <Insights />}
+      {/* Insights moved to /insights */}
       {activeTab === 'reports' && <Reports />}
       {activeTab === 'trails' && <Trails />}
       {activeTab === 'compliance' && <Compliance />}
       {activeTab === 'models' && <ModelComparison />}
-      {activeTab === 'leaderboard' && <Leaderboard />}
+      {/* Leaderboard moved to /leaderboard */}
     </div>
   );
 }

@@ -202,7 +202,7 @@ export default function App() {
         }
       />
       <Route path="/audit" element={<Navigate to="/settings?tab=audit" replace />} />
-      <Route path="/insights" element={<Navigate to="/settings?tab=insights" replace />} />
+      <Route path="/insights" element={<ProtectedRoute><Layout><Insights /></Layout></ProtectedRoute>} />
       <Route path="/reports" element={<Navigate to="/settings?tab=reports" replace />} />
       <Route
         path="/infrastructure"
@@ -256,7 +256,7 @@ export default function App() {
       />
       <Route
         path="/leaderboard"
-        element={<Navigate to="/settings?tab=leaderboard" replace />}
+        element={<ProtectedRoute><Layout><Leaderboard /></Layout></ProtectedRoute>}
       />
       <Route
         path="/api-keys"
