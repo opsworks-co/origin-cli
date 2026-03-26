@@ -89,6 +89,7 @@ export function clearRepoConfig(repoPath: string) {
  */
 export function isConnectedMode(): boolean {
   const config = loadConfig();
+  if (config?.mode === 'standalone') return false;
   return !!(config?.apiKey);
 }
 
