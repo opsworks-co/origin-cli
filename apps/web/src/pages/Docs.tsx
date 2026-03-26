@@ -2818,6 +2818,14 @@ origin enable --agent gemini`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin link</code>
+                <P>Connect a repo to a specific Origin agent. By default, Origin auto-detects the running agent via process detection. Use <code className="text-indigo-400">origin link &lt;slug&gt;</code> to manually link a repo (writes to <code className="text-indigo-400">.origin.json</code>). When linked, the CLI sends the agent slug on session start to receive that agent&apos;s system prompt and policies.</P>
+                <CodeBlock>{`origin link claude-code    # Link this repo to "claude-code" agent
+origin link --list         # Show current link
+origin link --unlink       # Remove link`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin agents</code>
                 <P>List and manage registered AI agents. Shows agent name, model, status, and session count.</P>
               </div>

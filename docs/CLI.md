@@ -125,17 +125,23 @@ origin disable --global                # Remove global hooks from ~/
 
 ### `origin link [slug]`
 
-Link this repo to a specific Origin agent (writes `.origin.json`).
+Link this repo to a specific Origin agent. Two modes:
+
+- **Auto-detect (default):** Origin detects which agent is running via process detection. No config needed.
+- **Manual link:** `origin link <agent-slug>` writes the mapping to `.origin.json` in the repo root.
+
+When linked, the CLI sends `agentSlug` to the API on session start and receives that agent's system prompt and policies.
 
 ```bash
-origin link                            # Show current mapping
-origin link my-agent                   # Link to agent slug
-origin link --clear                    # Remove agent mapping
+origin link claude-code                # Link this repo to "claude-code" agent
+origin link --list                     # Show current link
+origin link --unlink                   # Remove link
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--clear` | Remove agent mapping (deletes `.origin.json`) |
+| `--list` | Show current agent link for this repo |
+| `--unlink` | Remove agent mapping (deletes from `.origin.json`) |
 
 ---
 
