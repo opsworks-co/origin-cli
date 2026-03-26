@@ -21,8 +21,12 @@ export async function statusCommand() {
   console.log(chalk.bold('\n  Origin Status\n'));
 
   // Mode status
-  const connected = config?.apiKey && config?.apiUrl;
-  if (connected) {
+  const connected = config?.mode !== 'standalone' && config?.apiKey && config?.apiUrl;
+  if (config?.mode === 'standalone') {
+    console.log(chalk.yellow('  ⚡ Standalone mode (forced)'));
+    console.log(chalk.gray('    Sessions tracked locally in git notes'));
+    console.log(chalk.gray('    Run `origin config set mode auto` to reconnect'));
+  } else if (connected) {
     console.log(chalk.green('  ✓ Connected mode'));
     console.log(chalk.gray(`    API: ${config.apiUrl}`));
     console.log(chalk.gray(`    Org: ${config.orgId || 'unknown'}`));
