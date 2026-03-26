@@ -40,6 +40,8 @@ import PublicPolicies from './pages/PublicPolicies';
 import CLI from './pages/CLI';
 import SharedSession from './pages/SharedSession';
 import Admin from './pages/Admin';
+import Blog from './pages/Blog';
+import BlogPost from './pages/BlogPost';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -68,6 +70,8 @@ export default function App() {
       <Route path="/docs" element={<PublicLayout><Docs /></PublicLayout>} />
       <Route path="/pricing" element={<PublicLayout><Pricing /></PublicLayout>} />
       <Route path="/cli" element={<PublicLayout><CLI /></PublicLayout>} />
+      <Route path="/blog" element={<PublicLayout><Blog /></PublicLayout>} />
+      <Route path="/blog/:slug" element={<PublicLayout><BlogPost /></PublicLayout>} />
       <Route path="/org/:orgSlug/policies" element={<PublicLayout><PublicPolicies /></PublicLayout>} />
       <Route path="/s/:slug" element={<SharedSession />} />
       <Route path="/login" element={<Login />} />

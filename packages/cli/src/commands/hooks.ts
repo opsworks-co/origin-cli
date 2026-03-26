@@ -1910,6 +1910,23 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
     }
   }
 
+  // ── Auto-Snapshot: save working tree before file-modifying tools ────────
+  const toolNameLower = (input.tool_name || '').toLowerCase();
+  if (['edit', 'write', 'patch', 'create', 'insert', 'replace', 'notebook_edit'].some(t => toolNameLower.includes(t))) {
+    try {
+      const cfg = loadConfig();
+      if (cfg?.autoSnapshot && state.repoPath) {
+        const { createAutoSnapshot } = await import('./snapshot.js');
+        const snapId = createAutoSnapshot(state.repoPath, state.sessionTag);
+        if (snapId) {
+          debugLog('pre-tool-use', 'auto-snapshot created', { snapId, toolName: input.tool_name });
+        }
+      }
+    } catch {
+      // Non-fatal — never block the agent for snapshot failures
+    }
+  }
+
   // ── File Attribution Context ─────────────────────────────────────────────
   // When an agent reads or edits a file, inject per-file attribution so
   // the agent knows who wrote each part before modifying it.

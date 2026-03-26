@@ -3,6 +3,7 @@ import { execSync } from 'child_process';
 import { insertPrompts, getPromptCount, type PromptRecord } from '../local-db.js';
 import { deduplicateStore } from '../local-db.js';
 import { getGitRoot } from '../session-state.js';
+import { loadConfig } from '../config.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -135,6 +136,25 @@ export async function dbImportCommand(opts?: { format?: string; file?: string })
       console.error(chalk.red(`Failed to import agent trace: ${err.message}`));
     }
     return;
+  }
+
+  // If checkpointRepo is configured, fetch origin-sessions from external repo first
+  const config = loadConfig();
+  if (config?.checkpointRepo) {
+    console.log(chalk.gray(`Fetching origin-sessions from checkpoint repo...`));
+    try {
+      execSync(
+        `git fetch ${config.checkpointRepo} origin-sessions:origin-sessions --force`,
+        {
+          encoding: 'utf-8',
+          cwd: repoPath,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 30_000,
+        },
+      );
+    } catch (err: any) {
+      console.log(chalk.yellow(`Warning: Could not fetch from checkpoint repo: ${err.message}`));
+    }
   }
 
   console.log(chalk.gray('Scanning origin-sessions branch...'));

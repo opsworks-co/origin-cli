@@ -312,14 +312,20 @@ export function pushSessionBranch(repoPath: string): void {
       timeout: 15_000,
     };
 
-    // Check if remote exists
-    try {
-      execSync('git remote get-url origin', execOpts);
-    } catch {
-      return; // no remote — nothing to push
-    }
+    const checkpointRepo = config?.checkpointRepo;
 
-    execSync(`git push origin ${BRANCH} --no-verify --quiet`, execOpts);
+    if (checkpointRepo) {
+      // Push to external checkpoint repo
+      execSync(`git push ${checkpointRepo} ${BRANCH} --no-verify --quiet`, execOpts);
+    } else {
+      // Push to same repo's origin remote
+      try {
+        execSync('git remote get-url origin', execOpts);
+      } catch {
+        return; // no remote — nothing to push
+      }
+      execSync(`git push origin ${BRANCH} --no-verify --quiet`, execOpts);
+    }
   } catch {
     // Never fail — push is best-effort
   }

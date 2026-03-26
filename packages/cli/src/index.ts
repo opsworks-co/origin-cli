@@ -9,6 +9,7 @@ import { whoamiCommand } from './commands/whoami.js';
 import { sessionsCommand, sessionDetailCommand, sessionEndCommand } from './commands/sessions.js';
 import { reviewCommand } from './commands/review.js';
 import { reviewPRCommand } from './commands/review-pr.js';
+import { intentReviewCommand } from './commands/intent-review.js';
 import { agentsCommand, agentCreateCommand } from './commands/agents.js';
 import { reposCommand, repoAddCommand } from './commands/repos.js';
 import { auditCommand } from './commands/audit.js';
@@ -46,6 +47,7 @@ import { compareCommand } from './commands/compare.js';
 import { reworkCommand } from './commands/rework.js';
 import { reportCommand } from './commands/report.js';
 import { backfillCommand } from './commands/backfill.js';
+import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
 import { checkForUpdate } from './version-check.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -240,6 +242,20 @@ program.command('rewind')
   .option('--list', 'List checkpoints without rewinding')
   .action(rewindCommand);
 
+// ─── Snapshots ────────────────────────────────────────────────────────────
+
+const snapshot = program.command('snapshot').description('Mid-session shadow snapshots (no commits)');
+snapshot.action(snapshotSaveCommand);
+snapshot.command('list')
+  .description('List all snapshots for current session')
+  .action(snapshotListCommand);
+snapshot.command('restore <id>')
+  .description('Restore working tree to a snapshot')
+  .action(snapshotRestoreCommand);
+snapshot.command('clean')
+  .description('Remove all shadow snapshots')
+  .action(snapshotCleanCommand);
+
 program.command('share <sessionId>')
   .description('Create a shareable prompt bundle from a session')
   .option('-p, --prompt <index>', 'Share a specific prompt by index')
@@ -410,6 +426,12 @@ program.command('review <sessionId>')
 program.command('review-pr <url>')
   .description('Analyze AI sessions behind a GitHub PR')
   .action(reviewPRCommand);
+
+program.command('intent-review [branch]')
+  .description('Intent-based review — shows WHY code was written (prompts, reasoning, risk) not just WHAT changed')
+  .option('-f, --format <format>', 'Output format: json, md (default: terminal)')
+  .option('-o, --output <file>', 'Write output to file')
+  .action(intentReviewCommand);
 
 // ─── Repos ───────────────────────────────────────────────────────────────
 

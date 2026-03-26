@@ -8,6 +8,26 @@ import { loadConfig, saveConfig, type OriginConfig } from '../config.js';
  * Validates keys against OriginConfig interface. Persists to ~/.origin/config.json.
  */
 
+// Map kebab-case aliases to camelCase config keys
+const KEY_ALIASES: Record<string, string> = {
+  'checkpoint-repo': 'checkpointRepo',
+  'commit-linking': 'commitLinking',
+  'push-strategy': 'pushStrategy',
+  'auto-update': 'autoUpdate',
+  'secret-redaction': 'secretRedaction',
+  'secret-scan': 'secretScan',
+  'hook-chaining': 'hookChaining',
+  'api-url': 'apiUrl',
+  'api-key': 'apiKey',
+  'org-id': 'orgId',
+  'user-id': 'userId',
+  'machine-id': 'machineId',
+};
+
+function resolveKey(key: string): string {
+  return KEY_ALIASES[key] || key;
+}
+
 // Valid config keys and their types/allowed values
 const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum'; values?: string[]; description: string }> = {
   apiUrl:          { type: 'string',  description: 'Origin API URL' },
@@ -21,9 +41,11 @@ const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum'; values?
   autoUpdate:      { type: 'boolean', description: 'Check for CLI updates on startup' },
   secretRedaction: { type: 'boolean', description: 'Redact secrets before sending to API' },
   hookChaining:    { type: 'boolean', description: 'Chain existing hooks when installing Origin hooks' },
+  checkpointRepo:  { type: 'string',  description: 'External git remote URL for session data (origin-sessions branch)' },
 };
 
-export async function configGetCommand(key: string): Promise<void> {
+export async function configGetCommand(rawKey: string): Promise<void> {
+  const key = resolveKey(rawKey);
   if (!CONFIG_KEYS[key]) {
     console.log(chalk.red(`Unknown config key: ${key}`));
     console.log(chalk.gray(`Valid keys: ${Object.keys(CONFIG_KEYS).join(', ')}`));
@@ -44,7 +66,8 @@ export async function configGetCommand(key: string): Promise<void> {
   }
 }
 
-export async function configSetCommand(key: string, value: string): Promise<void> {
+export async function configSetCommand(rawKey: string, value: string): Promise<void> {
+  const key = resolveKey(rawKey);
   const keySpec = CONFIG_KEYS[key];
   if (!keySpec) {
     console.log(chalk.red(`Unknown config key: ${key}`));

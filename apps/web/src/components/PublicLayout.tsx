@@ -7,6 +7,7 @@ const NAV_LINKS = [
   { to: '/docs', label: 'Docs' },
   { to: '/cli', label: 'CLI' },
   { to: '/pricing', label: 'Pricing' },
+  { to: '/blog', label: 'Blog' },
 ];
 
 export default function PublicLayout({ children }: { children: React.ReactNode }) {

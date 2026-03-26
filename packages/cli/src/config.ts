@@ -21,6 +21,8 @@ export interface OriginConfig {
   secretScan?: boolean;        // Pre-commit secret scanning (default: true)
   hookChaining?: boolean;
   mode?: 'standalone' | 'auto'; // Force standalone even when logged in
+  checkpointRepo?: string; // External git remote URL for origin-sessions branch
+  autoSnapshot?: boolean;  // Auto-save snapshots before agent file edits (default: false)
 }
 
 export interface AgentConfig {
