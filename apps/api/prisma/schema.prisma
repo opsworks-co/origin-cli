@@ -234,6 +234,8 @@ model Agent {
   versions          AgentVersion[]
   policyAssignments PolicyAssignment[]
   apiKeyScopes      ApiKeyAgentScope[]
+
+  @@unique([orgId, slug])
 }
 
 // ── Policies ────────────────────────────────────────────────────

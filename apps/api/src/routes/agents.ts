@@ -32,6 +32,14 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
       return res.status(400).json({ error: 'Missing required fields: name, slug, model' });
     }
 
+    // Check for duplicate slug within the org
+    const existingAgent = await prisma.agent.findFirst({
+      where: { orgId: req.user!.orgId, slug },
+    });
+    if (existingAgent) {
+      return res.status(409).json({ error: `Agent with slug '${slug}' already exists in this organization.` });
+    }
+
     const agent = await prisma.agent.create({
       data: {
         orgId: req.user!.orgId,
