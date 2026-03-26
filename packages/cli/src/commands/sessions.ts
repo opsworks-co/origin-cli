@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
-import { getGitRoot } from '../session-state.js';
+import { getGitRoot, listActiveSessions } from '../session-state.js';
 
 interface LocalSession {
   sessionId: string;
@@ -70,7 +70,9 @@ function listLocalSessions(repoPath: string): LocalSession[] {
   return sessions;
 }
 
-export async function sessionsCommand(opts: { status?: string; model?: string; limit?: string; all?: boolean }) {
+export async function sessionsCommand(opts: { status?: string; model?: string; limit?: string; all?: boolean; global?: boolean }) {
+  // --global is alias for --all
+  if (opts.global) opts.all = true;
   const repoPath = getGitRoot(process.cwd());
   const limit = parseInt(opts.limit || '20', 10);
 
@@ -78,6 +80,29 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
   let localSessions: LocalSession[] = [];
   if (repoPath) {
     localSessions = listLocalSessions(repoPath);
+
+    // Also include active sessions from state files (standalone mode won't have git branch data)
+    try {
+      const activeStates = listActiveSessions(repoPath);
+      const existingIds = new Set(localSessions.map(s => s.sessionId));
+      for (const state of activeStates) {
+        if (!existingIds.has(state.sessionId)) {
+          localSessions.push({
+            sessionId: state.sessionId,
+            model: state.model || 'unknown',
+            status: 'RUNNING',
+            filesChanged: [],
+            costUsd: 0,
+            tokensUsed: 0,
+            durationMs: Date.now() - new Date(state.startedAt).getTime(),
+            linesAdded: 0,
+            linesRemoved: 0,
+            startedAt: state.startedAt,
+            agentName: undefined,
+          } as LocalSession);
+        }
+      }
+    } catch { /* ignore */ }
 
     // Apply filters
     if (opts.model) {

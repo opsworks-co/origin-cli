@@ -85,6 +85,8 @@ program.command('disable')
 program.command('link [slug]')
   .description('Link this repo to an Origin agent (set .origin.json)')
   .option('--clear', 'Remove agent mapping')
+  .option('--list', 'Show current link')
+  .option('--unlink', 'Remove link')
   .action(linkCommand);
 program.command('status').description('Show current status (active session, branch, repo info)').action(statusCommand);
 program.command('whoami').description('Show current user and org info').action(whoamiCommand);
@@ -409,6 +411,7 @@ sessions
   .option('-m, --model <model>', 'Filter by model')
   .option('-l, --limit <n>', 'Max results', '20')
   .option('-a, --all', 'Show sessions from all repos (default: current repo only)')
+  .option('-g, --global', 'Alias for --all')
   .action(sessionsCommand);
 
 program.command('session <id>').description('View session detail').action(sessionDetailCommand);
