@@ -138,18 +138,26 @@ export async function rewindCommand(
     return;
   }
 
-  // Determine commit range from session state or use last 20 commits
+  // Determine commit range from session state or scan recent commits
   const state = loadSessionState(cwd);
   let range: string;
   if (state?.headShaAtStart) {
     range = `${state.headShaAtStart}..HEAD`;
   } else {
-    range = 'HEAD~20..HEAD';
+    // No active session — scan last 50 commits for any with Origin notes
+    range = 'HEAD~50..HEAD';
   }
 
-  const checkpoints = getCheckpoints(repoPath, range);
+  let checkpoints = getCheckpoints(repoPath, range);
+
+  // Filter to only AI checkpoints (commits with Origin notes) unless in active session
+  if (!state?.headShaAtStart) {
+    checkpoints = checkpoints.filter(c => c.sessionId || c.model);
+  }
+
   if (checkpoints.length === 0) {
-    console.log(chalk.gray('No checkpoints found in this range.'));
+    console.log(chalk.gray('No checkpoints found. AI commits are automatically tracked as checkpoints.'));
+    console.log(chalk.gray('Run an AI session and make commits — they\'ll appear here.'));
     return;
   }
 

@@ -26,6 +26,9 @@ export interface GitNoteData {
   aiPercentage?: number;
   humanPercentage?: number;
   mixedPercentage?: number;
+  checkpoint?: boolean;
+  checkpointAt?: string;
+  filesChanged?: string[];
 }
 
 export function writeGitNotes(

@@ -1727,6 +1727,9 @@ export async function handlePostCommit(): Promise<void> {
       linesAdded,
       linesRemoved,
       originUrl: state ? `${apiUrl}/sessions/${state.sessionId}` : '',
+      checkpoint: true,
+      checkpointAt: new Date().toISOString(),
+      filesChanged,
     });
     debugLog('post-commit', 'git notes written');
   } catch (err: any) {
