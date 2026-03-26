@@ -2836,6 +2836,14 @@ origin review abc123 --flag`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin intent-review</code>
+                <P>Structured intent-based code review. Shows WHY code was written (prompts, reasoning) not just WHAT changed. Includes risk assessment (HIGH/MEDIUM/LOW) based on files touched and test coverage.</P>
+                <CodeBlock>{`origin intent-review               # Review current branch vs main
+origin intent-review feature/auth  # Review specific branch
+origin intent-review --format json --output review.json`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin stats</code>
                 <P>Show organization-wide statistics: sessions this week, active agents, AI code percentage, costs, and tokens.</P>
               </div>
@@ -2863,6 +2871,15 @@ origin backfill --min-confidence high # Only tag high-confidence matches`}</Code
                 <CodeBlock>{`origin rework                        # Show reworked AI code in the last 30 days
 origin rework --days 90              # Extend the lookback window
 origin rework --agent cursor         # Filter by agent`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin snapshot</code>
+                <P>Save and restore working tree snapshots during long AI sessions. Snapshots are stored on shadow branches and don&apos;t create commits. Enable auto-snapshots before every file edit with <code className="text-indigo-400">origin config set auto-snapshot true</code>.</P>
+                <CodeBlock>{`origin snapshot                    # Save snapshot of current working tree
+origin snapshot list               # List all snapshots for current session
+origin snapshot restore <id>       # Restore to a previous snapshot
+origin snapshot clean              # Remove all shadow snapshots`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -2944,6 +2961,12 @@ origin rewind --to <sha>         # restore to a specific commit`}</CodeBlock>
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin doctor</code>
                 <P>Diagnose issues with your Origin setup. Checks configuration, hooks, API connectivity, and agent integrations.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set checkpoint-repo</code>
+                <P>Store session data in a separate git repository. Useful when your codebase is public but session data is private, or when centralizing sessions across multiple repos.</P>
+                <CodeBlock>{`origin config set checkpoint-repo https://github.com/org/sessions-repo.git`}</CodeBlock>
               </div>
             </div>
           </div>
