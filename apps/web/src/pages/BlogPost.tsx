@@ -7,6 +7,94 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'ai-agents-need-a-manager': (
+    <>
+      <p>
+        Here&rsquo;s the situation at most engineering teams right now: developers are using 3-4 different
+        AI coding agents. Claude for complex architecture. Cursor for fast iteration. Gemini for
+        broad codebase work. Codex for automation. Maybe Copilot too.
+      </p>
+      <p>
+        And nobody has any idea what&rsquo;s happening.
+      </p>
+
+      <h2>The visibility problem</h2>
+      <p>
+        Your CTO asks: &ldquo;How much are we spending on AI coding tools?&rdquo; Nobody knows.
+        &ldquo;Which agent produces the most reliable code?&rdquo; Nobody can tell. &ldquo;Did any AI
+        agent touch the auth module this week?&rdquo; You&rsquo;d have to ask every developer individually.
+      </p>
+      <p>
+        This is the state of AI coding in 2026. Powerful tools with zero accountability. Every agent
+        operates in its own silo. The code ships, but the context disappears.
+      </p>
+
+      <h2>What we built</h2>
+      <p>
+        Origin is an open-source CLI that installs in 30 seconds and tracks every AI coding session
+        across every agent. One command:
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div className="text-green-400">$ npm i -g origin-cli</div>
+        <div className="text-green-400">$ origin init</div>
+        <div className="text-gray-500 mt-2"># Detected: Claude Code, Cursor, Codex</div>
+        <div className="text-gray-500"># Hooks installed. Tracking active.</div>
+      </div>
+      <p>
+        From that moment, every AI session is recorded. Every prompt. Every file changed. Every token
+        spent. Every model used. All stored locally in git notes &mdash; no server required.
+      </p>
+
+      <h2>Attribution that actually works</h2>
+      <p>
+        Run <code>origin blame</code> on any file and you see which AI agent wrote each line,
+        when, and from which prompt. Not just &ldquo;John committed this&rdquo; &mdash; but
+        &ldquo;Claude wrote this 3 hours ago in response to: refactor auth with JWT validation.&rdquo;
+      </p>
+      <p>
+        Run <code>origin rework</code> and you see which AI-written code got changed within a week.
+        If Gemini&rsquo;s code has a 40% churn rate in your repo, maybe stop using Gemini for that repo.
+      </p>
+
+      <h2>Governance for teams</h2>
+      <p>
+        The CLI works standalone, but teams need more. Connect to the Origin platform and you get:
+      </p>
+      <ul>
+        <li><strong>Policy enforcement</strong> &mdash; block commits containing secrets, restrict which models can be used, require human review for security-sensitive files</li>
+        <li><strong>Budget controls</strong> &mdash; set per-agent and per-developer spending limits. Get alerts at 80%. Block new sessions at 100%.</li>
+        <li><strong>PR merge gating</strong> &mdash; require AI session review before merge. GitHub and GitLab status checks built in.</li>
+        <li><strong>Compliance audit trail</strong> &mdash; one command generates a SOC 2 / ISO 27001 report of all AI activity</li>
+        <li><strong>IAM</strong> &mdash; per-developer API keys with agent and repo scoping. Zero-trust by default.</li>
+      </ul>
+
+      <h2>What makes this different</h2>
+      <p>
+        We looked at every tool in this space. Entire (backed by the former GitHub CEO with $60M)
+        does session recording. git-ai does line-level attribution. Both are good at what they do.
+      </p>
+      <p>
+        But neither does governance. No policy enforcement. No secret scanning. No budget controls.
+        No PR gating. No compliance. No system prompt injection that tells agents what other agents did.
+      </p>
+      <p>
+        Origin does all of it. Open source CLI, self-hosted option, and a platform for teams
+        that need dashboards and controls.
+      </p>
+
+      <h2>Try it</h2>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div className="text-green-400">$ npm i -g origin-cli</div>
+        <div className="text-green-400">$ origin init</div>
+        <div className="text-green-400">$ origin blame src/api.ts</div>
+      </div>
+      <p>
+        GitHub: <a href="https://github.com/dolobanko/origin-cli" className="text-indigo-400 hover:text-indigo-300">github.com/dolobanko/origin-cli</a>
+        <br />
+        Platform: <a href="https://getorigin.io" className="text-indigo-400 hover:text-indigo-300">getorigin.io</a>
+      </p>
+    </>
+  ),
   'why-git-blame-is-broken': (
     <>
       <p>

@@ -20,9 +20,18 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Your AI agents need a manager. We built one.',
+    slug: 'ai-agents-need-a-manager',
+    date: '2026-03-26',
+    author: 'Artem Dolobanko',
+    tags: ['product', 'governance', 'engineering'],
+    excerpt:
+      'Your team runs Claude, Cursor, Gemini, and Codex across dozens of repos. Nobody knows which agent wrote what, what it cost, or whether it followed the rules. We built Origin to fix that.',
+  },
+  {
     title: 'Why git blame is broken in the age of AI coding',
     slug: 'why-git-blame-is-broken',
-    date: '2026-03-26',
+    date: '2026-03-25',
     author: 'Artem Dolobanko',
     tags: ['engineering', 'ai-coding', 'open-source'],
     excerpt:
