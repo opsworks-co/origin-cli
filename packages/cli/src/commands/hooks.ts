@@ -690,22 +690,29 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
     if (connected) {
       // ── Connected mode: register session with Origin platform ──
-      debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, repoUrl, agentSlug: finalAgentSlug, branch });
-      const result = await api.startSession({
-        machineId: agentConfig.machineId,
-        prompt: '',
-        model,
-        repoPath,
-        repoUrl: repoUrl || undefined,
-        agentSlug: finalAgentSlug,
-        branch: branch || undefined,
-        hostname: agentConfig.hostname || undefined,
-      });
-      sessionId = result.sessionId;
-      agentSystemPrompt = result.agentSystemPrompt || undefined;
-      activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
-      enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
-      debugLog('session-start', 'api returned', { sessionId });
+      try {
+        debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, repoUrl, agentSlug: finalAgentSlug, branch });
+        const result = await api.startSession({
+          machineId: agentConfig.machineId,
+          prompt: '',
+          model,
+          repoPath,
+          repoUrl: repoUrl || undefined,
+          agentSlug: finalAgentSlug,
+          branch: branch || undefined,
+          hostname: agentConfig.hostname || undefined,
+        });
+        sessionId = result.sessionId;
+        agentSystemPrompt = result.agentSystemPrompt || undefined;
+        activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
+        enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+        debugLog('session-start', 'api returned', { sessionId });
+      } catch (apiErr: any) {
+        // API failed — fall back to local session instead of aborting entirely
+        debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
+        process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
+        sessionId = `local-${crypto.randomUUID()}`;
+      }
     } else {
       // ── Standalone mode: generate local session ID ──
       sessionId = `local-${crypto.randomUUID()}`;
