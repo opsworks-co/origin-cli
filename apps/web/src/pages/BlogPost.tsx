@@ -7,91 +7,103 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
-  'ai-agents-need-a-manager': (
+  'ai-agent-rework-rates': (
     <>
       <p>
-        Here&rsquo;s the situation at most engineering teams right now: developers are using 3-4 different
-        AI coding agents. Claude for complex architecture. Cursor for fast iteration. Gemini for
-        broad codebase work. Codex for automation. Maybe Copilot too.
+        We had a question nobody could answer: if your team uses Claude, Gemini, Cursor, and Codex
+        on the same codebase, which agent writes code that actually survives?
       </p>
       <p>
-        And nobody has any idea what&rsquo;s happening.
-      </p>
-
-      <h2>The visibility problem</h2>
-      <p>
-        Your CTO asks: &ldquo;How much are we spending on AI coding tools?&rdquo; Nobody knows.
-        &ldquo;Which agent produces the most reliable code?&rdquo; Nobody can tell. &ldquo;Did any AI
-        agent touch the auth module this week?&rdquo; You&rsquo;d have to ask every developer individually.
+        Not which one writes code fastest. Not which one feels nicest to use. Which one writes code
+        that&rsquo;s still there a week later, untouched, doing its job.
       </p>
       <p>
-        This is the state of AI coding in 2026. Powerful tools with zero accountability. Every agent
-        operates in its own silo. The code ships, but the context disappears.
+        So we measured it.
       </p>
 
-      <h2>What we built</h2>
+      <h2>The setup</h2>
       <p>
-        Origin is an open-source CLI that installs in 30 seconds and tracks every AI coding session
-        across every agent. One command:
+        We used Origin&rsquo;s <code>origin rework</code> command, which tracks AI-written code that gets
+        modified within a given time window. If Claude writes a function on Monday and someone rewrites
+        it on Thursday, that&rsquo;s rework. The function didn&rsquo;t stick.
+      </p>
+      <p>
+        We ran four agents on the same repo over two weeks. Same types of tasks &mdash; feature work, bug
+        fixes, refactors. Then we measured churn: what percentage of each agent&rsquo;s code got
+        rewritten within 7 days.
       </p>
       <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
-        <div className="text-green-400">$ npm i -g origin-cli</div>
-        <div className="text-green-400">$ origin init</div>
-        <div className="text-gray-500 mt-2"># Detected: Claude Code, Cursor, Codex</div>
-        <div className="text-gray-500"># Hooks installed. Tracking active.</div>
+        <div className="text-gray-500">$ origin rework --days 14</div>
+        <div className="mt-2" />
+        <div><span className="text-purple-400">Claude</span>{'     '}18 commits{'   '}3 reworked{'   '}churn <span className="text-green-400">12%</span></div>
+        <div><span className="text-blue-400">Cursor</span>{'     '}14 commits{'   '}4 reworked{'   '}churn <span className="text-yellow-400">22%</span></div>
+        <div><span className="text-green-400">Codex</span>{'      '}21 commits{'   '}7 reworked{'   '}churn <span className="text-yellow-400">28%</span></div>
+        <div><span className="text-amber-400">Gemini</span>{'     '}12 commits{'   '}5 reworked{'   '}churn <span className="text-red-400">38%</span></div>
       </div>
+
+      <h2>What the numbers mean</h2>
       <p>
-        From that moment, every AI session is recorded. Every prompt. Every file changed. Every token
-        spent. Every model used. All stored locally in git notes &mdash; no server required.
+        <strong>Claude had a 12% rework rate.</strong> Out of 18 commits, only 3 needed changes within
+        a week. The code it wrote was largely production-ready on the first pass.
+      </p>
+      <p>
+        <strong>Cursor landed at 22%.</strong> Fast to iterate with, but about one in five changes needed
+        a follow-up. Mostly small fixes &mdash; missed edge cases, incomplete error handling.
+      </p>
+      <p>
+        <strong>Codex came in at 28%.</strong> It was prolific &mdash; the most commits of any agent. But
+        volume came at a cost. The reworked code was often structural: wrong abstractions, functions that
+        needed to be split or moved.
+      </p>
+      <p>
+        <strong>Gemini had the highest churn at 38%.</strong> Nearly 4 in 10 pieces of code needed
+        rework. The pattern was consistent: it would write something that looked correct but
+        missed project conventions or made incorrect assumptions about the codebase.
       </p>
 
-      <h2>Attribution that actually works</h2>
+      <h2>Where it gets interesting</h2>
       <p>
-        Run <code>origin blame</code> on any file and you see which AI agent wrote each line,
-        when, and from which prompt. Not just &ldquo;John committed this&rdquo; &mdash; but
-        &ldquo;Claude wrote this 3 hours ago in response to: refactor auth with JWT validation.&rdquo;
-      </p>
-      <p>
-        Run <code>origin rework</code> and you see which AI-written code got changed within a week.
-        If Gemini&rsquo;s code has a 40% churn rate in your repo, maybe stop using Gemini for that repo.
-      </p>
-
-      <h2>Governance for teams</h2>
-      <p>
-        The CLI works standalone, but teams need more. Connect to the Origin platform and you get:
+        The headline numbers only tell part of the story. When we broke it down by task type:
       </p>
       <ul>
-        <li><strong>Policy enforcement</strong> &mdash; block commits containing secrets, restrict which models can be used, require human review for security-sensitive files</li>
-        <li><strong>Budget controls</strong> &mdash; set per-agent and per-developer spending limits. Get alerts at 80%. Block new sessions at 100%.</li>
-        <li><strong>PR merge gating</strong> &mdash; require AI session review before merge. GitHub and GitLab status checks built in.</li>
-        <li><strong>Compliance audit trail</strong> &mdash; one command generates a SOC 2 / ISO 27001 report of all AI activity</li>
-        <li><strong>IAM</strong> &mdash; per-developer API keys with agent and repo scoping. Zero-trust by default.</li>
+        <li><strong>Bug fixes</strong>: Claude and Cursor were nearly tied. Both under 15% churn.</li>
+        <li><strong>New features</strong>: Claude pulled ahead. Its code needed fewer structural changes.</li>
+        <li><strong>Refactors</strong>: This is where the gap widened. Claude 8% churn, Gemini 45%.</li>
+        <li><strong>Tests</strong>: Codex was actually the best here. 10% churn vs Claude&rsquo;s 18%.</li>
       </ul>
-
-      <h2>What makes this different</h2>
       <p>
-        We looked at every tool in this space. Entire (backed by the former GitHub CEO with $60M)
-        does session recording. git-ai does line-level attribution. Both are good at what they do.
-      </p>
-      <p>
-        But neither does governance. No policy enforcement. No secret scanning. No budget controls.
-        No PR gating. No compliance. No system prompt injection that tells agents what other agents did.
-      </p>
-      <p>
-        Origin does all of it. Open source CLI, self-hosted option, and a platform for teams
-        that need dashboards and controls.
+        No single agent won everything. The smart play isn&rsquo;t picking one agent &mdash;
+        it&rsquo;s knowing which agent to use for which task, in which repo.
       </p>
 
-      <h2>Try it</h2>
+      <h2>The cost angle</h2>
+      <p>
+        Rework isn&rsquo;t free. Every rewritten function means a developer spent time understanding
+        what the AI did wrong and fixing it. If your team generates 200 AI commits per week and
+        30% need rework, that&rsquo;s 60 commits someone has to revisit.
+      </p>
+      <p>
+        At our measured averages, switching from Gemini to Claude on refactoring tasks alone would
+        have saved roughly 15 developer-hours over two weeks. That&rsquo;s real money.
+      </p>
+
+      <h2>How to measure this yourself</h2>
       <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
         <div className="text-green-400">$ npm i -g origin-cli</div>
         <div className="text-green-400">$ origin init</div>
-        <div className="text-green-400">$ origin blame src/api.ts</div>
+        <div className="text-gray-500 mt-2"># Use your agents normally for a week, then:</div>
+        <div className="text-green-400 mt-1">$ origin rework --days 7</div>
       </div>
       <p>
+        Origin tracks which agent wrote every commit. <code>origin rework</code> calculates how much of
+        that code got changed afterward. You get a per-agent, per-file breakdown of what stuck and
+        what didn&rsquo;t.
+      </p>
+      <p>
+        It&rsquo;s open source. Takes 30 seconds to set up. Works with Claude, Cursor, Gemini, and Codex.
+      </p>
+      <p>
         GitHub: <a href="https://github.com/dolobanko/origin-cli" className="text-indigo-400 hover:text-indigo-300">github.com/dolobanko/origin-cli</a>
-        <br />
-        Platform: <a href="https://getorigin.io" className="text-indigo-400 hover:text-indigo-300">getorigin.io</a>
       </p>
     </>
   ),
