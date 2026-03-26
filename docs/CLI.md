@@ -786,8 +786,16 @@ origin config list
 | `secretRedaction` | boolean | `true`, `false` | Redact secrets before sending to API |
 | `hookChaining` | boolean | `true`, `false` | Chain existing hooks when installing Origin hooks |
 | `checkpointRepo` | string | | External git remote URL for session data |
+| `mode` | enum | `auto`, `standalone` | Force standalone mode — skip all API calls, everything local |
 
 Kebab-case aliases are accepted (e.g., `commit-linking` for `commitLinking`).
+
+**Entering standalone mode:**
+
+```bash
+origin init --standalone                   # At setup time
+origin config set mode standalone          # Switch anytime (skip all API calls, everything local)
+```
 
 Config file location: `~/.origin/config.json`
 
