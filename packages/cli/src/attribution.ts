@@ -104,6 +104,8 @@ export function isAiCommit(repoPath: string, commitSha: string): boolean {
   const rawNote = readOriginNote(repoPath, commitSha);
   const note = rawNote?.origin || rawNote;
   if (note?.sessionId && note.sessionId !== 'unknown') return true;
+  // Backfill notes have agent but no sessionId
+  if (note?.agent && note.agent !== 'Human') return true;
 
   // Check commit message for Origin-Session trailer
   try {
@@ -607,7 +609,7 @@ export function computeAttributionStats(
       const note = rawNote?.origin || rawNote;
 
       // Also check commit message trailers as fallback
-      let isAi = !!note?.sessionId && note.sessionId !== 'unknown';
+      let isAi = (!!note?.sessionId && note.sessionId !== 'unknown') || (!!note?.agent && note.agent !== 'Human');
       if (!isAi) {
         const detected = detectAiFromCommit(repoPath, sha);
         if (detected?.isAi) {

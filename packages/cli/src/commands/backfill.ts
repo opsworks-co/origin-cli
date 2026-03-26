@@ -646,7 +646,9 @@ function detectFromFileChanges(
 function applyBackfillNote(repoPath: string, result: BackfillResult): boolean {
   try {
     const noteData = JSON.stringify({
+      sessionId: `backfill-${result.sha.slice(0, 8)}`,
       agent: result.agent,
+      agentName: result.agent,
       model: 'unknown',
       confidence: result.confidence,
       source: result.source,

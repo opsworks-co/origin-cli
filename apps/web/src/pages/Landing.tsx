@@ -137,22 +137,18 @@ function InstallCommand() {
   };
 
   return (
-    <div className="mt-10 max-w-xl mx-auto">
+    <div className="mt-8 flex justify-center">
       <button
         onClick={handleCopy}
-        className="w-full group relative bg-gray-900 border border-gray-700 hover:border-indigo-500/50 rounded-xl px-5 py-4 text-left transition-colors cursor-pointer"
+        className="group bg-gray-900/80 border border-gray-700 hover:border-indigo-500/50 rounded-lg px-4 py-2 transition-colors cursor-pointer"
       >
-        <div className="flex items-center gap-3">
-          <span className="text-green-400 text-sm font-mono shrink-0">$</span>
-          <code className="text-sm font-mono text-gray-200 flex-1 whitespace-nowrap">
-            {INSTALL_CMD}
-          </code>
-          <span className="text-xs text-gray-500 group-hover:text-indigo-400 transition-colors shrink-0">
-            {copied ? 'Copied!' : 'Click to copy'}
-          </span>
-        </div>
+        <code className="text-sm font-mono text-gray-300">
+          <span className="text-green-400">$</span> npm i -g <span className="text-indigo-400">origin-cli</span>
+        </code>
+        <span className="text-xs text-gray-500 ml-3 group-hover:text-indigo-400 transition-colors">
+          {copied ? 'Copied!' : 'Copy'}
+        </span>
       </button>
-      <p className="text-xs text-gray-600 mt-2">Requires Node.js 18+</p>
     </div>
   );
 }
