@@ -275,7 +275,7 @@ export function listAllActiveSessions(): SessionState[] {
           // Auto-expire RUNNING sessions that are stale:
           // If status is not ENDED, check if the session is actually still alive
           if (state.status !== 'ENDED') {
-            const STALE_MS = 5 * 60 * 1000; // 5 minutes
+            const STALE_MS = 15 * 60 * 1000; // 15 minutes
             let isAlive = false;
 
             // Check 1: is there an active .git state file being updated?
@@ -409,18 +409,27 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
     // spawned via shell wrappers — process.ppid dies immediately. Walk up the
     // process tree to find the actual agent process so the heartbeat can detect
     // when it exits and end the session.
+    // Long-running agents: process.ppid IS the agent (Claude Code, Windsurf)
+    // IDE agents: hooks spawned via shell wrappers, need to walk process tree
+    const LONG_RUNNING_AGENTS = ['claude-code', 'windsurf'];
     const AGENT_PROCESS_PATTERNS: Record<string, RegExp> = {
-      'cursor': /Cursor/,       // /Applications/Cursor.app or "Cursor Helper"
-      'codex': /codex/i,        // node .../codex or native codex binary
+      'cursor': /Cursor|cursor/i,
+      'codex': /codex/i,
       'gemini': /gemini/i,
       'aider': /aider/i,
     };
-    const pattern = agentSlug ? AGENT_PROCESS_PATTERNS[agentSlug] : undefined;
+
     let parentPid: number;
-    if (pattern) {
-      parentPid = findAncestorPid(pattern);
+    if (agentSlug && LONG_RUNNING_AGENTS.includes(agentSlug)) {
+      // For Claude Code / Windsurf, process.ppid is the agent itself
+      parentPid = process.ppid || 0;
+      // Verify the parent is actually alive
+      if (parentPid > 0) {
+        try { process.kill(parentPid, 0); } catch { parentPid = 0; }
+      }
     } else {
-      parentPid = process.ppid || process.pid;
+      const pattern = agentSlug ? AGENT_PROCESS_PATTERNS[agentSlug] : undefined;
+      parentPid = pattern ? findAncestorPid(pattern) : 0;
     }
 
     const child = spawn(process.execPath, [heartbeatScript, sessionId, apiUrl, apiKey, pidFile, String(parentPid), stateFile || ''], {
