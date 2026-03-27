@@ -150,6 +150,14 @@ export function getStatePath(cwd?: string, sessionTag?: string): string {
 export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string): void {
   const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+
+  // Also mirror to ~/.origin/sessions/ for global discovery (origin sessions --all)
+  try {
+    const globalDir = path.join(os.homedir(), '.origin', 'sessions');
+    fs.mkdirSync(globalDir, { recursive: true, mode: 0o700 });
+    const globalPath = path.join(globalDir, `${state.sessionId.slice(0, 12)}.json`);
+    fs.writeFileSync(globalPath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  } catch { /* non-fatal */ }
 }
 
 export function loadSessionState(cwd?: string, sessionTag?: string): SessionState | null {
