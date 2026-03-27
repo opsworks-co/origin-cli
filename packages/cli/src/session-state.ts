@@ -266,10 +266,62 @@ export function listAllActiveSessions(): SessionState[] {
     for (const entry of entries) {
       if (entry.endsWith('.json')) {
         try {
-          const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
+          const filePath = path.join(sessionsDir, entry);
+          const state = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
           if (!state || typeof state !== 'object' || !state.sessionId) continue;
           if (seen.has(state.sessionId)) continue;
           seen.add(state.sessionId);
+
+          // Auto-expire RUNNING sessions that are stale:
+          // If status is not ENDED, check if the session is actually still alive
+          if (state.status !== 'ENDED') {
+            const STALE_MS = 5 * 60 * 1000; // 5 minutes
+            let isAlive = false;
+
+            // Check 1: is there an active .git state file being updated?
+            if (state.repoPath && state.sessionTag) {
+              try {
+                const gitStateFile = path.join(state.repoPath, `.git`, `origin-session-${state.sessionTag}.json`);
+                const stat = fs.statSync(gitStateFile);
+                if (Date.now() - stat.mtimeMs < STALE_MS) {
+                  isAlive = true;
+                }
+              } catch { /* file gone or not accessible */ }
+            }
+
+            // Check 2: is the heartbeat daemon still running?
+            if (!isAlive) {
+              try {
+                const heartbeatDir = path.join(os.homedir(), '.origin', 'heartbeats');
+                const pidFile = path.join(heartbeatDir, `${state.sessionId}.pid`);
+                if (fs.existsSync(pidFile)) {
+                  const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+                  if (pid > 0) {
+                    process.kill(pid, 0); // existence check
+                    isAlive = true;
+                  }
+                }
+              } catch { /* process dead or pid file gone */ }
+            }
+
+            // Check 3: was the archive file itself recently updated?
+            if (!isAlive) {
+              try {
+                const stat = fs.statSync(filePath);
+                if (Date.now() - stat.mtimeMs < STALE_MS) {
+                  isAlive = true;
+                }
+              } catch { /* ignore */ }
+            }
+
+            if (!isAlive) {
+              state.status = 'ENDED';
+              state.endedAt = state.endedAt || new Date().toISOString();
+              // Persist the correction
+              try { fs.writeFileSync(filePath, JSON.stringify(state), { mode: 0o600 }); } catch { /* best effort */ }
+            }
+          }
+
           sessions.push(state);
         } catch { /* skip */ }
       }
