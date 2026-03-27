@@ -152,11 +152,13 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
 
   // Also mirror to ~/.origin/sessions/ for global discovery (origin sessions --all)
+  // Always mark as RUNNING since this is an active save
   try {
     const globalDir = path.join(os.homedir(), '.origin', 'sessions');
     fs.mkdirSync(globalDir, { recursive: true, mode: 0o700 });
     const globalPath = path.join(globalDir, `${state.sessionId.slice(0, 12)}.json`);
-    fs.writeFileSync(globalPath, JSON.stringify(state, null, 2), { mode: 0o600 });
+    const globalState = { ...state, status: 'RUNNING' };
+    fs.writeFileSync(globalPath, JSON.stringify(globalState, null, 2), { mode: 0o600 });
   } catch { /* non-fatal */ }
 }
 
