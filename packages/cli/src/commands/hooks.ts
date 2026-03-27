@@ -1669,11 +1669,25 @@ export async function handlePostCommit(): Promise<void> {
     }
   }
 
-  // Update branch on all active sessions if it changed
+  // Update branch + accumulate filesChanged on all active sessions
   for (const s of activeSessions) {
+    let changed = false;
     if (currentBranch && currentBranch !== s.branch) {
       debugLog('post-commit', 'branch changed', { from: s.branch, to: currentBranch, sessionId: s.sessionId });
       s.branch = currentBranch;
+      changed = true;
+    }
+    // Accumulate files changed in session state so standalone sessions show file counts
+    if (filesChanged.length > 0) {
+      const existing = new Set((s as any).filesChanged || []);
+      for (const f of filesChanged) existing.add(f);
+      (s as any).filesChanged = Array.from(existing);
+      (s as any).linesAdded = ((s as any).linesAdded || 0) + linesAdded;
+      (s as any).linesRemoved = ((s as any).linesRemoved || 0) + linesRemoved;
+      (s as any).commitCount = ((s as any).commitCount || 0) + 1;
+      changed = true;
+    }
+    if (changed) {
       saveSessionState(s, s.repoPath || hookCwd, s.sessionTag);
     }
   }

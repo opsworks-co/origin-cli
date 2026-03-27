@@ -92,7 +92,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
               sessionId: state.sessionId,
               model: state.model || 'unknown',
               status: (state as any).status === 'ENDED' ? 'ENDED' : 'RUNNING',
-              filesChanged: [],
+              filesChanged: (state as any).filesChanged || [],
               costUsd: 0,
               tokensUsed: 0,
               durationMs: Date.now() - new Date(state.startedAt).getTime(),
@@ -128,7 +128,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
             sessionId: state.sessionId,
             model: state.model || 'unknown',
             status: (state as any).status === 'ENDED' ? 'ENDED' : 'RUNNING',
-            filesChanged: [],
+            filesChanged: (state as any).filesChanged || [],
             costUsd: 0,
             tokensUsed: 0,
             durationMs: Date.now() - new Date(state.startedAt).getTime(),
@@ -309,7 +309,29 @@ export async function sessionDetailCommand(id: string) {
     }
 
     const sessions = listLocalSessions(repoPath);
-    const session = sessions.find(s => s.sessionId.startsWith(id));
+    let session = sessions.find(s => s.sessionId.startsWith(id));
+
+    // Fallback: check ~/.origin/sessions/ state files
+    if (!session) {
+      const allStates = listAllActiveSessions();
+      const stateMatch = allStates.find(s => s.sessionId.startsWith(id));
+      if (stateMatch) {
+        session = {
+          sessionId: stateMatch.sessionId,
+          model: stateMatch.model || 'unknown',
+          status: (stateMatch as any).status === 'ENDED' ? 'ENDED' : 'RUNNING',
+          filesChanged: (stateMatch as any).filesChanged || [],
+          costUsd: 0,
+          tokensUsed: 0,
+          durationMs: Date.now() - new Date(stateMatch.startedAt).getTime(),
+          linesAdded: 0,
+          linesRemoved: 0,
+          startedAt: stateMatch.startedAt,
+          agentName: undefined,
+          prompts: stateMatch.prompts,
+        } as any;
+      }
+    }
 
     if (!session) {
       console.log(chalk.red(`Session not found: ${id}`));
