@@ -1,4 +1,7 @@
 import chalk from 'chalk';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { loadConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { loadSessionState, getGitRoot, getHeadSha } from '../session-state.js';
@@ -201,6 +204,44 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
       }
 
       session = loadLocalSession(sessionId!, repoPath);
+
+      // Fallback: check ~/.origin/sessions/ state files
+      if (!session) {
+        try {
+          const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+          const entries = fs.readdirSync(sessionsDir);
+          for (const entry of entries) {
+            if (!entry.endsWith('.json')) continue;
+            try {
+              const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
+              if (state?.sessionId?.startsWith(sessionId!)) {
+                session = {
+                  id: state.sessionId,
+                  model: state.model || 'unknown',
+                  agentSlug: state.agentSlug,
+                  tokensUsed: 0,
+                  costUsd: 0,
+                  toolCalls: 0,
+                  linesAdded: 0,
+                  linesRemoved: 0,
+                  durationMs: state.startedAt ? Date.now() - new Date(state.startedAt).getTime() : 0,
+                  filesChanged: JSON.stringify([]),
+                  createdAt: state.startedAt,
+                  status: (state as any).status || 'RUNNING',
+                  promptChanges: state.prompts?.map((p: string, i: number) => ({
+                    promptIndex: i,
+                    promptText: p,
+                    filesChanged: [],
+                  })) || [],
+                };
+                promptsText = state.prompts?.join('\n') || '';
+                break;
+              }
+            } catch { /* skip */ }
+          }
+        } catch { /* no sessions dir */ }
+      }
+
       if (!session) {
         // Try local DB as fallback
         const prompts = getPromptsBySession(sessionId!);
