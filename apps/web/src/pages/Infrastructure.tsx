@@ -73,7 +73,7 @@ export default function Infrastructure() {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <KpiCard label="Machines" value={machines.length} icon={Server} subtext={`${onlineCount} online`} />
         <KpiCard label="Agents" value={agents.length} icon={Bot} color="purple" subtext={`${agents.filter(a => a.status === 'ACTIVE').length} active`} />
-        <KpiCard label="Integrations" value={integrations.length} icon={Plug} subtext={integrations.some(i => i.provider === 'github') ? 'GitHub connected' : 'None connected'} />
+        <KpiCard label="Integrations" value={integrations.length} icon={Plug} subtext={integrations.length > 0 ? integrations.map(i => i.provider).join(', ') : 'None connected'} />
         <KpiCard label="Status" value={onlineCount > 0 ? 'Healthy' : 'Idle'} icon={HeartPulse} color={onlineCount > 0 ? 'green' : 'default'} subtext={onlineCount > 0 ? `${onlineCount} machine${onlineCount !== 1 ? 's' : ''} reporting` : 'No recent activity'} />
       </div>
 
@@ -202,19 +202,23 @@ export default function Infrastructure() {
             Settings &rarr;
           </Link>
         </div>
-        <div className="card">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-300">GitHub</span>
-              {integrations.some(i => i.provider === 'github') ? (
-                <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">Connected</span>
-              ) : (
-                <Link to="/settings" className="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors">
-                  Set up &rarr;
-                </Link>
-              )}
-            </div>
-          </div>
+        <div className="card space-y-3">
+          {(['github', 'gitlab', 'slack', 'llm', 'email'] as const).map((provider) => {
+            const connected = integrations.some(i => i.provider === provider);
+            const labels: Record<string, string> = { github: 'GitHub', gitlab: 'GitLab', slack: 'Slack', llm: 'LLM (Claude)', email: 'Email (Resend)' };
+            return (
+              <div key={provider} className="flex items-center gap-2">
+                <span className="text-sm text-gray-300 w-32">{labels[provider] || provider}</span>
+                {connected ? (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">Connected</span>
+                ) : (
+                  <Link to="/settings?tab=integrations" className="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors">
+                    Set up &rarr;
+                  </Link>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
