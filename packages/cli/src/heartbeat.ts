@@ -21,9 +21,10 @@ const pidFile = args[3];
 const parentPid = args[4] ? parseInt(args[4], 10) : 0;
 const stateFile = args[5] || '';
 
-if (!sessionId || !apiUrl || !apiKey || !pidFile) {
+if (!sessionId || !pidFile) {
   process.exit(1);
 }
+const isConnected = !!(apiUrl && apiKey);
 
 // Write our PID so the main process can kill us
 fs.writeFileSync(pidFile, String(process.pid));
@@ -65,17 +66,36 @@ function isStateFileStale(): boolean {
  * Cleans up state file so the next session-start doesn't find stale state.
  */
 async function endSession() {
-  try {
-    await fetch(`${apiUrl}/api/mcp/session/end`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': apiKey,
-      },
-      body: JSON.stringify({ sessionId }),
-    });
-  } catch { /* best effort */ }
-  // Clean up state file so next session starts fresh
+  // Archive state file to ~/.origin/sessions/ before deleting
+  if (stateFile) {
+    try {
+      const raw = fs.readFileSync(stateFile, 'utf-8');
+      const state = JSON.parse(raw);
+      state.status = 'ENDED';
+      state.endedAt = new Date().toISOString();
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
+      const archiveDir = `${homeDir}/.origin/sessions`;
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const archivePath = `${archiveDir}/${(state.sessionId || sessionId).slice(0, 12)}.json`;
+      fs.writeFileSync(archivePath, JSON.stringify(state));
+    } catch { /* best effort */ }
+  }
+
+  // End on API if connected
+  if (apiKey && apiUrl) {
+    try {
+      await fetch(`${apiUrl}/api/mcp/session/end`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+        },
+        body: JSON.stringify({ sessionId }),
+      });
+    } catch { /* best effort */ }
+  }
+
+  // Clean up active state file
   if (stateFile) {
     try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
   }
@@ -108,13 +128,16 @@ async function ping() {
       process.exit(0);
     }
 
-    await fetch(`${apiUrl}/api/mcp/session/${sessionId}/ping`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': apiKey,
-      },
-    });
+    // Only ping API in connected mode
+    if (isConnected) {
+      await fetch(`${apiUrl}/api/mcp/session/${sessionId}/ping`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+        },
+      });
+    }
   } catch {
     // Silently ignore network errors — will retry next interval
   }
