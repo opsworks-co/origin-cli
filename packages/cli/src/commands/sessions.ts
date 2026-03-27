@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
-import { getGitRoot, listActiveSessions } from '../session-state.js';
+import { getGitRoot, listActiveSessions, listAllActiveSessions } from '../session-state.js';
 
 interface LocalSession {
   sessionId: string;
@@ -83,14 +83,15 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
 
     // Also include active sessions from state files (standalone mode won't have git branch data)
     try {
-      const activeStates = listActiveSessions(repoPath);
+      // If --all, scan ALL repos' state files; otherwise just current repo
+      const activeStates = opts.all ? listAllActiveSessions() : listActiveSessions(repoPath);
       const existingIds = new Set(localSessions.map(s => s.sessionId));
       for (const state of activeStates) {
         if (!existingIds.has(state.sessionId)) {
           localSessions.push({
             sessionId: state.sessionId,
             model: state.model || 'unknown',
-            status: 'RUNNING',
+            status: (state as any).status === 'ENDED' ? 'ENDED' : 'RUNNING',
             filesChanged: [],
             costUsd: 0,
             tokensUsed: 0,

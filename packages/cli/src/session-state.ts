@@ -168,9 +168,23 @@ export function loadSessionState(cwd?: string, sessionTag?: string): SessionStat
 export function clearSessionState(cwd?: string, sessionTag?: string): void {
   const statePath = getStatePath(cwd, sessionTag);
   try {
+    // Instead of deleting, mark as ended and archive to ~/.origin/sessions/
+    const raw = fs.readFileSync(statePath, 'utf-8');
+    const state = JSON.parse(raw);
+    state.status = 'ENDED';
+    state.endedAt = new Date().toISOString();
+
+    // Archive to ~/.origin/sessions/ so origin sessions --all can find it
+    const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
+    fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    const archivePath = path.join(archiveDir, `${state.sessionId.slice(0, 12)}.json`);
+    fs.writeFileSync(archivePath, JSON.stringify(state), { mode: 0o600 });
+
+    // Remove active state file
     fs.unlinkSync(statePath);
   } catch {
-    // file doesn't exist, that's fine
+    // file doesn't exist or corrupt, try plain delete
+    try { fs.unlinkSync(statePath); } catch { /* ignore */ }
   }
 }
 
@@ -218,6 +232,34 @@ export function listActiveSessions(cwd?: string): SessionState[] {
         try {
           const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
           if (!state || typeof state !== 'object' || !state.sessionId) continue;
+          sessions.push(state);
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* ignore */ }
+
+  return sessions;
+}
+
+/**
+ * List sessions from ALL repos (for --all/--global flag).
+ * Scans ~/.origin/sessions/ for both active and archived sessions.
+ */
+export function listAllActiveSessions(): SessionState[] {
+  const sessions: SessionState[] = [];
+  const seen = new Set<string>();
+
+  // Scan ~/.origin/sessions/ — ALL files (active + archived)
+  const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+  try {
+    const entries = fs.readdirSync(sessionsDir);
+    for (const entry of entries) {
+      if (entry.endsWith('.json')) {
+        try {
+          const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
+          if (!state || typeof state !== 'object' || !state.sessionId) continue;
+          if (seen.has(state.sessionId)) continue;
+          seen.add(state.sessionId);
           sessions.push(state);
         } catch { /* skip */ }
       }
