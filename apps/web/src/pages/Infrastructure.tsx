@@ -202,17 +202,17 @@ export default function Infrastructure() {
             Settings &rarr;
           </Link>
         </div>
-        <div className="card space-y-3">
+        <div className="grid grid-cols-5 gap-3">
           {(['github', 'gitlab', 'slack', 'llm', 'email'] as const).map((provider) => {
             const connected = integrations.some(i => i.provider === provider);
-            const labels: Record<string, string> = { github: 'GitHub', gitlab: 'GitLab', slack: 'Slack', llm: 'LLM (Claude)', email: 'Email (Resend)' };
+            const labels: Record<string, string> = { github: 'GitHub', gitlab: 'GitLab', slack: 'Slack', llm: 'LLM', email: 'Email' };
             return (
-              <div key={provider} className="flex items-center gap-2">
-                <span className="text-sm text-gray-300 w-32">{labels[provider] || provider}</span>
+              <div key={provider} className={`card px-4 py-3 text-center ${connected ? 'border-green-800/50' : 'border-gray-800'}`}>
+                <span className="text-sm text-gray-200 block">{labels[provider]}</span>
                 {connected ? (
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-400">Connected</span>
+                  <span className="text-[10px] text-green-400 mt-1 block">Connected</span>
                 ) : (
-                  <Link to="/settings?tab=integrations" className="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors">
+                  <Link to="/settings?tab=integrations" className="text-[10px] text-gray-500 hover:text-indigo-400 mt-1 block transition-colors">
                     Set up &rarr;
                   </Link>
                 )}
