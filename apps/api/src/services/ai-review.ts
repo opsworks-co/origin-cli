@@ -174,9 +174,17 @@ function parseReviewResponse(text: string): AIReviewResult {
 }
 
 export async function runAIReview(data: SessionData): Promise<AIReviewResult | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  // Try org-level LLM key first, then fall back to env var
+  let apiKey: string | null = null;
+  try {
+    const config = await prisma.integrationConfig.findFirst({
+      where: { orgId: data.orgId, provider: 'llm' },
+    });
+    apiKey = config?.token || null;
+  } catch { /* ignore */ }
+  if (!apiKey) apiKey = process.env.ANTHROPIC_API_KEY || null;
   if (!apiKey) {
-    console.log('[ai-review] Skipping — no ANTHROPIC_API_KEY set');
+    console.log('[ai-review] Skipping — no LLM key configured (set in Settings > Integrations or ANTHROPIC_API_KEY env)');
     return null;
   }
 

@@ -863,7 +863,7 @@ router.post('/:id/ai-review', async (req: AuthRequest, res: Response) => {
     });
 
     if (!result) {
-      return res.status(500).json({ error: 'AI review failed — check ANTHROPIC_API_KEY' });
+      return res.status(500).json({ error: 'AI review failed — configure LLM key in Settings > Integrations' });
     }
 
     // Fetch the updated review
