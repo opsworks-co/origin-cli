@@ -186,8 +186,9 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
   for (const entry of display) {
     if (entry.type === 'local') {
       const s = entry.data;
-      const statusColor = s.status === 'running' ? chalk.green : chalk.gray;
-      const statusLabel = s.status === 'running' ? 'RUNNING' : 'ENDED';
+      const isRunning = s.status?.toLowerCase() === 'running';
+      const statusColor = isRunning ? chalk.green : chalk.gray;
+      const statusLabel = isRunning ? 'RUNNING' : 'ENDED';
       const files = s.filesChanged.length;
       const age = s.startedAt ? timeAgo(s.startedAt) : '—';
 
