@@ -754,13 +754,14 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       }
     }
 
-    // Start background heartbeat daemon (only in connected mode)
-    if (connected && config) {
+    // Start background heartbeat daemon (both connected and standalone mode)
+    // In standalone: heartbeat detects parent process death + state file staleness → auto-ends session
+    {
       const stateFile = getStatePath(repoPath, sessionTag);
-      // For fire-and-forget agents (Codex, Gemini, Aider), the hook process exits
-      // immediately so we can't track parent PID — skip the parent check
-      startHeartbeat(sessionId, config.apiUrl || 'https://getorigin.io', config.apiKey, stateFile, finalAgentSlug);
-      debugLog('session-start', 'heartbeat started', { sessionId, stateFile, agentSlug: finalAgentSlug });
+      const hbApiUrl = (connected && config) ? (config.apiUrl || 'https://getorigin.io') : '';
+      const hbApiKey = (connected && config) ? config.apiKey : '';
+      startHeartbeat(sessionId, hbApiUrl, hbApiKey, stateFile, finalAgentSlug);
+      debugLog('session-start', 'heartbeat started', { sessionId, stateFile, agentSlug: finalAgentSlug, standalone: !connected });
     }
 
     // Build system message: agent system prompt first, then tracking notice + policies + attribution
