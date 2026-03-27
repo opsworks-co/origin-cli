@@ -40,6 +40,7 @@ export default function SessionDetail() {
 
   // AI Review
   const [aiReviewLoading, setAiReviewLoading] = useState(false);
+  const [reviewExpanded, setReviewExpanded] = useState(false);
 
   // Delete
   const [deleting, setDeleting] = useState(false);
@@ -219,8 +220,8 @@ export default function SessionDetail() {
             )}
             <span className="badge-blue text-[10px] py-0">{session.model}</span>
           </span>
-          {(session.apiKeyName || session.userName) && (
-            <span>by {session.apiKeyName || session.userName}</span>
+          {(session.userName || session.apiKeyName) && (
+            <span>by {session.userName || session.apiKeyName}</span>
           )}
           <span>{formatDuration(session.durationMs)}</span>
           <span>{session.tokensUsed.toLocaleString()} tokens</span>
@@ -259,13 +260,38 @@ export default function SessionDetail() {
         </div>
       </div>
 
-      {/* ── AI Quality Score Card ── */}
+      {/* ── AI Quality Score Card (collapsible) ── */}
       {session.review?.score != null && (
-        <div className={`rounded-lg px-5 py-4 flex-shrink-0 border ${
+        <div className={`rounded-lg flex-shrink-0 border ${
           session.review.score >= 80 ? 'bg-green-900/10 border-green-800/30' :
           session.review.score >= 50 ? 'bg-amber-900/10 border-amber-800/30' :
           'bg-red-900/10 border-red-800/30'
         }`}>
+          <button
+            onClick={() => setReviewExpanded((prev) => !prev)}
+            className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-white/5 transition-colors rounded-lg"
+          >
+            <div className="flex items-center gap-3">
+              <span className={`text-2xl font-bold tabular-nums ${
+                session.review.score >= 80 ? 'text-green-400' :
+                session.review.score >= 50 ? 'text-amber-400' : 'text-red-400'
+              }`}>{session.review.score}</span>
+              <span className="text-xs text-gray-500">AI Score</span>
+              {session.review.riskLevel && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium uppercase ${
+                  session.review.riskLevel === 'low' ? 'bg-green-500/20 text-green-400' :
+                  session.review.riskLevel === 'medium' ? 'bg-amber-500/20 text-amber-400' :
+                  'bg-red-500/20 text-red-400'
+                }`}>{session.review.riskLevel} risk</span>
+              )}
+              {session.review.concerns && session.review.concerns.length > 0 && (
+                <span className="text-xs text-gray-500">{session.review.concerns.length} concerns</span>
+              )}
+            </div>
+            <span className="text-gray-500 text-xs">{reviewExpanded ? '▲ Collapse' : '▼ Expand'}</span>
+          </button>
+          {reviewExpanded && (
+          <div className="px-5 pb-4">
           <div className="flex items-start gap-5">
             {/* Big score number */}
             <div className="flex-shrink-0 text-center">
@@ -348,6 +374,8 @@ export default function SessionDetail() {
               )}
             </div>
           </div>
+          </div>
+          )}
         </div>
       )}
 
