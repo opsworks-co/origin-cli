@@ -81,12 +81,48 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
   if (repoPath) {
     localSessions = listLocalSessions(repoPath);
 
-    // Also include active sessions from state files (standalone mode won't have git branch data)
+    // Also include active sessions from state files for current repo
+    if (!opts.all) {
+      try {
+        const activeStates = listActiveSessions(repoPath);
+        const existingIds = new Set(localSessions.map(s => s.sessionId));
+        for (const state of activeStates) {
+          if (!existingIds.has(state.sessionId)) {
+            localSessions.push({
+              sessionId: state.sessionId,
+              model: state.model || 'unknown',
+              status: (state as any).status === 'ENDED' ? 'ENDED' : 'RUNNING',
+              filesChanged: [],
+              costUsd: 0,
+              tokensUsed: 0,
+              durationMs: Date.now() - new Date(state.startedAt).getTime(),
+              linesAdded: 0,
+              linesRemoved: 0,
+              startedAt: state.startedAt,
+              agentName: undefined,
+            } as LocalSession);
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Apply filters
+    if (opts.model) {
+      const m = opts.model.toLowerCase();
+      localSessions = localSessions.filter(s => s.model.toLowerCase().includes(m));
+    }
+    if (opts.status) {
+      const st = opts.status.toLowerCase();
+      localSessions = localSessions.filter(s => s.status.toLowerCase() === st);
+    }
+  }
+
+  // For --all/--global: scan ALL repos' state files from ~/.origin/sessions/
+  if (opts.all) {
     try {
-      // If --all, scan ALL repos' state files; otherwise just current repo
-      const activeStates = opts.all ? listAllActiveSessions() : listActiveSessions(repoPath);
+      const allStates = listAllActiveSessions();
       const existingIds = new Set(localSessions.map(s => s.sessionId));
-      for (const state of activeStates) {
+      for (const state of allStates) {
         if (!existingIds.has(state.sessionId)) {
           localSessions.push({
             sessionId: state.sessionId,
@@ -104,16 +140,6 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
         }
       }
     } catch { /* ignore */ }
-
-    // Apply filters
-    if (opts.model) {
-      const m = opts.model.toLowerCase();
-      localSessions = localSessions.filter(s => s.model.toLowerCase().includes(m));
-    }
-    if (opts.status) {
-      const st = opts.status.toLowerCase();
-      localSessions = localSessions.filter(s => s.status.toLowerCase() === st);
-    }
   }
 
   // In connected mode, also fetch user's platform sessions and merge
