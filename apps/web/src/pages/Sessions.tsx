@@ -765,8 +765,8 @@ export default function Sessions() {
                         {s.agentVersion && <span className="text-gray-600 ml-1">v{s.agentVersion}</span>}
                       </td>
                       <td className="px-6 py-3 text-gray-400 text-xs">
-                        {s.apiKeyName || s.userName ||
-                          s.commitAuthor || <span className="text-gray-600">—</span>}
+                        {s.userName || s.commitAuthor ||
+                          <span className="text-gray-600">—</span>}
                       </td>
                       <td className="px-6 py-3 text-gray-400">{s.repoName ?? '—'}</td>
                       <td className="px-6 py-3 text-gray-400 text-xs max-w-[140px] truncate">
