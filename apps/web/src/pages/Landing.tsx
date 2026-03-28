@@ -504,10 +504,10 @@ $ origin explain abc123 # replay a session`}
             <tbody className="divide-y divide-gray-800">
               {[
                 ['Session recording & replay', true, true, false],
-                ['Prompt & transcript capture', true, true, true],
-                ['AI blame (line-level attribution)', true, true, true],
+                ['Prompt & transcript capture', true, true, false],
+                ['AI blame (line-level attribution)', true, false, true],
                 ['Multi-agent support (4+ agents)', true, true, true],
-                ['Team dashboard', true, true, true],
+                ['Team dashboard', true, false, true],
                 ['Open-source CLI', true, true, true],
                 ['Policy enforcement (file, model, cost)', true, false, false],
                 ['Secret & credential scanning', true, false, false],

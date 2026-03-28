@@ -253,20 +253,20 @@ origin config set mode auto`}</CodeBlock>
               </thead>
               <tbody className="text-gray-400">
                 {([
-                  ['Core approach', 'Session lifecycle hooks', 'Git hooks + shadow branches', 'Checkpoint + Git notes'],
-                  ['What it captures', 'Full session: prompts, responses, tool calls, costs', 'Session transcripts + checkpoints', 'Code attribution only (line → agent)'],
+                  ['Core approach', 'Session lifecycle hooks', 'Git hooks + checkpoint branches', 'Git notes + checkpoint markers'],
+                  ['What it captures', 'Full session: prompts, responses, tool calls, costs', 'Session transcripts + checkpoints', 'Line-level attribution (agent → line)'],
                   ['', '', '', ''],
                   ['SESSION & TRACKING', '', '', ''],
-                  ['Session capture', '✓ Full lifecycle (6 events)', '✓ Transcripts on push', '—'],
-                  ['Session history', '✓ origin sessions', '✓ Web dashboard', '—'],
+                  ['Session capture', '✓ Full lifecycle (6 events)', '✓ Transcripts + checkpoints', '—'],
+                  ['Session history', '✓ origin sessions', '✓ entire status', '—'],
                   ['Session explain', '✓ origin explain --summarize', '✓ entire explain', '—'],
-                  ['Ask about code', '✓ origin ask (file/session/query)', '—', '✓ /ask (query author)'],
+                  ['Ask about code', '✓ origin ask (file/session/query)', '—', '—'],
                   ['Session sharing', '✓ origin share (bundle/clipboard/public URL)', '—', '—'],
                   ['PR analysis', '✓ origin review-pr (sessions per PR)', '—', '—'],
-                  ['Session resume', '✓ origin resume (restore context)', '—', '—'],
+                  ['Session resume', '✓ origin resume (restore context)', '✓ entire resume', '—'],
                   ['', '', '', ''],
                   ['ATTRIBUTION & BLAME', '', '', ''],
-                  ['AI blame', '✓ origin blame (line-level)', '—', '✓ git-ai blame'],
+                  ['AI blame', '✓ origin blame (line-level)', '✓ Commit-level (via explain)', '✓ git-ai blame (line-level)'],
                   ['Attributed diffs', '✓ origin diff (AI/human annotations)', '—', '—'],
                   ['Time travel / rewind', '✓ origin rewind (interactive)', '✓ entire rewind', '—'],
                   ['', '', '', ''],
@@ -280,7 +280,7 @@ origin config set mode auto`}</CodeBlock>
                   ['Session reviews', '✓ Approve/reject/flag', '—', '—'],
                   ['Audit log', '✓ SOC 2 ready', '—', '—'],
                   ['PR gating', '✓ Block unreviewed PRs', '—', '—'],
-                  ['Team dashboards', '✓ Connected mode', '✓ Web dashboard', '✓ Enterprise'],
+                  ['Team dashboards', '✓ Connected mode', '—', '✓ Enterprise'],
                   ['', '', '', ''],
                   ['DEVOPS & WORKFLOW', '', '', ''],
                   ['CI/CD integration', '✓ origin ci (check, squash-merge, GH Actions)', '—', '—'],
@@ -294,8 +294,8 @@ origin config set mode auto`}</CodeBlock>
                   ['IDE integration', '—', '—', '✓ VS Code gutter'],
                   ['Works offline', '✓', '✓', '✓'],
                   ['Zero config', '✓ origin init', '✓ entire enable', '✓ Auto'],
-                  ['Agents supported', '6 agents', '5 agents', '12+ agents'],
-                  ['License', 'MIT', 'Proprietary', 'Apache 2.0'],
+                  ['Agents supported', '6 agents', '6 agents', '11+ agents'],
+                  ['License', 'MIT', 'MIT', 'Apache 2.0'],
                   ['', '', '', ''],
                   ['TOTAL', '35+ commands', '~5 commands', '~6 commands'],
                 ] as [string, string, string, string][]).map(([feature, origin, entire, gitai], i) => {
@@ -351,13 +351,13 @@ origin config set mode auto`}</CodeBlock>
               <div className="card bg-gray-800/30 border-gray-700 p-4">
                 <h4 className="text-sm font-semibold text-gray-300 mb-2">When to use Entire</h4>
                 <p className="text-xs text-gray-400">
-                  Visual dashboard for browsing AI coding sessions and checkpoints. AI-powered session summaries via <code className="text-gray-300">entire explain</code>. Checkpoint rewind support. No policy enforcement or attribution features.
+                  Open-source (MIT) session recording with checkpoint branches. Full transcript capture, <code className="text-gray-300">entire explain</code> for AI summaries, and <code className="text-gray-300">entire rewind/resume</code> for checkpoint management. No policy enforcement or line-level blame.
                 </p>
               </div>
               <div className="card bg-gray-800/30 border-gray-700 p-4">
                 <h4 className="text-sm font-semibold text-gray-300 mb-2">When to use git-ai</h4>
                 <p className="text-xs text-gray-400">
-                  Best for line-level attribution — knowing which AI agent wrote each line. Broadest agent support (12+), VS Code gutter annotations, and <code className="text-gray-300">/ask</code> to query the original AI about its code. No session tracking or governance.
+                  Best for line-level attribution — knowing which AI agent wrote each line. Broadest agent support (11+), VS Code gutter annotations, and enterprise dashboards. Uses Git Notes so attribution survives rebases and squashes. No session tracking or governance.
                 </p>
               </div>
             </div>

@@ -157,9 +157,13 @@ export default function Leaderboard() {
                       <td className="px-3 py-3 text-right text-gray-300">{e.lines.toLocaleString()}</td>
                       <td className="px-3 py-3 text-right text-gray-300">${e.cost.toFixed(2)}</td>
                       <td className="px-3 py-3 text-right">
-                        <span className={e.approvalRate >= 80 ? 'text-green-400' : e.approvalRate >= 50 ? 'text-amber-400' : 'text-red-400'}>
-                          {e.approvalRate.toFixed(0)}%
-                        </span>
+                        {e.approvalRate > 0 ? (
+                          <span className={e.approvalRate >= 80 ? 'text-green-400' : e.approvalRate >= 50 ? 'text-amber-400' : 'text-red-400'}>
+                            {e.approvalRate.toFixed(0)}%
+                          </span>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
                       </td>
                       <td className="px-3 py-3 text-right">
                         <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-xs font-bold ${

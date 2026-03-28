@@ -14,7 +14,7 @@ export interface OriginConfig {
   machineId?: string;
   // Feature flags
   commitLinking?: 'always' | 'prompt' | 'never';
-  pushStrategy?: 'auto' | 'prompt' | 'false';
+  pushStrategy?: 'auto' | 'prompt' | 'false' | 'always';
   telemetry?: boolean;
   autoUpdate?: boolean;
   secretRedaction?: boolean;

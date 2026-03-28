@@ -699,9 +699,6 @@ export default function Sessions() {
                   <SortHeader field="duration" align="right">
                     Duration
                   </SortHeader>
-                  <SortHeader field="toolCalls" align="right">
-                    Tools
-                  </SortHeader>
                   <SortHeader field="tokens" align="right">
                     Tokens
                   </SortHeader>
@@ -781,9 +778,6 @@ export default function Sessions() {
                       </td>
                       <td className="px-6 py-3 text-right text-gray-400 tabular-nums">
                         {formatDuration(s.durationMs)}
-                      </td>
-                      <td className="px-6 py-3 text-right text-gray-400 tabular-nums">
-                        {s.toolCalls}
                       </td>
                       <td className="px-6 py-3 text-right text-gray-400 tabular-nums">
                         {(s.tokensUsed / 1000).toFixed(1)}k

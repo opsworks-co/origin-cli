@@ -108,7 +108,10 @@ function generateInsight(stats: Stats): InsightResult {
 
 function InsightBanner({ stats }: { stats: Stats }) {
   const storageKey = 'origin_insight_dismissed';
-  const [dismissed, setDismissed] = useState(() => localStorage.getItem(storageKey) === 'true');
+  const [dismissed, setDismissed] = useState(() => {
+    const val = localStorage.getItem(storageKey);
+    return val === 'true' || val === 'permanent';
+  });
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
@@ -123,7 +126,7 @@ function InsightBanner({ stats }: { stats: Stats }) {
   const { headline, advice } = generateInsight(stats);
 
   const handleDismiss = () => {
-    localStorage.setItem(storageKey, 'true');
+    localStorage.setItem(storageKey, 'permanent');
     setVisible(false);
     setTimeout(() => setDismissed(true), 300);
   };

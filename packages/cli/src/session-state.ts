@@ -277,7 +277,7 @@ export function listAllActiveSessions(): SessionState[] {
           // Auto-expire RUNNING sessions that are stale:
           // If status is not ENDED, check if the session is actually still alive
           if (state.status !== 'ENDED') {
-            const STALE_MS = 15 * 60 * 1000; // 15 minutes
+            const STALE_MS = 3 * 60 * 60 * 1000; // 3 hours
             let isAlive = false;
 
             // Check 1: is there an active .git state file being updated?

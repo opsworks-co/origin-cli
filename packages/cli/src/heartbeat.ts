@@ -31,7 +31,7 @@ const isConnected = !!(apiUrl && apiKey);
 fs.writeFileSync(pidFile, String(process.pid), { mode: 0o600 });
 
 const PING_INTERVAL_MS = 30_000; // 30 seconds
-const STALE_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes without state file update = stale
+const STALE_THRESHOLD_MS = 3 * 60 * 60 * 1000; // 3 hours without state file update = stale
 
 /**
  * Check if a process is still alive (signal 0 = existence check).

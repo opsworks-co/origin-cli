@@ -305,6 +305,14 @@ export function pushSessionBranch(repoPath: string): void {
     if (strategy === 'false') return; // Never push
     if (strategy === 'prompt') return; // User pushes manually via pre-push hook
 
+    // In connected mode, session data goes to the API — no need to push
+    // session branches to the repo remote (which may be public).
+    // Only push if explicitly configured with a checkpointRepo or in standalone mode.
+    const connected = !!(config?.apiKey && config?.apiUrl);
+    if (connected && !config?.checkpointRepo && strategy !== 'always') {
+      return; // Connected mode — data is on the platform, don't push to repo
+    }
+
     const execOpts = {
       encoding: 'utf-8' as const,
       cwd: repoPath,

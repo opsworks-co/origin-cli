@@ -54,6 +54,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         userId: true,
         costUsd: true,
         linesAdded: true,
+        linesRemoved: true,
         tokensUsed: true,
         createdAt: true,
         review: { select: { status: true } },
@@ -96,7 +97,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
       const entry = userMap.get(uid)!;
       entry.sessions++;
-      entry.lines += s.linesAdded;
+      entry.lines += s.linesAdded + s.linesRemoved;
       entry.cost += s.costUsd;
       entry.total++;
 
@@ -159,14 +160,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       // Violation rate
       const violationRate = data.total > 0 ? data.violations / data.total : 0;
 
-      // Quality score
+      // Quality score (0–100)
       const qualityScore = parseFloat(
         (
-          (approvalRate / 100) * 0.4 +
+          ((approvalRate / 100) * 0.4 +
           reviewCoverage * 0.3 +
           (1 - violationRate) * 0.2 +
-          0.1
-        ).toFixed(2)
+          0.1) * 100
+        ).toFixed(0)
       );
 
       // Activity grid: last 365 days
