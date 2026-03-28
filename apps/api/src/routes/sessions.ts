@@ -221,8 +221,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       }),
     ]);
 
-    // Auto-expire stale RUNNING sessions (no heartbeat ping in 5 minutes)
-    const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+    // Auto-expire stale RUNNING sessions (no heartbeat ping in 15 minutes)
+    const STALE_THRESHOLD_MS = 15 * 60 * 1000;
     const now = Date.now();
     const staleIds: string[] = [];
     for (const s of sessions) {

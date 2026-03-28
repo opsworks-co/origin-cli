@@ -212,8 +212,8 @@ app.listen(Number(PORT), HOST, () => {
   // machine sleeps. Use a generous threshold — developers take long breaks,
   // read docs, etc. The session-end hook handles normal completion; this
   // only catches truly orphaned sessions.
-  const STALE_SESSION_CHECK_MS = 1 * 60 * 1000;    // check every 1 min
-  const STALE_THRESHOLD_MS = 2 * 60 * 1000;        // 2 min without heartbeat ping
+  const STALE_SESSION_CHECK_MS = 5 * 60 * 1000;    // check every 5 min
+  const STALE_THRESHOLD_MS = 15 * 60 * 1000;       // 15 min without heartbeat ping
   setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS);

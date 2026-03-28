@@ -1280,6 +1280,12 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
       });
       debugLog('stop', 'update complete');
+
+      // Send a heartbeat ping to keep the server-side session alive
+      // (prevents the server's stale session cleanup from ending it)
+      try {
+        await api.pingSession(state.sessionId);
+      } catch { /* non-fatal */ }
     }
 
     // Write git notes on any commits that don't have them yet
