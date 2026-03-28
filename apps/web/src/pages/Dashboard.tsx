@@ -107,8 +107,7 @@ function generateInsight(stats: Stats): InsightResult {
 }
 
 function InsightBanner({ stats }: { stats: Stats }) {
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const storageKey = `origin_insight_dismissed_${todayKey}`;
+  const storageKey = 'origin_insight_dismissed';
   const [dismissed, setDismissed] = useState(() => localStorage.getItem(storageKey) === 'true');
   const [visible, setVisible] = useState(false);
 
@@ -369,7 +368,7 @@ export default function Dashboard() {
             </Link>
           </div>
           <div className="space-y-2">
-            {activeSessions.map((s) => {
+            {activeSessions.slice(0, 2).map((s) => {
               const elapsed = s.startedAt
                 ? Math.floor((Date.now() - new Date(s.startedAt).getTime()) / 1000)
                 : 0;
