@@ -973,6 +973,8 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       state.transcriptPath = input.transcript_path;
     }
 
+    // Ensure session stays RUNNING (may have been auto-expired by listAllActiveSessions)
+    state.status = 'RUNNING';
     saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
     debugLog('user-prompt-submit', 'prompt saved', { promptCount: state.prompts.length, sessionId: state.sessionId, tag: state.sessionTag });
 
@@ -1336,7 +1338,8 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     pushSessionBranch(state.repoPath);
     debugLog('stop', 'session files written + pushed', { prompts: writeData.prompts.length, costUsd: writeData.costUsd });
 
-    // Re-save state so the archive file's mtime stays fresh (prevents auto-expire)
+    // Re-save state with RUNNING status so the archive stays fresh
+    state.status = 'RUNNING';
     saveSessionState(state, found!.saveCwd, state.sessionTag);
   } catch (err: any) {
     debugLog('stop', 'ERROR', { message: err.message, stack: err.stack });

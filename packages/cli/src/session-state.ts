@@ -40,6 +40,8 @@ export interface SessionState {
   activePolicies?: string[];  // Cached active policies for session resume
   enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
   trailId?: string;           // Trail ID if session is linked to an active trail
+  status?: string;            // RUNNING | ENDED | COMPLETED
+  endedAt?: string;           // ISO timestamp when session ended
 }
 
 // ─── Git Directory ─────────────────────────────────────────────────────────

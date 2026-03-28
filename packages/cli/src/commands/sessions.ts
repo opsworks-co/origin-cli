@@ -65,8 +65,13 @@ function listLocalSessions(repoPath: string): LocalSession[] {
     // origin-sessions branch might not have sessions/ dir
   }
 
-  // Sort by startedAt descending
-  sessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  // Sort: RUNNING first, then by startedAt descending
+  sessions.sort((a, b) => {
+    const aRunning = a.status === 'RUNNING' ? 1 : 0;
+    const bRunning = b.status === 'RUNNING' ? 1 : 0;
+    if (aRunning !== bRunning) return bRunning - aRunning;
+    return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
+  });
   return sessions;
 }
 
