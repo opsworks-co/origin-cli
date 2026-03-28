@@ -189,8 +189,8 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
 
   // Sort: RUNNING first, then by time descending
   merged.sort((a, b) => {
-    const aStatus = a.type === 'local' ? (a.data.status || '') : (a.data.status || '');
-    const bStatus = b.type === 'local' ? (b.data.status || '') : (b.data.status || '');
+    const aStatus = (a.data.status || '').toUpperCase();
+    const bStatus = (b.data.status || '').toUpperCase();
     const aRunning = aStatus === 'RUNNING' ? 1 : 0;
     const bRunning = bStatus === 'RUNNING' ? 1 : 0;
     if (aRunning !== bRunning) return bRunning - aRunning;
@@ -265,9 +265,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
       console.log(
         `  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.cyan(displayModel.padEnd(25))}  ${statusColor(status.padEnd(12))}  ${fileDisplay.padEnd(12)}  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}`
       );
-      if (s.commitMessage) {
-        console.log(`           ${chalk.gray(s.commitMessage.slice(0, 60))}`);
-      }
+      // Prompt subtitle removed — keep session list clean
     }
   }
   console.log('');
