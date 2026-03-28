@@ -593,13 +593,29 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   if (agentsWithPerPromptSessionStart.includes(finalAgentSlug || '')) {
     let existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || ''));
     // Also check global archive — the .git/ file might have been cleaned up
+    // Don't use listAllActiveSessions() as it auto-expires stale sessions.
+    // Instead, directly scan archive files and match by repo + agent + recency (24h).
     if (!existing) {
-      const allSessions = listAllActiveSessions();
-      existing = allSessions.find(s =>
-        s.status !== 'ENDED' &&
-        s.repoPath === repoPath &&
-        sessionMatchesAgent(s, finalAgentSlug || '')
-      );
+      try {
+        const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
+        const entries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
+        const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+        for (const entry of entries) {
+          try {
+            const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
+            if (!s?.sessionId || !s?.startedAt) continue;
+            // Skip sessions older than 24h
+            if (Date.now() - new Date(s.startedAt).getTime() > MAX_AGE_MS) continue;
+            // Skip explicitly ended sessions
+            if (s.status === 'ENDED' && s.endedAt) continue;
+            // Match repo and agent
+            if (s.repoPath === repoPath && sessionMatchesAgent(s, finalAgentSlug || '')) {
+              existing = s;
+              break;
+            }
+          } catch { /* skip corrupt file */ }
+        }
+      } catch { /* no archive dir */ }
     }
     if (existing) {
       debugLog('session-start', 'reusing existing session for per-prompt agent', {
