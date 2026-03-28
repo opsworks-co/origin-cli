@@ -9,6 +9,7 @@ import {
   clearSessionState,
   findSessionByClaudeId,
   listActiveSessions,
+  listAllActiveSessions,
   getGitDir,
   getGitRoot,
   discoverGitRoot,
@@ -588,8 +589,18 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
   // For Cursor/Codex: if an existing session is still active, reuse it
   // instead of creating a new one. Output the system message and return.
+  // Check both .git/ state files AND ~/.origin/sessions/ archive
   if (agentsWithPerPromptSessionStart.includes(finalAgentSlug || '')) {
-    const existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || ''));
+    let existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || ''));
+    // Also check global archive — the .git/ file might have been cleaned up
+    if (!existing) {
+      const allSessions = listAllActiveSessions();
+      existing = allSessions.find(s =>
+        s.status !== 'ENDED' &&
+        s.repoPath === repoPath &&
+        sessionMatchesAgent(s, finalAgentSlug || '')
+      );
+    }
     if (existing) {
       debugLog('session-start', 'reusing existing session for per-prompt agent', {
         sessionId: existing.sessionId,
