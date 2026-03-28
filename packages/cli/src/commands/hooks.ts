@@ -1328,19 +1328,23 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       debugLog('stop', 'git notes error (non-fatal)', { message: notesErr.message });
     }
 
-    // Write session files to origin-sessions branch + push on every Stop
-    const apiUrl = config?.apiUrl || 'https://getorigin.io';
-    const writeData = buildSessionWriteData({
-      state, parsed, promptMappings, gitCapture,
-      status: 'running', apiUrl,
-    });
-    writeSessionFiles(state.repoPath, writeData);
-    pushSessionBranch(state.repoPath);
-    debugLog('stop', 'session files written + pushed', { prompts: writeData.prompts.length, costUsd: writeData.costUsd });
-
-    // Re-save state with RUNNING status so the archive stays fresh
+    // Re-save state with RUNNING status FIRST so it survives any errors below
     state.status = 'RUNNING';
     saveSessionState(state, found!.saveCwd, state.sessionTag);
+
+    // Write session files to origin-sessions branch + push on every Stop
+    try {
+      const apiUrl = config?.apiUrl || 'https://getorigin.io';
+      const writeData = buildSessionWriteData({
+        state, parsed, promptMappings, gitCapture,
+        status: 'running', apiUrl,
+      });
+      writeSessionFiles(state.repoPath, writeData);
+      pushSessionBranch(state.repoPath);
+      debugLog('stop', 'session files written + pushed', { prompts: writeData.prompts.length, costUsd: writeData.costUsd });
+    } catch (gitErr: any) {
+      debugLog('stop', 'session files write/push failed (non-fatal)', { message: gitErr.message });
+    }
   } catch (err: any) {
     debugLog('stop', 'ERROR', { message: err.message, stack: err.stack });
     process.stderr.write(`[origin] stop error: ${err.message}\n`);
