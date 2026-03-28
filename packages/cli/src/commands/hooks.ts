@@ -906,6 +906,45 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     saveSessionState(state, found!.saveCwd, state.sessionTag);
   }
   if (!state) {
+    // Before auto-creating, try to recover from archive (session state file may have been
+    // deleted by a stale cleanup or heartbeat, but the archive still has the session).
+    // This is critical for Cursor/Codex where session-start fires once per conversation
+    // but user-prompt-submit fires per prompt.
+    try {
+      const recoveryRepoPath = discoverGitRoot(hookCwd) || hookCwd;
+      const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
+      const archiveEntries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
+      const MAX_RECOVERY_AGE_MS = 24 * 60 * 60 * 1000;
+      let bestCandidate: SessionState | null = null;
+      let bestAge = Infinity;
+      for (const entry of archiveEntries) {
+        try {
+          const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
+          if (!s?.sessionId || !s?.startedAt) continue;
+          const age = Date.now() - new Date(s.startedAt).getTime();
+          if (age > MAX_RECOVERY_AGE_MS) continue;
+          if (s.status === 'ENDED' && s.endedAt) continue;
+          if (s.repoPath !== recoveryRepoPath) continue;
+          if (agentSlug && !sessionMatchesAgent(s, agentSlug)) continue;
+          if (age < bestAge) {
+            bestCandidate = s;
+            bestAge = age;
+          }
+        } catch { /* skip */ }
+      }
+      if (bestCandidate) {
+        debugLog('user-prompt-submit', 'recovered session from archive', {
+          sessionId: bestCandidate.sessionId,
+          tag: bestCandidate.sessionTag,
+          ageMin: Math.round(bestAge / 60000),
+        });
+        // Restore the .git state file so subsequent hooks can find it
+        saveSessionState(bestCandidate, recoveryRepoPath, bestCandidate.sessionTag);
+        state = bestCandidate;
+      }
+    } catch { /* no archive dir — fall through to auto-create */ }
+  }
+  if (!state) {
     // No existing session at all — auto-create one (first prompt without SessionStart)
     debugLog('user-prompt-submit', 'no session state — attempting auto-create', { hookCwd });
     const autoConfig = loadConfig();
@@ -1156,8 +1195,36 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       hookCwd = wsRoot;
     }
   }
-  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
-  const state = found?.state || null;
+  let found = findStateForHook(hookCwd, input.session_id, agentSlug);
+  let state = found?.state || null;
+  // Recover from archive if .git state file is missing (Cursor/Codex sessions)
+  if (!state) {
+    try {
+      const recoveryRepoPath = discoverGitRoot(hookCwd) || hookCwd;
+      const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
+      const archiveEntries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
+      let bestCandidate: SessionState | null = null;
+      let bestAge = Infinity;
+      for (const entry of archiveEntries) {
+        try {
+          const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
+          if (!s?.sessionId || !s?.startedAt) continue;
+          const age = Date.now() - new Date(s.startedAt).getTime();
+          if (age > 24 * 60 * 60 * 1000) continue;
+          if (s.status === 'ENDED' && s.endedAt) continue;
+          if (s.repoPath !== recoveryRepoPath) continue;
+          if (agentSlug && !sessionMatchesAgent(s, agentSlug)) continue;
+          if (age < bestAge) { bestCandidate = s; bestAge = age; }
+        } catch { /* skip */ }
+      }
+      if (bestCandidate) {
+        debugLog('stop', 'recovered session from archive', { sessionId: bestCandidate.sessionId, tag: bestCandidate.sessionTag });
+        saveSessionState(bestCandidate, recoveryRepoPath, bestCandidate.sessionTag);
+        state = bestCandidate;
+        found = { state, saveCwd: recoveryRepoPath };
+      }
+    } catch { /* no archive */ }
+  }
   if (!state) {
     debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
     return;
