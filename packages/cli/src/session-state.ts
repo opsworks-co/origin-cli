@@ -412,11 +412,14 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
     // process tree to find the actual agent process so the heartbeat can detect
     // when it exits and end the session.
     // Long-running agents: process.ppid IS the agent (Claude Code, Windsurf)
-    // IDE agents: hooks spawned via shell wrappers, need to walk process tree
+    // IDE agents (Cursor, Codex): hooks are short-lived subprocesses — the parent
+    // PID found by walking the tree is often an intermediate process that dies after
+    // the hook exits. Passing it to the heartbeat causes the heartbeat to kill the
+    // session after 30 seconds. For these agents, pass parentPid=0 so the heartbeat
+    // relies on state file staleness (15 min) instead.
     const LONG_RUNNING_AGENTS = ['claude-code', 'windsurf'];
+    const STALE_FILE_ONLY_AGENTS = ['cursor', 'codex'];
     const AGENT_PROCESS_PATTERNS: Record<string, RegExp> = {
-      'cursor': /Cursor|cursor/i,
-      'codex': /codex/i,
       'gemini': /gemini/i,
       'aider': /aider/i,
     };
@@ -429,6 +432,10 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
       if (parentPid > 0) {
         try { process.kill(parentPid, 0); } catch { parentPid = 0; }
       }
+    } else if (agentSlug && STALE_FILE_ONLY_AGENTS.includes(agentSlug)) {
+      // For Cursor / Codex, ancestor PID detection is unreliable — the process
+      // tree has short-lived intermediaries. Use stale file check only.
+      parentPid = 0;
     } else {
       const pattern = agentSlug ? AGENT_PROCESS_PATTERNS[agentSlug] : undefined;
       parentPid = pattern ? findAncestorPid(pattern) : 0;
