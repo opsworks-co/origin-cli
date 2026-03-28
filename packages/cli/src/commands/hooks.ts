@@ -555,7 +555,10 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   // If SessionEnd didn't fire (user Ctrl+C'd, terminal closed), old state files
   // linger and subsequent hooks attach to the wrong session.
   // On session-start, force-end any prior sessions for the same agent in this repo.
-  if (!claudeSessionId) {
+  // BUT for Cursor/Codex, session-start fires on every prompt — don't end previous,
+  // just reuse the existing session.
+  const agentsWithPerPromptSessionStart = ['cursor', 'codex'];
+  if (!claudeSessionId && !agentsWithPerPromptSessionStart.includes(finalAgentSlug || '')) {
     const staleSessions = finalAgentSlug ? listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug)) : listActiveSessions(repoPath);
     for (const stale of staleSessions) {
       debugLog('session-start', 'cleaning up stale session for same agent', {
@@ -580,6 +583,36 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       }
       clearSessionState(repoPath, stale.sessionTag);
       if (repoPath !== hookCwd) clearSessionState(hookCwd, stale.sessionTag);
+    }
+  }
+
+  // For Cursor/Codex: if an existing session is still active, reuse it
+  // instead of creating a new one. Output the system message and return.
+  if (agentsWithPerPromptSessionStart.includes(finalAgentSlug || '')) {
+    const existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || ''));
+    if (existing) {
+      debugLog('session-start', 'reusing existing session for per-prompt agent', {
+        sessionId: existing.sessionId,
+        tag: existing.sessionTag,
+        agent: finalAgentSlug,
+      });
+      // Touch the state file to keep it fresh
+      saveSessionState(existing, repoPath, existing.sessionTag);
+
+      // Output system message
+      let systemMsg = '';
+      if (existing.agentSystemPrompt) systemMsg += existing.agentSystemPrompt + '\n\n';
+      systemMsg += 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
+      if (existing.activePolicies && Array.isArray(existing.activePolicies) && existing.activePolicies.length > 0) {
+        systemMsg += '\n\nActive policies for this session:\n' +
+          existing.activePolicies.map((p: string) => `- ${p}`).join('\n');
+      }
+      try {
+        const attributionCtx = buildAttributionContext(repoPath);
+        if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
+      } catch {}
+      process.stdout.write(JSON.stringify({ systemMessage: systemMsg }));
+      return;
     }
   }
 
