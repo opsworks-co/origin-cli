@@ -187,8 +187,13 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     }
   }
 
-  // Sort by time descending
+  // Sort: RUNNING first, then by time descending
   merged.sort((a, b) => {
+    const aStatus = a.type === 'local' ? (a.data.status || '') : (a.data.status || '');
+    const bStatus = b.type === 'local' ? (b.data.status || '') : (b.data.status || '');
+    const aRunning = aStatus === 'RUNNING' ? 1 : 0;
+    const bRunning = bStatus === 'RUNNING' ? 1 : 0;
+    if (aRunning !== bRunning) return bRunning - aRunning;
     const ta = a.type === 'local' ? a.data.startedAt : (a.data.createdAt || a.data.startedAt);
     const tb = b.type === 'local' ? b.data.startedAt : (b.data.createdAt || b.data.startedAt);
     return new Date(tb).getTime() - new Date(ta).getTime();
