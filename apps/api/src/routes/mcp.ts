@@ -1004,25 +1004,9 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       link: `/sessions/${sessionId}`,
     }).catch(() => {});
 
-    runAIReview({
-      sessionId,
-      orgId,
-      model: codingSession.model,
-      prompt: prompt || codingSession.prompt || '',
-      filesChanged: parsedFiles,
-      tokensUsed: tokensUsed ?? codingSession.tokensUsed ?? 0,
-      toolCalls: toolCalls ?? codingSession.toolCalls ?? 0,
-      linesAdded: linesAdded ?? codingSession.linesAdded ?? 0,
-      linesRemoved: linesRemoved ?? codingSession.linesRemoved ?? 0,
-      costUsd: costUsd ?? codingSession.costUsd ?? 0,
-      durationMs: durationMs ?? codingSession.durationMs ?? 0,
-      transcript: transcriptValue?.slice(0, 5000),
-      diff: gitCapture?.diff?.slice(0, 10000),
-      promptChanges: promptChanges?.map((pc: any) => ({
-        promptText: (pc.promptText || '').slice(0, 200),
-        filesChanged: pc.filesChanged || [],
-      })),
-    }).catch(err => console.error('[ai-review] Background error:', err));
+    // AI auto-review disabled by default — run manually via dashboard or origin review
+    // TODO: add org-level setting to enable auto-review
+    // runAIReview({ ... }).catch(err => console.error('[ai-review] Background error:', err));
 
     // Run secret/PII scanner on the diff in background
     // Use gitCapture.diff if available, otherwise read stored diff from sessionDiff
