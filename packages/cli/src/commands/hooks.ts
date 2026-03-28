@@ -1329,6 +1329,9 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     writeSessionFiles(state.repoPath, writeData);
     pushSessionBranch(state.repoPath);
     debugLog('stop', 'session files written + pushed', { prompts: writeData.prompts.length, costUsd: writeData.costUsd });
+
+    // Re-save state so the archive file's mtime stays fresh (prevents auto-expire)
+    saveSessionState(state, found!.saveCwd, state.sessionTag);
   } catch (err: any) {
     debugLog('stop', 'ERROR', { message: err.message, stack: err.stack });
     process.stderr.write(`[origin] stop error: ${err.message}\n`);
