@@ -1131,7 +1131,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
   } catch (err: any) {
     console.error('End session error:', err?.message || err, err?.code, err?.meta);
     // Return more detail so CLI can debug
-    res.status(500).json({ error: 'Internal server error', detail: err?.message || 'unknown' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -1144,6 +1144,11 @@ router.post('/violations', async (req: McpRequest, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: machineId, policyId, description' });
     }
 
+    // Sanitize metadata to prevent injection / storage abuse
+    const stripHtml = (s: string) => s.replace(/<[^>]*>/g, '');
+    const safeDescription = stripHtml(String(description)).slice(0, 500);
+    const safeFilepath = filepath ? stripHtml(String(filepath)).slice(0, 255) : undefined;
+
     const orgId = req.orgId as string;
 
     await prisma.auditLog.create({
@@ -1151,7 +1156,7 @@ router.post('/violations', async (req: McpRequest, res: Response) => {
         orgId,
         action: 'POLICY_VIOLATION',
         resource: policyId,
-        metadata: JSON.stringify({ policyId, description, filepath, machineId }),
+        metadata: JSON.stringify({ policyId, description: safeDescription, filepath: safeFilepath, machineId }),
       },
     });
 
@@ -1160,9 +1165,9 @@ router.post('/violations', async (req: McpRequest, res: Response) => {
       orgId,
       'POLICY_VIOLATION',
       'Policy Violation Detected',
-      `${description}${filepath ? ` — ${filepath}` : ''}`,
+      `${safeDescription}${safeFilepath ? ` — ${safeFilepath}` : ''}`,
       '/audit',
-      { policyId, description, filepath, machineId }
+      { policyId, description: safeDescription, filepath: safeFilepath, machineId }
     );
 
     res.json({ logged: true });

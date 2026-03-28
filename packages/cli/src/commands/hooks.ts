@@ -44,7 +44,7 @@ function debugLog(event: string, message: string, data?: any): void {
       line += ' ' + JSON.stringify(data, null, 0);
     }
     line += '\n';
-    fs.appendFileSync(DEBUG_LOG, line);
+    fs.appendFileSync(DEBUG_LOG, line, { mode: 0o600 });
   } catch {
     // Never fail on logging
   }

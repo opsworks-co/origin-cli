@@ -337,7 +337,8 @@ router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest,
     res.json(result);
   } catch (err: any) {
     console.error('[gitlab-oauth] Test error:', err);
-    res.status(500).json({ success: false, error: err.message });
+    console.error('[gitlab-oauth] Test error detail:', err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 

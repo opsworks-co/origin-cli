@@ -432,9 +432,10 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
       parentPid = pattern ? findAncestorPid(pattern) : 0;
     }
 
-    const child = spawn(process.execPath, [heartbeatScript, sessionId, apiUrl, apiKey, pidFile, String(parentPid), stateFile || ''], {
+    const child = spawn(process.execPath, [heartbeatScript, sessionId, apiUrl, '', pidFile, String(parentPid), stateFile || ''], {
       detached: true,
       stdio: 'ignore',
+      env: { ...process.env, ORIGIN_HEARTBEAT_API_KEY: apiKey },
     });
     child.unref();
   } catch {

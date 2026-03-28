@@ -134,7 +134,7 @@ Be concise, specific, and actionable. Format responses in markdown when helpful.
 `;
 
 const assistantLimits = new Map<string, { count: number; resetAt: number }>();
-const MAX_ASSISTANT_PER_WINDOW = 20;
+const MAX_ASSISTANT_PER_WINDOW = 10;
 const ASSISTANT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 
 function checkAssistantRateLimit(userId: string): boolean {

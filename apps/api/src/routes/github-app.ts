@@ -370,7 +370,8 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
     res.json({ linked: false, installations: installationList });
   } catch (err: any) {
     console.error('[github-app] Detect error:', err);
-    res.status(500).json({ error: err.message || 'Internal server error' });
+    console.error('[github-app] Detect error detail:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

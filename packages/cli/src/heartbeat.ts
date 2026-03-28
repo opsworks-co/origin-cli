@@ -12,11 +12,12 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'fs';
+import os from 'os';
 
 const args = process.argv.slice(2);
 const sessionId = args[0];
 const apiUrl = args[1];
-const apiKey = args[2];
+const apiKey = process.env.ORIGIN_HEARTBEAT_API_KEY || args[2];
 const pidFile = args[3];
 const parentPid = args[4] ? parseInt(args[4], 10) : 0;
 const stateFile = args[5] || '';
@@ -27,7 +28,7 @@ if (!sessionId || !pidFile) {
 const isConnected = !!(apiUrl && apiKey);
 
 // Write our PID so the main process can kill us
-fs.writeFileSync(pidFile, String(process.pid));
+fs.writeFileSync(pidFile, String(process.pid), { mode: 0o600 });
 
 const PING_INTERVAL_MS = 30_000; // 30 seconds
 const STALE_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes without state file update = stale
@@ -73,11 +74,11 @@ async function endSession() {
       const state = JSON.parse(raw);
       state.status = 'ENDED';
       state.endedAt = new Date().toISOString();
-      const homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
+      const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
       const archiveDir = `${homeDir}/.origin/sessions`;
       fs.mkdirSync(archiveDir, { recursive: true });
       const archivePath = `${archiveDir}/${(state.sessionId || sessionId).slice(0, 12)}.json`;
-      fs.writeFileSync(archivePath, JSON.stringify(state));
+      fs.writeFileSync(archivePath, JSON.stringify(state), { mode: 0o600 });
     } catch { /* best effort */ }
   }
 

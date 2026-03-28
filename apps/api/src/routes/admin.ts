@@ -9,7 +9,7 @@ const router = Router();
 // Checks that the authenticated user's email is in the SUPER_ADMINS env var
 // (comma-separated list of emails, e.g. "alice@example.com,bob@example.com").
 // ---------------------------------------------------------------------------
-function requireSuperAdmin(req: AuthRequest, res: Response, next: NextFunction) {
+async function requireSuperAdmin(req: AuthRequest, res: Response, next: NextFunction) {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
   const superAdmins = (process.env.SUPER_ADMINS ?? '')
@@ -21,16 +21,15 @@ function requireSuperAdmin(req: AuthRequest, res: Response, next: NextFunction) 
     return res.status(403).json({ error: 'No super-admins configured' });
   }
 
-  // Look up the user's email from the DB (the JWT only contains id/orgId/role)
-  prisma.user
-    .findUnique({ where: { id: req.user.id }, select: { email: true } })
-    .then((user) => {
-      if (!user || !superAdmins.includes(user.email.toLowerCase())) {
-        return res.status(403).json({ error: 'Forbidden: super-admin access required' });
-      }
-      next();
-    })
-    .catch(() => res.status(500).json({ error: 'Failed to verify super-admin status' }));
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { email: true } });
+    if (!user || !superAdmins.includes(user.email.toLowerCase())) {
+      return res.status(403).json({ error: 'Forbidden: super-admin access required' });
+    }
+    next();
+  } catch {
+    return res.status(500).json({ error: 'Failed to verify super-admin status' });
+  }
 }
 
 router.use(requireAuth);

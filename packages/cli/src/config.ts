@@ -53,7 +53,7 @@ export function loadAgentConfig(): AgentConfig | null {
 
 export function saveAgentConfig(config: AgentConfig) {
   ensureConfigDir();
-  fs.writeFileSync(AGENT_PATH, JSON.stringify(config, null, 2));
+  fs.writeFileSync(AGENT_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
 // ── Per-repo config (.origin.json in repo root) ─────────────────────────────
