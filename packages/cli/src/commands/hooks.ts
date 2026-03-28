@@ -925,14 +925,35 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           debugLog('user-prompt-submit', 'heartbeat started for auto-created session', { sessionId, stateFile, agentSlug: finalAgentSlug });
         }
       } catch (err: any) {
-        debugLog('user-prompt-submit', 'auto-create failed', { message: err.message });
+        debugLog('user-prompt-submit', 'auto-create failed, falling back to local', { message: err.message });
         const status = err.status || 0;
         if (status === 401) {
-          process.stderr.write(`[origin] Session blocked — invalid or expired API key. Run \`origin login\`.\n`);
+          process.stderr.write(`[origin] API key invalid — session tracked locally. Run \`origin login\`.\n`);
         } else if (status === 403) {
-          process.stderr.write(`[origin] Session blocked — ${err.message}\n`);
+          process.stderr.write(`[origin] ${err.message} — session tracked locally.\n`);
         } else if (status === 429) {
-          process.stderr.write(`[origin] Session blocked — budget limit reached.\n`);
+          process.stderr.write(`[origin] Budget limit reached — session tracked locally.\n`);
+        }
+        // Always create a local fallback session so tracking continues
+        if (!state && repoPath) {
+          const fbId = `local-${crypto.randomUUID()}`;
+          const fbModel = input.model || agentSlug || 'unknown';
+          const fbBranch = getBranch(hookCwd);
+          const fbTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
+          state = {
+            sessionId: fbId,
+            claudeSessionId: input.session_id || '',
+            transcriptPath: input.transcript_path || '',
+            model: fbModel,
+            startedAt: new Date().toISOString(),
+            prompts: [],
+            repoPath,
+            headShaAtStart: getHeadSha(hookCwd),
+            branch: fbBranch,
+            sessionTag: fbTag,
+          };
+          saveSessionState(state, repoPath, fbTag);
+          debugLog('user-prompt-submit', 'local fallback session created', { sessionId: fbId, sessionTag: fbTag });
         }
       }
     }
