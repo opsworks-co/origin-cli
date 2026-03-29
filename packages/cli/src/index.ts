@@ -34,7 +34,7 @@ import { diffCommand } from './commands/diff.js';
 import { searchCommand } from './commands/search.js';
 import { rewindCommand } from './commands/rewind.js';
 import { trailCommand, trailListCommand, trailCreateCommand, trailUpdateCommand, trailAssignCommand, trailLabelCommand } from './commands/trail.js';
-import { ciCheckCommand, ciSquashMergeCommand, ciGenerateWorkflowCommand } from './commands/ci.js';
+import { ciCheckCommand, ciSquashMergeCommand, ciGenerateWorkflowCommand, ciSessionCheckCommand } from './commands/ci.js';
 import { pluginListCommand, pluginInstallCommand, pluginRemoveCommand } from './commands/plugin.js';
 import { upgradeCommand } from './commands/upgrade.js';
 import { analyzeCommand } from './commands/analyze.js';
@@ -329,6 +329,12 @@ ci.command('squash-merge <baseBranch>')
 ci.command('generate-workflow')
   .description('Generate GitHub Actions workflow snippet')
   .action(ciGenerateWorkflowCommand);
+ci.command('session-check')
+  .description('Verify all commits have linked Origin sessions (tamper detection)')
+  .option('--since <commit>', 'Check from specific commit instead of branch point')
+  .option('--warn-only', 'Exit 0 even if commits lack sessions (print warning only)')
+  .option('--json', 'Output results as JSON')
+  .action(ciSessionCheckCommand);
 
 // ─── Plugin System ───────────────────────────────────────────────────────
 

@@ -242,6 +242,45 @@ function sessionMatchesAgent(session: SessionState, agentSlug: string): boolean 
   return model.includes(slug) || slug.includes(model);
 }
 
+/**
+ * Write Origin policies to agent-specific rules/instructions files.
+ * Cursor: ~/.cursor/rules/origin.md
+ * Codex: AGENTS.md in project root (Codex reads this natively)
+ * Claude Code: uses systemMessage from stdout (no file needed)
+ */
+function writeAgentRulesFile(agentSlug: string, systemMsg: string, repoPath: string): void {
+  if (!systemMsg || !agentSlug) return;
+
+  let target: string | undefined;
+  if (agentSlug === 'cursor') {
+    target = path.join(os.homedir(), '.cursor', 'rules', 'origin.md');
+  } else if (agentSlug === 'codex') {
+    // Codex reads AGENTS.md from project root
+    target = path.join(repoPath, 'AGENTS.md');
+  }
+
+  if (target) {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    // For AGENTS.md, wrap with a marker so we only replace our section
+    if (agentSlug === 'codex') {
+      const marker = '<!-- origin-managed -->';
+      const content = `${marker}\n${systemMsg}\n${marker}`;
+      const existingContent = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
+      const markerRegex = new RegExp(`${marker}[\\s\\S]*?${marker}`, 'g');
+      if (existingContent.includes(marker)) {
+        fs.writeFileSync(target, existingContent.replace(markerRegex, content));
+      } else if (existingContent.trim()) {
+        fs.writeFileSync(target, existingContent + '\n\n' + content);
+      } else {
+        fs.writeFileSync(target, content);
+      }
+    } else {
+      fs.writeFileSync(target, systemMsg);
+    }
+    debugLog('session-start', 'agent rules file written', { agent: agentSlug, path: target });
+  }
+}
+
 // ─── Concurrent Session State Lookup ──────────────────────────────────────
 
 /**
@@ -638,7 +677,15 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         const attributionCtx = buildAttributionContext(repoPath);
         if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
       } catch {}
-      process.stdout.write(JSON.stringify({ systemMessage: systemMsg }));
+      const isCursorReuse = finalAgentSlug && finalAgentSlug === 'cursor';
+      const outputKeyReuse = isCursorReuse ? 'additional_context' : 'systemMessage';
+      process.stdout.write(JSON.stringify({ [outputKeyReuse]: systemMsg }));
+
+      // Write rules file for reused sessions too
+      try {
+        writeAgentRulesFile(finalAgentSlug || '', systemMsg, repoPath);
+      } catch {}
+
       return;
     }
   }
@@ -849,8 +896,22 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       // Non-fatal — skip attribution context if it fails
     }
 
-    const output = JSON.stringify({ systemMessage: systemMsg });
+    // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
+    const cursorAgents = ['cursor'];
+    const isCursor = finalAgentSlug && cursorAgents.includes(finalAgentSlug);
+    const outputKey = isCursor ? 'additional_context' : 'systemMessage';
+    const output = JSON.stringify({ [outputKey]: systemMsg });
     process.stdout.write(output);
+    debugLog('session-start', 'system prompt injected', { key: outputKey, length: systemMsg.length });
+
+    // Write rules files so agents natively see Origin policies
+    if (systemMsg) {
+      try {
+        writeAgentRulesFile(finalAgentSlug || '', systemMsg, repoPath);
+      } catch {
+        // Non-fatal
+      }
+    }
   } catch (err: any) {
     debugLog('session-start', 'ERROR', { message: err.message, stack: err.stack });
     const status = err.status || 0;
@@ -1173,9 +1234,12 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     } catch {}
 
     if (systemMsg) {
-      const output = JSON.stringify({ systemMessage: systemMsg });
+      // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
+      const cursorAgents = ['cursor'];
+      const outputKey = (agentSlug && cursorAgents.includes(agentSlug)) ? 'additional_context' : 'systemMessage';
+      const output = JSON.stringify({ [outputKey]: systemMsg });
       process.stdout.write(output);
-      debugLog('user-prompt-submit', 'systemMessage injected', { length: systemMsg.length });
+      debugLog('user-prompt-submit', 'systemMessage injected', { key: outputKey, length: systemMsg.length });
     }
   } catch (sysErr: any) {
     debugLog('user-prompt-submit', 'systemMessage injection failed (non-fatal)', { message: sysErr.message });
