@@ -7,6 +7,193 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'ai-governance-policies-ci': (
+    <>
+      <p>
+        Here&rsquo;s the problem with AI coding agents: they don&rsquo;t read the employee handbook.
+        Claude doesn&rsquo;t know your team bans <code>.env</code> commits. Codex doesn&rsquo;t know
+        you have a policy against touching <code>src/auth/</code>. Cursor doesn&rsquo;t care about
+        your commit message format.
+      </p>
+      <p>
+        Until now. We shipped three features that give engineering teams actual control over what AI
+        agents can and can&rsquo;t do.
+      </p>
+
+      <h2>1. Cross-agent policy enforcement</h2>
+      <p>
+        Define policies once in the Origin dashboard. They&rsquo;re enforced across every agent your
+        team uses &mdash; Claude Code, Cursor, Codex, and Gemini.
+      </p>
+      <p>
+        Policies are injected into the agent&rsquo;s system prompt at session start. The agent sees
+        them as rules it must follow. If it violates a policy (e.g., commits a diff containing a
+        blocked pattern), Origin blocks the session.
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg overflow-hidden my-6">
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+          <div className="w-3 h-3 rounded-full bg-red-500/80" />
+          <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+          <div className="w-3 h-3 rounded-full bg-green-500/80" />
+          <span className="text-xs text-gray-500 ml-2 font-mono">Origin Dashboard &mdash; Policies</span>
+        </div>
+        <div className="p-4 space-y-3">
+          <div className="flex items-center justify-between bg-gray-800/50 rounded-lg p-3">
+            <div>
+              <div className="text-sm font-medium text-gray-200">No sensitive files</div>
+              <div className="text-xs text-gray-500">Restricted files: **/.env, src/auth/**</div>
+            </div>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 border border-red-500/30">Blocks session</span>
+          </div>
+          <div className="flex items-center justify-between bg-gray-800/50 rounded-lg p-3">
+            <div>
+              <div className="text-sm font-medium text-gray-200">Block offensive language</div>
+              <div className="text-xs text-gray-500">Block diff content matching pattern</div>
+            </div>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 border border-red-500/30">Blocks session</span>
+          </div>
+          <div className="flex items-center justify-between bg-gray-800/50 rounded-lg p-3">
+            <div>
+              <div className="text-sm font-medium text-gray-200">Commit format required</div>
+              <div className="text-xs text-gray-500">Commit messages must follow: type(scope): description</div>
+            </div>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">Warns</span>
+          </div>
+        </div>
+      </div>
+      <p>
+        This is what the agent sees when a session starts:
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div className="text-gray-500 mb-2">System prompt injected by Origin:</div>
+        <div className="text-gray-300">Active policies for this session:</div>
+        <div className="text-gray-400">- No sensitive files: **/.env (Blocks session)</div>
+        <div className="text-gray-400">- No sensitive files: src/auth/** (Blocks session)</div>
+        <div className="text-gray-400">- Block offensive language (Blocks session)</div>
+        <div className="text-gray-400">- Commit format required (Warns)</div>
+      </div>
+
+      <h2>2. Native rules injection for Cursor and Codex</h2>
+      <p>
+        Injecting policies via <code>systemMessage</code> works for Claude Code. But Cursor and Codex
+        have their own rules systems &mdash; Cursor reads <code>~/.cursor/rules/</code> and Codex reads
+        <code>AGENTS.md</code> in the project root.
+      </p>
+      <p>
+        Origin now writes policies directly to these locations on every session start. No extra setup.
+        The agent reads them natively, alongside its own built-in system prompt.
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div className="text-gray-500"># What happens on session-start:</div>
+        <div className="mt-2">
+          <span className="text-purple-400">Cursor</span>
+          {'  '}
+          <span className="text-gray-500">&rarr;</span>
+          {'  '}
+          <span className="text-gray-300">~/.cursor/rules/origin.md</span>
+        </div>
+        <div>
+          <span className="text-green-400">Codex</span>
+          {'   '}
+          <span className="text-gray-500">&rarr;</span>
+          {'  '}
+          <span className="text-gray-300">./AGENTS.md</span>
+          {'  '}
+          <span className="text-gray-500">(project root)</span>
+        </div>
+        <div>
+          <span className="text-blue-400">Claude</span>
+          {'  '}
+          <span className="text-gray-500">&rarr;</span>
+          {'  '}
+          <span className="text-gray-300">systemMessage in hook response</span>
+        </div>
+      </div>
+      <p>
+        The content is managed by an <code>{'<!-- origin-managed -->'}</code> marker, so existing
+        <code>AGENTS.md</code> content isn&rsquo;t overwritten &mdash; Origin appends its section
+        and updates it on each session.
+      </p>
+
+      <h2>3. CI/CD tamper detection</h2>
+      <p>
+        Every commit made through an Origin-tracked session gets a signed git note. The new
+        <code>origin ci session-check</code> command verifies that every commit on a branch has one.
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div className="text-gray-500">$ origin ci session-check</div>
+        <div className="mt-3 font-semibold text-gray-200">Origin Session Check &mdash; 26 commits</div>
+        <div className="mt-2" />
+        <div>{'  '}<span className="text-green-400">&#10003;</span> <span className="text-gray-500">3cc0eff</span> Update README <span className="text-gray-600">(cursor)</span></div>
+        <div>{'  '}<span className="text-green-400">&#10003;</span> <span className="text-gray-500">7409d77</span> chore: append session note <span className="text-gray-600">(cursor)</span></div>
+        <div>{'  '}<span className="text-green-400">&#10003;</span> <span className="text-gray-500">f5a1a68</span> chore: update hello.txt <span className="text-gray-600">(codex)</span></div>
+        <div>{'  '}<span className="text-red-400">&#10007;</span> <span className="text-white">a8b3c2d</span> fix: quick patch <span className="text-red-400">&mdash; no Origin session</span></div>
+        <div className="mt-3 text-gray-400">{'  '}1/4 commit(s) have no linked Origin session.</div>
+        <div className="text-gray-600">{'  '}AI governance policy requires all commits to have a tracked session.</div>
+      </div>
+      <p>
+        If any commit lacks a session, the check fails with exit code 1 &mdash; blocking the PR.
+        Use <code>--warn-only</code> to make it non-blocking, or <code>--json</code> for machine-readable output.
+      </p>
+
+      <h2>Drop it into your CI pipeline</h2>
+      <p>
+        We ship ready-made templates for GitHub Actions and GitLab CI:
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div className="text-gray-500"># .github/workflows/origin-ci-check.yml</div>
+        <div className="mt-2 text-blue-400">name: <span className="text-gray-300">Origin Session Check</span></div>
+        <div className="text-blue-400">on:</div>
+        <div className="text-gray-300 pl-4">pull_request:</div>
+        <div className="text-gray-300 pl-8">branches: [main]</div>
+        <div className="mt-2 text-blue-400">steps:</div>
+        <div className="text-gray-300 pl-4">- run: npm i -g @anthropic/origin-cli</div>
+        <div className="text-gray-300 pl-4">- run: origin ci session-check --since ${'{{'}base_sha{'}}'}</div>
+      </div>
+      <p>
+        Every PR gets a check: did every commit come from a tracked, governed AI session?
+        If someone bypasses Origin and commits directly, the check catches it.
+      </p>
+
+      <h2>What this means for teams</h2>
+      <p>
+        Before these features, AI governance was honor-system. You could write policies in a wiki
+        and hope agents followed them. Now:
+      </p>
+      <ul>
+        <li><strong>Policies are enforced at the agent level</strong> &mdash; not just documented</li>
+        <li><strong>Every agent speaks the same rules</strong> &mdash; Cursor, Codex, Claude, Gemini</li>
+        <li><strong>CI catches gaps</strong> &mdash; commits without sessions are flagged automatically</li>
+        <li><strong>Zero developer friction</strong> &mdash; it&rsquo;s all automatic via hooks</li>
+      </ul>
+
+      <h2>Get started</h2>
+      <div className="bg-gray-900 border border-indigo-500/30 rounded-lg p-6 my-6">
+        <div className="font-mono text-sm mb-4">
+          <div><span className="text-gray-500">$</span> npm i -g origin-cli</div>
+          <div><span className="text-gray-500">$</span> origin init</div>
+          <div><span className="text-gray-500">$</span> origin ci session-check <span className="text-gray-600">--warn-only</span></div>
+        </div>
+        <div className="flex flex-wrap gap-4">
+          <a
+            href="https://github.com/dolobanko/origin-cli"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm transition-colors"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" /></svg>
+            GitHub
+          </a>
+          <Link
+            to="/docs"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors"
+          >
+            Read the docs
+          </Link>
+        </div>
+      </div>
+    </>
+  ),
   'ai-agent-rework-rates': (
     <>
       <p>

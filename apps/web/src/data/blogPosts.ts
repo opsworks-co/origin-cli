@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Your AI agents now follow company rules. Here\'s how we enforce policies across Cursor, Codex, and Claude.',
+    slug: 'ai-governance-policies-ci',
+    date: '2026-03-29',
+    author: 'Artem Dolobanko',
+    tags: ['governance', 'security', 'ci-cd'],
+    excerpt:
+      'We shipped cross-agent policy enforcement, CI/CD tamper detection, and native rules injection for Cursor and Codex. Your AI agents now follow the same rules your developers do.',
+  },
+  {
     title: 'We tested 4 AI agents on the same repo. Here\'s which one writes code that sticks.',
     slug: 'ai-agent-rework-rates',
     date: '2026-03-26',

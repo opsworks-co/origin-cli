@@ -628,12 +628,40 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
   // For Cursor/Codex: if an existing session is still active, reuse it
   // instead of creating a new one. Output the system message and return.
-  // Check both .git/ state files AND ~/.origin/sessions/ archive
+  // First, clean up orphaned sessions whose heartbeats died (e.g. Mac sleep).
   if (agentsWithPerPromptSessionStart.includes(finalAgentSlug || '')) {
+    const allActive = listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug || ''));
+    for (const s of allActive) {
+      const hbPidFile = path.join(os.homedir(), '.origin', 'heartbeats', `${s.sessionId}.pid`);
+      let heartbeatAlive = false;
+      try {
+        const hbPid = parseInt(fs.readFileSync(hbPidFile, 'utf-8').trim(), 10);
+        if (hbPid > 0) { process.kill(hbPid, 0); heartbeatAlive = true; }
+      } catch { /* pid file missing or process dead */ }
+      if (!heartbeatAlive) {
+        debugLog('session-start', 'ending orphaned session (heartbeat dead)', {
+          sessionId: s.sessionId, tag: s.sessionTag, agent: finalAgentSlug,
+        });
+        stopHeartbeat(s.sessionId);
+        if (connected && s.sessionId) {
+          try {
+            const durationMs = Date.now() - new Date(s.startedAt).getTime();
+            await api.endSession({
+              sessionId: s.sessionId,
+              prompt: s.prompts.join('\n\n---\n\n') || undefined,
+              durationMs: durationMs > 0 ? durationMs : undefined,
+              branch: s.branch || undefined,
+            });
+          } catch {}
+        }
+        clearSessionState(repoPath, s.sessionTag);
+        if (repoPath !== hookCwd) clearSessionState(hookCwd, s.sessionTag);
+      }
+    }
+
+    // Now look for a valid active session to reuse
     let existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || ''));
     // Also check global archive — the .git/ file might have been cleaned up
-    // Don't use listAllActiveSessions() as it auto-expires stale sessions.
-    // Instead, directly scan archive files and match by repo + agent + recency (24h).
     if (!existing) {
       try {
         const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
@@ -643,11 +671,8 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           try {
             const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
             if (!s?.sessionId || !s?.startedAt) continue;
-            // Skip sessions older than 24h
             if (Date.now() - new Date(s.startedAt).getTime() > MAX_AGE_MS) continue;
-            // Skip explicitly ended sessions
             if (s.status === 'ENDED' && s.endedAt) continue;
-            // Match repo and agent
             if (s.repoPath === repoPath && sessionMatchesAgent(s, finalAgentSlug || '')) {
               existing = s;
               break;
@@ -2720,13 +2745,23 @@ export async function handlePrePush(): Promise<void> {
     return;
   }
 
-  // Push origin-sessions branch if it exists
-  try {
-    execSync('git rev-parse refs/heads/origin-sessions', execOpts);
-    execSync('git push origin origin-sessions --no-verify --quiet', execOpts);
-    debugLog('pre-push', 'pushed origin-sessions');
-  } catch (err: any) {
-    debugLog('pre-push', 'origin-sessions push skipped', { message: err.message });
+  // In connected mode, session data goes to the API — don't push
+  // origin-sessions branch to repo remote (may be public).
+  const config = loadConfig();
+  const connected = !!(config?.apiKey && config?.apiUrl);
+  const strategy = config?.pushStrategy || 'auto';
+
+  if (!connected || config?.checkpointRepo || strategy === 'always') {
+    // Push origin-sessions branch if it exists (standalone mode only)
+    try {
+      execSync('git rev-parse refs/heads/origin-sessions', execOpts);
+      execSync('git push origin origin-sessions --no-verify --quiet', execOpts);
+      debugLog('pre-push', 'pushed origin-sessions');
+    } catch (err: any) {
+      debugLog('pre-push', 'origin-sessions push skipped', { message: err.message });
+    }
+  } else {
+    debugLog('pre-push', 'SKIP origin-sessions push: connected mode');
   }
 
   // Push refs/notes/origin if they exist
