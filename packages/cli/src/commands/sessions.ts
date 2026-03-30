@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
-import { getGitRoot, listActiveSessions, listAllActiveSessions } from '../session-state.js';
+import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat } from '../session-state.js';
 
 interface LocalSession {
   sessionId: string;
@@ -387,9 +387,111 @@ export async function sessionEndCommand(id: string) {
   try {
     await api.endSessionById(id);
     console.log(chalk.green(`Session ${id} ended successfully.`));
+
+    // Clean up local state files and heartbeat for this session
+    const allSessions = listAllActiveSessions();
+    for (const s of allSessions) {
+      if (s.sessionId === id || s.sessionId.startsWith(id)) {
+        stopHeartbeat(s.sessionId);
+        if (s.sessionTag) {
+          clearSessionState(s.repoPath || undefined, s.sessionTag);
+        }
+        // Also clean global state file in ~/.origin/sessions/
+        try {
+          const fs = await import('fs');
+          const path = await import('path');
+          const os = await import('os');
+          const globalPath = path.join(os.homedir(), '.origin', 'sessions', `${s.sessionId.slice(0, 12)}.json`);
+          if (fs.existsSync(globalPath)) {
+            const raw = fs.readFileSync(globalPath, 'utf-8');
+            const state = JSON.parse(raw);
+            state.status = 'ENDED';
+            state.endedAt = new Date().toISOString();
+            fs.writeFileSync(globalPath, JSON.stringify(state), { mode: 0o600 });
+          }
+        } catch { /* ignore */ }
+        console.log(chalk.gray(`  Local state cleaned.`));
+        break;
+      }
+    }
   } catch (err: any) {
     console.error(chalk.red('Error:'), err.message);
   }
+}
+
+/**
+ * `origin sessions clean` — End all stale RUNNING sessions.
+ * Optionally filter by --repo or --all.
+ */
+export async function sessionCleanCommand(opts: { all?: boolean }) {
+  if (!isConnectedMode()) {
+    console.error(chalk.red('Error: Requires connected mode. Run: origin login'));
+    return;
+  }
+
+  try {
+    // Fetch all sessions, find RUNNING ones
+    const repoPath = getGitRoot();
+    const result = await api.getSessions({ status: 'RUNNING' });
+    const sessions = result?.sessions || [];
+
+    if (!sessions || sessions.length === 0) {
+      // No platform sessions — but still clean local state files below
+    }
+
+    // Filter to current repo unless --all
+    let toEnd = sessions;
+    if (!opts.all && repoPath) {
+      const repoUrl = (() => {
+        try {
+          return execSync('git remote get-url origin', {
+            encoding: 'utf-8',
+            cwd: repoPath,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          }).trim();
+        } catch { return ''; }
+      })();
+      if (repoUrl) {
+        toEnd = sessions.filter((s: any) => s.repoUrl === repoUrl);
+      }
+    }
+
+    if (toEnd.length > 0) {
+      console.log(chalk.bold(`\nEnding ${toEnd.length} running session(s)...\n`));
+
+    let ended = 0;
+    for (const s of toEnd) {
+      try {
+        await api.endSessionById(s.id);
+        console.log(chalk.green('  ✓ ') + chalk.gray(s.id.slice(0, 8)) + ' ' + (s.model || 'unknown') + ' ' + chalk.gray(timeAgo(s.startedAt)));
+        ended++;
+      } catch {
+        console.log(chalk.red('  ✗ ') + chalk.gray(s.id.slice(0, 8)) + ' failed to end');
+      }
+    }
+
+    console.log(chalk.green(`\n  Ended ${ended} session(s) on platform.\n`));
+    }
+  } catch (err: any) {
+    console.error(chalk.red('Error:'), err.message);
+  }
+
+  // Also clean up local state files and kill orphaned heartbeats
+  try {
+    const repoPath = getGitRoot();
+    const localSessions = opts.all ? listAllActiveSessions() : (repoPath ? listActiveSessions(repoPath) : []);
+    let localCleaned = 0;
+    for (const s of localSessions) {
+      stopHeartbeat(s.sessionId);
+      if (s.sessionTag) {
+        clearSessionState(s.repoPath || repoPath || undefined, s.sessionTag);
+      }
+      localCleaned++;
+    }
+    if (localCleaned > 0) {
+      console.log(chalk.gray(`  Cleaned ${localCleaned} local state file(s).`));
+    }
+  } catch { /* ignore */ }
 }
 
 function timeAgo(dateStr: string): string {
