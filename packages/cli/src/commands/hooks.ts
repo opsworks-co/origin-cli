@@ -1545,7 +1545,13 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         toolCalls: parsed.toolCalls || undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
-        promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
+        promptChanges: promptMappings.length > 0
+          ? promptMappings.map(pm => ({
+              ...pm,
+              promptText: (pm.promptText || '').slice(0, 1000),
+              diff: (pm.diff || '').slice(0, 100_000),
+            }))
+          : undefined,
       });
       debugLog('stop', 'update complete');
 
@@ -1739,7 +1745,13 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
         gitCapture: gitCapture.diff ? gitCapture : undefined,
-        promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
+        promptChanges: promptMappings.length > 0
+          ? promptMappings.map(pm => ({
+              ...pm,
+              promptText: (pm.promptText || '').slice(0, 1000),
+              diff: (pm.diff || '').slice(0, 100_000),
+            }))
+          : undefined,
         branch: getBranch(hookCwd) || undefined,
       });
       debugLog('session-end', 'api.endSession complete');

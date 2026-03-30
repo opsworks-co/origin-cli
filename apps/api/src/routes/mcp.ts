@@ -680,20 +680,18 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
       }
     }
 
-    // Replace prompt→file change mappings (delete old, create new)
+    // Replace prompt→file change mappings (delete old, create new — bulk)
     if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
       await prisma.promptChange.deleteMany({ where: { sessionId: id } });
-      for (const pc of promptChanges) {
-        await prisma.promptChange.create({
-          data: {
-            sessionId: id,
-            promptIndex: pc.promptIndex ?? 0,
-            promptText: (pc.promptText || '').slice(0, 1000),
-            filesChanged: JSON.stringify(pc.filesChanged || []),
-            diff: (pc.diff || '').slice(0, 200_000),
-          },
-        });
-      }
+      await prisma.promptChange.createMany({
+        data: promptChanges.map((pc: any) => ({
+          sessionId: id,
+          promptIndex: pc.promptIndex ?? 0,
+          promptText: (pc.promptText || '').slice(0, 1000),
+          filesChanged: JSON.stringify(pc.filesChanged || []),
+          diff: (pc.diff || '').slice(0, 200_000),
+        })),
+      });
     }
 
     emitSessionEvent({
@@ -951,16 +949,18 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     }
 
     // Create PromptChange records for prompt → file change mappings
-    if (promptChanges && Array.isArray(promptChanges)) {
-      for (const pc of promptChanges) {
-        await prisma.promptChange.create({
-          data: {
+    // Only write if no promptChanges exist yet (avoid overwriting richer data from updateSession)
+    if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
+      const existingCount = await prisma.promptChange.count({ where: { sessionId } });
+      if (existingCount === 0) {
+        await prisma.promptChange.createMany({
+          data: promptChanges.map((pc: any) => ({
             sessionId,
             promptIndex: pc.promptIndex ?? 0,
             promptText: (pc.promptText || '').slice(0, 1000),
             filesChanged: JSON.stringify(pc.filesChanged || []),
             diff: (pc.diff || '').slice(0, 200_000),
-          },
+          })),
         });
       }
     }

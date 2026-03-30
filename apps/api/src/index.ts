@@ -96,7 +96,7 @@ app.use('/api/webhooks', express.raw({ type: '*/*', limit: '10mb' }), (req, _res
   next();
 }, webhookRoutes);
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Public routes (no auth required) — mount BEFORE authMiddleware
 app.use('/api/share', shareRoutes);
