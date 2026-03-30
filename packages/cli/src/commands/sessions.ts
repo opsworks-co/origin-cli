@@ -390,43 +390,76 @@ export async function sessionDetailCommand(id: string) {
 }
 
 export async function sessionEndCommand(id: string) {
-  // 1. End on platform (if connected)
+  const fs = await import('fs');
+  const path = await import('path');
+  const os = await import('os');
+
+  // 1. Kill heartbeat FIRST — before ending on platform, so it can't re-ping
+  try {
+    const hbDir = path.join(os.homedir(), '.origin', 'heartbeats');
+    if (fs.existsSync(hbDir)) {
+      const pidFiles = fs.readdirSync(hbDir).filter(f => f.endsWith('.pid'));
+      for (const pf of pidFiles) {
+        const sessionId = pf.replace('.pid', '');
+        if (sessionId === id || sessionId.startsWith(id) || id.startsWith(sessionId.slice(0, 8))) {
+          const pidPath = path.join(hbDir, pf);
+          try {
+            const pid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
+            if (pid > 0) {
+              try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+              console.log(chalk.gray(`  Killed heartbeat (pid ${pid}).`));
+            }
+          } catch { /* ignore */ }
+          try { fs.unlinkSync(pidPath); } catch { /* ignore */ }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 2. End on platform (if connected)
   if (isConnectedMode()) {
     try {
       await api.endSessionById(id);
       console.log(chalk.green(`Session ${id} ended on platform.`));
     } catch (err: any) {
-      // Don't block local cleanup if API fails
       console.log(chalk.yellow(`Platform: ${err.message || 'failed to end'}`));
     }
   }
 
-  // 2. Always clean local state files, heartbeats, and global archive
+  // 3. Clean local state files and global archive
   let localCleaned = false;
   try {
+    // Clean active state files (in .git/ dirs)
     const allSessions = listAllActiveSessions();
     for (const s of allSessions) {
-      if (s.sessionId === id || s.sessionId.startsWith(id)) {
-        stopHeartbeat(s.sessionId);
+      if (s.sessionId === id || s.sessionId.startsWith(id) || id.startsWith(s.sessionId.slice(0, 8))) {
+        stopHeartbeat(s.sessionId); // double-check
         if (s.sessionTag) {
           clearSessionState(s.repoPath || undefined, s.sessionTag);
         }
-        // Mark global state file as ENDED
-        try {
-          const fs = await import('fs');
-          const path = await import('path');
-          const os = await import('os');
-          const globalPath = path.join(os.homedir(), '.origin', 'sessions', `${s.sessionId.slice(0, 12)}.json`);
-          if (fs.existsSync(globalPath)) {
-            const raw = fs.readFileSync(globalPath, 'utf-8');
-            const state = JSON.parse(raw);
-            state.status = 'ENDED';
-            state.endedAt = new Date().toISOString();
-            fs.writeFileSync(globalPath, JSON.stringify(state), { mode: 0o600 });
-          }
-        } catch { /* ignore */ }
         localCleaned = true;
         break;
+      }
+    }
+  } catch { /* ignore */ }
+
+  // Clean global archive (~/.origin/sessions/)
+  try {
+    const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+    if (fs.existsSync(sessionsDir)) {
+      const entries = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
+      for (const entry of entries) {
+        const filePath = path.join(sessionsDir, entry);
+        try {
+          const raw = fs.readFileSync(filePath, 'utf-8');
+          const state = JSON.parse(raw);
+          if (state.sessionId === id || state.sessionId?.startsWith(id) || id.startsWith(state.sessionId?.slice(0, 8) || '')) {
+            state.status = 'ENDED';
+            state.endedAt = new Date().toISOString();
+            fs.writeFileSync(filePath, JSON.stringify(state), { mode: 0o600 });
+            localCleaned = true;
+          }
+        } catch { /* ignore corrupt file */ }
       }
     }
   } catch { /* ignore */ }
