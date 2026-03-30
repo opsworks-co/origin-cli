@@ -40,6 +40,8 @@ import { upgradeCommand } from './commands/upgrade.js';
 import { analyzeCommand } from './commands/analyze.js';
 import { handoffShowCommand, handoffClearCommand } from './commands/handoff.js';
 import { memoryShowCommand, memoryClearCommand } from './commands/memory.js';
+import { todoListCommand, todoDoneCommand, todoShowCommand, todoAddCommand, todoRemoveCommand } from './commands/todo.js';
+import { explainCompareCommand } from './commands/explain.js';
 import { dbImportCommand, dbStatsCommand } from './commands/db.js';
 import { proxyInstallCommand, proxyUninstallCommand, proxyStatusCommand } from './commands/proxy.js';
 import { verifyCommand } from './commands/verify.js';
@@ -164,6 +166,34 @@ memory.command('show')
 memory.command('clear')
   .description('Clear all session memory for this repo')
   .action(memoryClearCommand);
+
+// ─── AI TODO Tracker ─────────────────────────────────────────────────────
+
+const todo = program.command('todo').description('AI-extracted TODO tracker across sessions');
+todo.action(todoListCommand);
+todo.command('list')
+  .description('List open TODOs')
+  .option('-a, --all', 'Show TODOs from all repos')
+  .option('-d, --done', 'Show completed TODOs')
+  .action(todoListCommand);
+todo.command('done <id>')
+  .description('Mark a TODO as complete')
+  .action(todoDoneCommand);
+todo.command('show <id>')
+  .description('Show details of a TODO')
+  .action(todoShowCommand);
+todo.command('add <text>')
+  .description('Manually add a TODO')
+  .action(todoAddCommand);
+todo.command('remove <id>')
+  .description('Remove a TODO')
+  .action(todoRemoveCommand);
+
+// ─── Session Compare ────────────────────────────────────────────────────
+
+program.command('session-compare <id1> <id2>')
+  .description('Compare two sessions side by side')
+  .action(explainCompareCommand);
 
 // ─── Attribution & Blame ─────────────────────────────────────────────────
 

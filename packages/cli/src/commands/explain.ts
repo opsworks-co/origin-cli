@@ -7,6 +7,7 @@ import { api } from '../api.js';
 import { loadSessionState, getGitRoot, getHeadSha } from '../session-state.js';
 import { getPromptsBySession } from '../local-db.js';
 import { execSync } from 'child_process';
+import { callLLM, getAnthropicKey } from '../llm.js';
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -387,7 +388,36 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
 
     // ── AI Summary (--summarize) ──
     if (opts?.summarize) {
+      // First show the structured summary
       console.log(generateSummary(session, promptsText));
+
+      // Then call LLM for deeper analysis if API key available
+      if (getAnthropicKey()) {
+        try {
+          process.stdout.write(chalk.gray('\n  Generating AI analysis...'));
+          const filesStr = (() => { try { const f = typeof session.filesChanged === 'string' ? JSON.parse(session.filesChanged) : session.filesChanged; return Array.isArray(f) ? f.join(', ') : ''; } catch { return ''; } })();
+          const promptsList = (session.promptChanges || []).map((pc: any, i: number) =>
+            `Prompt ${i + 1}: ${(pc.promptText || '').slice(0, 300)}`
+          ).join('\n');
+
+          const aiResponse = await callLLM(
+            'You analyze AI coding sessions. Be concise. Use plain text, no markdown.',
+            [{
+              role: 'user',
+              content: `Analyze this AI coding session:\n\nModel: ${session.model}\nDuration: ${formatDuration(session.durationMs || 0)}\nFiles changed: ${filesStr}\nLines: +${session.linesAdded || 0} -${session.linesRemoved || 0}\nTokens: ${session.tokensUsed || 0}\nCost: $${(session.costUsd || 0).toFixed(4)}\n\nPrompts:\n${promptsList}\n\nProvide:\n1. Intent: What was the developer trying to accomplish? (1 sentence)\n2. Outcome: What was actually achieved? (1 sentence)\n3. Learnings: What patterns or techniques were used? (1-2 sentences)\n4. Friction: Any signs of struggle, retries, or inefficiency? (1 sentence)\n5. Time saved estimate vs writing manually (rough estimate)`
+            }],
+            { maxTokens: 512 },
+          );
+          process.stdout.write('\r' + ' '.repeat(40) + '\r');
+          console.log(chalk.bold('\n  AI Analysis\n'));
+          for (const line of aiResponse.split('\n')) {
+            console.log(chalk.gray(`  ${line}`));
+          }
+        } catch (err: any) {
+          process.stdout.write('\r' + ' '.repeat(40) + '\r');
+          console.log(chalk.gray(`\n  (AI analysis unavailable: ${err.message})`));
+        }
+      }
     }
 
     // Dashboard link (connected only)
@@ -399,5 +429,95 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
     console.log('');
   } catch (err: any) {
     console.log(chalk.red(`Failed to load session: ${err.message}`));
+  }
+}
+
+/**
+ * origin explain --compare <id1> <id2>
+ * Compare two sessions side by side.
+ */
+export async function explainCompareCommand(id1: string, id2: string): Promise<void> {
+  const connected = isConnectedMode();
+  const config = loadConfig();
+  const repoPath = getGitRoot(process.cwd());
+
+  async function loadSession(id: string): Promise<any> {
+    if (connected && config) {
+      return api.getSession(id);
+    }
+    if (repoPath) {
+      const local = loadLocalSession(id, repoPath);
+      if (local) return local;
+    }
+    throw new Error(`Session ${id} not found`);
+  }
+
+  try {
+    const [s1, s2] = await Promise.all([loadSession(id1), loadSession(id2)]);
+
+    console.log(chalk.bold('\n  Session Comparison\n'));
+
+    const fields: Array<{ label: string; v1: string; v2: string }> = [
+      { label: 'Session', v1: (s1.id || s1.sessionId || id1).slice(0, 8), v2: (s2.id || s2.sessionId || id2).slice(0, 8) },
+      { label: 'Model', v1: s1.model || 'unknown', v2: s2.model || 'unknown' },
+      { label: 'Duration', v1: formatDuration(s1.durationMs || 0), v2: formatDuration(s2.durationMs || 0) },
+      { label: 'Tokens', v1: (s1.tokensUsed || 0).toLocaleString(), v2: (s2.tokensUsed || 0).toLocaleString() },
+      { label: 'Cost', v1: `$${(s1.costUsd || 0).toFixed(4)}`, v2: `$${(s2.costUsd || 0).toFixed(4)}` },
+      { label: 'Lines +', v1: String(s1.linesAdded || 0), v2: String(s2.linesAdded || 0) },
+      { label: 'Lines -', v1: String(s1.linesRemoved || 0), v2: String(s2.linesRemoved || 0) },
+      { label: 'Tool calls', v1: String(s1.toolCalls || 0), v2: String(s2.toolCalls || 0) },
+    ];
+
+    const maxLabel = Math.max(...fields.map(f => f.label.length));
+    const maxV1 = Math.max(...fields.map(f => f.v1.length), 10);
+
+    for (const f of fields) {
+      console.log(
+        chalk.gray(`  ${f.label.padEnd(maxLabel + 2)}`) +
+        chalk.white(f.v1.padEnd(maxV1 + 4)) +
+        chalk.white(f.v2)
+      );
+    }
+
+    // Efficiency comparison
+    const totalLines1 = (s1.linesAdded || 0) + (s1.linesRemoved || 0);
+    const totalLines2 = (s2.linesAdded || 0) + (s2.linesRemoved || 0);
+    const tokPerLine1 = totalLines1 > 0 ? Math.round((s1.tokensUsed || 0) / totalLines1) : 0;
+    const tokPerLine2 = totalLines2 > 0 ? Math.round((s2.tokensUsed || 0) / totalLines2) : 0;
+
+    console.log(chalk.bold('\n  Efficiency'));
+    console.log(chalk.gray(`  Tokens/line:  ${chalk.white(String(tokPerLine1).padEnd(maxV1 + 4))}${chalk.white(String(tokPerLine2))}`));
+
+    if (s1.durationMs && s2.durationMs) {
+      const lpm1 = Math.round(totalLines1 / (s1.durationMs / 60000));
+      const lpm2 = Math.round(totalLines2 / (s2.durationMs / 60000));
+      console.log(chalk.gray(`  Lines/min:    ${chalk.white(String(lpm1).padEnd(maxV1 + 4))}${chalk.white(String(lpm2))}`));
+    }
+
+    // AI comparison if key available
+    if (getAnthropicKey()) {
+      try {
+        process.stdout.write(chalk.gray('\n  Generating AI comparison...'));
+        const aiResponse = await callLLM(
+          'You compare AI coding sessions. Be concise. Use plain text, no markdown.',
+          [{
+            role: 'user',
+            content: `Compare these two AI coding sessions:\n\nSession 1: model=${s1.model}, duration=${formatDuration(s1.durationMs||0)}, tokens=${s1.tokensUsed||0}, cost=$${(s1.costUsd||0).toFixed(4)}, lines=+${s1.linesAdded||0}/-${s1.linesRemoved||0}\nSession 2: model=${s2.model}, duration=${formatDuration(s2.durationMs||0)}, tokens=${s2.tokensUsed||0}, cost=$${(s2.costUsd||0).toFixed(4)}, lines=+${s2.linesAdded||0}/-${s2.linesRemoved||0}\n\nWhich session was more efficient? What are the key differences? (3-4 sentences max)`
+          }],
+          { maxTokens: 256 },
+        );
+        process.stdout.write('\r' + ' '.repeat(40) + '\r');
+        console.log(chalk.bold('\n  AI Comparison\n'));
+        for (const line of aiResponse.split('\n')) {
+          console.log(chalk.gray(`  ${line}`));
+        }
+      } catch {
+        process.stdout.write('\r' + ' '.repeat(40) + '\r');
+      }
+    }
+
+    console.log('');
+  } catch (err: any) {
+    console.log(chalk.red(`Failed to compare sessions: ${err.message}`));
   }
 }

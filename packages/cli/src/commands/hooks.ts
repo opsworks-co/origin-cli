@@ -30,6 +30,7 @@ import { findTrailByBranch, addSessionToTrail } from '../trail-state.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
 import { writeSessionMemory, buildMemoryContext } from '../memory.js';
+import { addTodosFromSession } from '../todo.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -1903,6 +1904,19 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       debugLog('session-end', 'session memory written');
     } catch (err: any) {
       debugLog('session-end', 'session memory error (non-fatal)', { message: err.message });
+    }
+
+    // Extract and store TODOs from prompts
+    try {
+      const todosAdded = addTodosFromSession(
+        state.sessionId, prompts, state.repoPath,
+        getBranch(hookCwd) || state.branch,
+      );
+      if (todosAdded > 0) {
+        debugLog('session-end', 'todos extracted', { count: todosAdded });
+      }
+    } catch {
+      // Non-fatal
     }
   } catch (err: any) {
     debugLog('session-end', 'ERROR', { message: err.message, stack: err.stack });
