@@ -128,6 +128,7 @@ origin enable
 origin enable --agent claude-code
 origin enable --agent cursor
 origin enable --agent gemini
+origin enable --agent codex
 origin enable --agent windsurf
 origin enable --agent aider
 
@@ -136,6 +137,9 @@ origin enable --global
 
 # Install and link to a specific Origin agent
 origin enable --link my-agent-slug
+
+# Override the agent slug used for session attribution
+origin enable --agent-slug my-custom-slug
 
 # Replace existing hooks instead of chaining
 origin enable --no-chain
@@ -147,6 +151,7 @@ origin enable --no-chain
 |-------|-------------|--------|
 | Claude Code | `~/.claude/settings.json` | SessionStart, Stop, UserPromptSubmit, SessionEnd, PreToolUse, PostToolUse |
 | Cursor | `~/.cursor/hooks.json` | sessionStart, stop, beforeSubmitPrompt, sessionEnd |
+| Codex CLI | `~/.codex/config.json` | SessionStart, Stop, UserPromptSubmit |
 | Gemini | `~/.gemini/settings.json` | SessionStart, SessionEnd, BeforeAgent, AfterAgent |
 | Windsurf | `~/.windsurf/hooks.json` | sessionStart, stop, beforeSubmitPrompt, sessionEnd |
 | Aider | `~/.aider.conf.yml` | git-commit-verify, notifications-command |
@@ -213,6 +218,24 @@ View full details of a session.
 origin session abc123
 # Shows: model, repo, commits, author, tokens, cost, duration,
 #        files changed, review status
+```
+
+### `origin sessions end <id>`
+
+End a running session. Kills the heartbeat process, ends the session on the platform, cleans local state files, and updates the `origin-sessions` git branch.
+
+```bash
+origin sessions end abc123      # End by session ID
+origin sessions end abc1        # Partial ID match works
+```
+
+### `origin sessions clean`
+
+End all stale RUNNING sessions in bulk.
+
+```bash
+origin sessions clean           # Clean sessions for current repo
+origin sessions clean --all     # Clean all repos
 ```
 
 ### `origin explain [sessionId]`
@@ -469,6 +492,94 @@ Shows:
 - Common patterns (questions, commands, fixes, refactors)
 - Time distribution (when you prompt most)
 - Top changed files
+
+### `origin report`
+
+Generate a sprint or time-range report with cost, model, user, and ROI metrics.
+
+```bash
+origin report                         # Default 7-day report
+origin report --range 14d             # 14-day report
+origin report --range 30d             # Monthly report
+origin report --format json           # JSON output
+origin report --format csv            # CSV output
+origin report --output sprint.md      # Write to file
+```
+
+### `origin audit`
+
+Generate a compliance audit trail (SOC 2, ISO 27001).
+
+```bash
+origin audit                                    # Audit last 30 days
+origin audit --from 2026-01-01 --to 2026-03-31  # Custom date range
+origin audit --format json                      # JSON output
+origin audit --format csv                       # CSV output
+origin audit --output audit.md                  # Write to file
+```
+
+### `origin backfill`
+
+Retroactively tag old commits as AI or human-authored.
+
+```bash
+origin backfill                       # Dry-run — show what would be tagged
+origin backfill --apply               # Actually write the tags
+origin backfill --days 180            # Go back 6 months
+origin backfill --min-confidence high # Only tag high-confidence matches
+```
+
+Scans `.claude/`, `.cursor/`, `.codex/` session history, commit message patterns, and code style heuristics to identify AI-generated commits.
+
+### `origin verify`
+
+Health check for agents, repo connection, and sessions.
+
+```bash
+origin verify           # Run all checks
+origin verify --json    # JSON output
+```
+
+### `origin review-pr`
+
+Review a pull request with AI governance analysis.
+
+```bash
+origin review-pr 123              # Review PR #123
+origin review-pr <pr-url>         # Review by URL
+```
+
+---
+
+## Reporting & Compliance
+
+### `origin agents`
+
+List and manage registered AI agents (connected mode).
+
+```bash
+origin agents                     # List all agents
+origin agents create --name "My Agent" --slug my-agent --model claude-opus-4-6
+```
+
+### `origin policies`
+
+View active governance policies for the organization.
+
+```bash
+origin policies
+```
+
+Policies are configured in the Origin dashboard and enforce rules like session review requirements, cost limits, model restrictions, and file access controls.
+
+### `origin repos`
+
+List and manage repositories tracked by Origin.
+
+```bash
+origin repos                      # List all repos
+origin repos add --name my-repo --path /path/to/repo
+```
 
 ---
 
@@ -834,7 +945,9 @@ origin doctor --verbose  # Detailed output
 ```
 
 Checks for:
-- Stuck sessions (>1hr old)
+- Stuck sessions (>1hr old, auto-ends with `--fix`)
+- Stale "running" sessions on `origin-sessions` branch (>1hr, marks as ended with `--fix`)
+- Orphaned entries referencing non-existent commits
 - Stale session state files (>24h/48h)
 - Orphaned session files in `~/.origin/sessions/`
 - Errors in hooks log
@@ -909,12 +1022,41 @@ Origin uses a multi-layer hook system:
 ```
 AI Agent → Agent Hook → Origin CLI → Origin API
                     ↓
-            .git/origin-session.json (local state)
+            .git/origin-session-<tag>.json (local state)
                     ↓
             origin-sessions branch (git plumbing)
                     ↓
             refs/notes/origin (git notes per commit)
 ```
+
+### Session Lifecycle
+
+Each agent handles session start/end differently:
+
+| Agent | Session Start | Session End | Fallback |
+|-------|--------------|-------------|----------|
+| Claude Code | `SessionStart` hook | `SessionEnd` hook | Heartbeat stale check (15 min) |
+| Cursor | `sessionStart` hook | No explicit end | Heartbeat stale check (15 min) |
+| Codex CLI | `user-prompt-submit` hook | No explicit end | Heartbeat stale check (15 min) |
+| Gemini CLI | `SessionStart` hook | `SessionEnd` hook | Heartbeat stale check (15 min) |
+
+**Heartbeat:** A background process (`~/.origin/heartbeats/<id>.pid`) pings the Origin API every 30 seconds. If the state file hasn't been updated in 15 minutes (agent closed/crashed), the heartbeat auto-ends the session.
+
+**Server-side cleanup:** The Origin platform also checks every 5 minutes and auto-completes any RUNNING sessions with no heartbeat ping in 15 minutes.
+
+### Per-Prompt Diff Tracking
+
+Origin tracks file changes per prompt, not just per session:
+
+- `headShaAtLastStop` — HEAD SHA after each prompt's stop, used as baseline for the next prompt's diff
+- `completedPromptMappings` — accumulated per-prompt file change data across stops
+- On each Stop event, the current prompt's changes are merged with previously saved mappings
+- The API receives all prompt mappings and stores them as `PromptChange` records
+- The AI Blame view on the dashboard uses these to show which prompt wrote which lines
+
+### Concurrent Sessions
+
+Claude Code supports multiple concurrent sessions on the same repo. Each session gets a unique tag derived from the Claude session ID, stored as `.git/origin-session-<tag>.json`.
 
 ### Secret Redaction
 
@@ -945,8 +1087,9 @@ When `secretRedaction` is enabled (default: true), Origin automatically redacts:
 | `~/.origin/blobs/<hash>` | Content-addressable blob storage |
 | `~/.origin/plugins.json` | Plugin registry |
 | `~/.origin/last-update-check.json` | Update check cache (24h TTL) |
-| `.git/origin-session.json` | Active session state |
-| `.git/origin-session-<tag>.json` | Concurrent session state |
+| `~/.origin/sessions/<id>.json` | Global session archive (backup state) |
+| `~/.origin/heartbeats/<id>.pid` | Active heartbeat PID files |
+| `.git/origin-session-<tag>.json` | Active session state (tagged per concurrent session) |
 | `.origin.json` | Per-repo config (agent slug, ignore patterns) |
 
 ### Git Refs
@@ -996,21 +1139,21 @@ Push notes: `git push origin refs/notes/origin`
 
 ## Supported Agents
 
-| Agent | Detection | Hook System | Status |
-|-------|-----------|-------------|--------|
-| Claude Code | Session hooks + process detection | Claude Code hooks API | Stable |
-| Gemini CLI | Process detection (`pgrep`) | Global post-commit hook | Stable |
-| Cursor | Session hooks | Cursor hooks API | Stable |
-| Codex CLI | Session hooks + process detection | Codex hooks API | Stable |
-| Aider | Process detection | Global post-commit hook | Stable |
-| Windsurf | Session hooks + process detection | Windsurf hooks API | Preview |
-| GitHub Copilot | Process detection | Global post-commit hook | Preview |
-| Continue | Process detection | Global post-commit hook | Preview |
-| Amp | Process detection | Global post-commit hook | Preview |
-| Junie | Process detection | Global post-commit hook | Preview |
-| OpenCode | Process detection | Global post-commit hook | Preview |
-| Rovo Dev | Process detection | Global post-commit hook | Preview |
-| Droid | Process detection | Global post-commit hook | Preview |
+| Agent | Detection | Hook System | Session Reuse | Status |
+|-------|-----------|-------------|---------------|--------|
+| Claude Code | Session hooks + process detection | Claude Code hooks API | No (new session per conversation) | Stable |
+| Cursor | Session hooks + Cursor DB | Cursor hooks API | Yes (reuses across prompts) | Stable |
+| Codex CLI | Session hooks + SQLite state | Codex hooks API | No (new session per conversation) | Stable |
+| Gemini CLI | Session hooks + process detection | Gemini settings hooks | No | Stable |
+| Aider | Process detection | Config hooks | No | Stable |
+| Windsurf | Session hooks + process detection | Windsurf hooks API | No | Preview |
+| GitHub Copilot | Process detection | Global post-commit hook | N/A | Preview |
+| Continue | Process detection | Global post-commit hook | N/A | Preview |
+| Amp | Process detection | Global post-commit hook | N/A | Preview |
+| Junie | Process detection | Global post-commit hook | N/A | Preview |
+| OpenCode | Process detection | Global post-commit hook | N/A | Preview |
+| Rovo Dev | Process detection | Global post-commit hook | N/A | Preview |
+| Droid | Process detection | Global post-commit hook | N/A | Preview |
 
 ### Cost Estimation
 
@@ -1059,17 +1202,50 @@ origin doctor --verbose    # Check for issues
 origin enable              # Reinstall hooks
 ```
 
-### Stale sessions
+### Stale/stuck sessions
 
 ```bash
-origin clean --force       # Remove stale data
-origin reset --force       # Clear current session
+origin doctor --fix        # Auto-fix stuck sessions (local + origin-sessions branch)
+origin sessions end <id>   # End a specific session
+origin sessions clean      # End all stale sessions for current repo
+origin sessions clean --all # End all stale sessions globally
+origin clean --force       # Remove orphaned data
+origin reset --force       # Clear current session state
 ```
+
+### Session still shows RUNNING after closing agent
+
+The heartbeat process auto-ends sessions after 15 minutes of inactivity. If it persists:
+
+```bash
+# Check for orphaned heartbeats
+ls ~/.origin/heartbeats/
+
+# Force end
+origin sessions end <id>
+
+# Fix stuck git branch entries
+origin doctor --fix
+```
+
+### AI Blame shows 0 prompts
+
+Check the hooks log for errors during the Stop event:
+
+```bash
+grep "stop.*ERROR" ~/.origin/hooks.log
+```
+
+Common causes: API payload too large (fixed in v0.20260330+), transcript path not found, or session state missing.
 
 ### View hook logs
 
 ```bash
 tail -100 ~/.origin/hooks.log
+
+# Filter for specific events
+grep "stop" ~/.origin/hooks.log | tail -20
+grep "ERROR" ~/.origin/hooks.log | tail -20
 ```
 
 ### Check connection
@@ -1077,4 +1253,5 @@ tail -100 ~/.origin/hooks.log
 ```bash
 origin whoami              # Verify auth
 origin status              # Check API health
+origin verify              # Full health check
 ```
