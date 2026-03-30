@@ -31,7 +31,7 @@ const isConnected = !!(apiUrl && apiKey);
 fs.writeFileSync(pidFile, String(process.pid), { mode: 0o600 });
 
 const PING_INTERVAL_MS = 30_000; // 30 seconds
-const STALE_THRESHOLD_MS = 3 * 60 * 60 * 1000; // 3 hours without state file update = stale
+const STALE_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes without state file update = stale
 
 /**
  * Check if a process is still alive (signal 0 = existence check).
@@ -67,31 +67,74 @@ function isStateFileStale(): boolean {
  * Cleans up state file so the next session-start doesn't find stale state.
  */
 async function endSession() {
-  // Archive state file to ~/.origin/sessions/ before deleting
+  // Read state file to send accumulated data with end request
+  let stateData: any = null;
   if (stateFile) {
     try {
       const raw = fs.readFileSync(stateFile, 'utf-8');
-      const state = JSON.parse(raw);
-      state.status = 'ENDED';
-      state.endedAt = new Date().toISOString();
-      const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
-      const archiveDir = `${homeDir}/.origin/sessions`;
-      fs.mkdirSync(archiveDir, { recursive: true });
-      const archivePath = `${archiveDir}/${(state.sessionId || sessionId).slice(0, 12)}.json`;
-      fs.writeFileSync(archivePath, JSON.stringify(state), { mode: 0o600 });
+      stateData = JSON.parse(raw);
     } catch { /* best effort */ }
   }
 
-  // End on API if connected
+  // Archive state file to ~/.origin/sessions/ before deleting
+  if (stateData) {
+    try {
+      stateData.status = 'ENDED';
+      stateData.endedAt = new Date().toISOString();
+      const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+      const archiveDir = `${homeDir}/.origin/sessions`;
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const archivePath = `${archiveDir}/${(stateData.sessionId || sessionId).slice(0, 12)}.json`;
+      fs.writeFileSync(archivePath, JSON.stringify(stateData), { mode: 0o600 });
+    } catch { /* best effort */ }
+  }
+
+  // End on API if connected — include accumulated prompt/session data
   if (apiKey && apiUrl) {
     try {
+      const endPayload: any = { sessionId };
+
+      if (stateData) {
+        // Send prompts accumulated during the session
+        const prompts: string[] = stateData.prompts || [];
+        if (prompts.length > 0) {
+          endPayload.prompt = prompts.join('\n\n---\n\n');
+        }
+
+        // Send duration
+        if (stateData.startedAt) {
+          const durationMs = Date.now() - new Date(stateData.startedAt).getTime();
+          if (durationMs > 0) endPayload.durationMs = durationMs;
+        }
+
+        // Send model if known
+        if (stateData.model && stateData.model !== 'unknown' && stateData.model !== 'default') {
+          // Don't overwrite — server already has model from updateSession calls
+        }
+
+        // Use saved per-prompt mappings (from stop handler) if available.
+        // Only build empty fallback if no real mappings exist — avoids
+        // overwriting real diffs that stop already sent to the API.
+        const savedMappings = stateData.completedPromptMappings;
+        if (savedMappings && Array.isArray(savedMappings) && savedMappings.length > 0) {
+          endPayload.promptChanges = savedMappings;
+        } else if (prompts.length > 0) {
+          endPayload.promptChanges = prompts.map((p: string, i: number) => ({
+            promptIndex: i,
+            promptText: p.slice(0, 1000),
+            filesChanged: [],
+            diff: '',
+          }));
+        }
+      }
+
       await fetch(`${apiUrl}/api/mcp/session/end`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
         },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify(endPayload),
       });
     } catch { /* best effort */ }
   }
