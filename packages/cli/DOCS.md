@@ -13,6 +13,9 @@ Origin is an AI coding governance platform that tracks, attributes, and governs 
 - [Search & Analysis](#search--analysis)
 - [Time Travel & Resume](#time-travel--resume)
 - [Trail System](#trail-system)
+- [Cross-Agent Handoff](#cross-agent-handoff)
+- [Session Memory](#session-memory)
+- [AI TODO Tracker](#ai-todo-tracker)
 - [Configuration](#configuration)
 - [Local Database](#local-database)
 - [CI/CD Integration](#cicd-integration)
@@ -262,7 +265,39 @@ origin explain --summarize
 origin explain --json
 ```
 
-The `--summarize` flag generates a structured AI summary with: intent, outcome, learnings, friction points, and open items.
+The `--summarize` flag generates:
+1. A structured metrics summary (scope, efficiency, velocity)
+2. An AI-powered analysis (requires `ANTHROPIC_API_KEY` or `origin config set anthropicApiKey <key>`) with:
+   - **Intent** — what the developer was trying to accomplish
+   - **Outcome** — what was actually achieved
+   - **Learnings** — patterns and techniques used
+   - **Friction** — signs of struggle or inefficiency
+   - **Time saved** — estimate vs writing manually
+
+### `origin session-compare <id1> <id2>`
+
+Compare two sessions side by side.
+
+```bash
+origin session-compare abc123 def456
+# Shows:
+#   Session    abc123       def456
+#   Model      claude-4     gpt-4o
+#   Duration   5m 30s       12m 15s
+#   Tokens     15,234       42,891
+#   Cost       $0.0456      $0.1234
+#   Lines +    89           45
+#   Lines -    12           30
+#
+#   Efficiency
+#   Tokens/line  151        574
+#   Lines/min    18         6
+#
+#   AI Comparison
+#   Session 1 was 3.8x more token-efficient...
+```
+
+If an Anthropic API key is available, includes an AI-powered comparison analysis.
 
 ### `origin review <sessionId>`
 
@@ -352,9 +387,17 @@ origin search "authentication"              # Search all prompts
 origin search "refactor" --model claude     # Filter by model
 origin search "database" --limit 50         # More results
 origin search "API" --repo /path/to/repo    # Filter by repo
+origin search "auth" --from 7d             # Only last 7 days
+origin search "fix" --from 2w              # Last 2 weeks
+origin search "deploy" --agent claude      # Filter by agent
+origin search "bug" --from 1m --agent cursor # Combined filters
 ```
 
-Searches the local prompt database. Run `origin db import` first to populate from the `origin-sessions` branch.
+Searches across multiple data sources:
+1. **Connected mode** — Origin API sessions
+2. **Local state files** — `~/.origin/sessions/*.json`
+3. **Git notes** — `refs/notes/origin` commit metadata
+4. **Local DB** — `~/.origin/db/` prompt database (run `origin db import` to populate)
 
 ### `origin ask <query>`
 
@@ -715,6 +758,188 @@ Trails are stored on the `origin-sessions` branch under `trails/` and synced wit
 
 ---
 
+## Cross-Agent Handoff
+
+Automatically pass context between different AI agents. When you finish a session in Claude Code and start one in Cursor (or any other agent), Origin carries over what you were working on.
+
+### How It Works
+
+1. **On session-end/stop:** Origin writes `.git/origin-handoff.json` with the session's prompts, files changed, summary, and extracted TODOs
+2. **On next session-start (any agent):** Origin reads the handoff and injects context into the new agent's system prompt
+
+The new agent automatically knows:
+- What was done in the previous session
+- Which files are in progress
+- The last prompt and its context
+- Open TODOs from the previous session
+
+### `origin handoff show`
+
+Preview the handoff context that will be passed to the next agent.
+
+```bash
+origin handoff show
+# Output:
+#   Cross-Agent Handoff Context
+#
+#   Agent:    claude-code
+#   Model:    claude-sonnet-4
+#   Session:  5c6c03a2
+#   Ended:    15m ago
+#   Branch:   feature/auth
+#
+#   Summary: Added JWT authentication middleware...
+#
+#   Last prompt: "add validation for expired tokens"
+#
+#   Files in progress (3):
+#     src/auth/middleware.ts
+#     src/auth/jwt.ts
+#     tests/auth.test.ts
+#
+#   Open TODOs:
+#     - add refresh token support
+#     - handle edge case for expired tokens
+```
+
+### `origin handoff clear`
+
+Clear handoff data for the current repo.
+
+```bash
+origin handoff clear
+```
+
+**Note:** Handoff data expires after 24 hours automatically.
+
+---
+
+## Session Memory
+
+Accumulated context across sessions. Origin remembers what happened in previous sessions and injects summaries into new ones.
+
+### How It Works
+
+1. **On session-end:** Origin writes a memory entry to git notes (`refs/notes/origin-memory`)
+2. **On next session-start:** Origin reads the last 3 session summaries and injects them into the system prompt
+
+The new agent gets context like:
+```
+Session history for this repo:
+- [15m ago] claude-code/claude-sonnet-4: Added JWT auth middleware
+  Files: src/auth/middleware.ts, src/auth/jwt.ts
+- [2h ago] cursor/gpt-4o: Refactored database queries
+  Files: src/db/queries.ts, src/db/pool.ts
+- [1d ago] claude-code/claude-sonnet-4: Set up project structure
+  Files: package.json, tsconfig.json, src/index.ts
+```
+
+### `origin memory show`
+
+Display accumulated session memory for the current repo.
+
+```bash
+origin memory show              # Show last 10 sessions
+origin memory show --limit 20   # Show more
+```
+
+### `origin memory clear`
+
+Clear all session memory for the current repo.
+
+```bash
+origin memory clear
+```
+
+Memory is stored in git notes and travels with the repo when pushed (`git push origin refs/notes/origin-memory`).
+
+---
+
+## AI TODO Tracker
+
+Origin automatically extracts TODOs mentioned in AI session prompts and tracks them across repos.
+
+### How It Works
+
+On session-end, Origin scans all prompts for patterns like:
+- `TODO: ...`, `FIXME: ...`, `NOTE: ...`
+- "need to fix X", "we should add Y", "handle Z later"
+- "still need to implement X"
+
+Extracted TODOs are stored in `~/.origin/origin-todos.json` across all repos.
+
+### `origin todo`
+
+List open TODOs (alias for `origin todo list`).
+
+```bash
+origin todo
+# Output:
+#   Open TODOs (3)
+#
+#   ○ a1b2c3d4  add refresh token support
+#     session:5c6c03a2  my-app  15m ago
+#     branch: feature/auth
+#
+#   ○ e5f6g7h8  handle edge case for expired tokens
+#     session:5c6c03a2  my-app  15m ago
+#
+#   ○ i9j0k1l2  add rate limiting to API endpoints
+#     session:d4e5f6a7  api-server  2h ago
+```
+
+### `origin todo list`
+
+```bash
+origin todo list                # Open TODOs for current repo
+origin todo list --all          # Open TODOs from all repos
+origin todo list --done         # Show completed TODOs
+```
+
+### `origin todo done <id>`
+
+Mark a TODO as complete.
+
+```bash
+origin todo done a1b2            # Partial ID match works
+# ✓ Marked as done: add refresh token support
+```
+
+### `origin todo show <id>`
+
+Show full details of a TODO including the originating session.
+
+```bash
+origin todo show a1b2
+# Output:
+#   TODO a1b2c3d4
+#   Text:      add refresh token support
+#   Status:    open
+#   Session:   5c6c03a2
+#   Repo:      /Users/you/my-app
+#   Branch:    feature/auth
+#   Created:   2026-03-30T10:15:00Z (2h ago)
+#   Source:    prompt
+```
+
+### `origin todo add <text>`
+
+Manually add a TODO.
+
+```bash
+origin todo add "migrate database to PostgreSQL"
+```
+
+### `origin todo remove <id>`
+
+Remove a TODO permanently.
+
+```bash
+origin todo remove a1b2
+```
+
+---
+
 ## Configuration
 
 ### `origin config`
@@ -747,6 +972,25 @@ origin config set telemetry true
 | `autoUpdate` | `true` \| `false` | `true` | Check for CLI updates |
 | `secretRedaction` | `true` \| `false` | `true` | Redact secrets before sending to API |
 | `hookChaining` | `true` \| `false` | `true` | Chain existing hooks when installing |
+| `anthropicApiKey` | string | — | Anthropic API key for AI features (`explain --summarize`, `chat`, `session-compare`) |
+| `agentSlugs` | object | `{}` | Per-tool agent slug overrides (e.g., `{"claude-code": "claude-front"}`) |
+
+### Agent Slug Overrides
+
+Override which Origin agent a tool's sessions are attributed to:
+
+```bash
+# Map Claude Code sessions to a custom agent slug
+origin config set agentSlugs.claude-code claude-frontend
+
+# Map Cursor sessions to a different agent
+origin config set agentSlugs.cursor cursor-backend
+
+# View current overrides
+origin config get agentSlugs
+```
+
+This is useful when you have multiple Origin agents (e.g., `claude-frontend`, `claude-backend`) and want different repos or tools to report to different agents.
 
 ### Per-Repo Config (`.origin.json`)
 
@@ -945,7 +1189,7 @@ origin doctor --verbose  # Detailed output
 ```
 
 Checks for:
-- Stuck sessions (>1hr old, auto-ends with `--fix`)
+- Stuck sessions (>1hr old, auto-ends with `--fix` — ends on platform API + local git branch)
 - Stale "running" sessions on `origin-sessions` branch (>1hr, marks as ended with `--fix`)
 - Orphaned entries referencing non-existent commits
 - Stale session state files (>24h/48h)
@@ -1027,6 +1271,12 @@ AI Agent → Agent Hook → Origin CLI → Origin API
             origin-sessions branch (git plumbing)
                     ↓
             refs/notes/origin (git notes per commit)
+                    ↓
+            .git/origin-handoff.json (cross-agent context)
+                    ↓
+            refs/notes/origin-memory (session memory)
+                    ↓
+            ~/.origin/origin-todos.json (extracted TODOs)
 ```
 
 ### Session Lifecycle
@@ -1089,7 +1339,9 @@ When `secretRedaction` is enabled (default: true), Origin automatically redacts:
 | `~/.origin/last-update-check.json` | Update check cache (24h TTL) |
 | `~/.origin/sessions/<id>.json` | Global session archive (backup state) |
 | `~/.origin/heartbeats/<id>.pid` | Active heartbeat PID files |
+| `~/.origin/origin-todos.json` | AI-extracted TODO tracker (cross-repo) |
 | `.git/origin-session-<tag>.json` | Active session state (tagged per concurrent session) |
+| `.git/origin-handoff.json` | Cross-agent handoff context (last session summary for next agent) |
 | `.origin.json` | Per-repo config (agent slug, ignore patterns) |
 
 ### Git Refs
@@ -1098,6 +1350,7 @@ When `secretRedaction` is enabled (default: true), Origin automatically redacts:
 |-----|---------|
 | `origin-sessions` | Orphan branch storing session data (metadata.json, prompts.md, changes.json per session) |
 | `refs/notes/origin` | Git notes with AI attribution metadata per commit |
+| `refs/notes/origin-memory` | Session memory — accumulated session summaries for context injection |
 | `trails/` | Trail metadata (on origin-sessions branch) |
 
 ### Origin-Sessions Branch Structure
@@ -1190,6 +1443,7 @@ Override in `.origin.json`:
 | `ORIGIN_API_URL` | Override API URL |
 | `ORIGIN_API_KEY` | Override API key |
 | `ORIGIN_DEBUG` | Enable debug logging |
+| `ANTHROPIC_API_KEY` | Anthropic API key for AI features (`explain --summarize`, `chat`, `session-compare`) |
 
 ---
 
