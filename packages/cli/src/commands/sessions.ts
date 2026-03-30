@@ -174,11 +174,22 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     }
   }
 
-  // Merge: local sessions first, then platform sessions not already in local
+  // Merge: local sessions first, then platform sessions not already in local.
+  // Platform status overrides local status (local git branch metadata is stale).
+  const platformStatusMap = new Map<string, string>();
+  for (const s of platformSessions) {
+    platformStatusMap.set(s.id.slice(0, 8), s.status || '');
+  }
+
   const localIds = new Set(localSessions.map(s => s.sessionId.slice(0, 8)));
   const merged: Array<{ type: 'local'; data: LocalSession } | { type: 'platform'; data: any }> = [];
 
   for (const s of localSessions) {
+    // Override local status with platform status (platform is source of truth)
+    const platformStatus = platformStatusMap.get(s.sessionId.slice(0, 8));
+    if (platformStatus && platformStatus !== 'RUNNING' && s.status?.toLowerCase() === 'running') {
+      s.status = platformStatus;
+    }
     merged.push({ type: 'local', data: s });
   }
   for (const s of platformSessions) {
