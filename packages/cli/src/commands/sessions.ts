@@ -379,16 +379,20 @@ export async function sessionDetailCommand(id: string) {
 }
 
 export async function sessionEndCommand(id: string) {
-  if (!isConnectedMode()) {
-    console.error(chalk.red('Error: End session requires connected mode. Run: origin login'));
-    return;
+  // 1. End on platform (if connected)
+  if (isConnectedMode()) {
+    try {
+      await api.endSessionById(id);
+      console.log(chalk.green(`Session ${id} ended on platform.`));
+    } catch (err: any) {
+      // Don't block local cleanup if API fails
+      console.log(chalk.yellow(`Platform: ${err.message || 'failed to end'}`));
+    }
   }
 
+  // 2. Always clean local state files, heartbeats, and global archive
+  let localCleaned = false;
   try {
-    await api.endSessionById(id);
-    console.log(chalk.green(`Session ${id} ended successfully.`));
-
-    // Clean up local state files and heartbeat for this session
     const allSessions = listAllActiveSessions();
     for (const s of allSessions) {
       if (s.sessionId === id || s.sessionId.startsWith(id)) {
@@ -396,7 +400,7 @@ export async function sessionEndCommand(id: string) {
         if (s.sessionTag) {
           clearSessionState(s.repoPath || undefined, s.sessionTag);
         }
-        // Also clean global state file in ~/.origin/sessions/
+        // Mark global state file as ENDED
         try {
           const fs = await import('fs');
           const path = await import('path');
@@ -410,12 +414,14 @@ export async function sessionEndCommand(id: string) {
             fs.writeFileSync(globalPath, JSON.stringify(state), { mode: 0o600 });
           }
         } catch { /* ignore */ }
-        console.log(chalk.gray(`  Local state cleaned.`));
+        localCleaned = true;
         break;
       }
     }
-  } catch (err: any) {
-    console.error(chalk.red('Error:'), err.message);
+  } catch { /* ignore */ }
+
+  if (localCleaned) {
+    console.log(chalk.green(`  Local state cleaned.`));
   }
 }
 
