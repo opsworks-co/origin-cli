@@ -6,7 +6,7 @@ import { statusCommand } from './commands/status.js';
 import { policiesCommand } from './commands/policies.js';
 import { syncCommand } from './commands/sync.js';
 import { whoamiCommand } from './commands/whoami.js';
-import { sessionsCommand, sessionDetailCommand, sessionEndCommand } from './commands/sessions.js';
+import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanCommand } from './commands/sessions.js';
 import { reviewCommand } from './commands/review.js';
 import { reviewPRCommand } from './commands/review-pr.js';
 import { intentReviewCommand } from './commands/intent-review.js';
@@ -38,6 +38,8 @@ import { ciCheckCommand, ciSquashMergeCommand, ciGenerateWorkflowCommand, ciSess
 import { pluginListCommand, pluginInstallCommand, pluginRemoveCommand } from './commands/plugin.js';
 import { upgradeCommand } from './commands/upgrade.js';
 import { analyzeCommand } from './commands/analyze.js';
+import { handoffShowCommand, handoffClearCommand } from './commands/handoff.js';
+import { memoryShowCommand, memoryClearCommand } from './commands/memory.js';
 import { dbImportCommand, dbStatsCommand } from './commands/db.js';
 import { proxyInstallCommand, proxyUninstallCommand, proxyStatusCommand } from './commands/proxy.js';
 import { verifyCommand } from './commands/verify.js';
@@ -76,6 +78,7 @@ program.command('enable')
   .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, windsurf, aider). Auto-detects if omitted.')
   .option('-g, --global', 'Install hooks globally (~/) so ALL repos are tracked automatically')
   .option('-l, --link <slug>', 'Link this repo to an Origin agent by slug (writes .origin.json)')
+  .option('-s, --agent-slug <slug>', 'Override agent slug for this tool (e.g. cursor-frontend). Saved to config.')
   .option('--no-chain', 'Replace existing hooks instead of chaining')
   .action(enableCommand);
 program.command('disable')
@@ -138,6 +141,29 @@ program.command('clean')
   .option('--dry-run', 'Show what would be cleaned without deleting')
   .option('-f, --force', 'Skip confirmation')
   .action(cleanCommand);
+
+// ─── Cross-Agent Handoff ─────────────────────────────────────────────────
+
+const handoff = program.command('handoff').description('Cross-agent context handoff');
+handoff.action(handoffShowCommand);
+handoff.command('show')
+  .description('Show handoff context that will be passed to the next agent')
+  .action(handoffShowCommand);
+handoff.command('clear')
+  .description('Clear handoff data for this repo')
+  .action(handoffClearCommand);
+
+// ─── Session Memory ─────────────────────────────────────────────────────
+
+const memory = program.command('memory').description('Session memory — accumulated context across sessions');
+memory.action(memoryShowCommand);
+memory.command('show')
+  .description('Display accumulated session memory for current repo')
+  .option('-l, --limit <n>', 'Number of sessions to show', '10')
+  .action(memoryShowCommand);
+memory.command('clear')
+  .description('Clear all session memory for this repo')
+  .action(memoryClearCommand);
 
 // ─── Attribution & Blame ─────────────────────────────────────────────────
 
@@ -423,6 +449,10 @@ sessions
 program.command('session <id>').description('View session detail').action(sessionDetailCommand);
 
 sessions.command('end <sessionId>').description('End a running session').action(sessionEndCommand);
+sessions.command('clean')
+  .description('End all stale RUNNING sessions')
+  .option('--all', 'End all running sessions across all repos')
+  .action(sessionCleanCommand);
 
 program.command('review <sessionId>')
   .description('Review a coding session')

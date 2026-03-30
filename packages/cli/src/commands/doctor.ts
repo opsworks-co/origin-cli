@@ -3,10 +3,11 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
-import { loadConfig } from '../config.js';
+import { loadConfig, isConnectedMode } from '../config.js';
 import { loadSessionState, clearSessionState, getGitRoot, getGitDir, listActiveSessions } from '../session-state.js';
 import { captureGitState } from '../git-capture.js';
 import { writeSessionFiles } from '../local-entrypoint.js';
+import { api } from '../api.js';
 
 /**
  * origin doctor
@@ -150,6 +151,19 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
                 console.log(chalk.gray(`    Stale running: ${dir} — ${metadata.model} — ${ageHrs.toFixed(1)}h`));
               }
               if (opts?.fix) {
+                // End session on platform API first
+                if (isConnectedMode()) {
+                  try {
+                    await api.endSession({
+                      sessionId: metadata.sessionId,
+                      durationMs: ageMs,
+                      branch: metadata.git?.branch || undefined,
+                    });
+                  } catch {
+                    // Session may not exist on platform — that's OK
+                  }
+                }
+
                 // Rewrite metadata with status: 'ended' — use existing metadata values,
                 // only try captureGitState as a fallback for missing data
                 let gitCapture: ReturnType<typeof captureGitState> | null = null;

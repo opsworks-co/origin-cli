@@ -28,6 +28,8 @@ import { writeGitNotes } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
 import { findTrailByBranch, addSessionToTrail } from '../trail-state.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
+import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
+import { writeSessionMemory, buildMemoryContext } from '../memory.js';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -966,6 +968,28 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       // Non-fatal — skip attribution context if it fails
     }
 
+    // Inject cross-agent handoff context (from previous session, possibly different agent)
+    try {
+      const handoffCtx = buildHandoffContext(repoPath);
+      if (handoffCtx) {
+        systemMsg += '\n\n' + handoffCtx;
+        debugLog('session-start', 'handoff context injected', { length: handoffCtx.length });
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    // Inject session memory (last 3 session summaries for this repo)
+    try {
+      const memoryCtx = buildMemoryContext(repoPath);
+      if (memoryCtx) {
+        systemMsg += '\n\n' + memoryCtx;
+        debugLog('session-start', 'memory context injected', { length: memoryCtx.length });
+      }
+    } catch {
+      // Non-fatal
+    }
+
     // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
     const isCursor = agentSlug === 'cursor';
     const outputKey = isCursor ? 'additional_context' : 'systemMessage';
@@ -1636,6 +1660,29 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     } catch (gitErr: any) {
       debugLog('stop', 'session files write/push failed (non-fatal)', { message: gitErr.message });
     }
+
+    // Update handoff context after each prompt stop (always fresh for next agent)
+    try {
+      const todos = extractTodosFromPrompts(prompts);
+      writeHandoff(state.repoPath, {
+        version: 1,
+        sessionId: state.sessionId,
+        agentSlug: agentSlug || 'unknown',
+        model: model || state.model || 'unknown',
+        endedAt: new Date().toISOString(),
+        branch: getBranch(found!.saveCwd) || state.branch,
+        prompts: prompts.map(p => p.slice(0, 500)),
+        summary: parsed.summary || null,
+        filesChanged,
+        linesAdded: gitCapture.linesAdded || 0,
+        linesRemoved: gitCapture.linesRemoved || 0,
+        lastPrompt: (prompts[prompts.length - 1] || '').slice(0, 2000),
+        lastResponse: null,
+        openTodos: todos,
+      });
+    } catch {
+      // Non-fatal
+    }
   } catch (err: any) {
     debugLog('stop', 'ERROR', { message: err.message, stack: err.stack });
     process.stderr.write(`[origin] stop error: ${err.message}\n`);
@@ -1810,6 +1857,52 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       } catch (err: any) {
         debugLog('session-end', 'git notes error (non-fatal)', { message: err.message });
       }
+    }
+
+    // Write cross-agent handoff context for next session
+    try {
+      const todos = extractTodosFromPrompts(prompts);
+      writeHandoff(state.repoPath, {
+        version: 1,
+        sessionId: state.sessionId,
+        agentSlug: agentSlug || 'unknown',
+        model,
+        endedAt: new Date().toISOString(),
+        branch: getBranch(hookCwd) || state.branch,
+        prompts: prompts.map(p => p.slice(0, 500)),
+        summary: parsed.summary || null,
+        filesChanged,
+        linesAdded: gitCapture.linesAdded,
+        linesRemoved: gitCapture.linesRemoved,
+        lastPrompt: (prompts[prompts.length - 1] || '').slice(0, 2000),
+        lastResponse: null, // Could extract from transcript later
+        openTodos: todos,
+      });
+      debugLog('session-end', 'handoff written', { filesCount: filesChanged.length, todosCount: todos.length });
+    } catch (err: any) {
+      debugLog('session-end', 'handoff write error (non-fatal)', { message: err.message });
+    }
+
+    // Write session memory entry for repo history
+    try {
+      const todos = extractTodosFromPrompts(prompts);
+      writeSessionMemory(state.repoPath, {
+        sessionId: state.sessionId,
+        agentSlug: agentSlug || 'unknown',
+        model,
+        startedAt: state.startedAt,
+        endedAt: new Date().toISOString(),
+        branch: getBranch(hookCwd) || state.branch,
+        summary: parsed.summary || prompts[0]?.slice(0, 200) || 'No summary',
+        filesChanged,
+        promptCount: prompts.length,
+        linesAdded: gitCapture.linesAdded,
+        linesRemoved: gitCapture.linesRemoved,
+        openTodos: todos,
+      });
+      debugLog('session-end', 'session memory written');
+    } catch (err: any) {
+      debugLog('session-end', 'session memory error (non-fatal)', { message: err.message });
     }
   } catch (err: any) {
     debugLog('session-end', 'ERROR', { message: err.message, stack: err.stack });
