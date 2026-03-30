@@ -476,6 +476,56 @@ export async function sessionEndCommand(id: string) {
   if (localCleaned) {
     console.log(chalk.green(`  Local state cleaned.`));
   }
+
+  // 4. Update origin-sessions git branch — mark as ended
+  try {
+    const repoPath = getGitRoot();
+    if (repoPath) {
+      const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+      const BRANCH = 'origin-sessions';
+      // Check if branch exists
+      execSync(`git rev-parse refs/heads/${BRANCH}`, execOpts);
+      const tree = execSync(`git ls-tree --name-only refs/heads/${BRANCH} sessions/`, execOpts).trim();
+      const sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
+
+      for (const dir of sessionDirs) {
+        const safeId = dir.replace('sessions/', '');
+        if (safeId === id || safeId.startsWith(id) || id.startsWith(safeId.slice(0, 8))) {
+          try {
+            const metaRaw = execSync(`git show refs/heads/${BRANCH}:${dir}/metadata.json`, execOpts).trim();
+            const metadata = JSON.parse(metaRaw);
+            if (metadata.status === 'running') {
+              // Use writeSessionFiles to update the branch
+              const { writeSessionFiles } = await import('../local-entrypoint.js');
+              writeSessionFiles(repoPath, {
+                sessionId: metadata.sessionId,
+                model: metadata.model,
+                startedAt: metadata.startedAt,
+                endedAt: new Date().toISOString(),
+                durationMs: Date.now() - new Date(metadata.startedAt).getTime(),
+                status: 'ended',
+                costUsd: metadata.cost?.usd || 0,
+                tokensUsed: metadata.tokens?.total || 0,
+                inputTokens: metadata.tokens?.input || 0,
+                outputTokens: metadata.tokens?.output || 0,
+                toolCalls: metadata.toolCalls || 0,
+                linesAdded: metadata.lines?.added || 0,
+                linesRemoved: metadata.lines?.removed || 0,
+                prompts: metadata.prompts || [],
+                filesChanged: metadata.filesChanged || [],
+                git: metadata.git || { branch: '', headBefore: '', headAfter: '', commitShas: [] },
+                summary: metadata.summary || '',
+                originUrl: metadata.originUrl || '',
+                changes: [],
+              });
+              console.log(chalk.green(`  Updated origin-sessions branch.`));
+            }
+          } catch { /* skip */ }
+          break;
+        }
+      }
+    }
+  } catch { /* origin-sessions branch doesn't exist or not in git repo */ }
 }
 
 /**

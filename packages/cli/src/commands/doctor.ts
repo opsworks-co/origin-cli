@@ -150,9 +150,13 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
                 console.log(chalk.gray(`    Stale running: ${dir} — ${metadata.model} — ${ageHrs.toFixed(1)}h`));
               }
               if (opts?.fix) {
-                // Rewrite metadata with status: 'ended' and capture git data
+                // Rewrite metadata with status: 'ended' — use existing metadata values,
+                // only try captureGitState as a fallback for missing data
+                let gitCapture: ReturnType<typeof captureGitState> | null = null;
                 try {
-                  const gitCapture = captureGitState(repoPath, metadata.git?.headBefore || null);
+                  gitCapture = captureGitState(repoPath, metadata.git?.headBefore || null);
+                } catch { /* git state capture failed — use metadata as-is */ }
+                try {
                   writeSessionFiles(repoPath, {
                     sessionId: metadata.sessionId,
                     model: metadata.model,
@@ -165,19 +169,23 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
                     inputTokens: metadata.tokens?.input || 0,
                     outputTokens: metadata.tokens?.output || 0,
                     toolCalls: metadata.toolCalls || 0,
-                    linesAdded: metadata.lines?.added || gitCapture.linesAdded || 0,
-                    linesRemoved: metadata.lines?.removed || gitCapture.linesRemoved || 0,
-                    prompts: [],
+                    linesAdded: metadata.lines?.added || gitCapture?.linesAdded || 0,
+                    linesRemoved: metadata.lines?.removed || gitCapture?.linesRemoved || 0,
+                    prompts: metadata.prompts || [],
                     filesChanged: metadata.filesChanged?.length > 0
                       ? metadata.filesChanged
-                      : (gitCapture.commitDetails?.flatMap(c => c.filesChanged) || []),
+                      : (gitCapture?.commitDetails?.flatMap((c: any) => c.filesChanged) || []),
                     git: metadata.git || { branch: '', headBefore: '', headAfter: '', commitShas: [] },
                     summary: metadata.summary || '',
                     originUrl: metadata.originUrl || '',
                     changes: [],
                   });
-                } catch { /* best effort */ }
-                fixed++;
+                  fixed++;
+                } catch {
+                  if (opts?.verbose) {
+                    console.log(chalk.red(`    ✗ Failed to fix ${dir}`));
+                  }
+                }
               }
             }
           }
