@@ -596,8 +596,10 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   // Cursor sends session_id but it changes per conversation/prompt — not stable.
   // Only treat session_id as a stable identifier for agents that keep it consistent
   // (Claude Code, Windsurf). For others (Cursor, Codex, Gemini), ignore it.
+  // Use the original hook command slug (agentSlug) for behavior checks, not the
+  // overridden finalAgentSlug which may be a custom name like "claude-front".
   const agentsWithStableSessionId = ['claude-code', 'windsurf'];
-  const hasStableSessionId = agentsWithStableSessionId.includes(finalAgentSlug || '');
+  const hasStableSessionId = agentsWithStableSessionId.includes(agentSlug || '');
   const claudeSessionId = hasStableSessionId ? (input.session_id || '') : '';
   let transcriptPath = input.transcript_path || '';
 
@@ -630,8 +632,8 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   // BUT for Cursor/Codex, session-start fires on every prompt — don't end previous,
   // just reuse the existing session.
   const agentsWithPerPromptSessionStart = ['cursor', 'codex'];
-  if (!claudeSessionId && !agentsWithPerPromptSessionStart.includes(finalAgentSlug || '')) {
-    const staleSessions = finalAgentSlug ? listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug)) : listActiveSessions(repoPath);
+  if (!claudeSessionId && !agentsWithPerPromptSessionStart.includes(agentSlug || '')) {
+    const staleSessions = agentSlug ? listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, agentSlug)) : listActiveSessions(repoPath);
     for (const stale of staleSessions) {
       debugLog('session-start', 'cleaning up stale session for same agent', {
         staleSessionId: stale.sessionId,
@@ -663,7 +665,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   //   but clean up old orphaned ones first.
   // First, clean up orphaned sessions whose heartbeats died (e.g. Mac sleep).
   const agentsWithSessionReuse = ['cursor']; // Only Cursor reuses sessions
-  if (agentsWithPerPromptSessionStart.includes(finalAgentSlug || '')) {
+  if (agentsWithPerPromptSessionStart.includes(agentSlug || '')) {
     const allActive = listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug || ''));
     for (const s of allActive) {
       const hbPidFile = path.join(os.homedir(), '.origin', 'heartbeats', `${s.sessionId}.pid`);
@@ -696,8 +698,8 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     // For Cursor only: look for a valid active session to reuse
     // Codex always gets a new session — skip reuse entirely.
     let existing: SessionState | null = null;
-    if (agentsWithSessionReuse.includes(finalAgentSlug || '')) {
-      existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || '')) || null;
+    if (agentsWithSessionReuse.includes(agentSlug || '')) {
+      existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, agentSlug || '')) || null;
       // Also check global archive — the .git/ file might have been cleaned up
       if (!existing) {
         try {
@@ -710,7 +712,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
               if (!s?.sessionId || !s?.startedAt) continue;
               if (Date.now() - new Date(s.startedAt).getTime() > MAX_AGE_MS) continue;
               if (s.status === 'ENDED' && s.endedAt) continue;
-              if (s.repoPath === repoPath && sessionMatchesAgent(s, finalAgentSlug || '')) {
+              if (s.repoPath === repoPath && sessionMatchesAgent(s, agentSlug || '')) {
                 existing = s;
                 break;
               }
@@ -740,7 +742,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         const attributionCtx = buildAttributionContext(repoPath);
         if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
       } catch {}
-      const isCursorReuse = finalAgentSlug && finalAgentSlug === 'cursor';
+      const isCursorReuse = agentSlug === 'cursor';
       const outputKeyReuse = isCursorReuse ? 'additional_context' : 'systemMessage';
       process.stdout.write(JSON.stringify({ [outputKeyReuse]: systemMsg }));
 
@@ -778,7 +780,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
 
   // Auto-discover Gemini transcript if not provided via stdin
-  if (!transcriptPath && (finalAgentSlug === 'gemini' || agentSlug === 'gemini')) {
+  if (!transcriptPath && agentSlug === 'gemini') {
     transcriptPath = discoverGeminiTranscriptPath() || '';
     if (transcriptPath) debugLog('session-start', 'auto-discovered transcript path', { transcriptPath });
   }
@@ -787,7 +789,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   let model = input.model || '';
   if (!model || model === 'unknown' || model === 'default') {
     // Cursor always sends model:"default" — try to read real model from its SQLite DB
-    if (finalAgentSlug === 'cursor' && input.conversation_id) {
+    if (agentSlug === 'cursor' && input.conversation_id) {
       const cursorModel = getCursorModelFromDb(input.conversation_id);
       if (cursorModel) {
         model = cursorModel;
@@ -961,8 +963,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     }
 
     // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
-    const cursorAgents = ['cursor'];
-    const isCursor = finalAgentSlug && cursorAgents.includes(finalAgentSlug);
+    const isCursor = agentSlug === 'cursor';
     const outputKey = isCursor ? 'additional_context' : 'systemMessage';
     const output = JSON.stringify({ [outputKey]: systemMsg });
     process.stdout.write(output);
@@ -1093,9 +1094,11 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           saveAgentConfig(autoAgentConfig);
         }
         const repoConfig = loadRepoConfig(repoPath);
-        const finalAgentSlug = repoConfig?.agent || agentSlug || autoAgentConfig.agentSlug || undefined;
+        const baseSlug = repoConfig?.agent || agentSlug || autoAgentConfig.agentSlug || undefined;
+        const slugOverride = baseSlug && autoConfig?.agentSlugs?.[baseSlug];
+        const finalAgentSlug = slugOverride || baseSlug;
         const branch = getBranch(hookCwd);
-        const model = input.model || (finalAgentSlug === 'gemini' ? 'gemini' : finalAgentSlug === 'codex' ? 'codex' : 'claude');
+        const model = input.model || (agentSlug === 'gemini' ? 'gemini' : agentSlug === 'codex' ? 'codex' : 'claude');
         const autoTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
 
         // Get git remote URL for better repo matching on the server

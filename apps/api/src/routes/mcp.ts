@@ -280,13 +280,21 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       // Try to match the tool type (claude-code, gemini, etc.) to an allowed agent
       const slugLower = agentSlug.toLowerCase();
       const prefix = slugLower.split('-')[0]; // "claude-code" → "claude"
-      // Exact match first
+      // 1. Exact slug or name match (highest priority)
       agent = allowedAgents.find((a) => {
-        const n = (a.name || '').toLowerCase();
         const s = (a.slug || '').toLowerCase();
-        return s === slugLower || s === prefix || n === slugLower || n === prefix;
+        const n = (a.name || '').toLowerCase();
+        return s === slugLower || n === slugLower;
       }) || null;
-      // Fuzzy: name or slug contains the tool prefix
+      // 2. Prefix match on slug/name (e.g. "claude-code" → prefix "claude" matches agent slug "claude")
+      if (!agent) {
+        agent = allowedAgents.find((a) => {
+          const s = (a.slug || '').toLowerCase();
+          const n = (a.name || '').toLowerCase();
+          return s === prefix || n === prefix;
+        }) || null;
+      }
+      // 3. Fuzzy: name or slug contains the tool prefix
       if (!agent) {
         agent = allowedAgents.find((a) => {
           const n = (a.name || '').toLowerCase();
