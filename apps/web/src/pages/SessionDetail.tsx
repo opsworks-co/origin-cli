@@ -71,17 +71,12 @@ export default function SessionDetail() {
   // Elapsed timer for running sessions — use durationMs when available
   useEffect(() => {
     if (!session || session.status !== 'RUNNING') return;
+    // If CLI already reported a duration, use it as the starting point
+    const baseMs = session.durationMs > 0 ? session.durationMs : 0;
+    const timerStart = Date.now();
     const update = () => {
-      if (session.durationMs && session.durationMs > 0) {
-        // Use the CLI-reported duration as base, add time since last API update
-        const baseSec = Math.floor(session.durationMs / 1000);
-        const sinceLast = session.updatedAt
-          ? Math.max(0, Math.floor((Date.now() - new Date(session.updatedAt).getTime()) / 1000))
-          : 0;
-        setElapsed(baseSec + sinceLast);
-      } else if (session.startedAt) {
-        setElapsed(Math.floor((Date.now() - new Date(session.startedAt).getTime()) / 1000));
-      }
+      const sincePageLoad = Date.now() - timerStart;
+      setElapsed(Math.floor((baseMs + sincePageLoad) / 1000));
     };
     update();
     const interval = setInterval(update, 1000);
