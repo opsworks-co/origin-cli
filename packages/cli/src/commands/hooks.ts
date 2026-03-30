@@ -582,13 +582,17 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   // Resolve agent slug: .origin.json → agentSlugs override → hook command slug → saved default → undefined
   const repoConfig = loadRepoConfig(repoPath);
   const baseSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
-  // Apply per-tool slug override from config (e.g. agentSlugs.cursor = "cursor-frontend")
-  const slugOverride = baseSlug && config?.agentSlugs?.[baseSlug];
+  // Apply per-tool slug override from config (e.g. agentSlugs.claude-code = "claude-front")
+  // Check both the hook command slug and the resolved base slug as override keys
+  const slugOverrides = config?.agentSlugs || {};
+  const slugOverride = (agentSlug && slugOverrides[agentSlug]) || (baseSlug && slugOverrides[baseSlug]) || undefined;
   const finalAgentSlug = slugOverride || baseSlug;
   debugLog('session-start', 'agent resolved', {
     fromRepoConfig: repoConfig?.agent,
     fromHookCommand: agentSlug,
     fromSavedDefault: agentConfig.agentSlug,
+    baseSlug,
+    configAgentSlugs: slugOverrides,
     slugOverride: slugOverride || null,
     final: finalAgentSlug,
   });
@@ -1095,7 +1099,8 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         }
         const repoConfig = loadRepoConfig(repoPath);
         const baseSlug = repoConfig?.agent || agentSlug || autoAgentConfig.agentSlug || undefined;
-        const slugOverride = baseSlug && autoConfig?.agentSlugs?.[baseSlug];
+        const autoSlugs = autoConfig?.agentSlugs || {};
+        const slugOverride = (agentSlug && autoSlugs[agentSlug]) || (baseSlug && autoSlugs[baseSlug]) || undefined;
         const finalAgentSlug = slugOverride || baseSlug;
         const branch = getBranch(hookCwd);
         const model = input.model || (agentSlug === 'gemini' ? 'gemini' : agentSlug === 'codex' ? 'codex' : 'claude');
