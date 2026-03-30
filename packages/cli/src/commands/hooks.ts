@@ -1486,56 +1486,28 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
     // For agents without transcripts (Codex, Gemini, Aider, Cursor): synthesize
     // prompt→file mappings so prompts are visible in the UI even without file changes.
+    // Strategy: build mapping for CURRENT prompt only, combine with previously saved mappings.
     if (promptMappings.length === 0 && prompts.length > 0) {
-      // Helper: get diff for specific commits
-      const getCommitDiff = (shas: string[]): string => {
-        if (shas.length === 0) return gitCapture.diff || '';
-        try {
-          return shas.filter(sha => /^[a-fA-F0-9]+$/.test(sha)).map(sha => {
-            try {
-              return execSync(`git show ${sha} --format="" --patch`, {
-                cwd: state.repoPath, encoding: 'utf-8',
-                stdio: ['pipe', 'pipe', 'pipe'],
-                maxBuffer: 5 * 1024 * 1024,
-              }).trim();
-            } catch { return ''; }
-          }).filter(Boolean).join('\n');
-        } catch { return ''; }
+      const previousMappings = state.completedPromptMappings || [];
+      const currentPromptIdx = prompts.length - 1;
+      const currentPromptText = prompts[currentPromptIdx] || '';
+
+      // Build mapping for current prompt only (gitCapture already scoped to this prompt via headShaAtLastStop)
+      const currentMapping = {
+        promptIndex: currentPromptIdx,
+        promptText: currentPromptText.slice(0, 1000),
+        filesChanged: filesChanged,
+        diff: (gitCapture.diff || '').slice(0, 200_000),
       };
 
-      if (prompts.length === 1) {
-        // Single prompt → all files + full diff
-        promptMappings = [{
-          promptIndex: 0,
-          promptText: prompts[0].slice(0, 1000),
-          filesChanged: filesChanged,
-          diff: (gitCapture.diff || '').slice(0, 200_000),
-        }];
-      } else {
-        // Multiple prompts → distribute commits across prompts proportionally
-        const commitsPerPrompt = Math.max(1, Math.ceil(gitCapture.commitDetails.length / prompts.length));
-        promptMappings = prompts.map((prompt, idx) => {
-          const startCommit = idx * commitsPerPrompt;
-          const endCommit = Math.min(startCommit + commitsPerPrompt, gitCapture.commitDetails.length);
-          const promptFiles = new Set<string>();
-          const commitShas: string[] = [];
-          for (let i = startCommit; i < endCommit; i++) {
-            commitShas.push(gitCapture.commitDetails[i].sha);
-            for (const f of gitCapture.commitDetails[i].filesChanged) promptFiles.add(f);
-          }
-          // If no commits mapped to this prompt, use all files as fallback for the last prompt
-          if (promptFiles.size === 0 && idx === prompts.length - 1) {
-            for (const f of filesChanged) promptFiles.add(f);
-          }
-          return {
-            promptIndex: idx,
-            promptText: prompt.slice(0, 1000),
-            filesChanged: Array.from(promptFiles),
-            diff: getCommitDiff(commitShas).slice(0, 200_000),
-          };
-        });
-      }
-      debugLog('stop', 'synthesized prompt mappings from git', { count: promptMappings.length });
+      // Combine previous mappings + current
+      promptMappings = [...previousMappings, currentMapping];
+      debugLog('stop', 'synthesized prompt mapping (incremental)', {
+        currentPromptIdx,
+        previousCount: previousMappings.length,
+        totalCount: promptMappings.length,
+        filesChanged: filesChanged.length,
+      });
     }
 
     if (connected) {
@@ -1613,6 +1585,15 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
     // Update per-prompt baseline so next prompt only sees its own changes
     state.headShaAtLastStop = gitCapture.headAfter;
+    // Save accumulated prompt mappings so next stop can include previous prompts' data
+    if (promptMappings.length > 0) {
+      state.completedPromptMappings = promptMappings.map(pm => ({
+        promptIndex: pm.promptIndex,
+        promptText: pm.promptText,
+        filesChanged: pm.filesChanged,
+        diff: pm.diff,
+      }));
+    }
     // Re-save state with RUNNING status FIRST so it survives any errors below
     state.status = 'RUNNING';
     saveSessionState(state, found!.saveCwd, state.sessionTag);

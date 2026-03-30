@@ -33,6 +33,12 @@ export interface SessionState {
   repoPath: string;           // Git repo root path OR working directory
   headShaAtStart: string | null; // HEAD commit SHA when session started (null if no git)
   headShaAtLastStop: string | null; // HEAD SHA after last prompt stop (for per-prompt diffs)
+  completedPromptMappings?: Array<{  // Accumulated per-prompt file change mappings
+    promptIndex: number;
+    promptText: string;
+    filesChanged: string[];
+    diff: string;
+  }>;
   branch: string | null;      // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support
   subagents?: SubagentRecord[];
