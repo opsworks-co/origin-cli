@@ -88,6 +88,34 @@ function getCursorModelFromDb(conversationId: string): string | null {
   return null;
 }
 
+/**
+ * Read Cursor conversation summary from its SQLite DB.
+ * Returns { title, tldr, overview, summaryBullets } or null.
+ * Used to populate session output when no transcript is available.
+ */
+function getCursorConversationSummary(conversationId: string): { title: string; tldr: string; overview: string; summaryBullets: string } | null {
+  try {
+    if (!/^[a-zA-Z0-9_-]+$/.test(conversationId)) return null;
+    const dbPath = path.join(os.homedir(), '.cursor', 'ai-tracking', 'ai-code-tracking.db');
+    if (!fs.existsSync(dbPath)) return null;
+
+    const result = execSync(
+      `sqlite3 -separator '|||' "${dbPath}" "SELECT title, tldr, overview, summaryBullets FROM conversation_summaries WHERE conversationId='${conversationId.replace(/'/g, "''")}' LIMIT 1"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
+    ).trim();
+    if (!result) return null;
+    const parts = result.split('|||');
+    return {
+      title: (parts[0] || '').trim(),
+      tldr: (parts[1] || '').trim(),
+      overview: (parts[2] || '').trim(),
+      summaryBullets: (parts[3] || '').trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ─── Session Write Helper ─────────────────────────────────────────────────
 
 import type { ParsedTranscript, PromptFileMapping } from '../transcript.js';
@@ -551,13 +579,17 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
   debugLog('session-start', 'repo path resolved', { repoPath, hookCwd, discovered: repoPath !== getGitRoot(hookCwd) });
 
-  // Resolve agent slug: .origin.json → hook command slug → saved default → undefined
+  // Resolve agent slug: .origin.json → agentSlugs override → hook command slug → saved default → undefined
   const repoConfig = loadRepoConfig(repoPath);
-  const finalAgentSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
+  const baseSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
+  // Apply per-tool slug override from config (e.g. agentSlugs.cursor = "cursor-frontend")
+  const slugOverride = baseSlug && config?.agentSlugs?.[baseSlug];
+  const finalAgentSlug = slugOverride || baseSlug;
   debugLog('session-start', 'agent resolved', {
     fromRepoConfig: repoConfig?.agent,
     fromHookCommand: agentSlug,
     fromSavedDefault: agentConfig.agentSlug,
+    slugOverride: slugOverride || null,
     final: finalAgentSlug,
   });
 
@@ -626,9 +658,11 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     }
   }
 
-  // For Cursor/Codex: if an existing session is still active, reuse it
-  // instead of creating a new one. Output the system message and return.
+  // For Cursor: session-start fires on every prompt, so reuse existing session.
+  // For Codex: session-start fires per conversation, so always create new session
+  //   but clean up old orphaned ones first.
   // First, clean up orphaned sessions whose heartbeats died (e.g. Mac sleep).
+  const agentsWithSessionReuse = ['cursor']; // Only Cursor reuses sessions
   if (agentsWithPerPromptSessionStart.includes(finalAgentSlug || '')) {
     const allActive = listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug || ''));
     for (const s of allActive) {
@@ -659,27 +693,31 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       }
     }
 
-    // Now look for a valid active session to reuse
-    let existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || ''));
-    // Also check global archive — the .git/ file might have been cleaned up
-    if (!existing) {
-      try {
-        const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
-        const entries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
-        const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
-        for (const entry of entries) {
-          try {
-            const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
-            if (!s?.sessionId || !s?.startedAt) continue;
-            if (Date.now() - new Date(s.startedAt).getTime() > MAX_AGE_MS) continue;
-            if (s.status === 'ENDED' && s.endedAt) continue;
-            if (s.repoPath === repoPath && sessionMatchesAgent(s, finalAgentSlug || '')) {
-              existing = s;
-              break;
-            }
-          } catch { /* skip corrupt file */ }
-        }
-      } catch { /* no archive dir */ }
+    // For Cursor only: look for a valid active session to reuse
+    // Codex always gets a new session — skip reuse entirely.
+    let existing: SessionState | null = null;
+    if (agentsWithSessionReuse.includes(finalAgentSlug || '')) {
+      existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || '')) || null;
+      // Also check global archive — the .git/ file might have been cleaned up
+      if (!existing) {
+        try {
+          const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
+          const entries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
+          const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+          for (const entry of entries) {
+            try {
+              const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
+              if (!s?.sessionId || !s?.startedAt) continue;
+              if (Date.now() - new Date(s.startedAt).getTime() > MAX_AGE_MS) continue;
+              if (s.status === 'ENDED' && s.endedAt) continue;
+              if (s.repoPath === repoPath && sessionMatchesAgent(s, finalAgentSlug || '')) {
+                existing = s;
+                break;
+              }
+            } catch { /* skip corrupt file */ }
+          }
+        } catch { /* no archive dir */ }
+      }
     }
     if (existing) {
       debugLog('session-start', 'reusing existing session for per-prompt agent', {
@@ -860,6 +898,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       prompts: [],
       repoPath,
       headShaAtStart: getHeadSha(hookCwd),
+      headShaAtLastStop: null,
       branch,
       sessionTag,
       agentSystemPrompt,
@@ -1094,6 +1133,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           prompts: [],
           repoPath,
           headShaAtStart: getHeadSha(hookCwd),
+          headShaAtLastStop: null,
           branch,
           sessionTag: autoTag,
           agentSystemPrompt,
@@ -1134,6 +1174,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             prompts: [],
             repoPath,
             headShaAtStart: getHeadSha(hookCwd),
+            headShaAtLastStop: null,
             branch: fbBranch,
             sessionTag: fbTag,
           };
@@ -1346,8 +1387,32 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     const parsed = parseTranscript(state.transcriptPath);
 
     // Format transcript for dashboard display (converts JSONL → [{role, content}] JSON)
-    const displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
+    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
     debugLog('stop', 'formatted transcript', { displayLength: displayTranscript.length });
+
+    // For Cursor: synthesize transcript from conversation_summaries DB when no real transcript
+    if (!displayTranscript && agentSlug === 'cursor' && input.conversation_id) {
+      const summary = getCursorConversationSummary(input.conversation_id);
+      if (summary) {
+        debugLog('stop', 'cursor summary from DB', { title: summary.title, hasTldr: !!summary.tldr });
+        const turns: Array<{ role: string; content: string }> = [];
+        // Add user prompts
+        for (const p of state.prompts) {
+          turns.push({ role: 'user', content: p });
+          // Build a response from available summary data
+          const responseParts: string[] = [];
+          if (summary.tldr) responseParts.push(summary.tldr);
+          if (summary.overview && summary.overview !== summary.tldr) responseParts.push(summary.overview);
+          if (summary.summaryBullets) responseParts.push(summary.summaryBullets);
+          if (responseParts.length > 0) {
+            turns.push({ role: 'assistant', content: responseParts.join('\n\n') });
+          }
+        }
+        if (turns.length > 0) {
+          displayTranscript = JSON.stringify(turns);
+        }
+      }
+    }
 
     // For Codex: supplement with data from its SQLite database when transcript is missing
     const codexData = (!state.transcriptPath && parsed.tokensUsed === 0)
@@ -1406,7 +1471,9 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     debugLog('stop', 'prompt mappings', { count: promptMappings.length });
 
     // Fall back to git-captured files if transcript parsing didn't find any
-    const gitCapture = captureGitState(state.repoPath, state.headShaAtStart);
+    // Use per-prompt baseline (headShaAtLastStop) so each prompt only shows its own changes
+    const promptBaseline = state.headShaAtLastStop || state.headShaAtStart;
+    const gitCapture = captureGitState(state.repoPath, promptBaseline);
     let filesChanged = parsed.filesChanged;
     if (filesChanged.length === 0 && gitCapture.commitDetails.length > 0) {
       const gitFiles = new Set<string>();
@@ -1544,6 +1611,8 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       debugLog('stop', 'git notes error (non-fatal)', { message: notesErr.message });
     }
 
+    // Update per-prompt baseline so next prompt only sees its own changes
+    state.headShaAtLastStop = gitCapture.headAfter;
     // Re-save state with RUNNING status FIRST so it survives any errors below
     state.status = 'RUNNING';
     saveSessionState(state, found!.saveCwd, state.sessionTag);
