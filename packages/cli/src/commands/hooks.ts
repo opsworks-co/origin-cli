@@ -1488,25 +1488,32 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       debugLog('stop', 'using git-captured files (transcript had none)', { count: filesChanged.length });
     }
 
-    // For agents without transcripts (Codex, Gemini, Aider, Cursor): synthesize
-    // prompt→file mappings so prompts are visible in the UI even without file changes.
-    // Strategy: build mapping for CURRENT prompt only, combine with previously saved mappings.
-    if (promptMappings.length === 0 && prompts.length > 0) {
+    // Build prompt→file mappings for the current prompt.
+    // Always merge with previously saved mappings so the API's deleteMany+recreate
+    // doesn't lose older prompts.
+    {
       const previousMappings = state.completedPromptMappings || [];
       const currentPromptIdx = prompts.length - 1;
       const currentPromptText = prompts[currentPromptIdx] || '';
 
-      // Build mapping for current prompt only (gitCapture already scoped to this prompt via headShaAtLastStop)
-      const currentMapping = {
-        promptIndex: currentPromptIdx,
-        promptText: currentPromptText.slice(0, 1000),
-        filesChanged: filesChanged,
-        diff: (gitCapture.diff || '').slice(0, 200_000),
-      };
+      if (promptMappings.length === 0 && prompts.length > 0) {
+        // No transcript-based mappings — synthesize from git for current prompt
+        const currentMapping = {
+          promptIndex: currentPromptIdx,
+          promptText: currentPromptText.slice(0, 1000),
+          filesChanged: filesChanged,
+          diff: (gitCapture.diff || '').slice(0, 200_000),
+        };
+        promptMappings = [...previousMappings, currentMapping];
+      } else if (promptMappings.length > 0 && previousMappings.length > 0) {
+        // Transcript gave us mappings for current prompt — merge with saved previous ones.
+        // Deduplicate by promptIndex (current prompt's data wins over saved).
+        const currentIndices = new Set(promptMappings.map(pm => pm.promptIndex));
+        const kept = previousMappings.filter(pm => !currentIndices.has(pm.promptIndex));
+        promptMappings = [...kept, ...promptMappings];
+      }
 
-      // Combine previous mappings + current
-      promptMappings = [...previousMappings, currentMapping];
-      debugLog('stop', 'synthesized prompt mapping (incremental)', {
+      debugLog('stop', 'prompt mappings (merged)', {
         currentPromptIdx,
         previousCount: previousMappings.length,
         totalCount: promptMappings.length,

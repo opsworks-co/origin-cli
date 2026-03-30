@@ -190,6 +190,15 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     if (platformStatus && platformStatus !== 'RUNNING' && s.status?.toLowerCase() === 'running') {
       s.status = platformStatus;
     }
+    // If still RUNNING and connected, do a direct lookup (repo filter may have excluded it)
+    if (s.status?.toLowerCase() === 'running' && isConnectedMode()) {
+      try {
+        const detail = await api.getSession(s.sessionId.slice(0, 8)) as any;
+        if (detail && detail.status && detail.status !== 'RUNNING') {
+          s.status = detail.status;
+        }
+      } catch { /* session not found on platform — keep local status */ }
+    }
     merged.push({ type: 'local', data: s });
   }
   for (const s of platformSessions) {
