@@ -29,6 +29,7 @@ import {
 } from '../services/github-integration.js';
 import { onSessionEvent, SessionEvent, emitSessionEvent } from '../services/session-events.js';
 import { callClaude } from './chat.js';
+import { getOrgLLMKey, getOrgLLMModel } from './settings.js';
 import { runAIReview } from '../services/ai-review.js';
 
 const router = Router();
@@ -184,7 +185,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     const status = req.query.status as string;
-    if (status === 'reviewed') {
+    if (status === 'RUNNING' || status === 'COMPLETED') {
+      where.status = status;
+    } else if (status === 'reviewed') {
       where.review = { isNot: null };
     } else if (status === 'unreviewed') {
       where.review = null;
@@ -905,10 +908,15 @@ router.post('/:id/end', async (req: AuthRequest, res: Response) => {
     const idParam = req.params.id as string;
 
     // Support both full UUID and short prefix (e.g. "4f39c580")
+    // Sessions may not have a linked commit yet, so also match by org via repo or user
+    const idFilter = idParam.length < 36 ? { startsWith: idParam } : idParam;
     const session = await prisma.codingSession.findFirst({
       where: {
-        id: idParam.length < 36 ? { startsWith: idParam } : idParam,
-        commit: { repo: { orgId: req.user!.orgId } },
+        id: idFilter,
+        OR: [
+          { commit: { repo: { orgId: req.user!.orgId } } },
+          { userId: req.user!.id },
+        ],
       },
     });
 
@@ -922,7 +930,8 @@ router.post('/:id/end', async (req: AuthRequest, res: Response) => {
     }
 
     if (session.status !== 'RUNNING') {
-      return res.status(400).json({ error: 'Session is not running' });
+      // Already ended — return success (idempotent)
+      return res.json({ ok: true, message: 'Session already ended' });
     }
 
     const now = new Date();
@@ -1483,13 +1492,23 @@ router.post('/:id/ask', async (req: AuthRequest, res: Response) => {
       msgs.push({ role: 'user', content: question });
     }
 
-    const answer = await callClaude(systemPrompt, msgs, 2048);
+    // Use org-level LLM config (same key configured in Settings)
+    const orgId = req.user!.orgId;
+    const [orgKey, orgModel] = await Promise.all([
+      getOrgLLMKey(orgId),
+      getOrgLLMModel(orgId),
+    ]);
+
+    const answer = await callClaude(systemPrompt, msgs, 2048, {
+      apiKey: orgKey || undefined,
+      model: orgModel,
+    });
 
     res.json({ answer });
   } catch (err: any) {
     console.error('Ask session author error:', err);
     if (err.message === 'AI chat is not configured') {
-      return res.status(503).json({ error: 'AI chat is not configured. Set ANTHROPIC_API_KEY.' });
+      return res.status(503).json({ error: 'AI chat is not configured. Set ANTHROPIC_API_KEY in Settings → Integrations.' });
     }
     res.status(500).json({ error: 'Internal server error' });
   }
