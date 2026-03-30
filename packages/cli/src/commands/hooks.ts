@@ -1033,41 +1033,45 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   if (!state) {
     // Before auto-creating, try to recover from archive (session state file may have been
     // deleted by a stale cleanup or heartbeat, but the archive still has the session).
-    // This is critical for Cursor/Codex where session-start fires once per conversation
-    // but user-prompt-submit fires per prompt.
-    try {
-      const recoveryRepoPath = discoverGitRoot(hookCwd) || hookCwd;
-      const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
-      const archiveEntries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
-      const MAX_RECOVERY_AGE_MS = 24 * 60 * 60 * 1000;
-      let bestCandidate: SessionState | null = null;
-      let bestAge = Infinity;
-      for (const entry of archiveEntries) {
-        try {
-          const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
-          if (!s?.sessionId || !s?.startedAt) continue;
-          const age = Date.now() - new Date(s.startedAt).getTime();
-          if (age > MAX_RECOVERY_AGE_MS) continue;
-          if (s.status === 'ENDED' && s.endedAt) continue;
-          if (s.repoPath !== recoveryRepoPath) continue;
-          if (agentSlug && !sessionMatchesAgent(s, agentSlug)) continue;
-          if (age < bestAge) {
-            bestCandidate = s;
-            bestAge = age;
-          }
-        } catch { /* skip */ }
-      }
-      if (bestCandidate) {
-        debugLog('user-prompt-submit', 'recovered session from archive', {
-          sessionId: bestCandidate.sessionId,
-          tag: bestCandidate.sessionTag,
-          ageMin: Math.round(bestAge / 60000),
-        });
-        // Restore the .git state file so subsequent hooks can find it
-        saveSessionState(bestCandidate, recoveryRepoPath, bestCandidate.sessionTag);
-        state = bestCandidate;
-      }
-    } catch { /* no archive dir — fall through to auto-create */ }
+    // Only for agents that REUSE sessions (Cursor). For Codex and others that create
+    // new sessions per conversation, recovering old sessions causes stale headShaAtStart
+    // which makes diffs show old changes.
+    const agentsWithArchiveRecovery = ['cursor'];
+    if (agentsWithArchiveRecovery.includes(agentSlug || '')) {
+      try {
+        const recoveryRepoPath = discoverGitRoot(hookCwd) || hookCwd;
+        const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
+        const archiveEntries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
+        const MAX_RECOVERY_AGE_MS = 24 * 60 * 60 * 1000;
+        let bestCandidate: SessionState | null = null;
+        let bestAge = Infinity;
+        for (const entry of archiveEntries) {
+          try {
+            const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
+            if (!s?.sessionId || !s?.startedAt) continue;
+            const age = Date.now() - new Date(s.startedAt).getTime();
+            if (age > MAX_RECOVERY_AGE_MS) continue;
+            if (s.status === 'ENDED' && s.endedAt) continue;
+            if (s.repoPath !== recoveryRepoPath) continue;
+            if (agentSlug && !sessionMatchesAgent(s, agentSlug)) continue;
+            if (age < bestAge) {
+              bestCandidate = s;
+              bestAge = age;
+            }
+          } catch { /* skip */ }
+        }
+        if (bestCandidate) {
+          debugLog('user-prompt-submit', 'recovered session from archive', {
+            sessionId: bestCandidate.sessionId,
+            tag: bestCandidate.sessionTag,
+            ageMin: Math.round(bestAge / 60000),
+          });
+          // Restore the .git state file so subsequent hooks can find it
+          saveSessionState(bestCandidate, recoveryRepoPath, bestCandidate.sessionTag);
+          state = bestCandidate;
+        }
+      } catch { /* no archive dir — fall through to auto-create */ }
+    }
   }
   if (!state) {
     // No existing session at all — auto-create one (first prompt without SessionStart)
