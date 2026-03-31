@@ -225,7 +225,9 @@ AI Agent commits code → Post-commit hook fires → Origin detects AI process
 | Location | Purpose |
 |----------|---------|
 | `refs/notes/origin` | Per-commit AI metadata (model, session, cost, tokens) |
+| `refs/notes/origin-memory` | Session memory — accumulated summaries across sessions |
 | `origin-sessions` branch | Session transcripts, prompts, file changes |
+| `.git/origin-handoff.json` | Cross-agent handoff context (latest session) |
 | `~/.origin/config.json` | CLI config |
 | `~/.origin/git-hooks/` | Global hook scripts |
 
@@ -243,6 +245,55 @@ AI Agent commits code → Post-commit hook fires → Origin detects AI process
 | Per-file context injection | **Yes** — agents see authorship | No | No |
 | Secret scanning | **Built-in** pre-commit hook | No | No |
 | Open source | **MIT** | MIT | Closed |
+
+---
+
+## Experimental Features
+
+New developer productivity features. Free, local-first, and available now.
+
+### Cross-Agent Context Handoff
+
+Switch from Claude to Cursor (or any agent) without losing context. When a session ends, Origin saves what you were working on. The next session — even with a different agent — picks up where you left off.
+
+```bash
+# Context is injected automatically into the next agent's system prompt
+# To preview what will be passed:
+origin handoff show
+
+# To clear:
+origin handoff clear
+```
+
+What gets handed off: last prompts, files in progress, open TODOs, session summary.
+
+### Session Memory
+
+Origin remembers what happened in previous sessions. New sessions get the last 3 summaries injected, so the agent knows what was done yesterday, which files were touched, and what's still open.
+
+```bash
+origin memory show              # See accumulated session history
+origin memory clear             # Reset memory for this repo
+```
+
+Stored in git notes (`refs/notes/origin-memory`) — travels with the repo.
+
+### AI TODO Tracker
+
+TODOs mentioned in AI sessions are automatically extracted and tracked. Captures `TODO`, `FIXME`, `NOTE`, and natural language patterns like "we need to fix X later".
+
+```bash
+origin todo list                # Show all open TODOs across repos
+origin todo done <id>           # Mark as complete
+origin todo show <id>           # Show originating session context
+origin todo add "fix auth flow" # Manually add a TODO
+```
+
+### AI-Powered Explain
+
+```bash
+origin explain <id> --summarize   # AI analysis: intent, outcome, learnings, friction
+```
 
 ---
 
