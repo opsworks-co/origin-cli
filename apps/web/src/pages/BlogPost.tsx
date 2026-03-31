@@ -7,6 +7,182 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'cross-agent-handoff-session-memory': (
+    <>
+      <p>
+        You&rsquo;re deep in a Claude Code session. You&rsquo;ve refactored three files, added a new
+        API endpoint, and you&rsquo;re halfway through writing tests. Then you switch to Cursor to
+        work on the frontend that calls that endpoint.
+      </p>
+      <p>
+        Cursor has no idea what you just did. It doesn&rsquo;t know which files changed, what the
+        endpoint looks like, or that you still need to handle error cases. You spend the first 5
+        minutes re-explaining everything.
+      </p>
+      <p>
+        <strong>That&rsquo;s over.</strong> We shipped three experimental features that give AI agents
+        memory across sessions and across tools.
+      </p>
+
+      <h2>Cross-agent context handoff</h2>
+      <p>
+        When a session ends, Origin saves the context to <code>.git/origin-handoff.json</code> &mdash;
+        last prompts, files in progress, open TODOs, and a session summary. When the next session starts
+        (any agent, same repo), that context gets injected into the system prompt automatically.
+      </p>
+      <p>This is what the next agent sees:</p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div className="text-gray-500 mb-2">Injected by Origin on session-start:</div>
+        <div className="text-gray-300 mt-2">Previous session context (claude-code, 12m ago):</div>
+        <div className="text-gray-400">Summary: Refactored auth module, added /api/users endpoint</div>
+        <div className="text-gray-400">Last prompt: &ldquo;add JWT refresh token logic&rdquo;</div>
+        <div className="text-gray-400">Files in progress: src/auth.ts, src/routes/users.ts, src/middleware.ts</div>
+        <div className="text-gray-400">Changes: +145 -23 lines</div>
+        <div className="text-gray-400 mt-1">Open TODOs from previous session:</div>
+        <div className="text-gray-400">&nbsp;&nbsp;- handle token expiry edge case</div>
+        <div className="text-gray-400">&nbsp;&nbsp;- add rate limiting to /api/users</div>
+      </div>
+      <p>
+        The handoff expires after 24 hours. You can preview it anytime:
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div><span className="text-gray-500">$</span> origin handoff show</div>
+      </div>
+
+      <h2>Session memory</h2>
+      <p>
+        Handoff covers the last session. But what about the bigger picture? Session memory stores a
+        rolling log of your last 20 sessions per repo, kept in git notes (<code>refs/notes/origin-memory</code>).
+      </p>
+      <p>
+        Every new session gets the last 3 summaries injected. Your agent knows what happened yesterday,
+        which files were hot, and what&rsquo;s still unfinished &mdash; without you saying a word.
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div className="text-gray-500 mb-2">Injected by Origin on session-start:</div>
+        <div className="text-gray-300">Session history for this repo:</div>
+        <div className="text-gray-400">- [2h ago] claude-code/claude-opus-4-6: Refactored auth module, added JWT refresh</div>
+        <div className="text-gray-400">&nbsp;&nbsp;Files: src/auth.ts, src/routes/users.ts, src/middleware.ts</div>
+        <div className="text-gray-400">- [1d ago] cursor/gpt-4.1: Built user settings page, added dark mode toggle</div>
+        <div className="text-gray-400">&nbsp;&nbsp;Files: src/pages/Settings.tsx, src/theme.ts</div>
+        <div className="text-gray-400">- [2d ago] gemini/gemini-2.5-pro: Set up CI pipeline, added lint + test steps</div>
+        <div className="text-gray-400">&nbsp;&nbsp;Files: .github/workflows/ci.yml, package.json</div>
+      </div>
+      <p>
+        Memory travels with the repo (it&rsquo;s stored in git notes). Push it to your remote and
+        teammates see the same history.
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div><span className="text-gray-500">$</span> origin memory show&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span className="text-gray-600"># see all stored summaries</span></div>
+        <div><span className="text-gray-500">$</span> origin memory clear&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span className="text-gray-600"># reset memory for this repo</span></div>
+      </div>
+
+      <h2>AI TODO tracker</h2>
+      <p>
+        Half the TODOs in a codebase are born in AI conversations. &ldquo;We need to fix X later&rdquo;,
+        &ldquo;TODO: handle the edge case&rdquo;, &ldquo;we should add rate limiting&rdquo; &mdash; they
+        get said in a prompt, the agent moves on, and nobody tracks them.
+      </p>
+      <p>
+        Origin now extracts these automatically. It catches <code>TODO</code>, <code>FIXME</code>,{' '}
+        <code>NOTE</code>, and natural language patterns like &ldquo;need to fix&rdquo;,
+        &ldquo;we should&rdquo;, and &ldquo;later&rdquo;. Every extracted TODO links back to the session
+        and prompt where it originated.
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div><span className="text-gray-500">$</span> origin todo list</div>
+        <div className="mt-2">
+          <span className="text-yellow-400">#1</span>{' '}
+          <span className="text-gray-300">handle token expiry edge case</span>{' '}
+          <span className="text-gray-600">(claude-code, 2h ago)</span>
+        </div>
+        <div>
+          <span className="text-yellow-400">#2</span>{' '}
+          <span className="text-gray-300">add rate limiting to /api/users</span>{' '}
+          <span className="text-gray-600">(claude-code, 2h ago)</span>
+        </div>
+        <div>
+          <span className="text-yellow-400">#3</span>{' '}
+          <span className="text-gray-300">add dark mode to settings page</span>{' '}
+          <span className="text-gray-600">(cursor, 1d ago)</span>
+        </div>
+        <div className="mt-2">
+          <div><span className="text-gray-500">$</span> origin todo done 1</div>
+          <div><span className="text-gray-500">$</span> origin todo show 2&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span className="text-gray-600"># see originating session</span></div>
+        </div>
+      </div>
+
+      <h2>AI-powered explain</h2>
+      <p>
+        <code>origin explain</code> already shows session metadata &mdash; prompts, files, tokens, cost.
+        Now with <code>--summarize</code>, it calls Claude to generate a structured analysis:
+      </p>
+      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
+        <div><span className="text-gray-500">$</span> origin explain abc123 --summarize</div>
+        <div className="mt-2">
+          <div className="text-indigo-400">Intent:</div>
+          <div className="text-gray-400">&nbsp;&nbsp;Refactor auth module to use JWT with refresh tokens</div>
+          <div className="text-indigo-400 mt-1">Outcome:</div>
+          <div className="text-gray-400">&nbsp;&nbsp;Added JWT validation, refresh endpoint, and token middleware.</div>
+          <div className="text-gray-400">&nbsp;&nbsp;3 files changed, +145 -23 lines.</div>
+          <div className="text-indigo-400 mt-1">Friction:</div>
+          <div className="text-gray-400">&nbsp;&nbsp;Agent initially used jwt.decode instead of jwt.verify.</div>
+          <div className="text-gray-400">&nbsp;&nbsp;Required follow-up prompt to fix security issue.</div>
+          <div className="text-indigo-400 mt-1">Time saved:</div>
+          <div className="text-gray-400">&nbsp;&nbsp;~45 minutes vs manual implementation</div>
+        </div>
+      </div>
+
+      <h2>Why this matters</h2>
+      <p>
+        Every AI coding tool treats each session as a blank slate. That&rsquo;s fine for a single
+        question, but real development happens across sessions, across tools, across days.
+      </p>
+      <p>
+        Context handoff means you stop wasting the first 5 minutes of every session re-explaining
+        what you&rsquo;re doing. Session memory means the agent understands your project&rsquo;s
+        trajectory. TODO tracking means nothing falls through the cracks.
+      </p>
+      <p>
+        These features are free, local-first, and open source. All data is stored in git &mdash; no
+        cloud dependency, no vendor lock-in.
+      </p>
+
+      <h2>Get started</h2>
+      <div className="bg-gray-900 border border-indigo-500/30 rounded-lg p-6 my-6">
+        <div className="font-mono text-sm mb-2">
+          <span className="text-gray-500">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
+        </div>
+        <div className="font-mono text-sm mb-4">
+          <span className="text-gray-500">$</span> origin init
+        </div>
+        <p className="text-sm text-gray-400 mb-4">
+          Handoff and memory kick in automatically after your first completed session.
+        </p>
+        <div className="flex flex-wrap gap-4">
+          <a
+            href="https://github.com/dolobanko/origin-cli"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm transition-colors"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" /></svg>
+            GitHub
+          </a>
+          <Link
+            to="/docs"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors"
+          >
+            Read the docs
+          </Link>
+        </div>
+      </div>
+      <p className="text-gray-400 text-sm">
+        These features are experimental. We&rsquo;re iterating fast based on developer feedback.
+        Try them, break them, <a href="https://github.com/dolobanko/origin-cli/issues" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">tell us what sucks</a>.
+      </p>
+    </>
+  ),
   'ai-governance-policies-ci': (
     <>
       <p>

@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Your AI agents now remember what happened last session. Here\'s how cross-agent handoff works.',
+    slug: 'cross-agent-handoff-session-memory',
+    date: '2026-03-31',
+    author: 'Artem Dolobanko',
+    tags: ['developer-tools', 'ai-coding', 'open-source'],
+    excerpt:
+      'Switch from Claude to Cursor mid-task without losing context. Origin now saves what you were working on and injects it into the next agent\'s session — automatically. Plus session memory, AI TODO tracking, and more.',
+  },
+  {
     title: 'Your AI agents now follow company rules. Here\'s how we enforce policies across Cursor, Codex, and Claude.',
     slug: 'ai-governance-policies-ci',
     date: '2026-03-29',
