@@ -1388,6 +1388,42 @@ origin stats`}</CodeBlock>
               repository where AI agents write code.
             </P>
 
+            {/* Repos Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Repositories</span>
+              </div>
+              <div className="p-4 space-y-2">
+                {[
+                  { name: 'acme/backend', synced: true, lastActivity: '2h ago', ai: 34, commits: 156 },
+                  { name: 'acme/frontend', synced: true, lastActivity: '5h ago', ai: 28, commits: 210 },
+                  { name: 'acme/api', synced: false, lastActivity: '1d ago', ai: 42, commits: 89 },
+                ].map((r, i) => (
+                  <div key={i} className="flex items-center gap-3 bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3 hover:bg-gray-800/60 cursor-pointer">
+                    <div className="w-7 h-7 rounded bg-gray-700/50 flex items-center justify-center text-[10px] text-gray-400 font-mono">{'{}'}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-gray-200 font-medium">{r.name}</div>
+                      <div className="text-[10px] text-gray-500">{r.commits} commits &middot; last activity {r.lastActivity}</div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {r.synced ? (
+                        <><div className="w-1.5 h-1.5 rounded-full bg-green-500" /><span className="text-[10px] text-green-400">Synced</span></>
+                      ) : (
+                        <><div className="w-1.5 h-1.5 rounded-full bg-amber-500" /><span className="text-[10px] text-amber-400">Pending</span></>
+                      )}
+                    </div>
+                    <div className="text-right">
+                      <div className="text-xs text-indigo-400 font-medium">{r.ai}%</div>
+                      <div className="text-[9px] text-gray-500">AI-authored</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <H2>Importing from GitHub (Recommended)</H2>
             <P>
               If you&apos;ve connected GitHub in Settings &rarr; Integrations, you&apos;ll see an
@@ -1483,6 +1519,46 @@ origin stats`}</CodeBlock>
               tools generate the most code and cost.
             </P>
 
+            {/* Agents Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Agents</span>
+              </div>
+              <div className="p-4">
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { name: 'Claude Code', slug: 'claude-code', model: 'sonnet-4', sessions: 89, status: 'active' },
+                    { name: 'Cursor', slug: 'cursor', model: 'gpt-4o', sessions: 34, status: 'active' },
+                    { name: 'Windsurf', slug: 'windsurf', model: 'sonnet-4', sessions: 12, status: 'inactive' },
+                  ].map((a, i) => (
+                    <div key={i} className={`bg-gray-800/40 border rounded-lg p-3 ${a.status === 'active' ? 'border-gray-700/50' : 'border-gray-700/30 opacity-60'}`}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-7 h-7 rounded-lg bg-indigo-600/30 flex items-center justify-center text-[10px] text-indigo-300 font-bold">{a.name[0]}</div>
+                        <div>
+                          <div className="text-xs text-gray-200 font-medium">{a.name}</div>
+                          <div className="text-[10px] text-gray-500 font-mono">{a.slug}</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="text-gray-500">Model: <span className="text-gray-400">{a.model}</span></span>
+                        <span className="text-gray-500">{a.sessions} sessions</span>
+                      </div>
+                      <div className="mt-2 flex items-center gap-1.5">
+                        {a.status === 'active' ? (
+                          <><div className="w-1.5 h-1.5 rounded-full bg-green-500" /><span className="text-[10px] text-green-400">Active</span></>
+                        ) : (
+                          <><div className="w-1.5 h-1.5 rounded-full bg-gray-600" /><span className="text-[10px] text-gray-500">Inactive</span></>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
             <H2>Setting Up Agents</H2>
 
             <Step n={1} title="Go to Agents page">
@@ -1555,6 +1631,39 @@ Description: Codeium's AI IDE agent`}</CodeBlock>
               <strong className="text-gray-200"> client-side</strong> (via the MCP server during sessions).
               All violations are logged to the audit trail and can trigger notifications.
             </P>
+
+            {/* Policies Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Policies</span>
+              </div>
+              <div className="p-4 space-y-2">
+                {[
+                  { name: 'No sensitive files', type: 'FILE_RESTRICTION', rules: 4, active: true },
+                  { name: 'Require review for large changes', type: 'REQUIRE_REVIEW', rules: 2, active: true },
+                  { name: 'Model allowlist', type: 'MODEL_ALLOWLIST', rules: 3, active: true },
+                  { name: 'Cost limit per session', type: 'COST_LIMIT', rules: 1, active: false },
+                ].map((p, i) => (
+                  <div key={i} className="flex items-center gap-3 bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3">
+                    <div className={`w-8 h-4 rounded-full relative ${p.active ? 'bg-green-600' : 'bg-gray-600'}`}>
+                      <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${p.active ? 'right-0.5' : 'left-0.5'}`} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-gray-200 font-medium">{p.name}</div>
+                      <div className="text-[10px] text-gray-500">{p.type}</div>
+                    </div>
+                    <div className="text-[10px] text-gray-500">{p.rules} rules</div>
+                    {p.active && <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />}
+                  </div>
+                ))}
+                <div className="flex justify-center pt-2">
+                  <div className="px-3 py-1.5 border border-dashed border-gray-600 rounded-lg text-xs text-gray-500 cursor-pointer hover:border-indigo-500 hover:text-indigo-400">+ Add Policy</div>
+                </div>
+              </div>
+            </div>
 
             <Callout type="info">
               Policies are only enforced when <strong className="text-gray-200">Active</strong>.
@@ -1730,6 +1839,45 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               Manage your organization&apos;s API keys, integrations, and account settings.
             </P>
 
+            {/* Settings Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Settings &mdash; API Keys</span>
+              </div>
+              <div className="p-4">
+                {/* Tabs */}
+                <div className="flex gap-4 border-b border-gray-700/50 mb-4">
+                  <span className="text-xs text-indigo-400 border-b-2 border-indigo-400 pb-1.5 font-medium">General</span>
+                  <span className="text-xs text-gray-500 pb-1.5">Integrations</span>
+                  <span className="text-xs text-gray-500 pb-1.5">Budget</span>
+                  <span className="text-xs text-gray-500 pb-1.5">Team</span>
+                </div>
+                {/* API Keys list */}
+                <div className="space-y-2">
+                  {[
+                    { name: 'Production CLI', prefix: 'org_sk_prod_a3f8...', created: 'Jan 15', agents: 2 },
+                    { name: 'CI/CD Runner', prefix: 'org_sk_ci_b7d2...', created: 'Feb 3', agents: 1 },
+                  ].map((k, i) => (
+                    <div key={i} className="flex items-center gap-3 bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-gray-200 font-medium">{k.name}</div>
+                        <div className="text-[10px] text-gray-500 font-mono">{k.prefix}</div>
+                      </div>
+                      <span className="text-[10px] text-gray-500">{k.agents} agents</span>
+                      <span className="text-[10px] text-gray-500">Created {k.created}</span>
+                      <span className="text-[10px] text-red-400 cursor-pointer">Revoke</span>
+                    </div>
+                  ))}
+                  <div className="flex justify-center pt-1">
+                    <div className="px-3 py-1.5 bg-indigo-600/20 border border-indigo-500/30 rounded-lg text-xs text-indigo-400 cursor-pointer">+ Create New Key</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <H2 id="api-keys">API Keys</H2>
             <P>
               API keys authenticate the CLI tool and MCP server. They are tied to your organization
@@ -1872,6 +2020,79 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
             <h1 id="dashboard" className="text-2xl font-bold mb-2">Dashboard</h1>
             <P>The dashboard provides a high-level governance overview of your organization&apos;s AI coding activity.</P>
 
+            {/* Dashboard Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Origin Dashboard</span>
+              </div>
+              <div className="p-6">
+                {/* Active Session Banner */}
+                <div className="bg-purple-900/30 border border-purple-700/50 rounded-lg p-3 mb-4 flex items-center gap-3">
+                  <div className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+                  <span className="text-xs text-purple-300 font-medium">1 Active Session</span>
+                  <div className="ml-auto flex items-center gap-4 text-xs text-gray-400">
+                    <span className="text-purple-300">claude-sonnet-4</span>
+                    <span>acme/backend</span>
+                    <span className="text-gray-500">3m 22s</span>
+                  </div>
+                </div>
+
+                {/* KPI Cards */}
+                <div className="grid grid-cols-5 gap-3 mb-4">
+                  <div className="bg-purple-900/20 border border-purple-700/40 rounded-lg p-3 text-center">
+                    <div className="text-lg font-bold text-purple-400">1</div>
+                    <div className="text-[10px] text-gray-500 uppercase">Active Now</div>
+                  </div>
+                  <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 text-center">
+                    <div className="text-lg font-bold text-gray-200">47</div>
+                    <div className="text-[10px] text-gray-500 uppercase">This Week</div>
+                  </div>
+                  <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 text-center">
+                    <div className="text-lg font-bold text-gray-200">$284</div>
+                    <div className="text-[10px] text-gray-500 uppercase">Est. Cost</div>
+                  </div>
+                  <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 text-center">
+                    <div className="text-lg font-bold text-amber-400">12</div>
+                    <div className="text-[10px] text-gray-500 uppercase">Unreviewed</div>
+                  </div>
+                  <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 text-center">
+                    <div className="text-lg font-bold text-green-400">94</div>
+                    <div className="text-[10px] text-gray-500 uppercase">Compliance</div>
+                  </div>
+                </div>
+
+                {/* Recent Sessions Table */}
+                <div className="bg-gray-800/30 rounded-lg border border-gray-700/50">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700/50">
+                    <span className="text-xs font-medium text-gray-300">Recent Sessions</span>
+                    <span className="text-[10px] text-indigo-400 cursor-pointer">View all &rarr;</span>
+                  </div>
+                  <div className="divide-y divide-gray-700/30 text-xs">
+                    {[
+                      { model: 'sonnet-4', repo: 'acme/backend', msg: 'Add user auth middleware', status: 'approved', age: '2h' },
+                      { model: 'opus-4', repo: 'acme/frontend', msg: 'Refactor dashboard layout', status: 'unreviewed', age: '5h' },
+                      { model: 'sonnet-4', repo: 'acme/api', msg: 'Fix rate limiter bug', status: 'flagged', age: '1d' },
+                    ].map((s, i) => (
+                      <div key={i} className="flex items-center gap-3 px-3 py-2">
+                        <span className="text-gray-500 font-mono w-20 truncate">{s.model}</span>
+                        <span className="text-gray-400 w-28 truncate">{s.repo}</span>
+                        <span className="text-gray-300 flex-1 truncate">{s.msg}</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                          s.status === 'approved' ? 'bg-green-900/40 text-green-400' :
+                          s.status === 'flagged' ? 'bg-amber-900/40 text-amber-400' :
+                          'bg-gray-700/40 text-gray-400'
+                        }`}>{s.status}</span>
+                        <span className="text-gray-600 w-8 text-right">{s.age}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <H3>Active Sessions</H3>
             <P>
               When AI coding sessions are currently running, a purple card appears at the top of the
@@ -1911,6 +2132,123 @@ Rule 1: {"models": ["claude-sonnet-4-20250514", "gpt-4o"]}
               Sessions represent individual AI coding interactions. Every time an agent
               writes code, Origin captures it as a session.
             </P>
+
+            {/* Session List Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Sessions</span>
+              </div>
+              <div className="p-4">
+                {/* Filter bar */}
+                <div className="flex gap-2 mb-3">
+                  {['All Models', 'All Status', 'All Agents', 'All Repos'].map((f) => (
+                    <div key={f} className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-[10px] text-gray-400">{f} ▾</div>
+                  ))}
+                  <div className="ml-auto flex items-center gap-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                    <span className="text-[10px] text-gray-500">Live</span>
+                  </div>
+                </div>
+
+                {/* Session table */}
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-[10px] text-gray-500 uppercase border-b border-gray-700/50">
+                      <th className="text-left py-1.5 font-medium">Status</th>
+                      <th className="text-left py-1.5 font-medium">Model</th>
+                      <th className="text-left py-1.5 font-medium">Agent</th>
+                      <th className="text-left py-1.5 font-medium">Repo</th>
+                      <th className="text-right py-1.5 font-medium">Duration</th>
+                      <th className="text-right py-1.5 font-medium">Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/50">
+                    {[
+                      { status: 'running', model: 'sonnet-4', agent: 'claude-code', repo: 'acme/backend', dur: '3m 22s', cost: '$0.14' },
+                      { status: 'approved', model: 'opus-4', agent: 'claude-code', repo: 'acme/frontend', dur: '12m 05s', cost: '$1.87' },
+                      { status: 'unreviewed', model: 'sonnet-4', agent: 'cursor', repo: 'acme/api', dur: '5m 41s', cost: '$0.32' },
+                      { status: 'flagged', model: 'sonnet-4', agent: 'claude-code', repo: 'acme/backend', dur: '8m 19s', cost: '$0.68' },
+                    ].map((s, i) => (
+                      <tr key={i} className="hover:bg-gray-800/30 cursor-pointer">
+                        <td className="py-2">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                            s.status === 'running' ? 'bg-purple-900/40 text-purple-400' :
+                            s.status === 'approved' ? 'bg-green-900/40 text-green-400' :
+                            s.status === 'flagged' ? 'bg-amber-900/40 text-amber-400' :
+                            'bg-gray-700/40 text-gray-400'
+                          }`}>{s.status}</span>
+                        </td>
+                        <td className="py-2 text-gray-400 font-mono">{s.model}</td>
+                        <td className="py-2 text-gray-400">{s.agent}</td>
+                        <td className="py-2 text-gray-300">{s.repo}</td>
+                        <td className="py-2 text-gray-500 text-right">{s.dur}</td>
+                        <td className="py-2 text-gray-300 text-right">{s.cost}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Session Detail Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Session Detail &mdash; acme/backend</span>
+              </div>
+              <div className="p-4">
+                <div className="flex gap-4">
+                  {/* Left sidebar */}
+                  <div className="w-44 flex-shrink-0 space-y-3">
+                    <div className="text-xs text-gray-500 uppercase font-medium">Info</div>
+                    <div className="space-y-2 text-xs">
+                      <div><span className="text-gray-500">Model</span><br /><span className="text-gray-300 font-mono">sonnet-4</span></div>
+                      <div><span className="text-gray-500">Agent</span><br /><span className="text-gray-300">claude-code</span></div>
+                      <div><span className="text-gray-500">Commit</span><br /><span className="text-indigo-400 font-mono">a3f8c21</span></div>
+                      <div><span className="text-gray-500">Cost</span><br /><span className="text-gray-300">$1.87</span></div>
+                      <div><span className="text-gray-500">Tokens</span><br /><span className="text-gray-300">48,210</span></div>
+                    </div>
+                  </div>
+                  {/* Right content */}
+                  <div className="flex-1 min-w-0">
+                    {/* Tabs */}
+                    <div className="flex gap-4 border-b border-gray-700/50 mb-3">
+                      <span className="text-xs text-indigo-400 border-b-2 border-indigo-400 pb-1.5 font-medium">Session</span>
+                      <span className="text-xs text-gray-500 pb-1.5">AI Blame</span>
+                      <span className="text-xs text-gray-500 pb-1.5">Security</span>
+                      <div className="ml-auto"><span className="text-xs bg-purple-600/30 text-purple-300 px-2 py-0.5 rounded">Ask</span></div>
+                    </div>
+                    {/* Prompt timeline */}
+                    <div className="space-y-2 mb-3">
+                      <div className="bg-gray-800/50 rounded-lg p-2">
+                        <div className="text-[10px] text-indigo-400 mb-1">Prompt 1</div>
+                        <div className="text-xs text-gray-300">Add user authentication middleware with JWT validation</div>
+                        <div className="mt-1 flex gap-2 text-[10px] text-gray-500">
+                          <span>3 files changed</span>
+                          <span className="text-green-500">+142</span>
+                          <span className="text-red-500">-8</span>
+                        </div>
+                      </div>
+                    </div>
+                    {/* Diff preview */}
+                    <div className="bg-gray-950 rounded border border-gray-700/50 font-mono text-[11px] overflow-hidden">
+                      <div className="px-3 py-1.5 bg-gray-800/50 text-gray-500 border-b border-gray-700/50">src/middleware/auth.ts</div>
+                      <div className="px-3 py-1">
+                        <div className="text-green-400/80">+ import {'{'} verify {'}'} from &apos;jsonwebtoken&apos;;</div>
+                        <div className="text-green-400/80">+ export function authMiddleware(req, res, next) {'{'}</div>
+                        <div className="text-green-400/80">+   const token = req.headers.authorization;</div>
+                        <div className="text-gray-600">  ...</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
 
             <H2 id="session-data">Session Data</H2>
             <ul className="space-y-2 mb-4">
@@ -2077,6 +2415,66 @@ GET /api/share/:slug`}</CodeBlock>
               similar to <code className="text-indigo-400">git blame</code> but for AI authorship.
             </P>
 
+            {/* AI Blame Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">AI Blame &mdash; src/middleware/auth.ts</span>
+              </div>
+              <div className="p-4">
+                {/* Legend */}
+                <div className="flex gap-4 mb-3 text-[10px]">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-2.5 h-2.5 rounded bg-purple-500/60" />
+                    <span className="text-gray-400">Prompt 1: &quot;Add auth middleware&quot;</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-2.5 h-2.5 rounded bg-blue-500/60" />
+                    <span className="text-gray-400">Prompt 2: &quot;Add error handling&quot;</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-2.5 h-2.5 rounded bg-green-500/60" />
+                    <span className="text-gray-400">[HU] Human</span>
+                  </div>
+                </div>
+                {/* Blame code view */}
+                <div className="bg-gray-950 rounded border border-gray-700/50 font-mono text-[11px]">
+                  {[
+                    { line: 1,  color: 'green',  label: '[HU]', code: "import express from 'express';" },
+                    { line: 2,  color: 'purple', label: 'P1',   code: "import { verify } from 'jsonwebtoken';" },
+                    { line: 3,  color: 'purple', label: 'P1',   code: '' },
+                    { line: 4,  color: 'purple', label: 'P1',   code: 'export function authMiddleware(req, res, next) {' },
+                    { line: 5,  color: 'purple', label: 'P1',   code: '  const token = req.headers.authorization;' },
+                    { line: 6,  color: 'blue',   label: 'P2',   code: '  if (!token) {' },
+                    { line: 7,  color: 'blue',   label: 'P2',   code: "    return res.status(401).json({ error: 'No token' });" },
+                    { line: 8,  color: 'blue',   label: 'P2',   code: '  }' },
+                    { line: 9,  color: 'purple', label: 'P1',   code: '  const decoded = verify(token, process.env.JWT_SECRET);' },
+                    { line: 10, color: 'purple', label: 'P1',   code: '  req.user = decoded;' },
+                    { line: 11, color: 'purple', label: 'P1',   code: '  next();' },
+                    { line: 12, color: 'purple', label: 'P1',   code: '}' },
+                  ].map((l) => (
+                    <div key={l.line} className="flex items-center hover:bg-gray-800/40 group">
+                      <div className={`w-1 self-stretch ${
+                        l.color === 'purple' ? 'bg-purple-500/60' :
+                        l.color === 'blue' ? 'bg-blue-500/60' :
+                        'bg-green-500/60'
+                      }`} />
+                      <span className="w-8 text-right pr-2 text-gray-600 select-none">{l.line}</span>
+                      <span className={`w-8 text-center text-[9px] font-bold ${
+                        l.color === 'purple' ? 'text-purple-400' :
+                        l.color === 'blue' ? 'text-blue-400' :
+                        'text-green-400'
+                      }`}>{l.label}</span>
+                      <span className="text-gray-300 pl-2">{l.code || '\u00A0'}</span>
+                      <span className="ml-auto pr-2 text-[9px] text-indigo-400 opacity-0 group-hover:opacity-100 cursor-pointer">Ask</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
             <H2>How It Works</H2>
             <P>
               When Origin tracks a coding session, it records a mapping of each user prompt to
@@ -2156,6 +2554,51 @@ GET /api/sessions/:id/blame?file=src/components/App.tsx
               grounded in the actual conversation transcript and code changes. It&apos;s like
               having the AI agent explain why it wrote the code it did.
             </P>
+
+            {/* Ask the Author Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Ask the Author &mdash; Session a3f8c21</span>
+              </div>
+              <div className="p-4">
+                {/* Chat messages */}
+                <div className="space-y-3 mb-3">
+                  {/* User question */}
+                  <div className="flex gap-2">
+                    <div className="w-5 h-5 rounded-full bg-gray-600 flex items-center justify-center text-[9px] text-gray-300 font-bold flex-shrink-0">Y</div>
+                    <div className="bg-gray-800/60 rounded-lg px-3 py-2 text-xs text-gray-300 max-w-[80%]">
+                      Why did you use a Map instead of a plain object for the cache?
+                    </div>
+                  </div>
+                  {/* AI answer */}
+                  <div className="flex gap-2">
+                    <div className="w-5 h-5 rounded-full bg-purple-600/40 flex items-center justify-center text-[9px] text-purple-300 font-bold flex-shrink-0">AI</div>
+                    <div className="bg-purple-900/20 border border-purple-800/30 rounded-lg px-3 py-2 text-xs text-gray-300 max-w-[80%]">
+                      <p className="mb-1.5">In <strong className="text-purple-300">Prompt #2</strong>, the developer asked to optimize cache lookups. A Map was chosen because:</p>
+                      <ul className="space-y-1 ml-3 text-gray-400">
+                        <li className="flex items-start gap-1"><span className="text-purple-400">*</span>Maps have O(1) lookup and preserve insertion order</li>
+                        <li className="flex items-start gap-1"><span className="text-purple-400">*</span>Keys can be any type, not just strings</li>
+                        <li className="flex items-start gap-1"><span className="text-purple-400">*</span>Better performance for frequent add/delete operations</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+                {/* Suggestion chips */}
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {['Why this approach?', 'What alternatives?', 'Any risks?'].map((q, i) => (
+                    <div key={i} className="px-2 py-1 bg-gray-800 border border-gray-700 rounded-full text-[10px] text-gray-400 cursor-pointer hover:border-purple-500/50 hover:text-purple-300">{q}</div>
+                  ))}
+                </div>
+                {/* Input */}
+                <div className="flex gap-2">
+                  <div className="flex-1 bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-500">Ask a question about this session...</div>
+                  <div className="px-3 py-2 bg-purple-600/30 border border-purple-500/40 rounded-lg text-xs text-purple-300 cursor-pointer">Ask</div>
+                </div>
+              </div>
+            </div>
 
             <H2>How It Works</H2>
             <P>
@@ -2321,6 +2764,50 @@ git fetch origin refs/notes/origin:refs/notes/origin
               instant risk assessments and flagging sessions that need human attention.
             </P>
 
+            {/* AI Review Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">AI Auto-Review</span>
+              </div>
+              <div className="p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="px-2 py-0.5 bg-amber-900/40 text-amber-400 rounded text-xs font-medium">FLAGGED</span>
+                  <span className="text-xs text-gray-500">Reviewed by AI &mdash; 3s ago</span>
+                  <span className="ml-auto text-[10px] text-gray-500">Risk: <span className="text-amber-400 font-medium">Medium</span></span>
+                </div>
+                <div className="space-y-2">
+                  {[
+                    { icon: '!', color: 'red', label: 'Security Risk', desc: 'Hardcoded JWT secret found in auth middleware' },
+                    { icon: '~', color: 'amber', label: 'Scope Risk', desc: 'Modified 3 files outside the requested scope' },
+                    { icon: '*', color: 'green', label: 'Code Quality', desc: 'Clean implementation with proper error handling' },
+                    { icon: '~', color: 'amber', label: 'Prompt Alignment', desc: '2 of 3 file changes match the prompt intent' },
+                  ].map((f, i) => (
+                    <div key={i} className={`flex items-start gap-2 px-3 py-2 rounded-lg border ${
+                      f.color === 'red' ? 'bg-red-900/10 border-red-800/30' :
+                      f.color === 'amber' ? 'bg-amber-900/10 border-amber-800/30' :
+                      'bg-green-900/10 border-green-800/30'
+                    }`}>
+                      <span className={`text-xs font-bold mt-0.5 ${
+                        f.color === 'red' ? 'text-red-400' :
+                        f.color === 'amber' ? 'text-amber-400' :
+                        'text-green-400'
+                      }`}>{f.icon}</span>
+                      <div>
+                        <div className="text-xs text-gray-200 font-medium">{f.label}</div>
+                        <div className="text-[11px] text-gray-400">{f.desc}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <div className="px-3 py-1.5 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300 cursor-pointer">Override AI Review</div>
+                </div>
+              </div>
+            </div>
+
             <H2>How It Works</H2>
             <P>
               When a coding session ends, Origin sends session data to Claude for analysis, including
@@ -2391,6 +2878,58 @@ git fetch origin refs/notes/origin:refs/notes/origin
               Origin provides budget management to help organizations control AI coding costs
               with monthly limits, spend alerts, and optional hard blocks.
             </P>
+
+            {/* Budget Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Budget &mdash; March 2025</span>
+              </div>
+              <div className="p-4">
+                {/* Progress bar */}
+                <div className="mb-4">
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-gray-400">Monthly Spend</span>
+                    <span className="text-gray-300">$284 <span className="text-gray-500">/ $500</span></span>
+                  </div>
+                  <div className="w-full h-3 bg-gray-800 rounded-full overflow-hidden relative">
+                    <div className="h-full bg-gradient-to-r from-indigo-600 to-indigo-400 rounded-full" style={{ width: '57%' }} />
+                    {/* Alert threshold markers */}
+                    <div className="absolute top-0 bottom-0 w-px bg-amber-500/60" style={{ left: '80%' }} />
+                    <div className="absolute top-0 bottom-0 w-px bg-red-500/60" style={{ left: '100%' }} />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                    <span>57% used</span>
+                    <div className="flex gap-3">
+                      <span className="text-amber-500/80">80% alert</span>
+                      <span className="text-red-500/80">100% block</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Spend breakdown */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-gray-800/40 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase mb-2">By Model</div>
+                    <div className="space-y-1.5 text-xs">
+                      <div className="flex justify-between"><span className="text-gray-400">claude-sonnet-4</span><span className="text-gray-300">$168</span></div>
+                      <div className="flex justify-between"><span className="text-gray-400">claude-opus-4</span><span className="text-gray-300">$92</span></div>
+                      <div className="flex justify-between"><span className="text-gray-400">gpt-4o</span><span className="text-gray-300">$24</span></div>
+                    </div>
+                  </div>
+                  <div className="bg-gray-800/40 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase mb-2">Daily Trend (last 7d)</div>
+                    <div className="flex items-end gap-1 h-10">
+                      {[3, 5, 4, 7, 6, 8, 5].map((h, i) => (
+                        <div key={i} className="flex-1 bg-indigo-500/40 rounded-t" style={{ height: `${h * 12}%` }} />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
 
             <H2>Configuration</H2>
             <P>
@@ -2503,6 +3042,41 @@ data: {"type":"session:ended","sessionId":"abc-123","orgId":"org-1","data":{"cos
               Findings are displayed in the session detail and trigger notifications for critical issues.
             </P>
 
+            {/* Secret Scanning Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Security &mdash; Session Findings</span>
+              </div>
+              <div className="p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="text-xs text-red-400 font-medium">3 findings detected</span>
+                </div>
+                <div className="space-y-2">
+                  {[
+                    { type: 'AWS_SECRET', severity: 'critical', file: 'src/config/aws.ts', line: 12, match: 'AKIA****' },
+                    { type: 'API_KEY', severity: 'high', file: 'src/services/stripe.ts', line: 8, match: 'sk_l****' },
+                    { type: 'PII_EMAIL', severity: 'low', file: 'src/utils/notify.ts', line: 45, match: 'admi****@company.com' },
+                  ].map((f, i) => (
+                    <div key={i} className="flex items-center gap-3 bg-gray-800/40 border border-gray-700/50 rounded-lg px-3 py-2.5">
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                        f.severity === 'critical' ? 'bg-red-900/50 text-red-400' :
+                        f.severity === 'high' ? 'bg-orange-900/50 text-orange-400' :
+                        'bg-gray-700/50 text-gray-400'
+                      }`}>{f.severity}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-gray-200 font-mono">{f.type}</div>
+                        <div className="text-[10px] text-gray-500">{f.file}:{f.line}</div>
+                      </div>
+                      <span className="text-xs text-gray-500 font-mono">{f.match}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
             <H2 id="detection-types">Detection Types</H2>
             <P>The scanner checks for the following patterns in added lines:</P>
             <ul className="space-y-2 mb-4">
@@ -2567,6 +3141,68 @@ data: {"type":"session:ended","sessionId":"abc-123","orgId":"org-1","data":{"cos
               exported as JSON.
             </P>
 
+            {/* Compliance Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Compliance Report &mdash; Jan 2025</span>
+              </div>
+              <div className="p-4">
+                {/* Score gauge */}
+                <div className="flex items-center gap-6 mb-4">
+                  <div className="relative w-20 h-20">
+                    <svg viewBox="0 0 36 36" className="w-20 h-20">
+                      <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#374151" strokeWidth="3" />
+                      <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#22c55e" strokeWidth="3" strokeDasharray="85, 100" strokeLinecap="round" />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-lg font-bold text-green-400">85</span>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm text-gray-200 font-medium">Compliance Score</div>
+                    <div className="text-[10px] text-green-400">Excellent</div>
+                  </div>
+                </div>
+
+                {/* Section breakdown */}
+                <div className="space-y-2">
+                  {[
+                    { label: 'Review Coverage', weight: '40%', score: 92, color: 'green' },
+                    { label: 'Violation Rate', weight: '30%', score: 78, color: 'green' },
+                    { label: 'Secret Detection', weight: '20%', score: 85, color: 'green' },
+                    { label: 'Base Score', weight: '10%', score: 100, color: 'green' },
+                  ].map((s, i) => (
+                    <div key={i} className="flex items-center gap-3 text-xs">
+                      <span className="text-gray-400 w-32">{s.label}</span>
+                      <span className="text-gray-600 w-8">{s.weight}</span>
+                      <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${s.score >= 80 ? 'bg-green-500/60' : s.score >= 60 ? 'bg-amber-500/60' : 'bg-red-500/60'}`} style={{ width: `${s.score}%` }} />
+                      </div>
+                      <span className="text-gray-300 w-8 text-right">{s.score}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Summary stats */}
+                <div className="grid grid-cols-4 gap-2 mt-4 pt-3 border-t border-gray-700/50">
+                  {[
+                    { label: 'Sessions', value: '124' },
+                    { label: 'Violations', value: '3' },
+                    { label: 'Secrets Found', value: '1' },
+                    { label: 'Review Rate', value: '92%' },
+                  ].map((s, i) => (
+                    <div key={i} className="text-center">
+                      <div className="text-sm font-bold text-gray-200">{s.value}</div>
+                      <div className="text-[10px] text-gray-500">{s.label}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
             <H2 id="compliance-score">Compliance Score</H2>
             <P>
               The compliance score is a 0-100 metric calculated from four weighted factors:
@@ -2628,6 +3264,96 @@ GET /api/reports/compliance/summary
               The Insights page provides comprehensive analytics across all AI coding operations
               with customizable date range filtering and multiple chart types.
             </P>
+
+            {/* Analytics Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Insights</span>
+              </div>
+              <div className="p-4">
+                {/* Date range controls */}
+                <div className="flex gap-1.5 mb-4">
+                  {['7d', '30d', '90d', 'Year'].map((p, i) => (
+                    <div key={i} className={`px-2 py-1 rounded text-[10px] cursor-pointer ${i === 1 ? 'bg-indigo-600/30 text-indigo-400 border border-indigo-500/40' : 'bg-gray-800 text-gray-500 border border-gray-700'}`}>{p}</div>
+                  ))}
+                </div>
+
+                {/* Chart grid */}
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Cost Over Time */}
+                  <div className="bg-gray-800/40 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase mb-2">Cost Over Time</div>
+                    <div className="flex items-end gap-0.5 h-16">
+                      {[12, 18, 15, 22, 19, 25, 20, 28, 24, 30, 26, 22, 18, 24].map((h, i) => (
+                        <div key={i} className="flex-1 bg-indigo-500/40 rounded-t hover:bg-indigo-500/60" style={{ height: `${h * 3}%` }} />
+                      ))}
+                    </div>
+                    <div className="flex justify-between text-[9px] text-gray-600 mt-1">
+                      <span>Mar 1</span><span>Mar 30</span>
+                    </div>
+                  </div>
+
+                  {/* Token Usage */}
+                  <div className="bg-gray-800/40 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase mb-2">Tokens Over Time</div>
+                    <div className="flex items-end gap-0.5 h-16">
+                      {[8, 14, 11, 18, 15, 20, 17, 22, 19, 25, 21, 18, 14, 20].map((h, i) => (
+                        <div key={i} className="flex-1 bg-purple-500/40 rounded-t hover:bg-purple-500/60" style={{ height: `${h * 3}%` }} />
+                      ))}
+                    </div>
+                    <div className="flex justify-between text-[9px] text-gray-600 mt-1">
+                      <span>Mar 1</span><span>Mar 30</span>
+                    </div>
+                  </div>
+
+                  {/* Cost by Model */}
+                  <div className="bg-gray-800/40 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase mb-2">Cost by Model</div>
+                    <div className="space-y-1.5">
+                      {[
+                        { model: 'sonnet-4', pct: 60, cost: '$168' },
+                        { model: 'opus-4', pct: 33, cost: '$92' },
+                        { model: 'gpt-4o', pct: 7, cost: '$24' },
+                      ].map((m, i) => (
+                        <div key={i} className="flex items-center gap-2 text-[10px]">
+                          <span className="text-gray-400 w-14 truncate">{m.model}</span>
+                          <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                            <div className="h-full bg-indigo-500/60 rounded-full" style={{ width: `${m.pct}%` }} />
+                          </div>
+                          <span className="text-gray-300 w-10 text-right">{m.cost}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Session Quality */}
+                  <div className="bg-gray-800/40 rounded-lg p-3">
+                    <div className="text-[10px] text-gray-500 uppercase mb-2">Session Quality</div>
+                    <div className="flex items-center justify-center gap-4 h-12">
+                      <div className="text-center">
+                        <div className="text-sm font-bold text-green-400">78%</div>
+                        <div className="text-[9px] text-gray-500">Approved</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-sm font-bold text-amber-400">14%</div>
+                        <div className="text-[9px] text-gray-500">Flagged</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-sm font-bold text-red-400">3%</div>
+                        <div className="text-[9px] text-gray-500">Rejected</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-sm font-bold text-gray-400">5%</div>
+                        <div className="text-[9px] text-gray-500">Pending</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
 
             <H2>Date Range Filtering</H2>
             <P>
@@ -2701,6 +3427,55 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
               adoption patterns across your engineering team.
             </P>
 
+            {/* Leaderboard Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Leaderboard &mdash; Last 30 Days</span>
+              </div>
+              <div className="p-4">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-[10px] text-gray-500 uppercase border-b border-gray-700/50">
+                      <th className="text-left py-1.5 font-medium w-8">#</th>
+                      <th className="text-left py-1.5 font-medium">Developer</th>
+                      <th className="text-right py-1.5 font-medium">Sessions</th>
+                      <th className="text-right py-1.5 font-medium">Lines</th>
+                      <th className="text-right py-1.5 font-medium">Cost</th>
+                      <th className="text-right py-1.5 font-medium">Approval</th>
+                      <th className="text-right py-1.5 font-medium">Quality</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/50">
+                    {[
+                      { rank: 1, name: 'Sarah C.', sessions: 42, lines: '3.2k', cost: '$89', approval: '95%', quality: 92, color: 'text-yellow-400' },
+                      { rank: 2, name: 'Mike R.', sessions: 38, lines: '2.8k', cost: '$72', approval: '91%', quality: 88, color: 'text-gray-300' },
+                      { rank: 3, name: 'Ana T.', sessions: 31, lines: '2.1k', cost: '$58', approval: '88%', quality: 85, color: 'text-amber-600' },
+                      { rank: 4, name: 'James L.', sessions: 25, lines: '1.6k', cost: '$44', approval: '92%', quality: 82, color: 'text-gray-500' },
+                      { rank: 5, name: 'Priya K.', sessions: 19, lines: '1.2k', cost: '$31', approval: '86%', quality: 79, color: 'text-gray-500' },
+                    ].map((d) => (
+                      <tr key={d.rank} className="hover:bg-gray-800/30">
+                        <td className={`py-2 font-bold ${d.color}`}>{d.rank}</td>
+                        <td className="py-2">
+                          <div className="flex items-center gap-2">
+                            <div className="w-5 h-5 rounded-full bg-indigo-600/40 flex items-center justify-center text-[9px] text-indigo-300 font-bold">{d.name[0]}</div>
+                            <span className="text-gray-200">{d.name}</span>
+                          </div>
+                        </td>
+                        <td className="py-2 text-gray-300 text-right">{d.sessions}</td>
+                        <td className="py-2 text-gray-400 text-right">{d.lines}</td>
+                        <td className="py-2 text-gray-300 text-right">{d.cost}</td>
+                        <td className="py-2 text-green-400 text-right">{d.approval}</td>
+                        <td className="py-2 text-right"><span className="text-gray-300">{d.quality}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <H2>How It Works</H2>
             <P>
               Origin aggregates data from all coding sessions and reviews to compute rankings.
@@ -2743,6 +3518,43 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
               Search through prompts, see what files they changed, and analyze patterns in how your
               team uses AI coding tools.
             </P>
+
+            {/* Prompts Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Prompt Library</span>
+              </div>
+              <div className="p-4">
+                {/* Search bar */}
+                <div className="flex gap-2 mb-3">
+                  <div className="flex-1 bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-400">Search prompts...</div>
+                  <div className="px-2 py-2 bg-gray-800 border border-gray-700 rounded-lg text-[10px] text-gray-400">All Models ▾</div>
+                  <div className="px-2 py-2 bg-gray-800 border border-gray-700 rounded-lg text-[10px] text-gray-400">All Repos ▾</div>
+                </div>
+                {/* Results */}
+                <div className="space-y-2">
+                  {[
+                    { prompt: 'Add JWT authentication middleware with token validation and refresh logic', model: 'sonnet-4', repo: 'acme/backend', files: 3, cost: '$1.87', status: 'approved' },
+                    { prompt: 'Refactor the dashboard layout to use CSS Grid and fix responsive breakpoints', model: 'opus-4', repo: 'acme/frontend', files: 5, cost: '$2.14', status: 'unreviewed' },
+                    { prompt: 'Fix rate limiter bug where requests were counted twice on retry', model: 'sonnet-4', repo: 'acme/api', files: 2, cost: '$0.42', status: 'approved' },
+                  ].map((p, i) => (
+                    <div key={i} className="bg-gray-800/40 border border-gray-700/50 rounded-lg px-3 py-2.5 hover:bg-gray-800/60 cursor-pointer">
+                      <div className="text-xs text-gray-200 mb-1 truncate">{p.prompt}</div>
+                      <div className="flex items-center gap-3 text-[10px]">
+                        <span className="text-gray-500 font-mono">{p.model}</span>
+                        <span className="text-gray-500">{p.repo}</span>
+                        <span className="text-gray-500">{p.files} files</span>
+                        <span className="text-gray-400">{p.cost}</span>
+                        <span className={`ml-auto px-1.5 py-0.5 rounded ${p.status === 'approved' ? 'bg-green-900/40 text-green-400' : 'bg-gray-700/40 text-gray-400'}`}>{p.status}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
 
             <H2>How It Works</H2>
             <P>
@@ -2806,6 +3618,51 @@ GET /api/prompts/patterns`}</CodeBlock>
               different task types.
             </P>
 
+            {/* Model Comparison Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Model Comparison</span>
+              </div>
+              <div className="p-4">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-[10px] text-gray-500 uppercase border-b border-gray-700/50">
+                      <th className="text-left py-1.5 font-medium">Model</th>
+                      <th className="text-right py-1.5 font-medium">Sessions</th>
+                      <th className="text-right py-1.5 font-medium">Avg Cost</th>
+                      <th className="text-right py-1.5 font-medium">Avg Duration</th>
+                      <th className="text-right py-1.5 font-medium">Avg Tokens</th>
+                      <th className="text-right py-1.5 font-medium">Approval</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/50">
+                    {[
+                      { model: 'claude-sonnet-4', sessions: 89, cost: '$0.68', dur: '6m 12s', tokens: '24.1k', approval: '94%', best: true },
+                      { model: 'claude-opus-4', sessions: 24, cost: '$3.42', dur: '14m 05s', tokens: '62.3k', approval: '97%', best: false },
+                      { model: 'gpt-4o', sessions: 34, cost: '$0.52', dur: '4m 38s', tokens: '18.7k', approval: '86%', best: false },
+                    ].map((m, i) => (
+                      <tr key={i} className="hover:bg-gray-800/30">
+                        <td className="py-2">
+                          <span className="text-gray-200 font-mono">{m.model}</span>
+                          {m.best && <span className="ml-1.5 text-[9px] text-indigo-400">best value</span>}
+                        </td>
+                        <td className="py-2 text-gray-300 text-right">{m.sessions}</td>
+                        <td className="py-2 text-gray-300 text-right">{m.cost}</td>
+                        <td className="py-2 text-gray-400 text-right">{m.dur}</td>
+                        <td className="py-2 text-gray-400 text-right">{m.tokens}</td>
+                        <td className="py-2 text-right">
+                          <span className={parseInt(m.approval) >= 90 ? 'text-green-400' : 'text-amber-400'}>{m.approval}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <H2>How It Works</H2>
             <P>
               Origin aggregates session data by model to compute comparative statistics.
@@ -2853,6 +3710,68 @@ GET /api/prompts/patterns`}</CodeBlock>
               When a PR contains AI-authored commits, Origin links the relevant coding sessions,
               evaluates policies, and posts a pass/fail check that controls whether the PR can be merged.
             </P>
+
+            {/* PR Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">GitHub Pull Request #42</span>
+              </div>
+              <div className="p-4">
+                {/* PR header */}
+                <div className="mb-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="px-1.5 py-0.5 bg-green-900/40 text-green-400 rounded text-[10px]">Open</span>
+                    <span className="text-sm text-gray-200 font-medium">Add JWT authentication middleware</span>
+                  </div>
+                  <div className="text-[10px] text-gray-500">acme/backend &mdash; feature/auth &rarr; main</div>
+                </div>
+                {/* Status check */}
+                <div className="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 mb-3">
+                  <div className="text-[10px] text-gray-500 uppercase mb-2">Status Checks</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-green-400 text-sm">&#10003;</span>
+                    <span className="text-xs text-gray-300 font-medium">origin/ai-governance</span>
+                    <span className="text-[10px] text-gray-500">&mdash; All 2 sessions approved</span>
+                  </div>
+                </div>
+                {/* Summary comment */}
+                <div className="bg-gray-800/30 border border-gray-700/50 rounded-lg p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-5 h-5 rounded-full bg-indigo-600/40 flex items-center justify-center text-[9px] text-indigo-300 font-bold">O</div>
+                    <span className="text-xs text-gray-300 font-medium">Origin Bot</span>
+                    <span className="text-[10px] text-gray-500">commented 2m ago</span>
+                  </div>
+                  <div className="text-[10px] text-gray-400 mb-2">2 sessions &middot; 5 agent turns &middot; 0 human corrections</div>
+                  <table className="w-full text-[10px]">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-gray-700/30">
+                        <th className="text-left py-1 font-medium">Session</th>
+                        <th className="text-left py-1 font-medium">Agent</th>
+                        <th className="text-right py-1 font-medium">Cost</th>
+                        <th className="text-right py-1 font-medium">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="border-b border-gray-700/20">
+                        <td className="py-1 text-indigo-400">a3f8c21</td>
+                        <td className="py-1 text-gray-400">claude-code</td>
+                        <td className="py-1 text-gray-300 text-right">$1.87</td>
+                        <td className="py-1 text-right"><span className="text-green-400">approved</span></td>
+                      </tr>
+                      <tr>
+                        <td className="py-1 text-indigo-400">b7d2e10</td>
+                        <td className="py-1 text-gray-400">claude-code</td>
+                        <td className="py-1 text-gray-300 text-right">$0.42</td>
+                        <td className="py-1 text-right"><span className="text-green-400">approved</span></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
 
             <H2>How It Works</H2>
             <div className="space-y-1 mb-4">
@@ -2939,6 +3858,48 @@ GET /api/pull-requests/review?url=https://github.com/org/repo/pull/42`}</CodeBlo
               rather than individual session level.
             </P>
 
+            {/* Trails Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Trails</span>
+              </div>
+              <div className="p-4 space-y-2">
+                {[
+                  { name: 'User Auth System', status: 'active', sessions: 8, cost: '$42', labels: ['backend', 'security'], priority: 'high' },
+                  { name: 'Dashboard Redesign', status: 'review', sessions: 5, cost: '$28', labels: ['frontend'], priority: 'medium' },
+                  { name: 'CI Pipeline Fix', status: 'done', sessions: 3, cost: '$12', labels: ['devops'], priority: 'low' },
+                ].map((t, i) => (
+                  <div key={i} className="bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${
+                        t.status === 'active' ? 'bg-green-900/40 text-green-400' :
+                        t.status === 'review' ? 'bg-amber-900/40 text-amber-400' :
+                        'bg-gray-700/40 text-gray-400'
+                      }`}>{t.status}</span>
+                      <span className="text-xs text-gray-200 font-medium">{t.name}</span>
+                      <span className={`ml-auto text-[9px] ${
+                        t.priority === 'high' ? 'text-red-400' :
+                        t.priority === 'medium' ? 'text-amber-400' :
+                        'text-gray-500'
+                      }`}>{t.priority}</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px]">
+                      <span className="text-gray-500">{t.sessions} sessions</span>
+                      <span className="text-gray-400">{t.cost}</span>
+                      <div className="flex gap-1 ml-auto">
+                        {t.labels.map((l, j) => (
+                          <span key={j} className="px-1.5 py-0.5 bg-indigo-900/30 border border-indigo-700/30 rounded text-[9px] text-indigo-400">{l}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <H2>How It Works</H2>
             <P>
               A Trail is a named container with a status lifecycle (active, review, done, paused),
@@ -2990,6 +3951,37 @@ POST /api/trails/:id/sessions
               Track which developer machines are running AI coding tools, what software
               is installed, and enforce machine-level policies.
             </P>
+
+            {/* Machines Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Machines</span>
+              </div>
+              <div className="p-4 space-y-2">
+                {[
+                  { hostname: 'sarah-mbp.local', id: 'mc_a3f8c2', tools: ['git', 'node', 'docker', 'python'], lastSeen: '2m ago' },
+                  { hostname: 'mike-desktop', id: 'mc_b7d2e1', tools: ['git', 'node', 'kubectl'], lastSeen: '1h ago' },
+                  { hostname: 'ci-runner-01', id: 'mc_c9e4f3', tools: ['git', 'node', 'docker'], lastSeen: '5m ago' },
+                ].map((m, i) => (
+                  <div key={i} className="flex items-center gap-3 bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3">
+                    <div className="w-7 h-7 rounded bg-gray-700/50 flex items-center justify-center text-[11px] text-gray-400">&#9000;</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs text-gray-200 font-medium">{m.hostname}</div>
+                      <div className="text-[10px] text-gray-500 font-mono">{m.id}</div>
+                    </div>
+                    <div className="flex gap-1">
+                      {m.tools.map((t, j) => (
+                        <span key={j} className="px-1.5 py-0.5 bg-gray-700/50 rounded text-[9px] text-gray-400">{t}</span>
+                      ))}
+                    </div>
+                    <div className="text-[10px] text-gray-500 w-14 text-right">{m.lastSeen}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
 
             <H2>How It Works</H2>
             <P>
@@ -3092,6 +4084,40 @@ GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
               When you import repos via &ldquo;Import from GitHub&rdquo;, webhooks are created automatically.
               This section covers manual webhook setup for advanced use cases.
             </P>
+
+            {/* Webhooks Mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Webhook Configuration</span>
+              </div>
+              <div className="p-4">
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[10px] text-gray-500 uppercase block mb-1">Payload URL</label>
+                    <div className="bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-xs text-indigo-400 font-mono">https://api.getorigin.io/webhooks/gh/wh_a3f8c21e</div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-gray-500 uppercase block mb-1">Secret</label>
+                    <div className="bg-gray-800/50 border border-gray-700 rounded px-3 py-2 text-xs text-gray-500 font-mono">whsec_****************************</div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-gray-500 uppercase block mb-1">Events</label>
+                    <div className="flex gap-2">
+                      <span className="px-2 py-1 bg-indigo-900/30 border border-indigo-700/30 rounded text-[10px] text-indigo-400">push</span>
+                      <span className="px-2 py-1 bg-indigo-900/30 border border-indigo-700/30 rounded text-[10px] text-indigo-400">pull_request</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                    <span className="text-[10px] text-green-400">Active</span>
+                    <span className="text-[10px] text-gray-500 ml-2">Last delivery: 2m ago (200 OK)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
 
             <H2>How Webhooks Work</H2>
             <P>
