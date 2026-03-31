@@ -242,7 +242,7 @@ export default function Dashboard() {
       label: 'Install the CLI',
       description: 'Run origin login then origin init on your dev machine to start capturing sessions.',
       done: machines.length > 0,
-      link: '/docs',
+      link: '/docs#quick-start',
       cta: 'View setup guide',
     },
     {
