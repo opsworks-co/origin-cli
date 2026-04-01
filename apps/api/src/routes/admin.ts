@@ -200,6 +200,80 @@ router.put('/orgs/:id', async (req: AuthRequest, res: Response) => {
 router.delete('/orgs/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
+
+    // Collect IDs for cascading deletes
+    const repos = await prisma.repo.findMany({ where: { orgId: id }, select: { id: true } });
+    const repoIds = repos.map(r => r.id);
+    const agents = await prisma.agent.findMany({ where: { orgId: id }, select: { id: true } });
+    const agentIds = agents.map(a => a.id);
+    const policies = await prisma.policy.findMany({ where: { orgId: id }, select: { id: true } });
+    const policyIds = policies.map(p => p.id);
+    const trails = await prisma.trail.findMany({ where: { orgId: id }, select: { id: true } });
+    const trailIds = trails.map(t => t.id);
+    const users = await prisma.user.findMany({ where: { orgId: id }, select: { id: true } });
+    const userIds = users.map(u => u.id);
+    const apiKeys = await prisma.apiKey.findMany({ where: { orgId: id }, select: { id: true } });
+    const apiKeyIds = apiKeys.map(k => k.id);
+
+    // Sessions are linked via commits -> repos, or via agentId/userId
+    const commits = repoIds.length > 0
+      ? await prisma.commit.findMany({ where: { repoId: { in: repoIds } }, select: { id: true } })
+      : [];
+    const commitIds = commits.map(c => c.id);
+    const sessions = commitIds.length > 0
+      ? await prisma.codingSession.findMany({ where: { commitId: { in: commitIds } }, select: { id: true } })
+      : [];
+    const sessionIds = sessions.map(s => s.id);
+
+    // Delete deepest leaves first
+    if (sessionIds.length > 0) {
+      await prisma.promptChange.deleteMany({ where: { sessionId: { in: sessionIds } } });
+      await prisma.secretFinding.deleteMany({ where: { sessionId: { in: sessionIds } } });
+      await prisma.sessionDiff.deleteMany({ where: { sessionId: { in: sessionIds } } });
+      await prisma.sessionReview.deleteMany({ where: { sessionId: { in: sessionIds } } });
+      await prisma.sharedSession.deleteMany({ where: { sessionId: { in: sessionIds } } });
+      await prisma.codingSession.deleteMany({ where: { id: { in: sessionIds } } });
+    }
+    if (trailIds.length > 0) {
+      await prisma.trailSession.deleteMany({ where: { trailId: { in: trailIds } } });
+    }
+    if (repoIds.length > 0) {
+      // Delete commits that aren't primary for any session (those sessions are already deleted)
+      await prisma.commit.deleteMany({ where: { repoId: { in: repoIds } } });
+      await prisma.pullRequest.deleteMany({ where: { repoId: { in: repoIds } } });
+      await prisma.webhook.deleteMany({ where: { repoId: { in: repoIds } } });
+    }
+    if (agentIds.length > 0) {
+      await prisma.agentVersion.deleteMany({ where: { agentId: { in: agentIds } } });
+    }
+    if (policyIds.length > 0) {
+      await prisma.policyRule.deleteMany({ where: { policyId: { in: policyIds } } });
+      await prisma.policyVersion.deleteMany({ where: { policyId: { in: policyIds } } });
+      await prisma.policyAssignment.deleteMany({ where: { policyId: { in: policyIds } } });
+    }
+    if (apiKeyIds.length > 0) {
+      await prisma.apiKeyAgentScope.deleteMany({ where: { apiKeyId: { in: apiKeyIds } } });
+      await prisma.apiKeyRepoScope.deleteMany({ where: { apiKeyId: { in: apiKeyIds } } });
+    }
+    if (userIds.length > 0) {
+      await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.sessionReview.deleteMany({ where: { userId: { in: userIds } } });
+    }
+
+    // Delete mid-level records
+    await prisma.trail.deleteMany({ where: { orgId: id } });
+    await prisma.apiKey.deleteMany({ where: { orgId: id } });
+    await prisma.agent.deleteMany({ where: { orgId: id } });
+    await prisma.policy.deleteMany({ where: { orgId: id } });
+    await prisma.repo.deleteMany({ where: { orgId: id } });
+    await prisma.machine.deleteMany({ where: { orgId: id } });
+    await prisma.invitation.deleteMany({ where: { orgId: id } });
+    await prisma.integrationConfig.deleteMany({ where: { orgId: id } });
+    await prisma.auditLog.deleteMany({ where: { orgId: id } });
+    await prisma.notification.deleteMany({ where: { orgId: id } });
+    await prisma.user.deleteMany({ where: { orgId: id } });
+
+    // Finally delete the org
     await prisma.org.delete({ where: { id } });
     res.status(204).end();
   } catch (err) {
