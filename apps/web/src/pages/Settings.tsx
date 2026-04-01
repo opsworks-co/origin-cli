@@ -637,10 +637,9 @@ export default function Settings() {
     setInstallingApp(true);
     setIntegrationError(null);
     try {
-      // First, try to auto-detect existing installations
+      // Check if already linked to this org
       const detect = await api.detectGitHubApp();
       if (detect.linked) {
-        // Already linked — refresh status
         setIntegrationSuccess(`Connected to GitHub account "${detect.account || 'unknown'}"`);
         const [status, intgs] = await Promise.all([
           api.getGitHubAppStatus(),
@@ -651,13 +650,8 @@ export default function Settings() {
         setInstallingApp(false);
         return;
       }
-      if (detect.installations && detect.installations.length > 0) {
-        // Show picker so admin can choose which GitHub account to link
-        setAvailableInstallations(detect.installations);
-        setInstallingApp(false);
-        return;
-      }
-      // No existing installation found — redirect to GitHub to install
+      // Always redirect to GitHub's own install flow — this ensures the user
+      // only sees their own GitHub orgs, not other Origin users' installations
       const { installUrl } = await api.getGitHubAppInstallUrl();
       window.location.href = installUrl;
     } catch (err: any) {
