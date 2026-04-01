@@ -240,6 +240,12 @@ router.put('/users/:id/role', async (req: AuthRequest, res: Response) => {
 router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
+    // Clean up all foreign key references before deleting
+    await prisma.notification.deleteMany({ where: { userId: id } });
+    await prisma.apiKey.deleteMany({ where: { userId: id } });
+    await prisma.sessionReview.deleteMany({ where: { userId: id } });
+    await prisma.auditLog.deleteMany({ where: { userId: id } });
+    await prisma.codingSession.updateMany({ where: { userId: id }, data: { userId: null } });
     await prisma.user.delete({ where: { id } });
     res.status(204).end();
   } catch (err) {
