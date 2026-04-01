@@ -267,17 +267,17 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
       return res.json({ linked: false, installations: [], message: 'No installations found. Install the GitHub App first.' });
     }
 
-    // Filter out installations already claimed by OTHER orgs
-    const claimedByOthers = await prisma.integrationConfig.findMany({
+    // Filter out installations already claimed by ANY org (including this one)
+    // This prevents showing other users' GitHub accounts to unrelated Origin users
+    const claimedByAny = await prisma.integrationConfig.findMany({
       where: {
         provider: 'github',
         authType: 'github_app',
-        orgId: { not: req.user!.orgId },
       },
       select: { settings: true },
     });
     const claimedInstallationIds = new Set<string>();
-    for (const cfg of claimedByOthers) {
+    for (const cfg of claimedByAny) {
       try {
         const s = JSON.parse(cfg.settings);
         if (s.installationId) claimedInstallationIds.add(String(s.installationId));
