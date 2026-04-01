@@ -118,6 +118,7 @@ function mapSession(s: any, pullRequests?: any[]) {
           promptText: pc.promptText,
           filesChanged: JSON.parse(pc.filesChanged || '[]'),
           diff: pc.diff || '',
+          uncommittedDiff: pc.uncommittedDiff || '',
           createdAt: pc.createdAt,
         }))
       : [],

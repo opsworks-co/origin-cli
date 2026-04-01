@@ -227,6 +227,7 @@ export interface PromptChange {
   promptText: string;
   filesChanged: string[];
   diff: string;
+  uncommittedDiff?: string;
   createdAt?: string;
 }
 

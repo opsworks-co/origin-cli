@@ -105,6 +105,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
             promptText: pc.promptText,
             filesChanged: safeParse(pc.filesChanged, []),
             diff: pc.diff || '',
+            uncommittedDiff: pc.uncommittedDiff || '',
             createdAt: pc.createdAt,
           }))
         : [],

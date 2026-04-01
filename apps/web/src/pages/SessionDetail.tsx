@@ -559,15 +559,7 @@ export default function SessionDetail() {
             );
           })()}
 
-          {/* System prompt */}
-          {session.agentSystemPrompt && (
-            <div className="card space-y-2 flex-1 min-w-[250px]">
-              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">System Prompt</h3>
-              <pre className="text-xs text-gray-400 bg-gray-900 rounded p-2 overflow-auto whitespace-pre-wrap max-h-24">
-                {session.agentSystemPrompt}
-              </pre>
-            </div>
-          )}
+          {/* System prompt hidden — available via API but not shown in UI */}
         </div>
       )}
 
@@ -643,7 +635,21 @@ export default function SessionDetail() {
           <div className={`flex-1 overflow-y-auto ${showAskPanel ? 'min-w-0' : ''}`}>
           {activeTab === 'session' && (
             <UnifiedSessionView
-              transcript={(() => { try { return JSON.parse(session.transcript); } catch { return []; } })()}
+              transcript={(() => {
+                try {
+                  const parsed = JSON.parse(session.transcript);
+                  if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+                } catch { /* empty */ }
+                // Synthesize transcript from prompt data when no real transcript exists (Codex, etc.)
+                const synth: Array<{ role: string; content: string }> = [];
+                // System prompt not injected into synthesized transcript
+                if (session.promptChanges) {
+                  for (const pc of session.promptChanges) {
+                    if (pc.promptText) synth.push({ role: 'user', content: pc.promptText });
+                  }
+                }
+                return synth;
+              })()}
               promptChanges={session.promptChanges || []}
               sessionDiff={session.sessionDiff}
             />

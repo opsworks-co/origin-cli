@@ -15,7 +15,9 @@ export interface GitCaptureResult {
   headAfter: string;
   commitShas: string[];     // Real commit SHAs created during session
   commitDetails: CommitInfo[]; // Per-commit metadata
-  diff: string;             // Unified diff (capped at MAX_DIFF_SIZE)
+  diff: string;             // Combined committed + uncommitted (capped at MAX_DIFF_SIZE)
+  committedDiff: string;    // Committed changes only (sha..sha)
+  uncommittedDiff: string;  // Uncommitted changes only (staged + unstaged + untracked)
   diffTruncated: boolean;
   linesAdded: number;
   linesRemoved: number;
@@ -33,7 +35,7 @@ const MAX_DIFF_SIZE = 500_000; // 500KB max diff size
  * - New commits created since headBefore
  * - Full unified diff (committed + uncommitted changes)
  */
-export function captureGitState(repoPath: string, headBefore: string | null): GitCaptureResult {
+export function captureGitState(repoPath: string, headBefore: string | null, opts?: { committedOnly?: boolean }): GitCaptureResult {
   const execOpts = {
     encoding: 'utf-8' as const,
     cwd: repoPath,
@@ -84,41 +86,73 @@ export function captureGitState(repoPath: string, headBefore: string | null): Gi
     }
   }
 
-  // 4. Build unified diff
-  let diff = '';
+  // 4. Build diffs: committedDiff (sha..sha), uncommittedDiff (working tree),
+  //    diff (combined for backwards compat)
+  let committedDiff = '';
+  let uncommittedDiff = '';
   let diffTruncated = false;
 
   try {
     // Committed changes since session start
     if (safeBefore !== headAfter) {
-      diff = execSync(`git diff ${safeBefore}..${headAfter}`, execOpts).trim();
+      committedDiff = execSync(`git diff ${safeBefore}..${headAfter}`, execOpts).trim();
     }
 
-    // Also include uncommitted changes (staged + unstaged combined)
-    // `git diff HEAD` captures both staged and unstaged changes in one pass
-    const uncommitted = execSync('git diff HEAD', execOpts).trim();
-
-    if (uncommitted) {
-      diff = diff ? diff + '\n' + uncommitted : uncommitted;
+    // Capture uncommitted changes (staged + unstaged + untracked)
+    if (!opts?.committedOnly) {
+      uncommittedDiff = execSync('git diff HEAD', execOpts).trim();
+      // Also capture new untracked files as diff
+      try {
+        const untracked = execSync(
+          'git ls-files --others --exclude-standard',
+          execOpts,
+        ).trim();
+        if (untracked) {
+          for (const file of untracked.split('\n').filter(Boolean)) {
+            try {
+              execSync(`git diff --no-index /dev/null "${file}"`, execOpts);
+            } catch (e: any) {
+              // git diff --no-index exits 1 on diff, stdout still has the diff
+              const out = (e.stdout || '').toString().trim();
+              if (out) {
+                uncommittedDiff = uncommittedDiff ? uncommittedDiff + '\n' + out : out;
+              }
+            }
+          }
+        }
+      } catch {
+        // ls-files failed — skip untracked
+      }
     }
 
-    // Enforce size limit
-    if (diff.length > MAX_DIFF_SIZE) {
-      diff = diff.slice(0, MAX_DIFF_SIZE);
+    // Enforce size limits
+    if (committedDiff.length > MAX_DIFF_SIZE) {
+      committedDiff = committedDiff.slice(0, MAX_DIFF_SIZE);
+      diffTruncated = true;
+    }
+    if (uncommittedDiff.length > MAX_DIFF_SIZE) {
+      uncommittedDiff = uncommittedDiff.slice(0, MAX_DIFF_SIZE);
       diffTruncated = true;
     }
   } catch {
     // git diff can fail on shallow clones, detached HEAD issues, etc.
   }
 
-  // 4. Count lines added/removed from diff
+  // Combined diff for backwards compat
+  let diff = committedDiff;
+  if (uncommittedDiff) {
+    diff = diff ? diff + '\n' + uncommittedDiff : uncommittedDiff;
+  }
+
+  // Count lines added/removed
   let linesAdded = 0;
   let linesRemoved = 0;
-
-  if (diff) {
-    for (const line of diff.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
-      if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+  for (const d of [committedDiff, uncommittedDiff]) {
+    if (d) {
+      for (const line of d.split('\n')) {
+        if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
+        if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+      }
     }
   }
 
@@ -128,10 +162,33 @@ export function captureGitState(repoPath: string, headBefore: string | null): Gi
     commitShas,
     commitDetails,
     diff,
+    committedDiff,
+    uncommittedDiff,
     diffTruncated,
     linesAdded,
     linesRemoved,
   };
+}
+
+/**
+ * Get list of files with uncommitted changes (staged + unstaged).
+ * Used to snapshot the dirty working tree before a prompt starts.
+ */
+export function getDirtyFiles(repoPath: string): string[] {
+  try {
+    const execOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000 };
+    // Tracked files with changes (staged + unstaged)
+    const tracked = execSync('git diff --name-only HEAD', execOpts).trim();
+    // Untracked files
+    const untracked = execSync('git ls-files --others --exclude-standard', execOpts).trim();
+    const files = [
+      ...(tracked ? tracked.split('\n').filter(Boolean) : []),
+      ...(untracked ? untracked.split('\n').filter(Boolean) : []),
+    ];
+    return files;
+  } catch {
+    return [];
+  }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -143,6 +200,8 @@ function emptyResult(headBefore: string): GitCaptureResult {
     commitShas: [],
     commitDetails: [],
     diff: '',
+    committedDiff: '',
+    uncommittedDiff: '',
     diffTruncated: false,
     linesAdded: 0,
     linesRemoved: 0,

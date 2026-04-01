@@ -332,7 +332,8 @@ export interface PromptFileMapping {
   promptIndex: number;
   promptText: string;       // Truncated to 1000 chars
   filesChanged: string[];   // Files modified after this prompt
-  diff: string;             // Unified diff of edits from this prompt
+  diff: string;             // Unified diff of committed edits from this prompt
+  uncommittedDiff?: string; // Unified diff of uncommitted changes from this prompt
 }
 
 /**

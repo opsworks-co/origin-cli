@@ -182,14 +182,15 @@ model SessionDiff {
 }
 
 model PromptChange {
-  id           String        @id @default(uuid())
-  sessionId    String
-  session      CodingSession @relation(fields: [sessionId], references: [id])
-  promptIndex  Int           // 0-based index in session
-  promptText   String        // Truncated to 1000 chars
-  filesChanged String        // JSON array of file paths
-  diff         String        @default("") // Unified diff of edits from this prompt
-  createdAt    DateTime      @default(now())
+  id              String        @id @default(uuid())
+  sessionId       String
+  session         CodingSession @relation(fields: [sessionId], references: [id])
+  promptIndex     Int           // 0-based index in session
+  promptText      String        // Truncated to 1000 chars
+  filesChanged    String        // JSON array of file paths
+  diff            String        @default("") // Unified diff of committed edits from this prompt
+  uncommittedDiff String        @default("") // Unified diff of uncommitted (staged+unstaged) changes
+  createdAt       DateTime      @default(now())
 }
 
 model SessionReview {

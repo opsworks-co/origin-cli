@@ -33,11 +33,13 @@ export interface SessionState {
   repoPath: string;           // Git repo root path OR working directory
   headShaAtStart: string | null; // HEAD commit SHA when session started (null if no git)
   headShaAtLastStop: string | null; // HEAD SHA after last prompt stop (for per-prompt diffs)
+  prePromptSha: string | null;  // HEAD SHA before current prompt (for per-prompt git diffs)
   completedPromptMappings?: Array<{  // Accumulated per-prompt file change mappings
     promptIndex: number;
     promptText: string;
     filesChanged: string[];
     diff: string;
+    uncommittedDiff?: string;
   }>;
   branch: string | null;      // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support
@@ -45,6 +47,7 @@ export interface SessionState {
   tabCompletions?: TabCompletionStats;
   agentSystemPrompt?: string; // Cached agent system prompt for session resume
   activePolicies?: string[];  // Cached active policies for session resume
+  prePromptDirtyFiles?: string[]; // Files that were already dirty (uncommitted) before current prompt
   enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
   trailId?: string;           // Trail ID if session is linked to an active trail
   status?: string;            // RUNNING | ENDED | COMPLETED

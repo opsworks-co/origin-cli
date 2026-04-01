@@ -24,6 +24,7 @@ interface DiffFile {
   linesAdded: number;
   linesRemoved: number;
   hunks: string[];
+  uncommitted?: boolean; // true if this file has uncommitted (not yet committed) changes
 }
 
 interface TranscriptTurn {
@@ -31,6 +32,7 @@ interface TranscriptTurn {
   humanMessage: Message | null;
   assistantMessages: Message[];
   promptChange: PromptChange | null;
+  systemMessage?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +91,9 @@ function buildUnifiedTurns(
   const matchedIndices = new Set<number>();
 
   for (const msg of transcript) {
+    // Skip system messages — not shown in the session view
+    if (msg.role === 'system') continue;
+
     const isHuman = msg.role === 'human' || msg.role === 'user';
     if (isHuman) {
       humanIndex++;
@@ -380,20 +385,30 @@ function TurnCard({
   const pc = turn.promptChange;
   const hasChanges = pc && pc.filesChanged.length > 0;
   const hasDiff = pc && pc.diff && pc.diff.length > 0;
+  const hasUncommittedDiff = pc && pc.uncommittedDiff && pc.uncommittedDiff.length > 0;
 
   const promptText =
     turn.humanMessage?.content || pc?.promptText || '(empty prompt)';
 
-  // Lazy diff parsing
+  // Lazy diff parsing — parse combined diff, mark uncommitted files using uncommittedDiff paths
   const files = useMemo(() => {
     if (!hasDiff) return [];
     if (diffCache.current.has(turn.turnIndex)) {
       return diffCache.current.get(turn.turnIndex)!;
     }
-    const parsed = parseDiff(pc!.diff);
-    diffCache.current.set(turn.turnIndex, parsed);
-    return parsed;
-  }, [hasDiff, turn.turnIndex, pc, diffCache]);
+    const allFiles = parseDiff(pc!.diff);
+    // Identify uncommitted file paths from the separate uncommittedDiff field
+    if (hasUncommittedDiff) {
+      const uncommittedPaths = new Set(
+        parseDiff(pc!.uncommittedDiff!).map(f => f.path)
+      );
+      for (const f of allFiles) {
+        if (uncommittedPaths.has(f.path)) f.uncommitted = true;
+      }
+    }
+    diffCache.current.set(turn.turnIndex, allFiles);
+    return allFiles;
+  }, [hasDiff, hasUncommittedDiff, turn.turnIndex, pc, diffCache]);
 
   const totalAdded = files.reduce((sum, f) => sum + f.linesAdded, 0);
   const totalRemoved = files.reduce((sum, f) => sum + f.linesRemoved, 0);
@@ -446,9 +461,9 @@ function TurnCard({
                 {formatPromptTime(pc.createdAt)}
               </span>
             )}
-            {hasChanges && (
+            {(hasChanges || files.length > 0) && (
               <span className="text-[11px] text-gray-500 bg-gray-800/60 px-1.5 py-0.5 rounded">
-                {pc!.filesChanged.length} file{pc!.filesChanged.length !== 1 ? 's' : ''}
+                {files.length > 0 ? files.length : pc!.filesChanged.length} file{(files.length > 0 ? files.length : pc!.filesChanged.length) !== 1 ? 's' : ''}
               </span>
             )}
             {hasDiff && (
@@ -468,6 +483,7 @@ function TurnCard({
       {/* Expanded content */}
       {isExpanded && (
         <div className="border-t border-gray-800/60">
+          {/* System context is available in session details but hidden from the turn view */}
           {/* Assistant response */}
           {assistantText && (
             <div className="px-5 py-4">
@@ -498,16 +514,18 @@ function TurnCard({
           )}
 
           {/* Files changed with diffs */}
-          {hasChanges && (
+          {(hasChanges || hasDiff) && (
             <div className={`px-5 py-4 space-y-1.5 ${assistantText ? 'border-t border-gray-800/40' : ''}`}>
               <div className="flex items-center gap-2 mb-3">
                 <div className="w-5 h-5 rounded-full bg-indigo-500/20 flex items-center justify-center">
                   <span className="text-[10px] text-indigo-400">{'\u{2702}'}</span>
                 </div>
                 <span className="text-[11px] font-medium text-gray-500">
-                  {pc!.filesChanged.length} file{pc!.filesChanged.length !== 1 ? 's' : ''} changed
+                  {hasChanges
+                    ? `${pc!.filesChanged.length} file${pc!.filesChanged.length !== 1 ? 's' : ''} changed`
+                    : `${files.length} file${files.length !== 1 ? 's' : ''} changed`}
                 </span>
-                {hasDiff && (
+                {(hasDiff || hasChanges) && (
                   <span className="text-[11px] font-mono text-gray-600">
                     <span className="text-green-400/60">+{totalAdded}</span>
                     {' '}
@@ -520,24 +538,40 @@ function TurnCard({
                 files.map((file, fileIdx) => {
                   const fileKey = `${turn.turnIndex}-${file.path}-${fileIdx}`;
                   const isFileCollapsed = expandedFiles[fileKey] === false;
+                  const isUncommitted = file.uncommitted;
                   return (
                     <div
                       key={fileKey}
-                      className="border border-gray-800/60 rounded-md overflow-hidden"
+                      className={`border rounded-md overflow-hidden ${
+                        isUncommitted
+                          ? 'border-violet-600/40'
+                          : 'border-gray-800/60'
+                      }`}
                     >
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           onToggleFile(fileKey);
                         }}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 bg-gray-800/30 hover:bg-gray-800/60 text-left text-[11px] transition-colors"
+                        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[11px] transition-colors ${
+                          isUncommitted
+                            ? 'bg-violet-900/15 hover:bg-violet-900/25'
+                            : 'bg-gray-800/30 hover:bg-gray-800/60'
+                        }`}
                       >
                         <span className="text-gray-600 text-[10px]">
                           {isFileCollapsed ? '\u25B6' : '\u25BC'}
                         </span>
-                        <span className="font-mono text-gray-300 flex-1 truncate">
+                        <span className={`font-mono flex-1 truncate ${
+                          isUncommitted ? 'text-violet-300/80' : 'text-gray-300'
+                        }`}>
                           {shortenPath(file.path)}
                         </span>
+                        {isUncommitted && (
+                          <span className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400/80 border border-violet-500/20">
+                            uncommitted
+                          </span>
+                        )}
                         <span className="text-green-400/70 font-mono">+{file.linesAdded}</span>
                         <span className="text-red-400/70 font-mono">-{file.linesRemoved}</span>
                       </button>
@@ -549,7 +583,7 @@ function TurnCard({
                     </div>
                   );
                 })
-              ) : (
+              ) : hasChanges ? (
                 <div className="space-y-1 ml-7">
                   {pc!.filesChanged.map((file) => (
                     <div
@@ -565,12 +599,12 @@ function TurnCard({
                     (no diff captured)
                   </p>
                 </div>
-              )}
+              ) : null}
             </div>
           )}
 
           {/* Empty expanded state */}
-          {!hasChanges && !assistantText && (
+          {!hasChanges && !hasDiff && !assistantText && (
             <div className="px-5 py-3 text-[11px] text-gray-700">
               No response or code changes captured
             </div>

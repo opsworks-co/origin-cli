@@ -400,6 +400,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
           sessionId: existingSession.id,
           agentSystemPrompt: dedupPrompt || undefined,
           activePolicies: [],
+          startedAt: existingSession.startedAt?.toISOString(),
         });
       }
     }
@@ -698,6 +699,7 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           promptText: (pc.promptText || '').slice(0, 1000),
           filesChanged: JSON.stringify(pc.filesChanged || []),
           diff: (pc.diff || '').slice(0, 200_000),
+          uncommittedDiff: (pc.uncommittedDiff || '').slice(0, 200_000),
         })),
       });
     }
@@ -968,6 +970,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
             promptText: (pc.promptText || '').slice(0, 1000),
             filesChanged: JSON.stringify(pc.filesChanged || []),
             diff: (pc.diff || '').slice(0, 200_000),
+            uncommittedDiff: (pc.uncommittedDiff || '').slice(0, 200_000),
           })),
         });
       }

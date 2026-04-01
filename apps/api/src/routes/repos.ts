@@ -1241,6 +1241,7 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
         promptText: pc.promptText,
         filesChanged: JSON.parse(pc.filesChanged || '[]'),
         diff: pc.diff || '',
+        uncommittedDiff: pc.uncommittedDiff || '',
       }));
 
       // If no PromptChange records exist, extract prompts from transcript
