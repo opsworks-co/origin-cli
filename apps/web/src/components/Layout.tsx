@@ -3,6 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { request } from '../api';
 import NotificationBell from './NotificationBell';
+import { LogoMark } from './Logo';
 import ChatWidget from './ChatWidget';
 import {
   LayoutDashboard,
@@ -17,7 +18,6 @@ import {
   DollarSign,
   Settings,
   Lightbulb,
-  Trophy,
   LogOut,
   Menu,
   X,
@@ -34,7 +34,6 @@ const NAV_ITEMS = [
   { to: '/iam', label: 'IAM', icon: Key },
   { to: '/budget', label: 'Budget', icon: DollarSign },
   { to: '/insights', label: 'Insights', icon: Lightbulb },
-  { to: '/leaderboard', label: 'Leaderboard', icon: Trophy },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -87,9 +86,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       >
         {/* Logo */}
         <div className="flex items-center gap-3 px-5 h-[60px] border-b border-white/[0.06]">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-indigo-600 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-indigo-500/25">
-            O
-          </div>
+          <LogoMark size={32} />
           <div>
             <span className="text-[15px] font-semibold text-gray-100 tracking-tight">Origin</span>
             <p className="text-[10px] text-gray-500 leading-tight -mt-0.5">AI coding agents orchestrator</p>
@@ -172,9 +169,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           >
             <Menu className="w-5 h-5" />
           </button>
-          <div className="w-6 h-6 rounded-md bg-gradient-to-br from-indigo-500 to-indigo-600 flex items-center justify-center text-white font-bold text-[10px]">
-            O
-          </div>
+          <LogoMark size={24} />
           <span className="text-sm font-semibold text-gray-200">Origin</span>
         </header>
 

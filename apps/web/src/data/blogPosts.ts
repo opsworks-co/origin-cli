@@ -20,6 +20,24 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Origin Solo: Free AI Coding Analytics for Individual Developers',
+    slug: 'origin-solo-free-ai-coding-analytics',
+    date: '2026-04-04',
+    author: 'Artem Dolobanko',
+    tags: ['developer-tools', 'solo', 'ai-coding', 'open-source'],
+    excerpt:
+      'You use Claude, Cursor, Gemini, and Codex every day — but you have no idea how much they cost, which one writes better code, or where your time goes. Origin Solo changes that. Free forever.',
+  },
+  {
+    title: 'Shadow AI Is Your Biggest Engineering Blind Spot — Here\'s How to Fix It',
+    slug: 'shadow-ai-engineering-blind-spot',
+    date: '2026-04-02',
+    author: 'Artem Dolobanko',
+    tags: ['security', 'governance', 'enterprise', 'shadow-ai'],
+    excerpt:
+      'Most engineering teams have no idea what AI coding tools their developers use, what data those tools access, or what code they produce. This invisible risk — shadow AI — is the fastest-growing security gap in enterprise software development.',
+  },
+  {
     title: 'Your AI agents now remember what happened last session. Here\'s how cross-agent handoff works.',
     slug: 'cross-agent-handoff-session-memory',
     date: '2026-03-31',

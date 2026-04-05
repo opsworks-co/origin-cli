@@ -1,17 +1,20 @@
 <p align="center">
-  <h1 align="center">Origin CLI</h1>
-  <p align="center"><strong>Know exactly what your AI agents are writing.</strong></p>
+  <img src="https://getorigin.io/favicon.svg" width="80" alt="Origin Logo" />
 </p>
+
+<h1 align="center">Origin CLI</h1>
+<p align="center"><strong>Know exactly what your AI agents are writing.</strong></p>
 
 <p align="center">
   <a href="https://github.com/dolobanko/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
   <a href="https://github.com/dolobanko/origin-cli/stargazers"><img src="https://img.shields.io/github/stars/dolobanko/origin-cli?style=social" alt="GitHub stars"></a>
+  <a href="https://getorigin.io"><img src="https://img.shields.io/badge/web-getorigin.io-6366f1" alt="Website"></a>
 </p>
 
 <p align="center">
   Track every AI coding session. Line-level AI/human attribution. Full visibility into AI-authored code.<br/>
   Zero setup — no server, no login, no API keys. All data stored in git.<br/>
-  Supports Cursor Agent Trace v0.1.0 standard.
+  <strong>50+ commands</strong> · <strong>10+ agents</strong> · <strong>MIT licensed</strong>
 </p>
 
 ---
@@ -52,22 +55,33 @@ origin backfill                  # Retroactively tag old commits as AI/human
 
 ## Supported Agents
 
-| Agent | Hook Type | Status |
+| Agent | Detection | Status |
 |-------|-----------|--------|
-| <img src="https://cdn.simpleicons.org/anthropic/D97757" width="14"> **Claude Code** | Session hooks + process detection | **Supported** |
-| <img src="https://cdn.simpleicons.org/cursor/00A4EF" width="14"> **Cursor** | Session hooks + Cursor DB | **Supported** |
-| <img src="https://cdn.simpleicons.org/openai/412991" width="14"> **Codex CLI** | Session hooks + process detection | **Supported** |
-| <img src="https://cdn.simpleicons.org/google/4285F4" width="14"> **Gemini CLI** | Session hooks + process detection | **Supported** |
-| Windsurf | Session hooks | Coming soon |
-| Aider | Config hooks | Coming soon |
-| GitHub Copilot | Process detection | Coming soon |
+| <img src="https://cdn.simpleicons.org/anthropic/D97757" width="14"> **Claude Code** | Session hooks + process detection | ✅ Supported |
+| <img src="https://cdn.simpleicons.org/cursor/00A4EF" width="14"> **Cursor** | Session hooks + Cursor DB + IDE extension | ✅ Supported |
+| <img src="https://cdn.simpleicons.org/openai/412991" width="14"> **Codex CLI** | Session hooks + process detection + npx cache | ✅ Supported |
+| <img src="https://cdn.simpleicons.org/google/4285F4" width="14"> **Gemini CLI** | Session hooks + process detection | ✅ Supported |
+| 🌊 **Windsurf** | Session hooks + CLI detection | ✅ Supported |
+| 🤖 **Aider** | Session hooks + CLI detection | ✅ Supported |
+| <img src="https://cdn.simpleicons.org/github/ffffff" width="14"> **GitHub Copilot** | IDE extension + GH CLI extension + process detection | ✅ Supported |
+| 🧠 **Cody** | IDE extension + CLI detection | ✅ Supported |
+| ▶️ **Continue** | IDE extension detection | ✅ Supported |
+| 💎 **Codeium** | IDE extension detection | ✅ Supported |
+| 🔧 **Cline** | IDE extension detection (Claude Dev) | ✅ Supported |
+
+**Detection methods:**
+- CLI availability (`which <tool>`)
+- IDE extension scanning (VS Code, VSCodium)
+- Extension directory inspection
+- MCP config inspection
+- Process detection during commits
 
 ---
 
 ## All Commands
 
 <details>
-<summary><strong>Attribution & Analysis</strong></summary>
+<summary><strong>Attribution & Analysis</strong> (9 commands)</summary>
 
 ```
 origin blame <file>             Line-by-line AI/human attribution
@@ -84,7 +98,7 @@ origin backfill                 Retroactive AI tagging (--apply, --days, --min-c
 </details>
 
 <details>
-<summary><strong>Sessions & Sharing</strong></summary>
+<summary><strong>Sessions & Sharing</strong> (7 commands)</summary>
 
 ```
 origin sessions                 List sessions for current repo (--all for everything)
@@ -99,29 +113,89 @@ origin share <id> --public      Create public link: getorigin.io/s/<slug>
 </details>
 
 <details>
-<summary><strong>Reporting & Compliance</strong></summary>
+<summary><strong>Reporting & Compliance</strong> (3 commands)</summary>
 
 ```
 origin report                   Sprint report — cost, models, users, ROI
                                   --range 7d|14d|30d  --format md|json|csv
 origin audit                    SOC 2 / ISO 27001 compliance audit trail
                                   --from <date>  --to <date>  --format md|json|csv
+origin trail                    View audit trail entries
 ```
 
 </details>
 
 <details>
-<summary><strong>Setup & Maintenance</strong></summary>
+<summary><strong>Setup & Maintenance</strong> (13 commands)</summary>
 
 ```
 origin init                     Initialize + install hooks
+origin login                    Authenticate with Origin server
+origin whoami                   Show current user and connection info
 origin enable [--global]        Install hooks + secret scanner
 origin disable [--global]       Remove hooks
 origin status                   Show system status
+origin config <key> [value]     Get/set configuration
 origin upgrade                  Upgrade CLI to latest version
 origin doctor [--fix]           Diagnose and fix issues
 origin verify                   Health check — agents, repo, sessions
 origin clean [--force]          Remove orphaned data
+origin reset                    Reset Origin data for this repo
+origin hooks                    Manage git hooks
+```
+
+</details>
+
+<details>
+<summary><strong>Repos & Agents</strong> (5 commands)</summary>
+
+```
+origin repos                    List tracked repositories
+origin agents                   List detected AI agents
+origin link                     Link current repo to Origin server
+origin sync                     Sync repos and upload session data
+origin ignore                   Manage ignored files/paths
+```
+
+</details>
+
+<details>
+<summary><strong>Reviews & Policies</strong> (4 commands)</summary>
+
+```
+origin review <id>              Review a session (approve/reject/flag)
+origin review-pr <url>          Review a pull request
+origin intent-review            AI intent verification for sessions
+origin policies                 List active governance policies
+```
+
+</details>
+
+<details>
+<summary><strong>Productivity & AI</strong> (8 commands)</summary>
+
+```
+origin handoff                  Cross-agent context handoff (show/clear)
+origin memory                   Session memory across conversations (show/clear)
+origin todo                     AI-extracted TODO tracker (list/done/add)
+origin chat                     Chat with Origin AI about your codebase
+origin resume                   Resume a previous session
+origin rewind                   Rewind to a previous session state
+origin snapshot                 Save a point-in-time snapshot
+origin analyze                  Deep analysis of session patterns
+```
+
+</details>
+
+<details>
+<summary><strong>Server & Integration</strong> (5 commands)</summary>
+
+```
+origin web                      Open Origin dashboard in browser
+origin proxy                    Local proxy for MCP integration
+origin plugin                   Manage plugins
+origin ci                       CI/CD integration commands
+origin db                       Local database management
 ```
 
 </details>
@@ -210,6 +284,35 @@ Pre-commit hook blocks commits containing hardcoded secrets:
 
 Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, JWTs, database connection strings, private keys, and `*_TOKEN=`/`*_SECRET=`/`*_KEY=` patterns.
 
+### Cross-Agent Context Handoff
+
+Switch from Claude to Cursor (or any agent) without losing context. When a session ends, Origin saves what you were working on. The next session — even with a different agent — picks up where you left off.
+
+```bash
+origin handoff show              # Preview what will be passed to next agent
+origin handoff clear             # Reset handoff context
+```
+
+### Session Memory
+
+Origin remembers what happened in previous sessions. New sessions get the last 3 summaries injected, so the agent knows what was done yesterday, which files were touched, and what's still open.
+
+```bash
+origin memory show              # See accumulated session history
+origin memory clear             # Reset memory for this repo
+```
+
+### AI TODO Tracker
+
+TODOs mentioned in AI sessions are automatically extracted and tracked:
+
+```bash
+origin todo list                # Show all open TODOs across repos
+origin todo done <id>           # Mark as complete
+origin todo show <id>           # Show originating session context
+origin todo add "fix auth flow" # Manually add a TODO
+```
+
 ---
 
 ## How It Works
@@ -240,60 +343,13 @@ AI Agent commits code → Post-commit hook fires → Origin detects AI process
 | Line-level attribution | **Yes** — per-line AI/human tags | Commit-level only | No |
 | Retroactive tagging | **Yes** — `origin backfill` | No | No |
 | Local-first / no server | **Yes** — git notes, zero setup | Yes | No — SaaS only |
-| Multi-agent support | **4 agents**, more coming | Claude only | GitHub Copilot only |
+| Multi-agent support | **11 agents** | Claude only | GitHub Copilot only |
 | Session transcripts | **Full prompts + responses** | No | No |
 | Per-file context injection | **Yes** — agents see authorship | No | No |
 | Secret scanning | **Built-in** pre-commit hook | No | No |
+| Cross-agent handoff | **Yes** — context carries over | No | No |
+| Total commands | **50+** | ~5 | N/A |
 | Open source | **MIT** | MIT | Closed |
-
----
-
-## Experimental Features
-
-New developer productivity features. Free, local-first, and available now.
-
-### Cross-Agent Context Handoff
-
-Switch from Claude to Cursor (or any agent) without losing context. When a session ends, Origin saves what you were working on. The next session — even with a different agent — picks up where you left off.
-
-```bash
-# Context is injected automatically into the next agent's system prompt
-# To preview what will be passed:
-origin handoff show
-
-# To clear:
-origin handoff clear
-```
-
-What gets handed off: last prompts, files in progress, open TODOs, session summary.
-
-### Session Memory
-
-Origin remembers what happened in previous sessions. New sessions get the last 3 summaries injected, so the agent knows what was done yesterday, which files were touched, and what's still open.
-
-```bash
-origin memory show              # See accumulated session history
-origin memory clear             # Reset memory for this repo
-```
-
-Stored in git notes (`refs/notes/origin-memory`) — travels with the repo.
-
-### AI TODO Tracker
-
-TODOs mentioned in AI sessions are automatically extracted and tracked. Captures `TODO`, `FIXME`, `NOTE`, and natural language patterns like "we need to fix X later".
-
-```bash
-origin todo list                # Show all open TODOs across repos
-origin todo done <id>           # Mark as complete
-origin todo show <id>           # Show originating session context
-origin todo add "fix auth flow" # Manually add a TODO
-```
-
-### AI-Powered Explain
-
-```bash
-origin explain <id> --summarize   # AI analysis: intent, outcome, learnings, friction
-```
 
 ---
 

@@ -15,6 +15,7 @@ import {
 } from 'recharts';
 import * as api from '../api';
 import type { Stats } from '../api';
+import { useAuth } from '../context/AuthContext';
 
 const CHART_THEME = {
   grid: '#1f2937',
@@ -45,6 +46,8 @@ function ChartCard({ title, children }: { title: string; children: React.ReactNo
 }
 
 export default function Insights() {
+  const { user } = useAuth();
+  const isDev = user?.accountType === 'developer';
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -107,7 +110,7 @@ export default function Insights() {
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="text-2xl font-bold">Insights</h1>
-          <p className="text-sm text-gray-500 mt-1">Analytics across your AI coding operations</p>
+          <p className="text-sm text-gray-500 mt-1">{isDev ? 'Your personal AI coding analytics' : 'Analytics across your AI coding operations'}</p>
         </div>
 
         {/* Date range filter */}
@@ -284,7 +287,8 @@ export default function Insights() {
           )}
         </ChartCard>
 
-        {/* Top Engineers */}
+        {/* Top Engineers — team only */}
+        {!isDev && (
         <ChartCard title="Top Engineers by AI Usage">
           {stats.topEngineers && stats.topEngineers.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -300,6 +304,7 @@ export default function Insights() {
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">No data available</div>
           )}
         </ChartCard>
+        )}
 
         {/* Activity by Hour */}
         <ChartCard title="Activity by Hour of Day">
@@ -318,7 +323,8 @@ export default function Insights() {
           )}
         </ChartCard>
 
-        {/* Session Quality Distribution */}
+        {/* Session Quality Distribution — team only */}
+        {!isDev && (
         <ChartCard title="Session Quality Distribution">
           {stats.qualityMetrics ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -349,8 +355,10 @@ export default function Insights() {
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">No data available</div>
           )}
         </ChartCard>
+        )}
 
-        {/* Secret Detections by Type */}
+        {/* Secret Detections by Type — team only */}
+        {!isDev && (
         <ChartCard title="Secret Detections by Type">
           {stats.secretsByType && stats.secretsByType.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -366,8 +374,10 @@ export default function Insights() {
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">No secrets detected</div>
           )}
         </ChartCard>
+        )}
 
-        {/* Policy Violations by Type */}
+        {/* Policy Violations by Type — team only */}
+        {!isDev && (
         <ChartCard title="Policy Violations by Type">
           {stats.violationsByType && stats.violationsByType.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -383,8 +393,10 @@ export default function Insights() {
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">No violations recorded</div>
           )}
         </ChartCard>
+        )}
 
-        {/* Cost by User */}
+        {/* Cost by User — team only */}
+        {!isDev && (
         <ChartCard title="Cost by User">
           {stats.costByUser && stats.costByUser.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -400,6 +412,7 @@ export default function Insights() {
             <div className="flex items-center justify-center h-full text-gray-500 text-sm">No data available</div>
           )}
         </ChartCard>
+        )}
 
         {/* Tokens Over Time */}
         <ChartCard title="Tokens Used Over Time">

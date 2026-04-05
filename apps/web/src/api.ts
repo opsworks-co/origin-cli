@@ -35,6 +35,7 @@ export async function request<T>(path: string, opts: RequestInit = {}): Promise<
 export interface AuthResponse {
   token: string;
   user: User;
+  apiKey?: string; // Auto-generated for solo developer accounts
 }
 
 export interface User {
@@ -42,9 +43,18 @@ export interface User {
   email: string;
   name: string;
   role: string;
+  accountType: 'org' | 'developer';
+  avatarUrl: string | null;
   orgId: string;
   orgName: string;
   orgSlug: string;
+}
+
+export function updateProfile(data: { name?: string; email?: string; avatarUrl?: string }) {
+  return request<User>('/api/auth/profile', {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
 }
 
 export function login(email: string, password: string) {
@@ -64,6 +74,24 @@ export function register(
   return request<AuthResponse>('/api/auth/register', {
     method: 'POST',
     body: JSON.stringify({ email, password, name, orgName, orgSlug }),
+  });
+}
+
+export function registerDeveloper(email: string, password: string, name: string) {
+  return request<AuthResponse>('/api/auth/register/developer', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, name }),
+  });
+}
+
+export function getOAuthUrl(provider: 'github' | 'gitlab' | 'google') {
+  return request<{ url: string }>(`/api/auth/oauth/${provider}`);
+}
+
+export function oauthCallback(provider: string, code: string, accountType?: string) {
+  return request<AuthResponse>(`/api/auth/oauth/${provider}/callback`, {
+    method: 'POST',
+    body: JSON.stringify({ code, accountType }),
   });
 }
 
@@ -890,21 +918,16 @@ export function getGitHubAppStatus() {
   }>('/api/github-app/status');
 }
 
-export function detectGitHubApp(installationId?: string) {
+export function detectGitHubApp(opts?: { installationId?: string; githubAccount?: string }) {
   return request<{
     linked: boolean;
     installationId?: string;
     account?: string;
     message?: string;
-    installations?: Array<{
-      installationId: string;
-      account: string;
-      accountType: string;
-      avatarUrl: string | null;
-    }>;
+    hasUnclaimedInstallations?: boolean;
   }>('/api/github-app/detect', {
     method: 'POST',
-    body: JSON.stringify(installationId ? { installationId } : {}),
+    body: JSON.stringify(opts || {}),
   });
 }
 
@@ -1227,7 +1250,7 @@ export function getInviteInfo(token: string) {
 }
 
 export function acceptInvite(data: { token: string; name: string; email: string; password: string }) {
-  return request<{ token: string; user: { id: string; email: string; name: string; role: string; orgId: string; orgName: string; orgSlug: string } }>('/api/auth/accept-invite', { method: 'POST', body: JSON.stringify(data) });
+  return request<AuthResponse>('/api/auth/accept-invite', { method: 'POST', body: JSON.stringify(data) });
 }
 
 // ---- PR-Grouped Sessions -----------------------------------------------------
@@ -1527,6 +1550,10 @@ export function getRepoHealth(id: string) {
 
 export function shareSession(id: string) {
   return request<{ url: string; slug: string; expiresAt: string | null }>(`/api/sessions/${id}/share`, { method: 'POST' });
+}
+
+export function unshareSession(id: string) {
+  return request<{ ok: boolean }>(`/api/sessions/${id}/share`, { method: 'DELETE' });
 }
 
 export function getSharedSession(slug: string) {

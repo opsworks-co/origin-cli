@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { loadConfig, loadAgentConfig, loadRepoConfig } from '../config.js';
+import { loadConfig, loadAgentConfig, loadRepoConfig, listProfiles } from '../config.js';
 import { api } from '../api.js';
 import { loadSessionState, listActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
 import { execSync } from 'child_process';
@@ -22,14 +22,27 @@ export async function statusCommand() {
 
   // Mode status
   const connected = config?.mode !== 'standalone' && config?.apiKey && config?.apiUrl;
+  const isSolo = config?.keyType === 'solo' || config?.accountType === 'developer';
+
   if (config?.mode === 'standalone') {
     console.log(chalk.yellow('  ⚡ Standalone mode (forced)'));
     console.log(chalk.gray('    Sessions tracked locally in git notes'));
     console.log(chalk.gray('    Run `origin config set mode auto` to reconnect'));
+  } else if (connected && isSolo) {
+    console.log(chalk.green('  ✅ Connected · Solo Developer'));
+    console.log(chalk.gray(`    📦 Personal workspace · All repos · All agents`));
   } else if (connected) {
-    console.log(chalk.green('  ✓ Connected mode'));
-    console.log(chalk.gray(`    API: ${config.apiUrl}`));
-    console.log(chalk.gray(`    Org: ${config.orgId || 'unknown'}`));
+    const orgName = config.orgName || config.orgId || 'unknown';
+    console.log(chalk.green(`  ✅ Connected · Team Member @ ${orgName}`));
+    // Fetch live scope info
+    try {
+      const data = await api.getWhoami() as any;
+      const repoLabel = data.repoScopes?.length > 0 ? `${data.repoScopes.length} repos` : `${data.repoCount || 0} repos`;
+      const agentLabel = data.agentScopes?.length > 0 ? `${data.agentScopes.length} agents` : `${data.agentCount || 0} agents`;
+      console.log(chalk.gray(`    📦 ${repoLabel} · ${agentLabel}`));
+    } catch {
+      console.log(chalk.gray(`    API: ${config.apiUrl}`));
+    }
   } else {
     console.log(chalk.green('  ✓ Standalone mode'));
     console.log(chalk.gray('    Sessions tracked locally in git notes'));
@@ -160,6 +173,22 @@ export async function statusCommand() {
       }
     } catch {
       console.log(chalk.red('  ✗ Cannot reach Origin API'));
+    }
+  }
+
+  // ── Multi-account profiles ────────────────────────────────────────
+  const profiles = listProfiles();
+  if (profiles.length > 0) {
+    console.log(chalk.bold('\n  Accounts'));
+    for (const p of profiles) {
+      const isActive = p.apiKey === config?.apiKey;
+      const mode = p.accountType === 'developer' ? chalk.green('solo') : chalk.blue('team');
+      const indicator = isActive ? chalk.white('●') : chalk.gray('○');
+      const label = `${p.name} (${mode}) → ${p.orgName}`;
+      console.log(`    ${indicator} ${isActive ? chalk.white(label) : chalk.gray(label)}`);
+    }
+    if (profiles.length > 1) {
+      console.log(chalk.gray('    Sessions sent to all accounts simultaneously'));
     }
   }
 

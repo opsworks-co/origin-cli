@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Helmet } from 'react-helmet-async';
 import { Link } from 'react-router-dom';
 
 const INSTALL_CMD = 'npm i -g https://getorigin.io/cli/origin-cli-latest.tgz';
@@ -1141,6 +1142,11 @@ export default function CLI() {
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-12">
+      <Helmet>
+        <title>CLI — Origin | Install &amp; Configure the Origin CLI</title>
+        <meta name="description" content="Install and configure the Origin CLI to track AI coding sessions, enforce policies, and stream real-time data from Claude Code, Cursor, and other AI agents." />
+        <link rel="canonical" href="https://getorigin.io/cli" />
+      </Helmet>
       <div className="flex gap-8">
         {/* Sidebar */}
         <aside className="hidden lg:block w-56 shrink-0">

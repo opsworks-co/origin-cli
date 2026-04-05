@@ -284,31 +284,58 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
       } catch { /* ignore */ }
     }
 
-    // If exactly one installation, auto-link it
-    // If multiple, return the list so frontend can let admin pick
-    const installationList = installations
-      .filter((inst: any) => !claimedInstallationIds.has(String(inst.id)))
-      .map((inst: any) => ({
-        installationId: String(inst.id),
-        account: inst.account?.login || 'unknown',
-        accountType: inst.account?.type || 'unknown', // User or Organization
-        avatarUrl: inst.account?.avatar_url || null,
-      }));
-
-    // Only auto-link if a specific installationId was explicitly passed by the admin
+    // Never return the full installation list — that leaks other users' GitHub accounts.
+    // Instead, allow linking by specific installationId OR by GitHub account name.
     const targetId = req.body?.installationId || null;
+    const targetAccount = req.body?.githubAccount?.trim().toLowerCase() || null;
 
+    // Find the target installation by ID or account name
+    let target: any = null;
     if (targetId) {
-      const target = installations.find((i: any) => String(i.id) === targetId);
+      target = installations.find((i: any) => String(i.id) === targetId);
       if (!target) {
         return res.status(400).json({ error: 'Installation not found.' });
       }
+    } else if (targetAccount) {
+      target = installations.find(
+        (i: any) => (i.account?.login || '').toLowerCase() === targetAccount,
+      );
+      if (!target) {
+        return res.status(404).json({
+          error: `No GitHub App installation found for account "${req.body.githubAccount}". Make sure the Origin app is installed on that GitHub account.`,
+        });
+      }
+      // Check if already claimed by another org
+      if (claimedInstallationIds.has(String(target.id))) {
+        return res.status(409).json({
+          error: `The GitHub App installation for "${req.body.githubAccount}" is already linked to another Origin organization. Disconnect it there first.`,
+        });
+      }
+    }
+
+    if (!target) {
+      // No target specified — just report whether unclaimed installations exist
+      const hasUnclaimed = installations.some(
+        (inst: any) => !claimedInstallationIds.has(String(inst.id)),
+      );
+      return res.json({
+        linked: false,
+        hasUnclaimedInstallations: hasUnclaimed,
+        message: hasUnclaimed
+          ? 'Existing installations found. Provide your GitHub username to link.'
+          : 'No unclaimed installations found. Install the GitHub App first.',
+      });
+    }
+
+    {
+
+      const linkedId = String(target.id);
 
       // Create installation token
       const tokenResult = await createInstallationToken(
         appConfig.appId!,
         decodedKey,
-        targetId,
+        linkedId,
       );
 
       const settings = {
@@ -316,7 +343,7 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
         postComments: true,
         checkOnReview: true,
         appId: appConfig.appId,
-        installationId: targetId,
+        installationId: linkedId,
         privateKey: appConfig.privateKey, // store escaped version
         tokenExpiresAt: tokenResult.expiresAt,
         appSlug: appConfig.appSlug,
@@ -349,25 +376,22 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
           orgId: req.user!.orgId,
           userId: req.user!.id,
           action: 'GITHUB_APP_LINKED',
-          resource: targetId,
+          resource: linkedId,
           metadata: JSON.stringify({
-            installationId: targetId,
+            installationId: linkedId,
             account: target.account?.login,
-            method: 'auto-detect',
+            method: targetAccount ? 'by-account-name' : 'by-installation-id',
           }),
         },
       });
 
       return res.json({
         linked: true,
-        installationId: targetId,
+        installationId: linkedId,
         account: target.account?.login,
         message: `Linked to GitHub account "${target.account?.login}"`,
       });
     }
-
-    // Multiple installations — return list for user to pick
-    res.json({ linked: false, installations: installationList });
   } catch (err: any) {
     console.error('[github-app] Detect error:', err);
     console.error('[github-app] Detect error detail:', err.message);

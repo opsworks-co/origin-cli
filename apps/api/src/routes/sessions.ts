@@ -28,8 +28,8 @@ import {
   parseRepoFullName,
 } from '../services/github-integration.js';
 import { onSessionEvent, SessionEvent, emitSessionEvent } from '../services/session-events.js';
-import { callClaude } from './chat.js';
-import { getOrgLLMKey, getOrgLLMModel } from './settings.js';
+import { callLLM } from './chat.js';
+import { getOrgLLMKey, getOrgLLMModel, getOrgLLMProvider } from './settings.js';
 import { runAIReview } from '../services/ai-review.js';
 
 const router = Router();
@@ -1495,14 +1495,16 @@ router.post('/:id/ask', async (req: AuthRequest, res: Response) => {
 
     // Use org-level LLM config (same key configured in Settings)
     const orgId = req.user!.orgId;
-    const [orgKey, orgModel] = await Promise.all([
+    const [orgKey, orgModel, orgProvider] = await Promise.all([
       getOrgLLMKey(orgId),
       getOrgLLMModel(orgId),
+      getOrgLLMProvider(orgId),
     ]);
 
-    const answer = await callClaude(systemPrompt, msgs, 2048, {
+    const answer = await callLLM(systemPrompt, msgs, 2048, {
       apiKey: orgKey || undefined,
       model: orgModel,
+      provider: orgProvider,
     });
 
     res.json({ answer });
@@ -1647,6 +1649,129 @@ router.post('/:id/share', async (req: AuthRequest, res: Response) => {
     });
   } catch (err) {
     console.error('Share session error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /:id/share — revoke a shared session link
+router.delete('/:id/share', async (req: AuthRequest, res: Response) => {
+  try {
+    const sessionId = req.params.id as string;
+
+    const session = await prisma.codingSession.findFirst({
+      where: {
+        id: sessionId.length < 36 ? { startsWith: sessionId } : sessionId,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+    });
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    await prisma.sharedSession.deleteMany({
+      where: { sessionId: session.id },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Revoke share error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Bookmarks ─────────────────────────────────────────────────────────────────
+
+// GET /bookmarked — list bookmarked sessions for the current user
+router.get('/bookmarked', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.user!.orgId;
+
+    const bookmarks = await prisma.sessionBookmark.findMany({
+      where: { userId },
+      include: {
+        session: {
+          include: {
+            commit: { include: { repo: true } },
+            agent: true,
+            user: true,
+            review: { include: { user: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Filter to only sessions in the user's org
+    const filtered = bookmarks.filter(
+      (b) => b.session.commit?.repo?.orgId === orgId,
+    );
+
+    res.json(
+      filtered.map((b) => ({
+        ...mapSession(b.session),
+        bookmark: {
+          id: b.id,
+          tags: JSON.parse(b.tags || '[]'),
+          note: b.note,
+          createdAt: b.createdAt,
+        },
+      })),
+    );
+  } catch (err) {
+    console.error('List bookmarks error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/bookmark — bookmark a session
+router.post('/:id/bookmark', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const sessionId = req.params.id as string;
+    const { tags, note } = req.body || {};
+
+    const bookmark = await prisma.sessionBookmark.upsert({
+      where: { sessionId_userId: { sessionId, userId } },
+      update: {
+        tags: JSON.stringify(tags || []),
+        note: note || '',
+      },
+      create: {
+        sessionId,
+        userId,
+        tags: JSON.stringify(tags || []),
+        note: note || '',
+      },
+    });
+
+    res.json({
+      id: bookmark.id,
+      sessionId: bookmark.sessionId,
+      tags: JSON.parse(bookmark.tags || '[]'),
+      note: bookmark.note,
+      createdAt: bookmark.createdAt,
+    });
+  } catch (err) {
+    console.error('Bookmark session error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /:id/bookmark — remove bookmark
+router.delete('/:id/bookmark', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const sessionId = req.params.id as string;
+
+    await prisma.sessionBookmark.deleteMany({
+      where: { sessionId, userId },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Remove bookmark error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

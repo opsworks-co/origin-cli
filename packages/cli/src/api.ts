@@ -1,4 +1,4 @@
-import { loadConfig } from './config.js';
+import { loadConfig, type Profile } from './config.js';
 
 function getConfig() {
   const config = loadConfig();
@@ -27,7 +27,26 @@ async function request(path: string, opts: RequestInit = {}) {
   return res.json();
 }
 
+/** Make an API request using a specific profile (for multi-account) */
+export async function requestWithProfile(profile: Profile, path: string, opts: RequestInit = {}) {
+  const res = await fetch(`${profile.apiUrl}${path}`, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': profile.apiKey,
+      ...opts.headers as Record<string, string>,
+    },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as any;
+    throw new Error(body?.message || body?.error || res.statusText);
+  }
+  return res.json();
+}
+
 export const api = {
+  request,
+  getWhoami: () => request('/api/mcp/whoami'),
   getPolicies: () => request('/api/mcp/policies'),
   registerMachine: (data: any) => request('/api/machines', { method: 'POST', body: JSON.stringify(data) }),
   getMachines: () => request('/api/machines'),

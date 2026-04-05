@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { Helmet } from 'react-helmet-async';
+import { useParams } from 'react-router-dom';
 import ChatWidget from '../components/ChatWidget';
 
 type Section =
@@ -15,6 +17,11 @@ type Section =
   | 'settings'
   | 'dashboard'
   | 'cli'
+  | 'cli-install'
+  | 'cli-sessions'
+  | 'cli-config'
+  | 'cli-hooks'
+  | 'cli-local'
   | 'mcp'
   | 'webhooks'
   | 'rbac'
@@ -28,48 +35,66 @@ type Section =
   | 'ai-blame'
   | 'ask-author'
   | 'git-notes'
-  | 'personal-insights'
-  | 'leaderboard'
+  | 'developer-dashboard'
   | 'pull-requests'
+  | 'github-checks'
   | 'trails'
   | 'prompts'
   | 'model-comparison'
-  | 'machines';
+  | 'machines'
+  | 'solo-setup';
 
-const SECTIONS: { key: Section; label: string; group?: string }[] = [
-  { key: 'overview', label: 'Overview', group: 'Getting Started' },
-  { key: 'quick-start', label: 'Quick Start Guide' },
-  { key: 'workflow', label: 'How It Works' },
-  { key: 'session-tracking', label: 'Session Tracking', group: 'Setup Guides' },
-  { key: 'integrations', label: 'GitHub Integration' },
-  { key: 'gitlab-integration', label: 'GitLab Integration' },
-  { key: 'repos', label: 'Repositories' },
-  { key: 'agents', label: 'Agents' },
-  { key: 'policies', label: 'Policies' },
-  { key: 'settings', label: 'Settings & API Keys' },
-  { key: 'rbac', label: 'Team & Roles' },
-  { key: 'dashboard', label: 'Dashboard', group: 'Features' },
-  { key: 'sessions', label: 'Sessions & Reviews' },
-  { key: 'ai-blame', label: 'AI Blame' },
-  { key: 'ask-author', label: 'Ask the Author' },
-  { key: 'git-notes', label: 'Git Notes' },
-  { key: 'ai-review', label: 'AI Auto-Review' },
-  { key: 'budget', label: 'Budget & Cost Controls' },
-  { key: 'realtime', label: 'Real-Time Streaming' },
-  { key: 'secret-scanning', label: 'Secret & PII Scanning' },
-  { key: 'compliance', label: 'Compliance Reports' },
-  { key: 'analytics', label: 'Enhanced Analytics' },
-  { key: 'leaderboard', label: 'Leaderboard' },
-  { key: 'prompts', label: 'Prompt Library' },
-  { key: 'model-comparison', label: 'Model Comparison' },
-  { key: 'pull-requests', label: 'Pull Requests' },
-  { key: 'trails', label: 'Trails' },
-  { key: 'machines', label: 'Machines' },
-  { key: 'personal-insights', label: 'Personal Insights' },
-  { key: 'webhooks', label: 'Webhooks' },
-  { key: 'cli', label: 'CLI Reference', group: 'Developer Tools' },
-  { key: 'mcp', label: 'MCP Server' },
-  { key: 'api', label: 'API Reference' },
+type DocTab = 'team' | 'solo' | 'cli';
+
+const TABS: { key: DocTab; label: string; description: string }[] = [
+  { key: 'team', label: 'Origin Team', description: 'Organization governance & management' },
+  { key: 'solo', label: 'Origin Solo', description: 'Personal developer dashboard' },
+  { key: 'cli', label: 'Origin CLI', description: 'Command-line tool & API' },
+];
+
+const SECTIONS: { key: Section; label: string; group?: string; tab: DocTab }[] = [
+  // ── Origin Team ──
+  { key: 'overview', label: 'Overview', group: 'Getting Started', tab: 'team' },
+  { key: 'quick-start', label: 'Quick Start Guide', tab: 'team' },
+  { key: 'workflow', label: 'How It Works', tab: 'team' },
+  { key: 'session-tracking', label: 'Session Tracking', group: 'Setup & Configuration', tab: 'team' },
+  { key: 'integrations', label: 'GitHub Integration', tab: 'team' },
+  { key: 'gitlab-integration', label: 'GitLab Integration', tab: 'team' },
+  { key: 'repos', label: 'Repositories', tab: 'team' },
+  { key: 'agents', label: 'Agents', tab: 'team' },
+  { key: 'policies', label: 'Policies', tab: 'team' },
+  { key: 'settings', label: 'Settings & API Keys', tab: 'team' },
+  { key: 'rbac', label: 'Team & Roles', tab: 'team' },
+  { key: 'dashboard', label: 'Organization Dashboard', group: 'Features', tab: 'team' },
+  { key: 'sessions', label: 'Sessions & Reviews', tab: 'team' },
+  { key: 'ai-review', label: 'AI Auto-Review', tab: 'team' },
+  { key: 'budget', label: 'Budget & Cost Controls', tab: 'team' },
+  { key: 'realtime', label: 'Real-Time Streaming', tab: 'team' },
+  { key: 'secret-scanning', label: 'Secret & PII Scanning', tab: 'team' },
+  { key: 'compliance', label: 'Compliance Reports', tab: 'team' },
+  { key: 'analytics', label: 'Enhanced Analytics', tab: 'team' },
+  { key: 'prompts', label: 'Prompt Library', tab: 'team' },
+  { key: 'model-comparison', label: 'Model Comparison', tab: 'team' },
+  { key: 'pull-requests', label: 'Pull Requests', tab: 'team' },
+  { key: 'github-checks', label: 'GitHub PR Checks', tab: 'team' },
+  { key: 'trails', label: 'Trails', tab: 'team' },
+  { key: 'machines', label: 'Machines', tab: 'team' },
+  { key: 'webhooks', label: 'Webhooks', tab: 'team' },
+  // ── Origin Solo ──
+  { key: 'solo-setup', label: 'Setup Guide', group: 'Getting Started', tab: 'solo' },
+  { key: 'developer-dashboard', label: 'Developer Dashboard', group: 'Your Workspace', tab: 'solo' },
+  { key: 'ai-blame', label: 'AI Blame', tab: 'solo' },
+  { key: 'ask-author', label: 'Ask the Author', tab: 'solo' },
+  { key: 'git-notes', label: 'Git Notes', tab: 'solo' },
+  // ── Origin CLI ──
+  { key: 'cli', label: 'CLI Overview', group: 'Getting Started', tab: 'cli' },
+  { key: 'cli-install', label: 'Installation', tab: 'cli' },
+  { key: 'cli-config', label: 'Configuration', tab: 'cli' },
+  { key: 'cli-sessions', label: 'Session Tracking', group: 'Usage', tab: 'cli' },
+  { key: 'cli-hooks', label: 'Git Hooks', tab: 'cli' },
+  { key: 'cli-local', label: 'Local Mode', tab: 'cli' },
+  { key: 'mcp', label: 'MCP Server', group: 'Advanced', tab: 'cli' },
+  { key: 'api', label: 'API Reference', tab: 'cli' },
 ];
 
 function CodeBlock({ children, title }: { children: string; title?: string }) {
@@ -138,15 +163,35 @@ function Callout({ type, children }: { type: 'info' | 'warning' | 'tip'; childre
 }
 
 export default function Docs() {
+  const { section: urlSection } = useParams<{ section?: string }>();
+  const [activeTab, setActiveTab] = useState<DocTab>('team');
   const [active, setActive] = useState<Section>('overview');
 
   useEffect(() => {
+    // Support /docs/:section URL paths
+    if (urlSection) {
+      const matched = SECTIONS.find((s) => s.key === urlSection);
+      if (matched) {
+        setActive(matched.key);
+        setActiveTab(matched.tab);
+        return;
+      }
+    }
     if (window.location.hash) {
       const hash = window.location.hash.slice(1);
+      // Check if hash matches a tab
+      const matchedTab = TABS.find((t) => t.key === hash);
+      if (matchedTab) {
+        setActiveTab(matchedTab.key);
+        const firstSection = SECTIONS.find((s) => s.tab === matchedTab.key);
+        if (firstSection) setActive(firstSection.key);
+        return;
+      }
       // Check if hash matches a section key for sidebar navigation
       const matchedSection = SECTIONS.find((s) => s.key === hash);
       if (matchedSection) {
         setActive(matchedSection.key);
+        setActiveTab(matchedSection.tab);
       }
       // Scroll to the element after a short delay to allow render
       setTimeout(() => {
@@ -154,21 +199,58 @@ export default function Docs() {
         if (el) el.scrollIntoView({ behavior: 'smooth' });
       }, 100);
     }
-  }, []);
+  }, [urlSection]);
 
+  const filteredSections = SECTIONS.filter((s) => s.tab === activeTab);
   let lastGroup = '';
+
+  const handleTabChange = (tab: DocTab) => {
+    setActiveTab(tab);
+    const first = SECTIONS.find((s) => s.tab === tab);
+    if (first) setActive(first.key);
+    window.history.replaceState(null, '', `#${tab}`);
+  };
 
   return (
     <>
+    <Helmet>
+      <title>Documentation — Origin | Setup, Features &amp; API Reference</title>
+      <meta name="description" content="Complete documentation for the Origin AI code governance platform. Setup guides, feature walkthroughs, CLI reference, API docs, and integration instructions." />
+      <link rel="canonical" href="https://getorigin.io/docs" />
+    </Helmet>
     <div className="max-w-6xl mx-auto px-6 py-8">
+
+    {/* Tab Navigation */}
+    <div className="flex items-center gap-1 mb-8 border-b border-gray-800/60 pb-px">
+      {TABS.map((tab) => (
+        <button
+          key={tab.key}
+          onClick={() => handleTabChange(tab.key)}
+          className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
+            activeTab === tab.key
+              ? 'text-white'
+              : 'text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          {tab.label}
+          {activeTab === tab.key && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full" />
+          )}
+        </button>
+      ))}
+      <span className="ml-3 text-xs text-gray-600 hidden sm:inline">
+        {TABS.find((t) => t.key === activeTab)?.description}
+      </span>
+    </div>
+
     <div className="flex gap-8">
       {/* Sidebar TOC */}
       <nav className="hidden lg:block w-48 flex-shrink-0 sticky top-20 self-start">
         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
-          Documentation
+          {TABS.find((t) => t.key === activeTab)?.label}
         </p>
         <div className="space-y-0.5">
-          {SECTIONS.map((s) => {
+          {filteredSections.map((s) => {
             const showGroup = s.group && s.group !== lastGroup;
             if (s.group) lastGroup = s.group;
             return (
@@ -201,7 +283,7 @@ export default function Docs() {
           onChange={(e) => setActive(e.target.value as Section)}
           className="select w-full text-sm"
         >
-          {SECTIONS.map((s) => (
+          {filteredSections.map((s) => (
             <option key={s.key} value={s.key}>
               {s.label}
             </option>
@@ -3418,97 +3500,6 @@ GET /api/stats?from=2025-01-01&to=2025-03-31
         )}
 
         {/* ─── LEADERBOARD ──────────────────────────────────── */}
-        {active === 'leaderboard' && (
-          <div>
-            <h1 id="leaderboard" className="text-2xl font-bold mb-2">Leaderboard</h1>
-            <P>
-              The Leaderboard ranks team members by AI coding activity across your organization.
-              Use it to identify power users, recognize high-quality contributors, and understand
-              adoption patterns across your engineering team.
-            </P>
-
-            {/* Leaderboard Mockup */}
-            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
-              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
-                <div className="w-3 h-3 rounded-full bg-red-500/80" />
-                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
-                <div className="w-3 h-3 rounded-full bg-green-500/80" />
-                <span className="text-xs text-gray-500 ml-2 font-mono">Leaderboard &mdash; Last 30 Days</span>
-              </div>
-              <div className="p-4">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-[10px] text-gray-500 uppercase border-b border-gray-700/50">
-                      <th className="text-left py-1.5 font-medium w-8">#</th>
-                      <th className="text-left py-1.5 font-medium">Developer</th>
-                      <th className="text-right py-1.5 font-medium">Sessions</th>
-                      <th className="text-right py-1.5 font-medium">Lines</th>
-                      <th className="text-right py-1.5 font-medium">Cost</th>
-                      <th className="text-right py-1.5 font-medium">Approval</th>
-                      <th className="text-right py-1.5 font-medium">Quality</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-800/50">
-                    {[
-                      { rank: 1, name: 'Sarah C.', sessions: 42, lines: '3.2k', cost: '$89', approval: '95%', quality: 92, color: 'text-yellow-400' },
-                      { rank: 2, name: 'Mike R.', sessions: 38, lines: '2.8k', cost: '$72', approval: '91%', quality: 88, color: 'text-gray-300' },
-                      { rank: 3, name: 'Ana T.', sessions: 31, lines: '2.1k', cost: '$58', approval: '88%', quality: 85, color: 'text-amber-600' },
-                      { rank: 4, name: 'James L.', sessions: 25, lines: '1.6k', cost: '$44', approval: '92%', quality: 82, color: 'text-gray-500' },
-                      { rank: 5, name: 'Priya K.', sessions: 19, lines: '1.2k', cost: '$31', approval: '86%', quality: 79, color: 'text-gray-500' },
-                    ].map((d) => (
-                      <tr key={d.rank} className="hover:bg-gray-800/30">
-                        <td className={`py-2 font-bold ${d.color}`}>{d.rank}</td>
-                        <td className="py-2">
-                          <div className="flex items-center gap-2">
-                            <div className="w-5 h-5 rounded-full bg-indigo-600/40 flex items-center justify-center text-[9px] text-indigo-300 font-bold">{d.name[0]}</div>
-                            <span className="text-gray-200">{d.name}</span>
-                          </div>
-                        </td>
-                        <td className="py-2 text-gray-300 text-right">{d.sessions}</td>
-                        <td className="py-2 text-gray-400 text-right">{d.lines}</td>
-                        <td className="py-2 text-gray-300 text-right">{d.cost}</td>
-                        <td className="py-2 text-green-400 text-right">{d.approval}</td>
-                        <td className="py-2 text-right"><span className="text-gray-300">{d.quality}</span></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <H2>How It Works</H2>
-            <P>
-              Origin aggregates data from all coding sessions and reviews to compute rankings.
-              The leaderboard queries session counts, lines of code changed, total cost,
-              approval rates, and quality scores per user for a given time period.
-            </P>
-
-            <H2>Ranking Metrics</H2>
-            <ul className="space-y-2 mb-4">
-              <Li><strong className="text-gray-200">Sessions</strong> &mdash; Total number of AI coding sessions completed. Higher counts indicate more active AI adoption.</Li>
-              <Li><strong className="text-gray-200">Lines Changed</strong> &mdash; Combined lines added and removed across all sessions. Measures raw output volume.</Li>
-              <Li><strong className="text-gray-200">Total Cost</strong> &mdash; Cumulative API cost across all sessions. Helps identify expensive usage patterns.</Li>
-              <Li><strong className="text-gray-200">Approval Rate</strong> &mdash; Percentage of reviewed sessions that were approved. Indicates code quality and policy compliance.</Li>
-              <Li><strong className="text-gray-200">Quality Score</strong> &mdash; Composite score combining approval rate, review coverage, and policy violation count.</Li>
-            </ul>
-
-            <H2>Time Periods</H2>
-            <P>
-              Filter rankings by time period: <strong className="text-gray-200">7 days</strong>, <strong className="text-gray-200">30 days</strong>,
-              or <strong className="text-gray-200">all time</strong>. Use shorter periods to track recent activity and longer periods for overall contribution.
-            </P>
-
-            <H2>API</H2>
-            <CodeBlock title="Leaderboard API">{`GET /api/leaderboard?period=30d&sort=sessions
-# Query params: period (7d, 30d, all), sort (sessions, lines, cost, approvalRate, quality)`}</CodeBlock>
-
-            <Callout type="tip">
-              The Leaderboard is a great way to gamify AI adoption and recognize developers
-              who produce high-quality AI-assisted code with strong approval rates.
-            </Callout>
-          </div>
-        )}
-
         {/* ─── PROMPT LIBRARY ──────────────────────────────────── */}
         {active === 'prompts' && (
           <div>
@@ -3848,6 +3839,192 @@ GET /api/pull-requests/review?url=https://github.com/org/repo/pull/42`}</CodeBlo
           </div>
         )}
 
+        {/* ─── GITHUB PR CHECKS ────────────────────────────────── */}
+        {active === 'github-checks' && (
+          <div>
+            <h1 id="github-checks" className="text-2xl font-bold mb-2">How GitHub PR Checks Work in Origin</h1>
+            <P>
+              Origin adds a governance status check to every pull request in your connected repositories.
+              This check tells you whether AI-authored code in the PR meets your organization&rsquo;s policies
+              before it can be merged.
+            </P>
+
+            {/* Visual: check states */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">GitHub PR &mdash; Status Checks</span>
+              </div>
+              <div className="p-4 space-y-3">
+                <div className="bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3">
+                  <div className="text-[10px] text-gray-500 uppercase mb-2">Scenario 1 &mdash; No policies configured</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-green-400 text-sm">&#10003;</span>
+                    <span className="text-xs text-gray-300 font-medium">origin/ai-governance</span>
+                    <span className="text-[10px] text-gray-500">&mdash; 1 session detected &middot; No policies &middot; Informational only</span>
+                  </div>
+                </div>
+                <div className="bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3">
+                  <div className="text-[10px] text-gray-500 uppercase mb-2">Scenario 2 &mdash; REQUIRE_REVIEW policy active</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-amber-400 text-sm">&#9679;</span>
+                    <span className="text-xs text-gray-300 font-medium">origin/ai-governance</span>
+                    <span className="text-[10px] text-gray-500">&mdash; 1 session pending review &middot; Waiting for approval</span>
+                  </div>
+                </div>
+                <div className="bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3">
+                  <div className="text-[10px] text-gray-500 uppercase mb-2">Scenario 3 &mdash; COST_LIMIT policy violated</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-red-400 text-sm">&#10007;</span>
+                    <span className="text-xs text-gray-300 font-medium">origin/ai-governance</span>
+                    <span className="text-[10px] text-gray-500">&mdash; Session cost $14.20 exceeds limit $10.00</span>
+                  </div>
+                </div>
+                <div className="bg-gray-800/40 border border-gray-700/50 rounded-lg px-4 py-3">
+                  <div className="text-[10px] text-gray-500 uppercase mb-2">Scenario 4 &mdash; No AI sessions detected</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-green-400 text-sm">&#10003;</span>
+                    <span className="text-xs text-gray-300 font-medium">origin/ai-governance</span>
+                    <span className="text-[10px] text-gray-500">&mdash; 0 sessions detected &middot; Assumed human-authored</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <H2>1. Every PR Gets a Check</H2>
+            <P>
+              When a developer pushes commits or opens a PR against a connected repository, Origin automatically
+              posts an <code className="text-indigo-400">origin/ai-governance</code> commit status check. This happens
+              for every PR &mdash; not just ones with AI code. Origin matches commit SHAs against tracked coding sessions
+              to determine which commits were AI-authored.
+            </P>
+
+            <H2>2. No Policies? Check Passes Automatically</H2>
+            <P>
+              If your organization has no active policies, every PR check passes with a green checkmark.
+              Origin still detects and reports AI sessions in the PR comment (number of sessions, agent name,
+              cost, files changed), but nothing blocks the merge. This is <strong className="text-gray-200">informational mode</strong> &mdash;
+              useful when you first set up Origin and want visibility before enforcing rules.
+            </P>
+            <Callout type="tip">
+              Start without policies to see how Origin tracks your AI usage, then gradually add policies as you learn what matters for your team.
+            </Callout>
+
+            <H2>3. REQUIRE_REVIEW Policy &mdash; Block Until Approved</H2>
+            <P>
+              The <code className="text-indigo-400">REQUIRE_REVIEW</code> policy requires that a designated reviewer
+              (typically a tech lead or CTO) approves each AI coding session before the PR can merge.
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li>PR check status is set to <strong className="text-amber-400">pending</strong> until all linked sessions are reviewed</Li>
+              <Li>Reviewer opens the session in Origin&rsquo;s dashboard, inspects the prompts and diffs, then clicks <strong className="text-gray-200">Approve</strong> or <strong className="text-gray-200">Reject</strong></Li>
+              <Li>Once all sessions are approved, Origin automatically updates the GitHub check to <strong className="text-green-400">success</strong></Li>
+              <Li>If any session is rejected, the check moves to <strong className="text-red-400">failure</strong> with a reason</Li>
+            </ul>
+
+            <H3>Agent-Scoped vs. Organization-Wide</H3>
+            <P>
+              Policies can be applied at two levels:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Agent-scoped policy:</strong> Applies only to sessions from a specific agent. For example, you might require review only for a junior developer&rsquo;s Cursor agent but not for a senior&rsquo;s Claude Code sessions. Create these from Policies &rarr; New Policy and select a specific agent.</Li>
+              <Li><strong className="text-gray-200">Organization-wide policy:</strong> Applies to all sessions across all agents. Use this when every AI-authored PR must be reviewed regardless of who wrote it. Create these by leaving the agent field blank (applies to &ldquo;All agents&rdquo;).</Li>
+            </ul>
+            <P>
+              When both exist, the stricter policy wins. If an org-wide policy says &ldquo;pass&rdquo; but an agent-scoped policy says &ldquo;block,&rdquo; the PR is blocked.
+            </P>
+
+            <H2>4. COST_LIMIT Policy &mdash; Block on Overspend</H2>
+            <P>
+              The <code className="text-indigo-400">COST_LIMIT</code> policy sets a maximum allowed cost per session.
+              If any AI session linked to the PR exceeds the threshold, the check fails immediately.
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li>Set a dollar limit per session (e.g., $10.00)</Li>
+              <Li>Origin checks the total API cost (input + output tokens) of each session</Li>
+              <Li>If cost exceeds the limit, the PR check fails with the exact amount shown</Li>
+              <Li>The developer can split work into smaller sessions or request a policy exception</Li>
+            </ul>
+
+            <H3>Agent-Scoped vs. Organization-Wide</H3>
+            <P>
+              Cost limits can also be scoped to specific agents or applied organization-wide:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Agent-scoped:</strong> Set different cost limits per agent. For example, $5 for quick-fix agents but $25 for architecture agents that need longer sessions.</Li>
+              <Li><strong className="text-gray-200">Organization-wide:</strong> A blanket cost limit applied to all agents. Any session exceeding this amount blocks the PR.</Li>
+            </ul>
+
+            <H2>5. &ldquo;0 Sessions Detected&rdquo; &mdash; Passes by Default</H2>
+            <P>
+              When Origin cannot match any commits in a PR to a tracked AI coding session, it assumes the code
+              is human-authored. The check passes with a green checkmark and the message &ldquo;0 sessions detected.&rdquo;
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li>This covers PRs written entirely by hand without AI assistance</Li>
+              <Li>It also covers AI-authored code where the developer didn&rsquo;t have the Origin CLI running (sessions weren&rsquo;t tracked)</Li>
+              <Li>If you want to enforce that all AI coding must be tracked, combine this with a team policy requiring Origin CLI usage</Li>
+            </ul>
+            <Callout type="info">
+              Origin identifies AI sessions by matching commit SHAs. If a developer uses an AI tool without Origin&rsquo;s CLI tracking the session, those commits appear as human-authored.
+            </Callout>
+
+            <H2>6. How to Create Your First Policy</H2>
+            <P>
+              Setting up PR checks takes two steps: connect GitHub and create a policy.
+            </P>
+            <div className="space-y-1 mb-4">
+              <Step n={1} title="Connect the GitHub App">
+                Go to <strong className="text-gray-200">Settings &rarr; Integrations</strong> and install the Origin GitHub App.
+                This gives Origin permission to post status checks and comments on your PRs. Make sure &ldquo;Post Checks&rdquo;
+                and &ldquo;Post Comments&rdquo; are enabled.
+              </Step>
+              <Step n={2} title="Import repositories">
+                Go to <strong className="text-gray-200">Repositories</strong> and import the repos you want to monitor.
+                Origin will only post checks on PRs in imported repos.
+              </Step>
+              <Step n={3} title="Create a policy">
+                Go to <strong className="text-gray-200">Policies &rarr; New Policy</strong>. Choose a policy type:
+                <ul className="mt-2 space-y-1">
+                  <li className="flex items-start gap-2"><span className="text-indigo-400">&bull;</span><span><strong className="text-gray-200">REQUIRE_REVIEW</strong> &mdash; Block PRs until sessions are approved in Origin</span></li>
+                  <li className="flex items-start gap-2"><span className="text-indigo-400">&bull;</span><span><strong className="text-gray-200">COST_LIMIT</strong> &mdash; Block PRs if session cost exceeds a threshold</span></li>
+                  <li className="flex items-start gap-2"><span className="text-indigo-400">&bull;</span><span><strong className="text-gray-200">FILE_RESTRICTION</strong> &mdash; Block PRs if AI modified protected files</span></li>
+                  <li className="flex items-start gap-2"><span className="text-indigo-400">&bull;</span><span><strong className="text-gray-200">MODEL_ALLOWLIST</strong> &mdash; Block PRs if an unapproved model was used</span></li>
+                </ul>
+              </Step>
+              <Step n={4} title="Choose the scope">
+                Select whether the policy applies to a <strong className="text-gray-200">specific agent</strong> or <strong className="text-gray-200">all agents</strong> (organization-wide).
+                Agent-scoped policies let you enforce stricter rules on certain agents while being lenient on others.
+              </Step>
+              <Step n={5} title="Enable branch protection (recommended)">
+                In GitHub, go to your repo&rsquo;s Settings &rarr; Branches &rarr; Branch protection rules. Add a rule for
+                your main branch and enable &ldquo;Require status checks to pass&rdquo; with <code className="text-indigo-400">origin/ai-governance</code> as
+                a required check. Now PRs cannot be merged until Origin&rsquo;s check passes.
+              </Step>
+            </div>
+
+            <H2>Summary: Check Status Decision Tree</H2>
+            <div className="bg-gray-900 border border-gray-700 rounded-xl p-4 my-4 font-mono text-xs text-gray-400 space-y-1">
+              <div>PR pushed &rarr; Origin receives webhook</div>
+              <div className="pl-4">&darr;</div>
+              <div className="pl-4">Match commits to sessions by SHA</div>
+              <div className="pl-8">&darr;</div>
+              <div className="pl-8"><span className="text-gray-300">0 sessions found?</span> &rarr; <span className="text-green-400">&#10003; Pass</span> (human code assumed)</div>
+              <div className="pl-8"><span className="text-gray-300">Sessions found, no policies?</span> &rarr; <span className="text-green-400">&#10003; Pass</span> (informational only)</div>
+              <div className="pl-8"><span className="text-gray-300">REQUIRE_REVIEW active?</span> &rarr; <span className="text-amber-400">&#9679; Pending</span> until reviewer approves in dashboard</div>
+              <div className="pl-8"><span className="text-gray-300">COST_LIMIT exceeded?</span> &rarr; <span className="text-red-400">&#10007; Fail</span> with cost details</div>
+              <div className="pl-8"><span className="text-gray-300">All policies pass?</span> &rarr; <span className="text-green-400">&#10003; Pass</span></div>
+            </div>
+
+            <Callout type="warning">
+              PR checks require the Origin GitHub App installed and connected in Settings &rarr; Integrations.
+              Repositories must be imported in Origin for checks to appear.
+            </Callout>
+          </div>
+        )}
+
         {/* ─── TRAILS ─────────────────────────────────────────── */}
         {active === 'trails' && (
           <div>
@@ -4019,59 +4196,447 @@ GET /api/machines/:id`}</CodeBlock>
           </div>
         )}
 
-        {/* ─── PERSONAL INSIGHTS ─────────────────────────────── */}
-        {active === 'personal-insights' && (
+        {/* ─── SOLO SETUP GUIDE ─────────────────────────────── */}
+        {active === 'solo-setup' && (
           <div>
-            <h1 id="personal-insights" className="text-2xl font-bold mb-2">Personal Insights</h1>
-            <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg p-4 mb-6">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-indigo-400 text-lg">🚧</span>
-                <span className="text-sm font-semibold text-indigo-300">Coming Soon</span>
-              </div>
-              <P>
-                Personal Insights is an upcoming feature that provides per-developer analytics
-                and AI-usage patterns. Track your personal coding efficiency, AI collaboration
-                habits, and improvement over time.
-              </P>
-            </div>
-
-            <H2>Planned Features</H2>
-            <ul className="space-y-2 mb-4">
-              <Li><strong className="text-gray-200">Developer Dashboard</strong> &mdash; Personal view of your AI-assisted sessions, costs, and productivity metrics</Li>
-              <Li><strong className="text-gray-200">Prompt Effectiveness</strong> &mdash; Analysis of which prompts lead to successful outcomes vs. repeated iterations</Li>
-              <Li><strong className="text-gray-200">Code Acceptance Rate</strong> &mdash; Percentage of AI-generated code that passes review without modification</Li>
-              <Li><strong className="text-gray-200">Model Preferences</strong> &mdash; Which AI models you use most and their effectiveness by task type</Li>
-              <Li><strong className="text-gray-200">Time Savings Estimate</strong> &mdash; Estimated hours saved through AI-assisted development</Li>
-              <Li><strong className="text-gray-200">Weekly Digest</strong> &mdash; Automated summary of your AI coding activity sent via email or Slack</Li>
-            </ul>
-
-            <H2>Skill Analysis</H2>
+            <h1 id="solo-setup" className="text-2xl font-bold mb-2">Origin Solo Setup Guide</h1>
             <P>
-              Personal Insights will categorize your AI usage patterns to help you improve your
-              AI-assisted development workflow:
+              Origin Solo is a free personal dashboard for individual developers who use AI coding tools.
+              Track every session, see costs across agents, and get line-level attribution &mdash; no team or organization required.
+            </P>
+
+            <Callout type="tip">
+              Origin Solo is <strong className="text-green-200">completely free</strong> &mdash; unlimited repos, unlimited sessions, all agents supported. No credit card needed.
+            </Callout>
+
+            <H2 id="solo-create-account">Step 1: Create Your Developer Account</H2>
+            <P>
+              Go to <code className="text-emerald-400">getorigin.io/register/developer</code> and create a developer account.
+              You can sign up with email/password or use GitHub, GitLab, or Google OAuth.
+            </P>
+            <Step n={1} title="Register">
+              <span>Visit the registration page and choose <strong className="text-emerald-400">Developer</strong> account. Enter your name, email, and password &mdash; or click a social login button.</span>
+            </Step>
+            <Step n={2} title="Verify & Sign In">
+              <span>After registration you&rsquo;re automatically signed in and redirected to your personal dashboard at <code className="text-emerald-400">/me</code>.</span>
+            </Step>
+
+            <H2 id="solo-install-cli">Step 2: Install the Origin CLI</H2>
+            <P>
+              The CLI is how sessions get tracked. It installs git hooks that automatically capture every AI coding session.
+            </P>
+            <CodeBlock title="Terminal">{`npm i -g https://getorigin.io/cli/origin-cli-latest.tgz`}</CodeBlock>
+            <P>
+              Verify the installation:
+            </P>
+            <CodeBlock>{`origin --version`}</CodeBlock>
+
+            <H2 id="solo-login">Step 3: Log In from the CLI</H2>
+            <P>
+              Authenticate the CLI with your developer account:
+            </P>
+            <CodeBlock title="Terminal">{`origin login`}</CodeBlock>
+            <P>
+              Enter the same email and password you used during registration. Your credentials are stored locally at <code className="text-indigo-400">~/.origin/config.json</code>.
+            </P>
+            <Callout type="info">
+              If you signed up via OAuth (GitHub/GitLab/Google), set a password first from your dashboard settings, or use an API key instead:
+              go to <code className="text-emerald-400">/me</code> &rarr; Settings &rarr; copy your API key &rarr; run <code className="text-indigo-400">origin login --api-key YOUR_KEY</code>.
+            </Callout>
+
+            <H2 id="solo-init">Step 4: Initialize Your Repository</H2>
+            <P>
+              Navigate to any Git repository and run:
+            </P>
+            <CodeBlock title="Terminal">{`cd ~/your-project
+origin init`}</CodeBlock>
+            <P>
+              This auto-detects installed AI tools (Claude Code, Cursor, Copilot, Gemini, Windsurf, Aider, Codex, etc.),
+              installs git hooks, and starts tracking sessions. You&rsquo;ll see output like:
+            </P>
+            <CodeBlock>{`Detecting AI agents...
+✓ Claude Code (claude-code)
+✓ Cursor (cursor)
+Installing git hooks...
+✓ post-commit hook installed
+✓ Origin initialized in 2.1s`}</CodeBlock>
+            <P>
+              Repos and agents are auto-created in your dashboard &mdash; no manual configuration needed.
+            </P>
+
+            <H2 id="solo-start-coding">Step 5: Start Coding with AI</H2>
+            <P>
+              That&rsquo;s it! Now whenever you use an AI coding tool in this repo, Origin automatically captures:
             </P>
             <ul className="space-y-2 mb-4">
-              <Li><strong className="text-gray-200">Prompt Engineering</strong> &mdash; Track how your prompts improve over time based on session outcomes</Li>
-              <Li><strong className="text-gray-200">Domain Expertise</strong> &mdash; Identify areas where you leverage AI most (frontend, backend, testing, DevOps)</Li>
-              <Li><strong className="text-gray-200">Collaboration Patterns</strong> &mdash; Multi-turn vs single-prompt sessions, tool usage frequency</Li>
-              <Li><strong className="text-gray-200">Security Awareness</strong> &mdash; Track secret detection hits and policy compliance over time</Li>
+              <Li><strong className="text-gray-200">Session metadata</strong> &mdash; model, agent, duration, token count, cost</Li>
+              <Li><strong className="text-gray-200">Prompts &amp; responses</strong> &mdash; what you asked, what the agent did, which files changed per prompt</Li>
+              <Li><strong className="text-gray-200">Diffs</strong> &mdash; line-by-line changes attributed to each session and prompt</Li>
+              <Li><strong className="text-gray-200">Commit linkage</strong> &mdash; each commit is linked back to the session that produced it</Li>
             </ul>
 
-            <H2>API Access (Planned)</H2>
-            <CodeBlock title="Personal Insights API (coming soon)">{`# Get your personal insights
-GET /api/insights/me
+            <H2 id="solo-verify">Verify It&rsquo;s Working</H2>
+            <P>
+              After your first AI-assisted commit, check that everything is tracking:
+            </P>
+            <CodeBlock title="Terminal">{`# View recent sessions
+origin sessions
 
-# Get insights for a specific developer (admin only)
-GET /api/insights/users/:userId
+# See AI attribution for a file
+origin blame src/index.ts
 
-# Get prompt effectiveness analysis
-GET /api/insights/me/prompts?from=2025-01-01&to=2025-03-31`}</CodeBlock>
+# Check your stats
+origin stats`}</CodeBlock>
+            <P>
+              You can also visit your dashboard at <code className="text-emerald-400">getorigin.io/me</code> to see sessions, cost breakdowns, and streaks.
+            </P>
 
+            <H2 id="solo-multiple-repos">Adding More Repositories</H2>
+            <P>
+              Just run <code className="text-indigo-400">origin init</code> in any additional Git repo. Each repo is auto-registered in your dashboard.
+              There&rsquo;s no limit on the number of repos you can track.
+            </P>
+
+            <H2 id="solo-optional">Optional: Standalone Mode</H2>
+            <P>
+              If you prefer fully local tracking with no server connection, use standalone mode:
+            </P>
+            <CodeBlock>{`origin init --standalone`}</CodeBlock>
+            <P>
+              Sessions are stored locally via git notes and a local SQLite database. You can switch to connected mode later by running
+              <code className="text-indigo-400"> origin login</code> followed by <code className="text-indigo-400">origin init</code>.
+            </P>
+
+            <H2 id="solo-next-steps">Next Steps</H2>
+            <ul className="space-y-2 mb-4">
+              <Li>Explore your <button onClick={() => { window.history.replaceState(null, '', '#developer-dashboard'); window.location.reload(); }} className="text-indigo-400 hover:text-indigo-300 underline">Developer Dashboard</button> to see session analytics and streaks</Li>
+              <Li>Use <button onClick={() => { window.history.replaceState(null, '', '#ai-blame'); window.location.reload(); }} className="text-indigo-400 hover:text-indigo-300 underline">AI Blame</button> to see which agent wrote each line of your code</Li>
+              <Li>Try <code className="text-indigo-400">origin stats</code> to view cost &amp; usage breakdowns from the terminal</Li>
+              <Li>Join a team later via invite link &mdash; your Solo account stays active alongside the org</Li>
+            </ul>
+          </div>
+        )}
+
+        {/* ─── PERSONAL INSIGHTS ─────────────────────────────── */}
+        {active === 'developer-dashboard' && (
+          <div>
+            <h1 id="developer-dashboard" className="text-2xl font-bold mb-2">Developer Dashboard</h1>
+            <P>
+              The Developer Dashboard (<code className="text-emerald-400">/me</code>) is a personal workspace for individual developers.
+              It provides a comprehensive view of your AI coding sessions, patterns, efficiency metrics, and prompt history.
+              Available to both developer accounts and org members.
+            </P>
+
+            <H2>Account Types</H2>
+            <P>Origin supports two account types with different experiences:</P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Organization Account</strong> &mdash; Full admin dashboard with team management, policies, IAM, budget controls, compliance, and infrastructure</Li>
+              <Li><strong className="text-gray-200">Developer Account</strong> &mdash; Lightweight personal dashboard focused on your sessions, stats, and efficiency</Li>
+            </ul>
+            <P>
+              Both account types are available from a single registration page at <code className="text-indigo-400">/register</code> &mdash;
+              choose <strong className="text-gray-200">Team</strong> or <strong className="text-emerald-400">Developer</strong> using the toggle at the top.
+            </P>
             <Callout type="info">
-              Personal Insights will be available for all team members. Organization admins
-              will have access to aggregated team-level insights while individual data
-              remains private to each developer.
+              Developer accounts use an emerald-themed interface with a simplified sidebar.
+              Org members can also access the developer dashboard at <code className="text-indigo-400">/me</code> alongside the org dashboard.
             </Callout>
+
+            <H2>Overview Cards</H2>
+            <P>
+              At the top of the dashboard, four stat cards give you a real-time summary:
+            </P>
+
+            {/* Overview mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">/me &mdash; Overview Cards</span>
+              </div>
+              <div className="p-4 grid grid-cols-4 gap-3">
+                {[
+                  { label: 'Sessions', value: '142', trend: '+12%', color: 'text-indigo-400' },
+                  { label: 'Tokens', value: '3.2M', trend: '+8%', color: 'text-yellow-400' },
+                  { label: 'Cost', value: '$47.20', trend: '-3%', color: 'text-green-400' },
+                  { label: 'Lines Written', value: '18.4k', trend: '+15%', color: 'text-emerald-400' },
+                ].map((c) => (
+                  <div key={c.label} className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
+                    <div className="text-[10px] text-gray-500 mb-1">{c.label}</div>
+                    <div className={`text-lg font-bold ${c.color}`}>{c.value}</div>
+                    <div className="text-[10px] text-gray-600">{c.trend} vs last week</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Sessions</strong> &mdash; Total number of AI coding sessions. Week-over-week trend shown below.</Li>
+              <Li><strong className="text-gray-200">Tokens</strong> &mdash; Total tokens consumed across all sessions (input + output).</Li>
+              <Li><strong className="text-gray-200">Cost</strong> &mdash; Cumulative API cost. Compared against last week.</Li>
+              <Li><strong className="text-gray-200">Lines Written</strong> &mdash; Total lines added/removed. Breakdown shown as <span className="text-green-400">+added</span> / <span className="text-red-400">-removed</span>.</Li>
+            </ul>
+            <P>
+              A streak counter appears when you have consecutive days of AI coding activity.
+            </P>
+
+            <H2>Sessions Tab</H2>
+            <P>
+              The Sessions tab is a searchable, filterable table of all your AI coding sessions.
+              Each row shows the agent, repository, branch, duration, cost, tokens, status, tags, and when the session happened.
+            </P>
+
+            {/* Sessions mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Sessions</span>
+              </div>
+              <div className="p-4">
+                <div className="flex gap-2 mb-3">
+                  <div className="flex-1 bg-gray-800/50 border border-gray-700 rounded px-3 py-1.5 text-xs text-gray-500">Search sessions...</div>
+                  <div className="bg-gray-800/50 border border-gray-700 rounded px-3 py-1.5 text-xs text-gray-400">All agents</div>
+                  <div className="bg-gray-800/50 border border-gray-700 rounded px-3 py-1.5 text-xs text-gray-400">All repos</div>
+                </div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-[10px] text-gray-500 uppercase border-b border-gray-700/50">
+                      <th className="text-left py-1.5 font-medium w-6"></th>
+                      <th className="text-left py-1.5 font-medium">Agent</th>
+                      <th className="text-left py-1.5 font-medium">Repo</th>
+                      <th className="text-right py-1.5 font-medium">Duration</th>
+                      <th className="text-right py-1.5 font-medium">Cost</th>
+                      <th className="text-right py-1.5 font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/50">
+                    {[
+                      { agent: 'claude-code', repo: 'org/api', dur: '12m', cost: '$0.84', status: 'ENDED' },
+                      { agent: 'cursor', repo: 'org/web', dur: '8m', cost: '$0.32', status: 'ENDED' },
+                      { agent: 'claude-code', repo: 'org/api', dur: '45m', cost: '$3.10', status: 'ENDED' },
+                    ].map((s, i) => (
+                      <tr key={i} className="hover:bg-gray-800/30">
+                        <td className="py-2 text-yellow-500/40">&#9733;</td>
+                        <td className="py-2 text-indigo-400">{s.agent}</td>
+                        <td className="py-2 text-gray-300">{s.repo}</td>
+                        <td className="py-2 text-gray-400 text-right">{s.dur}</td>
+                        <td className="py-2 text-gray-300 text-right">{s.cost}</td>
+                        <td className="py-2 text-right"><span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-400">{s.status}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <H3>Features</H3>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Search</strong> &mdash; Full-text search across session metadata, commit messages, and agent names</Li>
+              <Li><strong className="text-gray-200">Filter by Agent</strong> &mdash; Dropdown to isolate sessions by a specific AI agent (Claude Code, Cursor, etc.)</Li>
+              <Li><strong className="text-gray-200">Filter by Repo</strong> &mdash; Scope to a single repository</Li>
+              <Li><strong className="text-gray-200">Filter by Status</strong> &mdash; Show only RUNNING, ENDED, or specific review statuses</Li>
+              <Li><strong className="text-gray-200">Star / Bookmark</strong> &mdash; Click the star icon to bookmark important sessions. Bookmarked sessions appear in the &ldquo;Saved&rdquo; filter</Li>
+              <Li><strong className="text-gray-200">Inline Tags</strong> &mdash; Add custom tags (e.g. &ldquo;bugfix&rdquo;, &ldquo;refactor&rdquo;, &ldquo;feature&rdquo;) to bookmarked sessions for categorization</Li>
+              <Li><strong className="text-gray-200">Pagination</strong> &mdash; Navigate through history with page controls. Default 20 sessions per page</Li>
+              <Li><strong className="text-gray-200">Click to Detail</strong> &mdash; Click any session row to navigate to the full session detail view</Li>
+            </ul>
+
+            <H2>Timeline Tab</H2>
+            <P>
+              The Timeline provides a vertical chronological view of your last 100 sessions, grouped by day.
+              Each session shows as a card with the agent name, model, duration, cost, and lines changed.
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Day Groups</strong> &mdash; Sessions are grouped under date headers (e.g. &ldquo;Today&rdquo;, &ldquo;Yesterday&rdquo;, &ldquo;March 28&rdquo;)</Li>
+              <Li><strong className="text-gray-200">Agent Markers</strong> &mdash; Color-coded indicators show which agent was used. When you switch agents mid-day, a visual marker highlights the transition</Li>
+              <Li><strong className="text-gray-200">Session Cards</strong> &mdash; Each card shows repo, branch, model, duration, cost, tokens, and lines changed at a glance</Li>
+              <Li><strong className="text-gray-200">Quick Navigation</strong> &mdash; Click any session card to jump to the full session detail</Li>
+            </ul>
+            <P>
+              The Timeline helps you review &ldquo;what did I do today/this week?&rdquo; without digging through individual sessions.
+            </P>
+
+            <H2>Agents Tab</H2>
+            <P>
+              The Agents tab shows a grid of cards &mdash; one per AI agent you&apos;ve used. Each card provides:
+            </P>
+
+            {/* Agents mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Agents</span>
+              </div>
+              <div className="p-4 grid grid-cols-3 gap-3">
+                {[
+                  { name: 'claude-code', model: 'claude-4-opus', sessions: 89, cost: '$32.10', status: 'active', color: '#818cf8' },
+                  { name: 'cursor', model: 'gpt-4o', sessions: 41, cost: '$12.40', status: 'active', color: '#34d399' },
+                  { name: 'copilot', model: 'gpt-4o-mini', sessions: 12, cost: '$2.80', status: 'inactive', color: '#f59e0b' },
+                ].map((a) => (
+                  <div key={a.name} className="bg-gray-800/50 rounded-lg p-3 border border-gray-700/50">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 rounded flex items-center justify-center text-[10px] font-bold" style={{ backgroundColor: `${a.color}20`, color: a.color }}>AI</div>
+                        <div>
+                          <div className="text-xs font-semibold text-gray-200">{a.name}</div>
+                          <div className="text-[9px] text-gray-600 font-mono">{a.model}</div>
+                        </div>
+                      </div>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded ${a.status === 'active' ? 'bg-green-900/30 text-green-400' : 'bg-gray-800 text-gray-500'}`}>{a.status}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[10px]">
+                      <div><span className="text-gray-500">Sessions:</span> <span className="text-gray-300">{a.sessions}</span></div>
+                      <div><span className="text-gray-500">Cost:</span> <span className="text-gray-300">{a.cost}</span></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Agent Name &amp; Model</strong> &mdash; The agent slug and its most frequently used model</Li>
+              <Li><strong className="text-gray-200">Total Sessions</strong> &mdash; Lifetime session count with this agent</Li>
+              <Li><strong className="text-gray-200">Total Cost &amp; Monthly Cost</strong> &mdash; Lifetime and current month spend</Li>
+              <Li><strong className="text-gray-200">Total Tokens</strong> &mdash; Lifetime token consumption</Li>
+              <Li><strong className="text-gray-200">Avg Session Duration</strong> &mdash; Average length of sessions with this agent</Li>
+              <Li><strong className="text-gray-200">Lines Added / Removed</strong> &mdash; Total code impact from this agent</Li>
+              <Li><strong className="text-gray-200">Status</strong> &mdash; <span className="text-green-400">Active</span> if used in the last 7 days, otherwise <span className="text-gray-500">inactive</span></Li>
+              <Li><strong className="text-gray-200">Last Active</strong> &mdash; Timestamp of the most recent session</Li>
+            </ul>
+
+            <H2>Stats Tab</H2>
+            <P>
+              The Stats tab provides visual analytics of your AI coding activity:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Contribution Heatmap</strong> &mdash; A 365-day calendar heatmap (similar to GitHub) showing your daily AI session activity. Darker cells = more sessions that day</Li>
+              <Li><strong className="text-gray-200">Cost Breakdown</strong> &mdash; Pie chart showing cost distribution across agents</Li>
+              <Li><strong className="text-gray-200">Model Distribution</strong> &mdash; Breakdown of which AI models you use (Claude Opus, Sonnet, GPT-4o, etc.) with session counts and costs</Li>
+              <Li><strong className="text-gray-200">Top Files</strong> &mdash; The 10 most frequently modified files across all AI sessions</Li>
+              <Li><strong className="text-gray-200">Repos</strong> &mdash; Session count per repository</Li>
+              <Li><strong className="text-gray-200">Code Impact</strong> &mdash; Summary card showing total lines added (green) and removed (red) across all sessions</Li>
+            </ul>
+            <P>
+              Data is fetched from <code className="text-indigo-400">GET /api/stats/me</code> which aggregates all sessions for the authenticated user.
+            </P>
+
+            <H2>Patterns Tab</H2>
+            <P>
+              The Patterns tab analyzes <em>when</em> you code with AI:
+            </P>
+
+            {/* Patterns mockup */}
+            <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden my-6">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900/80">
+                <div className="w-3 h-3 rounded-full bg-red-500/80" />
+                <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
+                <div className="w-3 h-3 rounded-full bg-green-500/80" />
+                <span className="text-xs text-gray-500 ml-2 font-mono">Patterns &mdash; Hour of Day</span>
+              </div>
+              <div className="p-4">
+                <div className="flex items-end gap-1 h-20">
+                  {[1,2,3,5,8,12,18,22,28,35,30,25,20,22,28,32,25,18,12,8,5,3,2,1].map((v, i) => (
+                    <div key={i} className="flex-1 rounded-t" style={{ height: `${(v/35)*100}%`, backgroundColor: v > 25 ? '#818cf8' : v > 15 ? '#818cf860' : '#818cf830' }} />
+                  ))}
+                </div>
+                <div className="flex justify-between text-[9px] text-gray-600 mt-1">
+                  <span>12am</span><span>6am</span><span>12pm</span><span>6pm</span><span>11pm</span>
+                </div>
+              </div>
+            </div>
+
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Hour-of-Day Chart</strong> &mdash; Bar chart with 24 buckets (0&ndash;23) showing session distribution across hours. Identifies your peak coding hours</Li>
+              <Li><strong className="text-gray-200">Day-of-Week Chart</strong> &mdash; Bar chart showing session distribution across weekdays (Mon&ndash;Sun). See which days you&apos;re most active</Li>
+              <Li><strong className="text-gray-200">Peak Hour</strong> &mdash; The single hour with the most sessions (e.g. &ldquo;2pm&rdquo;)</Li>
+              <Li><strong className="text-gray-200">Peak Day</strong> &mdash; The weekday with the most sessions (e.g. &ldquo;Wednesday&rdquo;)</Li>
+              <Li><strong className="text-gray-200">Monthly Summary</strong> &mdash; Sessions and cost for the current month</Li>
+              <Li><strong className="text-gray-200">Averages</strong> &mdash; Average session duration, tokens per session, and cost per session</Li>
+            </ul>
+
+            <H2>Efficiency Tab</H2>
+            <P>
+              The Efficiency tab measures how productively you use AI coding tools:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Tokens per Line</strong> &mdash; How many tokens are consumed to produce one line of code. Lower is more efficient. Calculated as <code className="text-gray-400">totalTokens / totalLinesAdded</code></Li>
+              <Li><strong className="text-gray-200">Cost per Commit</strong> &mdash; Average API cost for each git commit made during AI sessions. Calculated as <code className="text-gray-400">totalCost / totalCommits</code></Li>
+              <Li><strong className="text-gray-200">Cost per Session</strong> &mdash; Average cost per session. Track whether this trends up or down over time</Li>
+              <Li><strong className="text-gray-200">Avg Lines per Session</strong> &mdash; Average lines of code produced per session</Li>
+              <Li><strong className="text-gray-200">Commit Stats</strong> &mdash; Total commits, commits per session ratio, and average files changed per commit</Li>
+            </ul>
+            <P>
+              Use these metrics to optimize your AI workflow &mdash; fewer tokens per line means you&apos;re writing better prompts, lower cost per commit means more efficient iteration.
+            </P>
+
+            <H2>Prompts Tab</H2>
+            <P>
+              The Prompts tab shows a paginated list of every prompt you sent to AI agents, paired with the code changes that resulted:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Prompt Text</strong> &mdash; The message you sent to the AI agent</Li>
+              <Li><strong className="text-gray-200">Agent &amp; Session</strong> &mdash; Which agent received the prompt and which session it belongs to</Li>
+              <Li><strong className="text-gray-200">Files Changed</strong> &mdash; List of files modified as a result of this prompt</Li>
+              <Li><strong className="text-gray-200">Inline Diff</strong> &mdash; Click to expand and see the exact code changes (unified diff) produced by the prompt</Li>
+              <Li><strong className="text-gray-200">Timestamp</strong> &mdash; When the prompt was sent</Li>
+              <Li><strong className="text-gray-200">Pagination</strong> &mdash; Navigate through prompt history, 30 per page</Li>
+            </ul>
+            <P>
+              This is useful for understanding which prompts led to the best outcomes, and for auditing what instructions
+              were given to AI tools in your codebase.
+            </P>
+
+            <H2>Quick Start</H2>
+            <P>
+              When your dashboard has no sessions yet, a built-in quick start guide appears with 3 steps:
+            </P>
+            <ol className="space-y-2 mb-4 list-decimal list-inside text-sm text-gray-400">
+              <li><strong className="text-gray-200">Install the CLI</strong> &mdash; <code className="text-emerald-400">npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</code></li>
+              <li><strong className="text-gray-200">Create an API Key</strong> &mdash; Go to <strong className="text-gray-200">Settings &rarr; General</strong> and create an API key. Copy it.</li>
+              <li><strong className="text-gray-200">Configure &amp; Init</strong> &mdash; <code className="text-emerald-400">origin config set api-key YOUR_KEY</code> then <code className="text-emerald-400">origin init</code> to detect your AI tools and install hooks</li>
+              <li><strong className="text-gray-200">Start Coding</strong> &mdash; Use any AI tool as normal. Sessions appear automatically</li>
+            </ol>
+
+            <H2>API Endpoints</H2>
+            <CodeBlock title="Developer Dashboard API">{`# Personal stats overview (sessions, cost, tokens, lines, heatmap, streak)
+GET /api/stats/me
+
+# Your sessions (paginated, filterable)
+GET /api/sessions?mine=true&limit=20&offset=0
+GET /api/sessions?mine=true&model=claude-code&status=ENDED
+
+# Bookmarked sessions
+GET /api/sessions/bookmarked
+
+# Agent breakdown cards
+GET /api/stats/me/agents
+
+# Coding patterns (hourly/daily distribution, peak times)
+GET /api/stats/me/patterns
+
+# Efficiency metrics (tokens/line, cost/commit, cost/session)
+GET /api/stats/me/efficiency
+
+# Prompt history with diffs (paginated)
+GET /api/stats/me/prompts?limit=30&offset=0`}</CodeBlock>
+
+            <H2>Developer Settings</H2>
+            <P>
+              Developer accounts have a streamlined Settings page with only relevant options:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">General</strong> &mdash; Profile info and API key management for CLI integration</Li>
+              <Li><strong className="text-gray-200">Models</strong> &mdash; Compare and track AI model performance</Li>
+            </ul>
+            <P>
+              Organization-level features like Integrations, Audit Log, Reports, Trails, and Compliance
+              are only visible for org accounts.
+            </P>
           </div>
         )}
 
@@ -4405,7 +4970,445 @@ origin rewind --to <sha>         # restore to a specific commit`}</CodeBlock>
                 <P>Force the CLI operating mode. Values: <code className="text-indigo-400">auto</code> (default) or <code className="text-indigo-400">standalone</code>. Standalone skips all API calls &mdash; everything stays local.</P>
                 <CodeBlock>{`origin config set mode standalone`}</CodeBlock>
               </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin web</code>
+                <P>Launch a local web dashboard in the browser. Shows AI attribution, sessions, and prompts from local data.</P>
+                <CodeBlock>{`origin web                # Launch on default port 3141
+origin web --port 8080    # Custom port`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin explain [sessionId]</code>
+                <P>AI-powered explanation of a session or the current working tree changes. Summarizes what happened, why, and what files were affected.</P>
+                <CodeBlock>{`origin explain                  # Explain current changes
+origin explain abc123           # Explain a specific session
+origin explain --format json    # Machine-readable output`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin ask &lt;query&gt;</code>
+                <P>Ask questions about your codebase using AI. Searches session history, prompts, and code changes to answer context-aware questions.</P>
+                <CodeBlock>{`origin ask "why was the auth middleware added?"
+origin ask "what changed in the last 3 sessions?"`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin chat</code>
+                <P>Start an interactive AI chat session about your codebase. Maintains context across messages within the chat.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin prompts &lt;file&gt;</code>
+                <P>Show the AI prompts that affected a specific file. Traces which prompts led to changes in the given file across all sessions.</P>
+                <CodeBlock>{`origin prompts src/auth.ts`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin blame &lt;file&gt;</code>
+                <P>Enhanced git blame that shows AI attribution. Identifies which lines were written by AI agents vs humans, with session IDs and prompt context.</P>
+                <CodeBlock>{`origin blame src/auth.ts
+origin blame --line 42 src/auth.ts`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin diff [range]</code>
+                <P>Show diffs with AI attribution metadata. Annotates which changes came from AI sessions and which were human-authored.</P>
+                <CodeBlock>{`origin diff                     # Current uncommitted changes
+origin diff HEAD~3              # Last 3 commits
+origin diff main..feature       # Branch comparison`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin verify</code>
+                <P>Verify that AI-generated code passes policy checks. Runs all configured policies against the current session or working tree.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin analyze</code>
+                <P>Deep analysis of AI coding patterns in the current repository. Shows AI vs human code ratio, model distribution, cost trends, and file-level attribution.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin compare &lt;arg1&gt; [arg2]</code>
+                <P>Compare two sessions, branches, or time periods side by side. Shows differences in cost, tokens, lines changed, and model usage.</P>
+                <CodeBlock>{`origin compare abc123 def456           # Compare two sessions
+origin compare main feature/auth       # Compare branches`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin export</code>
+                <P>Export session data in various formats for external analysis or reporting.</P>
+                <CodeBlock>{`origin export --format csv --output sessions.csv
+origin export --format json --from 2026-01-01`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin resume [branch]</code>
+                <P>Resume a previous AI coding session. Loads context from the last session on the current or specified branch so the next AI interaction has full history.</P>
+                <CodeBlock>{`origin resume                   # Resume on current branch
+origin resume feature/auth      # Resume on specific branch`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin handoff</code>
+                <P>Cross-agent context handoff. Transfer session context between different AI tools (e.g. from Claude Code to Cursor).</P>
+                <CodeBlock>{`origin handoff create            # Create a handoff bundle
+origin handoff apply <id>        # Apply a handoff from another agent`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin memory</code>
+                <P>Session memory management &mdash; accumulated context across sessions. View, search, and manage persistent knowledge the AI has gathered about your codebase.</P>
+                <CodeBlock>{`origin memory show               # Show current memory
+origin memory search "auth"      # Search memory entries
+origin memory clear              # Clear accumulated memory`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin todo</code>
+                <P>AI-extracted TODO tracker across sessions. Automatically identifies and tracks TODOs, FIXMEs, and action items from AI coding sessions.</P>
+                <CodeBlock>{`origin todo                      # List active TODOs
+origin todo done <id>            # Mark a TODO as complete
+origin todo clear                # Clear completed TODOs`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin ignore</code>
+                <P>Manage file ignore patterns for Origin tracking. Similar to .gitignore but for AI session tracking.</P>
+                <CodeBlock>{`origin ignore add "*.log"         # Ignore log files
+origin ignore add "node_modules"  # Ignore directories
+origin ignore list               # Show current ignore patterns
+origin ignore remove "*.log"      # Remove a pattern`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin clean</code>
+                <P>Remove orphaned branches, stale sessions, and temp files created by Origin.</P>
+                <CodeBlock>{`origin clean                     # Show what would be cleaned
+origin clean --force             # Clean without confirmation`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin ci</code>
+                <P>CI/CD integration for AI attribution. Generate CI configs and run attribution checks in pipelines.</P>
+                <CodeBlock>{`origin ci init                   # Generate CI config file
+origin ci check                  # Run attribution check (for CI)
+origin ci report                 # Generate CI attribution report`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin db</code>
+                <P>Local prompt database management. Import, query, and maintain the local SQLite database of session data.</P>
+                <CodeBlock>{`origin db import                 # Import from origin-sessions branch
+origin db stats                  # Show database statistics`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin proxy</code>
+                <P>Transparent git proxy for attribution tracking. Intercepts git operations to automatically capture AI session context.</P>
+                <CodeBlock>{`origin proxy start               # Start the git proxy
+origin proxy stop                # Stop the proxy
+origin proxy status              # Check proxy status`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin plugin</code>
+                <P>External agent plugin management. Install and manage plugins for additional AI tool integrations.</P>
+                <CodeBlock>{`origin plugin list                # List installed plugins
+origin plugin install <name>     # Install a plugin
+origin plugin remove <name>      # Remove a plugin`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin session-compare &lt;id1&gt; &lt;id2&gt;</code>
+                <P>Side-by-side comparison of two sessions. Shows differences in prompts, files changed, cost, tokens, and outcomes.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin reset</code>
+                <P>Clear local session state for this repo. Use when a session gets stuck or state files become corrupted.</P>
+                <CodeBlock>{`origin reset                     # Clear session state
+origin reset --force             # Force clear even if session looks active`}</CodeBlock>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin notifications</code>
+                <P>View and manage notification preferences. Control which events trigger alerts (violations, reviews, budget thresholds).</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin team</code>
+                <P>View team members, roles, and activity. Manage team composition from the command line.</P>
+              </div>
             </div>
+          </div>
+        )}
+
+        {/* ─── CLI INSTALL ──────────────────────────────────────── */}
+        {active === 'cli-install' && (
+          <div>
+            <h1 id="cli-install" className="text-2xl font-bold mb-2">CLI Installation</h1>
+            <P>
+              The Origin CLI is distributed as an npm package. Install it globally to get started.
+            </P>
+
+            <H2>Install from Origin Platform</H2>
+            <CodeBlock title="npm">{`npm i -g ${window.location.origin}/cli/origin-cli-latest.tgz`}</CodeBlock>
+
+            <H2>Verify Installation</H2>
+            <CodeBlock>{`origin --version
+origin doctor`}</CodeBlock>
+
+            <H2>First-Time Setup</H2>
+            <P>After installation, authenticate and initialize:</P>
+            <CodeBlock>{`# 1. Log in to your Origin account
+origin login
+
+# 2. Initialize — detects AI tools, installs hooks
+origin init
+
+# 3. Verify everything is working
+origin status`}</CodeBlock>
+
+            <Callout type="info">
+              <code className="text-indigo-400">origin init</code> auto-detects Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, and more.
+              It installs global git hooks so all repos are tracked automatically.
+            </Callout>
+
+            <H2>Standalone Mode</H2>
+            <P>Run without the Origin platform — all data stays local:</P>
+            <CodeBlock>{`origin init --standalone`}</CodeBlock>
+            <P>
+              In standalone mode, sessions are stored on the <code className="text-indigo-400">origin-sessions</code> git branch
+              and in a local SQLite database. No API key or server needed.
+            </P>
+          </div>
+        )}
+
+        {/* ─── CLI CONFIG ──────────────────────────────────────── */}
+        {active === 'cli-config' && (
+          <div>
+            <h1 id="cli-config" className="text-2xl font-bold mb-2">CLI Configuration</h1>
+            <P>
+              Configuration is stored at <code className="text-indigo-400">~/.origin/config.json</code>.
+              Use <code className="text-indigo-400">origin config</code> commands to manage settings.
+            </P>
+
+            <H2>Config Commands</H2>
+            <div className="space-y-4 mt-4">
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set api-key &lt;key&gt;</code>
+                <P>Set your API key for authenticating with the Origin platform.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set api-url &lt;url&gt;</code>
+                <P>Set custom API URL. Default: <code className="text-indigo-400">https://getorigin.io</code></P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set mode &lt;auto|standalone&gt;</code>
+                <P>Force operating mode. <code className="text-indigo-400">auto</code> uses the platform when credentials exist, <code className="text-indigo-400">standalone</code> keeps everything local.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set checkpoint-repo &lt;url&gt;</code>
+                <P>Store session data in a separate private git repo instead of the main codebase.</P>
+              </div>
+
+              <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set auto-snapshot true</code>
+                <P>Automatically save working tree snapshots before every AI file edit.</P>
+              </div>
+            </div>
+
+            <H2>Config File</H2>
+            <CodeBlock title="~/.origin/config.json">{`{
+  "apiKey": "org_...",
+  "apiUrl": "https://getorigin.io",
+  "mode": "auto",
+  "pushStrategy": "auto",
+  "checkpointRepo": null,
+  "autoSnapshot": false
+}`}</CodeBlock>
+
+            <H2>Per-Repo Config</H2>
+            <P>
+              Create a <code className="text-indigo-400">.origin.json</code> in any repo root to override settings:
+            </P>
+            <CodeBlock title=".origin.json">{`{
+  "agent": "claude-code",
+  "autoSnapshot": true,
+  "pushStrategy": "prompt"
+}`}</CodeBlock>
+          </div>
+        )}
+
+        {/* ─── CLI SESSIONS ──────────────────────────────────────── */}
+        {active === 'cli-sessions' && (
+          <div>
+            <h1 id="cli-sessions" className="text-2xl font-bold mb-2">CLI Session Tracking</h1>
+            <P>
+              Origin automatically tracks AI coding sessions via git hooks. Each session captures
+              the model, prompts, files changed, cost, tokens, and duration.
+            </P>
+
+            <H2>Viewing Sessions</H2>
+            <CodeBlock>{`# List recent sessions for current repo
+origin sessions
+
+# Show more sessions
+origin sessions --limit 50
+
+# Filter by status
+origin sessions --status running
+
+# Show only local sessions (not synced to platform)
+origin sessions --local
+
+# Show source column (local vs origin)
+origin sessions --source
+
+# All repos (global view)
+origin sessions --all`}</CodeBlock>
+
+            <H2>Session Details</H2>
+            <CodeBlock>{`# View full session detail by ID (first 8 chars)
+origin sessions show abc12345`}</CodeBlock>
+            <P>
+              Shows model, cost, tokens, duration, lines changed, files, branch, commits, and full prompt history.
+            </P>
+
+            <H2>Managing Sessions</H2>
+            <CodeBlock>{`# End a running session manually
+origin sessions end abc12345
+
+# Clean up all stale running sessions
+origin sessions clean
+
+# Clean across all repos
+origin sessions clean --all`}</CodeBlock>
+
+            <H2>Session Data Storage</H2>
+            <P>Sessions are stored in multiple locations depending on mode:</P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Connected mode</strong> &mdash; Sent to Origin platform via API + stored locally on <code className="text-indigo-400">origin-sessions</code> git branch</Li>
+              <Li><strong className="text-gray-200">Standalone mode</strong> &mdash; Stored on <code className="text-indigo-400">origin-sessions</code> git branch + local SQLite DB</Li>
+              <Li><strong className="text-gray-200">Active sessions</strong> &mdash; State files in <code className="text-indigo-400">~/.origin/sessions/</code> and <code className="text-indigo-400">.git/origin-session-*</code></Li>
+            </ul>
+          </div>
+        )}
+
+        {/* ─── CLI HOOKS ──────────────────────────────────────── */}
+        {active === 'cli-hooks' && (
+          <div>
+            <h1 id="cli-hooks" className="text-2xl font-bold mb-2">Git Hooks</h1>
+            <P>
+              Origin uses git hooks to automatically capture session data. Hooks are installed globally
+              by <code className="text-indigo-400">origin init</code> or per-repo by <code className="text-indigo-400">origin enable</code>.
+            </P>
+
+            <H2>How Hooks Work</H2>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">post-commit</strong> &mdash; Captures commit SHA, files changed, and links it to the active AI session</Li>
+              <Li><strong className="text-gray-200">Session start detection</strong> &mdash; Detects when an AI tool begins a coding session via process monitoring</Li>
+              <Li><strong className="text-gray-200">Session end</strong> &mdash; Finalizes session data, writes to <code className="text-indigo-400">origin-sessions</code> branch, syncs to platform</Li>
+            </ul>
+
+            <H2>Managing Hooks</H2>
+            <CodeBlock>{`# Install hooks for specific agent
+origin enable --agent claude-code
+
+# Remove hooks
+origin disable claude-code
+
+# Check hook status
+origin doctor`}</CodeBlock>
+
+            <H2>Supported AI Tools</H2>
+            <P>Origin auto-detects and installs hooks for:</P>
+            <ul className="space-y-2 mb-4">
+              <Li><strong className="text-gray-200">Claude Code</strong> &mdash; via MCP server config and CLI hooks</Li>
+              <Li><strong className="text-gray-200">Cursor</strong> &mdash; via workspace rules and git hooks</Li>
+              <Li><strong className="text-gray-200">GitHub Copilot</strong> &mdash; via VS Code extension detection</Li>
+              <Li><strong className="text-gray-200">Gemini</strong> &mdash; via CLI detection</Li>
+              <Li><strong className="text-gray-200">Aider</strong> &mdash; via CLI detection and config</Li>
+              <Li><strong className="text-gray-200">Windsurf</strong> &mdash; via workspace detection</Li>
+              <Li><strong className="text-gray-200">Cody</strong> &mdash; via VS Code extension</Li>
+            </ul>
+          </div>
+        )}
+
+        {/* ─── CLI LOCAL ──────────────────────────────────────── */}
+        {active === 'cli-local' && (
+          <div>
+            <h1 id="cli-local" className="text-2xl font-bold mb-2">Local Mode</h1>
+            <P>
+              Origin can run entirely offline with no server connection. All session data stays in your git repo
+              on the <code className="text-indigo-400">origin-sessions</code> orphan branch.
+            </P>
+
+            <H2>Setup</H2>
+            <CodeBlock>{`# Initialize in standalone mode
+origin init --standalone
+
+# Or switch an existing setup to standalone
+origin config set mode standalone`}</CodeBlock>
+
+            <H2>How Local Storage Works</H2>
+            <P>
+              Each session creates three files on the <code className="text-indigo-400">origin-sessions</code> orphan branch:
+            </P>
+            <ul className="space-y-2 mb-4">
+              <Li><code className="text-indigo-400">sessions/&lt;id&gt;/metadata.json</code> &mdash; Session metadata (model, cost, tokens, duration, files, git info)</Li>
+              <Li><code className="text-indigo-400">sessions/&lt;id&gt;/prompts.md</code> &mdash; Human-readable prompt log</Li>
+              <Li><code className="text-indigo-400">sessions/&lt;id&gt;/changes.json</code> &mdash; Per-prompt diffs and file changes</Li>
+            </ul>
+            <P>
+              Files are written using git plumbing (hash-object, update-index, write-tree, commit-tree) so
+              your working directory and current branch are never touched.
+            </P>
+
+            <H2>Viewing Local Sessions</H2>
+            <CodeBlock>{`# List sessions from origin-sessions branch
+origin sessions --local
+
+# View session detail
+origin sessions show abc12345
+
+# Browse in the browser
+origin web`}</CodeBlock>
+
+            <H2>Local Web Dashboard</H2>
+            <P>
+              Run <code className="text-indigo-400">origin web</code> to launch a local web dashboard on port 3141.
+              Shows AI attribution, session history, and prompt details from local data.
+            </P>
+            <CodeBlock>{`origin web                # Launch on default port 3141
+origin web --port 8080    # Custom port`}</CodeBlock>
+
+            <H2>Push Strategy</H2>
+            <P>Control whether session data is pushed to remote:</P>
+            <CodeBlock>{`# Auto-push (default in standalone mode)
+origin config set push-strategy auto
+
+# Never push
+origin config set push-strategy false
+
+# Manual push only
+origin config set push-strategy prompt`}</CodeBlock>
+
+            <H2>Migrating to Connected Mode</H2>
+            <P>To switch from standalone to platform mode:</P>
+            <CodeBlock>{`# Log in to get credentials
+origin login
+
+# Re-initialize
+origin init
+
+# Backfill existing local sessions to platform
+origin sync`}</CodeBlock>
           </div>
         )}
 

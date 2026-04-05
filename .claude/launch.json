@@ -3,14 +3,14 @@
   "configurations": [
     {
       "name": "api",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@origin/api", "dev"],
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": ["-c", "eval $(/opt/homebrew/bin/brew shellenv) && pnpm --filter @origin/api dev"],
       "port": 4002
     },
     {
       "name": "web",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "web", "dev"],
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": ["-c", "eval $(/opt/homebrew/bin/brew shellenv) && pnpm --filter web dev"],
       "port": 5176
     }
   ]

@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
 import { getDocsContext, getOrgContext } from '../services/chat-context.js';
-import { getOrgLLMKey, getOrgLLMModel } from './settings.js';
+import { getOrgLLMKey, getOrgLLMModel, getOrgLLMProvider } from './settings.js';
 
 const router = Router();
 
@@ -35,23 +35,29 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
-// Helper: call Claude and extract text response
+// Provider detection: figure out which provider a model belongs to
 // ---------------------------------------------------------------------------
 
-export async function callClaude(
+export type LLMProvider = 'anthropic' | 'openai' | 'google';
+
+export function detectProvider(model: string): LLMProvider {
+  if (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4')) return 'openai';
+  if (model.startsWith('gemini-')) return 'google';
+  return 'anthropic';
+}
+
+// ---------------------------------------------------------------------------
+// Helper: call LLM (multi-provider) and extract text response
+// ---------------------------------------------------------------------------
+
+async function callAnthropic(
+  apiKey: string,
+  model: string,
   systemPrompt: string,
   messages: Array<{ role: string; content: string }>,
-  maxTokens: number = 1024,
-  opts?: { apiKey?: string; model?: string },
+  maxTokens: number,
 ): Promise<string> {
-  const apiKey = opts?.apiKey || process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('AI chat is not configured');
-  }
-
-  const model = opts?.model || 'claude-sonnet-4-20250514';
   const client = new Anthropic({ apiKey });
-
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
@@ -67,6 +73,100 @@ export async function callClaude(
     .map((b) => (b as { type: 'text'; text: string }).text)
     .join('');
 }
+
+async function callOpenAI(
+  apiKey: string,
+  model: string,
+  systemPrompt: string,
+  messages: Array<{ role: string; content: string }>,
+  maxTokens: number,
+): Promise<string> {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages.map(m => ({ role: m.role, content: m.content })),
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`OpenAI API error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content || '';
+}
+
+async function callGoogle(
+  apiKey: string,
+  model: string,
+  systemPrompt: string,
+  messages: Array<{ role: string; content: string }>,
+  maxTokens: number,
+): Promise<string> {
+  const geminiMessages = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents: geminiMessages,
+        generationConfig: { maxOutputTokens: maxTokens },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Google AI API error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
+export async function callLLM(
+  systemPrompt: string,
+  messages: Array<{ role: string; content: string }>,
+  maxTokens: number = 1024,
+  opts?: { apiKey?: string; model?: string; provider?: LLMProvider },
+): Promise<string> {
+  const apiKey = opts?.apiKey || process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error('AI chat is not configured');
+  }
+
+  const model = opts?.model || 'claude-sonnet-4-20250514';
+  const provider = opts?.provider || detectProvider(model);
+
+  switch (provider) {
+    case 'openai':
+      return callOpenAI(apiKey, model, systemPrompt, messages, maxTokens);
+    case 'google':
+      return callGoogle(apiKey, model, systemPrompt, messages, maxTokens);
+    case 'anthropic':
+    default:
+      return callAnthropic(apiKey, model, systemPrompt, messages, maxTokens);
+  }
+}
+
+/** @deprecated Use callLLM instead. Kept for backward compatibility. */
+export const callClaude = callLLM;
 
 // ---------------------------------------------------------------------------
 // POST /docs — Public docs chatbot (rate-limited, no auth required)
@@ -179,14 +279,16 @@ router.post('/assistant', requireAuth, async (req: AuthRequest, res: Response) =
     const systemPrompt = ASSISTANT_SYSTEM_PROMPT + orgContext;
 
     // Use org-level LLM config if available, fall back to env var
-    const [orgKey, orgModel] = await Promise.all([
+    const [orgKey, orgModel, orgProvider] = await Promise.all([
       getOrgLLMKey(orgId),
       getOrgLLMModel(orgId),
+      getOrgLLMProvider(orgId),
     ]);
 
-    const responseText = await callClaude(systemPrompt, trimmedMessages, 2048, {
+    const responseText = await callLLM(systemPrompt, trimmedMessages, 2048, {
       apiKey: orgKey || undefined,
       model: orgModel,
+      provider: orgProvider,
     });
     return res.json({ message: responseText });
   } catch (err: any) {

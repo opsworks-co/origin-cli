@@ -1,18 +1,26 @@
 import { createInterface } from 'readline/promises';
-import { saveConfig } from '../config.js';
+import { saveConfig, saveProfile, listProfiles, loadConfig } from '../config.js';
 import chalk from 'chalk';
 
-export async function loginCommand() {
+export async function loginCommand(opts: { key?: string; profile?: string }) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
   console.log(chalk.bold('\n🔑 Origin Login\n'));
 
-  const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
-  const apiKey = await rl.question(chalk.gray('API Key: '));
-  rl.close();
+  let url: string;
+  let key: string;
 
-  const url = (apiUrl.trim() || 'https://getorigin.io').replace(/\/+$/, '');
-  const key = apiKey.trim();
+  if (opts.key) {
+    // --key flag: skip prompts, use default URL
+    url = 'https://getorigin.io';
+    key = opts.key.trim();
+  } else {
+    const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
+    const apiKey = await rl.question(chalk.gray('API Key: '));
+    rl.close();
+    url = (apiUrl.trim() || 'https://getorigin.io').replace(/\/+$/, '');
+    key = apiKey.trim();
+  }
 
   if (!key) {
     console.log(chalk.red('Error: API key is required'));
@@ -42,24 +50,69 @@ export async function loginCommand() {
     }
     const data = await res.json() as any;
 
+    const keyType = data.keyType || 'team';
+    const accountType = data.accountType || 'org';
+    const isSolo = keyType === 'solo' || accountType === 'developer';
+
+    // Determine profile name
+    const profileName = opts.profile || (isSolo ? 'dev' : 'team');
+
+    // Save as primary config (always — this is the active account for CLI commands)
+    const currentConfig = loadConfig();
     saveConfig({
+      ...currentConfig,
       apiUrl: url.replace(/\/+$/, ''),
       apiKey: key,
       orgId: data.orgId || '',
       userId: '',
+      keyType,
+      accountType,
+      orgName: data.orgName || '',
     });
 
-    console.log(chalk.green('✓ Connected to Origin'));
-    console.log(chalk.gray(`  Organization: ${data.orgName || 'Unknown'}`));
-    console.log(chalk.gray(`  API Key: ${data.apiKeyName || key.slice(0, 4) + '••••••••'}`));
-    console.log(chalk.gray(`  Agents: ${data.agentCount || 0} configured`));
-    console.log(chalk.gray(`  Repos: ${data.repoCount || 0} registered`));
-    if (data.repoScopes?.length === 0) {
-      console.log(chalk.yellow('  ⚠ This API key has no repo access. Assign repos in Settings → API Keys.'));
+    // Also save as named profile (for multi-account hooks)
+    saveProfile(profileName, {
+      name: profileName,
+      apiUrl: url.replace(/\/+$/, ''),
+      apiKey: key,
+      orgId: data.orgId || '',
+      orgName: data.orgName || '',
+      keyType: keyType as 'solo' | 'team',
+      accountType: accountType as 'developer' | 'org',
+    });
+
+    if (isSolo) {
+      console.log(chalk.green(`✓ Connected — Solo Developer`));
+      console.log(chalk.gray(`  Profile: ${profileName}`));
+      console.log(chalk.gray(`  Workspace: ${data.orgName || 'Personal workspace'}`));
+      console.log(chalk.gray(`  All repos · All agents · No restrictions`));
+    } else {
+      console.log(chalk.green(`✓ Connected — Team Member @ ${data.orgName || 'Unknown'}`));
+      console.log(chalk.gray(`  Profile: ${profileName}`));
+      console.log(chalk.gray(`  API Key: ${data.apiKeyName || key.slice(0, 4) + '••••••••'}`));
+      console.log(chalk.gray(`  Agents: ${data.agentCount || 0} configured`));
+      console.log(chalk.gray(`  Repos: ${data.repoCount || 0} registered`));
+      if (data.repoScopes?.length === 0) {
+        console.log(chalk.yellow('  ⚠ This API key has no repo access. Ask your admin to assign repos.'));
+      }
+      if (data.agentScopes?.length === 0) {
+        console.log(chalk.yellow('  ⚠ This API key has no agent access. Ask your admin to assign agents.'));
+      }
     }
-    if (data.agentScopes?.length === 0) {
-      console.log(chalk.yellow('  ⚠ This API key has no agent access. Assign agents in Settings → API Keys.'));
+
+    // Show all active profiles
+    const allProfiles = listProfiles();
+    if (allProfiles.length > 1) {
+      console.log(chalk.gray('\n  Active accounts:'));
+      for (const p of allProfiles) {
+        const isActive = p.apiKey === key;
+        const mode = p.accountType === 'developer' ? 'solo' : 'team';
+        const label = `${p.name} (${mode}) → ${p.orgName}`;
+        console.log(isActive ? chalk.white(`    ● ${label}`) : chalk.gray(`    ○ ${label}`));
+      }
+      console.log(chalk.gray('\n  Sessions will be sent to all accounts simultaneously.'));
     }
+
     console.log(chalk.gray(`  Config saved to ~/.origin/config.json`));
   } catch (err: any) {
     console.log(chalk.red(`✗ Failed to connect: ${err.message}`));

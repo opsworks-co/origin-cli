@@ -70,7 +70,11 @@ program
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
-program.command('login').description('Login to Origin').action(loginCommand);
+program.command('login')
+  .description('Login to Origin')
+  .option('--key <apiKey>', 'API key (skip interactive prompt)')
+  .option('--profile <name>', 'Save as named profile (default: auto-detect "dev" or "team")')
+  .action(loginCommand);
 program.command('init')
   .description('Register this machine as an agent host')
   .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
@@ -474,6 +478,8 @@ sessions
   .option('-l, --limit <n>', 'Max results', '20')
   .option('-a, --all', 'Show sessions from all repos (default: current repo only)')
   .option('-g, --global', 'Alias for --all')
+  .option('--local', 'Show only local sessions (not synced to Origin)')
+  .option('--source', 'Show source column (local/origin) for each session')
   .action(sessionsCommand);
 
 program.command('session <id>').description('View session detail').action(sessionDetailCommand);

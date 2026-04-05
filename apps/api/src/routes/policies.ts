@@ -1,9 +1,9 @@
 import { Router, Response } from 'express';
-import Anthropic from '@anthropic-ai/sdk';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { createPolicyVersion } from '../services/versioning.js';
-import { getOrgLLMKey } from './settings.js';
+import { getOrgLLMKey, getOrgLLMModel, getOrgLLMProvider } from './settings.js';
+import { callLLM } from './chat.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -417,21 +417,21 @@ router.post('/from-natural-language', requireRole('MEMBER'), async (req: AuthReq
       `Available repos: ${repos.map(r => r.name).join(', ') || 'none'}`,
     ].join('\n');
 
-    const apiKey = await getOrgLLMKey(orgId);
+    const [apiKey, orgModel, orgProvider] = await Promise.all([
+      getOrgLLMKey(orgId),
+      getOrgLLMModel(orgId),
+      getOrgLLMProvider(orgId),
+    ]);
     if (!apiKey) {
-      return res.status(400).json({ error: 'Anthropic API key not configured. Add it in Settings → AI Chat.' });
+      return res.status(400).json({ error: 'LLM API key not configured. Add it in Settings → AI Chat.' });
     }
-    const anthropic = new Anthropic({ apiKey });
-    const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
-      system: NL_SYSTEM_PROMPT,
-      messages: [
-        { role: 'user', content: `Context:\n${contextInfo}\n\nUser request:\n${prompt}` },
-      ],
-    });
 
-    const text = message.content[0].type === 'text' ? message.content[0].text : '';
+    const text = await callLLM(
+      NL_SYSTEM_PROMPT,
+      [{ role: 'user', content: `Context:\n${contextInfo}\n\nUser request:\n${prompt}` }],
+      2000,
+      { apiKey, model: orgModel, provider: orgProvider },
+    );
 
     let parsed: any[];
     try {

@@ -45,14 +45,24 @@ Standalone is the default. Run `origin login` to switch to connected mode.
 Authenticate with the Origin platform (connected mode).
 
 ```bash
-origin login
+origin login                    # interactive — prompts for URL + key
+origin login --key <api-key>    # non-interactive — uses default URL
+origin login --profile team     # save as named profile (multi-account)
 ```
 
-Prompts for:
-- **Origin API URL** (default: `https://getorigin.io`)
-- **API Key** from Settings > API Keys
+| Flag | Description |
+|------|-------------|
+| `--key <key>` | API key (skip interactive prompt) |
+| `--profile <name>` | Save as a named profile instead of auto-detecting. Auto-detects `dev` (solo) or `team` (org) if omitted. |
 
-Saves credentials to `~/.origin/config.json`.
+Saves credentials to `~/.origin/config.json` and `~/.origin/profiles/<name>.json`.
+
+**Multi-account:** Login twice to connect both a solo dev account and a team account. See [ACCOUNTS.md](./ACCOUNTS.md) for details.
+
+```bash
+origin login                 # dev account (primary)
+origin login --profile team  # team account (secondary)
+```
 
 ---
 

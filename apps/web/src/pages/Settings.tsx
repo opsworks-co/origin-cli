@@ -25,13 +25,119 @@ interface ApiKey {
 }
 
 type SettingsTab = 'general' | 'integrations' | 'audit' | 'reports' | 'trails' | 'compliance' | 'models';
-const VALID_TABS: SettingsTab[] = ['general', 'integrations', 'audit', 'reports', 'trails', 'compliance', 'models'];
+const ORG_TABS: SettingsTab[] = ['general', 'integrations', 'audit', 'reports', 'trails', 'compliance', 'models'];
+const DEV_TABS: SettingsTab[] = ['general', 'models'];
+
+function ProfileEditor() {
+  const { user, updateUser } = useAuth();
+  const [name, setName] = useState(user?.name || '');
+  const [email, setEmail] = useState(user?.email || '');
+  const [avatarUrl, setAvatarUrl] = useState(user?.avatarUrl || '');
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  const isDirty = name !== (user?.name || '') || email !== (user?.email || '') || avatarUrl !== (user?.avatarUrl || '');
+
+  const handleSave = async () => {
+    setSaving(true);
+    setFeedback(null);
+    try {
+      const updated = await api.updateProfile({
+        ...(name !== user?.name ? { name } : {}),
+        ...(email !== user?.email ? { email } : {}),
+        ...(avatarUrl !== (user?.avatarUrl || '') ? { avatarUrl } : {}),
+      });
+      updateUser(updated);
+      setFeedback({ type: 'success', msg: 'Profile updated' });
+      setTimeout(() => setFeedback(null), 3000);
+    } catch (err: any) {
+      setFeedback({ type: 'error', msg: err.message || 'Failed to update profile' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-5">
+        {/* Avatar */}
+        <div className="flex flex-col items-center gap-2">
+          {avatarUrl ? (
+            <img src={avatarUrl} alt="Avatar" className="w-16 h-16 rounded-full object-cover ring-2 ring-gray-700" />
+          ) : (
+            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-indigo-500/20 to-indigo-600/20 ring-2 ring-indigo-500/20 flex items-center justify-center text-indigo-400 text-2xl font-medium">
+              {name?.charAt(0).toUpperCase() ?? '?'}
+            </div>
+          )}
+          <span className="inline-block text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-800 text-gray-400 border border-gray-700">
+            {user?.accountType === 'developer' ? 'Developer' : user?.role}
+          </span>
+        </div>
+
+        {/* Form fields */}
+        <div className="flex-1 space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+              placeholder="Your name"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Email</label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+              placeholder="you@example.com"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-400 mb-1">Avatar URL</label>
+            <input
+              type="url"
+              value={avatarUrl}
+              onChange={(e) => setAvatarUrl(e.target.value)}
+              className="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+              placeholder="https://example.com/photo.jpg"
+            />
+            <p className="text-[10px] text-gray-600 mt-1">Paste a link to your profile photo (GitHub, Gravatar, etc.)</p>
+          </div>
+        </div>
+      </div>
+
+      {feedback && (
+        <div className={`text-sm px-3 py-2 rounded-lg ${
+          feedback.type === 'success' ? 'bg-emerald-900/20 text-emerald-400 border border-emerald-800' : 'bg-red-900/20 text-red-400 border border-red-800'
+        }`}>
+          {feedback.msg}
+        </div>
+      )}
+
+      <div className="flex justify-end">
+        <button
+          onClick={handleSave}
+          disabled={!isDirty || saving}
+          className="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {saving ? 'Saving...' : 'Save Changes'}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function Settings() {
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Active tab — read from URL ?tab= param, default to 'general'
+  const isDev = user?.accountType === 'developer';
+  const VALID_TABS = isDev ? DEV_TABS : ORG_TABS;
   const tabParam = searchParams.get('tab') as SettingsTab | null;
   const initialTab: SettingsTab = tabParam && VALID_TABS.includes(tabParam) ? tabParam : 'general';
   const [activeTab, setActiveTabState] = useState<SettingsTab>(initialTab);
@@ -129,9 +235,8 @@ export default function Settings() {
     appSlug?: string;
   } | null>(null);
   const [installingApp, setInstallingApp] = useState(false);
-  const [availableInstallations, setAvailableInstallations] = useState<
-    { installationId: string; account: string; accountType: string; avatarUrl: string | null }[]
-  >([]);
+  const [showLinkExisting, setShowLinkExisting] = useState(false);
+  const [linkGithubAccount, setLinkGithubAccount] = useState('');
 
   // Org settings
   const [orgName, setOrgName] = useState('');
@@ -163,6 +268,7 @@ export default function Settings() {
   // AI Chat config
   const [chatApiKey, setChatApiKey] = useState('');
   const [chatModel, setChatModel] = useState('claude-sonnet-4-20250514');
+  const [chatProvider, setChatProvider] = useState<'anthropic' | 'openai' | 'google'>('anthropic');
   const [chatConfigured, setChatConfigured] = useState(false);
   const [chatSource, setChatSource] = useState<'none' | 'environment' | 'org'>('none');
   const [chatLoading, setChatLoading] = useState(false);
@@ -372,6 +478,7 @@ export default function Settings() {
       const res = await fetch('/api/settings/chat', { headers: { Authorization: `Bearer ${localStorage.getItem('origin_token')}` } });
       const data = await res.json();
       setChatConfigured(data.configured || data.hasKey);
+      setChatProvider(data.llmProvider || 'anthropic');
       setChatModel(data.model || 'claude-sonnet-4-20250514');
       setChatSource(data.source || 'none');
     } catch { /* ignore */ }
@@ -386,7 +493,7 @@ export default function Settings() {
       const res = await fetch('/api/settings/chat', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('origin_token')}` },
-        body: JSON.stringify({ apiKey: chatApiKey, model: chatModel }),
+        body: JSON.stringify({ apiKey: chatApiKey, model: chatModel, llmProvider: chatProvider }),
       });
       const data = await res.json();
       if (res.ok) {
@@ -410,7 +517,7 @@ export default function Settings() {
       const res = await fetch('/api/settings/chat/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('origin_token')}` },
-        body: JSON.stringify({ apiKey: chatApiKey || undefined }),
+        body: JSON.stringify({ apiKey: chatApiKey || undefined, llmProvider: chatProvider }),
       });
       const data = await res.json();
       setChatTestResult(data);
@@ -637,25 +744,34 @@ export default function Settings() {
     setInstallingApp(true);
     setIntegrationError(null);
     try {
-      // Check if already linked to this org
-      const detect = await api.detectGitHubApp();
-      if (detect.linked) {
-        setIntegrationSuccess(`Connected to GitHub account "${detect.account || 'unknown'}"`);
+      const { installUrl } = await api.getGitHubAppInstallUrl();
+      window.location.href = installUrl;
+    } catch (err: any) {
+      setIntegrationError(err.message || 'Failed to start GitHub App installation');
+      setInstallingApp(false);
+    }
+  };
+
+  const handleLinkGitHubAccount = async () => {
+    if (!linkGithubAccount.trim()) return;
+    setInstallingApp(true);
+    setIntegrationError(null);
+    try {
+      const result = await api.detectGitHubApp({ githubAccount: linkGithubAccount.trim() });
+      if (result.linked) {
+        setIntegrationSuccess(`Connected to GitHub account "${result.account || linkGithubAccount}"`);
         const [status, intgs] = await Promise.all([
           api.getGitHubAppStatus(),
           api.getIntegrations(),
         ]);
         setGithubAppStatus(status);
         setIntegrations(intgs || []);
-        setInstallingApp(false);
-        return;
+        setShowLinkExisting(false);
+        setLinkGithubAccount('');
       }
-      // Always redirect to GitHub's own install flow — this ensures the user
-      // only sees their own GitHub orgs, not other Origin users' installations
-      const { installUrl } = await api.getGitHubAppInstallUrl();
-      window.location.href = installUrl;
     } catch (err: any) {
-      setIntegrationError(err.message || 'Failed to start GitHub App installation');
+      setIntegrationError(err.message || 'Failed to link GitHub account');
+    } finally {
       setInstallingApp(false);
     }
   };
@@ -786,7 +902,9 @@ export default function Settings() {
     <div className={`space-y-8 ${['team', 'audit', 'insights', 'reports'].includes(activeTab) ? '' : 'max-w-3xl'}`}>
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
-        <p className="text-sm text-gray-500 mt-1">Manage API keys, team, and organization</p>
+        <p className="text-sm text-gray-500 mt-1">
+          {isDev ? 'Manage your profile and API keys' : 'Manage API keys, team, and organization'}
+        </p>
       </div>
 
       {/* Tab Navigation */}
@@ -795,13 +913,13 @@ export default function Settings() {
           onClick={() => setActiveTab('general')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'general'
-              ? 'border-indigo-500 text-indigo-400'
+              ? (isDev ? 'border-emerald-500 text-emerald-400' : 'border-indigo-500 text-indigo-400')
               : 'border-transparent text-gray-500 hover:text-gray-300'
           }`}
         >
           General
         </button>
-        {(user?.role === 'ADMIN' || user?.role === 'OWNER') && (
+        {!isDev && (user?.role === 'ADMIN' || user?.role === 'OWNER') && (
         <button
           onClick={() => setActiveTab('integrations')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
@@ -813,6 +931,8 @@ export default function Settings() {
           Integrations
         </button>
         )}
+        {!isDev && (
+        <>
         <div className="w-px h-5 bg-gray-800 self-center mx-1" />
         <button
           onClick={() => setActiveTab('audit')}
@@ -855,11 +975,13 @@ export default function Settings() {
         >
           Compliance
         </button>
+        </>
+        )}
         <button
           onClick={() => setActiveTab('models')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'models'
-              ? 'border-indigo-500 text-indigo-400'
+              ? (isDev ? 'border-emerald-500 text-emerald-400' : 'border-indigo-500 text-indigo-400')
               : 'border-transparent text-gray-500 hover:text-gray-300'
           }`}
         >
@@ -869,20 +991,100 @@ export default function Settings() {
 
       {activeTab === 'general' && (
         <>
-          {/* API Keys + Team moved to IAM */}
-          {(user?.role === 'ADMIN' || user?.role === 'OWNER') && (
-          <section className="card space-y-3">
+          {/* Profile section — both solo and team */}
+          <section className="card space-y-4">
             <div>
-              <h2 className="text-lg font-semibold">Team & API Keys</h2>
+              <h2 className="text-lg font-semibold">Profile</h2>
+              <p className="text-sm text-gray-500 mt-0.5">Manage your account details</p>
+            </div>
+            <ProfileEditor />
+          </section>
+
+          {/* Developer API Keys */}
+          {isDev && (
+          <section className="card space-y-4">
+            <div>
+              <h2 className="text-lg font-semibold">API Key</h2>
               <p className="text-sm text-gray-500 mt-0.5">
-                Manage team members, API keys, and access control
+                Use this key to connect the Origin CLI to your account
               </p>
             </div>
-            <a href="/iam" className="btn-primary text-sm inline-block w-fit">
-              Open IAM →
-            </a>
+
+            {keyError && (
+              <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-red-400 text-sm">
+                {keyError}
+              </div>
+            )}
+
+            {loadingKeys && <div className="text-sm text-gray-500">Loading...</div>}
+
+            {!loadingKeys && apiKeys.length > 0 && (
+              <div className="space-y-2">
+                {apiKeys.map((key) => (
+                  <div key={key.id} className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-3">
+                    <div>
+                      <span className="text-sm text-gray-200">{key.name}</span>
+                      <code className="block text-xs text-emerald-400 mt-0.5">{key.keyPrefix}...</code>
+                      <span className="text-[10px] text-gray-600">Created {new Date(key.createdAt).toLocaleDateString()}</span>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        setDeletingKeyId(key.id);
+                        try { await api.deleteApiKey(key.id); await fetchApiKeys(); }
+                        catch (err: any) { setKeyError(err.message); }
+                        finally { setDeletingKeyId(null); }
+                      }}
+                      disabled={deletingKeyId === key.id}
+                      className="text-xs text-red-400 hover:text-red-300"
+                    >
+                      {deletingKeyId === key.id ? 'Deleting...' : 'Revoke'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {createdKey && (
+              <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3">
+                <p className="text-xs text-emerald-400 mb-1">Copy this key — it won't be shown again:</p>
+                <code className="text-sm text-emerald-300 break-all select-all">{createdKey}</code>
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <input
+                value={newKeyName}
+                onChange={(e) => setNewKeyName(e.target.value)}
+                placeholder="Key name (e.g. laptop)"
+                className="input flex-1 text-sm"
+              />
+              <button
+                onClick={async () => {
+                  if (!newKeyName.trim()) return;
+                  setCreatingKey(true);
+                  setKeyError(null);
+                  try {
+                    const res = await api.createApiKey({ name: newKeyName.trim() });
+                    setCreatedKey(res.key);
+                    setNewKeyName('');
+                    await fetchApiKeys();
+                  } catch (err: any) { setKeyError(err.message); }
+                  finally { setCreatingKey(false); }
+                }}
+                disabled={creatingKey || !newKeyName.trim()}
+                className="btn-primary text-sm px-4"
+              >
+                {creatingKey ? 'Creating...' : 'Create Key'}
+              </button>
+            </div>
+
+            <div className="bg-gray-800/30 rounded-lg p-3 text-xs text-gray-500">
+              <p className="font-medium text-gray-400 mb-1">CLI Setup</p>
+              <code className="text-emerald-400">origin config set-api-key YOUR_KEY</code>
+            </div>
           </section>
           )}
+
 
           {/* REMOVED: old API Keys inline section — now in /iam */}
           {false && (
@@ -1221,7 +1423,8 @@ export default function Settings() {
           </section>
           )}
 
-          {/* Org Section */}
+          {/* Org Section — hidden for developer accounts */}
+          {!isDev && (
           <section className="card space-y-4">
             <div>
               <h2 className="text-lg font-semibold">Organization</h2>
@@ -1347,6 +1550,7 @@ export default function Settings() {
               </form>
             )}
           </section>
+          )}
         </>
       )}
 
@@ -1437,67 +1641,45 @@ export default function Settings() {
 
                       return (
                         <div className="space-y-3">
-                          {availableInstallations.length > 0 ? (
-                            <>
-                              <p className="text-sm text-gray-400">Select a GitHub account to connect:</p>
-                              <div className="space-y-2">
-                                {availableInstallations.map((inst) => (
-                                  <button
-                                    key={inst.installationId}
-                                    type="button"
-                                    onClick={async () => {
-                                      setInstallingApp(true);
-                                      try {
-                                        const result = await api.detectGitHubApp(inst.installationId);
-                                        if (result.linked) {
-                                          setIntegrationSuccess(`Connected to GitHub account "${result.account || inst.account}"`);
-                                          const [status, intgs] = await Promise.all([
-                                            api.getGitHubAppStatus(),
-                                            api.getIntegrations(),
-                                          ]);
-                                          setGithubAppStatus(status);
-                                          setIntegrations(intgs || []);
-                                          setAvailableInstallations([]);
-                                        }
-                                      } catch (err: any) {
-                                        setIntegrationError(err.message);
-                                      } finally {
-                                        setInstallingApp(false);
-                                      }
-                                    }}
-                                    disabled={installingApp}
-                                    className="flex items-center gap-3 w-full p-3 rounded-lg border border-gray-700 hover:border-indigo-500/50 hover:bg-gray-800/50 transition-all text-left"
-                                  >
-                                    {inst.avatarUrl && (
-                                      <img src={inst.avatarUrl} alt="" className="w-8 h-8 rounded-full" />
-                                    )}
-                                    <div>
-                                      <span className="text-sm font-medium text-gray-200">{inst.account}</span>
-                                      <span className="text-xs text-gray-500 ml-2">{inst.accountType}</span>
-                                    </div>
-                                  </button>
-                                ))}
+                          <button
+                            type="button"
+                            onClick={handleInstallGitHubApp}
+                            disabled={installingApp}
+                            className="btn-primary text-sm"
+                          >
+                            {installingApp ? 'Checking...' : 'Install GitHub App'}
+                          </button>
+                          {showLinkExisting ? (
+                            <div className="space-y-2 pt-1">
+                              <p className="text-sm text-gray-400">
+                                Enter your GitHub username or organization:
+                              </p>
+                              <div className="flex gap-2">
+                                <input
+                                  type="text"
+                                  value={linkGithubAccount}
+                                  onChange={(e) => setLinkGithubAccount(e.target.value)}
+                                  onKeyDown={(e) => e.key === 'Enter' && handleLinkGitHubAccount()}
+                                  placeholder="e.g. dolobanko"
+                                  className="flex-1 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={handleLinkGitHubAccount}
+                                  disabled={installingApp || !linkGithubAccount.trim()}
+                                  className="btn-primary text-sm"
+                                >
+                                  {installingApp ? 'Linking...' : 'Link'}
+                                </button>
                               </div>
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  setAvailableInstallations([]);
-                                  const { installUrl } = await api.getGitHubAppInstallUrl();
-                                  window.location.href = installUrl;
-                                }}
-                                className="text-sm text-indigo-400 hover:text-indigo-300"
-                              >
-                                + Install on a different GitHub account
-                              </button>
-                            </>
+                            </div>
                           ) : (
                             <button
                               type="button"
-                              onClick={handleInstallGitHubApp}
-                              disabled={installingApp}
-                              className="btn-primary text-sm"
+                              onClick={() => setShowLinkExisting(true)}
+                              className="block text-sm text-gray-500 hover:text-gray-400"
                             >
-                              {installingApp ? 'Checking...' : 'Install GitHub App'}
+                              Already installed? Link existing installation
                             </button>
                           )}
                         </div>
@@ -2255,13 +2437,39 @@ export default function Settings() {
 
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Anthropic API Key</label>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Provider</label>
+                <select
+                  value={chatProvider}
+                  onChange={(e) => {
+                    const p = e.target.value as 'anthropic' | 'openai' | 'google';
+                    setChatProvider(p);
+                    // Reset model to default for selected provider
+                    const defaults: Record<string, string> = {
+                      anthropic: 'claude-sonnet-4-20250514',
+                      openai: 'gpt-4o',
+                      google: 'gemini-2.5-flash',
+                    };
+                    setChatModel(defaults[p] || 'claude-sonnet-4-20250514');
+                    setChatApiKey('');
+                  }}
+                  className="select w-full"
+                >
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="google">Google AI</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">
+                  {chatProvider === 'anthropic' ? 'Anthropic' : chatProvider === 'openai' ? 'OpenAI' : 'Google AI'} API Key
+                </label>
                 <input
                   type="password"
                   value={chatApiKey}
                   onChange={(e) => setChatApiKey(e.target.value)}
                   className="input w-full"
-                  placeholder={chatConfigured ? '••••••••••••••••••' : 'sk-ant-...'}
+                  placeholder={chatConfigured ? '••••••••••••••••••' : chatProvider === 'anthropic' ? 'sk-ant-...' : chatProvider === 'openai' ? 'sk-...' : 'AIza...'}
                 />
                 <p className="text-xs text-gray-500 mt-1">
                   {chatSource === 'environment' && 'Server environment key is active. Add an org key to override it.'}
@@ -2273,9 +2481,32 @@ export default function Settings() {
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-1">Model</label>
                 <select value={chatModel} onChange={(e) => setChatModel(e.target.value)} className="select w-full">
-                  <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
-                  <option value="claude-opus-4-20250514">Claude Opus 4</option>
-                  <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
+                  {chatProvider === 'anthropic' && (
+                    <>
+                      <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+                      <option value="claude-opus-4-20250514">Claude Opus 4</option>
+                      <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
+                    </>
+                  )}
+                  {chatProvider === 'openai' && (
+                    <>
+                      <option value="gpt-4o">GPT-4o</option>
+                      <option value="gpt-4o-mini">GPT-4o Mini</option>
+                      <option value="gpt-4.1">GPT-4.1</option>
+                      <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+                      <option value="gpt-4.1-nano">GPT-4.1 Nano</option>
+                      <option value="o3">o3</option>
+                      <option value="o3-mini">o3-mini</option>
+                      <option value="o4-mini">o4-mini</option>
+                    </>
+                  )}
+                  {chatProvider === 'google' && (
+                    <>
+                      <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                      <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                    </>
+                  )}
                 </select>
               </div>
 

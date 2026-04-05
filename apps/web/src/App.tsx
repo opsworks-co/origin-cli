@@ -2,11 +2,13 @@ import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
+import DeveloperLayout from './components/DeveloperLayout';
 import PublicLayout from './components/PublicLayout';
 import { ToastProvider } from './components/Toast';
 import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import RegisterDeveloper from './pages/RegisterDeveloper';
 import Pricing from './pages/Pricing';
 import Dashboard from './pages/Dashboard';
 import Sessions from './pages/Sessions';
@@ -37,11 +39,16 @@ import TrailDetail from './pages/TrailDetail';
 import Prompts from './pages/Prompts';
 import ComplianceDashboard from './pages/Compliance';
 import PublicPolicies from './pages/PublicPolicies';
-import CLI from './pages/CLI';
 import SharedSession from './pages/SharedSession';
 import Admin from './pages/Admin';
 import Blog from './pages/Blog';
 import BlogPost from './pages/BlogPost';
+import Demo from './pages/Demo';
+import DemoPlatform from './pages/DemoPlatform';
+import DemoCLI from './pages/DemoCLI';
+import MyDashboard from './pages/MyDashboard';
+import SessionCompare from './pages/SessionCompare';
+import OAuthCallback from './pages/OAuthCallback';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -61,6 +68,24 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** Picks Layout or DeveloperLayout based on accountType */
+function AppLayout({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  if (user?.accountType === 'developer') {
+    return <DeveloperLayout>{children}</DeveloperLayout>;
+  }
+  return <Layout>{children}</Layout>;
+}
+
+/** Redirects developer accounts to /me, shows org Dashboard for org accounts */
+function DashboardRedirect() {
+  const { user } = useAuth();
+  if (user?.accountType === 'developer') {
+    return <Navigate to="/me" replace />;
+  }
+  return <Layout><Dashboard /></Layout>;
+}
+
 export default function App() {
   return (
     <ToastProvider>
@@ -68,25 +93,39 @@ export default function App() {
       {/* Public routes — wrapped in PublicLayout */}
       <Route path="/" element={<PublicLayout><Landing /></PublicLayout>} />
       <Route path="/docs" element={<PublicLayout><Docs /></PublicLayout>} />
+      <Route path="/docs/:section" element={<PublicLayout><Docs /></PublicLayout>} />
       <Route path="/pricing" element={<PublicLayout><Pricing /></PublicLayout>} />
-      <Route path="/cli" element={<PublicLayout><CLI /></PublicLayout>} />
+      <Route path="/cli" element={<Navigate to="/docs#cli" replace />} />
       <Route path="/blog" element={<PublicLayout><Blog /></PublicLayout>} />
       <Route path="/blog/:slug" element={<PublicLayout><BlogPost /></PublicLayout>} />
+      <Route path="/demo" element={<PublicLayout><Demo /></PublicLayout>} />
+      <Route path="/demo/platform" element={<PublicLayout><DemoPlatform /></PublicLayout>} />
+      <Route path="/demo/cli" element={<PublicLayout><DemoCLI /></PublicLayout>} />
       <Route path="/org/:orgSlug/policies" element={<PublicLayout><PublicPolicies /></PublicLayout>} />
       <Route path="/s/:slug" element={<SharedSession />} />
+      <Route path="/auth/:provider/callback" element={<OAuthCallback />} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/register/developer" element={<RegisterDeveloper />} />
       <Route path="/invite/:token" element={<AcceptInvite />} />
       <Route path="/accept-invite/:token" element={<AcceptInvite />} />
 
-      {/* Protected routes — wrapped in Layout */}
+      {/* Protected routes — wrapped in AppLayout (auto-picks org vs developer layout) */}
       <Route
         path="/dashboard"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Dashboard />
-            </Layout>
+            <DashboardRedirect />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/me"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <MyDashboard />
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -94,9 +133,9 @@ export default function App() {
         path="/repos"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <Repos />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -104,9 +143,9 @@ export default function App() {
         path="/repos/:id"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <RepoDetail />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -114,9 +153,9 @@ export default function App() {
         path="/sessions"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <Sessions />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -124,9 +163,19 @@ export default function App() {
         path="/sessions/:id"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <SessionDetail />
-            </Layout>
+            </AppLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/compare/:id1/:id2"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <SessionCompare />
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -134,9 +183,9 @@ export default function App() {
         path="/agents"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <Agents />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -144,9 +193,9 @@ export default function App() {
         path="/policies"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <Policies />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -154,9 +203,9 @@ export default function App() {
         path="/policies/:id"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <PolicyDetail />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -164,9 +213,9 @@ export default function App() {
         path="/agents/:id"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <AgentDetail />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -174,9 +223,9 @@ export default function App() {
         path="/notifications"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <Notifications />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -184,9 +233,9 @@ export default function App() {
         path="/pull-requests"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <PullRequests />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -195,22 +244,22 @@ export default function App() {
         path="/team/:id"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <UserDetail />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
       <Route path="/audit" element={<Navigate to="/settings?tab=audit" replace />} />
-      <Route path="/insights" element={<ProtectedRoute><Layout><Insights /></Layout></ProtectedRoute>} />
+      <Route path="/insights" element={<ProtectedRoute><AppLayout><Insights /></AppLayout></ProtectedRoute>} />
       <Route path="/reports" element={<Navigate to="/settings?tab=reports" replace />} />
       <Route
         path="/infrastructure"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <Infrastructure />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -218,9 +267,9 @@ export default function App() {
         path="/machines/:id"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <MachineDetail />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -228,9 +277,9 @@ export default function App() {
         path="/budget"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <BudgetPage />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -238,9 +287,9 @@ export default function App() {
         path="/iam"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <IAM />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -248,15 +297,15 @@ export default function App() {
         path="/settings"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <Settings />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
       <Route
         path="/leaderboard"
-        element={<ProtectedRoute><Layout><Leaderboard /></Layout></ProtectedRoute>}
+        element={<ProtectedRoute><AppLayout><Leaderboard /></AppLayout></ProtectedRoute>}
       />
       <Route
         path="/api-keys"
@@ -270,9 +319,9 @@ export default function App() {
         path="/trails/:id"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <TrailDetail />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />
@@ -293,9 +342,9 @@ export default function App() {
         path="/admin"
         element={
           <ProtectedRoute>
-            <Layout>
+            <AppLayout>
               <Admin />
-            </Layout>
+            </AppLayout>
           </ProtectedRoute>
         }
       />

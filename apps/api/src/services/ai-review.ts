@@ -1,6 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { prisma } from '../db.js';
 import { notifyOrgAdmins } from './notifications.js';
+import { callLLM, type LLMProvider } from '../routes/chat.js';
 
 // ---------------------------------------------------------------------------
 // AI-Powered Auto-Review with Quality Scoring
@@ -176,15 +176,24 @@ function parseReviewResponse(text: string): AIReviewResult {
 export async function runAIReview(data: SessionData): Promise<AIReviewResult | null> {
   // Try org-level LLM key first, then fall back to env var
   let apiKey: string | null = null;
+  let llmProvider: LLMProvider = 'anthropic';
+  let llmModel: string = 'claude-sonnet-4-20250514';
   try {
     const config = await prisma.integrationConfig.findFirst({
       where: { orgId: data.orgId, provider: 'llm' },
     });
     apiKey = config?.token || null;
+    if (config) {
+      try {
+        const settings = JSON.parse(config.settings);
+        if (settings.llmProvider) llmProvider = settings.llmProvider;
+        if (settings.model) llmModel = settings.model;
+      } catch { /* ignore */ }
+    }
   } catch { /* ignore */ }
   if (!apiKey) apiKey = process.env.ANTHROPIC_API_KEY || null;
   if (!apiKey) {
-    console.log('[ai-review] Skipping — no LLM key configured (set in Settings > Integrations or ANTHROPIC_API_KEY env)');
+    console.log('[ai-review] Skipping — no LLM key configured (set in Settings > AI Chat or ANTHROPIC_API_KEY env)');
     return null;
   }
 
@@ -192,21 +201,12 @@ export async function runAIReview(data: SessionData): Promise<AIReviewResult | n
   if (!org) return null;
 
   try {
-    const client = new Anthropic({ apiKey });
-
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: [
-        { role: 'user', content: buildPrompt(data) },
-      ],
-    });
-
-    const responseText = message.content
-      .filter((b) => b.type === 'text')
-      .map((b) => (b as { type: 'text'; text: string }).text)
-      .join('');
+    const responseText = await callLLM(
+      SYSTEM_PROMPT,
+      [{ role: 'user', content: buildPrompt(data) }],
+      1024,
+      { apiKey, model: llmModel, provider: llmProvider },
+    );
 
     const result = parseReviewResponse(responseText);
 

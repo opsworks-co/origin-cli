@@ -1,11 +1,12 @@
 import React from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { LogoMark } from './Logo';
 
 const NAV_LINKS = [
   { to: '/', label: 'Home' },
+  { to: '/demo', label: 'Demo' },
   { to: '/docs', label: 'Docs' },
-  { to: '/cli', label: 'CLI' },
   { to: '/pricing', label: 'Pricing' },
   { to: '/blog', label: 'Blog' },
 ];
@@ -20,9 +21,7 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-8">
             <Link to="/" className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
-                O
-              </div>
+              <LogoMark size={32} />
               <span className="text-lg font-semibold">Origin</span>
             </Link>
             <div className="hidden sm:flex items-center gap-6 text-sm">
@@ -44,9 +43,17 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
           </div>
           <div className="flex items-center gap-4">
             {user ? (
-              <Link to="/dashboard" className="btn-primary text-sm">
-                Go to Dashboard
-              </Link>
+              <div className="flex items-center gap-3">
+                {user.accountType === 'developer' ? (
+                  <Link to="/me" className="btn-primary text-sm bg-emerald-600 hover:bg-emerald-500">
+                    My Dashboard
+                  </Link>
+                ) : (
+                  <Link to="/dashboard" className="btn-primary text-sm">
+                    Dashboard
+                  </Link>
+                )}
+              </div>
             ) : (
               <>
                 <Link to="/login" className="text-sm text-gray-400 hover:text-gray-100 transition-colors">
@@ -62,24 +69,22 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
       </nav>
 
       {/* Page content */}
-      <main className="flex-1">{children}</main>
+      <main className="flex-1 animate-fade-in">{children}</main>
 
       {/* Footer */}
       <footer className="border-t border-gray-800/50">
         <div className="max-w-6xl mx-auto px-6 py-8">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded bg-indigo-600 flex items-center justify-center text-white font-bold text-xs">
-                O
-              </div>
+              <LogoMark size={24} />
               <span className="font-semibold text-sm">Origin</span>
               <span className="text-xs text-gray-600">v2</span>
             </div>
             <div className="flex items-center gap-6 text-xs text-gray-600">
+              <Link to="/demo" className="hover:text-gray-400 transition-colors">Demo</Link>
               <Link to="/docs" className="hover:text-gray-400 transition-colors">Documentation</Link>
-              <Link to="/cli" className="hover:text-gray-400 transition-colors">CLI</Link>
+              <Link to="/docs#cli" className="hover:text-gray-400 transition-colors">CLI</Link>
               <Link to="/pricing" className="hover:text-gray-400 transition-colors">Pricing</Link>
-              <span>AI Agent Governance Platform</span>
               <span>&copy; {new Date().getFullYear()} Origin</span>
             </div>
           </div>

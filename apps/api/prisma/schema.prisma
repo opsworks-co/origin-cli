@@ -33,12 +33,17 @@ model User {
   name          String
   passwordHash  String
   role          String         @default("MEMBER")
+  accountType   String         @default("org")    // "org" or "developer"
+  avatarUrl     String?
+  provider      String?        // "github", "gitlab", "google", or null for email/password
+  providerUserId String?
   createdAt     DateTime       @default(now())
   auditLogs     AuditLog[]
   reviews       SessionReview[]
   notifications Notification[]
   sessions      CodingSession[]
   apiKeys       ApiKey[]
+  bookmarks     SessionBookmark[]
 }
 
 model Invitation {
@@ -65,6 +70,7 @@ model ApiKey {
   keyHash   String
   keyPrefix String
   role      String?  // Standalone key role: VIEWER, MEMBER, ADMIN. Null = uses linked user's role
+  keyType   String   @default("team") // "solo" = auto-generated on dev signup, "team" = org-managed
   createdAt DateTime @default(now())
   repoScopes  ApiKeyRepoScope[]
   agentScopes ApiKeyAgentScope[]
@@ -165,6 +171,7 @@ model CodingSession {
   secretFindings SecretFinding[]
   trailSessions  TrailSession[]
   sharedSessions SharedSession[]
+  bookmarks      SessionBookmark[]
 }
 
 model SessionDiff {
@@ -456,4 +463,19 @@ model SharedSession {
   expiresAt   DateTime?              // null = never expires
   createdAt   DateTime      @default(now())
   createdById String?
+}
+
+// ── Session Bookmarks ────────────────────────────────────────────────
+
+model SessionBookmark {
+  id        String        @id @default(uuid())
+  sessionId String
+  session   CodingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tags      String        @default("[]") // JSON array of string tags
+  note      String        @default("")
+  createdAt DateTime      @default(now())
+
+  @@unique([sessionId, userId])
 }

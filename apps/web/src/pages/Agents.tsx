@@ -160,13 +160,32 @@ export default function Agents() {
             </div>
             <div>
               <label className="block text-sm text-gray-400 mb-1">Model</label>
-              <input
+              <select
                 required
                 value={formModel}
                 onChange={(e) => setFormModel(e.target.value)}
                 className="input w-full"
-                placeholder="claude-sonnet-4-20250514"
-              />
+              >
+                <option value="">Select a model...</option>
+                <optgroup label="Anthropic">
+                  <option value="claude-sonnet-4">Claude Sonnet 4</option>
+                  <option value="claude-opus-4">Claude Opus 4</option>
+                  <option value="claude-haiku-3.5">Claude Haiku 3.5</option>
+                </optgroup>
+                <optgroup label="OpenAI">
+                  <option value="gpt-4o">GPT-4o</option>
+                  <option value="gpt-4.1">GPT-4.1</option>
+                  <option value="o3">o3</option>
+                </optgroup>
+                <optgroup label="Google">
+                  <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                </optgroup>
+                <optgroup label="Other">
+                  <option value="custom">Custom</option>
+                </optgroup>
+              </select>
+              <p className="text-[11px] text-gray-600 mt-1">The LLM this agent uses. For tracking and cost estimation.</p>
             </div>
             <div>
               <label className="block text-sm text-gray-400 mb-1">Description (optional)</label>

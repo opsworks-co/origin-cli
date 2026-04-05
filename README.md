@@ -110,6 +110,25 @@ origin chat
 
 ---
 
+## Account Types
+
+| | Solo Developer | Team |
+|---|---|---|
+| **For** | Individual developers | Organizations |
+| **Repos** | Auto-created on first session | Must be registered by admin |
+| **Agents** | Auto-created when detected | Must be configured with API key permissions |
+| **Policies** | Skipped | Enforced |
+| **API key scopes** | Unrestricted | Scoped to specific repos + agents |
+
+**Multi-account:** Developers on a team can connect both their personal dev account and the team account. Sessions on team repos appear in both dashboards. See [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
+
+```bash
+origin login                    # personal dev account
+origin login --profile team     # team account
+```
+
+---
+
 ## Quick Start (Connected Platform)
 
 ### 1. Clone and run

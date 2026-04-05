@@ -520,4 +520,596 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /me — personal developer stats ──────────────────────────────────────
+
+router.get('/me', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.user!.orgId;
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    const baseWhere = {
+      userId,
+      commit: { repoId: { in: repoIds } },
+    };
+
+    // ── All-time aggregates ─────────────────────────────────────
+    const [totalSessions, allTimeAgg] = await Promise.all([
+      prisma.codingSession.count({ where: baseWhere }),
+      prisma.codingSession.aggregate({
+        where: baseWhere,
+        _sum: {
+          tokensUsed: true,
+          costUsd: true,
+          linesAdded: true,
+          linesRemoved: true,
+          toolCalls: true,
+        },
+      }),
+    ]);
+
+    // ── This week vs last week ─────────────────────────────────
+    const now = new Date();
+    const thisWeekStart = new Date(now);
+    thisWeekStart.setDate(now.getDate() - now.getDay());
+    thisWeekStart.setHours(0, 0, 0, 0);
+
+    const lastWeekStart = new Date(thisWeekStart);
+    lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+
+    const [thisWeekAgg, lastWeekAgg] = await Promise.all([
+      prisma.codingSession.aggregate({
+        where: { ...baseWhere, createdAt: { gte: thisWeekStart } },
+        _count: true,
+        _sum: { costUsd: true, tokensUsed: true },
+      }),
+      prisma.codingSession.aggregate({
+        where: { ...baseWhere, createdAt: { gte: lastWeekStart, lt: thisWeekStart } },
+        _count: true,
+        _sum: { costUsd: true, tokensUsed: true },
+      }),
+    ]);
+
+    // ── Agent breakdown ─────────────────────────────────────────
+    const agentGroups = await prisma.codingSession.groupBy({
+      by: ['agentId'],
+      where: baseWhere,
+      _count: true,
+      _sum: { costUsd: true },
+    });
+    const agentIds = agentGroups.filter((g) => g.agentId).map((g) => g.agentId as string);
+    const agents = await prisma.agent.findMany({
+      where: { id: { in: agentIds } },
+      select: { id: true, name: true },
+    });
+    const agentMap = new Map(agents.map((a) => [a.id, a.name]));
+
+    const agentBreakdown = agentGroups.map((g) => ({
+      agentId: g.agentId,
+      agentName: agentMap.get(g.agentId || '') || g.agentId || 'Unknown',
+      sessions: g._count,
+      cost: parseFloat((g._sum.costUsd || 0).toFixed(2)),
+    }));
+
+    // ── Most modified files (top 10) ────────────────────────────
+    const recentSessions = await prisma.codingSession.findMany({
+      where: baseWhere,
+      select: { filesChanged: true },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+
+    const fileCounts: Record<string, number> = {};
+    for (const s of recentSessions) {
+      if (!s.filesChanged) continue;
+      const files = s.filesChanged.split(',').map((f) => f.trim()).filter(Boolean);
+      for (const f of files) {
+        fileCounts[f] = (fileCounts[f] || 0) + 1;
+      }
+    }
+    const topFiles = Object.entries(fileCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([file, count]) => ({ file, count }));
+
+    // ── Activity heatmap (last 365 days) ────────────────────────
+    const yearAgo = new Date();
+    yearAgo.setFullYear(yearAgo.getFullYear() - 1);
+
+    const heatmapSessions = await prisma.codingSession.findMany({
+      where: { ...baseWhere, createdAt: { gte: yearAgo } },
+      select: { createdAt: true },
+    });
+
+    const heatmap: Record<string, number> = {};
+    for (const s of heatmapSessions) {
+      const day = s.createdAt.toISOString().split('T')[0];
+      heatmap[day] = (heatmap[day] || 0) + 1;
+    }
+
+    // ── Repo breakdown ──────────────────────────────────────────
+    const repoGroups = await prisma.codingSession.groupBy({
+      by: ['commitId'],
+      where: baseWhere,
+      _count: true,
+    });
+    // Resolve repo names from commits
+    const commitIds = repoGroups.map((g) => g.commitId);
+    const commits = await prisma.commit.findMany({
+      where: { id: { in: commitIds } },
+      select: { id: true, repoId: true, repo: { select: { name: true } } },
+    });
+    const commitRepoMap = new Map(commits.map((c) => [c.id, { repoId: c.repoId, name: c.repo.name }]));
+
+    const repoSessionCounts: Record<string, { name: string; sessions: number }> = {};
+    for (const g of repoGroups) {
+      const repo = commitRepoMap.get(g.commitId);
+      if (!repo) continue;
+      if (!repoSessionCounts[repo.repoId]) {
+        repoSessionCounts[repo.repoId] = { name: repo.name, sessions: 0 };
+      }
+      repoSessionCounts[repo.repoId].sessions += g._count;
+    }
+    const sessionsByRepo = Object.entries(repoSessionCounts)
+      .map(([repoId, v]) => ({ repoId, repoName: v.name, sessions: v.sessions }))
+      .sort((a, b) => b.sessions - a.sessions);
+
+    // ── Model breakdown ─────────────────────────────────────────
+    const modelGroups = await prisma.codingSession.groupBy({
+      by: ['model'],
+      where: baseWhere,
+      _count: true,
+      _sum: { costUsd: true },
+    });
+    const modelBreakdown = modelGroups.map((g) => ({
+      model: g.model,
+      sessions: g._count,
+      cost: parseFloat((g._sum.costUsd || 0).toFixed(2)),
+    }));
+
+    // ── Streak ──────────────────────────────────────────────────
+    let streak = 0;
+    const today = new Date().toISOString().split('T')[0];
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    // Start from today if it has activity, otherwise from yesterday
+    let checkDate = heatmap[today] ? today : yesterdayStr;
+    for (let i = 0; i < 365; i++) {
+      if (heatmap[checkDate]) {
+        streak++;
+      } else {
+        break;
+      }
+      // Move to previous day
+      const d = new Date(checkDate);
+      d.setDate(d.getDate() - 1);
+      checkDate = d.toISOString().split('T')[0];
+    }
+
+    res.json({
+      totalSessions,
+      totalTokens: allTimeAgg._sum.tokensUsed || 0,
+      totalCost: parseFloat((allTimeAgg._sum.costUsd || 0).toFixed(2)),
+      totalLinesAdded: allTimeAgg._sum.linesAdded || 0,
+      totalLinesRemoved: allTimeAgg._sum.linesRemoved || 0,
+      totalToolCalls: allTimeAgg._sum.toolCalls || 0,
+      thisWeek: {
+        sessions: thisWeekAgg._count,
+        cost: parseFloat((thisWeekAgg._sum.costUsd || 0).toFixed(2)),
+        tokens: thisWeekAgg._sum.tokensUsed || 0,
+      },
+      lastWeek: {
+        sessions: lastWeekAgg._count,
+        cost: parseFloat((lastWeekAgg._sum.costUsd || 0).toFixed(2)),
+        tokens: lastWeekAgg._sum.tokensUsed || 0,
+      },
+      agentBreakdown,
+      modelBreakdown,
+      topFiles,
+      sessionsByRepo,
+      heatmap,
+      streak,
+    });
+  } catch (err) {
+    console.error('Personal stats error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /me/agents — per-agent cards for developer dashboard ───────────────
+
+router.get('/me/agents', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.user!.orgId;
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    const baseWhere = {
+      userId,
+      commit: { repoId: { in: repoIds } },
+    };
+
+    // ── All sessions for this user ─────────────────────────────
+    const sessions = await prisma.codingSession.findMany({
+      where: baseWhere,
+      select: {
+        agentId: true,
+        model: true,
+        costUsd: true,
+        tokensUsed: true,
+        durationMs: true,
+        linesAdded: true,
+        linesRemoved: true,
+        createdAt: true,
+      },
+    });
+
+    // ── Group by agentId ───────────────────────────────────────
+    const agentGroupMap = new Map<
+      string | null,
+      {
+        totalSessions: number;
+        totalCost: number;
+        totalTokens: number;
+        totalDuration: number;
+        linesAdded: number;
+        linesRemoved: number;
+        costThisMonth: number;
+        sessionsThisMonth: number;
+        lastActive: Date | null;
+        modelCounts: Record<string, number>;
+      }
+    >();
+
+    const firstOfMonth = new Date();
+    firstOfMonth.setDate(1);
+    firstOfMonth.setHours(0, 0, 0, 0);
+
+    for (const s of sessions) {
+      const key = s.agentId;
+      if (!agentGroupMap.has(key)) {
+        agentGroupMap.set(key, {
+          totalSessions: 0,
+          totalCost: 0,
+          totalTokens: 0,
+          totalDuration: 0,
+          linesAdded: 0,
+          linesRemoved: 0,
+          costThisMonth: 0,
+          sessionsThisMonth: 0,
+          lastActive: null,
+          modelCounts: {},
+        });
+      }
+      const g = agentGroupMap.get(key)!;
+      g.totalSessions++;
+      g.totalCost += s.costUsd;
+      g.totalTokens += s.tokensUsed;
+      g.totalDuration += s.durationMs;
+      g.linesAdded += s.linesAdded;
+      g.linesRemoved += s.linesRemoved;
+      g.modelCounts[s.model] = (g.modelCounts[s.model] || 0) + 1;
+
+      if (s.createdAt >= firstOfMonth) {
+        g.costThisMonth += s.costUsd;
+        g.sessionsThisMonth++;
+      }
+
+      if (!g.lastActive || s.createdAt > g.lastActive) {
+        g.lastActive = s.createdAt;
+      }
+    }
+
+    // ── Resolve agent names ────────────────────────────────────
+    const agentIds = [...agentGroupMap.keys()].filter((id): id is string => id !== null);
+    const agentDetails = await prisma.agent.findMany({
+      where: { id: { in: agentIds } },
+      select: { id: true, name: true },
+    });
+    const agentNameMap = new Map(agentDetails.map((a) => [a.id, a.name]));
+
+    // ── Build response ─────────────────────────────────────────
+    const now = new Date();
+    const sevenDaysAgo = new Date(now);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const agents = [...agentGroupMap.entries()].map(([agentId, g]) => {
+      // Most-used model (mode)
+      let model = 'unknown';
+      let maxCount = 0;
+      for (const [m, count] of Object.entries(g.modelCounts)) {
+        if (count > maxCount) {
+          maxCount = count;
+          model = m;
+        }
+      }
+
+      const lastActive = g.lastActive ? g.lastActive.toISOString() : null;
+      const status: 'active' | 'inactive' =
+        g.lastActive && g.lastActive >= sevenDaysAgo ? 'active' : 'inactive';
+
+      return {
+        agentId,
+        agentName: agentNameMap.get(agentId || '') || agentId || 'Unknown',
+        model,
+        totalSessions: g.totalSessions,
+        totalCost: parseFloat(g.totalCost.toFixed(2)),
+        totalTokens: g.totalTokens,
+        costThisMonth: parseFloat(g.costThisMonth.toFixed(2)),
+        sessionsThisMonth: g.sessionsThisMonth,
+        lastActive,
+        status,
+        avgSessionDuration: g.totalSessions > 0 ? Math.round(g.totalDuration / g.totalSessions) : 0,
+        linesAdded: g.linesAdded,
+        linesRemoved: g.linesRemoved,
+      };
+    });
+
+    res.json({ agents });
+  } catch (err) {
+    console.error('Personal agent stats error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /me/patterns — coding patterns (hour-of-day, day-of-week) ────────────
+
+router.get('/me/patterns', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.user!.orgId;
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    const baseWhere = {
+      userId,
+      commit: { repoId: { in: repoIds } },
+    };
+
+    const sessions = await prisma.codingSession.findMany({
+      where: baseWhere,
+      select: { createdAt: true, durationMs: true, tokensUsed: true, costUsd: true },
+    });
+
+    // Hourly distribution (24 buckets)
+    const hourly = new Array(24).fill(0);
+    // Daily distribution (7 buckets, Sun=0 .. Sat=6)
+    const daily = new Array(7).fill(0);
+
+    let totalDuration = 0;
+    let totalTokens = 0;
+    let totalCost = 0;
+
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    let sessionsThisMonth = 0;
+    let costThisMonth = 0;
+
+    for (const s of sessions) {
+      const hour = s.createdAt.getHours();
+      const day = s.createdAt.getDay();
+      hourly[hour]++;
+      daily[day]++;
+      totalDuration += s.durationMs;
+      totalTokens += s.tokensUsed;
+      totalCost += s.costUsd;
+
+      if (s.createdAt >= monthStart) {
+        sessionsThisMonth++;
+        costThisMonth += s.costUsd;
+      }
+    }
+
+    const count = sessions.length || 1;
+    const avgSessionDuration = Math.round(totalDuration / count);
+    const avgTokensPerSession = Math.round(totalTokens / count);
+    const avgCostPerSession = parseFloat((totalCost / count).toFixed(4));
+
+    const peakHour = hourly.indexOf(Math.max(...hourly));
+    const peakDayIndex = daily.indexOf(Math.max(...daily));
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const peakDay = dayNames[peakDayIndex];
+
+    res.json({
+      hourly,
+      daily,
+      avgSessionDuration,
+      avgTokensPerSession,
+      avgCostPerSession,
+      peakHour,
+      peakDay,
+      sessionsThisMonth,
+      costThisMonth: parseFloat(costThisMonth.toFixed(2)),
+    });
+  } catch (err) {
+    console.error('Patterns stats error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /me/efficiency — cost efficiency metrics ─────────────────────────────
+
+router.get('/me/efficiency', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.user!.orgId;
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    const baseWhere = {
+      userId,
+      commit: { repoId: { in: repoIds } },
+    };
+
+    const agg = await prisma.codingSession.aggregate({
+      where: baseWhere,
+      _sum: {
+        tokensUsed: true,
+        costUsd: true,
+        linesAdded: true,
+        toolCalls: true,
+      },
+      _count: true,
+    });
+
+    const totalTokens = agg._sum.tokensUsed || 0;
+    const totalCost = agg._sum.costUsd || 0;
+    const totalLines = agg._sum.linesAdded || 0;
+    const totalToolCalls = agg._sum.toolCalls || 0;
+    const sessionCount = agg._count || 1;
+
+    const tokensPerLine = totalLines > 0
+      ? parseFloat((totalTokens / totalLines).toFixed(1))
+      : 0;
+
+    const costPerSession = parseFloat((totalCost / sessionCount).toFixed(4));
+    const avgLinesPerSession = Math.round(totalLines / sessionCount);
+
+    // Commits linked to user's sessions
+    const commitCount = await prisma.commit.count({
+      where: {
+        repoId: { in: repoIds },
+        session: { userId },
+      },
+    });
+
+    // Also count commits via sessionCommits relation
+    const linkedCommitCount = await prisma.commit.count({
+      where: {
+        repoId: { in: repoIds },
+        codingSession: { userId },
+      },
+    });
+
+    const totalCommits = commitCount + linkedCommitCount;
+    const costPerCommit = totalCommits > 0
+      ? parseFloat((totalCost / totalCommits).toFixed(4))
+      : 0;
+    const commitsPerSession = totalCommits > 0
+      ? parseFloat((totalCommits / sessionCount).toFixed(1))
+      : 0;
+
+    // Avg files per commit
+    const commitsWithFiles = await prisma.commit.findMany({
+      where: {
+        repoId: { in: repoIds },
+        OR: [
+          { session: { userId } },
+          { codingSession: { userId } },
+        ],
+      },
+      select: { filesChanged: true },
+    });
+
+    let totalFilesChanged = 0;
+    for (const c of commitsWithFiles) {
+      try {
+        const files = JSON.parse(c.filesChanged);
+        totalFilesChanged += Array.isArray(files) ? files.length : 0;
+      } catch {
+        // filesChanged might be comma-separated or empty
+      }
+    }
+    const avgFilesPerCommit = commitsWithFiles.length > 0
+      ? parseFloat((totalFilesChanged / commitsWithFiles.length).toFixed(1))
+      : 0;
+
+    res.json({
+      tokensPerLine,
+      costPerCommit,
+      costPerSession,
+      avgLinesPerSession,
+      cacheTokens: { read: 0, created: 0 }, // No cache token fields in schema
+      toolCallBreakdown: totalToolCalls, // Simplified: total count (transcript parsing deferred)
+      commitStats: {
+        totalCommits,
+        commitsPerSession,
+        avgFilesPerCommit,
+      },
+    });
+  } catch (err) {
+    console.error('Efficiency stats error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /me/prompts — recent prompts with file changes ───────────────────────
+
+router.get('/me/prompts', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.user!.orgId;
+
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const offset = parseInt(req.query.offset as string) || 0;
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    const q = (req.query.q as string)?.trim();
+
+    const baseWhere: any = {
+      session: {
+        userId,
+        commit: { repoId: { in: repoIds } },
+      },
+      ...(q ? { promptText: { contains: q } } : {}),
+    };
+
+    const [prompts, total] = await Promise.all([
+      prisma.promptChange.findMany({
+        where: baseWhere,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+        select: {
+          sessionId: true,
+          promptIndex: true,
+          promptText: true,
+          filesChanged: true,
+          diff: true,
+          createdAt: true,
+          session: {
+            select: {
+              agent: { select: { name: true } },
+            },
+          },
+        },
+      }),
+      prisma.promptChange.count({ where: baseWhere }),
+    ]);
+
+    res.json({
+      prompts: prompts.map((p) => ({
+        sessionId: p.sessionId,
+        agentName: p.session.agent?.name || 'Unknown',
+        promptIndex: p.promptIndex,
+        promptText: p.promptText,
+        filesChanged: (() => {
+          try { return JSON.parse(p.filesChanged); } catch { return p.filesChanged; }
+        })(),
+        diff: p.diff,
+        createdAt: p.createdAt.toISOString(),
+      })),
+      total,
+    });
+  } catch (err) {
+    console.error('Prompts stats error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

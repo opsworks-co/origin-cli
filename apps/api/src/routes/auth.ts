@@ -84,10 +84,87 @@ router.post('/register', async (req: AuthRequest, res: Response) => {
 
     res.status(201).json({
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: org.id, orgName: org.name, orgSlug: org.slug },
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, accountType: 'org', orgId: org.id, orgName: org.name, orgSlug: org.slug },
     });
   } catch (err) {
     console.error('Register error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /register/developer — create a developer account (personal workspace, no org setup)
+router.post('/register/developer', async (req: AuthRequest, res: Response) => {
+  try {
+    const { email, password, name } = req.body;
+
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(409).json({ error: 'Email already registered' });
+    }
+
+    // Auto-generate a personal workspace
+    const baseSlug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'dev';
+    let slug = `${baseSlug}-personal`;
+    let attempt = 0;
+    while (await prisma.org.findUnique({ where: { slug } })) {
+      attempt++;
+      slug = `${baseSlug}-personal-${attempt}`;
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const org = await prisma.org.create({
+      data: { name: `${name}'s workspace`, slug },
+    });
+
+    const user = await prisma.user.create({
+      data: {
+        orgId: org.id,
+        email,
+        name,
+        passwordHash,
+        role: 'OWNER',
+        accountType: 'developer',
+      },
+    });
+
+    // Auto-generate an API key for solo developer
+    const rawKey = `org_${crypto.randomBytes(32).toString('hex')}`;
+    const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
+    const keyPrefix = rawKey.slice(0, 12) + '...';
+
+    await prisma.apiKey.create({
+      data: {
+        orgId: org.id,
+        userId: user.id,
+        name: 'Personal key',
+        keyHash,
+        keyPrefix,
+        keyType: 'solo',
+      },
+    });
+
+    const token = signToken({ id: user.id, orgId: org.id, role: user.role });
+
+    res.status(201).json({
+      token,
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, accountType: 'developer', orgId: org.id, orgName: org.name, orgSlug: org.slug },
+      apiKey: rawKey,
+    });
+  } catch (err) {
+    console.error('Register developer error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -141,7 +218,7 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
 
     res.json({
       token,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: user.orgId, orgName: user.org.name, orgSlug: user.org.slug },
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, accountType: user.accountType, orgId: user.orgId, orgName: user.org.name, orgSlug: user.org.slug },
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -166,12 +243,55 @@ router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
       email: user.email,
       name: user.name,
       role: user.role,
+      accountType: user.accountType,
+      avatarUrl: user.avatarUrl,
       orgId: user.orgId,
       orgName: user.org.name,
       orgSlug: user.org.slug,
     });
   } catch (err) {
     console.error('Me error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /profile — update current user's profile (name, email, avatarUrl)
+router.patch('/profile', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { name, email, avatarUrl } = req.body;
+    const data: any = {};
+    if (typeof name === 'string' && name.trim()) data.name = name.trim();
+    if (typeof email === 'string' && email.trim()) {
+      // Check email uniqueness
+      const existing = await prisma.user.findFirst({ where: { email: email.trim(), id: { not: req.user!.id } } });
+      if (existing) return res.status(409).json({ error: 'Email already in use' });
+      data.email = email.trim();
+    }
+    if (typeof avatarUrl === 'string') data.avatarUrl = avatarUrl || null;
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const user = await prisma.user.update({
+      where: { id: req.user!.id },
+      data,
+      include: { org: true },
+    });
+
+    res.json({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      accountType: user.accountType,
+      avatarUrl: user.avatarUrl,
+      orgId: user.orgId,
+      orgName: user.org.name,
+      orgSlug: user.org.slug,
+    });
+  } catch (err) {
+    console.error('Profile update error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -264,7 +384,13 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
       },
     });
 
-    const jwtToken = signToken({ id: user.id, orgId: invitation.orgId, role: user.role });
+    // When accepting an invite, user becomes an org member
+    const updatedUser = await prisma.user.update({
+      where: { id: user.id },
+      data: { accountType: 'org' },
+    });
+
+    const jwtToken = signToken({ id: user.id, orgId: invitation.orgId, role: updatedUser.role });
 
     res.status(201).json({
       token: jwtToken,
@@ -272,7 +398,8 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
         id: user.id,
         email: user.email,
         name: user.name,
-        role: user.role,
+        role: updatedUser.role,
+        accountType: 'org',
         orgId: invitation.orgId,
         orgName: invitation.org.name,
         orgSlug: invitation.org.slug,
@@ -446,6 +573,229 @@ router.delete('/api-keys/:id', requireAuth, async (req: AuthRequest, res: Respon
   } catch (err) {
     console.error('Delete API key error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── OAuth ────────────────────────────────────────────────────────────────────
+
+const OAUTH_PROVIDERS: Record<string, {
+  authorizeUrl: string;
+  tokenUrl: string;
+  userUrl: string;
+  scopes: string;
+  clientIdEnv: string;
+  clientSecretEnv: string;
+}> = {
+  github: {
+    authorizeUrl: 'https://github.com/login/oauth/authorize',
+    tokenUrl: 'https://github.com/login/oauth/access_token',
+    userUrl: 'https://api.github.com/user',
+    scopes: 'read:user user:email',
+    clientIdEnv: 'GITHUB_CLIENT_ID',
+    clientSecretEnv: 'GITHUB_CLIENT_SECRET',
+  },
+  gitlab: {
+    authorizeUrl: 'https://gitlab.com/oauth/authorize',
+    tokenUrl: 'https://gitlab.com/oauth/token',
+    userUrl: 'https://gitlab.com/api/v4/user',
+    scopes: 'read_user',
+    clientIdEnv: 'GITLAB_CLIENT_ID',
+    clientSecretEnv: 'GITLAB_CLIENT_SECRET',
+  },
+  google: {
+    authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUrl: 'https://oauth2.googleapis.com/token',
+    userUrl: 'https://www.googleapis.com/oauth2/v2/userinfo',
+    scopes: 'openid email profile',
+    clientIdEnv: 'GOOGLE_CLIENT_ID',
+    clientSecretEnv: 'GOOGLE_CLIENT_SECRET',
+  },
+};
+
+function getOAuthRedirectUri(provider: string) {
+  const base = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
+  return `${base}/auth/${provider}/callback`;
+}
+
+// GET /oauth/:provider — redirect to provider's OAuth consent screen
+router.get('/oauth/:provider', (req: AuthRequest, res: Response) => {
+  const provider = req.params.provider as string;
+  const config = OAUTH_PROVIDERS[provider];
+  if (!config) return res.status(400).json({ error: 'Unknown provider' });
+
+  const clientId = process.env[config.clientIdEnv];
+  if (!clientId) return res.status(500).json({ error: `${provider} OAuth not configured` });
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: getOAuthRedirectUri(provider),
+    scope: config.scopes,
+    response_type: 'code',
+    state: crypto.randomBytes(16).toString('hex'),
+  });
+
+  // Google needs access_type for refresh tokens
+  if (provider === 'google') params.set('access_type', 'offline');
+
+  res.json({ url: `${config.authorizeUrl}?${params.toString()}` });
+});
+
+// POST /oauth/:provider/callback — exchange code for token, find or create user
+router.post('/oauth/:provider/callback', async (req: AuthRequest, res: Response) => {
+  const provider = req.params.provider as string;
+  const config = OAUTH_PROVIDERS[provider];
+  if (!config) return res.status(400).json({ error: 'Unknown provider' });
+
+  const { code, accountType: requestedAccountType } = req.body;
+  if (!code) return res.status(400).json({ error: 'Authorization code required' });
+
+  const clientId = process.env[config.clientIdEnv];
+  const clientSecret = process.env[config.clientSecretEnv];
+  if (!clientId || !clientSecret) return res.status(500).json({ error: `${provider} OAuth not configured` });
+
+  try {
+    // 1. Exchange code for access token
+    const tokenBody: Record<string, string> = {
+      client_id: clientId,
+      client_secret: clientSecret,
+      code,
+      redirect_uri: getOAuthRedirectUri(provider),
+    };
+    if (provider === 'gitlab' || provider === 'google') tokenBody.grant_type = 'authorization_code';
+
+    const tokenRes = await fetch(config.tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': provider === 'github' ? 'application/json' : 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+      },
+      body: provider === 'github' ? JSON.stringify(tokenBody) : new URLSearchParams(tokenBody).toString(),
+    });
+    const tokenData = await tokenRes.json() as any;
+    const accessToken = tokenData.access_token;
+    if (!accessToken) {
+      console.error('OAuth token exchange failed:', tokenData);
+      return res.status(400).json({ error: 'Failed to get access token from provider' });
+    }
+
+    // 2. Fetch user profile from provider
+    const userRes = await fetch(config.userUrl, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    });
+    const profile = await userRes.json() as any;
+
+    let email: string;
+    let userName: string;
+    let providerUserId: string;
+    let avatarUrl: string | null = null;
+
+    if (provider === 'github') {
+      providerUserId = String(profile.id);
+      userName = profile.name || profile.login;
+      avatarUrl = profile.avatar_url || null;
+      // GitHub may not return email in profile if it's private — fetch from /user/emails
+      email = profile.email;
+      if (!email) {
+        const emailsRes = await fetch('https://api.github.com/user/emails', {
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+        });
+        const emails = await emailsRes.json() as any[];
+        const primary = emails.find((e: any) => e.primary && e.verified) || emails.find((e: any) => e.verified);
+        email = primary?.email;
+      }
+    } else if (provider === 'gitlab') {
+      providerUserId = String(profile.id);
+      userName = profile.name || profile.username;
+      email = profile.email;
+      avatarUrl = profile.avatar_url || null;
+    } else {
+      // Google
+      providerUserId = profile.id;
+      userName = profile.name;
+      email = profile.email;
+      avatarUrl = profile.picture || null;
+    }
+
+    if (!email) return res.status(400).json({ error: 'Could not get email from provider' });
+
+    // 3. Find existing user by provider ID, or by email
+    let user = await prisma.user.findFirst({
+      where: { provider, providerUserId },
+      include: { org: true },
+    });
+
+    if (!user) {
+      // Check if email already exists (link OAuth to existing account)
+      user = await prisma.user.findFirst({
+        where: { email },
+        include: { org: true },
+      });
+
+      if (user) {
+        // Link OAuth provider to existing account
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: { provider, providerUserId, avatarUrl: user.avatarUrl || avatarUrl },
+          include: { org: true },
+        });
+      } else {
+        // Create new account (developer by default, or team if requested)
+        const isTeam = requestedAccountType === 'team';
+        const slug = email.split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase().slice(0, 30) + '-' + crypto.randomBytes(3).toString('hex');
+        const org = await prisma.org.create({
+          data: { name: isTeam ? `${userName}'s org` : `${userName}'s workspace`, slug },
+        });
+
+        const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+        user = await prisma.user.create({
+          data: {
+            orgId: org.id,
+            email,
+            name: userName,
+            passwordHash,
+            role: 'OWNER',
+            accountType: isTeam ? 'org' : 'developer',
+            provider,
+            providerUserId,
+            avatarUrl,
+          },
+          include: { org: true },
+        });
+
+        // Auto-generate API key for new OAuth user
+        const rawKey = `org_${crypto.randomBytes(32).toString('hex')}`;
+        const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
+        await prisma.apiKey.create({
+          data: {
+            orgId: org.id,
+            userId: user.id,
+            name: 'Default',
+            keyHash,
+            keyPrefix: rawKey.slice(0, 12),
+            keyType: 'solo',
+          },
+        });
+      }
+    }
+
+    const token = signToken({ id: user.id, orgId: user.orgId, role: user.role });
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        accountType: user.accountType,
+        avatarUrl: user.avatarUrl,
+        orgId: user.orgId,
+        orgName: user.org.name,
+        orgSlug: user.org.slug,
+      },
+    });
+  } catch (err) {
+    console.error(`OAuth ${provider} callback error:`, err);
+    res.status(500).json({ error: 'OAuth authentication failed' });
   }
 });
 

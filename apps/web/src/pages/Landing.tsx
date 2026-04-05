@@ -1,25 +1,104 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Helmet } from 'react-helmet-async';
 import { Link } from 'react-router-dom';
 
-// ── Animated grid background for hero ──────────────────────────────────────
-function GridBackground() {
+// ── Animated aurora background ──────────────────────────────────────────────
+function AuroraBackground() {
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none">
-      {/* Animated dot grid */}
-      <div className="absolute inset-0" style={{
-        backgroundImage: 'radial-gradient(circle, rgba(99,102,241,0.15) 1px, transparent 1px)',
-        backgroundSize: '32px 32px',
-        maskImage: 'radial-gradient(ellipse at center, black 30%, transparent 70%)',
-        WebkitMaskImage: 'radial-gradient(ellipse at center, black 30%, transparent 70%)',
-      }} />
-      {/* Animated glow pulse */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full animate-pulse"
-        style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.08) 0%, transparent 70%)' }} />
+      <div className="aurora-blob aurora-1" />
+      <div className="aurora-blob aurora-2" />
+      <div className="aurora-blob aurora-3" />
+      {/* Noise overlay */}
+      <div className="absolute inset-0 opacity-[0.015]"
+        style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg viewBox=\'0 0 256 256\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cfilter id=\'n\'%3E%3CfeTurbulence type=\'fractalNoise\' baseFrequency=\'0.9\' numOctaves=\'4\' stitchTiles=\'stitch\'/%3E%3C/filter%3E%3Crect width=\'100%25\' height=\'100%25\' filter=\'url(%23n)\'/%3E%3C/svg%3E")' }} />
     </div>
   );
 }
 
-// ── Fade-in on scroll hook ─────────────────────────────────────────────────
+// ── Floating particles ──────────────────────────────────────────────────────
+function Particles() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    let animId: number;
+    const particles: { x: number; y: number; vx: number; vy: number; size: number; alpha: number; color: string }[] = [];
+    const colors = ['99,102,241', '168,85,247', '56,189,248', '16,185,129'];
+
+    const resize = () => { canvas.width = canvas.offsetWidth; canvas.height = canvas.offsetHeight; };
+    resize();
+    window.addEventListener('resize', resize);
+
+    for (let i = 0; i < 40; i++) {
+      particles.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        vx: (Math.random() - 0.5) * 0.3,
+        vy: (Math.random() - 0.5) * 0.3,
+        size: Math.random() * 2 + 0.5,
+        alpha: Math.random() * 0.3 + 0.1,
+        color: colors[Math.floor(Math.random() * colors.length)],
+      });
+    }
+
+    const draw = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      particles.forEach((p) => {
+        p.x += p.vx;
+        p.y += p.vy;
+        if (p.x < 0) p.x = canvas.width;
+        if (p.x > canvas.width) p.x = 0;
+        if (p.y < 0) p.y = canvas.height;
+        if (p.y > canvas.height) p.y = 0;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${p.color},${p.alpha})`;
+        ctx.fill();
+      });
+
+      // Draw connections
+      particles.forEach((a, i) => {
+        particles.slice(i + 1).forEach((b) => {
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 120) {
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.strokeStyle = `rgba(99,102,241,${0.06 * (1 - dist / 120)})`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+          }
+        });
+      });
+
+      animId = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => { cancelAnimationFrame(animId); window.removeEventListener('resize', resize); };
+  }, []);
+
+  return <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />;
+}
+
+// ── Staggered text reveal ───────────────────────────────────────────────────
+function RevealText({ children, delay = 0, className = '' }: { children: React.ReactNode; delay?: number; className?: string }) {
+  const [show, setShow] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setShow(true), delay); return () => clearTimeout(t); }, [delay]);
+  return (
+    <span className={`inline-block transition-all duration-700 ease-out ${show ? 'opacity-100 translate-y-0 blur-0' : 'opacity-0 translate-y-4 blur-sm'} ${className}`}>
+      {children}
+    </span>
+  );
+}
+
+// ── Fade-in on scroll ────────────────────────────────────────────────────────
 function useFadeIn() {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
@@ -28,215 +107,415 @@ function useFadeIn() {
     if (!el) return;
     const observer = new IntersectionObserver(
       ([entry]) => { if (entry.isIntersecting) { setVisible(true); observer.disconnect(); } },
-      { threshold: 0.15 }
+      { threshold: 0.1 }
     );
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
-  return { ref, className: `transition-all duration-700 ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}` };
+  return { ref, className: `transition-all duration-700 ease-out ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}` };
 }
 
-function FadeIn({ children, delay = 0 }: { children: React.ReactNode; delay?: number }) {
+function FadeIn({ children, delay = 0, className = '' }: { children: React.ReactNode; delay?: number; className?: string }) {
   const fade = useFadeIn();
   return (
-    <div ref={fade.ref} className={fade.className} style={{ transitionDelay: `${delay}ms` }}>
+    <div ref={fade.ref} className={`${fade.className} ${className}`} style={{ transitionDelay: `${delay}ms` }}>
       {children}
     </div>
   );
 }
 
-const FEATURES = [
-  {
-    title: 'AI Blame — Line-Level Attribution',
-    desc: 'Run origin blame on any file. See exactly which AI agent wrote each line, what prompt generated it, the model used, and the full session it came from.',
-    icon: '🔍',
-    tag: 'NEW',
-  },
-  {
-    title: 'Per-File Attribution Context',
-    desc: 'When an agent opens a file, Origin injects line-level authorship context into the system prompt — so every AI knows what other AIs changed before it.',
-    icon: '📄',
-    tag: 'NEW',
-  },
-  {
-    title: 'Live Session Dashboard',
-    desc: 'Watch AI sessions in real-time across your org. See active agents, tokens burned, cost per session, and kill runaway sessions instantly.',
-    icon: '⚡',
-    tag: 'NEW',
-  },
-  {
-    title: 'Full Session Replay',
-    desc: 'Every prompt, response, tool call, and file change — recorded with timestamps, token counts, and cost breakdowns. Replay any session from CLI or dashboard.',
-    icon: '▶',
-  },
-  {
-    title: 'Policy Enforcement',
-    desc: 'Block secrets, enforce file restrictions, set cost limits, require human review. Policies evaluate in real-time and block PRs with violations.',
-    icon: '🛡',
-  },
-  {
-    title: 'Cost & Token Tracking',
-    desc: 'Track spend per agent, model, repo, and developer. Set budget limits. See which models deliver the best ROI across your engineering org.',
-    icon: '💰',
-    tag: 'NEW',
-  },
-];
+// ── Live counter ────────────────────────────────────────────────────────────
+function AnimatedNumber({ target, duration = 2000, suffix = '' }: { target: number; duration?: number; suffix?: string }) {
+  const [value, setValue] = useState(0);
+  const ref = useRef<HTMLSpanElement>(null);
+  const started = useRef(false);
 
-const CAPABILITIES = [
-  {
-    category: 'For CTOs',
-    icon: '📊',
-    items: [
-      'See what AI agents are writing across every repo',
-      'Track engineering ROI — cost per session, tokens per commit',
-      'Compare model performance: Claude vs Gemini vs GPT',
-      'Identify top AI power users and adoption trends',
-    ],
-  },
-  {
-    category: 'For Security Leads',
-    icon: '🔒',
-    items: [
-      'Enforce file access policies in real-time',
-      'Secret scanner catches leaked credentials before merge',
-      'Content filter blocks sensitive data in AI outputs',
-      'Complete audit trail for SOC 2 and compliance',
-    ],
-  },
-  {
-    category: 'For Developers',
-    icon: '⌨️',
-    items: [
-      'origin init — 30 seconds to set up, zero config after that',
-      'origin blame — see which AI wrote any line of code',
-      'origin explain — replay the conversation behind any commit',
-      'Works with Claude Code, Cursor, Gemini CLI, and Codex',
-    ],
-  },
-];
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting && !started.current) {
+        started.current = true;
+        const start = Date.now();
+        const tick = () => {
+          const progress = Math.min((Date.now() - start) / duration, 1);
+          const eased = 1 - Math.pow(1 - progress, 3);
+          setValue(Math.floor(target * eased));
+          if (progress < 1) requestAnimationFrame(tick);
+        };
+        tick();
+      }
+    }, { threshold: 0.5 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [target, duration]);
 
-const AGENTS = [
-  { name: 'Claude Code', status: 'Supported', badge: 'bg-purple-600/20 text-purple-400 border-purple-500/30' },
-  { name: 'Cursor', status: 'Supported', badge: 'bg-blue-600/20 text-blue-400 border-blue-500/30' },
-  { name: 'Gemini CLI', status: 'Supported', badge: 'bg-amber-600/20 text-amber-400 border-amber-500/30' },
-  { name: 'Codex', status: 'Supported', badge: 'bg-green-600/20 text-green-400 border-green-500/30' },
-  { name: 'Copilot', status: 'Coming soon', badge: 'bg-gray-800/50 text-gray-500 border-gray-700/50' },
-  { name: 'Windsurf', status: 'Coming soon', badge: 'bg-gray-800/50 text-gray-500 border-gray-700/50' },
-  { name: 'Aider', status: 'Coming soon', badge: 'bg-gray-800/50 text-gray-500 border-gray-700/50' },
-];
-
-const INSTALL_CMD = 'npm i -g https://getorigin.io/cli/origin-cli-latest.tgz';
-
-function InstallCommand() {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(INSTALL_CMD);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div className="mt-8 flex justify-center">
-      <button
-        onClick={handleCopy}
-        className="group bg-gray-900/80 border border-gray-700 hover:border-indigo-500/50 rounded-lg px-4 py-2 transition-colors cursor-pointer"
-      >
-        <code className="text-sm font-mono text-gray-300">
-          <span className="text-green-400">$</span> npm i -g <span className="text-indigo-400">origin-cli</span>
-        </code>
-        <span className="text-xs text-gray-500 ml-3 group-hover:text-indigo-400 transition-colors">
-          {copied ? 'Copied!' : 'Copy'}
-        </span>
-      </button>
-    </div>
-  );
+  return <span ref={ref}>{value.toLocaleString()}{suffix}</span>;
 }
 
-function TerminalDemo() {
+// ── CLI Demo ─────────────────────────────────────────────────────────────────
+const CLI_DEMOS: { cmd: string; desc: string; lines: { text: string; color?: string; delay?: number }[] }[] = [
+  {
+    cmd: 'init',
+    desc: 'Setup in 30s',
+    lines: [
+      { text: '$ origin init', color: 'text-gray-200' },
+      { text: '  Detecting AI agents...', color: 'text-gray-500', delay: 300 },
+      { text: '  \u2713 Claude Code (claude-code)', color: 'text-emerald-400', delay: 600 },
+      { text: '  \u2713 Cursor (cursor)', color: 'text-emerald-400', delay: 800 },
+      { text: '  Installing git hooks...', color: 'text-gray-500', delay: 1100 },
+      { text: '  \u2713 post-commit hook installed', color: 'text-emerald-400', delay: 1400 },
+      { text: '  \u2713 Origin initialized in 2.1s', color: 'text-indigo-400', delay: 1800 },
+    ],
+  },
+  {
+    cmd: 'blame',
+    desc: 'AI attribution',
+    lines: [
+      { text: '$ origin blame src/api.ts', color: 'text-gray-200' },
+      { text: '  L12  \u2502 claude-4  \u2502 "add auth middleware"', color: 'text-blue-400', delay: 400 },
+      { text: '  L13  \u2502 claude-4  \u2502 "add auth middleware"', color: 'text-blue-400', delay: 500 },
+      { text: '  L14  \u2502 human     \u2502                      ', color: 'text-gray-500', delay: 600 },
+      { text: '  L15  \u2502 cursor    \u2502 "refactor error handler"', color: 'text-amber-400', delay: 700 },
+      { text: '  L16  \u2502 cursor    \u2502 "refactor error handler"', color: 'text-amber-400', delay: 800 },
+      { text: '  L17  \u2502 gemini    \u2502 "add rate limiting"', color: 'text-purple-400', delay: 900 },
+    ],
+  },
+  {
+    cmd: 'sessions',
+    desc: 'Track sessions',
+    lines: [
+      { text: '$ origin sessions', color: 'text-gray-200' },
+      { text: '  ID       Agent      Cost    Duration  Status', color: 'text-gray-600', delay: 300 },
+      { text: '  a3f2..   claude-4   $0.42   3m 12s    ended', color: 'text-gray-400', delay: 500 },
+      { text: '  b7e1..   cursor     $0.18   1m 45s    ended', color: 'text-gray-400', delay: 600 },
+      { text: '  c9d4..   gemini     $0.31   2m 08s    ended', color: 'text-gray-400', delay: 700 },
+      { text: '  d1a8..   claude-4   $0.67   5m 22s    running', color: 'text-emerald-400', delay: 800 },
+      { text: '  Total: 4 sessions, $1.58 today', color: 'text-indigo-400', delay: 1100 },
+    ],
+  },
+  {
+    cmd: 'stats',
+    desc: 'Cost & usage',
+    lines: [
+      { text: '$ origin stats --week', color: 'text-gray-200' },
+      { text: '  Sessions: 47    Cost: $12.30', color: 'text-gray-400', delay: 400 },
+      { text: '  Tokens:   1.2M  Lines: +3,241 / -892', color: 'text-gray-400', delay: 600 },
+      { text: '  Top model:   claude-4-sonnet (62%)', color: 'text-blue-400', delay: 800 },
+      { text: '  Top agent:   claude-code (34 sessions)', color: 'text-amber-400', delay: 1000 },
+      { text: '  Streak:      12 days', color: 'text-emerald-400', delay: 1200 },
+    ],
+  },
+  {
+    cmd: 'explain',
+    desc: 'Session replay',
+    lines: [
+      { text: '$ origin explain a3f2', color: 'text-gray-200' },
+      { text: '  Session a3f2.. | claude-4 | 3m 12s', color: 'text-gray-600', delay: 400 },
+      { text: '  Turn 1: "add user authentication"', color: 'text-gray-400', delay: 700 },
+      { text: '    > auth.ts, middleware.ts (+48 lines)', color: 'text-emerald-400', delay: 900 },
+      { text: '  Turn 2: "add rate limiting"', color: 'text-gray-400', delay: 1200 },
+      { text: '    > rateLimit.ts, api.ts (+23 lines)', color: 'text-emerald-400', delay: 1400 },
+      { text: '  Turn 3: "write tests"', color: 'text-gray-400', delay: 1700 },
+      { text: '    > auth.test.ts (+67 lines)', color: 'text-emerald-400', delay: 1900 },
+    ],
+  },
+];
+
+function CliDemo() {
+  const [active, setActive] = useState(0);
+  const [visibleLines, setVisibleLines] = useState(1);
+  const demo = CLI_DEMOS[active];
+
+  useEffect(() => {
+    const timer = setInterval(() => setActive((p) => (p + 1) % CLI_DEMOS.length), 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    setVisibleLines(1);
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    demo.lines.forEach((line, i) => {
+      if (i === 0) return;
+      if (line.delay) timers.push(setTimeout(() => setVisibleLines((v) => Math.max(v, i + 1)), line.delay));
+    });
+    return () => timers.forEach(clearTimeout);
+  }, [active]);
+
   return (
-    <div className="mt-16 max-w-3xl mx-auto">
-      <div className="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden shadow-2xl shadow-indigo-900/10">
-        {/* Terminal header */}
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
-          <div className="w-3 h-3 rounded-full bg-red-500/80" />
-          <div className="w-3 h-3 rounded-full bg-yellow-500/80" />
-          <div className="w-3 h-3 rounded-full bg-green-500/80" />
-          <span className="ml-2 text-xs text-gray-500 font-mono">origin blame src/api.ts</span>
+    <div className="max-w-2xl mx-auto">
+      <div className="flex gap-1 mb-2">
+        {CLI_DEMOS.map((c, i) => (
+          <button
+            key={c.cmd}
+            onClick={() => setActive(i)}
+            className={`flex-1 py-1.5 text-center text-xs font-mono rounded transition-all duration-200 ${
+              i === active
+                ? 'text-indigo-400 bg-indigo-500/8 border border-indigo-500/20'
+                : 'text-gray-600 border border-transparent hover:text-gray-400'
+            }`}
+          >
+            <span className="block">{c.cmd}</span>
+            <span className={`block text-[10px] ${i === active ? 'text-gray-400' : 'text-gray-700'}`}>{c.desc}</span>
+          </button>
+        ))}
+      </div>
+      <div className="bg-[rgb(10,10,12)] border border-gray-800/60 rounded-lg overflow-hidden shadow-2xl shadow-black/50">
+        <div className="flex items-center gap-1.5 px-3 py-2 border-b border-white/[0.04]">
+          <div className="w-2.5 h-2.5 rounded-full bg-[#ff5f57]" />
+          <div className="w-2.5 h-2.5 rounded-full bg-[#febc2e]" />
+          <div className="w-2.5 h-2.5 rounded-full bg-[#28c840]" />
+          <span className="ml-2 text-[11px] text-gray-600 font-mono">terminal</span>
         </div>
-        {/* Terminal content */}
-        <div className="px-5 py-4 text-xs font-mono leading-relaxed overflow-x-auto whitespace-pre text-left">
-<span className="text-gray-500">{'  1 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{"import express from 'express';"}</span>{'\n'}
-<span className="text-gray-500">{'  2 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{"import { prisma } from './db';"}</span>{'\n'}
-<span className="text-gray-500">{'  3 │ '}</span><span className="text-gray-400">Human     </span><span className="text-gray-600">│ 2d ago  │ </span>{'\n'}
-<span className="text-gray-500">{'  4 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'export async function getUsers() {'}</span>{'\n'}
-<span className="text-gray-500">{'  5 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'  const users = await prisma.user.findMany();'}</span>{'\n'}
-<span className="text-gray-500">{'  6 │ '}</span><span className="text-blue-400">Cursor    </span><span className="text-gray-600">│ 30m ago │ </span><span className="text-gray-300">{'  return users.filter(u => u.active);'}</span>{'\n'}
-<span className="text-gray-500">{'  7 │ '}</span><span className="text-amber-400">Gemini    </span><span className="text-gray-600">│ 1h ago  │ </span><span className="text-gray-300">{'}'}</span>{'\n'}
-<span className="text-gray-500">{'  8 │ '}</span><span className="text-gray-400">Human     </span><span className="text-gray-600">│ 2d ago  │ </span>{'\n'}
-<span className="text-gray-500">{'  9 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'// retry with exponential backoff'}</span>{'\n'}
-<span className="text-gray-500">{' 10 │ '}</span><span className="text-purple-400">Claude    </span><span className="text-gray-600">│ 3h ago  │ </span><span className="text-gray-300">{'export async function fetchWithRetry(url: string) {'}</span>
-        </div>
-        <div className="px-5 py-3 border-t border-gray-800 flex items-center gap-4">
-          <span className="text-xs text-gray-500">10 lines</span>
-          <span className="text-xs"><span className="text-purple-400">●</span> Claude: 40%</span>
-          <span className="text-xs"><span className="text-amber-400">●</span> Gemini: 30%</span>
-          <span className="text-xs"><span className="text-blue-400">●</span> Cursor: 10%</span>
-          <span className="text-xs"><span className="text-gray-400">●</span> Human: 20%</span>
+        <div className="px-4 py-3 font-mono text-[13px] leading-relaxed h-[185px]">
+          {demo.lines.slice(0, visibleLines).map((line, i) => (
+            <div key={`${active}-${i}`} className={`${line.color || 'text-gray-500'}`}>{line.text}</div>
+          ))}
+          {visibleLines < demo.lines.length && (
+            <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse" />
+          )}
         </div>
       </div>
     </div>
   );
 }
 
+// ── Install command ──────────────────────────────────────────────────────────
+const INSTALL_CMD = 'npm i -g https://getorigin.io/cli/origin-cli-latest.tgz';
+
+function InstallCommand() {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(INSTALL_CMD);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <div className="max-w-xl mx-auto mt-8">
+      <button
+        onClick={handleCopy}
+        className="w-full flex items-center gap-3 bg-[rgb(10,10,12)] border border-gray-800/60 rounded-lg px-4 py-3 text-left group hover:border-gray-700/60 transition-colors"
+      >
+        <span className="text-indigo-400 text-xs font-mono">$</span>
+        <code className="flex-1 text-sm font-mono text-gray-400 truncate">{INSTALL_CMD}</code>
+        <span className="text-xs text-gray-600 group-hover:text-gray-400 transition-colors shrink-0">
+          {copied ? 'Copied' : 'Copy'}
+        </span>
+      </button>
+    </div>
+  );
+}
+
+// ── Agents ───────────────────────────────────────────────────────────────────
+const AGENTS = [
+  { name: 'Claude Code', color: 'text-purple-400' },
+  { name: 'Cursor', color: 'text-blue-400' },
+  { name: 'Gemini CLI', color: 'text-amber-400' },
+  { name: 'Codex', color: 'text-green-400' },
+  { name: 'Copilot', color: 'text-gray-500', soon: true },
+  { name: 'Windsurf', color: 'text-gray-500', soon: true },
+];
+
+// ── Main ─────────────────────────────────────────────────────────────────────
 export default function Landing() {
   return (
     <>
-      {/* Hero */}
-      <section className="relative overflow-hidden">
-        <GridBackground />
-        {/* Gradient orbs */}
-        <div className="absolute top-0 left-1/4 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl animate-[pulse_4s_ease-in-out_infinite]" />
-        <div className="absolute top-20 right-1/4 w-80 h-80 bg-purple-600/10 rounded-full blur-3xl animate-[pulse_5s_ease-in-out_infinite_1s]" />
-        <div className="absolute bottom-0 left-1/2 w-64 h-64 bg-cyan-600/5 rounded-full blur-3xl animate-[pulse_6s_ease-in-out_infinite_2s]" />
+      <Helmet>
+        <title>Origin — AI Code Attribution & Governance</title>
+        <meta name="description" content="Origin tracks every AI coding session, attributes every line, and gives you full visibility into AI-generated code. Free for solo developers." />
+        <link rel="canonical" href="https://getorigin.io" />
+      </Helmet>
 
-        <div className="relative max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-600/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-6">
-            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-            AI Code Attribution &amp; Governance
+      <style>{`
+        .aurora-blob {
+          position: absolute;
+          border-radius: 50%;
+          filter: blur(80px);
+          opacity: 0.07;
+          will-change: transform;
+        }
+        .aurora-1 {
+          width: 600px; height: 600px;
+          background: linear-gradient(135deg, #6366f1, #a855f7);
+          top: -200px; left: -100px;
+          animation: drift1 20s ease-in-out infinite;
+        }
+        .aurora-2 {
+          width: 500px; height: 500px;
+          background: linear-gradient(135deg, #38bdf8, #6366f1);
+          top: -100px; right: -150px;
+          animation: drift2 25s ease-in-out infinite;
+        }
+        .aurora-3 {
+          width: 400px; height: 400px;
+          background: linear-gradient(135deg, #10b981, #38bdf8);
+          bottom: -150px; left: 30%;
+          animation: drift3 22s ease-in-out infinite;
+        }
+        @keyframes drift1 {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          33% { transform: translate(80px, 40px) scale(1.1); }
+          66% { transform: translate(-40px, 60px) scale(0.95); }
+        }
+        @keyframes drift2 {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          33% { transform: translate(-60px, 50px) scale(0.9); }
+          66% { transform: translate(40px, -30px) scale(1.1); }
+        }
+        @keyframes drift3 {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          33% { transform: translate(50px, -40px) scale(1.15); }
+          66% { transform: translate(-70px, 20px) scale(0.9); }
+        }
+        @keyframes shimmer {
+          0% { background-position: -200% center; }
+          100% { background-position: 200% center; }
+        }
+        .text-shimmer {
+          background: linear-gradient(90deg, #6366f1 0%, #a855f7 25%, #38bdf8 50%, #a855f7 75%, #6366f1 100%);
+          background-size: 200% auto;
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          animation: shimmer 6s linear infinite;
+        }
+        @keyframes scan {
+          0% { transform: translateY(-100%); opacity: 0; }
+          10% { opacity: 1; }
+          90% { opacity: 1; }
+          100% { transform: translateY(100%); opacity: 0; }
+        }
+        .scan-line {
+          animation: scan 3s ease-in-out infinite;
+        }
+      `}</style>
+
+      {/* ─── HERO ─────────────────────────────────────────────────────────── */}
+      <section className="relative min-h-[85vh] flex items-center overflow-hidden">
+        <AuroraBackground />
+        <Particles />
+
+        {/* Scan line effect */}
+        <div className="absolute inset-0 pointer-events-none overflow-hidden">
+          <div className="scan-line absolute left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-indigo-500/30 to-transparent" />
+        </div>
+
+        <div className="relative w-full max-w-5xl mx-auto px-6 py-20">
+          <div className="max-w-3xl">
+            {/* Badge */}
+            <RevealText delay={200}>
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/[0.08] bg-white/[0.03] mb-8 backdrop-blur-sm">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-xs text-gray-400">AI Code Attribution & Governance</span>
+              </div>
+            </RevealText>
+
+            <h1 className="text-[clamp(2.8rem,7vw,5rem)] font-bold leading-[1.0] tracking-[-0.04em]">
+              <RevealText delay={400}>
+                <span className="text-white">Your AI agents build fast. </span>
+                <span className="text-shimmer">Origin keeps them in check.</span>
+              </RevealText>
+            </h1>
+
+            <RevealText delay={1400}>
+              <p className="mt-8 text-lg text-gray-400 max-w-lg leading-relaxed">
+                Track every AI coding session. See which agent wrote what, how much it cost,
+                and what changed.{' '}
+                <span className="text-emerald-400/90">Free for solo developers.</span>
+              </p>
+            </RevealText>
+
+            <RevealText delay={1700}>
+              <div className="mt-10 flex items-center gap-4">
+                <Link
+                  to="/register?type=developer"
+                  className="group relative px-7 py-3 text-sm font-medium rounded-lg bg-indigo-600 text-white overflow-hidden transition-all hover:shadow-lg hover:shadow-indigo-500/25"
+                >
+                  <span className="relative z-10">Get started free &rarr;</span>
+                  <div className="absolute inset-0 bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                </Link>
+                <Link
+                  to="/pricing"
+                  className="px-7 py-3 text-sm font-medium rounded-lg text-gray-300 border border-white/[0.1] hover:bg-white/[0.05] hover:border-white/[0.15] transition-all"
+                >
+                  View plans
+                </Link>
+              </div>
+            </RevealText>
+
+            {/* Agent pills */}
+            <RevealText delay={2000}>
+              <div className="mt-14 flex items-center gap-3 flex-wrap">
+                <span className="text-[11px] text-gray-600 uppercase tracking-wider mr-1">Works with</span>
+                {AGENTS.map((a) => (
+                  <span
+                    key={a.name}
+                    className={`text-[11px] font-medium px-2.5 py-1 rounded-full border border-white/[0.06] bg-white/[0.02] ${a.color} ${a.soon ? 'opacity-30' : ''}`}
+                  >
+                    {a.name}
+                  </span>
+                ))}
+              </div>
+            </RevealText>
           </div>
-          <h1 className="text-4xl sm:text-5xl md:text-6xl font-bold text-gray-100 leading-tight tracking-tight">
-            Your AI agents build fast.
-            <br />
-            <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-indigo-400 bg-clip-text text-transparent bg-[length:200%_auto] animate-[shimmer_3s_linear_infinite]">
-              Origin keeps them in check.
-            </span>
-          </h1>
-          <p className="mt-6 text-lg md:text-xl text-gray-400 max-w-2xl mx-auto leading-relaxed">
-            Your team uses Claude, Cursor, Gemini, Codex &mdash; but nobody tracks which AI wrote what.
-            Origin records every AI session, attributes every line, and enforces your policies before merge.
-          </p>
 
-          {/* Top 5 commands — Hero callout */}
-          <div className="mt-10 max-w-2xl mx-auto">
-            <div className="grid grid-cols-5 gap-2">
-              {[
-                { cmd: 'init', desc: 'Setup in 30s' },
-                { cmd: 'blame', desc: 'AI attribution' },
-                { cmd: 'sessions', desc: 'Track sessions' },
-                { cmd: 'stats', desc: 'Cost & usage' },
-                { cmd: 'explain', desc: 'Session replay' },
-              ].map((c) => (
-                <div key={c.cmd} className="bg-gray-900/80 border border-gray-800 rounded-lg px-2 py-2 text-center">
-                  <code className="text-xs font-mono text-indigo-400 whitespace-nowrap">origin {c.cmd}</code>
-                  <p className="text-[10px] text-gray-500 mt-0.5">{c.desc}</p>
-                </div>
-              ))}
+          {/* Side stat counters */}
+          <div className="hidden lg:flex absolute right-6 top-1/2 -translate-y-1/2 flex-col gap-8 items-end">
+            <RevealText delay={2200}>
+              <div className="text-right">
+                <div className="text-3xl font-bold text-white tabular-nums"><AnimatedNumber target={4} />+</div>
+                <div className="text-[11px] text-gray-600 uppercase tracking-wider">AI agents</div>
+              </div>
+            </RevealText>
+            <RevealText delay={2400}>
+              <div className="text-right">
+                <div className="text-3xl font-bold text-white tabular-nums"><AnimatedNumber target={50} />+</div>
+                <div className="text-[11px] text-gray-600 uppercase tracking-wider">CLI commands</div>
+              </div>
+            </RevealText>
+            <RevealText delay={2600}>
+              <div className="text-right">
+                <div className="text-3xl font-bold text-emerald-400 tabular-nums">$0</div>
+                <div className="text-[11px] text-gray-600 uppercase tracking-wider">Solo plan</div>
+              </div>
+            </RevealText>
+          </div>
+        </div>
+      </section>
+
+      <div className="border-t border-white/[0.06]" />
+
+      {/* ─── CLI DEMO ─────────────────────────────────────────────────────── */}
+      <section className="max-w-4xl mx-auto px-6 py-24">
+        <FadeIn>
+          <div className="flex items-end justify-between mb-8">
+            <div>
+              <p className="text-xs text-gray-600 font-mono mb-2">1.0</p>
+              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Five commands,<br />full visibility</h2>
             </div>
+            <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
+              Install the CLI and run <code className="text-indigo-400/80">origin init</code>. Everything is tracked from your first commit.
+            </p>
           </div>
+          <CliDemo />
+          <div className="flex items-center gap-3">
+            <div className="flex-1"><InstallCommand /></div>
+            <a
+              href="https://github.com/dolobanko/origin-cli"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 px-4 py-3 rounded-lg bg-[rgb(10,10,12)] border border-gray-800/60 text-sm text-gray-400 hover:text-white hover:border-gray-700/60 transition-colors shrink-0"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+              GitHub
+            </a>
+          </div>
+        </FadeIn>
+      </section>
 
-          {/* Video demo */}
-          <div className="mt-10 max-w-3xl mx-auto rounded-xl overflow-hidden border border-gray-800 shadow-2xl shadow-indigo-900/10">
+      {/* ─── VIDEO ────────────────────────────────────────────────────────── */}
+      <section className="max-w-4xl mx-auto px-6 pb-24">
+        <FadeIn>
+          <div className="rounded-lg overflow-hidden border border-white/[0.06] shadow-2xl shadow-black/40">
             <div style={{ position: 'relative', paddingBottom: '56.25%', height: 0 }}>
               <iframe
                 src="https://www.loom.com/embed/9916f9b26b5142b399f8e6822bc2ca02?sid=auto&hide_owner=true&hide_share=true&hide_title=true&hideEmbedTopBar=true"
@@ -246,338 +525,224 @@ export default function Landing() {
               />
             </div>
           </div>
-
-          {/* Terminal demo removed — video is enough */}
-
-          {/* Install one-liner */}
-          <InstallCommand />
-
-          <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-4">
-            <Link
-              to="/register"
-              className="btn-primary px-8 py-3 text-base font-semibold rounded-xl shadow-lg shadow-indigo-600/20"
-            >
-              Get started free
-            </Link>
-            <a
-              href="https://github.com/dolobanko/origin-cli"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm text-gray-400 hover:text-gray-100 transition-colors"
-            >
-              Open Source on GitHub &rarr;
-            </a>
-          </div>
-
-          {/* Agent badges */}
-          <div className="mt-16 flex flex-wrap items-center justify-center gap-3">
-            {AGENTS.map((agent) => (
-              <span
-                key={agent.name}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium ${agent.badge}`}
-              >
-                {agent.name}
-                {agent.status === 'Coming soon' && (
-                  <span className="text-[10px] opacity-60">soon</span>
-                )}
-              </span>
-            ))}
-          </div>
-        </div>
+        </FadeIn>
       </section>
 
-      {/* What's New */}
-      <section className="bg-indigo-950/20 border-y border-indigo-500/10">
-        <div className="max-w-4xl mx-auto px-6 py-12">
-          <div className="flex items-center gap-2 mb-6">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-sm font-semibold text-green-400">What&apos;s New</span>
-          </div>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {[
-              { title: 'Per-File Attribution', desc: 'Agents see line-level authorship when reading files' },
-              { title: 'System Prompt Injection', desc: 'AI agents get context about what other AIs changed' },
-              { title: 'Secret Scanner', desc: 'Block credentials from leaking into AI-generated code' },
-              { title: 'Live Sessions', desc: 'Watch your team\'s AI sessions in real-time' },
-            ].map((item) => (
-              <div key={item.title} className="bg-gray-900/60 border border-gray-800 rounded-lg px-4 py-3">
-                <h4 className="text-sm font-semibold text-gray-200">{item.title}</h4>
-                <p className="text-xs text-gray-500 mt-1 leading-relaxed">{item.desc}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
+      <div className="border-t border-white/[0.06]" />
 
-      {/* Features */}
-      <FadeIn>
-      <section id="features" className="max-w-6xl mx-auto px-6 py-24">
-        <div className="text-center mb-16">
-          <h2 className="text-3xl font-bold">Know exactly which AI wrote every line</h2>
-          <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-            From line-level attribution to real-time policy enforcement &mdash;
-            Origin gives you complete visibility into AI-authored code.
-          </p>
-        </div>
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {FEATURES.map((f) => (
-            <div
-              key={f.title}
-              className="card hover:border-indigo-500/30 transition-all duration-300 group relative hover:shadow-lg hover:shadow-indigo-500/5 hover:-translate-y-1"
-            >
-              {f.tag && (
-                <span className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-green-600/20 text-green-400 text-[10px] font-semibold border border-green-500/30">
-                  {f.tag}
-                </span>
-              )}
-              <div className="w-10 h-10 rounded-lg bg-indigo-600/10 flex items-center justify-center text-indigo-400 text-xl mb-4 group-hover:bg-indigo-600/20 transition-colors">
-                {f.icon}
-              </div>
-              <h3 className="text-lg font-semibold text-gray-100">{f.title}</h3>
-              <p className="mt-2 text-sm text-gray-400 leading-relaxed">{f.desc}</p>
+      {/* ─── FEATURES ─────────────────────────────────────────────────────── */}
+      <section className="max-w-5xl mx-auto px-6 py-24">
+        <FadeIn>
+          <div className="flex items-end justify-between mb-16">
+            <div>
+              <p className="text-xs text-gray-600 font-mono mb-2">2.0</p>
+              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Everything recorded.<br />Nothing lost.</h2>
             </div>
+            <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
+              From line-level attribution to real-time policy enforcement.
+            </p>
+          </div>
+        </FadeIn>
+
+        <div className="grid md:grid-cols-2 gap-px bg-white/[0.04] rounded-lg overflow-hidden border border-white/[0.06]">
+          {[
+            { title: 'AI Blame', desc: 'See which AI agent wrote each line of code, what prompt generated it, and the full session it came from.', label: '2.1', accent: 'text-indigo-400' },
+            { title: 'Session Replay', desc: 'Every prompt, response, tool call, and file change — recorded with timestamps, token counts, and costs.', label: '2.2', accent: 'text-purple-400' },
+            { title: 'Cost Tracking', desc: 'Track spend per agent, model, repo, and developer. Set budgets. See which models deliver the best ROI.', label: '2.3', accent: 'text-amber-400' },
+            { title: 'Live Dashboard', desc: 'Watch AI sessions in real-time. See active agents, tokens burned, cost per session, and stop runaway agents.', label: '2.4', accent: 'text-emerald-400' },
+            { title: 'Policy Enforcement', desc: 'Block secrets, enforce file restrictions, set cost limits, require human review. Evaluate in real-time.', label: '2.5', accent: 'text-cyan-400' },
+            { title: 'Attribution Context', desc: 'When an agent opens a file, Origin injects line-level authorship — so every AI knows what others changed.', label: '2.6', accent: 'text-rose-400' },
+          ].map((f, i) => (
+            <FadeIn key={f.label} delay={i * 80}>
+              <div className="bg-[rgb(8,9,10)] p-8 h-full group hover:bg-white/[0.02] transition-colors duration-200">
+                <div className="flex items-center gap-3 mb-4">
+                  <span className="text-xs text-gray-700 font-mono">{f.label}</span>
+                  <h3 className={`text-base font-semibold ${f.accent}`}>{f.title}</h3>
+                </div>
+                <p className="text-sm text-gray-500 leading-relaxed">{f.desc}</p>
+              </div>
+            </FadeIn>
           ))}
         </div>
       </section>
-      </FadeIn>
 
-      {/* Two-Part Value Prop */}
-      <section className="bg-gray-900/30 border-y border-gray-800/50">
-        <div className="max-w-5xl mx-auto px-6 py-24">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl font-bold">Free CLI + Team Platform</h2>
-            <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-              Start standalone &mdash; no account needed. Add team features when you&apos;re ready.
+      <div className="border-t border-white/[0.06]" />
+
+      {/* ─── HOW IT WORKS ─────────────────────────────────────────────────── */}
+      <section className="max-w-5xl mx-auto px-6 py-24">
+        <FadeIn>
+          <div className="flex items-end justify-between mb-16">
+            <div>
+              <p className="text-xs text-gray-600 font-mono mb-2">3.0</p>
+              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">From code to merge,<br />fully tracked</h2>
+            </div>
+            <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
+              Origin works silently in the background. No workflow changes required.
             </p>
           </div>
-          <div className="grid md:grid-cols-2 gap-8">
-            <div className="card border-green-500/20">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="text-green-400 font-mono text-sm">$</span>
-                <span className="text-lg font-semibold text-gray-200">Origin CLI</span>
-                <span className="px-2 py-0.5 rounded-full bg-green-600/20 text-green-400 text-[10px] font-semibold border border-green-500/30">Free &amp; Open Source</span>
+        </FadeIn>
+
+        <div className="space-y-0">
+          {[
+            { step: '01', title: 'Code with AI', desc: 'Use Claude, Cursor, Codex, or Gemini. Origin hooks capture everything automatically.' },
+            { step: '02', title: 'Capture & attribute', desc: 'Every prompt, file change, and token is recorded. Per-line attribution tags each author.' },
+            { step: '03', title: 'Enforce policies', desc: 'File restrictions, blocked patterns, model allowlists, and cost limits evaluate in real-time.' },
+            { step: '04', title: 'PR governance', desc: 'Status check on the pull request shows sessions, cost, and policy violations.' },
+            { step: '05', title: 'Review & ship', desc: 'Review flagged sessions in dashboard or CLI. Approve, and the PR merges with full audit trail.' },
+          ].map((s, i) => (
+            <FadeIn key={s.step} delay={i * 60}>
+              <div className="flex items-start gap-6 py-6 border-t border-white/[0.06] group">
+                <span className="text-xs font-mono text-gray-700 pt-0.5 w-6 shrink-0">{s.step}</span>
+                <div className="flex-1 flex items-start justify-between gap-8">
+                  <h3 className="text-base font-medium text-gray-200 w-48 shrink-0">{s.title}</h3>
+                  <p className="text-sm text-gray-500 leading-relaxed">{s.desc}</p>
+                </div>
               </div>
-              <ul className="space-y-2.5 text-sm text-gray-400">
-                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Zero config — <code className="text-indigo-400 text-xs">origin init</code> and you&apos;re done</li>
-                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> AI blame, session replay, stats — all local via git notes</li>
-                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Works offline — no server, no account, no telemetry</li>
-                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Claude Code, Cursor, Gemini CLI, Codex supported</li>
-              </ul>
-              <pre className="mt-4 bg-gray-800 rounded-lg px-4 py-3 text-xs font-mono text-gray-300 overflow-x-auto">
-{`$ origin init           # detect agents, install hooks
-$ origin blame app.ts   # see who wrote what
-$ origin sessions       # list AI sessions
-$ origin explain abc123 # replay a session`}
-              </pre>
-            </div>
-            <div className="card border-indigo-500/20">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="text-indigo-400 text-sm">◆</span>
-                <span className="text-lg font-semibold text-gray-200">Origin Platform</span>
-                <span className="px-2 py-0.5 rounded-full bg-indigo-600/20 text-indigo-400 text-[10px] font-semibold border border-indigo-500/30">Teams</span>
-              </div>
-              <ul className="space-y-2.5 text-sm text-gray-400">
-                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Live dashboard — sessions, costs, agents, repos</li>
-                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Policy enforcement — block secrets, restrict files, set budgets</li>
-                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> PR merge gating — GitHub &amp; GitLab status checks</li>
-                <li className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span> Compliance reports — SOC 2 ready audit trail</li>
-              </ul>
-              <div className="mt-4 bg-gray-800 rounded-lg px-4 py-3">
-                <p className="text-xs text-gray-400">
-                  <span className="text-indigo-400 font-semibold">getorigin.io</span> — dashboard, policies, PR compliance.
-                </p>
-                <Link to="/register" className="inline-block mt-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors font-medium">
-                  Start free trial &rarr;
-                </Link>
-              </div>
-            </div>
-          </div>
+            </FadeIn>
+          ))}
         </div>
       </section>
 
-      {/* How It Works */}
-      <section id="how-it-works" className="max-w-5xl mx-auto px-6 py-24">
-        <div className="text-center mb-16">
-          <h2 className="text-3xl font-bold">How Origin works</h2>
-          <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-            From code to merge &mdash; Origin tracks every AI coding session and enforces your policies automatically.
-          </p>
-        </div>
-        <div className="relative">
-          <div className="absolute left-6 top-0 bottom-0 w-px bg-gray-800 hidden md:block" />
-          <div className="space-y-12">
-            {[
-              {
-                step: '1',
-                title: 'Developer codes with AI',
-                desc: 'A developer uses Claude Code, Cursor, Gemini, or Codex. Origin\'s hooks silently track the session — prompts, files changed, model, cost, and token usage.',
-                accent: 'bg-indigo-600',
-              },
-              {
-                step: '2',
-                title: 'Origin captures & attributes',
-                desc: 'Every prompt-to-code-change is recorded. Per-file attribution tags each line with its author. Policies evaluate in real-time — file restrictions, model allowlists, cost limits, secret scanning.',
-                accent: 'bg-purple-600',
-              },
-              {
-                step: '3',
-                title: 'AI agents get context',
-                desc: 'When an agent opens a file, Origin injects attribution context — which lines were AI-generated, by which agent, from which prompt. Agents make better decisions with full history.',
-                accent: 'bg-cyan-600',
-              },
-              {
-                step: '4',
-                title: 'PR gets a governance check',
-                desc: 'Origin posts an AI governance status check on the pull request — sessions linked, total cost, policy violations. If policies are violated, the PR is blocked from merging.',
-                accent: 'bg-amber-500',
-              },
-              {
-                step: '5',
-                title: 'Team reviews and ships',
-                desc: 'Flagged sessions are reviewed in the dashboard or CLI. Once approved, the status check goes green and the PR can be merged. Full audit trail preserved.',
-                accent: 'bg-green-500',
-              },
-            ].map((s) => (
-              <div key={s.step} className="flex items-start gap-6 relative">
-                <div className={`${s.accent} w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-lg shrink-0 z-10 shadow-lg`}>
-                  {s.step}
-                </div>
-                <div className="pt-1">
-                  <h3 className="text-lg font-semibold text-gray-100">{s.title}</h3>
-                  <p className="mt-1.5 text-sm text-gray-400 leading-relaxed max-w-2xl">{s.desc}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
+      <div className="border-t border-white/[0.06]" />
 
-      {/* Use Cases */}
-      <section id="use-cases" className="bg-gray-950/50 border-y border-gray-800/50">
-        <div className="max-w-6xl mx-auto px-6 py-24">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl font-bold">Built for every stakeholder</h2>
-            <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-              Whether you&apos;re responsible for engineering velocity, security compliance,
-              or developer experience &mdash; Origin has you covered.
+      {/* ─── SOLO vs TEAM ─────────────────────────────────────────────────── */}
+      <section className="max-w-5xl mx-auto px-6 py-24">
+        <FadeIn>
+          <div className="flex items-end justify-between mb-16">
+            <div>
+              <p className="text-xs text-gray-600 font-mono mb-2">4.0</p>
+              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Two modes,<br />one platform</h2>
+            </div>
+            <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
+              Solo is free forever. Team adds governance. Use both at the same time.
             </p>
           </div>
-          <div className="grid md:grid-cols-3 gap-8">
-            {CAPABILITIES.map((cap) => (
-              <div key={cap.category} className="card">
-                <div className="flex items-center gap-2 mb-4">
-                  <span className="text-xl">{cap.icon}</span>
-                  <h3 className="text-lg font-semibold text-indigo-400">{cap.category}</h3>
-                </div>
-                <ul className="space-y-3">
-                  {cap.items.map((item, i) => (
-                    <li key={i} className="flex items-start gap-2 text-sm text-gray-400">
-                      <span className="text-green-400 mt-0.5 flex-shrink-0">✓</span>
-                      {item}
-                    </li>
-                  ))}
-                </ul>
+        </FadeIn>
+
+        <div className="grid md:grid-cols-2 gap-6">
+          <FadeIn>
+            <div className="border border-emerald-500/15 rounded-lg p-8 bg-emerald-500/[0.02] h-full">
+              <div className="flex items-center gap-3 mb-2">
+                <span className="text-xs font-mono text-gray-700">4.1</span>
+                <h3 className="text-lg font-semibold text-gray-100">Origin Solo</h3>
+                <span className="text-xs text-emerald-400 font-medium">Free</span>
               </div>
-            ))}
-          </div>
+              <p className="text-sm text-gray-500 mb-6">Your personal AI coding dashboard.</p>
+              <div className="space-y-3 text-sm text-gray-400">
+                {['Unlimited repos, sessions, and agents', 'Full session replay with prompts and diffs', 'Token usage and cost tracking per model', 'CLI tools \u2014 blame, stats, diff, prompts', 'Works with Claude, Gemini, Codex, Cursor'].map((item) => (
+                  <div key={item} className="flex items-start gap-2.5"><span className="text-emerald-400/60 mt-0.5 text-xs">+</span>{item}</div>
+                ))}
+              </div>
+              <div className="mt-8">
+                <Link to="/register?type=developer" className="text-sm text-emerald-400 hover:text-emerald-300 transition-colors">Get free account &rarr;</Link>
+              </div>
+            </div>
+          </FadeIn>
+
+          <FadeIn delay={100}>
+            <div className="border border-indigo-500/15 rounded-lg p-8 bg-indigo-500/[0.02] h-full">
+              <div className="flex items-center gap-3 mb-2">
+                <span className="text-xs font-mono text-gray-700">4.2</span>
+                <h3 className="text-lg font-semibold text-gray-100">Origin Team</h3>
+                <span className="text-xs text-indigo-400 font-medium">$29/user/mo</span>
+              </div>
+              <p className="text-sm text-gray-500 mb-6">Governance for engineering teams.</p>
+              <div className="space-y-3 text-sm text-gray-400">
+                {['Everything in Solo, plus:', 'Centralized team dashboard \u2014 all sessions', 'Policy enforcement \u2014 model, cost, file limits', 'GitHub & GitLab PR checks and merge gating', 'Audit logs, compliance reports, Slack alerts'].map((item, i) => (
+                  <div key={item} className="flex items-start gap-2.5"><span className="text-indigo-400/60 mt-0.5 text-xs">{i === 0 ? '~' : '+'}</span>{item}</div>
+                ))}
+              </div>
+              <div className="mt-8">
+                <Link to="/register?type=org" className="text-sm text-indigo-400 hover:text-indigo-300 transition-colors">Start 14-day trial &rarr;</Link>
+              </div>
+            </div>
+          </FadeIn>
         </div>
       </section>
 
-      {/* Comparison */}
-      <section id="comparison" className="max-w-6xl mx-auto px-6 py-24">
-        <div className="text-center mb-16">
-          <h2 className="text-3xl font-bold">How Origin compares</h2>
-          <p className="text-gray-400 mt-3 max-w-xl mx-auto">
-            Origin is the most complete AI coding governance platform. Here&apos;s how it stacks up.
-          </p>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border border-gray-800 rounded-xl overflow-hidden">
-            <thead>
-              <tr className="bg-gray-800/60">
-                <th className="text-left px-5 py-3 text-gray-400 font-medium w-1/4">Capability</th>
-                <th className="text-center px-5 py-3 text-indigo-400 font-semibold">Origin</th>
-                <th className="text-center px-5 py-3 text-gray-400 font-medium">Entire</th>
-                <th className="text-center px-5 py-3 text-gray-400 font-medium">git-ai</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800">
-              {[
-                ['Session recording & replay', true, true, false],
-                ['Prompt & transcript capture', true, true, false],
-                ['AI blame (line-level attribution)', true, false, true],
-                ['Multi-agent support (4+ agents)', true, true, true],
-                ['Team dashboard', true, false, true],
-                ['Open-source CLI', true, true, true],
-                ['Policy enforcement (file, model, cost)', true, false, false],
-                ['Secret & credential scanning', true, false, false],
-                ['PR/MR merge gating', true, false, false],
-                ['Budget controls & cost alerts', true, false, false],
-                ['System prompt injection (cross-agent)', true, false, false],
-                ['Per-file attribution context injection', true, false, false],
-                ['Compliance audit trail (SOC 2 / ISO)', true, false, false],
-                ['AI rework & churn detection', true, false, false],
-                ['Intent review for PRs', true, false, false],
-              ].map(([feature, origin, entire, gitai], i) => (
-                <tr key={i} className={i % 2 === 0 ? 'bg-gray-900/30' : ''}>
-                  <td className="px-5 py-2.5 text-gray-300">{feature as string}</td>
-                  <td className="px-5 py-2.5 text-center">{origin ? <span className="text-green-400">✓</span> : <span className="text-gray-600">&mdash;</span>}</td>
-                  <td className="px-5 py-2.5 text-center">{entire ? <span className="text-green-400">✓</span> : <span className="text-gray-600">&mdash;</span>}</td>
-                  <td className="px-5 py-2.5 text-center">{gitai ? <span className="text-green-400">✓</span> : <span className="text-gray-600">&mdash;</span>}</td>
+      <div className="border-t border-white/[0.06]" />
+
+      {/* ─── COMPARISON ───────────────────────────────────────────────────── */}
+      <section className="max-w-4xl mx-auto px-6 py-24">
+        <FadeIn>
+          <div className="mb-12">
+            <p className="text-xs text-gray-600 font-mono mb-2">5.0</p>
+            <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">How Origin compares</h2>
+          </div>
+        </FadeIn>
+
+        <FadeIn delay={100}>
+          <div className="border border-white/[0.06] rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-white/[0.06]">
+                  <th className="text-left px-5 py-3 text-gray-600 font-normal text-xs">Capability</th>
+                  <th className="text-center px-5 py-3 text-indigo-400 font-medium text-xs">Origin</th>
+                  <th className="text-center px-5 py-3 text-gray-600 font-normal text-xs">Entire</th>
+                  <th className="text-center px-5 py-3 text-gray-600 font-normal text-xs">git-ai</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {[
+                  ['Session recording & replay', true, true, false],
+                  ['AI blame (line-level attribution)', true, false, true],
+                  ['Multi-agent support', true, true, true],
+                  ['Policy enforcement', true, false, false],
+                  ['Secret & credential scanning', true, false, false],
+                  ['PR/MR merge gating', true, false, false],
+                  ['Budget controls', true, false, false],
+                  ['Cross-agent attribution context', true, false, false],
+                  ['Compliance audit trail', true, false, false],
+                  ['Rework & churn detection', true, false, false],
+                ].map(([feature, origin, entire, gitai], i) => (
+                  <tr key={i} className="border-t border-white/[0.03]">
+                    <td className="px-5 py-2.5 text-gray-400 text-xs">{feature as string}</td>
+                    <td className="px-5 py-2.5 text-center">{origin ? <span className="text-indigo-400 text-xs">Yes</span> : <span className="text-gray-700">&mdash;</span>}</td>
+                    <td className="px-5 py-2.5 text-center">{entire ? <span className="text-gray-500 text-xs">Yes</span> : <span className="text-gray-700">&mdash;</span>}</td>
+                    <td className="px-5 py-2.5 text-center">{gitai ? <span className="text-gray-500 text-xs">Yes</span> : <span className="text-gray-700">&mdash;</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </FadeIn>
       </section>
 
-      {/* Install / CTA */}
-      <section id="setup" className="bg-gradient-to-b from-gray-950 to-indigo-950/20 border-t border-gray-800/50">
-        <div className="max-w-4xl mx-auto px-6 py-24 text-center">
-          <h2 className="text-3xl font-bold mb-4">
-            Get started in 30 seconds
-          </h2>
-          <p className="text-gray-400 mb-10 max-w-xl mx-auto">
-            Install the CLI and run <code className="text-indigo-400">origin init</code>. Works standalone — no server, no account.
-            Add <code className="text-indigo-400">origin login</code> later for team dashboard and policies.
-          </p>
+      <div className="border-t border-white/[0.06]" />
 
-          <div className="max-w-2xl mx-auto mb-12">
+      {/* ─── CTA ──────────────────────────────────────────────────────────── */}
+      <section className="relative overflow-hidden">
+        <div className="absolute inset-0 pointer-events-none">
+          <div className="aurora-blob" style={{ width: 500, height: 500, background: 'linear-gradient(135deg, #6366f1, #a855f7)', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', filter: 'blur(100px)', opacity: 0.05 }} />
+        </div>
+
+        <div className="relative max-w-3xl mx-auto px-6 py-28 text-center">
+          <FadeIn>
+            <h2 className="text-4xl font-bold text-gray-100 tracking-[-0.02em] mb-4">
+              Get started in 30 seconds
+            </h2>
+            <p className="text-gray-500 mb-10 max-w-md mx-auto text-lg">
+              Install the CLI and run <code className="text-indigo-400/70">origin init</code>. Solo is free forever.
+            </p>
+
             <InstallCommand />
 
-            <div className="grid sm:grid-cols-3 gap-6 mt-10">
-              {[
-                { step: '1', title: 'Install CLI', desc: 'One npm command' },
-                { step: '2', title: 'origin init', desc: 'Detects agents & installs hooks' },
-                { step: '3', title: 'Code with AI', desc: 'Everything tracked automatically' },
-              ].map((s) => (
-                <div key={s.step} className="text-center">
-                  <div className="w-10 h-10 rounded-full bg-indigo-600 text-white font-bold text-sm flex items-center justify-center mx-auto mb-3">
-                    {s.step}
-                  </div>
-                  <p className="font-semibold text-gray-200 text-sm">{s.title}</p>
-                  <p className="text-xs text-gray-500 mt-1">{s.desc}</p>
-                </div>
-              ))}
+            <div className="mt-10 flex items-center justify-center gap-4">
+              <Link
+                to="/register?type=developer"
+                className="group relative px-8 py-3 text-sm font-medium rounded-lg bg-indigo-600 text-white overflow-hidden transition-all hover:shadow-lg hover:shadow-indigo-500/25"
+              >
+                <span className="relative z-10">Start free &rarr;</span>
+                <div className="absolute inset-0 bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+              </Link>
+              <Link
+                to="/register?type=org"
+                className="px-8 py-3 text-sm font-medium rounded-lg text-gray-300 border border-white/[0.1] hover:bg-white/[0.05] hover:border-white/[0.15] transition-all"
+              >
+                Team trial &rarr;
+              </Link>
             </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <Link
-              to="/register"
-              className="btn-primary px-10 py-3 text-base font-semibold rounded-xl shadow-lg shadow-indigo-600/20"
-            >
-              Create your account &rarr;
-            </Link>
-            <a
-              href="https://github.com/dolobanko/origin-cli"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm text-gray-400 hover:text-gray-100 transition-colors"
-            >
-              Star on GitHub &rarr;
-            </a>
-          </div>
+          </FadeIn>
         </div>
       </section>
     </>

@@ -1,0 +1,32 @@
+# Origin Session Check — GitHub Actions
+# Verifies every commit in a PR has a linked Origin session.
+# Add this to .github/workflows/origin-ci-check.yml
+
+name: Origin Session Check
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  origin-session-check:
+    name: origin/session-required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for merge-base detection
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Origin CLI
+        run: npm install -g @anthropic/origin-cli
+
+      - name: Fetch Origin git notes
+        run: git fetch origin refs/notes/origin:refs/notes/origin || true
+
+      - name: Run session check
+        env:
+          ORIGIN_API_KEY: ${{ secrets.ORIGIN_API_KEY }}
+        run: origin ci session-check --since ${{ github.event.pull_request.base.sha }}

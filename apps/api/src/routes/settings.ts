@@ -352,7 +352,7 @@ router.get('/chat', async (req: AuthRequest, res: Response) => {
     if (!config) {
       return res.json({
         configured: false,
-        provider: 'anthropic',
+        llmProvider: 'anthropic',
         model: 'claude-sonnet-4-20250514',
         hasKey: !!process.env.ANTHROPIC_API_KEY,
         source: process.env.ANTHROPIC_API_KEY ? 'environment' : 'none',
@@ -364,7 +364,7 @@ router.get('/chat', async (req: AuthRequest, res: Response) => {
 
     res.json({
       configured: true,
-      provider: 'anthropic',
+      llmProvider: settings.llmProvider || 'anthropic',
       model: settings.model || 'claude-sonnet-4-20250514',
       hasKey: true,
       source: 'org',
@@ -375,24 +375,53 @@ router.get('/chat', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Valid models per provider
+const VALID_MODELS: Record<string, string[]> = {
+  anthropic: [
+    'claude-sonnet-4-20250514',
+    'claude-opus-4-20250514',
+    'claude-haiku-4-5-20251001',
+  ],
+  openai: [
+    'gpt-4o',
+    'gpt-4o-mini',
+    'gpt-4.1',
+    'gpt-4.1-mini',
+    'gpt-4.1-nano',
+    'o3',
+    'o3-mini',
+    'o4-mini',
+  ],
+  google: [
+    'gemini-2.5-pro',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+  ],
+};
+
+const DEFAULT_MODELS: Record<string, string> = {
+  anthropic: 'claude-sonnet-4-20250514',
+  openai: 'gpt-4o',
+  google: 'gemini-2.5-flash',
+};
+
+const VALID_PROVIDERS = ['anthropic', 'openai', 'google'];
+
 // PUT /api/settings/chat — save chat config
 router.put('/chat', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
-    const { apiKey, model } = req.body;
+    const { apiKey, model, llmProvider } = req.body;
 
     if (!apiKey) {
       return res.status(400).json({ error: 'API key is required' });
     }
 
-    const validModels = [
-      'claude-sonnet-4-20250514',
-      'claude-opus-4-20250514',
-      'claude-haiku-4-5-20251001',
-    ];
-    const selectedModel = validModels.includes(model) ? model : 'claude-sonnet-4-20250514';
+    const provider = VALID_PROVIDERS.includes(llmProvider) ? llmProvider : 'anthropic';
+    const providerModels = VALID_MODELS[provider] || VALID_MODELS.anthropic;
+    const selectedModel = providerModels.includes(model) ? model : (DEFAULT_MODELS[provider] || providerModels[0]);
 
-    const settings = JSON.stringify({ model: selectedModel });
+    const settings = JSON.stringify({ model: selectedModel, llmProvider: provider });
 
     const existing = await prisma.integrationConfig.findFirst({
       where: { orgId, provider: 'llm' },
@@ -415,11 +444,11 @@ router.put('/chat', requireRole('ADMIN'), async (req: AuthRequest, res: Response
         userId: req.user!.id,
         action: 'CHAT_CONFIG_UPDATED',
         resource: 'llm',
-        metadata: JSON.stringify({ model: selectedModel }),
+        metadata: JSON.stringify({ model: selectedModel, llmProvider: provider }),
       },
     });
 
-    res.json({ ok: true, model: selectedModel });
+    res.json({ ok: true, model: selectedModel, llmProvider: provider });
   } catch (err) {
     console.error('Save chat config error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -430,27 +459,63 @@ router.put('/chat', requireRole('ADMIN'), async (req: AuthRequest, res: Response
 router.post('/chat/test', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
-    const { apiKey } = req.body;
+    const { apiKey, llmProvider } = req.body;
 
     const keyToTest = apiKey || (await getOrgLLMKey(orgId)) || process.env.ANTHROPIC_API_KEY;
     if (!keyToTest) {
       return res.status(400).json({ error: 'No API key provided or configured' });
     }
 
-    // Make a minimal API call to verify the key
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': keyToTest,
-        'anthropic-version': '2023-06-01',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 10,
-        messages: [{ role: 'user', content: 'ping' }],
-      }),
-    });
+    const provider = llmProvider || (await getOrgLLMProvider(orgId));
+    let response: globalThis.Response;
+
+    switch (provider) {
+      case 'openai':
+        response = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${keyToTest}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            max_tokens: 10,
+            messages: [{ role: 'user', content: 'ping' }],
+          }),
+        });
+        break;
+
+      case 'google':
+        response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${keyToTest}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: 'ping' }] }],
+              generationConfig: { maxOutputTokens: 10 },
+            }),
+          },
+        );
+        break;
+
+      case 'anthropic':
+      default:
+        response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'x-api-key': keyToTest,
+            'anthropic-version': '2023-06-01',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 10,
+            messages: [{ role: 'user', content: 'ping' }],
+          }),
+        });
+        break;
+    }
 
     if (!response.ok) {
       const err = await response.text();
@@ -485,6 +550,21 @@ export async function getOrgLLMModel(orgId: string): Promise<string> {
     return settings.model || 'claude-sonnet-4-20250514';
   } catch {
     return 'claude-sonnet-4-20250514';
+  }
+}
+
+export async function getOrgLLMProvider(orgId: string): Promise<'anthropic' | 'openai' | 'google'> {
+  const config = await prisma.integrationConfig.findFirst({
+    where: { orgId, provider: 'llm' },
+  });
+  if (!config) return 'anthropic';
+  try {
+    const settings = JSON.parse(config.settings);
+    const p = settings.llmProvider;
+    if (p === 'openai' || p === 'google') return p;
+    return 'anthropic';
+  } catch {
+    return 'anthropic';
   }
 }
 

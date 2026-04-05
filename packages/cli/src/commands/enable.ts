@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
 import { execSync } from 'child_process';
-import { loadConfig, saveRepoConfig, isConnectedMode } from '../config.js';
+import { loadConfig, saveConfig, saveRepoConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 
@@ -433,7 +433,7 @@ function detectAgents(gitRoot: string): AgentType[] {
 // Only the 4 officially supported agents — Windsurf/Aider coming soon
 const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex'];
 
-export async function enableCommand(opts: { agent?: string; global?: boolean; link?: string }): Promise<void> {
+export async function enableCommand(opts: { agent?: string; global?: boolean; link?: string; agentSlug?: string }): Promise<void> {
   // Standalone mode doesn't require login
   const config = loadConfig();
 
@@ -549,6 +549,15 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
       saveRepoConfig(basePath, { agent: opts.link });
       console.log(chalk.gray(`    Wrote .origin.json with agent "${opts.link}" anyway.`));
     }
+  }
+
+  // If --agent-slug provided, save per-tool slug override to config
+  if (opts.agentSlug && config) {
+    const toolSlug = agentsToEnable[0]; // Primary agent being enabled
+    if (!config.agentSlugs) config.agentSlugs = {};
+    config.agentSlugs[toolSlug] = opts.agentSlug;
+    saveConfig(config);
+    console.log(chalk.green(`\n  ✓ Agent slug override: ${toolSlug} → ${opts.agentSlug}`));
   }
 
   console.log(chalk.bold('\n📋 Next steps:\n'));

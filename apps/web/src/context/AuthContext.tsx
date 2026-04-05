@@ -8,7 +8,9 @@ interface AuthState {
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string, orgName: string, orgSlug: string) => Promise<void>;
+  registerDeveloper: (email: string, password: string, name: string) => Promise<string | undefined>;
   setSession: (token: string, user: User) => void;
+  updateUser: (u: User) => void;
   logout: () => void;
 }
 
@@ -62,9 +64,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  const registerDeveloper = useCallback(
+    async (email: string, password: string, name: string): Promise<string | undefined> => {
+      setError(null);
+      try {
+        const res = await api.registerDeveloper(email, password, name);
+        localStorage.setItem('origin_token', res.token);
+        setUser(res.user);
+        return res.apiKey; // Return auto-generated API key for solo developers
+      } catch (err: any) {
+        setError(err.message ?? 'Registration failed');
+        throw err;
+      }
+    },
+    [],
+  );
+
   const setSession = useCallback((token: string, userData: User) => {
     localStorage.setItem('origin_token', token);
     setUser(userData);
+  }, []);
+
+  const updateUser = useCallback((u: User) => {
+    setUser(u);
   }, []);
 
   const logout = useCallback(() => {
@@ -73,7 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, error, login, register, setSession, logout }}>
+    <AuthContext.Provider value={{ user, loading, error, login, register, registerDeveloper, setSession, updateUser, logout }}>
       {children}
     </AuthContext.Provider>
   );

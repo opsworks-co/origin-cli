@@ -52,6 +52,9 @@ export interface SessionState {
   trailId?: string;           // Trail ID if session is linked to an active trail
   status?: string;            // RUNNING | ENDED | COMPLETED
   endedAt?: string;           // ISO timestamp when session ended
+  teamProfile?: string;       // Multi-account: team profile name (if session was duplicated to team)
+  teamSessionId?: string;     // Multi-account: session ID on team account
+  agentSlug?: string;         // Agent slug that created this session (claude-code, gemini, codex, etc.)
 }
 
 // ─── Git Directory ─────────────────────────────────────────────────────────

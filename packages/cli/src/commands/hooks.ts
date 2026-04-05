@@ -1,7 +1,7 @@
-import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
+import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir, loadSecondaryProfiles, loadProfile } from '../config.js';
 import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
-import { api } from '../api.js';
+import { api, requestWithProfile } from '../api.js';
 import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, setActivePricing } from '../transcript.js';
 import {
   saveSessionState,
@@ -52,6 +52,49 @@ function debugLog(event: string, message: string, data?: any): void {
   } catch {
     // Never fail on logging
   }
+}
+
+// ─── Multi-account helpers ──────────────────────────────────────────────
+// Dev account is ALWAYS the primary — developer always sees their sessions.
+// Team account is an optional secondary — if the team key accepts the session
+// (repo in scope), it gets a duplicate so team admins can see it too.
+
+/**
+ * Fire-and-forget: update session on the team profile (if this session has one).
+ */
+function updateTeamSession(state: SessionState, data: any): void {
+  if (!state.teamSessionId || !state.teamProfile) return;
+  const profile = loadProfile(state.teamProfile);
+  if (!profile) return;
+  requestWithProfile(profile, `/api/mcp/session/${state.teamSessionId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  }).catch(() => {});
+}
+
+/**
+ * Fire-and-forget: ping session on the team profile.
+ */
+function pingTeamSession(state: SessionState): void {
+  if (!state.teamSessionId || !state.teamProfile) return;
+  const profile = loadProfile(state.teamProfile);
+  if (!profile) return;
+  requestWithProfile(profile, `/api/mcp/session/${state.teamSessionId}/ping`, {
+    method: 'POST',
+  }).catch(() => {});
+}
+
+/**
+ * Fire-and-forget: end session on the team profile.
+ */
+function endTeamSession(state: SessionState, endPayload: any): void {
+  if (!state.teamSessionId || !state.teamProfile) return;
+  const profile = loadProfile(state.teamProfile);
+  if (!profile) return;
+  requestWithProfile(profile, '/api/mcp/session/end', {
+    method: 'POST',
+    body: JSON.stringify({ ...endPayload, sessionId: state.teamSessionId }),
+  }).catch(() => {});
 }
 
 // ─── Diff Filtering ─────────────────────────────────────────────────────
@@ -279,14 +322,20 @@ const AGENT_MODEL_PATTERNS: Record<string, RegExp> = {
 };
 
 /**
- * Check if a session's model field matches the given agent slug.
+ * Check if a session belongs to the given agent slug.
+ * Primary: match on stored agentSlug (reliable, set at session creation).
+ * Fallback: match model name against known patterns.
  */
 function sessionMatchesAgent(session: SessionState, agentSlug: string): boolean {
-  const model = (session.model || '').toLowerCase();
   const slug = agentSlug.toLowerCase();
+  // Primary: exact agent slug match (most reliable)
+  if (session.agentSlug) {
+    return session.agentSlug.toLowerCase() === slug;
+  }
+  // Fallback: model-based matching for legacy sessions without agentSlug
+  const model = (session.model || '').toLowerCase();
   const pattern = AGENT_MODEL_PATTERNS[slug];
   if (pattern) return pattern.test(model);
-  // Fallback for unknown agents: exact substring match
   return model.includes(slug) || slug.includes(model);
 }
 
@@ -414,18 +463,15 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
     }
 
     // Multiple sessions, no agent-specific match found.
-    // If we know the agent slug, pick the most recent session — it's better than
-    // returning null (which causes auto-create and duplicate sessions).
+    // Do NOT fall back to most recent — that causes cross-contamination
+    // (e.g. Codex writing to Gemini's session).
     if (agentSlug) {
-      const best = sessions[0]; // already sorted by startedAt desc
-      debugLog('findStateForHook', 'multiple sessions, using most recent', {
+      debugLog('findStateForHook', 'no agent match among multiple sessions', {
         agentSlug,
-        sessionId: best.sessionId,
-        model: best.model,
-        tag: best.sessionTag,
         totalSessions: sessions.length,
+        sessionSlugs: sessions.map(s => ({ id: s.sessionId, slug: s.agentSlug, model: s.model })),
       });
-      return { state: best, saveCwd: best.repoPath || repoPath };
+      return null;
     }
 
     // No agent slug at all — truly ambiguous
@@ -613,9 +659,10 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
   debugLog('session-start', 'repo path resolved', { repoPath, hookCwd, discovered: repoPath !== getGitRoot(hookCwd) });
 
-  // Resolve agent slug: .origin.json → agentSlugs override → hook command slug → saved default → undefined
+  // Resolve agent slug: hook command (actual tool) → .origin.json → saved default
+  // Hook command (claude-code, gemini, etc.) always wins — it's the actual tool running.
   const repoConfig = loadRepoConfig(repoPath);
-  const baseSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
+  const baseSlug = agentSlug || repoConfig?.agent || agentConfig.agentSlug || undefined;
   // Apply per-tool slug override from config (e.g. agentSlugs.claude-code = "claude-front")
   // Check both the hook command slug and the resolved base slug as override keys
   const slugOverrides = config?.agentSlugs || {};
@@ -844,7 +891,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           }
           const sessionFiles = Array.from(sessionFilesSet);
           const durationMs = Date.now() - new Date(existing.startedAt).getTime();
-          await api.updateSession(existing.sessionId, {
+          const reuseUpdateData = {
             filesChanged: sessionFiles.length > 0 ? sessionFiles : undefined,
             durationMs: durationMs > 0 ? durationMs : undefined,
             promptChanges: existing.completedPromptMappings.map(pm => ({
@@ -854,7 +901,9 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
               uncommittedDiff: (pm.uncommittedDiff || '').slice(0, 100_000),
             })),
             status: 'RUNNING',
-          });
+          };
+          await api.updateSession(existing.sessionId, reuseUpdateData);
+          updateTeamSession(existing, reuseUpdateData);
           debugLog('session-start', 'sent accumulated promptChanges (reuse)', {
             count: existing.completedPromptMappings.length, sessionFiles: sessionFiles.length,
           });
@@ -995,44 +1044,70 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
 
   try {
-    let sessionId: string;
+    let sessionId: string = `local-${crypto.randomUUID()}`;
     let agentSystemPrompt: string | undefined;
     let activePolicies: string[] | undefined;
     let enforcementRules: any[] | undefined;
     let apiStartedAt: string | undefined;
 
+    let teamProfile: string | undefined;
+    let teamSessionId: string | undefined;
+
     if (connected) {
-      // ── Connected mode: register session with Origin platform ──
+      // ── Connected mode: always create on primary (dev) account ──
+      const startPayload = {
+        machineId: agentConfig.machineId,
+        prompt: '',
+        model,
+        repoPath,
+        repoUrl: repoUrl || undefined,
+        agentSlug: finalAgentSlug,
+        branch: branch || undefined,
+        hostname: agentConfig.hostname || undefined,
+      };
+
       try {
-        debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, repoUrl, agentSlug: finalAgentSlug, branch });
-        const result = await api.startSession({
-          machineId: agentConfig.machineId,
-          prompt: '',
-          model,
-          repoPath,
-          repoUrl: repoUrl || undefined,
-          agentSlug: finalAgentSlug,
-          branch: branch || undefined,
-          hostname: agentConfig.hostname || undefined,
-        });
+        debugLog('session-start', 'calling api.startSession (primary)', { machineId: agentConfig.machineId, model, repoPath, agentSlug: finalAgentSlug });
+        const result = await api.startSession(startPayload);
         sessionId = result.sessionId;
         agentSystemPrompt = result.agentSystemPrompt || undefined;
         activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
         enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
-        // Use server startedAt if returned (deduped sessions preserve original start time)
-        if (result.startedAt) {
-          apiStartedAt = result.startedAt;
-        }
-        debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt });
+        if (result.startedAt) apiStartedAt = result.startedAt;
+        debugLog('session-start', 'primary session created', { sessionId, deduped: !!result.startedAt });
       } catch (apiErr: any) {
-        // API failed — fall back to local session instead of aborting entirely
-        debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
+        debugLog('session-start', 'primary API failed, falling back to local', { message: apiErr.message });
         process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
-        sessionId = `local-${crypto.randomUUID()}`;
+      }
+
+      // ── Also try team profiles (secondary — fire-and-forget duplicate) ──
+      const secondaryProfiles = loadSecondaryProfiles();
+      for (const profile of secondaryProfiles) {
+        try {
+          const secResult = await requestWithProfile(profile, '/api/mcp/session/start', {
+            method: 'POST',
+            body: JSON.stringify(startPayload),
+          });
+          teamProfile = profile.name;
+          teamSessionId = secResult.sessionId;
+          // If team returns policies/system prompt, merge them
+          if (secResult.agentSystemPrompt && !agentSystemPrompt) {
+            agentSystemPrompt = secResult.agentSystemPrompt;
+          }
+          if (secResult.activePolicies?.length > 0 && !activePolicies?.length) {
+            activePolicies = secResult.activePolicies;
+          }
+          if (secResult.enforcementRules?.length > 0 && !enforcementRules?.length) {
+            enforcementRules = secResult.enforcementRules;
+          }
+          debugLog('session-start', `team session created on "${profile.name}"`, { teamSessionId });
+          break; // Only one team profile
+        } catch (secErr: any) {
+          debugLog('session-start', `team profile "${profile.name}" rejected (expected for non-team repos)`, { error: secErr.message });
+        }
       }
     } else {
       // ── Standalone mode: generate local session ID ──
-      sessionId = `local-${crypto.randomUUID()}`;
       debugLog('session-start', 'standalone session', { sessionId });
     }
 
@@ -1053,6 +1128,9 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       agentSystemPrompt,
       activePolicies,
       enforcementRules,
+      teamProfile: teamProfile || undefined,
+      teamSessionId: teamSessionId || undefined,
+      agentSlug: finalAgentSlug || agentSlug || undefined,
     };
 
     // Save to tagged file — each concurrent session gets its own state file
@@ -1263,7 +1341,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           saveAgentConfig(autoAgentConfig);
         }
         const repoConfig = loadRepoConfig(repoPath);
-        const baseSlug = repoConfig?.agent || agentSlug || autoAgentConfig.agentSlug || undefined;
+        const baseSlug = agentSlug || repoConfig?.agent || autoAgentConfig.agentSlug || undefined;
         const autoSlugs = autoConfig?.agentSlugs || {};
         const slugOverride = (agentSlug && autoSlugs[agentSlug]) || (baseSlug && autoSlugs[baseSlug]) || undefined;
         const finalAgentSlug = slugOverride || baseSlug;
@@ -1277,30 +1355,48 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           repoUrl = execSync('git remote get-url origin', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
         } catch { /* no remote — that's fine */ }
 
-        let sessionId: string;
+        let sessionId: string = `local-${crypto.randomUUID()}`;
         let agentSystemPrompt: string | undefined;
         let activePolicies: string[] | undefined;
         let enforcementRules: any[] | undefined;
+        let autoTeamProfile: string | undefined;
+        let autoTeamSessionId: string | undefined;
+        const autoStartPayload = {
+          machineId: autoAgentConfig.machineId,
+          prompt: input.prompt || '',
+          model,
+          repoPath,
+          repoUrl: repoUrl || undefined,
+          agentSlug: finalAgentSlug,
+          branch: branch || undefined,
+        };
         if (isConnectedMode() && autoConfig) {
-          const result = await api.startSession({
-            machineId: autoAgentConfig.machineId,
-            prompt: input.prompt || '',
-            model,
-            repoPath,
-            repoUrl: repoUrl || undefined,
-            agentSlug: finalAgentSlug,
-            branch: branch || undefined,
-          });
-          sessionId = result.sessionId;
-          agentSystemPrompt = result.agentSystemPrompt || undefined;
-          activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
-          enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
-          debugLog('user-prompt-submit', 'api returned policies', { sessionId, policiesCount: activePolicies?.length || 0, rulesCount: enforcementRules?.length || 0 });
-        } else {
-          sessionId = `local-${crypto.randomUUID()}`;
+          try {
+            const result = await api.startSession(autoStartPayload);
+            sessionId = result.sessionId;
+            agentSystemPrompt = result.agentSystemPrompt || undefined;
+            activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
+            enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+          } catch (primaryErr: any) {
+            debugLog('user-prompt-submit', 'primary start failed', { message: primaryErr.message });
+          }
+          // Also try team profiles
+          const secProfiles = loadSecondaryProfiles();
+          for (const profile of secProfiles) {
+            try {
+              const secResult = await requestWithProfile(profile, '/api/mcp/session/start', {
+                method: 'POST', body: JSON.stringify(autoStartPayload),
+              });
+              autoTeamProfile = profile.name;
+              autoTeamSessionId = secResult.sessionId;
+              debugLog('user-prompt-submit', `team session on "${profile.name}"`, { teamSessionId: secResult.sessionId });
+              break;
+            } catch { /* team rejected — normal for non-team repos */ }
+          }
+          debugLog('user-prompt-submit', 'api returned', { sessionId, teamSessionId: autoTeamSessionId });
         }
 
-        debugLog('user-prompt-submit', 'auto-created session', { sessionId, sessionTag: autoTag, repoPath, repoUrl });
+        debugLog('user-prompt-submit', 'auto-created session', { sessionId, sessionTag: autoTag, repoPath, repoUrl, agentSlug: finalAgentSlug });
         state = {
           sessionId,
           claudeSessionId: input.session_id || '',
@@ -1318,10 +1414,13 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           agentSystemPrompt,
           activePolicies,
           enforcementRules,
+          teamProfile: autoTeamProfile || undefined,
+          teamSessionId: autoTeamSessionId || undefined,
+          agentSlug: finalAgentSlug || agentSlug || undefined,
         };
         saveSessionState(state, repoPath, autoTag);
 
-        // Start heartbeat for auto-created sessions so they don't get cleaned up as stale
+        // Start heartbeat for auto-created sessions
         const connected = isConnectedMode();
         if (connected && autoConfig) {
           const stateFile = getStatePath(repoPath, autoTag);
@@ -1493,7 +1592,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           : state.prompts;
         const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
 
-        await api.updateSession(state.sessionId, {
+        const promptUpdateData = {
           prompt: joinedPrompt || undefined,
           transcript: displayTranscript || undefined,
           model: model && model !== 'unknown' && model !== 'default' ? model : undefined,
@@ -1505,7 +1604,6 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           durationMs: durationMs > 0 ? durationMs : undefined,
           costUsd: costUsd > 0 ? costUsd : undefined,
           status: 'RUNNING',
-          // Send accumulated per-prompt diffs so they appear immediately on the platform
           promptChanges: state.completedPromptMappings && state.completedPromptMappings.length > 0
             ? state.completedPromptMappings.map(pm => ({
                 ...pm,
@@ -1513,8 +1611,12 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                 diff: (pm.diff || '').slice(0, 100_000),
               }))
             : undefined,
-        });
-        debugLog('user-prompt-submit', 'heartbeat sent', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd, promptChanges: state.completedPromptMappings?.length || 0 });
+        };
+        await api.updateSession(state.sessionId, promptUpdateData);
+        await api.pingSession(state.sessionId);
+        updateTeamSession(state, promptUpdateData);
+        pingTeamSession(state);
+        debugLog('user-prompt-submit', 'heartbeat sent', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd, teamSessionId: state.teamSessionId });
 
         // Restart heartbeat daemon if it died (e.g., Mac sleep killed it)
         if (!isHeartbeatAlive(state.sessionId)) {
@@ -1837,7 +1939,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         costUsd,
         promptMappings: promptMappings.length,
       });
-      await api.updateSession(state.sessionId, {
+      const stopUpdateData = {
         prompt: joinedPrompt || undefined,
         transcript: displayTranscript || undefined,
         model: model !== 'unknown' ? model : undefined,
@@ -1855,13 +1957,15 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
               diff: (pm.diff || '').slice(0, 100_000),
             }))
           : undefined,
-      });
-      debugLog('stop', 'update complete');
+      };
+      await api.updateSession(state.sessionId, stopUpdateData);
+      updateTeamSession(state, stopUpdateData);
+      debugLog('stop', 'update complete', { teamSessionId: state.teamSessionId });
 
       // Send a heartbeat ping to keep the server-side session alive
-      // (prevents the server's stale session cleanup from ending it)
       try {
         await api.pingSession(state.sessionId);
+        pingTeamSession(state);
       } catch { /* non-fatal */ }
     }
 
@@ -2135,7 +2239,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         promptMappings: promptMappings.length,
       });
 
-      await api.endSession({
+      const endPayload = {
         sessionId: state.sessionId,
         prompt: joinedPrompt || undefined,
         summary: parsed.summary || undefined,
@@ -2156,8 +2260,11 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
             }))
           : undefined,
         branch: getBranch(hookCwd) || undefined,
-      });
-      debugLog('session-end', 'api.endSession complete');
+      };
+
+      await api.endSession(endPayload);
+      endTeamSession(state, endPayload);
+      debugLog('session-end', 'api.endSession complete', { teamSessionId: state.teamSessionId });
     }
 
     // Auto-attach session to active trail (safety net for auto-created sessions)

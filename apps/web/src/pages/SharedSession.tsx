@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getSharedSession } from '../api';
 import { formatCost, formatDuration, getStatusBadgeClass } from '../utils';
+import { LogoMark } from '../components/Logo';
 
 interface SharedSessionData {
   id: string;
@@ -110,9 +111,7 @@ export default function SharedSession() {
       <nav className="border-b border-gray-800/50 sticky top-0 bg-gray-950/90 backdrop-blur-sm z-50">
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-sm">
-              O
-            </div>
+            <LogoMark size={32} />
             <span className="text-lg font-semibold">Origin</span>
           </Link>
           <span className="text-sm text-gray-500">Shared Session</span>

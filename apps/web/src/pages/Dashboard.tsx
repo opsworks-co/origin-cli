@@ -170,11 +170,14 @@ export default function Dashboard() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationConfig[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
+  const [agents, setAgents] = useState<api.Agent[]>([]);
+  const [apiKeys, setApiKeys] = useState<{ id: string; repoScopes: any[]; agentScopes: any[] }[]>([]);
   const [activeSessions, setActiveSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [complianceScore, setComplianceScore] = useState<number | null>(null);
-  const [onboardingDismissed, setOnboardingDismissed] = useState(() => localStorage.getItem('origin_onboarding_dismissed') === 'true');
+  const onboardingKey = `origin_onboarding_dismissed_${user?.orgId || ''}`;
+  const [onboardingDismissed, setOnboardingDismissed] = useState(() => localStorage.getItem(onboardingKey) === 'true');
 
   useEffect(() => {
     Promise.all([
@@ -184,14 +187,18 @@ export default function Dashboard() {
       api.getIntegrations().catch(() => []),
       api.getPolicies().catch(() => []),
       api.getActiveSessions().catch(() => ({ sessions: [] })),
+      api.getAgents().catch(() => []),
+      api.getApiKeys().catch(() => []),
     ])
-      .then(([s, sess, m, integ, pol, active]) => {
+      .then(([s, sess, m, integ, pol, active, ag, keys]) => {
         setStats(s);
         setSessions(sess.sessions);
         setMachines(m);
         setIntegrations(integ);
         setPolicies(pol);
         setActiveSessions(active.sessions);
+        setAgents(ag);
+        setApiKeys(keys);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -230,34 +237,70 @@ export default function Dashboard() {
   if (!stats) return null;
 
   // ── Onboarding checklist ─────────────────────────────────────────────────
+  const hasGitHubConnected = integrations.some((i) => i.provider === 'github');
+  const hasRepos = (stats.totalRepos ?? 0) > 0;
+  const hasAgents = agents.length > 0;
+  const hasApiKey = apiKeys.length > 0;
+  const hasApiKeyScoped = apiKeys.some((k) => k.repoScopes.length > 0 || k.agentScopes.length > 0);
+  const hasSessions = (stats.totalSessions ?? 0) > 0;
+  const hasPolicies = policies.length > 0;
+
   const setupSteps = [
     {
-      label: 'Connect your first repo',
-      description: 'Link a GitHub repo or add a local repository to start tracking AI-authored code.',
-      done: (stats.totalRepos ?? 0) > 0,
+      label: 'Connect GitHub',
+      description: 'Install the GitHub App or add a personal access token to enable repo imports and PR checks.',
+      done: hasGitHubConnected,
+      link: '/settings?tab=integrations',
+      cta: 'Connect',
+      icon: '🔗',
+    },
+    {
+      label: 'Import a repository',
+      description: 'Import repos from GitHub or add one manually. Origin will track all AI-authored changes here.',
+      done: hasRepos,
       link: '/repos',
-      cta: 'Add repo',
+      cta: 'Import',
+      icon: '📦',
     },
     {
-      label: 'Install the CLI',
-      description: 'Run origin login then origin init on your dev machine to start capturing sessions.',
-      done: machines.length > 0,
+      label: 'Register an agent',
+      description: 'Define which AI coding tool you use — Claude Code, Cursor, Gemini, Codex, or others.',
+      done: hasAgents,
+      link: '/agents',
+      cta: 'Create agent',
+      icon: '🤖',
+    },
+    {
+      label: 'Create an API key',
+      description: 'Generate an API key for the CLI to authenticate and send session data to Origin.',
+      done: hasApiKey,
+      link: '/iam',
+      cta: 'Create key',
+      icon: '🔑',
+    },
+    {
+      label: 'Assign permissions',
+      description: 'Scope your API key to specific repos and agents to control what data it can access.',
+      done: hasApiKeyScoped,
+      link: '/iam',
+      cta: 'Configure',
+      icon: '⚙️',
+    },
+    {
+      label: 'Install the CLI & run a session',
+      description: 'Install the Origin CLI, run origin login, then origin init in your repo. Use any AI agent — the session is captured automatically.',
+      done: hasSessions,
       link: '/docs#quick-start',
-      cta: 'View setup guide',
+      cta: 'Setup guide',
+      icon: '⚡',
     },
     {
-      label: 'Create your first policy',
-      description: 'Set governance rules to control which files AI can touch, cost limits, and required reviews.',
-      done: policies.length > 0,
+      label: 'Create a policy',
+      description: 'Set governance rules — restrict file access, enforce reviews, set cost limits, or filter content.',
+      done: hasPolicies,
       link: '/policies',
       cta: 'Create policy',
-    },
-    {
-      label: 'Invite a team member',
-      description: 'Add your team so they can review AI-generated code and share governance policies.',
-      done: (stats.totalUsers ?? 0) > 1,
-      link: '/settings?tab=team',
-      cta: 'Invite team',
+      icon: '🛡️',
     },
   ];
 
@@ -283,73 +326,69 @@ export default function Dashboard() {
       <InsightBanner stats={stats} />
 
       {/* ── Onboarding Checklist ─────────────────────────────────────────── */}
-      {!allSetUp && !onboardingDismissed && (
-        <div className="card">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-100">Get started with Origin</h2>
-              <p className="text-sm text-gray-500 mt-0.5">
-                Complete these steps to set up AI code governance for your team.
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500">{completedSteps}/{setupSteps.length}</span>
-              <div className="w-24 h-2 bg-gray-700 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-green-500 rounded-full transition-all duration-500"
-                  style={{ width: `${(completedSteps / setupSteps.length) * 100}%` }}
-                />
+      {!allSetUp && !onboardingDismissed && (() => {
+        const firstIncomplete = setupSteps.findIndex((s) => !s.done);
+        return (
+          <div className="relative">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-3">
+                <h2 className="text-sm font-medium text-gray-400">Setup</h2>
+                <div className="flex items-center gap-1.5">
+                  <div className="w-20 h-1 bg-gray-700/50 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-indigo-500 to-green-500 rounded-full transition-all duration-700"
+                      style={{ width: `${(completedSteps / setupSteps.length) * 100}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-gray-600">{completedSteps}/{setupSteps.length}</span>
+                </div>
               </div>
               <button
-                onClick={() => { localStorage.setItem('origin_onboarding_dismissed', 'true'); setOnboardingDismissed(true); }}
+                onClick={() => { localStorage.setItem(onboardingKey, 'true'); setOnboardingDismissed(true); }}
                 className="text-gray-600 hover:text-gray-400 transition-colors"
                 title="Dismiss"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                </svg>
+                <X className="w-3.5 h-3.5" />
               </button>
             </div>
-          </div>
-          <div className="space-y-2">
-            {setupSteps.map((step, i) => (
-              <div
-                key={i}
-                className={`flex items-center gap-4 rounded-lg px-4 py-3 transition-colors ${
-                  step.done
-                    ? 'bg-green-900/10 border border-green-800/30'
-                    : 'bg-gray-800/50 border border-gray-700/50'
-                }`}
-              >
-                {/* Step indicator */}
-                <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
-                  step.done
-                    ? 'bg-green-500/20 text-green-400'
-                    : 'bg-gray-700/50 text-gray-500'
-                }`}>
-                  {step.done ? '\u2713' : i + 1}
-                </div>
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <p className={`text-sm font-medium ${step.done ? 'text-green-400 line-through decoration-green-700' : 'text-gray-200'}`}>
-                    {step.label}
-                  </p>
-                  <p className="text-xs text-gray-500 mt-0.5">{step.description}</p>
-                </div>
-                {/* CTA */}
-                {!step.done && (
+            <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+              {setupSteps.map((step, i) => {
+                const isCurrent = i === firstIncomplete;
+                return (
                   <Link
+                    key={i}
                     to={step.link}
-                    className="flex-shrink-0 px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                    className={`group flex-shrink-0 rounded-lg px-3 py-2.5 transition-all duration-200 border w-[160px] ${
+                      step.done
+                        ? 'bg-green-900/8 border-green-800/20'
+                        : isCurrent
+                          ? 'bg-indigo-900/15 border-indigo-500/30 ring-1 ring-indigo-500/20'
+                          : 'bg-gray-800/30 border-gray-700/30 opacity-50 hover:opacity-75'
+                    }`}
                   >
-                    {step.cta}
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-sm">{step.icon}</span>
+                      {step.done ? (
+                        <svg className="w-3.5 h-3.5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
+                      ) : (
+                        <span className={`text-[9px] font-bold ${isCurrent ? 'text-indigo-400' : 'text-gray-600'}`}>{i + 1}</span>
+                      )}
+                    </div>
+                    <p className={`text-[11px] font-medium leading-tight ${step.done ? 'text-green-400' : isCurrent ? 'text-gray-200' : 'text-gray-500'}`}>
+                      {step.label}
+                    </p>
+                    {!step.done && isCurrent && (
+                      <span className="inline-block mt-1.5 text-[10px] font-medium text-indigo-400">{step.cta} →</span>
+                    )}
                   </Link>
-                )}
-              </div>
-            ))}
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── Action Banner (removed) ──────────────────────────────────────── */}
 

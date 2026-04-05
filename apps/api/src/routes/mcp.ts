@@ -31,6 +31,8 @@ interface McpRequest extends Request {
   mcpUserId?: string;  // User ID resolved from the API key (for per-member attribution)
   apiKeyId?: string;   // ID of the API key that created this session
   apiKeyName?: string; // Name of the API key (for standalone key attribution)
+  keyType?: string;    // "solo" = auto-generated dev key, "team" = org-managed key
+  accountType?: string; // "developer" or "org"
   repoScopes?: string[]; // Repo IDs this API key is scoped to (empty = unrestricted)
   agentScopes?: string[]; // Agent IDs this API key is scoped to (empty = no agent access)
 }
@@ -49,6 +51,7 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
       where: { keyHash },
       include: {
         org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
+        user: { select: { accountType: true } },
         repoScopes: { select: { repoId: true } },
         agentScopes: { select: { agentId: true } },
       },
@@ -61,6 +64,8 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     req.orgId = found.orgId;
     req.apiKeyId = found.id;
     req.apiKeyName = found.name;
+    req.keyType = (found as any).keyType || 'team';
+    req.accountType = (found as any).user?.accountType || 'org';
     req.repoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
     req.agentScopes = found.agentScopes.map((s: { agentId: string }) => s.agentId);
     // Resolve user for session attribution:
@@ -90,6 +95,8 @@ router.get('/whoami', async (req: McpRequest, res: Response) => {
       orgName: org.name,
       orgSlug: org.slug,
       apiKeyName: req.apiKeyName,
+      keyType: req.keyType || 'team',
+      accountType: req.accountType || 'org',
       repoScopes: req.repoScopes || [],
       agentScopes: req.agentScopes || [],
       agentCount,
@@ -214,17 +221,36 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     }
 
+    const isSoloKey = req.keyType === 'solo' || req.accountType === 'developer';
+
     if (!repo) {
-      const orgRepos = await prisma.repo.findMany({ where: { orgId }, select: { path: true } });
-      console.log('[session/start] REPO NOT FOUND', { repoPath, repoUrl, orgRepoPaths: orgRepos.map(r => r.path) });
-      return res.status(403).json({
-        error: 'Repository not registered',
-        message: `"${repoPath}" is not registered in Origin. Ask your admin to add it first.`,
-      });
+      if (isSoloKey) {
+        // Solo developer: auto-register the repo
+        const repoName = repoPath.split('/').filter(Boolean).pop() || repoPath;
+        try {
+          repo = await prisma.repo.create({
+            data: { orgId, name: repoName, path: repoPath, provider: repoUrl ? 'github' : 'local' },
+          });
+        } catch {
+          // Race condition — repo was created between findFirst and create
+          repo = await prisma.repo.findFirst({ where: { orgId, path: repoPath } });
+        }
+        if (!repo) {
+          return res.status(500).json({ error: 'Failed to auto-register repo' });
+        }
+        console.log('[session/start] auto-registered repo for solo dev', { repoPath, repoId: repo.id });
+      } else {
+        const orgRepos = await prisma.repo.findMany({ where: { orgId }, select: { path: true } });
+        console.log('[session/start] REPO NOT FOUND', { repoPath, repoUrl, orgRepoPaths: orgRepos.map(r => r.path) });
+        return res.status(403).json({
+          error: 'Repository not registered',
+          message: `"${repoPath}" is not registered in Origin. Ask your admin to add it first.`,
+        });
+      }
     }
 
-    // Enforce repo-scoped API key access — no scopes = no access
-    if (!req.repoScopes || req.repoScopes.length === 0 || !req.repoScopes.includes(repo.id)) {
+    // Enforce repo-scoped API key access — solo keys have unrestricted access
+    if (!isSoloKey && (!req.repoScopes || req.repoScopes.length === 0 || !req.repoScopes.includes(repo.id))) {
       return res.status(403).json({
         error: 'Access denied',
         message: `This API key does not have access to repo "${repo.name}". Assign repo access in Settings → API Keys.`,
@@ -255,25 +281,39 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     let agent: { id: string; systemPrompt?: string | null; securityRulesEnabled?: boolean; securityRules?: string | null; slug?: string; name?: string; versions?: { version: number }[] } | null = null;
     const agentSelect = { id: true, systemPrompt: true, securityRulesEnabled: true, securityRules: true, slug: true, name: true, versions: { orderBy: { version: 'desc' as const }, take: 1, select: { version: true } } };
 
-    // Enforce API key → agent scope: no scopes = no access
-    if (!req.agentScopes || req.agentScopes.length === 0) {
-      return res.status(403).json({
-        error: 'No agent access',
-        message: 'This API key has no agent assignments. Assign agents in Settings → API Keys.',
-      });
+    // Enforce API key → agent scope: solo keys skip this check
+    if (!isSoloKey) {
+      if (!req.agentScopes || req.agentScopes.length === 0) {
+        return res.status(403).json({
+          error: 'No agent access',
+          message: 'This API key has no agent assignments. Assign agents in Settings → API Keys.',
+        });
+      }
     }
 
     // Get all agents this API key has access to
-    const allowedAgents = await prisma.agent.findMany({
-      where: { orgId, id: { in: req.agentScopes }, status: 'ACTIVE' },
-      select: agentSelect,
-    });
+    const allowedAgents = isSoloKey
+      ? await prisma.agent.findMany({ where: { orgId, status: 'ACTIVE' }, select: agentSelect })
+      : await prisma.agent.findMany({ where: { orgId, id: { in: req.agentScopes }, status: 'ACTIVE' }, select: agentSelect });
 
-    if (allowedAgents.length === 0) {
+    if (allowedAgents.length === 0 && !isSoloKey) {
       return res.status(403).json({
         error: 'No active agents',
         message: 'This API key is assigned to agents that no longer exist or are inactive.',
       });
+    }
+
+    // Solo developer with no agents: auto-create one based on the tool type
+    if (allowedAgents.length === 0 && isSoloKey) {
+      const autoSlug = agentSlug || 'ai-agent';
+      const autoName = autoSlug.split('-').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      const created = await prisma.agent.upsert({
+        where: { orgId_slug: { orgId, slug: autoSlug } },
+        create: { orgId, name: autoName, slug: autoSlug, model: model || 'unknown', status: 'ACTIVE' },
+        update: { status: 'ACTIVE' },
+      });
+      agent = { ...created, systemPrompt: null, securityRulesEnabled: false, securityRules: null, versions: [] };
+      console.log('[session/start] auto-created agent for solo dev', { slug: autoSlug, agentId: created.id });
     }
 
     if (agentSlug) {
@@ -304,21 +344,34 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     }
 
-    // If no match by slug, and key has exactly one agent, use that
-    if (!agent && allowedAgents.length === 1) {
-      agent = allowedAgents[0];
+    // Solo dev: auto-create the correct agent if no match found
+    if (!agent && isSoloKey && agentSlug) {
+      const autoSlug = agentSlug.toLowerCase();
+      const autoName = autoSlug.split('-').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      const created = await prisma.agent.upsert({
+        where: { orgId_slug: { orgId, slug: autoSlug } },
+        create: { orgId, name: autoName, slug: autoSlug, model: model || 'unknown', status: 'ACTIVE' },
+        update: { status: 'ACTIVE' },
+      });
+      agent = { ...created, systemPrompt: null, securityRulesEnabled: false, securityRules: null, versions: [] };
+      console.log('[session/start] auto-created agent for solo dev', { slug: autoSlug, agentId: created.id });
     }
 
-    // If still no match and multiple agents, pick the best match or reject
-    if (!agent) {
-      return res.status(400).json({
-        error: 'Ambiguous agent',
-        message: `Could not determine which agent to use for tool "${agentSlug || 'unknown'}". This API key has access to: ${allowedAgents.map((a) => a.name).join(', ')}. Ensure agent names match the tool type (e.g. "Claude" for claude-code, "Gemini" for gemini).`,
+    // Team key: reject if no matching agent — API key must have explicit agent permission
+    if (!agent && !isSoloKey) {
+      return res.status(403).json({
+        error: 'Agent not permitted',
+        message: `This API key does not have access to agent "${agentSlug || 'unknown'}". Available agents: ${allowedAgents.map((a) => a.name).join(', ')}. Assign the correct agent in Settings → API Keys.`,
       });
     }
 
-    // Check model allowlist policies (with agent/machine/repo scope)
-    const modelCheck = await enforceSessionStart(orgId, model, {
+    // Solo fallback
+    if (!agent) {
+      agent = allowedAgents[0] || null;
+    }
+
+    // Check model allowlist policies (with agent/machine/repo scope) — skip for solo devs
+    const modelCheck = isSoloKey ? { allowed: true, violations: [] } : await enforceSessionStart(orgId, model, {
       agentId: agent?.id ?? null,
       machineId: machine?.id ?? null,
       repoId: repo.id,

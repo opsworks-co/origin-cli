@@ -5,6 +5,7 @@ import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent, TeamMemb
 import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../utils';
 import { Archive, ArchiveRestore, GitBranch } from 'lucide-react';
 import { useToast } from '../components/Toast';
+import { useAuth } from '../context/AuthContext';
 
 function statusBadge(status: string) {
   return <span className={getStatusBadgeClass(status)}>{status}</span>;
@@ -19,6 +20,8 @@ const LIMIT = 20;
 export default function Sessions() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { user } = useAuth();
+  const isDev = user?.accountType === 'developer';
   const [sessions, setSessions] = useState<Session[]>([]);
   const [total, setTotal] = useState(0);
   const [aggregates, setAggregates] = useState<any>(null);
@@ -330,7 +333,8 @@ export default function Sessions() {
             )}
           </div>
 
-          {/* View mode toggle */}
+          {/* View mode toggle — team only (PR grouping) */}
+          {!isDev && (
           <div className="flex rounded-lg border border-gray-700 overflow-hidden">
             <button
               onClick={() => setViewMode('list')}
@@ -353,6 +357,7 @@ export default function Sessions() {
               By PR
             </button>
           </div>
+          )}
 
           {/* Archive toggle */}
           <button
@@ -400,6 +405,7 @@ export default function Sessions() {
             <p className="text-xs text-gray-500 uppercase tracking-wider">Tool Calls</p>
             <p className="text-lg font-semibold text-gray-200 mt-0.5">{analytics.totalTools}</p>
           </div>
+          {!isDev && (
           <div className="card py-3 px-4">
             <p className="text-xs text-gray-500 uppercase tracking-wider">Avg Score</p>
             <p className={`text-lg font-semibold mt-0.5 ${
@@ -410,12 +416,15 @@ export default function Sessions() {
               {analytics.avgScore ?? '—'}
             </p>
           </div>
+          )}
+          {!isDev && (
           <div className="card py-3 px-4">
             <p className="text-xs text-gray-500 uppercase tracking-wider">Flagged</p>
             <p className={`text-lg font-semibold mt-0.5 ${analytics.flaggedCount > 0 ? 'text-red-400' : 'text-green-400'}`}>
               {analytics.flaggedCount}
             </p>
           </div>
+          )}
         </div>
       )}
 
@@ -438,6 +447,7 @@ export default function Sessions() {
             <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
           </select>
 
+          {!isDev && (
           <select
             value={status}
             onChange={(e) => setStatus(e.target.value)}
@@ -450,6 +460,7 @@ export default function Sessions() {
             <option value="rejected">Rejected</option>
             <option value="flagged">Flagged</option>
           </select>
+          )}
 
           <select
             value={repoId}
@@ -477,6 +488,7 @@ export default function Sessions() {
             ))}
           </select>
 
+          {!isDev && (
           <select
             value={userId}
             onChange={(e) => setUserId(e.target.value)}
@@ -489,6 +501,7 @@ export default function Sessions() {
               </option>
             ))}
           </select>
+          )}
 
           <select
             value={branch}
@@ -521,6 +534,8 @@ export default function Sessions() {
             {selectedIds.size} session{selectedIds.size !== 1 ? 's' : ''} selected
           </span>
           <div className="flex gap-2 ml-auto">
+            {!isDev && (
+            <>
             <button
               onClick={() => handleBulkReview('approved')}
               disabled={bulkLoading}
@@ -542,6 +557,8 @@ export default function Sessions() {
             >
               {bulkLoading ? 'Processing...' : 'Flag Selected'}
             </button>
+            </>
+            )}
             <button
               onClick={handleBulkArchive}
               disabled={bulkLoading}
@@ -693,7 +710,7 @@ export default function Sessions() {
                   <SortHeader field="model">Model</SortHeader>
                   <th className="px-6 py-3 font-medium">Status</th>
                   <th className="px-6 py-3 font-medium">Agent</th>
-                  <th className="px-6 py-3 font-medium">User</th>
+                  {!isDev && <th className="px-6 py-3 font-medium">User</th>}
                   <th className="px-6 py-3 font-medium">Repo</th>
                   <th className="px-6 py-3 font-medium">Branch</th>
                   <SortHeader field="duration" align="right">
@@ -705,7 +722,7 @@ export default function Sessions() {
                   <SortHeader field="cost" align="right">
                     Cost
                   </SortHeader>
-                  <SortHeader field="score">Score</SortHeader>
+                  {!isDev && <SortHeader field="score">Score</SortHeader>}
                   <SortHeader field="date" align="right">
                     Age
                   </SortHeader>
@@ -761,10 +778,12 @@ export default function Sessions() {
                         {s.agentName ?? <span className="text-gray-600">—</span>}
                         {s.agentVersion && <span className="text-gray-600 ml-1">v{s.agentVersion}</span>}
                       </td>
+                      {!isDev && (
                       <td className="px-6 py-3 text-gray-400 text-xs">
                         {s.userName || s.commitAuthor ||
                           <span className="text-gray-600">—</span>}
                       </td>
+                      )}
                       <td className="px-6 py-3 text-gray-400">{s.repoName ?? '—'}</td>
                       <td className="px-6 py-3 text-gray-400 text-xs max-w-[140px] truncate">
                         {s.branch ? (
@@ -785,6 +804,7 @@ export default function Sessions() {
                       <td className="px-6 py-3 text-right text-gray-300 tabular-nums">
                         {formatCost(s.costUsd)}
                       </td>
+                      {!isDev && (
                       <td className="px-6 py-3">
                         {s.review?.score != null ? (
                           <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full ${
@@ -803,6 +823,7 @@ export default function Sessions() {
                           <span className="text-xs text-gray-600">—</span>
                         )}
                       </td>
+                      )}
                       <td className="px-6 py-3 text-right text-gray-500">
                         {timeAgo(s.createdAt)}
                       </td>

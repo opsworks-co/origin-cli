@@ -1,0 +1,17 @@
+# Origin Session Check — GitLab CI
+# Verifies every commit in a merge request has a linked Origin session.
+# Add this to your .gitlab-ci.yml
+
+origin-session-check:
+  stage: test
+  image: node:20
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  before_script:
+    - npm install -g @anthropic/origin-cli
+    - git fetch origin refs/notes/origin:refs/notes/origin || true
+  script:
+    - origin ci session-check --since $CI_MERGE_REQUEST_DIFF_BASE_SHA
+  variables:
+    ORIGIN_API_KEY: $ORIGIN_API_KEY
+    GIT_DEPTH: 0  # Full history needed for merge-base detection

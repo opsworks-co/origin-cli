@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Session } from '../api';
+import { useAuth } from '../context/AuthContext';
 import UnifiedSessionView from '../components/UnifiedSessionView';
 import AiBlameView from '../components/AiBlameView';
 import AskAuthorPanel from '../components/AskAuthorPanel';
@@ -15,6 +16,8 @@ function statusBadge(status: string) {
 export default function SessionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isDev = user?.accountType === 'developer';
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -47,6 +50,19 @@ export default function SessionDetail() {
 
   // End session
   const [ending, setEnding] = useState(false);
+
+  // Share
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+
+  // Export
+  const [showExportMenu, setShowExportMenu] = useState(false);
+
+  // Replay
+  const [replayActive, setReplayActive] = useState(false);
+  const [replayIndex, setReplayIndex] = useState(0);
+  const [replayPlaying, setReplayPlaying] = useState(false);
 
   // Real-time watch
   const [elapsed, setElapsed] = useState(0);
@@ -159,6 +175,117 @@ export default function SessionDetail() {
     }
   };
 
+  // Replay auto-advance
+  useEffect(() => {
+    if (!replayActive || !replayPlaying || !session?.promptChanges?.length) return;
+    const timer = setInterval(() => {
+      setReplayIndex((prev) => {
+        if (prev >= session.promptChanges!.length - 1) { setReplayPlaying(false); return prev; }
+        return prev + 1;
+      });
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [replayActive, replayPlaying, session?.promptChanges?.length]);
+
+  // Replay keyboard controls
+  useEffect(() => {
+    if (!replayActive) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); setReplayPlaying((p) => !p); }
+      if (e.key === 'ArrowRight' && session?.promptChanges?.length) {
+        setReplayPlaying(false);
+        setReplayIndex((p) => Math.min(p + 1, session.promptChanges!.length - 1));
+      }
+      if (e.key === 'ArrowLeft') { setReplayPlaying(false); setReplayIndex((p) => Math.max(p - 1, 0)); }
+      if (e.key === 'Escape') { setReplayActive(false); setReplayPlaying(false); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [replayActive, session?.promptChanges?.length]);
+
+  const handleShare = async () => {
+    if (!id) return;
+    setSharing(true);
+    try {
+      const result = await api.shareSession(id);
+      const url = `https://getorigin.io/s/${result.slug}`;
+      setShareUrl(url);
+      await navigator.clipboard.writeText(url);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 3000);
+    } catch (err: any) {
+      setError(err.message);
+    }
+    setSharing(false);
+  };
+
+  const handleUnshare = async () => {
+    if (!id) return;
+    try {
+      await api.unshareSession(id);
+      setShareUrl(null);
+    } catch {}
+  };
+
+  const exportAsMarkdown = () => {
+    if (!session) return;
+    const date = new Date(session.createdAt).toISOString().split('T')[0];
+    const lines = [
+      `# Origin Session — ${session.repoName || 'Unknown Repo'}`,
+      '',
+      `| Field | Value |`,
+      `|-------|-------|`,
+      `| Agent | ${session.agentName || 'Unknown'} |`,
+      `| Model | ${session.model} |`,
+      `| Duration | ${formatDuration(session.durationMs)} |`,
+      `| Cost | ${formatCost(session.costUsd)} |`,
+      `| Tokens | ${session.tokensUsed.toLocaleString()} |`,
+      `| Lines | +${session.linesAdded} / -${session.linesRemoved} |`,
+      `| Branch | ${session.branch || '—'} |`,
+      `| Date | ${new Date(session.createdAt).toLocaleString()} |`,
+      '',
+    ];
+    if (session.promptChanges?.length) {
+      lines.push('## Prompts', '');
+      session.promptChanges.forEach((p: any, i: number) => {
+        lines.push(`### Prompt ${i + 1}`, '', p.promptText || '_(empty)_', '');
+        if (p.filesChanged) {
+          try {
+            const files = typeof p.filesChanged === 'string' ? JSON.parse(p.filesChanged) : p.filesChanged;
+            if (files.length) lines.push('**Files:** ' + files.join(', '), '');
+          } catch {}
+        }
+        if (p.diff) {
+          lines.push('```diff', p.diff.slice(0, 5000), '```', '');
+        }
+      });
+    }
+    lines.push('---', '*Exported from [Origin](https://getorigin.io)*');
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `origin-session-${id?.slice(0, 8)}-${date}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setShowExportMenu(false);
+  };
+
+  const [archiving, setArchiving] = useState(false);
+
+  const handleToggleArchive = async () => {
+    if (!id || !session) return;
+    setArchiving(true);
+    try {
+      await api.archiveSession(id, !session.archived);
+      setSession((prev) => prev ? { ...prev, archived: !prev.archived } : prev);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setArchiving(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!id || !confirm('Delete this session? This cannot be undone.')) return;
     setDeleting(true);
@@ -204,7 +331,7 @@ export default function SessionDetail() {
           &larr; Sessions
         </button>
         <h1 className="text-xl font-bold">{session.repoName ?? 'Session'}</h1>
-        {statusBadge(session.review?.status?.toLowerCase() ?? (session.status === 'RUNNING' ? 'running' : 'ended'))}
+        {statusBadge(isDev ? (session.status === 'RUNNING' ? 'running' : 'ended') : (session.review?.status?.toLowerCase() ?? (session.status === 'RUNNING' ? 'running' : 'ended')))}
         <span className="text-xs text-gray-600 font-mono">{session.commitSha?.slice(0, 8)}</span>
         {session.branch && (
           <span className="text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full font-mono inline-flex items-center gap-1">
@@ -233,37 +360,123 @@ export default function SessionDetail() {
           <span className="text-green-400">+{session.linesAdded}</span>
           <span className="text-red-400">-{session.linesRemoved}</span>
 
-          {/* Toggle details */}
-          <button
-            onClick={() => setShowMeta((prev) => !prev)}
-            className="text-gray-600 hover:text-gray-400 transition-colors ml-1"
-            title="Show details"
-          >
-            {showMeta ? 'Hide details' : 'Details'}
-          </button>
-          {session.status === 'RUNNING' && (
+          {/* Action buttons — pill style */}
+          <div className="flex items-center gap-2 ml-2 flex-wrap">
+            {/* Replay */}
+            {session.promptChanges && session.promptChanges.length > 0 && (
+              <button
+                onClick={() => { setReplayActive(true); setReplayIndex(0); setReplayPlaying(true); }}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-purple-500/15 text-purple-400 border border-purple-500/25 hover:bg-purple-500/25 transition-colors"
+                title="Replay session step by step"
+              >
+                Replay
+              </button>
+            )}
+
+            {/* Export */}
+            <div className="relative">
+              <button
+                onClick={() => setShowExportMenu(!showExportMenu)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-gray-700/50 text-gray-300 border border-gray-600/50 hover:bg-gray-700 transition-colors"
+                title="Export session"
+              >
+                Export
+              </button>
+              {showExportMenu && (
+                <div className="absolute right-0 top-full mt-1 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 py-1 min-w-[160px]">
+                  <button
+                    onClick={exportAsMarkdown}
+                    className="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
+                  >
+                    Export as Markdown
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Share */}
+            {shareUrl ? (
+              <span className="inline-flex items-center gap-1">
+                <button
+                  onClick={() => { navigator.clipboard.writeText(shareUrl); setShareCopied(true); setTimeout(() => setShareCopied(false), 2000); }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/25 transition-colors"
+                  title="Copy share link"
+                >
+                  {shareCopied ? 'Copied!' : 'Copy link'}
+                </button>
+                <button
+                  onClick={handleUnshare}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-gray-700/50 text-gray-400 border border-gray-600/50 hover:bg-red-500/15 hover:text-red-400 hover:border-red-500/25 transition-colors"
+                  title="Revoke share link"
+                >
+                  Unshare
+                </button>
+              </span>
+            ) : (
+              <button
+                onClick={handleShare}
+                disabled={sharing}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-indigo-500/15 text-indigo-400 border border-indigo-500/25 hover:bg-indigo-500/25 transition-colors disabled:opacity-50"
+                title="Create public share link"
+              >
+                {sharing ? 'Sharing...' : 'Share'}
+              </button>
+            )}
+
+            {/* Details */}
             <button
-              onClick={handleEnd}
-              disabled={ending}
-              className="text-amber-500/60 hover:text-amber-400 transition-colors ml-1 disabled:opacity-50"
-              title="End session"
+              onClick={() => setShowMeta((prev) => !prev)}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+                showMeta
+                  ? 'bg-sky-500/15 text-sky-400 border-sky-500/25'
+                  : 'bg-gray-700/50 text-gray-300 border-gray-600/50 hover:bg-gray-700'
+              }`}
+              title="Show details"
             >
-              {ending ? 'Ending...' : 'End'}
+              Details
             </button>
-          )}
-          <button
-            onClick={handleDelete}
-            disabled={deleting}
-            className="text-red-500/60 hover:text-red-400 transition-colors ml-1 disabled:opacity-50"
-            title="Delete session"
-          >
-            {deleting ? 'Deleting...' : 'Delete'}
-          </button>
+
+            {/* End session */}
+            {session.status === 'RUNNING' && (
+              <button
+                onClick={handleEnd}
+                disabled={ending}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-amber-500/15 text-amber-400 border border-amber-500/25 hover:bg-amber-500/25 transition-colors disabled:opacity-50"
+                title="End session"
+              >
+                {ending ? 'Ending...' : 'End'}
+              </button>
+            )}
+
+            {/* Archive / Unarchive */}
+            <button
+              onClick={handleToggleArchive}
+              disabled={archiving}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors disabled:opacity-50 ${
+                session.archived
+                  ? 'bg-amber-500/15 text-amber-400 border-amber-500/25 hover:bg-amber-500/25'
+                  : 'bg-gray-700/50 text-gray-300 border-gray-600/50 hover:bg-gray-700'
+              }`}
+              title={session.archived ? 'Unarchive session' : 'Archive session'}
+            >
+              {archiving ? 'Working...' : session.archived ? 'Unarchive' : 'Archive'}
+            </button>
+
+            {/* Delete */}
+            <button
+              onClick={handleDelete}
+              disabled={deleting}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+              title="Delete session"
+            >
+              {deleting ? 'Deleting...' : 'Delete'}
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* ── AI Quality Score Card (collapsible) ── */}
-      {session.review?.score != null && (
+      {/* ── AI Quality Score Card (collapsible) — team only ── */}
+      {!isDev && session.review?.score != null && (
         <div className={`rounded-lg flex-shrink-0 border ${
           session.review.score >= 80 ? 'bg-green-900/10 border-green-800/30' :
           session.review.score >= 50 ? 'bg-amber-900/10 border-amber-800/30' :
@@ -381,8 +594,8 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* ── Review Reason Banner (for flagged/rejected without score) ── */}
-      {session.review && session.review.score == null && ['flagged', 'rejected'].includes(session.review.status?.toLowerCase()) && (
+      {/* ── Review Reason Banner (for flagged/rejected without score) — team only ── */}
+      {!isDev && session.review && session.review.score == null && ['flagged', 'rejected'].includes(session.review.status?.toLowerCase()) && (
         <div className={`rounded-lg px-4 py-3 flex-shrink-0 border ${
           session.review.status?.toLowerCase() === 'rejected'
             ? 'bg-red-900/20 border-red-800/40'
@@ -763,8 +976,8 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* Review bar */}
-      {(!session.review || session.review.isAutoReview) && (
+      {/* Review bar — team only */}
+      {!isDev && (!session.review || session.review.isAutoReview) && (
         <div className="card flex-shrink-0">
           <div className="flex flex-col sm:flex-row gap-3 items-center">
             <span className="text-sm text-gray-400 whitespace-nowrap">
@@ -821,6 +1034,97 @@ export default function SessionDetail() {
           </div>
         </div>
       )}
+      {/* ── Session Replay Overlay ── */}
+      {replayActive && session.promptChanges && session.promptChanges.length > 0 && (() => {
+        const turns = session.promptChanges.sort((a: any, b: any) => a.promptIndex - b.promptIndex);
+        const turn = turns[replayIndex] as any;
+        const total = turns.length;
+        const files = (() => { try { return typeof turn.filesChanged === 'string' ? JSON.parse(turn.filesChanged) : turn.filesChanged; } catch { return []; } })();
+        return (
+          <div className="fixed inset-0 z-50 bg-gray-950/95 backdrop-blur-sm flex flex-col">
+            {/* Top bar */}
+            <div className="flex items-center justify-between px-6 py-3 border-b border-gray-800">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-semibold text-purple-400">Session Replay</span>
+                <span className="text-xs text-gray-500">{session.repoName} &middot; {session.agentName || session.model}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">Space: play/pause &middot; Arrows: prev/next &middot; Esc: close</span>
+                <button onClick={() => { setReplayActive(false); setReplayPlaying(false); }} className="text-gray-500 hover:text-gray-300 ml-2 text-sm">Close</button>
+              </div>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto px-6 py-6 max-w-4xl mx-auto w-full">
+              <div className="mb-4">
+                <span className="text-[10px] text-gray-500 uppercase tracking-wider">Prompt {replayIndex + 1} of {total}</span>
+              </div>
+              <div className="card mb-4">
+                <div className="text-xs text-gray-500 mb-2">Prompt</div>
+                <p className="text-sm text-gray-200 whitespace-pre-wrap">{turn.promptText || '_(empty)_'}</p>
+              </div>
+              {files.length > 0 && (
+                <div className="mb-4">
+                  <div className="text-xs text-gray-500 mb-2">Files changed</div>
+                  <div className="flex flex-wrap gap-1">
+                    {files.map((f: string, i: number) => (
+                      <span key={i} className="px-2 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 font-mono">{f}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {turn.diff && (
+                <div>
+                  <div className="text-xs text-gray-500 mb-2">Diff</div>
+                  <pre className="bg-gray-900 rounded-lg p-4 text-xs font-mono overflow-x-auto max-h-[400px] overflow-y-auto">
+                    {turn.diff.split('\n').map((line: string, i: number) => (
+                      <div key={i} className={
+                        line.startsWith('+') ? 'text-green-400' :
+                        line.startsWith('-') ? 'text-red-400' :
+                        line.startsWith('@@') ? 'text-cyan-400' :
+                        'text-gray-500'
+                      }>{line}</div>
+                    ))}
+                  </pre>
+                </div>
+              )}
+            </div>
+
+            {/* Progress bar + controls */}
+            <div className="border-t border-gray-800 px-6 py-3">
+              <div className="flex items-center gap-4 max-w-4xl mx-auto">
+                <button
+                  onClick={() => { setReplayPlaying(false); setReplayIndex(Math.max(0, replayIndex - 1)); }}
+                  disabled={replayIndex === 0}
+                  className="text-gray-400 hover:text-gray-200 disabled:text-gray-700 text-sm"
+                >
+                  Prev
+                </button>
+                <button
+                  onClick={() => setReplayPlaying(!replayPlaying)}
+                  className="w-8 h-8 rounded-full bg-purple-600 hover:bg-purple-500 flex items-center justify-center text-white text-sm transition-colors"
+                >
+                  {replayPlaying ? '||' : '\u25B6'}
+                </button>
+                <button
+                  onClick={() => { setReplayPlaying(false); setReplayIndex(Math.min(total - 1, replayIndex + 1)); }}
+                  disabled={replayIndex >= total - 1}
+                  className="text-gray-400 hover:text-gray-200 disabled:text-gray-700 text-sm"
+                >
+                  Next
+                </button>
+                <div className="flex-1 bg-gray-800 rounded-full h-1.5 mx-2">
+                  <div
+                    className="h-1.5 rounded-full bg-purple-500 transition-all duration-300"
+                    style={{ width: `${((replayIndex + 1) / total) * 100}%` }}
+                  />
+                </div>
+                <span className="text-xs text-gray-500 tabular-nums">{replayIndex + 1}/{total}</span>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
