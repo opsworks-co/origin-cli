@@ -68,7 +68,7 @@ interface MyStats {
   totalToolCalls: number;
   thisWeek: { sessions: number; cost: number; tokens: number };
   lastWeek: { sessions: number; cost: number; tokens: number };
-  agentBreakdown: Array<{ agentId: string | null; agentName: string; sessions: number; cost: number }>;
+  agentBreakdown: Array<{ agentId: string | null; agentName: string; sessions: number; cost: number; tokens: number; linesAdded: number; linesRemoved: number }>;
   modelBreakdown: Array<{ model: string; sessions: number; cost: number }>;
   topFiles: Array<{ file: string; count: number }>;
   sessionsByRepo: Array<{ repoId: string; repoName: string; sessions: number }>;
@@ -204,6 +204,131 @@ function Trend({ current, previous }: { current: number; previous: number }) {
         {flat ? '—' : `${up ? '+' : ''}${diff.toFixed(0)}%`}
       </span>
       <span className="text-gray-600">vs last week</span>
+    </div>
+  );
+}
+
+// ── Clickable stat cards with agent breakdown ─────────────────────────────
+type StatKey = 'sessions' | 'tokens' | 'cost' | 'lines';
+
+function StatCardsRow({ stats, fmt, fmtCost }: { stats: MyStats; fmt: (n: number) => string; fmtCost: (n: number) => string }) {
+  const [expanded, setExpanded] = useState<StatKey | null>(null);
+
+  const toggle = (key: StatKey) => setExpanded(expanded === key ? null : key);
+
+  const agentValue = (a: MyStats['agentBreakdown'][0], key: StatKey) => {
+    switch (key) {
+      case 'sessions': return fmt(a.sessions);
+      case 'tokens': return fmt(a.tokens);
+      case 'cost': return fmtCost(a.cost);
+      case 'lines': return `+${fmt(a.linesAdded)} / -${fmt(a.linesRemoved)}`;
+    }
+  };
+
+  const sorted = (key: StatKey) => [...stats.agentBreakdown].sort((a, b) => {
+    switch (key) {
+      case 'sessions': return b.sessions - a.sessions;
+      case 'tokens': return b.tokens - a.tokens;
+      case 'cost': return b.cost - a.cost;
+      case 'lines': return b.linesAdded - a.linesAdded;
+    }
+  });
+
+  const total = (key: StatKey) => {
+    switch (key) {
+      case 'sessions': return stats.totalSessions;
+      case 'tokens': return stats.totalTokens;
+      case 'cost': return stats.totalCost;
+      case 'lines': return stats.totalLinesAdded;
+    }
+  };
+
+  const pct = (a: MyStats['agentBreakdown'][0], key: StatKey) => {
+    const t = total(key);
+    if (!t) return 0;
+    const v = key === 'sessions' ? a.sessions : key === 'tokens' ? a.tokens : key === 'cost' ? a.cost : a.linesAdded;
+    return (v / t) * 100;
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <button onClick={() => toggle('sessions')} className={`card py-4 text-left transition-all hover:border-indigo-500/30 cursor-pointer ${expanded === 'sessions' ? 'border-indigo-500/40 bg-indigo-500/5' : ''}`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+              <Play className="w-3.5 h-3.5" />
+              Sessions
+            </div>
+            <ChevronDown className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded === 'sessions' ? 'rotate-180' : ''}`} />
+          </div>
+          <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalSessions)}</div>
+          <Trend current={stats.thisWeek.sessions} previous={stats.lastWeek.sessions} />
+        </button>
+        <button onClick={() => toggle('tokens')} className={`card py-4 text-left transition-all hover:border-indigo-500/30 cursor-pointer ${expanded === 'tokens' ? 'border-indigo-500/40 bg-indigo-500/5' : ''}`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+              <Zap className="w-3.5 h-3.5" />
+              Tokens
+            </div>
+            <ChevronDown className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded === 'tokens' ? 'rotate-180' : ''}`} />
+          </div>
+          <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalTokens)}</div>
+          <Trend current={stats.thisWeek.tokens} previous={stats.lastWeek.tokens} />
+        </button>
+        <button onClick={() => toggle('cost')} className={`card py-4 text-left transition-all hover:border-indigo-500/30 cursor-pointer ${expanded === 'cost' ? 'border-indigo-500/40 bg-indigo-500/5' : ''}`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+              <DollarSign className="w-3.5 h-3.5" />
+              Cost
+            </div>
+            <ChevronDown className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded === 'cost' ? 'rotate-180' : ''}`} />
+          </div>
+          <div className="text-2xl font-bold text-gray-100">{fmtCost(stats.totalCost)}</div>
+          <Trend current={stats.thisWeek.cost} previous={stats.lastWeek.cost} />
+        </button>
+        <button onClick={() => toggle('lines')} className={`card py-4 text-left transition-all hover:border-indigo-500/30 cursor-pointer ${expanded === 'lines' ? 'border-indigo-500/40 bg-indigo-500/5' : ''}`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+              <Code2 className="w-3.5 h-3.5" />
+              Lines Written
+            </div>
+            <ChevronDown className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded === 'lines' ? 'rotate-180' : ''}`} />
+          </div>
+          <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalLinesAdded)}</div>
+          <div className="text-xs text-gray-600">
+            <span className="text-green-500">+{fmt(stats.totalLinesAdded)}</span>
+            {' / '}
+            <span className="text-red-400">-{fmt(stats.totalLinesRemoved)}</span>
+          </div>
+        </button>
+      </div>
+
+      {/* Agent breakdown panel */}
+      {expanded && stats.agentBreakdown.length > 0 && (
+        <div className="card py-3 px-4 animate-fade-in">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">By Agent</span>
+            <button onClick={() => setExpanded(null)} className="text-gray-600 hover:text-gray-400">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div className="space-y-2">
+            {sorted(expanded).map((a, i) => (
+              <div key={i} className="flex items-center gap-3">
+                <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: agentColor(a.agentName) }} />
+                <span className="text-sm text-gray-300 w-28 truncate">{a.agentName}</span>
+                <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{ width: `${Math.max(pct(a, expanded), 2)}%`, backgroundColor: agentColor(a.agentName) }}
+                  />
+                </div>
+                <span className="text-sm font-medium text-gray-200 w-24 text-right">{agentValue(a, expanded)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -897,44 +1022,7 @@ export default function MyDashboard() {
           ))}
         </div>
       ) : stats ? (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div className="card py-4">
-            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-              <Play className="w-3.5 h-3.5" />
-              Sessions
-            </div>
-            <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalSessions)}</div>
-            <Trend current={stats.thisWeek.sessions} previous={stats.lastWeek.sessions} />
-          </div>
-          <div className="card py-4">
-            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-              <Zap className="w-3.5 h-3.5" />
-              Tokens
-            </div>
-            <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalTokens)}</div>
-            <Trend current={stats.thisWeek.tokens} previous={stats.lastWeek.tokens} />
-          </div>
-          <div className="card py-4">
-            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-              <DollarSign className="w-3.5 h-3.5" />
-              Cost
-            </div>
-            <div className="text-2xl font-bold text-gray-100">{fmtCost(stats.totalCost)}</div>
-            <Trend current={stats.thisWeek.cost} previous={stats.lastWeek.cost} />
-          </div>
-          <div className="card py-4">
-            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-              <Code2 className="w-3.5 h-3.5" />
-              Lines Written
-            </div>
-            <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalLinesAdded)}</div>
-            <div className="text-xs text-gray-600">
-              <span className="text-green-500">+{fmt(stats.totalLinesAdded)}</span>
-              {' / '}
-              <span className="text-red-400">-{fmt(stats.totalLinesRemoved)}</span>
-            </div>
-          </div>
-        </div>
+        <StatCardsRow stats={stats} fmt={fmt} fmtCost={fmtCost} />
       ) : null}
 
       {/* Quick Start Guide — shows when no sessions */}

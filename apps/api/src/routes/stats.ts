@@ -578,7 +578,7 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
       by: ['agentId'],
       where: baseWhere,
       _count: true,
-      _sum: { costUsd: true },
+      _sum: { costUsd: true, tokensUsed: true, linesAdded: true, linesRemoved: true },
     });
     const agentIds = agentGroups.filter((g) => g.agentId).map((g) => g.agentId as string);
     const agents = await prisma.agent.findMany({
@@ -592,6 +592,9 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
       agentName: agentMap.get(g.agentId || '') || g.agentId || 'Unknown',
       sessions: g._count,
       cost: parseFloat((g._sum.costUsd || 0).toFixed(2)),
+      tokens: g._sum.tokensUsed || 0,
+      linesAdded: g._sum.linesAdded || 0,
+      linesRemoved: g._sum.linesRemoved || 0,
     }));
 
     // ── Most modified files (top 10) ────────────────────────────
