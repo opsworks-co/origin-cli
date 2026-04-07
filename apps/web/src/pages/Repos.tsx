@@ -102,6 +102,72 @@ export default function Repos() {
   const [gitlabImportResults, setGitlabImportResults] = useState<GitLabImportResult[]>([]);
   const [gitlabSearchFilter, setGitlabSearchFilter] = useState('');
 
+  // Inline connect state (shown when GitHub App / GitLab OAuth not configured)
+  const [showGitHubPat, setShowGitHubPat] = useState(false);
+  const [showGitLabOAuth, setShowGitLabOAuth] = useState(false);
+  const [ghPatToken, setGhPatToken] = useState('');
+  const [glOAuthAppId, setGlOAuthAppId] = useState('');
+  const [glOAuthSecret, setGlOAuthSecret] = useState('');
+  const [savingPat, setSavingPat] = useState(false);
+  const [savingGlOAuth, setSavingGlOAuth] = useState(false);
+
+  const handleConnectGitHub = async () => {
+    try {
+      const { installUrl } = await api.getGitHubAppInstallUrl();
+      window.location.href = installUrl;
+    } catch {
+      // GitHub App not configured — show PAT form
+      setShowGitHubPat(true);
+      setShowGitLabOAuth(false);
+    }
+  };
+
+  const handleConnectGitLab = async () => {
+    try {
+      const { authorizeUrl } = await api.getGitLabOAuthInstallUrl();
+      window.location.href = authorizeUrl;
+    } catch {
+      // GitLab OAuth not configured — show OAuth setup form
+      setShowGitLabOAuth(true);
+      setShowGitHubPat(false);
+    }
+  };
+
+  const handleSaveGhPat = async () => {
+    if (!ghPatToken.trim()) return;
+    setSavingPat(true);
+    try {
+      await api.createIntegration({ provider: 'github', token: ghPatToken.trim() });
+      setHasGitHub(true);
+      setShowGitHubPat(false);
+      setGhPatToken('');
+      toast('success', 'GitHub connected');
+      handleDiscover();
+    } catch (err: any) {
+      toast('error', err.message || 'Failed to connect GitHub');
+    } finally {
+      setSavingPat(false);
+    }
+  };
+
+  const handleSaveGlOAuth = async () => {
+    if (!glOAuthAppId.trim() || !glOAuthSecret.trim()) return;
+    setSavingGlOAuth(true);
+    try {
+      await api.saveGitLabOAuthConfig({
+        clientId: glOAuthAppId.trim(),
+        clientSecret: glOAuthSecret.trim(),
+        redirectUri: `${window.location.origin}/api/gitlab-oauth/callback`,
+      });
+      // Now redirect to GitLab OAuth
+      const { authorizeUrl } = await api.getGitLabOAuthInstallUrl();
+      window.location.href = authorizeUrl;
+    } catch (err: any) {
+      toast('error', err.message || 'Failed to configure GitLab OAuth');
+      setSavingGlOAuth(false);
+    }
+  };
+
   const fetchRepos = useCallback(() => {
     setLoading(true);
     api
@@ -118,6 +184,17 @@ export default function Repos() {
       setHasGitHub(!!gh);
       const gl = configs.find((c: IntegrationConfig) => c.provider === 'gitlab' && c.hasToken);
       setHasGitLab(!!gl);
+
+      // Auto-discover after OAuth callback
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('github_app') === 'success' && gh) {
+        handleDiscover();
+        window.history.replaceState({}, '', '/repos');
+      }
+      if (params.get('gitlab_oauth') === 'success' && gl) {
+        handleDiscoverGitLab();
+        window.history.replaceState({}, '', '/repos');
+      }
     }).catch(() => {});
   }, [fetchRepos]);
 
@@ -355,21 +432,35 @@ export default function Repos() {
           <div className="flex items-center gap-2">
             {hasGitHub && (
               <button
-                onClick={showImport ? () => setShowImport(false) : () => { handleDiscover(); setShowGitLabImport(false); }}
+                onClick={showImport ? () => setShowImport(false) : () => { handleDiscover(); setShowGitLabImport(false); setShowForm(false); }}
                 className="btn-primary text-sm"
               >
                 {showImport ? 'Close' : 'Import from GitHub'}
               </button>
             )}
+            {!hasGitHub && (
+              <button
+                onClick={() => handleConnectGitHub()}
+                className="text-sm px-3 py-1.5 rounded-lg border border-gray-700 hover:border-gray-600 text-gray-300 hover:text-white transition-colors"
+              >
+                Connect GitHub
+              </button>
+            )}
             {hasGitLab && (
               <button
-                onClick={showGitLabImport ? () => setShowGitLabImport(false) : () => { handleDiscoverGitLab(); setShowImport(false); }}
+                onClick={showGitLabImport ? () => setShowGitLabImport(false) : () => { handleDiscoverGitLab(); setShowImport(false); setShowForm(false); }}
                 className="btn-primary text-sm"
                 style={{ background: '#FC6D26' }}
               >
                 {showGitLabImport ? 'Close' : 'Import from GitLab'}
               </button>
             )}
+            <button
+              onClick={() => { setShowForm(!showForm); setShowImport(false); setShowGitLabImport(false); }}
+              className="text-sm px-3 py-1.5 rounded-lg border border-gray-700 hover:border-indigo-500/50 text-gray-300 hover:text-white transition-colors"
+            >
+              {showForm ? 'Close' : '+ Add Repo'}
+            </button>
           </div>
         )}
       </div>
@@ -673,7 +764,7 @@ export default function Repos() {
                 if (hasGitHub) {
                   handleDiscover();
                 } else {
-                  navigate('/settings?tab=integrations');
+                  handleConnectGitHub();
                 }
               }}
               className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-indigo-500/50 hover:bg-gray-800/50 transition-all group text-left"
@@ -699,7 +790,7 @@ export default function Repos() {
                 if (hasGitLab) {
                   handleDiscoverGitLab();
                 } else {
-                  navigate('/settings?tab=integrations');
+                  handleConnectGitLab();
                 }
               }}
               className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-orange-500/50 hover:bg-gray-800/50 transition-all group text-left"
@@ -741,6 +832,66 @@ export default function Repos() {
               </div>
             </button>
           </div>
+
+          {/* Inline GitHub PAT form */}
+          {showGitHubPat && (
+            <div className="max-w-lg mx-auto mt-4 p-4 rounded-lg border border-gray-700 bg-gray-800/50 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-200">Enter GitHub Personal Access Token</p>
+                <button onClick={() => { setShowGitHubPat(false); setGhPatToken(''); }} className="text-gray-500 hover:text-gray-300">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={ghPatToken}
+                  onChange={(e) => setGhPatToken(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSaveGhPat()}
+                  className="flex-1 rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
+                  placeholder="ghp_xxxxxxxxxxxx"
+                  autoFocus
+                />
+                <button onClick={handleSaveGhPat} disabled={savingPat || !ghPatToken.trim()} className="btn-primary text-sm disabled:opacity-50">
+                  {savingPat ? 'Connecting...' : 'Connect'}
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">Requires <code className="text-gray-400">repo</code> scope</p>
+            </div>
+          )}
+
+          {/* Inline GitLab OAuth setup form */}
+          {showGitLabOAuth && (
+            <div className="max-w-lg mx-auto mt-4 p-4 rounded-lg border border-gray-700 bg-gray-800/50 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-200">Connect GitLab</p>
+                <button onClick={() => { setShowGitLabOAuth(false); setGlOAuthAppId(''); setGlOAuthSecret(''); }} className="text-gray-500 hover:text-gray-300">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+              </div>
+              <p className="text-xs text-gray-500">
+                Create an OAuth Application at <strong className="text-gray-400">GitLab &rarr; Preferences &rarr; Applications</strong> with redirect URI: <code className="text-gray-400">{window.location.origin}/api/gitlab-oauth/callback</code>
+              </p>
+              <input
+                value={glOAuthAppId}
+                onChange={(e) => setGlOAuthAppId(e.target.value)}
+                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
+                placeholder="Application ID"
+                autoFocus
+              />
+              <input
+                type="password"
+                value={glOAuthSecret}
+                onChange={(e) => setGlOAuthSecret(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSaveGlOAuth()}
+                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
+                placeholder="Secret"
+              />
+              <button onClick={handleSaveGlOAuth} disabled={savingGlOAuth || !glOAuthAppId.trim() || !glOAuthSecret.trim()} className="btn-primary text-sm disabled:opacity-50">
+                {savingGlOAuth ? 'Connecting...' : 'Connect to GitLab'}
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="space-y-4">
@@ -834,6 +985,16 @@ export default function Repos() {
                         title="Archive repo"
                       >
                         <Archive className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteTarget(repo);
+                        }}
+                        className="text-xs text-gray-400 hover:text-red-400 transition-colors px-2 py-1 rounded hover:bg-gray-800"
+                        title="Delete repo"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
 
