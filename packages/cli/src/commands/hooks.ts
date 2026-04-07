@@ -1470,7 +1470,15 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     return;
   }
 
-  const prompt = input.prompt || '';
+  const prompt = (input.prompt || '')
+    // Filter out system/hook messages and internal agent tags that aren't real user prompts
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
+    .replace(/<task-id>[\s\S]*?<\/task-id>/g, '')
+    .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/g, '')
+    .replace(/<output-file>[\s\S]*?<\/output-file>/g, '')
+    .replace(/<command-name>[\s\S]*?<\/command-name>/g, '')
+    .trim();
   if (prompt) {
     // ── Per-prompt diff: capture previous prompt's changes before recording new prompt ──
     const repoPath = state.repoPath || hookCwd;

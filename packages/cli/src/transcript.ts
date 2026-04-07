@@ -224,6 +224,14 @@ function cleanPrompt(text: string): string | null {
     .replace(/<ide_opened_file>[\s\S]*?<\/ide_opened_file>/g, '')
     .replace(/<ide_selected_text>[\s\S]*?<\/ide_selected_text>/g, '')
     .replace(/<ide_context>[\s\S]*?<\/ide_context>/g, '')
+    // Strip Claude Code system reminders and hook feedback
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    // Strip internal agent tags that leak when prompts overlap with active execution
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
+    .replace(/<task-id>[\s\S]*?<\/task-id>/g, '')
+    .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/g, '')
+    .replace(/<output-file>[\s\S]*?<\/output-file>/g, '')
+    .replace(/<command-name>[\s\S]*?<\/command-name>/g, '')
     .trim();
 
   if (!cleaned) return null;
