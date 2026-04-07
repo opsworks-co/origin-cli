@@ -41,10 +41,10 @@ const postContent: Record<string, React.ReactNode> = {
         </div>
         <div className="px-5 py-4 font-mono text-sm space-y-1">
           <div className="text-gray-300">~/my-project/</div>
-          <div className="text-gray-500 pl-4">&boxvr;&boxh;&boxh; <span className="text-indigo-400">api/</span> <span className="text-gray-600">&larr; git repo (Express server)</span></div>
-          <div className="text-gray-500 pl-4">&boxvr;&boxh;&boxh; <span className="text-indigo-400">web/</span> <span className="text-gray-600">&larr; git repo (React app)</span></div>
-          <div className="text-gray-500 pl-4">&boxvr;&boxh;&boxh; <span className="text-indigo-400">cli/</span> <span className="text-gray-600">&larr; git repo (CLI tool)</span></div>
-          <div className="text-gray-500 pl-4">&boxur;&boxh;&boxh; <span className="text-gray-600">.claude/</span></div>
+          <div className="text-gray-500 pl-4">├── <span className="text-indigo-400">api/</span> <span className="text-gray-600">&larr; git repo (Express server)</span></div>
+          <div className="text-gray-500 pl-4">├── <span className="text-indigo-400">web/</span> <span className="text-gray-600">&larr; git repo (React app)</span></div>
+          <div className="text-gray-500 pl-4">├── <span className="text-indigo-400">cli/</span> <span className="text-gray-600">&larr; git repo (CLI tool)</span></div>
+          <div className="text-gray-500 pl-4">└── <span className="text-gray-600">.claude/</span></div>
         </div>
       </div>
 
