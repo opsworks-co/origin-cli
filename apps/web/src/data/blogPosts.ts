@@ -20,6 +20,24 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Multi-Repo Sessions: Track AI Coding Across Your Entire Workspace',
+    slug: 'multi-repo-sessions',
+    date: '2026-04-07',
+    author: 'Artem Dolobanko',
+    tags: ['developer-tools', 'solo', 'ai-coding', 'open-source', 'productivity'],
+    excerpt:
+      'Working in a monorepo or multi-project workspace? Origin now detects all git repos under your working directory and tracks changes across all of them in a single session. No config needed.',
+  },
+  {
+    title: 'Merge Sessions & Commits Tab: See the Full Picture of Your AI Coding',
+    slug: 'merge-sessions',
+    date: '2026-04-05',
+    author: 'Artem Dolobanko',
+    tags: ['developer-tools', 'solo', 'ai-coding', 'productivity', 'commits'],
+    excerpt:
+      'Two new features: Merge Sessions combines multiple AI sessions into one unified view. The Commits tab shows every commit with AI/human attribution, linked sessions, cost, and which agent wrote the code.',
+  },
+  {
     title: 'Origin Solo: Free AI Coding Analytics for Individual Developers',
     slug: 'origin-solo-free-ai-coding-analytics',
     date: '2026-04-04',

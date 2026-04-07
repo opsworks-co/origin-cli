@@ -8,6 +8,517 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'multi-repo-sessions': (
+    <>
+      <p>
+        You&rsquo;re deep in a Claude Code session, building a feature that touches your API server,
+        your CLI tool, and your VS Code extension. Three repos, one workspace, one task.
+      </p>
+      <p>
+        Until today, Origin couldn&rsquo;t track that. If your working directory wasn&rsquo;t a git repo,
+        the session simply didn&rsquo;t show up. You&rsquo;d open the dashboard and see&hellip; nothing.
+      </p>
+      <p>
+        We fixed that. <strong>Origin now discovers all git repos under your working directory and tracks
+        changes across all of them in a single session.</strong> No config. No flags. It just works.
+      </p>
+
+      <h2>The problem</h2>
+      <p>
+        Modern projects don&rsquo;t live in one repo. You might have a monorepo with <code className="text-indigo-400">apps/</code> and <code className="text-indigo-400">packages/</code>,
+        or a workspace directory with related repos side by side:
+      </p>
+
+      {/* Directory tree mock */}
+      <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden my-8 shadow-2xl shadow-purple-500/5">
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800 bg-gray-900/80">
+          <div className="flex gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-red-500/70" />
+            <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+            <div className="w-3 h-3 rounded-full bg-green-500/70" />
+          </div>
+          <div className="text-[11px] text-gray-500 font-mono ml-2">~/my-project</div>
+        </div>
+        <div className="px-5 py-4 font-mono text-sm space-y-1">
+          <div className="text-gray-300">~/my-project/</div>
+          <div className="text-gray-500 pl-4">&boxvr;&boxh;&boxh; <span className="text-indigo-400">api/</span> <span className="text-gray-600">&larr; git repo (Express server)</span></div>
+          <div className="text-gray-500 pl-4">&boxvr;&boxh;&boxh; <span className="text-indigo-400">web/</span> <span className="text-gray-600">&larr; git repo (React app)</span></div>
+          <div className="text-gray-500 pl-4">&boxvr;&boxh;&boxh; <span className="text-indigo-400">cli/</span> <span className="text-gray-600">&larr; git repo (CLI tool)</span></div>
+          <div className="text-gray-500 pl-4">&boxur;&boxh;&boxh; <span className="text-gray-600">.claude/</span></div>
+        </div>
+      </div>
+
+      <p>
+        When you run <code className="text-indigo-400">claude</code> from <code className="text-indigo-400">~/my-project</code>,
+        Claude Code reports that as your working directory. But <code className="text-indigo-400">~/my-project</code> itself
+        isn&rsquo;t a git repo &mdash; the repos are inside it. Origin&rsquo;s hooks would bail out and skip tracking entirely.
+      </p>
+
+      <h2>How it works now</h2>
+      <p>
+        When Origin detects that your working directory isn&rsquo;t a git repo, it scans immediate subdirectories
+        for <code className="text-indigo-400">.git</code> folders. If it finds multiple repos, it creates a single
+        session that tracks all of them.
+      </p>
+
+      {/* Session dashboard mock */}
+      <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden my-8 shadow-2xl shadow-indigo-500/5">
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800 bg-gray-900/80">
+          <div className="flex gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-red-500/70" />
+            <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+            <div className="w-3 h-3 rounded-full bg-green-500/70" />
+          </div>
+          <div className="text-[11px] text-gray-500 font-mono ml-2">getorigin.io &mdash; Sessions</div>
+        </div>
+        <div className="px-1 py-2">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-500 border-b border-gray-800">
+                <th className="px-3 py-2 text-left font-medium">Model</th>
+                <th className="px-3 py-2 text-left font-medium">Status</th>
+                <th className="px-3 py-2 text-left font-medium">Agent</th>
+                <th className="px-3 py-2 text-left font-medium">Repo</th>
+                <th className="px-3 py-2 text-left font-medium">Duration</th>
+                <th className="px-3 py-2 text-left font-medium">Tokens</th>
+                <th className="px-3 py-2 text-left font-medium">Cost</th>
+                <th className="px-3 py-2 text-right font-medium">Age</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { model: 'CLAUDE-OPUS-4-6', status: 'running', agent: 'Claude Code', repo: 'api, web, cli', dur: '14m', tokens: '89k', cost: '$0.34', age: 'now' },
+                { model: 'CLAUDE', status: 'ended', agent: 'Claude Code', repo: 'api', dur: '8m', tokens: '45k', cost: '$0.12', age: '2h ago' },
+              ].map((s, i) => (
+                <tr key={i} className="border-b border-gray-800/50 hover:bg-gray-800/20">
+                  <td className="px-3 py-2.5">
+                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${i === 0 ? 'bg-indigo-500/20 text-indigo-400' : 'bg-gray-800 text-gray-400'}`}>{s.model}</span>
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className={`inline-flex items-center gap-1 text-xs ${s.status === 'running' ? 'text-green-400' : 'text-gray-500'}`}>
+                      {s.status === 'running' && <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />}
+                      {s.status}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2.5 text-gray-400">{s.agent}</td>
+                  <td className="px-3 py-2.5 text-gray-400">{s.repo}</td>
+                  <td className="px-3 py-2.5 text-gray-500">{s.dur}</td>
+                  <td className="px-3 py-2.5 text-gray-500">{s.tokens}</td>
+                  <td className="px-3 py-2.5 text-gray-300">{s.cost}</td>
+                  <td className="px-3 py-2.5 text-gray-600 text-right">{s.age}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <p>
+        Notice the first row: the <strong>Repo</strong> column shows <code className="text-indigo-400">api, web, cli</code> &mdash;
+        all three repos tracked in one session. File changes are prefixed with the repo name
+        so you know exactly where each change lives.
+      </p>
+
+      <h2>What gets tracked per repo</h2>
+      <p>
+        Origin captures full git state for each repo independently:
+      </p>
+      <ul>
+        <li><strong>HEAD SHA at session start</strong> &mdash; baseline for computing diffs</li>
+        <li><strong>Per-prompt diffs</strong> &mdash; what changed in each repo after each prompt</li>
+        <li><strong>Branch</strong> &mdash; tracked per repo (they can be on different branches)</li>
+        <li><strong>Uncommitted changes</strong> &mdash; filtered to exclude pre-existing dirty files</li>
+        <li><strong>File paths</strong> &mdash; prefixed with repo directory name (e.g. <code className="text-indigo-400">api/src/routes/mcp.ts</code>)</li>
+      </ul>
+
+      {/* File changes mock */}
+      <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden my-8 shadow-2xl shadow-purple-500/5">
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800 bg-gray-900/80">
+          <div className="flex gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-red-500/70" />
+            <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+            <div className="w-3 h-3 rounded-full bg-green-500/70" />
+          </div>
+          <div className="text-[11px] text-gray-500 font-mono ml-2">Session Detail &mdash; Files Changed</div>
+        </div>
+        <div className="px-5 py-4 space-y-1 font-mono text-xs">
+          <div className="text-gray-500 text-[10px] uppercase tracking-wider mb-2">5 files across 3 repos</div>
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-gray-900/50">
+            <span className="text-indigo-400">api/</span><span className="text-gray-300">src/routes/mcp.ts</span>
+            <span className="text-green-500 ml-auto">+42</span><span className="text-red-400">-8</span>
+          </div>
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-gray-900/50">
+            <span className="text-indigo-400">api/</span><span className="text-gray-300">prisma/schema.prisma</span>
+            <span className="text-green-500 ml-auto">+12</span><span className="text-red-400">-0</span>
+          </div>
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-gray-900/50">
+            <span className="text-purple-400">cli/</span><span className="text-gray-300">src/session-state.ts</span>
+            <span className="text-green-500 ml-auto">+56</span><span className="text-red-400">-0</span>
+          </div>
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-gray-900/50">
+            <span className="text-purple-400">cli/</span><span className="text-gray-300">src/commands/hooks.ts</span>
+            <span className="text-green-500 ml-auto">+144</span><span className="text-red-400">-5</span>
+          </div>
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-gray-900/50">
+            <span className="text-yellow-400">web/</span><span className="text-gray-300">src/pages/Sessions.tsx</span>
+            <span className="text-green-500 ml-auto">+3</span><span className="text-red-400">-1</span>
+          </div>
+        </div>
+      </div>
+
+      <h2>Zero configuration</h2>
+      <p>
+        If you already have Origin enabled (<code className="text-indigo-400">origin enable --agent claude-code</code>),
+        multi-repo tracking works automatically. There&rsquo;s nothing to configure. Origin detects the workspace
+        structure at session start and adapts.
+      </p>
+      <p>
+        Single-repo sessions work exactly as before. The multi-repo behavior only activates when your working
+        directory contains multiple git repos as immediate subdirectories.
+      </p>
+
+      <h2>Under the hood</h2>
+      <p>
+        Here&rsquo;s what happens when you start a session from a multi-repo workspace:
+      </p>
+      <ol>
+        <li>The <code className="text-indigo-400">SessionStart</code> hook fires with your working directory</li>
+        <li>Origin checks if the directory is a git repo. It&rsquo;s not.</li>
+        <li>Origin scans subdirectories and finds 3 <code className="text-indigo-400">.git</code> folders</li>
+        <li>A workspace-level session is created on the API, with a <code className="text-indigo-400">SessionRepo</code> link for each repo</li>
+        <li>On each prompt completion, diffs are captured from all repos independently</li>
+        <li>File paths are prefixed with the repo directory name so nothing collides</li>
+      </ol>
+
+      {/* Architecture diagram */}
+      <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden my-8 shadow-2xl shadow-indigo-500/5">
+        <div className="px-6 py-5 space-y-4">
+          <div className="text-center text-gray-500 text-[10px] uppercase tracking-wider">Session lifecycle</div>
+          <div className="flex items-center justify-center gap-3 text-xs">
+            <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-indigo-400 text-center">
+              <div className="font-medium">SessionStart</div>
+              <div className="text-[10px] text-indigo-400/60">detect repos</div>
+            </div>
+            <div className="text-gray-600">&rarr;</div>
+            <div className="rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-2 text-purple-400 text-center">
+              <div className="font-medium">API</div>
+              <div className="text-[10px] text-purple-400/60">create SessionRepo links</div>
+            </div>
+            <div className="text-gray-600">&rarr;</div>
+            <div className="rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-2 text-green-400 text-center">
+              <div className="font-medium">Stop</div>
+              <div className="text-[10px] text-green-400/60">capture per-repo diffs</div>
+            </div>
+            <div className="text-gray-600">&rarr;</div>
+            <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-yellow-400 text-center">
+              <div className="font-medium">Dashboard</div>
+              <div className="text-[10px] text-yellow-400/60">show all repos</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h2>Try it</h2>
+      <p>
+        If you work across multiple repos, this is the update you&rsquo;ve been waiting for.
+        Install or update the Origin CLI, enable hooks, and launch your AI agent from the workspace root:
+      </p>
+
+      {/* Terminal mock */}
+      <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden my-8 shadow-2xl shadow-purple-500/5">
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800 bg-gray-900/80">
+          <div className="flex gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-red-500/70" />
+            <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+            <div className="w-3 h-3 rounded-full bg-green-500/70" />
+          </div>
+          <div className="text-[11px] text-gray-500 font-mono ml-2">Terminal</div>
+        </div>
+        <div className="px-5 py-4 font-mono text-sm space-y-1">
+          <div><span className="text-green-400">$</span> <span className="text-gray-300">npm i -g @origin/cli</span></div>
+          <div><span className="text-green-400">$</span> <span className="text-gray-300">origin login</span></div>
+          <div><span className="text-green-400">$</span> <span className="text-gray-300">origin enable -g --agent claude-code</span></div>
+          <div><span className="text-green-400">$</span> <span className="text-gray-300">cd ~/my-project</span> <span className="text-gray-600"># parent of multiple repos</span></div>
+          <div><span className="text-green-400">$</span> <span className="text-gray-300">claude</span> <span className="text-gray-600"># session tracks all child repos</span></div>
+        </div>
+      </div>
+
+      <p>
+        Works with Claude Code, Cursor, Gemini, Windsurf, Codex, and Aider. Free with{' '}
+        <a href="https://getorigin.io/register" className="text-indigo-400 hover:text-indigo-300">Origin Solo</a>.
+      </p>
+      <div className="flex flex-wrap gap-4">
+        <a
+          href="https://github.com/dolobanko/origin-cli"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-sm transition-colors"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" /></svg>
+          GitHub
+        </a>
+        <a
+          href="https://getorigin.io/docs"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors"
+        >
+          Read the docs
+        </a>
+      </div>
+    </>
+  ),
+  'merge-sessions': (
+    <>
+      <p>
+        Modern developers don&rsquo;t use one AI tool. They switch between Claude Code for deep refactors,
+        Cursor for quick edits, Codex for prototyping. A single feature might span 3&ndash;5 sessions
+        across different agents, sometimes with breaks in between.
+      </p>
+      <p>
+        The result? Your dashboard shows five separate sessions for what was really one task.
+        Costs are fragmented. Context is scattered. You can&rsquo;t see the full picture.
+      </p>
+      <p>
+        Today we&rsquo;re shipping <strong>Merge Sessions</strong> &mdash; select any sessions
+        from your dashboard, click Merge, and get a single unified view with combined transcripts,
+        summed costs, and all code changes in one place.
+      </p>
+
+      <h2>How it works</h2>
+      <p>
+        In your Solo Dashboard, select the sessions you want to combine using the checkboxes.
+        A purple <strong>Merge</strong> button appears next to Compare. Click it, and Origin creates
+        a new merged session instantly.
+      </p>
+
+      {/* Screenshot mock: selection */}
+      <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden my-8 shadow-2xl shadow-purple-500/5">
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800 bg-gray-900/80">
+          <div className="flex gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-red-500/70" />
+            <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+            <div className="w-3 h-3 rounded-full bg-green-500/70" />
+          </div>
+          <div className="text-[11px] text-gray-500 font-mono ml-2">getorigin.io/me &mdash; Sessions</div>
+        </div>
+        <div className="px-5 py-4 space-y-2">
+          <div className="flex items-center gap-3 mb-3">
+            <span className="text-xs text-gray-400">2 sessions selected</span>
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">Compare 2/2</span>
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-purple-500/15 text-purple-400 border border-purple-500/30">
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+              Merge 2
+            </span>
+          </div>
+          {[
+            { checked: true, agent: 'Claude Code', model: 'claude-opus-4', repo: 'my-app', cost: '$0.42', tokens: '89k', time: '12m ago' },
+            { checked: true, agent: 'Cursor', model: 'claude-sonnet-4', repo: 'my-app', cost: '$0.08', tokens: '12k', time: '5m ago' },
+            { checked: false, agent: 'Claude Code', model: 'claude-opus-4', repo: 'my-app', cost: '$0.31', tokens: '67k', time: '1h ago' },
+          ].map((s, i) => (
+            <div key={i} className={`flex items-center gap-4 px-3 py-2 rounded-lg border ${s.checked ? 'border-purple-500/30 bg-purple-500/5' : 'border-gray-800 bg-gray-900/30'}`}>
+              <input type="checkbox" checked={s.checked} readOnly className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-purple-500" />
+              <span className="text-xs font-medium text-purple-400 bg-purple-500/15 px-1.5 py-0.5 rounded">{s.agent}</span>
+              <span className="text-xs text-gray-400 font-mono">{s.model}</span>
+              <span className="text-xs text-gray-500">{s.repo}</span>
+              <span className="text-xs text-gray-300 ml-auto">{s.cost}</span>
+              <span className="text-xs text-gray-500">{s.tokens}</span>
+              <span className="text-xs text-gray-600">{s.time}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <h2>What gets merged</h2>
+      <p>The merged session combines everything from the originals:</p>
+      <ul>
+        <li><strong>Transcripts</strong> &mdash; all conversation turns from every session, sorted chronologically with session dividers</li>
+        <li><strong>Costs &amp; tokens</strong> &mdash; summed across all sessions so you see the true cost of the feature</li>
+        <li><strong>Code changes</strong> &mdash; unified diff combining all files modified across sessions</li>
+        <li><strong>Prompts</strong> &mdash; every prompt from every session, re-indexed in order</li>
+        <li><strong>Duration</strong> &mdash; total time spent across all sessions</li>
+      </ul>
+
+      {/* Screenshot mock: merged result */}
+      <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden my-8 shadow-2xl shadow-purple-500/5">
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800 bg-gray-900/80">
+          <div className="flex gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-red-500/70" />
+            <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+            <div className="w-3 h-3 rounded-full bg-green-500/70" />
+          </div>
+          <div className="text-[11px] text-gray-500 font-mono ml-2">Merged Session</div>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-purple-900/30 text-purple-400">
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+              Merged
+            </span>
+            <span className="text-xs text-gray-400">2 sessions combined</span>
+          </div>
+          <div className="grid grid-cols-4 gap-3">
+            {[
+              { label: 'Total Cost', value: '$0.50', color: 'text-green-400' },
+              { label: 'Tokens', value: '101k', color: 'text-yellow-400' },
+              { label: 'Duration', value: '8m 42s', color: 'text-indigo-400' },
+              { label: 'Files Changed', value: '4', color: 'text-purple-400' },
+            ].map((c) => (
+              <div key={c.label} className="rounded-lg border border-gray-800 bg-gray-900/50 px-3 py-2">
+                <div className="text-[10px] text-gray-500">{c.label}</div>
+                <div className={`text-lg font-bold ${c.color}`}>{c.value}</div>
+              </div>
+            ))}
+          </div>
+          <div className="border-t border-gray-800 pt-3 space-y-2">
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">Combined Transcript</div>
+            <div className="rounded-lg border border-gray-800 bg-gray-900/30 px-3 py-2">
+              <div className="text-[10px] text-purple-400 mb-1">&mdash; Session 1 (Claude Code) &mdash;</div>
+              <div className="text-xs text-gray-400">Refactor the auth middleware to support JWT refresh tokens...</div>
+            </div>
+            <div className="rounded-lg border border-gray-800 bg-gray-900/30 px-3 py-2">
+              <div className="text-[10px] text-purple-400 mb-1">&mdash; Session 2 (Cursor) &mdash;</div>
+              <div className="text-xs text-gray-400">Fix the token expiry check and add unit tests...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h2>Use cases</h2>
+      <ul>
+        <li><strong>Multi-agent features</strong> &mdash; Started in Claude Code, finished in Cursor? Merge them to see the full story.</li>
+        <li><strong>Session breaks</strong> &mdash; Took a break and your session auto-closed? Merge the before and after.</li>
+        <li><strong>Daily summaries</strong> &mdash; Merge all your short sessions into a single daily summary.</li>
+        <li><strong>Cost tracking</strong> &mdash; See the true cost of a feature, not just individual sessions.</li>
+      </ul>
+
+      <h2>Rules and edge cases</h2>
+      <p>We handle the tricky parts so you don&rsquo;t have to:</p>
+      <ul>
+        <li><strong>Same repo only</strong> &mdash; Sessions from different repositories can&rsquo;t be merged. This prevents accidental mixing of unrelated work.</li>
+        <li><strong>Mixed agents allowed</strong> &mdash; Claude + Cursor + Codex in one merged session? Works fine. The model field shows all agents used.</li>
+        <li><strong>Running sessions blocked</strong> &mdash; Can&rsquo;t merge a session that&rsquo;s still running. Wait for it to complete first.</li>
+        <li><strong>Originals preserved</strong> &mdash; The original sessions are hidden from the list but not deleted. They&rsquo;re still accessible via direct link.</li>
+      </ul>
+
+      <h2>How to use it</h2>
+      <ol>
+        <li>Go to your <a href="https://getorigin.io/me" className="text-indigo-400 hover:text-indigo-300">Solo Dashboard</a></li>
+        <li>In the Sessions tab, check the boxes next to the sessions you want to merge</li>
+        <li>Click the purple <strong>Merge</strong> button</li>
+        <li>You&rsquo;ll be redirected to the new merged session automatically</li>
+      </ol>
+
+      <hr className="border-gray-800 my-10" />
+
+      <h2>Commits Tab: Your AI-Attributed Git History</h2>
+      <p>
+        Alongside Merge Sessions, we&rsquo;re shipping the <strong>Commits tab</strong> in the Solo Dashboard.
+        Think of it as <code className="text-indigo-400">git log</code> meets AI attribution &mdash; every commit
+        linked to the session that produced it, with full context on which agent wrote the code and what it cost.
+      </p>
+
+      <p>
+        If you&rsquo;ve used Entire.io, this is our analog to their Checkpoints feature. But Origin goes further:
+      </p>
+      <ul>
+        <li><strong>Entire</strong>: commit &rarr; diff + checkpoint</li>
+        <li><strong>Origin</strong>: commit &rarr; diff + session + AI/human attribution + cost + which prompt wrote what</li>
+      </ul>
+
+      {/* Commits tab mock */}
+      <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden my-8 shadow-2xl shadow-indigo-500/5">
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800 bg-gray-900/80">
+          <div className="flex gap-1.5">
+            <div className="w-3 h-3 rounded-full bg-red-500/70" />
+            <div className="w-3 h-3 rounded-full bg-yellow-500/70" />
+            <div className="w-3 h-3 rounded-full bg-green-500/70" />
+          </div>
+          <div className="text-[11px] text-gray-500 font-mono ml-2">getorigin.io/me &mdash; Commits</div>
+        </div>
+        <div className="px-1 py-2">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-gray-500 border-b border-gray-800">
+                <th className="px-3 py-2 text-left font-medium"></th>
+                <th className="px-3 py-2 text-left font-medium">SHA</th>
+                <th className="px-3 py-2 text-left font-medium">Message</th>
+                <th className="px-3 py-2 text-left font-medium">Agent</th>
+                <th className="px-3 py-2 text-left font-medium">Cost</th>
+                <th className="px-3 py-2 text-left font-medium">Changes</th>
+                <th className="px-3 py-2 text-right font-medium">When</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { ai: true, sha: 'a3f8c21', msg: 'feat: add JWT refresh token rotation', agent: 'Claude Code', cost: '$0.42', changes: '+89 -12', time: '2h ago' },
+                { ai: true, sha: 'b7e1d04', msg: 'fix: token expiry edge case in middleware', agent: 'Cursor', cost: '$0.08', changes: '+14 -3', time: '1h ago' },
+                { ai: false, sha: 'c2a9f88', msg: 'docs: update API changelog', agent: null, cost: null, changes: '+22 -0', time: '45m ago' },
+                { ai: true, sha: 'e5d3b17', msg: 'test: add refresh token integration tests', agent: 'Codex', cost: '$0.03', changes: '+156 -0', time: '30m ago' },
+              ].map((c, i) => (
+                <tr key={i} className="border-b border-gray-800/50 hover:bg-gray-800/20">
+                  <td className="px-3 py-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${c.ai ? 'bg-indigo-500/15 text-indigo-400' : 'bg-gray-700/60 text-gray-400'}`}>
+                      {c.ai ? 'AI' : 'HU'}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 font-mono text-gray-400">{c.sha}</td>
+                  <td className="px-3 py-2 text-gray-300">{c.msg}</td>
+                  <td className="px-3 py-2">
+                    {c.agent ? (
+                      <span className="text-purple-400 bg-purple-500/10 px-1.5 py-0.5 rounded text-[10px] font-medium">{c.agent}</span>
+                    ) : (
+                      <span className="text-gray-600">&mdash;</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-gray-300">{c.cost || '&mdash;'}</td>
+                  <td className="px-3 py-2">
+                    <span className="text-green-500">{c.changes.split(' ')[0]}</span>
+                    {' '}
+                    <span className="text-red-400">{c.changes.split(' ')[1]}</span>
+                  </td>
+                  <td className="px-3 py-2 text-right text-gray-600">{c.time}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h2>What each commit shows</h2>
+      <p>Every commit in the table includes:</p>
+      <ul>
+        <li><strong>[AI] or [HU] badge</strong> &mdash; instantly see whether a commit came from an AI session or was human-written</li>
+        <li><strong>Short SHA + message</strong> &mdash; standard git info you&rsquo;re used to</li>
+        <li><strong>Linked agent</strong> &mdash; which AI tool produced this commit (Claude Code, Cursor, Codex, Gemini, etc.)</li>
+        <li><strong>Cost</strong> &mdash; how much the session that produced this commit cost in API tokens</li>
+        <li><strong>Lines changed</strong> &mdash; file count and +/- line stats</li>
+        <li><strong>Expandable details</strong> &mdash; click any row to see full SHA, author, detection method, branch, and all files changed</li>
+        <li><strong>Session link</strong> &mdash; jump directly to the full session to see the transcript, prompts, and diffs</li>
+      </ul>
+
+      <h2>Sort and paginate</h2>
+      <p>
+        Commits can be sorted by <strong>date</strong> (newest first), <strong>repo</strong> (alphabetical),
+        or <strong>cost</strong> (most expensive sessions first). Pagination handles repos with thousands of commits.
+      </p>
+
+      <h2>How it connects to git notes</h2>
+      <p>
+        Under the hood, Origin stores session linkage in <code className="text-indigo-400">git notes</code> on the
+        <code className="text-indigo-400"> origin-sessions</code> ref. Every commit made during an AI session gets a note
+        with the session ID. The Commits tab reads this linkage and enriches it with session data from the Origin API.
+      </p>
+      <p>
+        This means your git history stays clean &mdash; no extra metadata in commit messages. The attribution
+        lives in git notes, which are invisible to normal workflows but queryable by Origin.
+      </p>
+
+      <h2>Both features, available now</h2>
+      <p>
+        Merge Sessions and the Commits tab are live for all Origin Solo users. Free, no limits.
+        Go to <a href="https://getorigin.io/me" className="text-indigo-400 hover:text-indigo-300">your dashboard</a> to try them.
+      </p>
+    </>
+  ),
   'origin-solo-free-ai-coding-analytics': (
     <>
       <p>
