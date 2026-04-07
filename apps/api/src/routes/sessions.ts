@@ -48,6 +48,9 @@ function mapSession(s: any, pullRequests?: any[]) {
     apiKeyName: s.apiKeyName || null,
     repoId: s.commit?.repoId || null,
     repoName: s.commit?.repo?.name || null,
+    repoNames: s.sessionRepos && s.sessionRepos.length > 0
+      ? s.sessionRepos.map((sr: any) => sr.repo?.name).filter(Boolean)
+      : (s.commit?.repo?.name ? [s.commit.repo.name] : []),
     commitSha: s.commit?.sha || null,
     commitMessage: s.commit?.message || null,
     commitAuthor: s.commit?.author || null,
@@ -71,6 +74,8 @@ function mapSession(s: any, pullRequests?: any[]) {
     endedAt: s.endedAt || null,
     agentSystemPrompt: s.agentSystemPrompt || null,
     agentVersion: s.agentVersion || null,
+    mergedFrom: s.mergedFrom ? JSON.parse(s.mergedFrom) : null,
+    mergedInto: s.mergedInto || null,
     createdAt: s.createdAt,
     review: s.review
       ? {
@@ -137,6 +142,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         repo: { orgId },
       },
       archived: req.query.archived === 'true' ? true : false,
+      mergedInto: null, // hide sessions that were merged into another
     };
 
     if (req.query.model) {
@@ -148,10 +154,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     if (req.query.repoId) {
-      where.commit = {
-        ...where.commit,
-        repoId: req.query.repoId as string,
-      };
+      where.OR = [
+        { commit: { ...where.commit, repoId: req.query.repoId as string } },
+        { commit: { repo: { orgId } }, sessionRepos: { some: { repoId: req.query.repoId as string } } },
+      ];
     }
 
     if (req.query.repoName) {
@@ -208,6 +214,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
           agent: true,
           user: true,
           review: { include: { user: true } },
+          sessionRepos: { include: { repo: true } },
         },
         orderBy: [
           { status: 'desc' },   // RUNNING sorts before COMPLETED alphabetically
@@ -569,6 +576,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         review: { include: { user: true } },
         sessionDiff: true,
         promptChanges: { orderBy: { promptIndex: 'asc' } },
+        sessionRepos: { include: { repo: true } },
       },
     });
 
@@ -1772,6 +1780,212 @@ router.delete('/:id/bookmark', async (req: AuthRequest, res: Response) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('Remove bookmark error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /merge — merge multiple sessions into one
+router.post('/merge', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { sessionIds, name } = req.body as { sessionIds: string[]; name?: string };
+
+    if (!sessionIds || !Array.isArray(sessionIds) || sessionIds.length < 2) {
+      return res.status(400).json({ error: 'At least 2 session IDs are required' });
+    }
+
+    // Fetch all sessions with their data
+    const sessions = await prisma.codingSession.findMany({
+      where: {
+        id: { in: sessionIds },
+        userId, // only merge own sessions
+      },
+      include: {
+        commit: { include: { repo: true } },
+        agent: true,
+        promptChanges: { orderBy: { createdAt: 'asc' } },
+        sessionDiff: true,
+      },
+      orderBy: { startedAt: 'asc' },
+    });
+
+    if (sessions.length !== sessionIds.length) {
+      return res.status(404).json({ error: 'One or more sessions not found or not accessible' });
+    }
+
+    // Validate: no running sessions
+    if (sessions.some((s) => s.status === 'RUNNING')) {
+      return res.status(400).json({ error: 'Cannot merge running sessions. Wait for them to complete.' });
+    }
+
+    // Validate: all from same repo
+    const repoIds = new Set(sessions.map((s) => s.commit?.repoId).filter(Boolean));
+    if (repoIds.size > 1) {
+      return res.status(400).json({ error: 'Cannot merge sessions from different repositories' });
+    }
+
+    // Validate: not already merged
+    if (sessions.some((s) => s.mergedInto)) {
+      return res.status(400).json({ error: 'One or more sessions were already merged into another session' });
+    }
+
+    // Compute merged values
+    const totalTokens = sessions.reduce((sum, s) => sum + s.tokensUsed, 0);
+    const totalInputTokens = sessions.reduce((sum, s) => sum + s.inputTokens, 0);
+    const totalOutputTokens = sessions.reduce((sum, s) => sum + s.outputTokens, 0);
+    const totalToolCalls = sessions.reduce((sum, s) => sum + s.toolCalls, 0);
+    const totalDuration = sessions.reduce((sum, s) => sum + s.durationMs, 0);
+    const totalLinesAdded = sessions.reduce((sum, s) => sum + s.linesAdded, 0);
+    const totalLinesRemoved = sessions.reduce((sum, s) => sum + s.linesRemoved, 0);
+    const totalCost = sessions.reduce((sum, s) => sum + s.costUsd, 0);
+
+    // Files changed: union of all
+    const allFiles = new Set<string>();
+    for (const s of sessions) {
+      try {
+        const files = JSON.parse(s.filesChanged);
+        if (Array.isArray(files)) files.forEach((f: string) => allFiles.add(f));
+      } catch { /* ignore */ }
+    }
+
+    // Agent: use common agent or "Multiple"
+    const agentIds = new Set(sessions.map((s) => s.agentId).filter(Boolean));
+    const agentNames = [...new Set(sessions.map((s) => s.agent?.name).filter(Boolean))];
+    const mergedAgentId = agentIds.size === 1 ? [...agentIds][0] : null;
+
+    // Model: use common model or list
+    const models = [...new Set(sessions.map((s) => s.model))];
+    const mergedModel = models.length === 1 ? models[0] : models.join(' + ');
+
+    // Branch: use common branch
+    const branches = [...new Set(sessions.map((s) => s.branch).filter(Boolean))];
+    const mergedBranch = branches.length === 1 ? branches[0] : branches.join(', ');
+
+    // Combine transcripts
+    const combinedTranscript: any[] = [];
+    for (const s of sessions) {
+      try {
+        const parsed = JSON.parse(s.transcript);
+        if (Array.isArray(parsed)) {
+          combinedTranscript.push(
+            { role: 'system', content: `--- Session ${s.id.slice(0, 8)} (${s.agent?.name || s.model}) ---` },
+            ...parsed,
+          );
+        }
+      } catch {
+        if (s.transcript) {
+          combinedTranscript.push(
+            { role: 'system', content: `--- Session ${s.id.slice(0, 8)} ---` },
+            { role: 'assistant', content: s.transcript },
+          );
+        }
+      }
+    }
+
+    // Combine diffs
+    const combinedDiff = sessions
+      .map((s) => s.sessionDiff?.diff || '')
+      .filter(Boolean)
+      .join('\n');
+
+    // Time range
+    const startedAt = sessions[0].startedAt || sessions[0].createdAt;
+    const endedAt = sessions[sessions.length - 1].endedAt || sessions[sessions.length - 1].createdAt;
+
+    // Create placeholder commit for the merged session
+    const placeholderSha = crypto.randomBytes(20).toString('hex');
+    const repoId = sessions[0].commit?.repoId!;
+    const mergedCommit = await prisma.commit.create({
+      data: {
+        repoId,
+        sha: placeholderSha,
+        message: name || `Merged session (${sessions.length} sessions)`,
+        author: 'origin-merge',
+        aiToolDetected: mergedModel,
+        aiDetectionMethod: 'merge',
+        filesChanged: JSON.stringify([...allFiles]),
+        committedAt: new Date(),
+      },
+    });
+
+    // Create the merged session
+    const mergedSession = await prisma.codingSession.create({
+      data: {
+        commitId: mergedCommit.id,
+        agentId: mergedAgentId,
+        userId,
+        model: mergedModel,
+        prompt: name || `Merged: ${agentNames.length > 1 ? agentNames.join(' + ') : agentNames[0] || 'AI'} session`,
+        transcript: JSON.stringify(combinedTranscript),
+        filesChanged: JSON.stringify([...allFiles]),
+        tokensUsed: totalTokens,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        toolCalls: totalToolCalls,
+        durationMs: totalDuration,
+        linesAdded: totalLinesAdded,
+        linesRemoved: totalLinesRemoved,
+        costUsd: totalCost,
+        branch: mergedBranch || null,
+        status: 'COMPLETED',
+        mergedFrom: JSON.stringify(sessionIds),
+        startedAt,
+        endedAt,
+      },
+    });
+
+    // Create merged session diff
+    if (combinedDiff) {
+      const allCommitShas = sessions.flatMap((s) => {
+        try { return JSON.parse(s.sessionDiff?.commitShas || '[]'); } catch { return []; }
+      });
+      await prisma.sessionDiff.create({
+        data: {
+          sessionId: mergedSession.id,
+          headBefore: sessions[0].sessionDiff?.headBefore || '',
+          headAfter: sessions[sessions.length - 1].sessionDiff?.headAfter || '',
+          commitShas: JSON.stringify([...new Set(allCommitShas)]),
+          diff: combinedDiff,
+          diffTruncated: sessions.some((s) => s.sessionDiff?.diffTruncated),
+          linesAdded: totalLinesAdded,
+          linesRemoved: totalLinesRemoved,
+        },
+      });
+    }
+
+    // Re-index prompt changes into the merged session
+    let promptOffset = 0;
+    for (const s of sessions) {
+      for (const pc of s.promptChanges) {
+        await prisma.promptChange.create({
+          data: {
+            sessionId: mergedSession.id,
+            promptIndex: promptOffset + pc.promptIndex,
+            promptText: pc.promptText,
+            filesChanged: pc.filesChanged,
+            diff: pc.diff,
+            uncommittedDiff: pc.uncommittedDiff || '',
+            createdAt: pc.createdAt,
+          },
+        });
+      }
+      promptOffset += s.promptChanges.length;
+    }
+
+    // Mark original sessions as merged
+    await prisma.codingSession.updateMany({
+      where: { id: { in: sessionIds } },
+      data: { mergedInto: mergedSession.id },
+    });
+
+    res.json({
+      mergedSessionId: mergedSession.id,
+      mergedCount: sessions.length,
+      totalTokens,
+      totalCost,
+    });
+  } catch (err) {
+    console.error('Merge sessions error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

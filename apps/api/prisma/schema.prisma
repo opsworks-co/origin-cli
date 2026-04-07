@@ -37,6 +37,8 @@ model User {
   avatarUrl     String?
   provider      String?        // "github", "gitlab", "google", or null for email/password
   providerUserId String?
+  emailVerified Boolean        @default(false)
+  lastLoginAt   DateTime?
   createdAt     DateTime       @default(now())
   auditLogs     AuditLog[]
   reviews       SessionReview[]
@@ -44,6 +46,18 @@ model User {
   sessions      CodingSession[]
   apiKeys       ApiKey[]
   bookmarks     SessionBookmark[]
+  authTokens    AuthToken[]
+}
+
+model AuthToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  token     String   @unique
+  type      String   // "password_reset" or "email_verification"
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
 }
 
 model Invitation {
@@ -113,6 +127,7 @@ model Repo {
   pullRequests PullRequest[]
   policyRules  PolicyRule[]
   apiKeyScopes ApiKeyRepoScope[]
+  sessionRepos SessionRepo[]
 }
 
 model Commit {
@@ -161,6 +176,8 @@ model CodingSession {
   apiKeyName   String?                         // Display name of the API key (e.g. "MacBook Claude", "CI Bot")
   agentSystemPrompt String?                    // Snapshot of agent system prompt active during session
   agentVersion      Int?                        // Agent version number at session start
+  mergedFrom   String?                         // JSON array of session IDs that were merged into this one
+  mergedInto   String?                         // Session ID this was merged into (original is hidden)
   startedAt    DateTime?                       // When session actually started (from session/start)
   endedAt      DateTime?                       // When session ended (from session/end)
   createdAt    DateTime       @default(now())
@@ -172,6 +189,7 @@ model CodingSession {
   trailSessions  TrailSession[]
   sharedSessions SharedSession[]
   bookmarks      SessionBookmark[]
+  sessionRepos   SessionRepo[]
 }
 
 model SessionDiff {
@@ -198,6 +216,18 @@ model PromptChange {
   diff            String        @default("") // Unified diff of committed edits from this prompt
   uncommittedDiff String        @default("") // Unified diff of uncommitted (staged+unstaged) changes
   createdAt       DateTime      @default(now())
+}
+
+model SessionRepo {
+  id        String        @id @default(uuid())
+  sessionId String
+  session   CodingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  repoId    String
+  repo      Repo          @relation(fields: [repoId], references: [id])
+  isPrimary Boolean       @default(false)
+  createdAt DateTime      @default(now())
+
+  @@unique([sessionId, repoId])
 }
 
 model SessionReview {

@@ -330,7 +330,7 @@ export default function SessionDetail() {
         >
           &larr; Sessions
         </button>
-        <h1 className="text-xl font-bold">{session.repoName ?? 'Session'}</h1>
+        <h1 className="text-xl font-bold">{(session.repoNames && session.repoNames.length > 1 ? session.repoNames.join(', ') : session.repoName) ?? 'Session'}</h1>
         {statusBadge(isDev ? (session.status === 'RUNNING' ? 'running' : 'ended') : (session.review?.status?.toLowerCase() ?? (session.status === 'RUNNING' ? 'running' : 'ended')))}
         <span className="text-xs text-gray-600 font-mono">{session.commitSha?.slice(0, 8)}</span>
         {session.branch && (

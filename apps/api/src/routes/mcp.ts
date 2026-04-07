@@ -153,14 +153,14 @@ router.get('/policies', async (req: McpRequest, res: Response) => {
 // POST /session/start — start a coding session
 router.post('/session/start', async (req: McpRequest, res: Response) => {
   try {
-    const { machineId, prompt, model, repoPath, repoUrl, agentSlug, branch } = req.body;
+    const { machineId, prompt, model, repoPath, repoUrl, agentSlug, branch, additionalRepoPaths } = req.body;
 
     if (!machineId || !model || !repoPath) {
       return res.status(400).json({ error: 'Missing required fields: machineId, model, repoPath' });
     }
 
     const orgId = req.orgId as string;
-    console.log('[session/start]', { orgId, repoPath, repoUrl: repoUrl || '(none)', agentSlug, machineId });
+    console.log('[session/start]', { orgId, repoPath, repoUrl: repoUrl || '(none)', agentSlug, machineId, additionalRepoPaths: additionalRepoPaths?.length || 0 });
 
     // Check budget before allowing session
     const budgetCheck = await checkBudget(orgId);
@@ -206,17 +206,15 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     }
 
-    // Fall back to matching by directory name (includes partial match)
+    // Fall back to matching by directory name (exact match only — fuzzy substring
+    // matching caused false positives like "origin" matching "origin-cli")
     if (!repo) {
       const dirName = repoPath.split('/').filter(Boolean).pop()?.toLowerCase();
       if (dirName) {
         const orgRepos = await prisma.repo.findMany({ where: { orgId } });
         repo = orgRepos.find((r) => {
           const repoName = r.path.split('/').pop()?.toLowerCase();
-          // Exact match or one contains the other (worktrust-test ↔ worktrust)
-          return repoName === dirName
-            || dirName.includes(repoName || '')
-            || (repoName || '').includes(dirName);
+          return repoName === dirName;
         }) || null;
       }
     }
@@ -391,10 +389,8 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     //    stale cleanup may have ended the session during idle. Reopen it.
     //    Skip dedup for agents that fire session-start per-prompt (Cursor, Codex) —
     //    for those, the CLI handles session continuity via local state files.
-    const agentsWithPerPromptSessionStart = ['cursor', 'codex'];
-    const skipDedup = agentsWithPerPromptSessionStart.includes(agentSlug || '');
     const dedupCutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 hour window
-    const existingSession = skipDedup ? null : await prisma.codingSession.findFirst({
+    const existingSession = await prisma.codingSession.findFirst({
       where: {
         agentId: agent?.id || null,
         commit: { repoId: repo.id },
@@ -505,6 +501,50 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       },
     });
 
+    // Create SessionRepo records for multi-repo sessions
+    // Always create the primary repo link
+    await prisma.sessionRepo.create({
+      data: {
+        sessionId: codingSession.id,
+        repoId: repo.id,
+        isPrimary: true,
+      },
+    });
+    // Create records for additional repos (if any)
+    if (additionalRepoPaths && Array.isArray(additionalRepoPaths)) {
+      for (const extraPath of additionalRepoPaths) {
+        try {
+          // Resolve each additional repo path using the same fuzzy matching
+          let extraRepo = await prisma.repo.findFirst({ where: { orgId, path: extraPath } });
+          if (!extraRepo) {
+            const dirName = extraPath.split('/').filter(Boolean).pop()?.toLowerCase();
+            if (dirName) {
+              const orgRepos = await prisma.repo.findMany({ where: { orgId } });
+              extraRepo = orgRepos.find((r) => r.path.toLowerCase().endsWith(`/${dirName}`)) || null;
+            }
+          }
+          // Auto-register for solo devs
+          if (!extraRepo && isSoloKey) {
+            const dirName = extraPath.split('/').filter(Boolean).pop() || extraPath;
+            extraRepo = await prisma.repo.create({
+              data: { orgId, name: dirName, path: extraPath, provider: 'local' },
+            });
+          }
+          if (extraRepo) {
+            await prisma.sessionRepo.create({
+              data: {
+                sessionId: codingSession.id,
+                repoId: extraRepo.id,
+                isPrimary: false,
+              },
+            });
+          }
+        } catch (err) {
+          console.log('[session/start] additional repo link failed (non-fatal)', extraPath, err);
+        }
+      }
+    }
+
     // Update machine lastSeenAt
     await prisma.machine.updateMany({
       where: { machineId },
@@ -602,11 +642,13 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
 router.post('/session/:id/ping', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    await prisma.codingSession.updateMany({
-      where: { id, status: 'RUNNING' },
-      data: { updatedAt: new Date() },
-    });
-    res.json({ ok: true });
+    const session = await prisma.codingSession.findUnique({ where: { id }, select: { status: true } });
+    if (!session) return res.json({ ok: true, status: 'NOT_FOUND' });
+
+    if (session.status === 'RUNNING') {
+      await prisma.codingSession.update({ where: { id }, data: { updatedAt: new Date() } });
+    }
+    res.json({ ok: true, status: session.status });
   } catch {
     res.status(500).json({ error: 'ping failed' });
   }
@@ -688,6 +730,17 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           }
         }
 
+        // Count lines from diff if linesAdded/linesRemoved not provided
+        let patchLinesAdded = gitCapture.linesAdded || 0;
+        let patchLinesRemoved = gitCapture.linesRemoved || 0;
+        if (patchLinesAdded === 0 && patchLinesRemoved === 0 && gitCapture.diff) {
+          const diffLines = gitCapture.diff.split('\n');
+          for (const line of diffLines) {
+            if (line.startsWith('+') && !line.startsWith('+++')) patchLinesAdded++;
+            else if (line.startsWith('-') && !line.startsWith('---')) patchLinesRemoved++;
+          }
+        }
+
         // Upsert SessionDiff — merge with existing if present
         const existingDiff = await prisma.sessionDiff.findUnique({ where: { sessionId: id } });
         if (existingDiff) {
@@ -701,8 +754,8 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
               headAfter: gitCapture.headAfter || existingDiff.headAfter,
               commitShas: JSON.stringify(mergedShas),
               diff: existingDiff.diff + '\n' + (gitCapture.diff || ''),
-              linesAdded: (existingDiff.linesAdded || 0) + (gitCapture.linesAdded || 0),
-              linesRemoved: (existingDiff.linesRemoved || 0) + (gitCapture.linesRemoved || 0),
+              linesAdded: (existingDiff.linesAdded || 0) + patchLinesAdded,
+              linesRemoved: (existingDiff.linesRemoved || 0) + patchLinesRemoved,
             },
           });
         } else {
@@ -714,19 +767,19 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
               commitShas: JSON.stringify(gitCapture.commitShas || []),
               diff: gitCapture.diff || '',
               diffTruncated: gitCapture.diffTruncated || false,
-              linesAdded: gitCapture.linesAdded || 0,
-              linesRemoved: gitCapture.linesRemoved || 0,
+              linesAdded: patchLinesAdded,
+              linesRemoved: patchLinesRemoved,
             },
           });
         }
 
         // Update session line counts
-        if (gitCapture.linesAdded || gitCapture.linesRemoved) {
+        if (patchLinesAdded || patchLinesRemoved) {
           await prisma.codingSession.update({
             where: { id },
             data: {
-              linesAdded: { increment: gitCapture.linesAdded || 0 },
-              linesRemoved: { increment: gitCapture.linesRemoved || 0 },
+              linesAdded: { increment: patchLinesAdded },
+              linesRemoved: { increment: patchLinesRemoved },
             },
           });
         }
@@ -975,6 +1028,17 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         }
       }
 
+      // If linesAdded/linesRemoved are missing but diff exists, count from diff
+      let diffLinesAdded = gitCapture.linesAdded || 0;
+      let diffLinesRemoved = gitCapture.linesRemoved || 0;
+      if (diffLinesAdded === 0 && diffLinesRemoved === 0 && gitCapture.diff) {
+        const diffLines = gitCapture.diff.split('\n');
+        for (const line of diffLines) {
+          if (line.startsWith('+') && !line.startsWith('+++')) diffLinesAdded++;
+          else if (line.startsWith('-') && !line.startsWith('---')) diffLinesRemoved++;
+        }
+      }
+
       // Create or update SessionDiff record with full diff
       await prisma.sessionDiff.upsert({
         where: { sessionId },
@@ -985,8 +1049,8 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           commitShas: JSON.stringify(gitCapture.commitShas || []),
           diff: gitCapture.diff || '',
           diffTruncated: gitCapture.diffTruncated || false,
-          linesAdded: gitCapture.linesAdded || 0,
-          linesRemoved: gitCapture.linesRemoved || 0,
+          linesAdded: diffLinesAdded,
+          linesRemoved: diffLinesRemoved,
         },
         update: {
           headBefore: gitCapture.headBefore || '',
@@ -994,18 +1058,18 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           commitShas: JSON.stringify(gitCapture.commitShas || []),
           diff: gitCapture.diff || '',
           diffTruncated: gitCapture.diffTruncated || false,
-          linesAdded: gitCapture.linesAdded || 0,
-          linesRemoved: gitCapture.linesRemoved || 0,
+          linesAdded: diffLinesAdded,
+          linesRemoved: diffLinesRemoved,
         },
       });
 
       // Update session lines from actual diff counts (more accurate than estimates)
-      if (gitCapture.linesAdded || gitCapture.linesRemoved) {
+      if (diffLinesAdded || diffLinesRemoved) {
         await prisma.codingSession.update({
           where: { id: sessionId },
           data: {
-            linesAdded: gitCapture.linesAdded || 0,
-            linesRemoved: gitCapture.linesRemoved || 0,
+            linesAdded: diffLinesAdded,
+            linesRemoved: diffLinesRemoved,
           },
         });
       }

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent, TeamMember } from '../api';
 import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../utils';
-import { Archive, ArchiveRestore, GitBranch } from 'lucide-react';
+import { Archive, ArchiveRestore, GitBranch, GitMerge } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
 
@@ -193,6 +193,30 @@ export default function Sessions() {
       setSelectedIds(new Set());
     } else {
       setSelectedIds(new Set(sessions.map((s) => s.id)));
+    }
+  };
+
+  const handleMerge = async () => {
+    if (selectedIds.size < 2) return;
+    const ids = Array.from(selectedIds);
+    const selected = sessions.filter((s) => ids.includes(s.id));
+    if (selected.some((s) => s.status === 'RUNNING')) {
+      toast('error', 'Cannot merge running sessions. Wait for them to complete.');
+      return;
+    }
+    setBulkLoading(true);
+    try {
+      const res = await api.request<{ mergedSessionId: string }>('/api/sessions/merge', {
+        method: 'POST',
+        body: JSON.stringify({ sessionIds: ids }),
+      });
+      toast('success', `Merged ${ids.length} sessions`);
+      setSelectedIds(new Set());
+      navigate(`/sessions/${res.mergedSessionId}`);
+    } catch (err: any) {
+      toast('error', err.message || 'Failed to merge sessions');
+    } finally {
+      setBulkLoading(false);
     }
   };
 
@@ -559,6 +583,16 @@ export default function Sessions() {
             </button>
             </>
             )}
+            {selectedIds.size >= 2 && (
+              <button
+                onClick={handleMerge}
+                disabled={bulkLoading}
+                className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5 border-purple-500/30 text-purple-400 hover:bg-purple-500/10"
+              >
+                <GitMerge className="w-3 h-3" />
+                {bulkLoading ? 'Merging...' : `Merge ${selectedIds.size}`}
+              </button>
+            )}
             <button
               onClick={handleBulkArchive}
               disabled={bulkLoading}
@@ -784,7 +818,7 @@ export default function Sessions() {
                           <span className="text-gray-600">—</span>}
                       </td>
                       )}
-                      <td className="px-6 py-3 text-gray-400">{s.repoName ?? '—'}</td>
+                      <td className="px-6 py-3 text-gray-400">{(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}</td>
                       <td className="px-6 py-3 text-gray-400 text-xs max-w-[140px] truncate">
                         {s.branch ? (
                           <span className="inline-flex items-center gap-1">

@@ -45,9 +45,11 @@ export interface User {
   role: string;
   accountType: 'org' | 'developer';
   avatarUrl: string | null;
+  emailVerified?: boolean;
   orgId: string;
   orgName: string;
   orgSlug: string;
+  provider?: string | null;
 }
 
 export function updateProfile(data: { name?: string; email?: string; avatarUrl?: string }) {
@@ -81,6 +83,35 @@ export function registerDeveloper(email: string, password: string, name: string)
   return request<AuthResponse>('/api/auth/register/developer', {
     method: 'POST',
     body: JSON.stringify({ email, password, name }),
+  });
+}
+
+export function forgotPassword(email: string) {
+  return request<{ message: string }>('/api/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function resetPassword(token: string, password: string) {
+  return request<{ message: string }>('/api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, password }),
+  });
+}
+
+export function verifyResetToken(token: string) {
+  return request<{ valid: boolean; type: string | null }>(`/api/auth/verify-token/${token}`);
+}
+
+export function sendVerificationEmail() {
+  return request<{ message: string }>('/api/auth/send-verification', { method: 'POST' });
+}
+
+export function verifyEmail(token: string) {
+  return request<{ message: string }>('/api/auth/verify-email', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
   });
 }
 
@@ -269,6 +300,7 @@ export interface Session {
   userEmail: string | null;
   repoId: string | null;
   repoName: string | null;
+  repoNames: string[];
   commitSha: string | null;
   commitMessage: string | null;
   commitAuthor: string | null;
