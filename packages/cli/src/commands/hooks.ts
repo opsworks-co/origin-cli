@@ -749,7 +749,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   // For Codex: session-start fires per conversation, so always create new session
   //   but clean up old orphaned ones first.
   // First, clean up orphaned sessions whose heartbeats died (e.g. Mac sleep).
-  const agentsWithSessionReuse = ['cursor', 'codex']; // Reuse existing session for per-prompt-start agents
+  const agentsWithSessionReuse = ['cursor']; // Only Cursor reuses sessions — Codex creates new per conversation
   if (agentsWithPerPromptSessionStart.includes(agentSlug || '')) {
     const allActive = listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug || ''));
     for (const s of allActive) {
@@ -767,7 +767,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           const stateFilePath = getStatePath(repoPath, s.sessionTag);
           const stat = fs.statSync(stateFilePath);
           const ageMs = Date.now() - stat.mtimeMs;
-          if (ageMs < 2 * 60 * 1000) { // state file updated < 2 min ago
+          if (ageMs < 10 * 60 * 1000) { // state file updated < 10 min ago — don't treat as orphan
             heartbeatAlive = true; // treat as alive
             debugLog('session-start', 'session state file still fresh, skipping orphan cleanup', {
               sessionId: s.sessionId, ageMs,
@@ -1606,10 +1606,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           transcript: displayTranscript || undefined,
           model: model && model !== 'unknown' && model !== 'default' ? model : undefined,
           filesChanged: parsed?.filesChanged && parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
-          tokensUsed: hbTokensUsed || undefined,
-          inputTokens: hbInputTokens || undefined,
-          outputTokens: hbOutputTokens || undefined,
-          toolCalls: parsed?.toolCalls || undefined,
+          tokensUsed: hbTokensUsed > 0 ? hbTokensUsed : undefined,
+          inputTokens: hbInputTokens > 0 ? hbInputTokens : undefined,
+          outputTokens: hbOutputTokens > 0 ? hbOutputTokens : undefined,
+          toolCalls: parsed?.toolCalls ? parsed.toolCalls : undefined,
           durationMs: durationMs > 0 ? durationMs : undefined,
           costUsd: costUsd > 0 ? costUsd : undefined,
           status: 'RUNNING',
@@ -1953,10 +1953,10 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         transcript: displayTranscript || undefined,
         model: model !== 'unknown' ? model : undefined,
         filesChanged: sessionFilesChanged.length > 0 ? sessionFilesChanged : undefined,
-        tokensUsed: parsed.tokensUsed || undefined,
-        inputTokens: parsed.inputTokens || undefined,
-        outputTokens: parsed.outputTokens || undefined,
-        toolCalls: parsed.toolCalls || undefined,
+        tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
+        inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
+        outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+        toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
         promptChanges: promptMappings.length > 0
@@ -2254,10 +2254,10 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         summary: parsed.summary || undefined,
         transcript: displayTranscript || undefined,
         filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
-        tokensUsed: parsed.tokensUsed || undefined,
-        inputTokens: parsed.inputTokens || undefined,
-        outputTokens: parsed.outputTokens || undefined,
-        toolCalls: parsed.toolCalls || undefined,
+        tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
+        inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
+        outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+        toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
         gitCapture: gitCapture.diff ? gitCapture : undefined,
