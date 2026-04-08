@@ -187,7 +187,7 @@ export default function Pricing() {
               <tr className="border-b border-gray-700/50">
                 <th className="text-left py-3 px-4 text-gray-400 font-medium">Feature</th>
                 <th className="text-center py-3 px-4 text-gray-400 font-medium">Solo</th>
-                <th className="text-center py-3 px-4 text-gray-400 font-medium">Team</th>
+                <th className="text-center py-3 px-4 text-indigo-400 font-semibold bg-indigo-500/5">Team</th>
                 <th className="text-center py-3 px-4 text-gray-400 font-medium">Enterprise</th>
               </tr>
             </thead>
@@ -215,7 +215,7 @@ export default function Pricing() {
                 <tr key={i}>
                   <td className="py-2.5 px-4 text-gray-300">{feature}</td>
                   <td className="py-2.5 px-4 text-center text-gray-400">{solo}</td>
-                  <td className="py-2.5 px-4 text-center text-gray-300">{team}</td>
+                  <td className="py-2.5 px-4 text-center text-gray-200 bg-indigo-500/5 font-medium">{team}</td>
                   <td className="py-2.5 px-4 text-center text-gray-400">{enterprise}</td>
                 </tr>
               ))}

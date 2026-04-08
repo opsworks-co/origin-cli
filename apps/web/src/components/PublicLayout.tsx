@@ -78,7 +78,6 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
             <div className="flex items-center gap-2">
               <LogoMark size={24} />
               <span className="font-semibold text-sm">Origin</span>
-              <span className="text-xs text-gray-600">v2</span>
             </div>
             <div className="flex items-center gap-6 text-xs text-gray-600">
               <Link to="/demo" className="hover:text-gray-400 transition-colors">Demo</Link>

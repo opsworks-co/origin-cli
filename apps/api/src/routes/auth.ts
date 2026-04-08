@@ -721,7 +721,7 @@ router.post('/send-verification', requireAuth, async (req: AuthRequest, res: Res
     });
 
     const verifyUrl = `${WEB_URL}/verify-email?token=${token}`;
-    await sendEmail(user.email, 'Verify your Origin email', `
+    const emailResult = await sendEmail(user.email, 'Verify your Origin email', `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
         <div style="text-align: center; margin-bottom: 32px;">
           <h1 style="color: #f3f4f6; font-size: 24px; margin: 0;">Origin</h1>
@@ -740,6 +740,11 @@ router.post('/send-verification', requireAuth, async (req: AuthRequest, res: Res
         </div>
       </div>
     `);
+
+    if (!emailResult.success) {
+      console.error('Email send failed:', emailResult.error);
+      return res.status(503).json({ error: emailResult.error || 'Email service not configured. Set RESEND_API_KEY.' });
+    }
 
     res.json({ message: 'Verification email sent' });
   } catch (err) {

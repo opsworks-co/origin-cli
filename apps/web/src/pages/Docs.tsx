@@ -47,9 +47,9 @@ type Section =
 type DocTab = 'team' | 'solo' | 'cli';
 
 const TABS: { key: DocTab; label: string; description: string }[] = [
-  { key: 'team', label: 'Origin Team', description: 'Organization governance & management' },
-  { key: 'solo', label: 'Origin Solo', description: 'Personal developer dashboard' },
   { key: 'cli', label: 'Origin CLI', description: 'Command-line tool & API' },
+  { key: 'solo', label: 'Origin Solo', description: 'Personal developer dashboard' },
+  { key: 'team', label: 'Origin Team', description: 'Organization governance & management' },
 ];
 
 const SECTIONS: { key: Section; label: string; group?: string; tab: DocTab }[] = [
@@ -164,7 +164,7 @@ function Callout({ type, children }: { type: 'info' | 'warning' | 'tip'; childre
 
 export default function Docs() {
   const { section: urlSection } = useParams<{ section?: string }>();
-  const [activeTab, setActiveTab] = useState<DocTab>('team');
+  const [activeTab, setActiveTab] = useState<DocTab>('cli');
   const [active, setActive] = useState<Section>('overview');
 
   useEffect(() => {

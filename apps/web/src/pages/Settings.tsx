@@ -1052,18 +1052,7 @@ export default function Settings() {
         >
           General
         </button>
-        {isDev && (
-        <button
-          onClick={() => setActiveTab('keys')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'keys'
-              ? 'border-emerald-500 text-emerald-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          API Keys
-        </button>
-        )}
+        {/* API Keys moved to standalone /api-keys page */}
         {!isDev && (user?.role === 'ADMIN' || user?.role === 'OWNER') && (
         <button
           onClick={() => setActiveTab('integrations')}

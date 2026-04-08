@@ -627,7 +627,7 @@ export default function Landing() {
 
         <div className="grid md:grid-cols-2 gap-6">
           <FadeIn>
-            <div className="border border-emerald-500/15 rounded-lg p-8 bg-emerald-500/[0.02] h-full">
+            <div className="border border-emerald-500/30 rounded-xl p-8 bg-gradient-to-b from-emerald-500/[0.08] to-emerald-500/[0.02] h-full shadow-lg shadow-emerald-500/5">
               <div className="flex items-center gap-3 mb-2">
                 <span className="text-xs font-mono text-gray-700">4.1</span>
                 <h3 className="text-lg font-semibold text-gray-100">Origin Solo</h3>
@@ -646,7 +646,7 @@ export default function Landing() {
           </FadeIn>
 
           <FadeIn delay={100}>
-            <div className="border border-indigo-500/15 rounded-lg p-8 bg-indigo-500/[0.02] h-full">
+            <div className="border border-indigo-500/30 rounded-xl p-8 bg-gradient-to-b from-indigo-500/[0.08] to-indigo-500/[0.02] h-full shadow-lg shadow-indigo-500/5">
               <div className="flex items-center gap-3 mb-2">
                 <span className="text-xs font-mono text-gray-700">4.2</span>
                 <h3 className="text-lg font-semibold text-gray-100">Origin Team</h3>

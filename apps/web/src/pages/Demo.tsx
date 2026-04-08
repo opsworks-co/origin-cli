@@ -6,7 +6,8 @@ import { PlatformTour } from './DemoPlatform';
 
 const TABS = [
   { id: 'cli', label: 'Origin CLI', icon: '⌨️' },
-  { id: 'platform', label: 'Origin Platform', icon: '🖥️' },
+  { id: 'solo', label: 'Origin Solo', icon: '👤' },
+  { id: 'platform', label: 'Origin Team', icon: '🖥️' },
 ] as const;
 
 type Tab = (typeof TABS)[number]['id'];
@@ -55,6 +56,18 @@ export default function Demo() {
 
           {/* ── Tour content ────────────────────────────────── */}
           {tab === 'cli' && <CLITour embedded />}
+          {tab === 'solo' && (
+            <div className="text-center py-16 space-y-4">
+              <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-3xl">👤</div>
+              <h3 className="text-xl font-semibold">Origin Solo Demo</h3>
+              <p className="text-gray-400 max-w-md mx-auto text-sm">
+                Your personal AI coding dashboard — track sessions, view costs, and replay prompts across all your AI agents. Free forever.
+              </p>
+              <Link to="/register?type=developer" className="inline-block mt-4 px-6 py-2.5 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-500 transition-colors">
+                Get free account &rarr;
+              </Link>
+            </div>
+          )}
           {tab === 'platform' && <PlatformTour embedded />}
 
           {/* ── CTA ─────────────────────────────────────────── */}

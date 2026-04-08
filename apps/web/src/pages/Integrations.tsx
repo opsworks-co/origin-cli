@@ -87,6 +87,10 @@ export default function Integrations() {
   const [chatTestResult, setChatTestResult] = useState<{ success: boolean; error?: string } | null>(null);
   const [chatMsg, setChatMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // Collapsible sections — click card to expand, click again to collapse
+  const [expandedSection, setExpandedSection] = useState<string | null>(null);
+  const toggleSection = (section: string) => setExpandedSection(prev => prev === section ? null : section);
+
   // Handle GitHub App / GitLab OAuth callback URL params
   useEffect(() => {
     const githubAppResult = searchParams.get('github_app');
@@ -542,7 +546,7 @@ export default function Integrations() {
           return (
             <div
               className={`rounded-xl border p-4 cursor-pointer transition-all hover:border-gray-600 ${isConnected ? 'border-green-800/50 bg-green-900/5' : 'border-gray-800 bg-gray-900/50'}`}
-              onClick={() => document.getElementById('github-section')?.scrollIntoView({ behavior: 'smooth' })}
+              onClick={() => toggleSection('github')}
             >
               <div className="flex items-center gap-3">
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${isConnected ? 'bg-green-900/30' : 'bg-gray-800'}`}>
@@ -571,7 +575,7 @@ export default function Integrations() {
           return (
             <div
               className={`rounded-xl border p-4 cursor-pointer transition-all hover:border-gray-600 ${isConnected ? 'border-green-800/50 bg-green-900/5' : 'border-gray-800 bg-gray-900/50'}`}
-              onClick={() => document.getElementById('gitlab-section')?.scrollIntoView({ behavior: 'smooth' })}
+              onClick={() => toggleSection('gitlab')}
             >
               <div className="flex items-center gap-3">
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${isConnected ? 'bg-green-900/30' : 'bg-gray-800'}`}>
@@ -599,7 +603,7 @@ export default function Integrations() {
           return (
             <div
               className={`rounded-xl border p-4 cursor-pointer transition-all hover:border-gray-600 ${slack ? 'border-green-800/50 bg-green-900/5' : 'border-gray-800 bg-gray-900/50'}`}
-              onClick={() => document.getElementById('slack-section')?.scrollIntoView({ behavior: 'smooth' })}
+              onClick={() => toggleSection('slack')}
             >
               <div className="flex items-center gap-3">
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${slack ? 'bg-green-900/30' : 'bg-gray-800'}`}>
@@ -624,7 +628,7 @@ export default function Integrations() {
         {/* AI Chat summary card */}
         <div
           className={`rounded-xl border p-4 cursor-pointer transition-all hover:border-gray-600 ${chatConfigured ? 'border-green-800/50 bg-green-900/5' : 'border-gray-800 bg-gray-900/50'}`}
-          onClick={() => document.getElementById('chat-section')?.scrollIntoView({ behavior: 'smooth' })}
+          onClick={() => toggleSection('chat')}
         >
           <div className="flex items-center gap-3">
             <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${chatConfigured ? 'bg-green-900/30' : 'bg-gray-800'}`}>
@@ -645,10 +649,11 @@ export default function Integrations() {
         </div>
       </div>
 
-      {/* ── Detailed configuration sections ── */}
+      {/* ── Detailed configuration sections (collapsible) ── */}
 
       {/* GitHub Integration */}
-      <section id="github-section" className="card space-y-5">
+      {expandedSection === 'github' && (
+      <section className="card space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gray-800 flex items-center justify-center">
@@ -937,9 +942,11 @@ export default function Integrations() {
           </div>
         )}
       </section>
+      )}
 
       {/* GitLab Integration */}
-      <section id="gitlab-section" className="card space-y-5">
+      {expandedSection === 'gitlab' && (
+      <section className="card space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gray-800 flex items-center justify-center">
@@ -1259,9 +1266,11 @@ export default function Integrations() {
           </div>
         )}
       </section>
+      )}
 
       {/* Slack Integration */}
-      <section id="slack-section" className="card space-y-5">
+      {expandedSection === 'slack' && (
+      <section className="card space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gray-800 flex items-center justify-center">
@@ -1416,8 +1425,9 @@ export default function Integrations() {
           </div>
         )}
       </section>
+      )}
 
-      {/* Email Reports */}
+      {/* Email Reports — always visible (simple toggle, not a full integration) */}
       <section className="card space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -1495,7 +1505,8 @@ export default function Integrations() {
       </section>
 
       {/* AI Chat Configuration */}
-      <section id="chat-section" className="card space-y-5">
+      {expandedSection === 'chat' && (
+      <section className="card space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gray-800 flex items-center justify-center">
@@ -1614,6 +1625,7 @@ export default function Integrations() {
           </div>
         </div>
       </section>
+      )}
     </div>
   );
 }
