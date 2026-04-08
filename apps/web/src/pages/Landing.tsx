@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { Link } from 'react-router-dom';
+import { LogoMark } from '../components/Logo';
 
 // ── Animated aurora background ──────────────────────────────────────────────
 function AuroraBackground() {
@@ -282,6 +283,7 @@ function CliDemo() {
 
 // ── Install command ──────────────────────────────────────────────────────────
 const INSTALL_CMD = 'npm i -g https://getorigin.io/cli/origin-cli-latest.tgz';
+const INSTALL_DISPLAY = 'npm i -g origin-cli';
 
 function InstallCommand() {
   const [copied, setCopied] = useState(false);
@@ -294,12 +296,14 @@ function InstallCommand() {
     <div className="max-w-xl mx-auto mt-8">
       <button
         onClick={handleCopy}
-        className="w-full flex items-center gap-3 bg-[rgb(10,10,12)] border border-gray-800/60 rounded-lg px-4 py-3 text-left group hover:border-gray-700/60 transition-colors"
+        className="inline-flex items-center gap-3 bg-[rgb(10,10,12)] border border-gray-800/60 rounded-lg px-4 py-3 text-left group hover:border-indigo-500/30 transition-colors"
       >
+        <span className="text-xs text-gray-500 shrink-0">Get started in seconds:</span>
         <span className="text-indigo-400 text-xs font-mono">$</span>
-        <code className="flex-1 text-sm font-mono text-gray-400 truncate">{INSTALL_CMD}</code>
+        <code className="text-sm font-mono text-gray-400">{INSTALL_DISPLAY}</code>
+        <span className="animate-pulse text-indigo-400 font-mono text-sm">&#9646;</span>
         <span className="text-xs text-gray-600 group-hover:text-gray-400 transition-colors shrink-0">
-          {copied ? 'Copied' : 'Copy'}
+          {copied ? 'Copied!' : 'Copy'}
         </span>
       </button>
     </div>
@@ -439,6 +443,20 @@ export default function Landing() {
                 >
                   View plans
                 </Link>
+                <a
+                  href="https://github.com/dolobanko/origin-cli"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 px-5 py-3 text-sm font-medium rounded-lg text-gray-400 border border-white/[0.1] hover:bg-white/[0.05] hover:border-white/[0.15] hover:text-white transition-all"
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                  GitHub
+                </a>
+              </div>
+
+              {/* Install one-liner */}
+              <div className="mt-6 max-w-xl">
+                <InstallCommand />
               </div>
             </RevealText>
 
@@ -497,18 +515,6 @@ export default function Landing() {
             </p>
           </div>
           <CliDemo />
-          <div className="flex items-center gap-3">
-            <div className="flex-1"><InstallCommand /></div>
-            <a
-              href="https://github.com/dolobanko/origin-cli"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 px-4 py-3 rounded-lg bg-[rgb(10,10,12)] border border-gray-800/60 text-sm text-gray-400 hover:text-white hover:border-gray-700/60 transition-colors shrink-0"
-            >
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-              GitHub
-            </a>
-          </div>
         </FadeIn>
       </section>
 
@@ -663,47 +669,125 @@ export default function Landing() {
       <div className="border-t border-white/[0.06]" />
 
       {/* ─── COMPARISON ───────────────────────────────────────────────────── */}
-      <section className="max-w-4xl mx-auto px-6 py-24">
+      <section className="max-w-5xl mx-auto px-6 py-24">
         <FadeIn>
-          <div className="mb-12">
+          <div className="text-center mb-14">
             <p className="text-xs text-gray-600 font-mono mb-2">5.0</p>
             <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">How Origin compares</h2>
+            <p className="text-gray-500 mt-3 text-sm">The only platform that covers attribution, governance, and developer experience.</p>
           </div>
         </FadeIn>
 
         <FadeIn delay={100}>
-          <div className="border border-white/[0.06] rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-white/[0.06]">
-                  <th className="text-left px-5 py-3 text-gray-600 font-normal text-xs">Capability</th>
-                  <th className="text-center px-5 py-3 text-indigo-400 font-medium text-xs">Origin</th>
-                  <th className="text-center px-5 py-3 text-gray-600 font-normal text-xs">Entire</th>
-                  <th className="text-center px-5 py-3 text-gray-600 font-normal text-xs">git-ai</th>
-                </tr>
-              </thead>
-              <tbody>
+          <div className="grid grid-cols-3 gap-5">
+            {/* Origin — highlighted */}
+            <div className="relative rounded-xl border border-indigo-500/30 bg-gradient-to-b from-indigo-500/[0.06] to-transparent p-6 overflow-hidden">
+              <div className="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-indigo-400/60 to-transparent" />
+              <div className="flex items-center gap-2.5 mb-5">
+                <LogoMark size={28} />
+                <span className="font-semibold text-gray-100">Origin</span>
+              </div>
+              <div className="space-y-3">
                 {[
-                  ['Session recording & replay', true, true, false],
-                  ['AI blame (line-level attribution)', true, false, true],
-                  ['Multi-agent support', true, true, true],
-                  ['Policy enforcement', true, false, false],
-                  ['Secret & credential scanning', true, false, false],
-                  ['PR/MR merge gating', true, false, false],
-                  ['Budget controls', true, false, false],
-                  ['Cross-agent attribution context', true, false, false],
-                  ['Compliance audit trail', true, false, false],
-                  ['Rework & churn detection', true, false, false],
-                ].map(([feature, origin, entire, gitai], i) => (
-                  <tr key={i} className="border-t border-white/[0.03]">
-                    <td className="px-5 py-2.5 text-gray-400 text-xs">{feature as string}</td>
-                    <td className="px-5 py-2.5 text-center">{origin ? <span className="text-indigo-400 text-xs">Yes</span> : <span className="text-gray-700">&mdash;</span>}</td>
-                    <td className="px-5 py-2.5 text-center">{entire ? <span className="text-gray-500 text-xs">Yes</span> : <span className="text-gray-700">&mdash;</span>}</td>
-                    <td className="px-5 py-2.5 text-center">{gitai ? <span className="text-gray-500 text-xs">Yes</span> : <span className="text-gray-700">&mdash;</span>}</td>
-                  </tr>
+                  'Session recording & replay',
+                  'AI blame (line-level)',
+                  'Multi-agent support (5+)',
+                  'Policy enforcement',
+                  'Secret & credential scanning',
+                  'PR/MR merge gating',
+                  'Budget controls',
+                  'Cross-agent context',
+                  'Compliance audit trail',
+                  'Rework & churn detection',
+                ].map((f, i) => (
+                  <div key={i} className="flex items-center gap-2.5">
+                    <div className="w-5 h-5 rounded-full bg-indigo-500/20 flex items-center justify-center shrink-0">
+                      <svg className="w-3 h-3 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </div>
+                    <span className="text-sm text-gray-300">{f}</span>
+                  </div>
                 ))}
-              </tbody>
-            </table>
+              </div>
+              <div className="mt-6 pt-4 border-t border-white/[0.06]">
+                <span className="text-xs text-indigo-400 font-medium">10 / 10</span>
+              </div>
+            </div>
+
+            {/* Entire */}
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.015] p-6">
+              <div className="flex items-center gap-2.5 mb-5">
+                <div className="w-7 h-7 rounded-lg bg-gray-800 flex items-center justify-center text-gray-500 text-xs font-bold">E</div>
+                <span className="font-semibold text-gray-400">Entire</span>
+              </div>
+              <div className="space-y-3">
+                {[
+                  [true,  'Session recording & replay'],
+                  [false, 'AI blame (line-level)'],
+                  [true,  'Multi-agent support'],
+                  [false, 'Policy enforcement'],
+                  [false, 'Secret & credential scanning'],
+                  [false, 'PR/MR merge gating'],
+                  [false, 'Budget controls'],
+                  [false, 'Cross-agent context'],
+                  [false, 'Compliance audit trail'],
+                  [false, 'Rework & churn detection'],
+                ].map(([has, label], i) => (
+                  <div key={i} className="flex items-center gap-2.5">
+                    {has ? (
+                      <div className="w-5 h-5 rounded-full bg-gray-700/50 flex items-center justify-center shrink-0">
+                        <svg className="w-3 h-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                      </div>
+                    ) : (
+                      <div className="w-5 h-5 rounded-full bg-gray-800/50 flex items-center justify-center shrink-0">
+                        <div className="w-1.5 h-px bg-gray-700" />
+                      </div>
+                    )}
+                    <span className={`text-sm ${has ? 'text-gray-400' : 'text-gray-600'}`}>{label as string}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-6 pt-4 border-t border-white/[0.06]">
+                <span className="text-xs text-gray-500">2 / 10</span>
+              </div>
+            </div>
+
+            {/* git-ai */}
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.015] p-6">
+              <div className="flex items-center gap-2.5 mb-5">
+                <div className="w-7 h-7 rounded-lg bg-gray-800 flex items-center justify-center text-gray-500 text-xs font-bold">G</div>
+                <span className="font-semibold text-gray-400">git-ai</span>
+              </div>
+              <div className="space-y-3">
+                {[
+                  [false, 'Session recording & replay'],
+                  [true,  'AI blame (line-level)'],
+                  [true,  'Multi-agent support'],
+                  [false, 'Policy enforcement'],
+                  [false, 'Secret & credential scanning'],
+                  [false, 'PR/MR merge gating'],
+                  [false, 'Budget controls'],
+                  [false, 'Cross-agent context'],
+                  [false, 'Compliance audit trail'],
+                  [false, 'Rework & churn detection'],
+                ].map(([has, label], i) => (
+                  <div key={i} className="flex items-center gap-2.5">
+                    {has ? (
+                      <div className="w-5 h-5 rounded-full bg-gray-700/50 flex items-center justify-center shrink-0">
+                        <svg className="w-3 h-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                      </div>
+                    ) : (
+                      <div className="w-5 h-5 rounded-full bg-gray-800/50 flex items-center justify-center shrink-0">
+                        <div className="w-1.5 h-px bg-gray-700" />
+                      </div>
+                    )}
+                    <span className={`text-sm ${has ? 'text-gray-400' : 'text-gray-600'}`}>{label as string}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-6 pt-4 border-t border-white/[0.06]">
+                <span className="text-xs text-gray-500">2 / 10</span>
+              </div>
+            </div>
           </div>
         </FadeIn>
       </section>

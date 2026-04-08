@@ -180,6 +180,7 @@ model CodingSession {
   mergedInto   String?                         // Session ID this was merged into (original is hidden)
   agentSessionId  String?                      // Agent's native session ID (Claude Code's session_id, Windsurf, etc.)
   parentSessionId String?                      // Root session of this chain (self-ref to CodingSession.id)
+  lastActivityAt  DateTime?                    // Last prompt/tool activity (distinct from heartbeat updatedAt)
   startedAt    DateTime?                       // When session actually started (from session/start)
   endedAt      DateTime?                       // When session ended (from session/end)
   createdAt    DateTime       @default(now())

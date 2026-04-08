@@ -446,6 +446,14 @@ export default function Repos() {
                 Connect GitHub
               </button>
             )}
+            {!hasGitLab && (
+              <button
+                onClick={() => handleConnectGitLab()}
+                className="text-sm px-3 py-1.5 rounded-lg border border-gray-700 hover:border-gray-600 text-gray-300 hover:text-white transition-colors"
+              >
+                Connect GitLab
+              </button>
+            )}
             {hasGitLab && (
               <button
                 onClick={showGitLabImport ? () => setShowGitLabImport(false) : () => { handleDiscoverGitLab(); setShowImport(false); setShowForm(false); }}

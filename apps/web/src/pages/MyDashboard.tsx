@@ -1425,6 +1425,11 @@ export default function MyDashboard() {
                                 <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
                                 Running
                               </span>
+                            ) : s.status === 'IDLE' ? (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-900/30 text-amber-400">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                Idle
+                              </span>
                             ) : s.review ? (
                               <span
                                 className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${

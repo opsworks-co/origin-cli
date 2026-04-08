@@ -543,6 +543,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         filesChanged: '[]',
         status: 'RUNNING',
         startedAt: new Date(),
+        lastActivityAt: new Date(),
         userId: req.mcpUserId || null,
         apiKeyId: req.apiKeyId || null,
         apiKeyName: req.apiKeyName || null,
@@ -737,6 +738,8 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         ...(status !== undefined && { status }),
         // Re-opening a completed session clears endedAt
         ...(status === 'RUNNING' && { endedAt: null }),
+        // Track last real activity (prompt/tool use) for IDLE detection
+        lastActivityAt: new Date(),
       },
     });
 

@@ -23,8 +23,10 @@ interface AdminUser {
   orgName: string;
   orgSlug: string;
   role: string;
+  accountType: string;
   sessionCount: number;
   lastActive: string | null;
+  lastLoginAt: string | null;
   createdAt: string;
 }
 
@@ -404,6 +406,9 @@ export default function Admin() {
                     Last Active
                   </th>
                   <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Last Login
+                  </th>
+                  <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Created
                   </th>
                   <th className="text-right py-3 px-4 text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -414,7 +419,7 @@ export default function Admin() {
               <tbody className="divide-y divide-white/[0.04]">
                 {users.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="text-center py-12 text-gray-500">
+                    <td colSpan={9} className="text-center py-12 text-gray-500">
                       {search ? 'No users match your search' : 'No users found'}
                     </td>
                   </tr>
@@ -464,6 +469,7 @@ export default function Admin() {
                         {u.sessionCount.toLocaleString()}
                       </td>
                       <td className="py-3 px-4 text-gray-400">{formatRelative(u.lastActive)}</td>
+                      <td className="py-3 px-4 text-gray-400">{formatRelative(u.lastLoginAt)}</td>
                       <td className="py-3 px-4 text-gray-400">{formatDate(u.createdAt)}</td>
                       <td className="py-3 px-4 text-right">
                         {editingUserId !== u.id && (

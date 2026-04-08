@@ -33,14 +33,14 @@ export default function RegisterDeveloper() {
 
       <div className="w-full max-w-sm relative">
         {/* Logo */}
-        <div className="flex items-center justify-center gap-2 mb-8">
+        <Link to="/" className="flex items-center justify-center gap-2 mb-8 hover:opacity-80 transition-opacity">
           <LogoMark size={40} variant="solo" />
           <span className="text-xl font-semibold">Origin</span>
-        </div>
+        </Link>
 
         <div className="card">
           <div className="text-center mb-6">
-            <h2 className="text-xl font-semibold">Developer Account</h2>
+            <h2 className="text-xl font-semibold">Origin Solo</h2>
             <p className="text-sm text-gray-500 mt-1">
               Track your AI sessions, stats, and streaks
             </p>
@@ -103,7 +103,7 @@ export default function RegisterDeveloper() {
             </div>
 
             <button type="submit" disabled={loading} className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm transition-colors disabled:opacity-50">
-              {loading ? 'Creating account...' : 'Create developer account'}
+              {loading ? 'Creating account...' : 'Create solo account'}
             </button>
           </form>
 

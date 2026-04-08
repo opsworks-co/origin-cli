@@ -8,7 +8,7 @@ interface AuthState {
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string, orgName: string, orgSlug: string) => Promise<void>;
-  registerDeveloper: (email: string, password: string, name: string) => Promise<string | undefined>;
+  registerDeveloper: (email: string, password: string, name: string) => Promise<void>;
   setSession: (token: string, user: User) => void;
   updateUser: (u: User) => void;
   logout: () => void;
@@ -65,13 +65,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const registerDeveloper = useCallback(
-    async (email: string, password: string, name: string): Promise<string | undefined> => {
+    async (email: string, password: string, name: string): Promise<void> => {
       setError(null);
       try {
         const res = await api.registerDeveloper(email, password, name);
         localStorage.setItem('origin_token', res.token);
         setUser(res.user);
-        return res.apiKey; // Return auto-generated API key for solo developers
       } catch (err: any) {
         setError(err.message ?? 'Registration failed');
         throw err;

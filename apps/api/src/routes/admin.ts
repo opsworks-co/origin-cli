@@ -152,8 +152,10 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
       orgName: u.org.name,
       orgSlug: u.org.slug,
       role: u.role,
+      accountType: u.accountType,
       sessionCount: u._count.sessions,
       lastActive: lastActiveMap.get(u.id) ?? null,
+      lastLoginAt: u.lastLoginAt ?? null,
       createdAt: u.createdAt,
     }));
 
@@ -258,6 +260,8 @@ router.delete('/orgs/:id', async (req: AuthRequest, res: Response) => {
     if (userIds.length > 0) {
       await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.sessionReview.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.sessionBookmark.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.authToken.deleteMany({ where: { userId: { in: userIds } } });
     }
 
     // Delete mid-level records
@@ -278,7 +282,8 @@ router.delete('/orgs/:id', async (req: AuthRequest, res: Response) => {
     res.status(204).end();
   } catch (err) {
     console.error('Admin DELETE /orgs/:id error:', err);
-    res.status(500).json({ error: 'Failed to delete organization' });
+    const msg = err instanceof Error ? err.message : 'Failed to delete organization';
+    res.status(500).json({ error: msg });
   }
 });
 
@@ -314,17 +319,62 @@ router.put('/users/:id/role', async (req: AuthRequest, res: Response) => {
 router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    // Clean up all foreign key references before deleting
+
+    const user = await prisma.user.findUnique({ where: { id }, select: { orgId: true, accountType: true } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Clean up user-level FK references
     await prisma.notification.deleteMany({ where: { userId: id } });
-    await prisma.apiKey.deleteMany({ where: { userId: id } });
+    await prisma.sessionBookmark.deleteMany({ where: { userId: id } });
+    await prisma.authToken.deleteMany({ where: { userId: id } });
     await prisma.sessionReview.deleteMany({ where: { userId: id } });
     await prisma.auditLog.deleteMany({ where: { userId: id } });
+    await prisma.apiKey.deleteMany({ where: { userId: id } });
     await prisma.codingSession.updateMany({ where: { userId: id }, data: { userId: null } });
+
+    // Check if this is the last user in the org
+    const orgUserCount = await prisma.user.count({ where: { orgId: user.orgId } });
+
     await prisma.user.delete({ where: { id } });
+
+    // If last user in org (solo user), clean up the entire org
+    if (orgUserCount <= 1) {
+      const orgId = user.orgId;
+      // Delete org-level data in dependency order
+      await prisma.trailSession.deleteMany({ where: { trail: { orgId } } });
+      await prisma.trail.deleteMany({ where: { orgId } });
+      await prisma.sharedSession.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
+      await prisma.promptChange.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
+      await prisma.sessionDiff.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
+      await prisma.sessionReview.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
+      await prisma.codingSession.deleteMany({ where: { commit: { repo: { orgId } } } });
+      await prisma.commit.deleteMany({ where: { repo: { orgId } } });
+      await prisma.secretFinding.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
+      await prisma.pullRequest.deleteMany({ where: { repo: { orgId } } });
+      await prisma.webhook.deleteMany({ where: { repo: { orgId } } });
+      await prisma.apiKeyRepoScope.deleteMany({ where: { repo: { orgId } } });
+      await prisma.repo.deleteMany({ where: { orgId } });
+      await prisma.policyAssignment.deleteMany({ where: { policy: { orgId } } });
+      await prisma.policyRule.deleteMany({ where: { policy: { orgId } } });
+      await prisma.policyVersion.deleteMany({ where: { policy: { orgId } } });
+      await prisma.policy.deleteMany({ where: { orgId } });
+      await prisma.apiKeyAgentScope.deleteMany({ where: { agent: { orgId } } });
+      await prisma.agentVersion.deleteMany({ where: { agent: { orgId } } });
+      await prisma.agent.deleteMany({ where: { orgId } });
+      await prisma.machine.deleteMany({ where: { orgId } });
+      await prisma.integrationConfig.deleteMany({ where: { orgId } });
+      await prisma.invitation.deleteMany({ where: { orgId } });
+      await prisma.notification.deleteMany({ where: { orgId } });
+      await prisma.auditLog.deleteMany({ where: { orgId } });
+      await prisma.apiKey.deleteMany({ where: { orgId } });
+      await prisma.org.delete({ where: { id: orgId } });
+    }
+
     res.status(204).end();
   } catch (err) {
     console.error('Admin DELETE /users/:id error:', err);
-    res.status(500).json({ error: 'Failed to delete user' });
+    const msg = err instanceof Error ? err.message : 'Failed to delete user';
+    res.status(500).json({ error: msg });
   }
 });
 

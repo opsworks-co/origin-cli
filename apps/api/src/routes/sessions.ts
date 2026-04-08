@@ -35,6 +35,15 @@ import { runAIReview } from '../services/ai-review.js';
 const router = Router();
 router.use(requireAuth);
 
+const IDLE_THRESHOLD_MS = 5 * 60 * 1000; // 5 min without prompt activity → IDLE
+
+function computeStatus(s: any): string {
+  if (s.status !== 'RUNNING') return s.status || 'COMPLETED';
+  const lastActivity = s.lastActivityAt ? new Date(s.lastActivityAt).getTime() : 0;
+  if (lastActivity && Date.now() - lastActivity > IDLE_THRESHOLD_MS) return 'IDLE';
+  return 'RUNNING';
+}
+
 function mapSession(s: any, pullRequests?: any[]) {
   return {
     id: s.id,
@@ -68,7 +77,7 @@ function mapSession(s: any, pullRequests?: any[]) {
     linesRemoved: s.linesRemoved,
     costUsd: s.costUsd,
     branch: s.branch || null,
-    status: s.status || 'COMPLETED',
+    status: computeStatus(s),
     archived: s.archived || false,
     startedAt: s.startedAt || null,
     endedAt: s.endedAt || null,

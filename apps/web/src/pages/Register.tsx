@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Building2, User, Copy, Check, Terminal } from 'lucide-react';
+import { Building2, User } from 'lucide-react';
 import * as api from '../api';
 import { LogoMark } from '../components/Logo';
 
@@ -18,7 +18,7 @@ type AccountType = 'team' | 'developer';
 export default function Register() {
   const { register, registerDeveloper, error: authError } = useAuth();
   const navigate = useNavigate();
-  const [accountType, setAccountType] = useState<AccountType>('team');
+  const [accountType, setAccountType] = useState<AccountType>('developer');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -27,20 +27,9 @@ export default function Register() {
   const [slugEdited, setSlugEdited] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [generatedKey, setGeneratedKey] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-
   const handleOrgNameChange = (v: string) => {
     setOrgName(v);
     if (!slugEdited) setOrgSlug(slugify(v));
-  };
-
-  const copyKey = () => {
-    if (generatedKey) {
-      navigator.clipboard.writeText(generatedKey);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -49,13 +38,8 @@ export default function Register() {
     setLoading(true);
     try {
       if (accountType === 'developer') {
-        const apiKey = await registerDeveloper(email, password, name);
-        if (apiKey) {
-          setGeneratedKey(apiKey);
-          // Don't navigate yet — show the API key first
-        } else {
-          navigate('/me');
-        }
+        await registerDeveloper(email, password, name);
+        navigate('/me');
       } else {
         await register(email, password, name, orgName, orgSlug);
         navigate('/dashboard');
@@ -69,87 +53,34 @@ export default function Register() {
 
   const isTeam = accountType === 'team';
 
-  // Show API key screen after successful developer registration
-  if (generatedKey) {
-    return (
-      <div className="min-h-screen flex items-center justify-center px-4 py-12">
-        <div className="absolute top-0 left-1/3 w-96 h-96 bg-emerald-600/5 rounded-full blur-3xl" />
-
-        <div className="w-full max-w-md relative">
-          <div className="flex items-center justify-center gap-2 mb-8">
-            <LogoMark size={40} />
-            <span className="text-xl font-semibold">Origin</span>
-          </div>
-
-          <div className="card">
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center">
-                <Check className="w-4 h-4 text-emerald-400" />
-              </div>
-              <h2 className="text-xl font-semibold">Account created!</h2>
-            </div>
-
-            <p className="text-sm text-gray-400 mb-5">
-              Your personal API key has been generated. Save it now — you won't be able to see it again.
-            </p>
-
-            {/* API Key display */}
-            <div className="relative">
-              <div className="bg-gray-900 border border-gray-700 rounded-lg p-3 pr-12 font-mono text-sm text-emerald-400 break-all select-all">
-                {generatedKey}
-              </div>
-              <button
-                onClick={copyKey}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-md hover:bg-gray-700 transition-colors"
-                title="Copy to clipboard"
-              >
-                {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-gray-400" />}
-              </button>
-            </div>
-
-            {/* Quick start */}
-            <div className="mt-5 p-3 rounded-lg bg-gray-800/50 border border-gray-700/50">
-              <div className="flex items-center gap-2 mb-2">
-                <Terminal className="w-4 h-4 text-gray-400" />
-                <span className="text-sm font-medium text-gray-300">Quick start</span>
-              </div>
-              <div className="space-y-1.5 font-mono text-xs text-gray-400">
-                <p>$ npm i -g @anthropic/origin-cli</p>
-                <p>$ origin login --key {generatedKey.slice(0, 16)}...</p>
-                <p>$ origin init</p>
-              </div>
-            </div>
-
-            <button
-              onClick={() => navigate('/me')}
-              className="w-full mt-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm transition-colors"
-            >
-              Go to Dashboard
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-12">
       <div className={`absolute top-0 w-96 h-96 rounded-full blur-3xl transition-colors duration-500 ${isTeam ? 'right-1/3 bg-purple-600/5' : 'left-1/3 bg-emerald-600/5'}`} />
 
       <div className="w-full max-w-sm relative">
         {/* Logo */}
-        <div className="flex items-center justify-center gap-2 mb-8">
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold transition-colors duration-300 ${isTeam ? 'bg-indigo-600' : 'bg-emerald-600'}`}>
-            O
-          </div>
+        <Link to="/" className="flex items-center justify-center gap-2 mb-8 hover:opacity-80 transition-opacity">
+          <LogoMark size={40} variant={isTeam ? 'default' : 'solo'} />
           <span className="text-xl font-semibold">Origin</span>
-        </div>
+        </Link>
 
         <div className="card">
           <h2 className="text-xl font-semibold text-center mb-5">Create your account</h2>
 
           {/* Account type toggle */}
           <div className="grid grid-cols-2 gap-2 mb-6">
+            <button
+              type="button"
+              onClick={() => setAccountType('developer')}
+              className={`flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 border ${
+                !isTeam
+                  ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400 shadow-sm shadow-emerald-500/5'
+                  : 'bg-transparent border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400'
+              }`}
+            >
+              <User className="w-4 h-4" />
+              Solo
+            </button>
             <button
               type="button"
               onClick={() => setAccountType('team')}
@@ -161,18 +92,6 @@ export default function Register() {
             >
               <Building2 className="w-4 h-4" />
               Team
-            </button>
-            <button
-              type="button"
-              onClick={() => setAccountType('developer')}
-              className={`flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 border ${
-                !isTeam
-                  ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400 shadow-sm shadow-emerald-500/5'
-                  : 'bg-transparent border-gray-700 text-gray-500 hover:border-gray-600 hover:text-gray-400'
-              }`}
-            >
-              <User className="w-4 h-4" />
-              Developer
             </button>
           </div>
 
@@ -293,7 +212,7 @@ export default function Register() {
                 ? 'Creating account...'
                 : isTeam
                 ? 'Create team account'
-                : 'Create developer account'}
+                : 'Create solo account'}
             </button>
           </form>
 

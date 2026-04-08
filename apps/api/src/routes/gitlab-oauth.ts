@@ -16,6 +16,14 @@ const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error('JWT_SECRET environment variable is required');
 
+// ── GET /debug-config — temporary debug endpoint ──
+router.get('/debug-config', (_req: Request, res: Response) => {
+  const clientId = process.env.GITLAB_APP_ID || process.env.GITLAB_CLIENT_ID || 'NOT_SET';
+  const hasSecret = !!(process.env.GITLAB_APP_SECRET || process.env.GITLAB_CLIENT_SECRET);
+  const redirectUri = process.env.GITLAB_APP_REDIRECT_URI || process.env.GITLAB_REDIRECT_URI || 'NOT_SET';
+  res.json({ clientId: clientId.slice(0, 12) + '...', hasSecret, redirectUri });
+});
+
 // ── GET /config — get GitLab OAuth app config for this org ──
 
 router.get('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
@@ -149,6 +157,8 @@ router.get('/install', requireAuth, requireRole('ADMIN'), async (req: AuthReques
     { expiresIn: '15m' },
   );
 
+  console.log('[gitlab-oauth] Install config:', JSON.stringify({ clientId: oauthConfig.clientId, redirectUri: oauthConfig.redirectUri, gitlabBaseUrl }));
+
   const authorizeUrl = `${gitlabBaseUrl}/oauth/authorize?` + new URLSearchParams({
     client_id: oauthConfig.clientId,
     redirect_uri: oauthConfig.redirectUri,
@@ -157,6 +167,7 @@ router.get('/install', requireAuth, requireRole('ADMIN'), async (req: AuthReques
     scope: 'api',
   }).toString();
 
+  console.log('[gitlab-oauth] Full authorize URL:', authorizeUrl);
   res.json({ authorizeUrl });
 });
 
@@ -274,7 +285,10 @@ router.get('/callback', async (req: Request, res: Response) => {
       },
     });
 
-    res.redirect('/settings?tab=integrations&gitlab_oauth=success');
+    // Check if Solo user to redirect to repos page
+    const callbackUser = await prisma.user.findUnique({ where: { id: statePayload.userId }, select: { accountType: true } });
+    const successRedirect = callbackUser?.accountType === 'developer' ? '/repos?gitlab_oauth=success' : '/settings?tab=integrations&gitlab_oauth=success';
+    res.redirect(successRedirect);
   } catch (err) {
     console.error('[gitlab-oauth] Callback error:', err);
     res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=unexpected');

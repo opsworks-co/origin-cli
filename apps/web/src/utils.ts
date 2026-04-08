@@ -19,6 +19,7 @@ export const STATUS_BADGE_MAP: Record<string, string> = {
   pending: 'badge-gray',
   completed: 'badge-blue',
   running: 'badge-purple',
+  idle: 'badge-amber',
 };
 
 export function getStatusBadgeClass(status: string): string {

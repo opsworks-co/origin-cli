@@ -28,14 +28,16 @@ function gitlabHeaders(token: string, authType?: string) {
 const oauthTokenCache = new Map<string, { token: string; expiresAt: Date }>();
 
 export function getGitLabOAuthConfig() {
-  const clientId = process.env.GITLAB_APP_ID;
-  const clientSecret = process.env.GITLAB_APP_SECRET;
-  const redirectUri = process.env.GITLAB_APP_REDIRECT_URI;
+  const clientId = process.env.GITLAB_APP_ID || process.env.GITLAB_CLIENT_ID;
+  const clientSecret = process.env.GITLAB_APP_SECRET || process.env.GITLAB_CLIENT_SECRET;
+  const redirectUri = process.env.GITLAB_APP_REDIRECT_URI || process.env.GITLAB_REDIRECT_URI;
 
-  if (!clientId || !clientSecret || !redirectUri) {
+  if (!clientId || !clientSecret) {
     return { configured: false } as const;
   }
-  return { configured: true, clientId, clientSecret, redirectUri } as const;
+  // Default redirect URI if not explicitly set
+  const finalRedirectUri = redirectUri || `${process.env.BASE_URL || 'https://getorigin.io'}/api/gitlab-oauth/callback`;
+  return { configured: true, clientId, clientSecret, redirectUri: finalRedirectUri } as const;
 }
 
 /**

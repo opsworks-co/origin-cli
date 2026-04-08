@@ -82,7 +82,7 @@ const SECTIONS: { key: Section; label: string; group?: string; tab: DocTab }[] =
   { key: 'webhooks', label: 'Webhooks', tab: 'team' },
   // ── Origin Solo ──
   { key: 'solo-setup', label: 'Setup Guide', group: 'Getting Started', tab: 'solo' },
-  { key: 'developer-dashboard', label: 'Developer Dashboard', group: 'Your Workspace', tab: 'solo' },
+  { key: 'developer-dashboard', label: 'Solo Dashboard', group: 'Your Workspace', tab: 'solo' },
   { key: 'ai-blame', label: 'AI Blame', tab: 'solo' },
   { key: 'ask-author', label: 'Ask the Author', tab: 'solo' },
   { key: 'git-notes', label: 'Git Notes', tab: 'solo' },
@@ -4209,16 +4209,16 @@ GET /api/machines/:id`}</CodeBlock>
               Origin Solo is <strong className="text-green-200">completely free</strong> &mdash; unlimited repos, unlimited sessions, all agents supported. No credit card needed.
             </Callout>
 
-            <H2 id="solo-create-account">Step 1: Create Your Developer Account</H2>
+            <H2 id="solo-create-account">Step 1: Create Your Solo Account</H2>
             <P>
-              Go to <code className="text-emerald-400">getorigin.io/register/developer</code> and create a developer account.
+              Go to <a href="https://getorigin.io/register/developer" className="text-emerald-400 hover:text-emerald-300 underline">getorigin.io/register</a> and create a Solo account.
               You can sign up with email/password or use GitHub, GitLab, or Google OAuth.
             </P>
             <Step n={1} title="Register">
-              <span>Visit the registration page and choose <strong className="text-emerald-400">Developer</strong> account. Enter your name, email, and password &mdash; or click a social login button.</span>
+              <span>Visit the <a href="https://getorigin.io/register/developer" className="text-emerald-400 hover:text-emerald-300 underline">registration page</a> and choose <strong className="text-emerald-400">Solo</strong> account. Enter your name, email, and password &mdash; or click a social login button.</span>
             </Step>
             <Step n={2} title="Verify & Sign In">
-              <span>After registration you&rsquo;re automatically signed in and redirected to your personal dashboard at <code className="text-emerald-400">/me</code>.</span>
+              <span>After registration you&rsquo;re automatically signed in and redirected to your personal dashboard at <a href="https://getorigin.io/me" className="text-emerald-400 hover:text-emerald-300 underline">/me</a>.</span>
             </Step>
 
             <H2 id="solo-install-cli">Step 2: Install the Origin CLI</H2>
@@ -4233,7 +4233,7 @@ GET /api/machines/:id`}</CodeBlock>
 
             <H2 id="solo-login">Step 3: Log In from the CLI</H2>
             <P>
-              Authenticate the CLI with your developer account:
+              Authenticate the CLI with your Solo account:
             </P>
             <CodeBlock title="Terminal">{`origin login`}</CodeBlock>
             <P>
@@ -4241,7 +4241,7 @@ GET /api/machines/:id`}</CodeBlock>
             </P>
             <Callout type="info">
               If you signed up via OAuth (GitHub/GitLab/Google), set a password first from your dashboard settings, or use an API key instead:
-              go to <code className="text-emerald-400">/me</code> &rarr; Settings &rarr; copy your API key &rarr; run <code className="text-indigo-400">origin login --api-key YOUR_KEY</code>.
+              go to <a href="https://getorigin.io/me" className="text-emerald-400 hover:text-emerald-300 underline">/me</a> &rarr; Settings &rarr; API Keys tab &rarr; create a key &rarr; run <code className="text-indigo-400">origin login --key YOUR_KEY</code>.
             </Callout>
 
             <H2 id="solo-init">Step 4: Initialize Your Repository</H2>
@@ -4288,7 +4288,7 @@ origin blame src/index.ts
 # Check your stats
 origin stats`}</CodeBlock>
             <P>
-              You can also visit your dashboard at <code className="text-emerald-400">getorigin.io/me</code> to see sessions, cost breakdowns, and streaks.
+              You can also visit your dashboard at <a href="https://getorigin.io/me" className="text-emerald-400 hover:text-emerald-300 underline">getorigin.io/me</a> to see sessions, cost breakdowns, and streaks.
             </P>
 
             <H2 id="solo-multiple-repos">Adding More Repositories</H2>
@@ -4309,7 +4309,7 @@ origin stats`}</CodeBlock>
 
             <H2 id="solo-next-steps">Next Steps</H2>
             <ul className="space-y-2 mb-4">
-              <Li>Explore your <button onClick={() => { window.history.replaceState(null, '', '#developer-dashboard'); window.location.reload(); }} className="text-indigo-400 hover:text-indigo-300 underline">Developer Dashboard</button> to see session analytics and streaks</Li>
+              <Li>Explore your <button onClick={() => { window.history.replaceState(null, '', '#developer-dashboard'); window.location.reload(); }} className="text-indigo-400 hover:text-indigo-300 underline">Solo Dashboard</button> to see session analytics and streaks</Li>
               <Li>Use <button onClick={() => { window.history.replaceState(null, '', '#ai-blame'); window.location.reload(); }} className="text-indigo-400 hover:text-indigo-300 underline">AI Blame</button> to see which agent wrote each line of your code</Li>
               <Li>Try <code className="text-indigo-400">origin stats</code> to view cost &amp; usage breakdowns from the terminal</Li>
               <Li>Join a team later via invite link &mdash; your Solo account stays active alongside the org</Li>
@@ -4320,26 +4320,26 @@ origin stats`}</CodeBlock>
         {/* ─── PERSONAL INSIGHTS ─────────────────────────────── */}
         {active === 'developer-dashboard' && (
           <div>
-            <h1 id="developer-dashboard" className="text-2xl font-bold mb-2">Developer Dashboard</h1>
+            <h1 id="developer-dashboard" className="text-2xl font-bold mb-2">Solo Dashboard</h1>
             <P>
-              The Developer Dashboard (<code className="text-emerald-400">/me</code>) is a personal workspace for individual developers.
+              The Solo Dashboard (<a href="https://getorigin.io/me" className="text-emerald-400 hover:text-emerald-300 underline">/me</a>) is a personal workspace for individual developers.
               It provides a comprehensive view of your AI coding sessions, patterns, efficiency metrics, and prompt history.
-              Available to both developer accounts and org members.
+              Available to both Solo accounts and org members.
             </P>
 
             <H2>Account Types</H2>
             <P>Origin supports two account types with different experiences:</P>
             <ul className="space-y-2 mb-4">
               <Li><strong className="text-gray-200">Organization Account</strong> &mdash; Full admin dashboard with team management, policies, IAM, budget controls, compliance, and infrastructure</Li>
-              <Li><strong className="text-gray-200">Developer Account</strong> &mdash; Lightweight personal dashboard focused on your sessions, stats, and efficiency</Li>
+              <Li><strong className="text-gray-200">Solo Account</strong> &mdash; Lightweight personal dashboard focused on your sessions, stats, and efficiency</Li>
             </ul>
             <P>
-              Both account types are available from a single registration page at <code className="text-indigo-400">/register</code> &mdash;
-              choose <strong className="text-gray-200">Team</strong> or <strong className="text-emerald-400">Developer</strong> using the toggle at the top.
+              Both account types are available from a single <a href="https://getorigin.io/register" className="text-indigo-400 hover:text-indigo-300 underline">registration page</a> &mdash;
+              choose <strong className="text-gray-200">Team</strong> or <strong className="text-emerald-400">Solo</strong> using the toggle at the top.
             </P>
             <Callout type="info">
-              Developer accounts use an emerald-themed interface with a simplified sidebar.
-              Org members can also access the developer dashboard at <code className="text-indigo-400">/me</code> alongside the org dashboard.
+              Solo accounts use an emerald-themed interface with a simplified sidebar.
+              Org members can also access the Solo dashboard at <a href="https://getorigin.io/me" className="text-emerald-400 hover:text-emerald-300 underline">/me</a> alongside the org dashboard.
             </Callout>
 
             <H2>Overview Cards</H2>
@@ -4597,8 +4597,7 @@ origin stats`}</CodeBlock>
             </P>
             <ol className="space-y-2 mb-4 list-decimal list-inside text-sm text-gray-400">
               <li><strong className="text-gray-200">Install the CLI</strong> &mdash; <code className="text-emerald-400">npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</code></li>
-              <li><strong className="text-gray-200">Create an API Key</strong> &mdash; Go to <strong className="text-gray-200">Settings &rarr; General</strong> and create an API key. Copy it.</li>
-              <li><strong className="text-gray-200">Configure &amp; Init</strong> &mdash; <code className="text-emerald-400">origin config set api-key YOUR_KEY</code> then <code className="text-emerald-400">origin init</code> to detect your AI tools and install hooks</li>
+              <li><strong className="text-gray-200">Login &amp; Init</strong> &mdash; <code className="text-emerald-400">origin login</code> then <code className="text-emerald-400">origin init</code> to detect your AI tools and install hooks</li>
               <li><strong className="text-gray-200">Start Coding</strong> &mdash; Use any AI tool as normal. Sessions appear automatically</li>
             </ol>
 
@@ -4768,6 +4767,7 @@ GET /api/stats/me/prompts?limit=30&offset=0`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin policies</code>
+                <span className="ml-2 inline-block text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Team</span>
                 <P>List all active governance policies from the server.</P>
               </div>
 
@@ -4825,6 +4825,7 @@ origin link --unlink       # Remove link`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin review &lt;sessionId&gt;</code>
+                <span className="ml-2 inline-block text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Team</span>
                 <P>Review a coding session from the command line. Approve, reject, or flag sessions with an optional note.</P>
                 <CodeBlock>{`origin review abc123 --approve
 origin review abc123 --reject --note "Security concern"
@@ -4833,6 +4834,7 @@ origin review abc123 --flag`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin intent-review</code>
+                <span className="ml-2 inline-block text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Team</span>
                 <P>Structured intent-based code review. Shows WHY code was written (prompts, reasoning) not just WHAT changed. Includes risk assessment (HIGH/MEDIUM/LOW) based on files touched and test coverage.</P>
                 <CodeBlock>{`origin intent-review               # Review current branch vs main
 origin intent-review feature/auth  # Review specific branch
@@ -4846,6 +4848,7 @@ origin intent-review --format json --output review.json`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin audit</code>
+                <span className="ml-2 inline-block text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Team</span>
                 <P>Generate a compliance audit trail for SOC 2 / ISO 27001 reporting. Filter by date range, author, or agent.</P>
                 <CodeBlock>{`origin audit
 origin audit --from 2026-01-01 --format csv --output q1.csv
@@ -4906,6 +4909,7 @@ origin search "database migration" --limit 5`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin trail</code>
+                <span className="ml-2 inline-block text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Team</span>
                 <P>Manage work trails &mdash; units of work (features, bug fixes) that span multiple AI sessions. Trails are tied to git branches and automatically link sessions.</P>
                 <CodeBlock>{`origin trail                     # show current trail for this branch
 origin trail create <name>       # create a new trail
@@ -4917,6 +4921,7 @@ origin trail label <label>       # add a label`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin review-pr &lt;pr-url&gt;</code>
+                <span className="ml-2 inline-block text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Team</span>
                 <P>Analyze all AI coding sessions behind a GitHub pull request. Shows a summary table with agent, model, cost, tokens, lines changed, and turn count for each session linked to the PR&apos;s commits.</P>
                 <CodeBlock>{`origin review-pr https://github.com/org/repo/pull/42
 
@@ -5198,8 +5203,8 @@ origin status`}</CodeBlock>
             <H2>Config Commands</H2>
             <div className="space-y-4 mt-4">
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set api-key &lt;key&gt;</code>
-                <P>Set your API key for authenticating with the Origin platform.</P>
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set apiKey &lt;key&gt;</code>
+                <P>Set your API key for authenticating with the Origin platform. Prefer <code className="text-indigo-400">origin login</code> which handles this automatically.</P>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -5331,12 +5336,11 @@ origin doctor`}</CodeBlock>
             <ul className="space-y-2 mb-4">
               <Li><strong className="text-gray-200">Claude Code</strong> &mdash; via MCP server config and CLI hooks</Li>
               <Li><strong className="text-gray-200">Cursor</strong> &mdash; via workspace rules and git hooks</Li>
-              <Li><strong className="text-gray-200">GitHub Copilot</strong> &mdash; via VS Code extension detection</Li>
-              <Li><strong className="text-gray-200">Gemini</strong> &mdash; via CLI detection</Li>
-              <Li><strong className="text-gray-200">Aider</strong> &mdash; via CLI detection and config</Li>
+              <Li><strong className="text-gray-200">Codex CLI</strong> &mdash; via process detection and hooks</Li>
+              <Li><strong className="text-gray-200">Gemini CLI</strong> &mdash; via CLI detection</Li>
               <Li><strong className="text-gray-200">Windsurf</strong> &mdash; via workspace detection</Li>
-              <Li><strong className="text-gray-200">Cody</strong> &mdash; via VS Code extension</Li>
             </ul>
+            <p className="text-gray-500 text-sm mt-2">Coming soon: GitHub Copilot, Aider, Cody, Continue, Codeium, Cline</p>
           </div>
         )}
 

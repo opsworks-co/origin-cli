@@ -1115,4 +1115,120 @@ router.get('/me/prompts', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /me/commits — personal commits with AI attribution ──────────────
+router.get('/me/commits', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.user!.orgId;
+
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const offset = parseInt(req.query.offset as string) || 0;
+    const sort = (req.query.sort as string) || 'date';
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    // Find commits linked to this user's sessions
+    const baseWhere: any = {
+      repoId: { in: repoIds },
+      OR: [
+        { codingSession: { userId } },
+        { session: { userId } },
+      ],
+    };
+
+    // Sort options
+    let orderBy: any = { committedAt: 'desc' };
+    if (sort === 'repo') orderBy = [{ repo: { name: 'asc' } }, { committedAt: 'desc' }];
+    if (sort === 'cost') orderBy = [{ codingSession: { costUsd: 'desc' } }, { committedAt: 'desc' }];
+
+    const sessionSelect = {
+      id: true,
+      model: true,
+      branch: true,
+      agent: { select: { name: true } },
+      costUsd: true,
+      tokensUsed: true,
+      linesAdded: true,
+      linesRemoved: true,
+      filesChanged: true,
+      sessionDiff: { select: { diff: true, linesAdded: true, linesRemoved: true } },
+      promptChanges: {
+        select: {
+          promptIndex: true,
+          promptText: true,
+          filesChanged: true,
+          diff: true,
+          createdAt: true,
+        },
+        orderBy: { promptIndex: 'asc' as const },
+      },
+    };
+
+    const [commits, total] = await Promise.all([
+      prisma.commit.findMany({
+        where: baseWhere,
+        orderBy,
+        take: limit,
+        skip: offset,
+        select: {
+          id: true,
+          sha: true,
+          message: true,
+          author: true,
+          aiToolDetected: true,
+          aiDetectionMethod: true,
+          branch: true,
+          filesChanged: true,
+          committedAt: true,
+          sessionId: true,
+          repo: { select: { name: true } },
+          codingSession: { select: sessionSelect },
+          session: { select: sessionSelect },
+        },
+      }),
+      prisma.commit.count({ where: baseWhere }),
+    ]);
+
+    res.json({
+      commits: commits.map((c) => {
+        const linkedSession = c.codingSession || c.session;
+        let files: string[] = [];
+        try { files = JSON.parse(c.filesChanged); } catch { /* ignore */ }
+        return {
+          id: c.id,
+          sha: c.sha,
+          message: c.message,
+          author: c.author,
+          aiToolDetected: c.aiToolDetected,
+          aiDetectionMethod: c.aiDetectionMethod,
+          branch: c.branch || linkedSession?.branch || null,
+          filesChanged: files,
+          committedAt: c.committedAt.toISOString(),
+          repoName: c.repo.name,
+          sessionId: linkedSession?.id || null,
+          sessionModel: linkedSession?.model || null,
+          sessionAgent: linkedSession?.agent?.name || null,
+          sessionCost: linkedSession?.costUsd || 0,
+          sessionTokens: linkedSession?.tokensUsed || 0,
+          sessionLinesAdded: linkedSession?.linesAdded || 0,
+          sessionLinesRemoved: linkedSession?.linesRemoved || 0,
+          diff: linkedSession?.sessionDiff?.diff || null,
+          prompts: linkedSession?.promptChanges?.map((pc: any) => ({
+            promptIndex: pc.promptIndex,
+            promptText: pc.promptText,
+            filesChanged: (() => { try { return JSON.parse(pc.filesChanged); } catch { return []; } })(),
+            createdAt: pc.createdAt?.toISOString(),
+          })) || [],
+        };
+      }),
+      total,
+    });
+  } catch (err) {
+    console.error('Commits stats error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

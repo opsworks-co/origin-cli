@@ -139,8 +139,10 @@ router.get('/callback', async (req: Request, res: Response) => {
       },
     });
 
-    // Redirect back to Settings page with success
-    res.redirect('/settings?tab=integrations&github_app=success');
+    // Redirect — Solo users go to /repos, org users to /settings
+    const cbUser = await prisma.user.findUnique({ where: { id: statePayload.userId }, select: { accountType: true } });
+    const successUrl = cbUser?.accountType === 'developer' ? '/repos?github_app=success' : '/settings?tab=integrations&github_app=success';
+    res.redirect(successUrl);
   } catch (err) {
     console.error('[github-app] Callback error:', err);
     res.redirect('/settings?tab=integrations&github_app=error&msg=unexpected');
