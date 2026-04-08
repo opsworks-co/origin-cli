@@ -8,6 +8,211 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'new-era-source-code-management-ai': (
+    <>
+      <p>
+        Something fundamental has changed in how software gets built. In the last twelve months, AI coding agents &mdash; Claude Code, Cursor, Gemini CLI, Codex &mdash; went from novelty to infrastructure. Teams that adopted them aren&rsquo;t writing 10% more code. They&rsquo;re writing 3&ndash;5x more. Entire features ship in hours instead of days.
+      </p>
+      <p>
+        But here&rsquo;s the problem nobody talks about: <strong className="text-gray-100">git has no idea any of this happened.</strong>
+      </p>
+      <p>
+        Every commit still shows a human author. Every <code>git blame</code> line points to the developer who hit Enter, not the AI that generated 200 lines of authentication middleware. The most important shift in software engineering history is invisible to the tools we rely on.
+      </p>
+      <p>
+        That&rsquo;s why we built Origin.
+      </p>
+
+      <h2>The Five Blind Spots</h2>
+      <p>
+        Talk to any engineering leader running AI agents across their team, and you&rsquo;ll hear the same questions:
+      </p>
+      <ol>
+        <li><strong className="text-gray-100">Who wrote this code?</strong> &mdash; A commit authored by dev@company.com could be 100% AI-generated. <code>Co-Authored-By</code> headers are unreliable. Most agents don&rsquo;t add them.</li>
+        <li><strong className="text-gray-100">What are we spending?</strong> &mdash; Claude API bills hit $2K/month and nobody knows which developer or project is driving cost. Token usage is invisible at the team level.</li>
+        <li><strong className="text-gray-100">What can AI touch?</strong> &mdash; Should AI agents be modifying production configs? Payment processing logic? There&rsquo;s no enforcement layer.</li>
+        <li><strong className="text-gray-100">What context was lost?</strong> &mdash; A developer works with Claude for 3 hours, stops, and resumes the next day. The session context, prompts, and reasoning are gone.</li>
+        <li><strong className="text-gray-100">Can we prove compliance?</strong> &mdash; SOC 2 auditors ask &ldquo;who reviewed this code?&rdquo; and the answer is &ldquo;an AI wrote it and the developer committed it without review.&rdquo;</li>
+      </ol>
+      <p>
+        These aren&rsquo;t theoretical problems. They&rsquo;re happening today in every engineering org that adopted AI coding tools.
+      </p>
+
+      <h2>Why Git Isn&rsquo;t Enough</h2>
+      <p>
+        Git is brilliant at tracking <em>changes</em>. It was never designed to track <em>intent</em>. Here&rsquo;s what a standard <code>git blame</code> looks like on AI-authored code:
+      </p>
+
+      {/* Visual: git blame vs origin blame */}
+      <div className="not-prose my-8 space-y-4">
+        <div className="rounded-xl border border-gray-800 bg-[#0d0e1a] overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <span className="text-xs text-red-400 font-mono font-medium">$ git blame src/auth.ts</span>
+            <span className="text-[10px] text-gray-600 ml-auto">Standard git</span>
+          </div>
+          <div className="px-4 py-3 font-mono text-xs space-y-0.5 text-gray-400 overflow-x-auto">
+            <div>a3f1e2d (Alex Kim  2026-04-07) <span className="text-gray-500">import jwt from &apos;jsonwebtoken&apos;;</span></div>
+            <div>a3f1e2d (Alex Kim  2026-04-07) <span className="text-gray-500">import bcrypt from &apos;bcryptjs&apos;;</span></div>
+            <div>a3f1e2d (Alex Kim  2026-04-07) <span className="text-gray-500"></span></div>
+            <div>a3f1e2d (Alex Kim  2026-04-07) <span className="text-gray-500">export async function authenticate(email, password) {'{'}</span></div>
+            <div>a3f1e2d (Alex Kim  2026-04-07) <span className="text-gray-500">  const user = await db.user.findUnique({'{'} where: {'{'} email {'}'} {'}'});</span></div>
+            <div>a3f1e2d (Alex Kim  2026-04-07) <span className="text-gray-500">  if (!user) throw new AuthError(&apos;not_found&apos;);</span></div>
+            <div className="text-gray-600 mt-1">... every line shows &ldquo;Alex Kim&rdquo; &mdash; who actually wrote this?</div>
+          </div>
+        </div>
+        <div className="rounded-xl border border-emerald-800/50 bg-[#0d0e1a] overflow-hidden">
+          <div className="px-4 py-2 border-b border-emerald-800/30 flex items-center gap-2">
+            <span className="text-xs text-emerald-400 font-mono font-medium">$ origin blame src/auth.ts</span>
+            <span className="text-[10px] text-emerald-600 ml-auto">With Origin</span>
+          </div>
+          <div className="px-4 py-3 font-mono text-xs space-y-0.5 overflow-x-auto">
+            <div><span className="text-indigo-400 font-bold">[AI]</span> <span className="text-gray-500">a3f1e2d</span> <span className="text-gray-400">import jwt from &apos;jsonwebtoken&apos;;</span></div>
+            <div><span className="text-indigo-400 font-bold">[AI]</span> <span className="text-gray-500">a3f1e2d</span> <span className="text-gray-400">import bcrypt from &apos;bcryptjs&apos;;</span></div>
+            <div><span className="text-indigo-400 font-bold">[AI]</span> <span className="text-gray-500">a3f1e2d</span> <span className="text-gray-400"></span></div>
+            <div><span className="text-indigo-400 font-bold">[AI]</span> <span className="text-gray-500">a3f1e2d</span> <span className="text-gray-400">export async function authenticate(email, password) {'{'}</span></div>
+            <div><span className="text-emerald-400 font-bold">[HU]</span> <span className="text-gray-500">b7c2d4e</span> <span className="text-gray-400">  const user = await db.user.findUnique({'{'} where: {'{'} email {'}'} {'}'});</span></div>
+            <div><span className="text-indigo-400 font-bold">[AI]</span> <span className="text-gray-500">a3f1e2d</span> <span className="text-gray-400">  if (!user) throw new AuthError(&apos;not_found&apos;);</span></div>
+            <div className="text-emerald-600 mt-1">Line-level attribution: AI vs human, per line</div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        The first output tells you nothing useful. The second tells you exactly which lines the AI wrote and which the human edited. That&rsquo;s the difference between flying blind and having full visibility.
+      </p>
+
+      <h2>How Origin Works</h2>
+      <p>
+        Origin sits between your AI coding agent and git. It&rsquo;s not a new version control system &mdash; it&rsquo;s an <em>attribution layer</em> that makes git AI-aware.
+      </p>
+
+      {/* Architecture diagram */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-gray-950 p-6">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-center">
+            {[
+              { label: 'AI Agent', sub: 'Claude, Cursor, Gemini...', color: 'indigo' },
+              { label: 'Git Hook', sub: 'Post-commit fires', color: 'gray' },
+              { label: 'Origin CLI', sub: 'Detects + captures', color: 'emerald' },
+              { label: 'Git Notes', sub: 'refs/notes/origin', color: 'gray' },
+              { label: 'Dashboard', sub: 'getorigin.io', color: 'indigo' },
+            ].map((step, i) => (
+              <React.Fragment key={step.label}>
+                {i > 0 && <span className="text-gray-600 hidden sm:block">&rarr;</span>}
+                {i > 0 && <span className="text-gray-600 sm:hidden">&darr;</span>}
+                <div className={`px-4 py-3 rounded-lg border ${step.color === 'emerald' ? 'border-emerald-800/50 bg-emerald-900/10' : step.color === 'indigo' ? 'border-indigo-800/50 bg-indigo-900/10' : 'border-gray-800 bg-gray-900/50'} flex-1 min-w-[120px]`}>
+                  <div className="text-sm font-semibold text-gray-200">{step.label}</div>
+                  <div className="text-[10px] text-gray-500 mt-0.5">{step.sub}</div>
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+          <p className="text-[10px] text-gray-600 text-center mt-4">Every AI coding session is captured, attributed, and stored &mdash; zero config required</p>
+        </div>
+      </div>
+
+      <p>
+        When a developer uses any AI coding agent, Origin&rsquo;s git hooks fire automatically. The CLI detects which agent is running, reads the session transcript, and writes metadata into git notes. No manual tagging, no workflow changes. It just works.
+      </p>
+
+      <h2>Session Replay: See Every Prompt and Decision</h2>
+      <p>
+        Every AI coding session is captured end-to-end: the prompts the developer gave, the files the AI touched, the exact diff per prompt, token usage, cost, and model. When something breaks in production, you don&rsquo;t just see <em>what</em> changed &mdash; you see <em>why</em> it changed.
+      </p>
+
+      {/* Session detail mock */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-gray-950 overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">Claude Code</span>
+              <span className="text-xs text-gray-400">api-server</span>
+              <span className="text-xs text-gray-600">main</span>
+            </div>
+            <div className="flex items-center gap-4 text-[10px] text-gray-500">
+              <span>42m</span>
+              <span>$4.40</span>
+              <span>6.5M tokens</span>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-800 text-gray-500">Done</span>
+            </div>
+          </div>
+          <div className="p-4 space-y-2">
+            <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Prompts</p>
+            {[
+              { prompt: 'add user authentication with JWT and bcrypt', files: 3, lines: '+87 / -12' },
+              { prompt: 'write tests for the auth middleware', files: 2, lines: '+124 / -0' },
+              { prompt: 'fix the token refresh logic and add rate limiting', files: 1, lines: '+15 / -8' },
+            ].map((p, i) => (
+              <div key={i} className="bg-gray-900/50 border border-gray-800/50 rounded-lg px-3 py-2 text-xs space-y-1">
+                <p className="text-gray-200">&ldquo;{p.prompt}&rdquo;</p>
+                <p className="text-[10px] text-gray-600">{p.files} files changed &middot; {p.lines}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <h2>Cost Visibility: Know Where Every Dollar Goes</h2>
+      <p>
+        When your team is running 5 different AI agents across 20 repos, API costs add up fast. Origin tracks cost per session, per model, per developer, per repo. No more surprise bills.
+      </p>
+
+      {/* Cost breakdown */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-gray-950 p-5 space-y-3">
+          <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Weekly Cost by Model</p>
+          {[
+            { model: 'claude-sonnet-4', cost: 142.50, pct: 58, color: 'bg-indigo-500' },
+            { model: 'claude-opus-4', cost: 67.20, pct: 27, color: 'bg-purple-500' },
+            { model: 'gpt-4o', cost: 23.80, pct: 10, color: 'bg-emerald-500' },
+            { model: 'gemini-2.5-pro', cost: 12.30, pct: 5, color: 'bg-amber-500' },
+          ].map((m) => (
+            <div key={m.model} className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-400 font-mono">{m.model}</span>
+                <span className="text-gray-300">${m.cost.toFixed(2)}</span>
+              </div>
+              <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                <div className={`h-full ${m.color} rounded-full opacity-70`} style={{ width: `${m.pct}%` }} />
+              </div>
+            </div>
+          ))}
+          <div className="flex justify-between text-xs pt-2 border-t border-gray-800">
+            <span className="text-gray-500">Total this week</span>
+            <span className="text-gray-200 font-semibold">$245.80</span>
+          </div>
+        </div>
+      </div>
+
+      <h2>The New SCM Layer</h2>
+      <p>
+        Think about what GitHub did for git. Git existed. It was powerful. But it was a local tool. GitHub added the collaboration layer &mdash; pull requests, code review, issues, CI/CD &mdash; that made git useful for teams.
+      </p>
+      <p>
+        Origin does the same thing for AI coding. Git exists. It&rsquo;s still the foundation. But it was built for a world where humans write code. Origin adds the <em>AI governance layer</em> &mdash; attribution, session tracking, cost visibility, policy enforcement, audit trails &mdash; that makes git useful for teams using AI agents.
+      </p>
+      <p>
+        This is the new era of source code management. Not because git is broken, but because the way code gets written has fundamentally changed, and our tools need to catch up.
+      </p>
+
+      <h2>What&rsquo;s Next</h2>
+      <p>
+        We&rsquo;re building Origin in public, and the roadmap is driven by what engineering teams actually need:
+      </p>
+      <ul>
+        <li><strong className="text-gray-100">Session chaining</strong> &mdash; automatically linking sessions that span across agent restarts and overnight breaks</li>
+        <li><strong className="text-gray-100">Multi-agent orchestration</strong> &mdash; tracking when multiple AI agents work on the same codebase simultaneously</li>
+        <li><strong className="text-gray-100">Real-time dashboards</strong> &mdash; live session streaming with token-by-token cost tracking</li>
+        <li><strong className="text-gray-100">Compliance reports</strong> &mdash; one-click SOC 2 and ISO 27001 evidence generation</li>
+      </ul>
+      <p>
+        Origin Solo is free forever for individual developers. No limits on repos, sessions, or agents. If you&rsquo;re using AI to write code, you should know what it&rsquo;s writing.
+      </p>
+      <p>
+        <a href="/register?type=developer" className="text-emerald-400 hover:text-emerald-300 font-medium">Get your free account &rarr;</a>
+      </p>
+    </>
+  ),
   'multi-repo-sessions': (
     <>
       <p>

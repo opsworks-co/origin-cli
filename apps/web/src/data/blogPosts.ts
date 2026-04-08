@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Why We Built Origin: The New Era of Source Code Management for AI',
+    slug: 'new-era-source-code-management-ai',
+    date: '2026-04-08',
+    author: 'Artem Dolobanko',
+    tags: ['ai-governance', 'developer-tools', 'engineering-leadership', 'origin'],
+    excerpt:
+      'AI writes 30-70% of production code now, but git has no idea. Git blame shows the human who committed, not the AI that wrote it. We built Origin to fix that — line-level attribution, session replay, cost tracking, and governance for the AI coding era.',
+  },
+  {
     title: 'Multi-Repo Sessions: Track AI Coding Across Your Entire Workspace',
     slug: 'multi-repo-sessions',
     date: '2026-04-07',
