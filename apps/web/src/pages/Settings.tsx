@@ -26,7 +26,7 @@ interface ApiKey {
 
 type SettingsTab = 'general' | 'keys' | 'integrations' | 'audit' | 'reports' | 'trails' | 'compliance' | 'models';
 const ORG_TABS: SettingsTab[] = ['general', 'integrations', 'audit', 'reports', 'trails', 'compliance', 'models'];
-const DEV_TABS: SettingsTab[] = ['general', 'keys', 'models'];
+const DEV_TABS: SettingsTab[] = ['general', 'models'];
 
 function ProfileEditor() {
   const { user, updateUser } = useAuth();
@@ -2907,102 +2907,7 @@ export default function Settings() {
       {activeTab === 'reports' && <Reports />}
       {activeTab === 'trails' && <Trails />}
       {activeTab === 'compliance' && <Compliance />}
-      {activeTab === 'keys' && isDev && (
-        <section className="card space-y-4">
-          <div>
-            <h2 className="text-lg font-semibold">API Keys</h2>
-            <p className="text-sm text-gray-500 mt-0.5">
-              Create and manage keys to connect the Origin CLI to your account
-            </p>
-          </div>
-
-          {keyError && (
-            <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-red-400 text-sm">
-              {keyError}
-            </div>
-          )}
-
-          {loadingKeys && <div className="text-sm text-gray-500">Loading...</div>}
-
-          {!loadingKeys && apiKeys.length > 0 && (
-            <div className="space-y-2">
-              {apiKeys.map((key) => (
-                <div key={key.id} className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-3">
-                  <div>
-                    <span className="text-sm text-gray-200">{key.name}</span>
-                    <code className="block text-xs text-emerald-400 mt-0.5">{key.keyPrefix}...</code>
-                    <span className="text-[10px] text-gray-600">Created {new Date(key.createdAt).toLocaleDateString()}</span>
-                  </div>
-                  <button
-                    onClick={async () => {
-                      setDeletingKeyId(key.id);
-                      try { await api.deleteApiKey(key.id); await fetchApiKeys(); }
-                      catch (err: any) { setKeyError(err.message); }
-                      finally { setDeletingKeyId(null); }
-                    }}
-                    disabled={deletingKeyId === key.id}
-                    className="text-xs text-red-400 hover:text-red-300"
-                  >
-                    {deletingKeyId === key.id ? 'Revoking...' : 'Revoke'}
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {!loadingKeys && apiKeys.length === 0 && !keyError && (
-            <div className="text-sm text-gray-500 bg-gray-800/30 rounded-lg p-4 text-center">
-              No API keys yet. Create one to connect the CLI.
-            </div>
-          )}
-
-          {createdKey && (
-            <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3">
-              <p className="text-xs text-emerald-400 mb-1">Copy this key — it won't be shown again:</p>
-              <code className="text-sm text-emerald-300 break-all select-all">{createdKey}</code>
-            </div>
-          )}
-
-          <div className="flex gap-2">
-            <input
-              value={newKeyName}
-              onChange={(e) => setNewKeyName(e.target.value)}
-              placeholder="Key name (e.g. laptop)"
-              className="input flex-1 text-sm"
-            />
-            <button
-              onClick={async () => {
-                if (!newKeyName.trim()) return;
-                setCreatingKey(true);
-                setKeyError(null);
-                try {
-                  const res = await api.createApiKey({ name: newKeyName.trim() });
-                  setCreatedKey(res.key);
-                  setNewKeyName('');
-                  await fetchApiKeys();
-                } catch (err: any) { setKeyError(err.message); }
-                finally { setCreatingKey(false); }
-              }}
-              disabled={creatingKey || !newKeyName.trim()}
-              className="btn-primary text-sm px-4"
-            >
-              {creatingKey ? 'Creating...' : 'Create Key'}
-            </button>
-          </div>
-
-          <div className="bg-gray-800/30 rounded-lg p-3 text-xs text-gray-500">
-            <p className="font-medium text-gray-400 mb-2">Quick Setup</p>
-            <div className="space-y-1 font-mono text-emerald-400">
-              <p>$ npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</p>
-              <p>$ origin login --key YOUR_KEY</p>
-              <p>$ origin init</p>
-            </div>
-            <a href="/docs" className="inline-block mt-2 text-indigo-400 hover:text-indigo-300 transition-colors">
-              View full setup guide &rarr;
-            </a>
-          </div>
-        </section>
-      )}
+      {/* API Keys moved to standalone /api-keys page */}
       {activeTab === 'models' && <ModelComparison />}
       {/* Leaderboard moved to /leaderboard */}
     </div>

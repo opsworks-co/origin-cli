@@ -21,6 +21,7 @@ import AuditLog from './pages/AuditLog';
 import Insights from './pages/Insights';
 import Settings from './pages/Settings';
 import Integrations from './pages/Integrations';
+import ApiKeys from './pages/ApiKeys';
 import BudgetPage from './pages/Budget';
 import IAM from './pages/IAM';
 import Docs from './pages/Docs';
@@ -326,7 +327,7 @@ export default function App() {
       />
       <Route
         path="/api-keys"
-        element={<Navigate to="/settings?tab=keys" replace />}
+        element={<ProtectedRoute><AppLayout><ApiKeys /></AppLayout></ProtectedRoute>}
       />
       <Route
         path="/trails"
