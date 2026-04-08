@@ -326,11 +326,23 @@ export interface Session {
   agentVersion: number | null;
   apiKeyId: string | null;
   apiKeyName: string | null;
+  agentSessionId?: string | null;
+  parentSessionId?: string | null;
   createdAt: string;
   review: SessionReview | null;
   pullRequests?: PullRequestInfo[];
   sessionDiff?: SessionDiff | null;
   promptChanges?: PromptChange[];
+  chainSessions?: Array<{
+    id: string;
+    startedAt: string | null;
+    endedAt: string | null;
+    costUsd: number;
+    tokensUsed: number;
+    durationMs: number;
+    status: string;
+    model: string;
+  }>;
 }
 
 export interface SessionReview {

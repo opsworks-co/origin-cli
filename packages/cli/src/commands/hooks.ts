@@ -1064,6 +1064,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         agentSlug: finalAgentSlug,
         branch: branch || undefined,
         hostname: agentConfig.hostname || undefined,
+        agentSessionId: claudeSessionId || undefined,
       };
 
       try {

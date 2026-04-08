@@ -28,6 +28,7 @@ import {
   Gauge,
   MessageSquare,
   GitCommit,
+  GitMerge,
   FileText,
   Terminal,
   Download,
@@ -57,6 +58,9 @@ interface Session {
   endedAt: string | null;
   review: { status: string; score: number | null } | null;
   bookmark?: { id: string; tags: string[]; note: string };
+  mergedFrom: string[] | null;
+  mergedInto: string | null;
+  parentSessionId: string | null;
 }
 
 interface MyStats {
@@ -724,7 +728,36 @@ function AgentCards({ agents }: { agents: AgentCard[] }) {
 
 // ── Main component ──────────────────────────────────────────────────────────
 
-type Tab = 'sessions' | 'timeline' | 'agents' | 'stats' | 'patterns' | 'efficiency' | 'prompts';
+type Tab = 'sessions' | 'timeline' | 'agents' | 'stats' | 'patterns' | 'efficiency' | 'prompts' | 'commits';
+
+interface CommitEntry {
+  id: string;
+  sha: string;
+  message: string;
+  author: string;
+  aiToolDetected: string | null;
+  aiDetectionMethod: string | null;
+  branch: string | null;
+  filesChanged: string[];
+  committedAt: string;
+  repoName: string;
+  sessionId: string | null;
+  sessionModel: string | null;
+  sessionAgent: string | null;
+  sessionCost: number;
+  sessionTokens: number;
+  sessionLinesAdded: number;
+  sessionLinesRemoved: number;
+  diff: string | null;
+  prompts: Array<{
+    promptIndex: number;
+    promptText: string;
+    filesChanged: string[];
+    createdAt: string;
+  }>;
+}
+
+type CommitSort = 'date' | 'repo' | 'cost';
 
 export default function MyDashboard() {
   const { user } = useAuth();
@@ -733,6 +766,7 @@ export default function MyDashboard() {
   // Stats
   const [stats, setStats] = useState<MyStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
+  const [hideGuide, setHideGuide] = useState(() => localStorage.getItem('origin:hide-guide') === '1');
 
   // Agent cards
   const [agentCards, setAgentCards] = useState<AgentCard[]>([]);
@@ -778,8 +812,19 @@ export default function MyDashboard() {
   const [promptSearch, setPromptSearch] = useState('');
   const [promptSearchDebounced, setPromptSearchDebounced] = useState('');
 
+  // Commits
+  const [commitEntries, setCommitEntries] = useState<CommitEntry[]>([]);
+  const [commitsTotal, setCommitsTotal] = useState(0);
+  const [commitsLoading, setCommitsLoading] = useState(false);
+  const [commitsOffset, setCommitsOffset] = useState(0);
+  const [expandedCommit, setExpandedCommit] = useState<string | null>(null);
+  const [commitSort, setCommitSort] = useState<CommitSort>('date');
+
   // Compare
   const [compareIds, setCompareIds] = useState<string[]>([]);
+
+  // Merge
+  const [merging, setMerging] = useState(false);
 
   // Tab
   const [tab, setTab] = useState<Tab>('sessions');
@@ -889,6 +934,23 @@ export default function MyDashboard() {
       .finally(() => setPromptsLoading(false));
   }, [tab, promptsOffset, promptSearchDebounced]);
 
+  // ── Fetch commits (lazy) ──────────────────────────────────────────
+  useEffect(() => {
+    if (tab !== 'commits') return;
+    setCommitsLoading(true);
+    const params = new URLSearchParams();
+    params.set('limit', '50');
+    params.set('offset', String(commitsOffset));
+    params.set('sort', commitSort);
+    request<{ commits: CommitEntry[]; total: number }>(`/api/stats/me/commits?${params.toString()}`)
+      .then((data) => {
+        setCommitEntries(data.commits);
+        setCommitsTotal(data.total);
+      })
+      .catch(() => {})
+      .finally(() => setCommitsLoading(false));
+  }, [tab, commitsOffset, commitSort]);
+
   // ── Fetch bookmarked IDs ────────────────────────────────────────────
   useEffect(() => {
     request<Session[]>('/api/sessions/bookmarked')
@@ -955,6 +1017,30 @@ export default function MyDashboard() {
     }
   };
 
+  // Merge sessions
+  const handleMerge = async () => {
+    if (compareIds.length < 2 || merging) return;
+    // Check: no running sessions
+    const selected = sessions.filter((s) => compareIds.includes(s.id));
+    if (selected.some((s) => s.status === 'RUNNING')) {
+      alert('Cannot merge running sessions. Wait for them to complete.');
+      return;
+    }
+    setMerging(true);
+    try {
+      const res = await request<{ mergedSessionId: string }>('/api/sessions/merge', {
+        method: 'POST',
+        body: JSON.stringify({ sessionIds: compareIds }),
+      });
+      setCompareIds([]);
+      navigate(`/sessions/${res.mergedSessionId}`);
+    } catch (err: any) {
+      alert(err.message || 'Failed to merge sessions');
+    } finally {
+      setMerging(false);
+    }
+  };
+
   // Filter sessions by search text
   const filteredSessions = useMemo(() => {
     const list = showBookmarked ? bookmarkedSessions : sessions;
@@ -991,6 +1077,7 @@ export default function MyDashboard() {
     { key: 'patterns', label: 'Patterns', icon: Timer },
     { key: 'efficiency', label: 'Efficiency', icon: Gauge },
     { key: 'prompts', label: 'Prompt Search', icon: Search },
+    { key: 'commits', label: 'Commits', icon: GitCommit },
   ];
 
   return (
@@ -1011,31 +1098,26 @@ export default function MyDashboard() {
         )}
       </div>
 
-      {/* Stat cards row */}
-      {statsLoading ? (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="card py-4 animate-pulse">
-              <div className="h-4 w-16 bg-gray-800 rounded mb-2" />
-              <div className="h-6 w-24 bg-gray-800 rounded" />
-            </div>
-          ))}
-        </div>
-      ) : stats ? (
-        <StatCardsRow stats={stats} fmt={fmt} fmtCost={fmtCost} />
-      ) : null}
-
-      {/* Quick Start Guide — shows when no sessions */}
-      {stats && stats.totalSessions === 0 && !statsLoading && (
+      {/* Quick Start Guide — always visible until dismissed */}
+      {!hideGuide && (
         <div className="rounded-xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 to-transparent p-6 space-y-5">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center">
-              <Terminal className="w-5 h-5 text-emerald-400" />
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center">
+                <Terminal className="w-5 h-5 text-emerald-400" />
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-gray-100">Get Started with Origin</h2>
+                <p className="text-sm text-gray-500">Set up session tracking in under 2 minutes</p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-lg font-bold text-gray-100">Get Started with Origin</h2>
-              <p className="text-sm text-gray-500">Set up session tracking in under 2 minutes</p>
-            </div>
+            <button
+              onClick={() => { setHideGuide(true); localStorage.setItem('origin:hide-guide', '1'); }}
+              className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1072,7 +1154,7 @@ export default function MyDashboard() {
                 <span className="text-sm font-semibold text-gray-200">Configure &amp; Init</span>
               </div>
               <div className="bg-gray-950 rounded-md p-3 font-mono text-xs text-gray-300 space-y-1 mb-3">
-                <div><span className="text-gray-500">$</span> origin config set api-key <span className="text-emerald-400">YOUR_KEY</span></div>
+                <div><span className="text-gray-500">$</span> origin login</div>
                 <div><span className="text-gray-500">$</span> origin init</div>
               </div>
               <p className="text-xs text-gray-500">Auto-detects Claude, Cursor, Copilot, Gemini &amp; more</p>
@@ -1115,6 +1197,20 @@ export default function MyDashboard() {
           </div>
         </div>
       )}
+
+      {/* Stat cards row */}
+      {statsLoading ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="card py-4 animate-pulse">
+              <div className="h-4 w-16 bg-gray-800 rounded mb-2" />
+              <div className="h-6 w-24 bg-gray-800 rounded" />
+            </div>
+          ))}
+        </div>
+      ) : stats ? (
+        <StatCardsRow stats={stats} fmt={fmt} fmtCost={fmtCost} />
+      ) : null}
 
       {/* Tabs */}
       <div className="flex items-center gap-1 border-b border-gray-800 pb-0 overflow-x-auto">
@@ -1194,18 +1290,32 @@ export default function MyDashboard() {
               Saved
             </button>
             {compareIds.length > 0 && (
-              <button
-                disabled={compareIds.length !== 2}
-                onClick={() => navigate(`/compare/${compareIds[0]}/${compareIds[1]}`)}
-                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors border ${
-                  compareIds.length === 2
-                    ? 'bg-indigo-500/15 text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/25'
-                    : 'bg-gray-800 text-gray-500 border-gray-700 opacity-60'
-                }`}
-              >
-                <BarChart3 className="w-3.5 h-3.5" />
-                Compare {compareIds.length}/2
-              </button>
+              <>
+                <button
+                  disabled={compareIds.length !== 2}
+                  onClick={() => navigate(`/compare/${compareIds[0]}/${compareIds[1]}`)}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors border ${
+                    compareIds.length === 2
+                      ? 'bg-indigo-500/15 text-indigo-400 border-indigo-500/30 hover:bg-indigo-500/25'
+                      : 'bg-gray-800 text-gray-500 border-gray-700 opacity-60'
+                  }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  Compare {compareIds.length}/2
+                </button>
+                <button
+                  disabled={compareIds.length < 2 || merging}
+                  onClick={handleMerge}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors border ${
+                    compareIds.length >= 2
+                      ? 'bg-purple-500/15 text-purple-400 border-purple-500/30 hover:bg-purple-500/25'
+                      : 'bg-gray-800 text-gray-500 border-gray-700 opacity-60'
+                  }`}
+                >
+                  <GitMerge className="w-3.5 h-3.5" />
+                  {merging ? 'Merging...' : `Merge ${compareIds.length}`}
+                </button>
+              </>
             )}
           </div>
 
@@ -1254,12 +1364,11 @@ export default function MyDashboard() {
                           <input
                             type="checkbox"
                             checked={compareIds.includes(s.id)}
-                            disabled={!compareIds.includes(s.id) && compareIds.length >= 2}
                             onChange={() => {
                               setCompareIds((prev) =>
                                 prev.includes(s.id)
                                   ? prev.filter((x) => x !== s.id)
-                                  : prev.length < 2 ? [...prev, s.id] : prev
+                                  : [...prev, s.id]
                               );
                             }}
                             className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 cursor-pointer"
@@ -1298,31 +1407,45 @@ export default function MyDashboard() {
                         <td className="px-4 py-3 text-gray-300">{fmtCost(s.costUsd)}</td>
                         <td className="px-4 py-3 text-gray-400 hidden lg:table-cell">{fmt(s.tokensUsed)}</td>
                         <td className="px-4 py-3">
-                          {s.status === 'RUNNING' ? (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">
-                              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                              Running
-                            </span>
-                          ) : s.review ? (
-                            <span
-                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                s.review.status === 'APPROVED'
-                                  ? 'bg-green-900/30 text-green-400'
-                                  : s.review.status === 'FLAGGED'
-                                  ? 'bg-amber-900/30 text-amber-400'
-                                  : s.review.status === 'REJECTED'
-                                  ? 'bg-red-900/30 text-red-400'
-                                  : 'bg-gray-800 text-gray-400'
-                              }`}
-                            >
-                              {s.review.status.charAt(0) + s.review.status.slice(1).toLowerCase()}
-                              {s.review.score !== null && ` ${s.review.score}`}
-                            </span>
-                          ) : (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-800 text-gray-500">
-                              Done
-                            </span>
-                          )}
+                          <div className="flex items-center gap-1">
+                            {s.mergedFrom && (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-900/30 text-purple-400">
+                                <GitMerge className="w-3 h-3" />
+                                Merged
+                              </span>
+                            )}
+                            {s.parentSessionId && (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-900/30 text-sky-400">
+                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                                Chain
+                              </span>
+                            )}
+                            {s.status === 'RUNNING' ? (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">
+                                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                                Running
+                              </span>
+                            ) : s.review ? (
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                  s.review.status === 'APPROVED'
+                                    ? 'bg-green-900/30 text-green-400'
+                                    : s.review.status === 'FLAGGED'
+                                    ? 'bg-amber-900/30 text-amber-400'
+                                    : s.review.status === 'REJECTED'
+                                    ? 'bg-red-900/30 text-red-400'
+                                    : 'bg-gray-800 text-gray-400'
+                                }`}
+                              >
+                                {s.review.status.charAt(0) + s.review.status.slice(1).toLowerCase()}
+                                {s.review.score !== null && ` ${s.review.score}`}
+                              </span>
+                            ) : !s.mergedFrom ? (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-800 text-gray-500">
+                                Done
+                              </span>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-4 py-3 hidden xl:table-cell" onClick={(e) => e.stopPropagation()}>
                           <TagEditor
@@ -1918,6 +2041,267 @@ export default function MyDashboard() {
               )}
             </>
           )}
+        </div>
+      )}
+
+      {/* ═══════════════════ COMMITS TAB ═══════════════════ */}
+      {tab === 'commits' && (
+        <div className="space-y-4">
+          {/* Sort controls */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-500">{commitsTotal} commit{commitsTotal !== 1 ? 's' : ''}</span>
+            <select
+              value={commitSort}
+              onChange={(e) => { setCommitSort(e.target.value as CommitSort); setCommitsOffset(0); }}
+              className="select text-sm"
+            >
+              <option value="date">Sort by date</option>
+              <option value="repo">Sort by repo</option>
+              <option value="cost">Sort by cost</option>
+            </select>
+          </div>
+
+          {/* Commits table */}
+          <div className="card overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-gray-500 border-b border-gray-800">
+                    <th className="px-4 py-3 font-medium w-10"></th>
+                    <th className="px-4 py-3 font-medium">SHA</th>
+                    <th className="px-4 py-3 font-medium">Message</th>
+                    <th className="px-4 py-3 font-medium">Repo</th>
+                    <th className="px-4 py-3 font-medium hidden md:table-cell">Branch</th>
+                    <th className="px-4 py-3 font-medium">Agent</th>
+                    <th className="px-4 py-3 font-medium">Cost</th>
+                    <th className="px-4 py-3 font-medium hidden lg:table-cell">Tokens</th>
+                    <th className="px-4 py-3 font-medium hidden lg:table-cell">Changes</th>
+                    <th className="px-4 py-3 font-medium text-right">When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {commitsLoading ? (
+                    Array.from({ length: 5 }).map((_, i) => (
+                      <tr key={i} className="border-b border-gray-800/50">
+                        <td colSpan={10} className="px-4 py-3">
+                          <div className="h-4 bg-gray-800 rounded animate-pulse" />
+                        </td>
+                      </tr>
+                    ))
+                  ) : commitEntries.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="px-4 py-8 text-center text-gray-600">
+                        No commits tracked yet. Make a commit during an AI session to see it here.
+                      </td>
+                    </tr>
+                  ) : (
+                    commitEntries.map((c) => {
+                      const isAI = !!c.sessionId;
+                      const isExpanded = expandedCommit === c.id;
+                      return (
+                        <React.Fragment key={c.id}>
+                          <tr
+                            className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors cursor-pointer"
+                            onClick={() => setExpandedCommit(isExpanded ? null : c.id)}
+                          >
+                            <td className="px-4 py-3">
+                              {isAI ? (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-500/15 text-indigo-400">
+                                  AI
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-700/60 text-gray-400">
+                                  HU
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 font-mono text-xs text-gray-400">{c.sha.slice(0, 7)}</td>
+                            <td className="px-4 py-3 text-gray-300 max-w-xs truncate">{c.message.split('\n')[0]}</td>
+                            <td className="px-4 py-3 text-gray-400">{c.repoName}</td>
+                            <td className="px-4 py-3 text-gray-500 hidden md:table-cell font-mono text-xs">{c.branch || '—'}</td>
+                            <td className="px-4 py-3">
+                              {c.sessionAgent ? (
+                                <span
+                                  className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded"
+                                  style={{ backgroundColor: `${agentColor(c.sessionAgent)}15`, color: agentColor(c.sessionAgent) }}
+                                >
+                                  {c.sessionAgent}
+                                </span>
+                              ) : (
+                                <span className="text-gray-600 text-xs">—</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-gray-300">{c.sessionCost > 0 ? fmtCost(c.sessionCost) : '—'}</td>
+                            <td className="px-4 py-3 text-gray-400 hidden lg:table-cell">{c.sessionTokens > 0 ? fmt(c.sessionTokens) : '—'}</td>
+                            <td className="px-4 py-3 hidden lg:table-cell">
+                              <span className="text-xs">
+                                <span className="text-gray-500">{c.filesChanged.length} file{c.filesChanged.length !== 1 ? 's' : ''}</span>
+                                {(c.sessionLinesAdded > 0 || c.sessionLinesRemoved > 0) && (
+                                  <>
+                                    <span className="text-green-500 ml-1.5">+{c.sessionLinesAdded}</span>
+                                    <span className="text-red-400 ml-1">-{c.sessionLinesRemoved}</span>
+                                  </>
+                                )}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right text-gray-500 text-xs whitespace-nowrap">
+                              {timeAgo(c.committedAt)}
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr className="border-b border-gray-800/50">
+                              <td colSpan={10} className="px-4 py-4 bg-gray-900/50">
+                                <div className="space-y-3">
+                                  {/* Details grid */}
+                                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                    <div>
+                                      <span className="text-gray-500">Author</span>
+                                      <p className="text-gray-300 mt-0.5">{c.author}</p>
+                                    </div>
+                                    <div>
+                                      <span className="text-gray-500">Full SHA</span>
+                                      <p className="text-gray-300 font-mono text-[10px] mt-0.5">{c.sha}</p>
+                                    </div>
+                                    {c.sessionModel && (
+                                      <div>
+                                        <span className="text-gray-500">Model</span>
+                                        <p className="text-gray-300 mt-0.5">{c.sessionModel}</p>
+                                      </div>
+                                    )}
+                                    {c.aiDetectionMethod && (
+                                      <div>
+                                        <span className="text-gray-500">Detection</span>
+                                        <p className="text-gray-300 mt-0.5">{c.aiDetectionMethod.replace(/-/g, ' ')}</p>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* Full commit message */}
+                                  {c.message.includes('\n') && (
+                                    <div>
+                                      <div className="text-[10px] text-gray-500 mb-1">Commit message</div>
+                                      <pre className="text-xs text-gray-400 whitespace-pre-wrap bg-gray-900/80 border border-gray-800 rounded-lg px-3 py-2">
+                                        {c.message}
+                                      </pre>
+                                    </div>
+                                  )}
+
+                                  {/* Files changed */}
+                                  {c.filesChanged.length > 0 && (
+                                    <div>
+                                      <div className="text-[10px] text-gray-500 mb-1">
+                                        {c.filesChanged.length} file{c.filesChanged.length !== 1 ? 's' : ''} changed
+                                      </div>
+                                      <div className="flex flex-wrap gap-1">
+                                        {c.filesChanged.map((f, fi) => (
+                                          <span key={fi} className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 font-mono">
+                                            {f}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Prompts that produced this commit */}
+                                  {c.prompts && c.prompts.length > 0 && (
+                                    <div>
+                                      <div className="text-[10px] text-gray-500 mb-1">
+                                        Prompts ({c.prompts.length})
+                                      </div>
+                                      <div className="space-y-1.5">
+                                        {c.prompts.slice(0, 5).map((p, pi) => (
+                                          <div key={pi} className="flex items-start gap-2 bg-gray-900/80 border border-gray-800 rounded-lg px-3 py-2">
+                                            <span className="text-[10px] text-indigo-400 font-mono shrink-0 mt-0.5">#{p.promptIndex + 1}</span>
+                                            <p className="text-xs text-gray-400 line-clamp-2">{p.promptText}</p>
+                                            {p.filesChanged.length > 0 && (
+                                              <span className="text-[10px] text-gray-600 shrink-0">{p.filesChanged.length} file{p.filesChanged.length !== 1 ? 's' : ''}</span>
+                                            )}
+                                          </div>
+                                        ))}
+                                        {c.prompts.length > 5 && (
+                                          <div className="text-[10px] text-gray-600">+{c.prompts.length - 5} more prompts</div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Inline diff */}
+                                  {c.diff && (
+                                    <div>
+                                      <div className="text-[10px] text-gray-500 mb-1">Diff</div>
+                                      <pre className="text-[10px] font-mono leading-relaxed bg-gray-900/80 border border-gray-800 rounded-lg px-3 py-2 overflow-x-auto max-h-60">
+                                        {c.diff.split('\n').slice(0, 80).map((line, li) => (
+                                          <div
+                                            key={li}
+                                            className={
+                                              line.startsWith('+') && !line.startsWith('+++')
+                                                ? 'text-green-400'
+                                                : line.startsWith('-') && !line.startsWith('---')
+                                                ? 'text-red-400'
+                                                : line.startsWith('@@')
+                                                ? 'text-cyan-400'
+                                                : line.startsWith('diff --git')
+                                                ? 'text-indigo-400 font-semibold'
+                                                : 'text-gray-500'
+                                            }
+                                          >
+                                            {line}
+                                          </div>
+                                        ))}
+                                        {c.diff.split('\n').length > 80 && (
+                                          <div className="text-gray-600 mt-1">... {c.diff.split('\n').length - 80} more lines</div>
+                                        )}
+                                      </pre>
+                                    </div>
+                                  )}
+
+                                  {/* Session link */}
+                                  {c.sessionId && (
+                                    <button
+                                      onClick={() => navigate(`/sessions/${c.sessionId}`)}
+                                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
+                                    >
+                                      <ExternalLink className="w-3 h-3" />
+                                      View linked session
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination */}
+            {commitsTotal > 50 && (
+              <div className="flex items-center justify-between px-4 py-3 border-t border-gray-800">
+                <span className="text-xs text-gray-500">
+                  {commitsOffset + 1}–{Math.min(commitsOffset + 50, commitsTotal)} of {commitsTotal}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    disabled={commitsOffset === 0}
+                    onClick={() => setCommitsOffset(Math.max(0, commitsOffset - 50))}
+                    className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-400 hover:text-gray-200 disabled:opacity-30"
+                  >
+                    Prev
+                  </button>
+                  <button
+                    disabled={commitsOffset + 50 >= commitsTotal}
+                    onClick={() => setCommitsOffset(commitsOffset + 50)}
+                    className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-400 hover:text-gray-200 disabled:opacity-30"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

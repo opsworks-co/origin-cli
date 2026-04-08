@@ -734,6 +734,44 @@ export default function SessionDetail() {
             </div>
           )}
 
+          {/* Session Chain */}
+          {session.chainSessions && session.chainSessions.length > 1 && (
+            <div className="card space-y-2 flex-1 min-w-[250px]">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                Session Chain ({session.chainSessions.length})
+              </h3>
+              <div className="text-xs text-gray-400 space-y-1.5">
+                {session.chainSessions.map((cs, i) => (
+                  <div
+                    key={cs.id}
+                    className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded ${cs.id === session.id ? 'bg-indigo-500/10 border border-indigo-500/30' : 'bg-gray-800/50 hover:bg-gray-800 cursor-pointer'}`}
+                    onClick={() => cs.id !== session.id && navigate(`/sessions/${cs.id}`)}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-gray-500 font-mono">#{i + 1}</span>
+                      <span className={cs.id === session.id ? 'text-indigo-400 font-medium' : 'text-gray-300'}>
+                        {cs.startedAt ? new Date(cs.startedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                      </span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${cs.status === 'RUNNING' ? 'bg-green-500/20 text-green-400' : 'bg-gray-700 text-gray-500'}`}>
+                        {cs.status === 'RUNNING' ? 'Running' : 'Done'}
+                      </span>
+                    </span>
+                    <span className="text-gray-500">{formatCost(cs.costUsd)}</span>
+                  </div>
+                ))}
+                <div className="flex justify-between pt-1 border-t border-gray-800 text-gray-500">
+                  <span>Total</span>
+                  <span className="text-gray-300 font-medium">
+                    {formatCost(session.chainSessions.reduce((s, c) => s + c.costUsd, 0))}
+                    {' · '}
+                    {formatDuration(session.chainSessions.reduce((s, c) => s + c.durationMs, 0))}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Review */}
           {session.review && (() => {
             const isAI = session.review.isAutoReview;

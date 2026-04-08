@@ -153,7 +153,7 @@ router.get('/policies', async (req: McpRequest, res: Response) => {
 // POST /session/start — start a coding session
 router.post('/session/start', async (req: McpRequest, res: Response) => {
   try {
-    const { machineId, prompt, model, repoPath, repoUrl, agentSlug, branch, additionalRepoPaths } = req.body;
+    const { machineId, prompt, model, repoPath, repoUrl, agentSlug, branch, additionalRepoPaths, agentSessionId } = req.body;
 
     if (!machineId || !model || !repoPath) {
       return res.status(400).json({ error: 'Missing required fields: machineId, model, repoPath' });
@@ -454,6 +454,58 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     }
 
+    // ── Session chaining: link to prior session from same agent session ──
+    let parentSessionId: string | null = null;
+
+    if (agentSessionId) {
+      // Primary: match by agent's native session ID
+      const priorByAgent = await prisma.codingSession.findFirst({
+        where: {
+          agentSessionId,
+          mergedInto: null,
+        },
+        orderBy: { startedAt: 'desc' },
+      });
+      if (priorByAgent) {
+        parentSessionId = priorByAgent.parentSessionId || priorByAgent.id;
+        console.log('[session/start] CHAIN: linking to prior session via agentSessionId', {
+          priorId: priorByAgent.id, parentSessionId, agentSessionId,
+        });
+      }
+    }
+
+    if (!parentSessionId) {
+      // Fallback: heuristic — same repo + branch + agent + machine within 24h
+      const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const priorByHeuristic = await prisma.codingSession.findFirst({
+        where: {
+          agentId: agent?.id || undefined,
+          commit: { repoId: repo.id },
+          branch: branch || undefined,
+          startedAt: { gte: cutoff24h },
+          status: 'COMPLETED',
+          mergedInto: null,
+        },
+        orderBy: { startedAt: 'desc' },
+      });
+      if (priorByHeuristic) {
+        // Verify same machine via audit log
+        const priorAudit = await prisma.auditLog.findFirst({
+          where: { resource: priorByHeuristic.id, action: 'SESSION_STARTED' },
+          orderBy: { createdAt: 'desc' },
+        });
+        const priorMachineId = priorAudit?.metadata
+          ? JSON.parse(priorAudit.metadata as string)?.machineId
+          : null;
+        if (priorMachineId === machineId) {
+          parentSessionId = priorByHeuristic.parentSessionId || priorByHeuristic.id;
+          console.log('[session/start] CHAIN: linking to prior session via heuristic', {
+            priorId: priorByHeuristic.id, parentSessionId,
+          });
+        }
+      }
+    }
+
     // Generate a placeholder SHA (random 40-char hex)
     const placeholderSha = crypto.randomBytes(20).toString('hex');
 
@@ -498,6 +550,8 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         agentSystemPrompt: fullSystemPrompt,
         agentVersion: agent?.versions?.[0]?.version || null,
         branch: branch || null,
+        agentSessionId: agentSessionId || null,
+        parentSessionId,
       },
     });
 
@@ -587,7 +641,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     } catch { /* non-critical */ }
 
-    res.json({ sessionId: codingSession.id, activePolicies, enforcementRules, agentSystemPrompt: fullSystemPrompt });
+    res.json({ sessionId: codingSession.id, parentSessionId, activePolicies, enforcementRules, agentSystemPrompt: fullSystemPrompt });
   } catch (err) {
     console.error('Start session error:', err);
     res.status(500).json({ error: 'Internal server error' });

@@ -76,6 +76,8 @@ function mapSession(s: any, pullRequests?: any[]) {
     agentVersion: s.agentVersion || null,
     mergedFrom: s.mergedFrom ? JSON.parse(s.mergedFrom) : null,
     mergedInto: s.mergedInto || null,
+    agentSessionId: s.agentSessionId || null,
+    parentSessionId: s.parentSessionId || null,
     createdAt: s.createdAt,
     review: s.review
       ? {
@@ -600,7 +602,23 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    res.json(mapSession(session, pullRequests));
+    const mapped: any = mapSession(session, pullRequests);
+
+    // Fetch chain siblings if this session is part of a chain
+    const chainId = session.parentSessionId || session.id;
+    const chainSessions = await prisma.codingSession.findMany({
+      where: {
+        OR: [{ id: chainId }, { parentSessionId: chainId }],
+        mergedInto: null,
+      },
+      select: { id: true, startedAt: true, endedAt: true, costUsd: true, tokensUsed: true, durationMs: true, status: true, model: true },
+      orderBy: { startedAt: 'asc' },
+    });
+    if (chainSessions.length > 1) {
+      mapped.chainSessions = chainSessions;
+    }
+
+    res.json(mapped);
   } catch (err) {
     console.error('Get session error:', err);
     res.status(500).json({ error: 'Internal server error' });
