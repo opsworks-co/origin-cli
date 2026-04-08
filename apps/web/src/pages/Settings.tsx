@@ -24,9 +24,9 @@ interface ApiKey {
   agentScopes: { agentId: string; agentName: string; agentSlug: string }[];
 }
 
-type SettingsTab = 'general' | 'integrations' | 'audit' | 'reports' | 'trails' | 'compliance' | 'models';
+type SettingsTab = 'general' | 'keys' | 'integrations' | 'audit' | 'reports' | 'trails' | 'compliance' | 'models';
 const ORG_TABS: SettingsTab[] = ['general', 'integrations', 'audit', 'reports', 'trails', 'compliance', 'models'];
-const DEV_TABS: SettingsTab[] = ['general', 'models'];
+const DEV_TABS: SettingsTab[] = ['general', 'keys', 'models'];
 
 function ProfileEditor() {
   const { user, updateUser } = useAuth();
@@ -57,8 +57,44 @@ function ProfileEditor() {
     }
   };
 
+  const [verificationSent, setVerificationSent] = useState(false);
+  const [sendingVerification, setSendingVerification] = useState(false);
+
+  const handleSendVerification = async () => {
+    setSendingVerification(true);
+    try {
+      await api.sendVerificationEmail();
+      setVerificationSent(true);
+    } catch (err: any) {
+      setFeedback({ type: 'error', msg: err.message || 'Failed to send verification email' });
+    } finally {
+      setSendingVerification(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
+      {/* Email verification banner */}
+      {user && !user.emailVerified && !user.provider && (
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-amber-900/20 border border-amber-800/50">
+          <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          <p className="text-sm text-amber-300 flex-1">
+            {verificationSent
+              ? 'Verification email sent! Check your inbox.'
+              : 'Your email is not verified.'}
+          </p>
+          {!verificationSent && (
+            <button
+              onClick={handleSendVerification}
+              disabled={sendingVerification}
+              className="text-xs font-medium text-amber-400 hover:text-amber-300 transition-colors disabled:opacity-50"
+            >
+              {sendingVerification ? 'Sending...' : 'Verify now'}
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="flex items-start gap-5">
         {/* Avatar — click to upload */}
         <div className="flex flex-col items-center gap-2">
@@ -142,6 +178,86 @@ function ProfileEditor() {
           className="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           {saving ? 'Saving...' : 'Save Changes'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PasswordChanger() {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  const canSubmit = currentPassword && newPassword.length >= 8 && newPassword === confirmPassword;
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
+    setSaving(true);
+    setFeedback(null);
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      setFeedback({ type: 'success', msg: 'Password updated successfully' });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setTimeout(() => setFeedback(null), 3000);
+    } catch (err: any) {
+      setFeedback({ type: 'error', msg: err.message || 'Failed to change password' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="block text-xs font-medium text-gray-400 mb-1">Current Password</label>
+        <input
+          type="password"
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          className="w-full max-w-sm bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-400 mb-1">New Password</label>
+        <input
+          type="password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          className="w-full max-w-sm bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+          placeholder="Min 8 characters"
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-400 mb-1">Confirm New Password</label>
+        <input
+          type="password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          className="w-full max-w-sm bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+        />
+        {confirmPassword && newPassword !== confirmPassword && (
+          <p className="text-xs text-red-400 mt-1">Passwords don't match</p>
+        )}
+      </div>
+      {feedback && (
+        <div className={`text-sm px-3 py-2 rounded-lg ${
+          feedback.type === 'success' ? 'bg-emerald-900/20 text-emerald-400 border border-emerald-800' : 'bg-red-900/20 text-red-400 border border-red-800'
+        }`}>
+          {feedback.msg}
+        </div>
+      )}
+      <div className="flex justify-end">
+        <button
+          onClick={handleSubmit}
+          disabled={!canSubmit || saving}
+          className="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {saving ? 'Updating...' : 'Update Password'}
         </button>
       </div>
     </div>
@@ -920,7 +1036,7 @@ export default function Settings() {
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
         <p className="text-sm text-gray-500 mt-1">
-          {isDev ? 'Manage your profile and API keys' : 'Manage API keys, team, and organization'}
+          {isDev ? 'Manage your profile and settings' : 'Manage team, integrations, and organization'}
         </p>
       </div>
 
@@ -936,6 +1052,18 @@ export default function Settings() {
         >
           General
         </button>
+        {isDev && (
+        <button
+          onClick={() => setActiveTab('keys')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'keys'
+              ? 'border-emerald-500 text-emerald-400'
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          API Keys
+        </button>
+        )}
         {!isDev && (user?.role === 'ADMIN' || user?.role === 'OWNER') && (
         <button
           onClick={() => setActiveTab('integrations')}
@@ -1017,93 +1145,66 @@ export default function Settings() {
             <ProfileEditor />
           </section>
 
-          {/* Developer API Keys */}
-          {isDev && (
+          {/* Change Password — only for email/password accounts */}
+          {user && !user.provider && (
           <section className="card space-y-4">
             <div>
-              <h2 className="text-lg font-semibold">API Key</h2>
-              <p className="text-sm text-gray-500 mt-0.5">
-                Use this key to connect the Origin CLI to your account
-              </p>
+              <h2 className="text-lg font-semibold">Change Password</h2>
+              <p className="text-sm text-gray-500 mt-0.5">Update your account password</p>
             </div>
+            <PasswordChanger />
+          </section>
+          )}
 
-            {keyError && (
-              <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-red-400 text-sm">
-                {keyError}
-              </div>
-            )}
-
-            {loadingKeys && <div className="text-sm text-gray-500">Loading...</div>}
-
-            {!loadingKeys && apiKeys.length > 0 && (
-              <div className="space-y-2">
-                {apiKeys.map((key) => (
-                  <div key={key.id} className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-3">
-                    <div>
-                      <span className="text-sm text-gray-200">{key.name}</span>
-                      <code className="block text-xs text-emerald-400 mt-0.5">{key.keyPrefix}...</code>
-                      <span className="text-[10px] text-gray-600">Created {new Date(key.createdAt).toLocaleDateString()}</span>
-                    </div>
-                    <button
-                      onClick={async () => {
-                        setDeletingKeyId(key.id);
-                        try { await api.deleteApiKey(key.id); await fetchApiKeys(); }
-                        catch (err: any) { setKeyError(err.message); }
-                        finally { setDeletingKeyId(null); }
-                      }}
-                      disabled={deletingKeyId === key.id}
-                      className="text-xs text-red-400 hover:text-red-300"
-                    >
-                      {deletingKeyId === key.id ? 'Deleting...' : 'Revoke'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {createdKey && (
-              <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3">
-                <p className="text-xs text-emerald-400 mb-1">Copy this key — it won't be shown again:</p>
-                <code className="text-sm text-emerald-300 break-all select-all">{createdKey}</code>
-              </div>
-            )}
-
-            <div className="flex gap-2">
-              <input
-                value={newKeyName}
-                onChange={(e) => setNewKeyName(e.target.value)}
-                placeholder="Key name (e.g. laptop)"
-                className="input flex-1 text-sm"
-              />
-              <button
-                onClick={async () => {
-                  if (!newKeyName.trim()) return;
-                  setCreatingKey(true);
-                  setKeyError(null);
-                  try {
-                    const res = await api.createApiKey({ name: newKeyName.trim() });
-                    setCreatedKey(res.key);
-                    setNewKeyName('');
-                    await fetchApiKeys();
-                  } catch (err: any) { setKeyError(err.message); }
-                  finally { setCreatingKey(false); }
-                }}
-                disabled={creatingKey || !newKeyName.trim()}
-                className="btn-primary text-sm px-4"
-              >
-                {creatingKey ? 'Creating...' : 'Create Key'}
-              </button>
+          {/* Connected Accounts */}
+          {user?.provider && (
+          <section className="card space-y-4">
+            <div>
+              <h2 className="text-lg font-semibold">Connected Account</h2>
+              <p className="text-sm text-gray-500 mt-0.5">Your account is linked to an external provider</p>
             </div>
-
-            <div className="bg-gray-800/30 rounded-lg p-3 text-xs text-gray-500">
-              <p className="font-medium text-gray-400 mb-1">CLI Setup</p>
-              <code className="text-emerald-400">origin config set-api-key YOUR_KEY</code>
+            <div className="flex items-center gap-3 bg-gray-800/50 rounded-lg px-4 py-3">
+              <div className="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center">
+                {user.provider === 'github' && (
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 fill-gray-300"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" /></svg>
+                )}
+                {user.provider === 'gitlab' && (
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 fill-orange-400"><path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 01-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 014.82 2a.43.43 0 01.58 0 .42.42 0 01.11.18l2.44 7.49h8.1l2.44-7.51A.42.42 0 0118.6 2a.43.43 0 01.58 0 .42.42 0 01.11.18l2.44 7.51L23 13.45a.84.84 0 01-.35.94z" /></svg>
+                )}
+              </div>
+              <div>
+                <span className="text-sm text-gray-200 capitalize">{user.provider}</span>
+                <span className="text-xs text-gray-500 block">Signed in via OAuth</span>
+              </div>
             </div>
           </section>
           )}
 
+          {/* Danger Zone */}
+          <section className="card space-y-4 border-red-900/30">
+            <div>
+              <h2 className="text-lg font-semibold text-red-400">Danger Zone</h2>
+              <p className="text-sm text-gray-500 mt-0.5">Irreversible actions for your account</p>
+            </div>
+            <div className="flex items-center justify-between bg-red-900/10 border border-red-900/30 rounded-lg px-4 py-3">
+              <div>
+                <p className="text-sm text-gray-200">Delete Account</p>
+                <p className="text-xs text-gray-500">Permanently delete your account and all associated data</p>
+              </div>
+              <button
+                className="text-xs font-medium text-red-400 hover:text-red-300 border border-red-800 hover:border-red-700 px-3 py-1.5 rounded-lg transition-colors"
+                onClick={() => {
+                  if (window.confirm('Are you sure? This will permanently delete your account, all sessions, and all data. This cannot be undone.')) {
+                    alert('Please contact support@getorigin.io to delete your account.');
+                  }
+                }}
+              >
+                Delete Account
+              </button>
+            </div>
+          </section>
 
-          {/* REMOVED: old API Keys inline section — now in /iam */}
+          {/* REMOVED: old API Keys inline section — now in /api-keys */}
           {false && (
           <section className="card space-y-4 hidden">
             <div>
@@ -2806,6 +2907,102 @@ export default function Settings() {
       {activeTab === 'reports' && <Reports />}
       {activeTab === 'trails' && <Trails />}
       {activeTab === 'compliance' && <Compliance />}
+      {activeTab === 'keys' && isDev && (
+        <section className="card space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold">API Keys</h2>
+            <p className="text-sm text-gray-500 mt-0.5">
+              Create and manage keys to connect the Origin CLI to your account
+            </p>
+          </div>
+
+          {keyError && (
+            <div className="bg-red-900/20 border border-red-800 rounded-lg p-3 text-red-400 text-sm">
+              {keyError}
+            </div>
+          )}
+
+          {loadingKeys && <div className="text-sm text-gray-500">Loading...</div>}
+
+          {!loadingKeys && apiKeys.length > 0 && (
+            <div className="space-y-2">
+              {apiKeys.map((key) => (
+                <div key={key.id} className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-3">
+                  <div>
+                    <span className="text-sm text-gray-200">{key.name}</span>
+                    <code className="block text-xs text-emerald-400 mt-0.5">{key.keyPrefix}...</code>
+                    <span className="text-[10px] text-gray-600">Created {new Date(key.createdAt).toLocaleDateString()}</span>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      setDeletingKeyId(key.id);
+                      try { await api.deleteApiKey(key.id); await fetchApiKeys(); }
+                      catch (err: any) { setKeyError(err.message); }
+                      finally { setDeletingKeyId(null); }
+                    }}
+                    disabled={deletingKeyId === key.id}
+                    className="text-xs text-red-400 hover:text-red-300"
+                  >
+                    {deletingKeyId === key.id ? 'Revoking...' : 'Revoke'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!loadingKeys && apiKeys.length === 0 && !keyError && (
+            <div className="text-sm text-gray-500 bg-gray-800/30 rounded-lg p-4 text-center">
+              No API keys yet. Create one to connect the CLI.
+            </div>
+          )}
+
+          {createdKey && (
+            <div className="bg-emerald-900/20 border border-emerald-800 rounded-lg p-3">
+              <p className="text-xs text-emerald-400 mb-1">Copy this key — it won't be shown again:</p>
+              <code className="text-sm text-emerald-300 break-all select-all">{createdKey}</code>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <input
+              value={newKeyName}
+              onChange={(e) => setNewKeyName(e.target.value)}
+              placeholder="Key name (e.g. laptop)"
+              className="input flex-1 text-sm"
+            />
+            <button
+              onClick={async () => {
+                if (!newKeyName.trim()) return;
+                setCreatingKey(true);
+                setKeyError(null);
+                try {
+                  const res = await api.createApiKey({ name: newKeyName.trim() });
+                  setCreatedKey(res.key);
+                  setNewKeyName('');
+                  await fetchApiKeys();
+                } catch (err: any) { setKeyError(err.message); }
+                finally { setCreatingKey(false); }
+              }}
+              disabled={creatingKey || !newKeyName.trim()}
+              className="btn-primary text-sm px-4"
+            >
+              {creatingKey ? 'Creating...' : 'Create Key'}
+            </button>
+          </div>
+
+          <div className="bg-gray-800/30 rounded-lg p-3 text-xs text-gray-500">
+            <p className="font-medium text-gray-400 mb-2">Quick Setup</p>
+            <div className="space-y-1 font-mono text-emerald-400">
+              <p>$ npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</p>
+              <p>$ origin login --key YOUR_KEY</p>
+              <p>$ origin init</p>
+            </div>
+            <a href="/docs" className="inline-block mt-2 text-indigo-400 hover:text-indigo-300 transition-colors">
+              View full setup guide &rarr;
+            </a>
+          </div>
+        </section>
+      )}
       {activeTab === 'models' && <ModelComparison />}
       {/* Leaderboard moved to /leaderboard */}
     </div>

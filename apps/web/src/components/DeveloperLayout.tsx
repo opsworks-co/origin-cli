@@ -7,8 +7,11 @@ import { LogoMark } from './Logo';
 import {
   LayoutDashboard,
   Play,
+  FolderGit2,
   Settings,
   Lightbulb,
+  Plug,
+  KeyRound,
   User,
   LogOut,
   Menu,
@@ -17,8 +20,11 @@ import {
 
 const DEV_NAV_ITEMS = [
   { to: '/me', label: 'My Dashboard', icon: LayoutDashboard },
+  { to: '/repos', label: 'Repositories', icon: FolderGit2 },
   { to: '/sessions', label: 'My Sessions', icon: Play },
   { to: '/insights', label: 'Insights', icon: Lightbulb },
+  { to: '/integrations', label: 'Integrations', icon: Plug },
+  { to: '/api-keys', label: 'API Keys', icon: KeyRound },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 

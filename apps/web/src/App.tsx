@@ -20,6 +20,7 @@ import Policies from './pages/Policies';
 import AuditLog from './pages/AuditLog';
 import Insights from './pages/Insights';
 import Settings from './pages/Settings';
+import Integrations from './pages/Integrations';
 import BudgetPage from './pages/Budget';
 import IAM from './pages/IAM';
 import Docs from './pages/Docs';
@@ -49,6 +50,9 @@ import DemoCLI from './pages/DemoCLI';
 import MyDashboard from './pages/MyDashboard';
 import SessionCompare from './pages/SessionCompare';
 import OAuthCallback from './pages/OAuthCallback';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
+import VerifyEmail from './pages/VerifyEmail';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -105,6 +109,9 @@ export default function App() {
       <Route path="/s/:slug" element={<SharedSession />} />
       <Route path="/auth/:provider/callback" element={<OAuthCallback />} />
       <Route path="/login" element={<Login />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/verify-email" element={<VerifyEmail />} />
       <Route path="/register" element={<Register />} />
       <Route path="/register/developer" element={<RegisterDeveloper />} />
       <Route path="/invite/:token" element={<AcceptInvite />} />
@@ -294,6 +301,16 @@ export default function App() {
         }
       />
       <Route
+        path="/integrations"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <Integrations />
+            </AppLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/settings"
         element={
           <ProtectedRoute>
@@ -309,7 +326,7 @@ export default function App() {
       />
       <Route
         path="/api-keys"
-        element={<Navigate to="/iam" replace />}
+        element={<Navigate to="/settings?tab=keys" replace />}
       />
       <Route
         path="/trails"

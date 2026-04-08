@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { sendEmail } from '../services/email.js';
 
 const router = Router();
 function requireEnv(name: string): string {
@@ -27,6 +28,8 @@ setInterval(() => {
 }, 60_000).unref();
 
 function signToken(payload: { id: string; orgId: string; role: string }): string {
+  // Update lastLoginAt (fire and forget)
+  prisma.user.update({ where: { id: payload.id }, data: { lastLoginAt: new Date() } }).catch(() => {});
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 }
 
@@ -140,28 +143,11 @@ router.post('/register/developer', async (req: AuthRequest, res: Response) => {
       },
     });
 
-    // Auto-generate an API key for solo developer
-    const rawKey = `org_${crypto.randomBytes(32).toString('hex')}`;
-    const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
-    const keyPrefix = rawKey.slice(0, 12) + '...';
-
-    await prisma.apiKey.create({
-      data: {
-        orgId: org.id,
-        userId: user.id,
-        name: 'Personal key',
-        keyHash,
-        keyPrefix,
-        keyType: 'solo',
-      },
-    });
-
     const token = signToken({ id: user.id, orgId: org.id, role: user.role });
 
     res.status(201).json({
       token,
       user: { id: user.id, email: user.email, name: user.name, role: user.role, accountType: 'developer', orgId: org.id, orgName: org.name, orgSlug: org.slug },
-      apiKey: rawKey,
     });
   } catch (err) {
     console.error('Register developer error:', err);
@@ -245,6 +231,7 @@ router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
       role: user.role,
       accountType: user.accountType,
       avatarUrl: user.avatarUrl,
+      emailVerified: user.emailVerified,
       orgId: user.orgId,
       orgName: user.org.name,
       orgSlug: user.org.slug,
@@ -292,6 +279,43 @@ router.patch('/profile', requireAuth, async (req: AuthRequest, res: Response) =>
     });
   } catch (err) {
     console.error('Profile update error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /change-password — change password for authenticated user
+router.post('/change-password', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new password are required' });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: req.user!.id } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // OAuth users don't have a password
+    if (user.provider) {
+      return res.status(400).json({ error: 'Cannot change password for OAuth accounts' });
+    }
+
+    const valid = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Change password error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -572,6 +596,176 @@ router.delete('/api-keys/:id', requireAuth, async (req: AuthRequest, res: Respon
     res.json({ success: true });
   } catch (err) {
     console.error('Delete API key error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Password Reset ──────────────────────────────────────────────────────────
+
+const WEB_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
+
+// POST /forgot-password — send password reset email
+router.post('/forgot-password', async (req: AuthRequest, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    // Always return success to prevent email enumeration
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return res.json({ message: 'If that email exists, a reset link has been sent.' });
+
+    // Invalidate any existing reset tokens
+    await prisma.authToken.updateMany({
+      where: { userId: user.id, type: 'password_reset', usedAt: null },
+      data: { usedAt: new Date() },
+    });
+
+    const token = crypto.randomBytes(32).toString('hex');
+    await prisma.authToken.create({
+      data: {
+        userId: user.id,
+        token,
+        type: 'password_reset',
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
+      },
+    });
+
+    const resetUrl = `${WEB_URL}/reset-password?token=${token}`;
+    await sendEmail(email, 'Reset your Origin password', `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        <div style="text-align: center; margin-bottom: 32px;">
+          <h1 style="color: #f3f4f6; font-size: 24px; margin: 0;">Origin</h1>
+        </div>
+        <div style="background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 32px;">
+          <h2 style="color: #f3f4f6; font-size: 18px; margin: 0 0 12px;">Reset your password</h2>
+          <p style="color: #9ca3af; font-size: 14px; line-height: 1.6; margin: 0 0 24px;">
+            Click the button below to set a new password. This link expires in 1 hour.
+          </p>
+          <a href="${resetUrl}" style="display: inline-block; background: #6366f1; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-size: 14px; font-weight: 500;">
+            Reset Password
+          </a>
+          <p style="color: #6b7280; font-size: 12px; margin: 24px 0 0;">
+            If you didn't request this, you can safely ignore this email.
+          </p>
+        </div>
+      </div>
+    `);
+
+    res.json({ message: 'If that email exists, a reset link has been sent.' });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /reset-password — set new password with token
+router.post('/reset-password', async (req: AuthRequest, res: Response) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: 'Token and password are required' });
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+
+    const authToken = await prisma.authToken.findFirst({
+      where: { token, type: 'password_reset', usedAt: null, expiresAt: { gt: new Date() } },
+    });
+
+    if (!authToken) return res.status(400).json({ error: 'Invalid or expired reset link' });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await prisma.user.update({ where: { id: authToken.userId }, data: { passwordHash } });
+    await prisma.authToken.update({ where: { id: authToken.id }, data: { usedAt: new Date() } });
+
+    res.json({ message: 'Password has been reset successfully' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /verify-token/:token — check if a reset token is valid
+router.get('/verify-token/:token', async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = req.params;
+    const authToken = await prisma.authToken.findFirst({
+      where: { token: token as string, usedAt: null, expiresAt: { gt: new Date() } },
+    });
+    res.json({ valid: !!authToken, type: authToken?.type || null });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Email Verification ──────────────────────────────────────────────────────
+
+// POST /send-verification — send email verification (requires auth)
+router.post('/send-verification', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user!.id } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (user.emailVerified) return res.json({ message: 'Email already verified' });
+
+    // Invalidate existing verification tokens
+    await prisma.authToken.updateMany({
+      where: { userId: user.id, type: 'email_verification', usedAt: null },
+      data: { usedAt: new Date() },
+    });
+
+    const token = crypto.randomBytes(32).toString('hex');
+    await prisma.authToken.create({
+      data: {
+        userId: user.id,
+        token,
+        type: 'email_verification',
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+      },
+    });
+
+    const verifyUrl = `${WEB_URL}/verify-email?token=${token}`;
+    await sendEmail(user.email, 'Verify your Origin email', `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+        <div style="text-align: center; margin-bottom: 32px;">
+          <h1 style="color: #f3f4f6; font-size: 24px; margin: 0;">Origin</h1>
+        </div>
+        <div style="background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 32px;">
+          <h2 style="color: #f3f4f6; font-size: 18px; margin: 0 0 12px;">Verify your email</h2>
+          <p style="color: #9ca3af; font-size: 14px; line-height: 1.6; margin: 0 0 24px;">
+            Welcome to Origin! Click the button below to verify your email address.
+          </p>
+          <a href="${verifyUrl}" style="display: inline-block; background: #10b981; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-size: 14px; font-weight: 500;">
+            Verify Email
+          </a>
+          <p style="color: #6b7280; font-size: 12px; margin: 24px 0 0;">
+            This link expires in 24 hours.
+          </p>
+        </div>
+      </div>
+    `);
+
+    res.json({ message: 'Verification email sent' });
+  } catch (err) {
+    console.error('Send verification error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /verify-email — verify email with token
+router.post('/verify-email', async (req: AuthRequest, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'Token is required' });
+
+    const authToken = await prisma.authToken.findFirst({
+      where: { token, type: 'email_verification', usedAt: null, expiresAt: { gt: new Date() } },
+    });
+
+    if (!authToken) return res.status(400).json({ error: 'Invalid or expired verification link' });
+
+    await prisma.user.update({ where: { id: authToken.userId }, data: { emailVerified: true } });
+    await prisma.authToken.update({ where: { id: authToken.id }, data: { usedAt: new Date() } });
+
+    res.json({ message: 'Email verified successfully' });
+  } catch (err) {
+    console.error('Verify email error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

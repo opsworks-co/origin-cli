@@ -59,6 +59,13 @@ export function updateProfile(data: { name?: string; email?: string; avatarUrl?:
   });
 }
 
+export function changePassword(currentPassword: string, newPassword: string) {
+  return request<{ success: boolean }>('/api/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
+
 export function login(email: string, password: string) {
   return request<AuthResponse>('/api/auth/login', {
     method: 'POST',
