@@ -73,6 +73,7 @@ program
 program.command('login')
   .description('Login to Origin')
   .option('--key <apiKey>', 'API key (skip interactive prompt)')
+  .option('--url <apiUrl>', 'API URL (default: https://getorigin.io)')
   .option('--profile <name>', 'Save as named profile (default: auto-detect "dev" or "team")')
   .action(loginCommand);
 program.command('init')

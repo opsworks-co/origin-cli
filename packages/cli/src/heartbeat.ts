@@ -31,7 +31,11 @@ const isConnected = !!(apiUrl && apiKey);
 fs.writeFileSync(pidFile, String(process.pid), { mode: 0o600 });
 
 const PING_INTERVAL_MS = 30_000; // 30 seconds
-const STALE_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes without state file update = stale
+// For agents where we can't detect parent PID (Cursor, Codex), we fall back to
+// state file freshness. Use a long threshold — the heartbeat should keep running
+// as long as the editor/terminal is open. Sessions stay IDLE on the dashboard
+// until the heartbeat dies (app closed) or the agent explicitly ends the session.
+const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours — safety net only
 
 /**
  * Check if a process is still alive (signal 0 = existence check).
@@ -48,8 +52,8 @@ function isProcessAlive(pid: number): boolean {
 
 /**
  * Check if the session state file was recently updated.
- * Each prompt submission updates the state file, so if it hasn't been
- * touched in 5 minutes, the agent is likely dead.
+ * Only used as safety net for agents where parent PID is unknown (Cursor, Codex).
+ * Uses 2-hour threshold to avoid killing sessions during long idle periods.
  */
 function isStateFileStale(): boolean {
   if (!stateFile) return false; // can't check without state file
@@ -174,13 +178,33 @@ async function ping() {
 
     // Only ping API in connected mode
     if (isConnected) {
-      await fetch(`${apiUrl}/api/mcp/session/${sessionId}/ping`, {
+      const resp = await fetch(`${apiUrl}/api/mcp/session/${sessionId}/ping`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
         },
       });
+      const data = await resp.json() as { ok: boolean; status?: string };
+      // If server says session is ended/completed, self-terminate
+      if (data.status && data.status !== 'RUNNING') {
+        // Clean up PID and state files
+        try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+        if (stateFile) {
+          try {
+            const raw = fs.readFileSync(stateFile, 'utf-8');
+            const state = JSON.parse(raw);
+            state.status = 'ENDED';
+            state.endedAt = new Date().toISOString();
+            const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+            const archiveDir = `${homeDir}/.origin/sessions`;
+            fs.mkdirSync(archiveDir, { recursive: true });
+            fs.writeFileSync(`${archiveDir}/${(state.sessionId || sessionId).slice(0, 12)}.json`, JSON.stringify(state), { mode: 0o600 });
+          } catch { /* best effort */ }
+          try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
+        }
+        process.exit(0);
+      }
     }
   } catch {
     // Silently ignore network errors — will retry next interval

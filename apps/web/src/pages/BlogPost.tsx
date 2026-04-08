@@ -87,27 +87,58 @@ const postContent: Record<string, React.ReactNode> = {
       </p>
 
       {/* Architecture diagram */}
-      <div className="not-prose my-8">
-        <div className="rounded-xl border border-gray-800 bg-gray-950 p-6">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-center">
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-gradient-to-b from-gray-950 to-[#0a0b14] p-6 sm:p-8">
+          <p className="text-[11px] text-gray-500 font-medium uppercase tracking-widest text-center mb-6">How Origin Works</p>
+          {/* Desktop: horizontal flow */}
+          <div className="hidden sm:flex items-stretch justify-center gap-0">
             {[
-              { label: 'AI Agent', sub: 'Claude, Cursor, Gemini...', color: 'indigo' },
-              { label: 'Git Hook', sub: 'Post-commit fires', color: 'gray' },
-              { label: 'Origin CLI', sub: 'Detects + captures', color: 'emerald' },
-              { label: 'Git Notes', sub: 'refs/notes/origin', color: 'gray' },
-              { label: 'Dashboard', sub: 'getorigin.io', color: 'indigo' },
+              { label: 'AI Agent', sub: 'Claude Code, Cursor,\nGemini, Codex', icon: '🤖', border: 'border-indigo-700/60', bg: 'bg-indigo-950/30', glow: 'shadow-indigo-900/20' },
+              { label: 'Git Hook', sub: 'Pre-commit &\npost-commit fire', icon: '⚡', border: 'border-gray-700/60', bg: 'bg-gray-900/40', glow: '' },
+              { label: 'Origin CLI', sub: 'Detects agent, captures\nsession & attribution', icon: '◈', border: 'border-emerald-600/60', bg: 'bg-emerald-950/30', glow: 'shadow-emerald-900/20' },
+              { label: 'Git Notes + API', sub: 'refs/notes/origin\n+ getorigin.io/api', icon: '📦', border: 'border-gray-700/60', bg: 'bg-gray-900/40', glow: '' },
+              { label: 'Dashboard', sub: 'Sessions, blame,\ncost & governance', icon: '📊', border: 'border-indigo-700/60', bg: 'bg-indigo-950/30', glow: 'shadow-indigo-900/20' },
             ].map((step, i) => (
               <React.Fragment key={step.label}>
-                {i > 0 && <span className="text-gray-600 hidden sm:block">&rarr;</span>}
-                {i > 0 && <span className="text-gray-600 sm:hidden">&darr;</span>}
-                <div className={`px-4 py-3 rounded-lg border ${step.color === 'emerald' ? 'border-emerald-800/50 bg-emerald-900/10' : step.color === 'indigo' ? 'border-indigo-800/50 bg-indigo-900/10' : 'border-gray-800 bg-gray-900/50'} flex-1 min-w-[120px]`}>
-                  <div className="text-sm font-semibold text-gray-200">{step.label}</div>
-                  <div className="text-[10px] text-gray-500 mt-0.5">{step.sub}</div>
+                {i > 0 && (
+                  <div className="flex items-center px-1">
+                    <div className="w-8 h-[2px] bg-gradient-to-r from-gray-700 to-gray-600" />
+                    <div className="w-0 h-0 border-t-[5px] border-t-transparent border-b-[5px] border-b-transparent border-l-[7px] border-l-gray-600" />
+                  </div>
+                )}
+                <div className={`${step.border} ${step.bg} ${step.glow} border rounded-xl px-5 py-5 flex-1 text-center shadow-lg min-w-[140px] max-w-[180px]`}>
+                  <div className="text-2xl mb-2">{step.icon}</div>
+                  <div className="text-sm font-bold text-gray-100 tracking-tight">{step.label}</div>
+                  <div className="text-[11px] text-gray-500 mt-1.5 leading-relaxed whitespace-pre-line">{step.sub}</div>
                 </div>
               </React.Fragment>
             ))}
           </div>
-          <p className="text-[10px] text-gray-600 text-center mt-4">Every AI coding session is captured, attributed, and stored &mdash; zero config required</p>
+          {/* Mobile: vertical flow */}
+          <div className="flex sm:hidden flex-col items-center gap-0">
+            {[
+              { label: 'AI Agent', sub: 'Claude Code, Cursor, Gemini, Codex', icon: '🤖', border: 'border-indigo-700/60', bg: 'bg-indigo-950/30' },
+              { label: 'Git Hook', sub: 'Pre-commit & post-commit fire', icon: '⚡', border: 'border-gray-700/60', bg: 'bg-gray-900/40' },
+              { label: 'Origin CLI', sub: 'Detects agent, captures session & attribution', icon: '◈', border: 'border-emerald-600/60', bg: 'bg-emerald-950/30' },
+              { label: 'Git Notes + API', sub: 'refs/notes/origin + getorigin.io/api', icon: '📦', border: 'border-gray-700/60', bg: 'bg-gray-900/40' },
+              { label: 'Dashboard', sub: 'Sessions, blame, cost & governance', icon: '📊', border: 'border-indigo-700/60', bg: 'bg-indigo-950/30' },
+            ].map((step, i) => (
+              <React.Fragment key={step.label}>
+                {i > 0 && (
+                  <div className="flex flex-col items-center py-1">
+                    <div className="w-[2px] h-6 bg-gradient-to-b from-gray-700 to-gray-600" />
+                    <div className="w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[7px] border-t-gray-600" />
+                  </div>
+                )}
+                <div className={`${step.border} ${step.bg} border rounded-xl px-5 py-4 w-full max-w-[280px] text-center`}>
+                  <div className="text-xl mb-1">{step.icon}</div>
+                  <div className="text-sm font-bold text-gray-100">{step.label}</div>
+                  <div className="text-[11px] text-gray-500 mt-1">{step.sub}</div>
+                </div>
+              </React.Fragment>
+            ))}
+          </div>
+          <p className="text-[11px] text-gray-600 text-center mt-6">Every AI coding session is captured, attributed, and stored &mdash; zero config required</p>
         </div>
       </div>
 

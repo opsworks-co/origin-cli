@@ -27,12 +27,16 @@ export function getStatusBadgeClass(status: string): string {
 }
 
 export function formatDuration(ms: number): string {
+  ms = Math.round(ms);
   if (ms < 1000) return `${ms}ms`;
   const seconds = Math.floor(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const remaining = seconds % 60;
-  return `${minutes}m ${remaining}s`;
+  if (minutes < 60) return `${minutes}m ${remaining}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMin = minutes % 60;
+  return `${hours}h ${remainingMin}m`;
 }
 
 export function formatCost(usd: number): string {

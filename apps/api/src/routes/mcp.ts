@@ -383,53 +383,65 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       });
     }
 
-    // ── Server-side dedup: if a RUNNING or recently-ended session already exists
-    //    for this machine + agent + repo, reuse it instead of creating a new one.
-    //    Claude Code fires session-start on open AND on resume from idle, and the
-    //    stale cleanup may have ended the session during idle. Reopen it.
-    //    Skip dedup for agents that fire session-start per-prompt (Cursor, Codex) —
-    //    for those, the CLI handles session continuity via local state files.
-    const dedupCutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 hour window
+    // ── Server-side dedup: if a RUNNING session already exists for this
+    //    machine + agent + repo, reuse it. No audit log lookup — machineId
+    //    is stored directly on the session to avoid race conditions when
+    //    multiple session-starts fire simultaneously (Codex, Cursor).
+    const dedupCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hour window
+    const dedupWhere: any = {
+      commit: { repoId: repo.id },
+      startedAt: { gte: dedupCutoff },
+      status: 'RUNNING',
+    };
+    // Match by machineId (primary) or agentId (fallback for sessions before machineId field)
+    if (machineId) {
+      dedupWhere.OR = [
+        { machineId, agentId: agent?.id || null },
+        // Fallback: match by agentId only for old sessions without machineId field
+        { machineId: null, agentId: agent?.id || null },
+      ];
+    } else {
+      dedupWhere.agentId = agent?.id || null;
+    }
     const existingSession = await prisma.codingSession.findFirst({
-      where: {
-        agentId: agent?.id || null,
-        commit: { repoId: repo.id },
-        startedAt: { gte: dedupCutoff },
-        status: { in: ['RUNNING', 'COMPLETED'] },
-      },
+      where: dedupWhere,
       include: { commit: { select: { repoId: true } } },
       orderBy: { startedAt: 'desc' },
     });
 
     if (existingSession) {
-      // Check machine match via audit log (machineId is stored in metadata)
-      const existingAudit = await prisma.auditLog.findFirst({
-        where: {
-          resource: existingSession.id,
-          action: 'SESSION_STARTED',
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      const existingMachineId = existingAudit?.metadata
-        ? JSON.parse(existingAudit.metadata as string)?.machineId
-        : null;
+      // For old sessions without machineId: verify via audit log
+      let isMatch = !!existingSession.machineId; // new sessions have machineId directly
+      if (!isMatch) {
+        const existingAudit = await prisma.auditLog.findFirst({
+          where: { resource: existingSession.id, action: 'SESSION_STARTED' },
+          orderBy: { createdAt: 'desc' },
+        });
+        const existingMachineId = existingAudit?.metadata
+          ? JSON.parse(existingAudit.metadata as string)?.machineId
+          : null;
+        isMatch = existingMachineId === machineId;
+      }
+      // Also match by agentSessionId
+      if (!isMatch && agentSessionId && existingSession.agentSessionId === agentSessionId) {
+        isMatch = true;
+      }
 
-      if (existingMachineId === machineId) {
-        // Reopen the session if it was auto-ended
-        if (existingSession.status === 'COMPLETED') {
-          await prisma.codingSession.update({
-            where: { id: existingSession.id },
-            data: { status: 'RUNNING', endedAt: null },
-          });
-          console.log('[session/start] REOPEN: reopening auto-ended session', {
-            existingId: existingSession.id, machineId,
-          });
-        } else {
-          console.log('[session/start] DEDUP: returning existing running session', {
-            existingId: existingSession.id, machineId,
-          });
-        }
-        // Re-evaluate system prompt from live agent settings (not stale snapshot)
+      if (isMatch) {
+        // Update lastActivityAt + ensure machineId is set
+        await prisma.codingSession.update({
+          where: { id: existingSession.id },
+          data: {
+            lastActivityAt: new Date(),
+            ...(existingSession.status === 'COMPLETED' && { status: 'RUNNING', endedAt: null }),
+            ...(!existingSession.machineId && machineId && { machineId }),
+          },
+        });
+        console.log('[session/start] DEDUP: returning existing session', {
+          existingId: existingSession.id, machineId, status: existingSession.status,
+        });
+
+        // Re-evaluate system prompt
         let dedupPrompt = agent?.systemPrompt || existingSession.agentSystemPrompt || null;
         if (agent?.securityRulesEnabled === true) {
           const securityBlock = agent?.securityRules?.trim() || DEFAULT_SECURITY_RULES;
@@ -437,14 +449,12 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
             ? `${dedupPrompt}\n\n<security-rules>\n${securityBlock}\n</security-rules>`
             : `<security-rules>\n${securityBlock}\n</security-rules>`;
         }
-        // Update the snapshot so future resumes also get the latest prompt
         if (dedupPrompt !== existingSession.agentSystemPrompt) {
           await prisma.codingSession.update({
             where: { id: existingSession.id },
             data: { agentSystemPrompt: dedupPrompt },
           });
         }
-        // Return the existing session instead of creating a duplicate
         return res.json({
           sessionId: existingSession.id,
           agentSystemPrompt: dedupPrompt || undefined,
@@ -553,6 +563,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         branch: branch || null,
         agentSessionId: agentSessionId || null,
         parentSessionId,
+        machineId: machineId || null,
       },
     });
 

@@ -768,6 +768,9 @@ export default function MyDashboard() {
   const [statsLoading, setStatsLoading] = useState(true);
   const [hideGuide, setHideGuide] = useState(() => localStorage.getItem('origin:hide-guide') === '1');
 
+  // Force-show guide for users with zero sessions (even if previously dismissed)
+  const showGuide = !hideGuide || (!statsLoading && stats?.totalSessions === 0);
+
   // Agent cards
   const [agentCards, setAgentCards] = useState<AgentCard[]>([]);
   const [agentsLoading, setAgentsLoading] = useState(true);
@@ -1099,7 +1102,7 @@ export default function MyDashboard() {
       </div>
 
       {/* Quick Start Guide — always visible until dismissed */}
-      {!hideGuide && (
+      {showGuide && (
         <div className="rounded-xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 to-transparent p-6 space-y-5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -1111,13 +1114,15 @@ export default function MyDashboard() {
                 <p className="text-sm text-gray-500">Set up session tracking in under 2 minutes</p>
               </div>
             </div>
-            <button
-              onClick={() => { setHideGuide(true); localStorage.setItem('origin:hide-guide', '1'); }}
-              className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
-              title="Dismiss"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            {(stats?.totalSessions ?? 0) > 0 && (
+              <button
+                onClick={() => { setHideGuide(true); localStorage.setItem('origin:hide-guide', '1'); }}
+                className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+                title="Dismiss"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1141,8 +1146,8 @@ export default function MyDashboard() {
               </div>
               <p className="text-xs text-gray-400 mb-3">
                 Go to{' '}
-                <a href="/settings" className="text-emerald-400 hover:text-emerald-300 underline">Settings</a>
-                {' '}&rarr; General &rarr; create an API key. Copy it &mdash; you&apos;ll need it next.
+                <a href="/api-keys" className="text-emerald-400 hover:text-emerald-300 underline">API Keys</a>
+                {' '}&rarr; create a key and copy it &mdash; you&apos;ll need it next.
               </p>
               <p className="text-xs text-gray-500">The key connects the CLI to your account</p>
             </div>
@@ -1272,6 +1277,7 @@ export default function MyDashboard() {
             >
               <option value="">All statuses</option>
               <option value="RUNNING">Running</option>
+              <option value="IDLE">Idle</option>
               <option value="COMPLETED">Completed</option>
               <option value="approved">Approved</option>
               <option value="flagged">Flagged</option>

@@ -1,20 +1,19 @@
 import { createInterface } from 'readline/promises';
-import { saveConfig, saveProfile, listProfiles, loadConfig } from '../config.js';
+import { saveConfig, saveProfile, listProfiles, loadConfig, deleteProfile } from '../config.js';
 import chalk from 'chalk';
 
-export async function loginCommand(opts: { key?: string; profile?: string }) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-
+export async function loginCommand(opts: { key?: string; url?: string; profile?: string }) {
   console.log(chalk.bold('\n🔑 Origin Login\n'));
 
   let url: string;
   let key: string;
 
   if (opts.key) {
-    // --key flag: skip prompts, use default URL
-    url = 'https://getorigin.io';
+    // Non-interactive mode
+    url = (opts.url || 'https://getorigin.io').replace(/\/+$/, '');
     key = opts.key.trim();
   } else {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
     const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
     const apiKey = await rl.question(chalk.gray('API Key: '));
     rl.close();
@@ -70,6 +69,14 @@ export async function loginCommand(opts: { key?: string; profile?: string }) {
       orgName: data.orgName || '',
     });
 
+    // Remove any stale profile using the same API key under a different name
+    const existingProfiles = listProfiles();
+    for (const p of existingProfiles) {
+      if (p.apiKey === key && p.name !== profileName) {
+        deleteProfile(p.name);
+      }
+    }
+
     // Also save as named profile (for multi-account hooks)
     saveProfile(profileName, {
       name: profileName,
@@ -107,7 +114,8 @@ export async function loginCommand(opts: { key?: string; profile?: string }) {
       for (const p of allProfiles) {
         const isActive = p.apiKey === key;
         const mode = p.accountType === 'developer' ? 'solo' : 'team';
-        const label = `${p.name} (${mode}) → ${p.orgName}`;
+        const displayName = p.accountType === 'developer' ? (p.orgName || 'Personal workspace') : p.orgName;
+        const label = `${p.name} (${mode}) → ${displayName}`;
         console.log(isActive ? chalk.white(`    ● ${label}`) : chalk.gray(`    ○ ${label}`));
       }
       console.log(chalk.gray('\n  Sessions will be sent to all accounts simultaneously.'));
@@ -118,4 +126,6 @@ export async function loginCommand(opts: { key?: string; profile?: string }) {
     console.log(chalk.red(`✗ Failed to connect: ${err.message}`));
     process.exit(1);
   }
+
+  process.exit(0);
 }

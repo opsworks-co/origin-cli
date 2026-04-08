@@ -36,12 +36,22 @@ const router = Router();
 router.use(requireAuth);
 
 const IDLE_THRESHOLD_MS = 5 * 60 * 1000; // 5 min without prompt activity → IDLE
+// Safety net: if heartbeat hasn't pinged in 2 hours, the agent is truly dead.
+// This only catches cases where the heartbeat daemon crashed without sending session/end.
+const ABANDONED_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function computeStatus(s: any): string {
-  if (s.status !== 'RUNNING') return s.status || 'COMPLETED';
-  const lastActivity = s.lastActivityAt ? new Date(s.lastActivityAt).getTime() : 0;
-  if (lastActivity && Date.now() - lastActivity > IDLE_THRESHOLD_MS) return 'IDLE';
-  return 'RUNNING';
+  // COMPLETED/ERROR = terminal states. Only set by explicit session/end call.
+  if (s.status === 'COMPLETED' || s.status === 'ERROR') return s.status;
+
+  // RUNNING sessions: check prompt activity for IDLE detection
+  if (s.status === 'RUNNING') {
+    const lastPrompt = s.lastActivityAt ? new Date(s.lastActivityAt).getTime() : 0;
+    if (lastPrompt && Date.now() - lastPrompt > IDLE_THRESHOLD_MS) return 'IDLE';
+    return 'RUNNING';
+  }
+
+  return s.status || 'COMPLETED';
 }
 
 function mapSession(s: any, pullRequests?: any[]) {
@@ -243,24 +253,25 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       }),
     ]);
 
-    // Auto-expire stale RUNNING sessions (no heartbeat ping in 15 minutes)
-    const STALE_THRESHOLD_MS = 15 * 60 * 1000;
+    // Safety net: expire truly abandoned sessions (heartbeat crashed without sending end).
+    // Uses updatedAt (set by heartbeat ping every 30s) — NOT lastActivityAt (set by prompts).
+    // If heartbeat is alive, updatedAt stays fresh even when user is idle.
     const now = Date.now();
-    const staleIds: string[] = [];
+    const abandonedIds: string[] = [];
     for (const s of sessions) {
       if (s.status === 'RUNNING') {
-        const lastActivity = new Date(s.updatedAt || s.createdAt).getTime();
-        if (now - lastActivity > STALE_THRESHOLD_MS) {
-          staleIds.push(s.id);
+        const lastHeartbeat = new Date(s.updatedAt || s.createdAt).getTime();
+        if (now - lastHeartbeat > ABANDONED_THRESHOLD_MS) {
+          abandonedIds.push(s.id);
           s.status = 'COMPLETED';
           s.endedAt = s.updatedAt || s.createdAt;
         }
       }
     }
-    // Update stale sessions in DB in background
-    if (staleIds.length > 0) {
+    // Update abandoned sessions in DB in background
+    if (abandonedIds.length > 0) {
       prisma.codingSession.updateMany({
-        where: { id: { in: staleIds } },
+        where: { id: { in: abandonedIds } },
         data: { status: 'COMPLETED', endedAt: new Date() },
       }).catch(() => {});
     }

@@ -331,7 +331,7 @@ export default function SessionDetail() {
           &larr; Sessions
         </button>
         <h1 className="text-xl font-bold">{(session.repoNames && session.repoNames.length > 1 ? session.repoNames.join(', ') : session.repoName) ?? 'Session'}</h1>
-        {statusBadge(isDev ? (session.status === 'RUNNING' ? 'running' : 'ended') : (session.review?.status?.toLowerCase() ?? (session.status === 'RUNNING' ? 'running' : 'ended')))}
+        {statusBadge(isDev ? session.status.toLowerCase() : (session.review?.status?.toLowerCase() ?? session.status.toLowerCase()))}
         <span className="text-xs text-gray-600 font-mono">{session.commitSha?.slice(0, 8)}</span>
         {session.branch && (
           <span className="text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full font-mono inline-flex items-center gap-1">
@@ -753,8 +753,8 @@ export default function SessionDetail() {
                       <span className={cs.id === session.id ? 'text-indigo-400 font-medium' : 'text-gray-300'}>
                         {cs.startedAt ? new Date(cs.startedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
                       </span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${cs.status === 'RUNNING' ? 'bg-green-500/20 text-green-400' : 'bg-gray-700 text-gray-500'}`}>
-                        {cs.status === 'RUNNING' ? 'Running' : 'Done'}
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${cs.status === 'RUNNING' ? 'bg-green-500/20 text-green-400' : cs.status === 'IDLE' ? 'bg-amber-500/20 text-amber-400' : 'bg-gray-700 text-gray-500'}`}>
+                        {cs.status === 'RUNNING' ? 'Running' : cs.status === 'IDLE' ? 'Idle' : 'Done'}
                       </span>
                     </span>
                     <span className="text-gray-500">{formatCost(cs.costUsd)}</span>

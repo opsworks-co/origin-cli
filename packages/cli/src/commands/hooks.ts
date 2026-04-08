@@ -745,11 +745,9 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     }
   }
 
-  // For Cursor: session-start fires on every prompt, so reuse existing session.
-  // For Codex: session-start fires per conversation, so always create new session
-  //   but clean up old orphaned ones first.
+  // For Cursor/Codex: session-start fires on every prompt, so reuse existing session.
   // First, clean up orphaned sessions whose heartbeats died (e.g. Mac sleep).
-  const agentsWithSessionReuse = ['cursor']; // Only Cursor reuses sessions — Codex creates new per conversation
+  const agentsWithSessionReuse = ['cursor', 'codex']; // Reuse active sessions — prevent duplicates from rapid session-start fires
   if (agentsWithPerPromptSessionStart.includes(agentSlug || '')) {
     const allActive = listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug || ''));
     for (const s of allActive) {
@@ -767,7 +765,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           const stateFilePath = getStatePath(repoPath, s.sessionTag);
           const stat = fs.statSync(stateFilePath);
           const ageMs = Date.now() - stat.mtimeMs;
-          if (ageMs < 10 * 60 * 1000) { // state file updated < 10 min ago — don't treat as orphan
+          if (ageMs < 2 * 60 * 60 * 1000) { // state file updated < 2 hours ago — don't treat as orphan
             heartbeatAlive = true; // treat as alive
             debugLog('session-start', 'session state file still fresh, skipping orphan cleanup', {
               sessionId: s.sessionId, ageMs,
@@ -796,11 +794,10 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       }
     }
 
-    // For Cursor only: look for a valid active session to reuse
-    // Codex always gets a new session — skip reuse entirely.
+    // For Cursor/Codex: look for a valid active session to reuse
     let existing: SessionState | null = null;
     if (agentsWithSessionReuse.includes(agentSlug || '')) {
-      existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, agentSlug || '')) || null;
+      existing = listActiveSessions(repoPath).find(s => sessionMatchesAgent(s, finalAgentSlug || agentSlug || '')) || null;
       // Also check global archive — the .git/ file might have been cleaned up
       if (!existing) {
         try {
@@ -813,7 +810,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
               if (!s?.sessionId || !s?.startedAt) continue;
               if (Date.now() - new Date(s.startedAt).getTime() > MAX_AGE_MS) continue;
               if (s.status === 'ENDED' && s.endedAt) continue;
-              if (s.repoPath === repoPath && sessionMatchesAgent(s, agentSlug || '')) {
+              if (s.repoPath === repoPath && sessionMatchesAgent(s, finalAgentSlug || agentSlug || '')) {
                 existing = s;
                 break;
               }

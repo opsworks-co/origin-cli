@@ -712,7 +712,7 @@ export default function Sessions() {
                           s.review.score >= 50 ? 'bg-amber-500/20 text-amber-400' :
                           'bg-red-500/20 text-red-400'
                         }`}>{s.review.score}</span>
-                      ) : statusBadge(s.review?.status?.toLowerCase() ?? (s.status === 'RUNNING' ? 'running' : 'ended'))}
+                      ) : statusBadge(s.review?.status?.toLowerCase() ?? s.status.toLowerCase())}
                       <span className="text-gray-600 text-xs">{timeAgo(s.createdAt)}</span>
                     </div>
                   ))}
@@ -801,6 +801,13 @@ export default function Sessions() {
                               <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-green-400" />
                             </span>
                             running
+                          </span>
+                        ) : s.status === 'IDLE' ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-400">
+                            <span className="relative flex h-1.5 w-1.5">
+                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
+                            </span>
+                            idle
                           </span>
                         ) : s.status === 'ERROR' ? (
                           <span className="text-xs font-medium text-red-400">error</span>
