@@ -709,23 +709,20 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     }
   }
 
-  // ── Clean up stale sessions for non-Claude agents (Gemini, Codex, etc.) ──────
-  // These agents don't provide a session_id, so we can't deduplicate by ID.
-  // If SessionEnd didn't fire (user Ctrl+C'd, terminal closed), old state files
-  // linger and subsequent hooks attach to the wrong session.
-  // On session-start, force-end any prior sessions for the same agent in this repo.
-  // BUT for Cursor/Codex, session-start fires on every prompt — don't end previous,
-  // just reuse the existing session.
+  // ── Clean up prior sessions for the SAME agent only ──────────────────────
+  // NEVER touch sessions from other agents. If agentSlug is unknown, skip cleanup.
+  // For Cursor/Codex (per-prompt session-start), skip this — they reuse below.
   const agentsWithPerPromptSessionStart = ['cursor', 'codex'];
-  if (!claudeSessionId && !agentsWithPerPromptSessionStart.includes(agentSlug || '')) {
-    const staleSessions = agentSlug ? listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, agentSlug)) : listActiveSessions(repoPath);
-    for (const stale of staleSessions) {
-      debugLog('session-start', 'cleaning up stale session for same agent', {
+  const effectiveSlug = finalAgentSlug || agentSlug || '';
+  if (!claudeSessionId && effectiveSlug && !agentsWithPerPromptSessionStart.includes(effectiveSlug)) {
+    const sameAgentSessions = listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, effectiveSlug));
+    for (const stale of sameAgentSessions) {
+      debugLog('session-start', 'cleaning up prior session for same agent', {
         staleSessionId: stale.sessionId,
         staleTag: stale.sessionTag,
-        agent: finalAgentSlug,
+        staleAgent: stale.agentSlug,
+        newAgent: effectiveSlug,
       });
-      // Kill the old heartbeat so it stops pinging
       stopHeartbeat(stale.sessionId);
       if (connected && stale.sessionId) {
         try {
