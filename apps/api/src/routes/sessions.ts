@@ -139,14 +139,24 @@ function mapSession(s: any, pullRequests?: any[]) {
         }
       : null,
     promptChanges: s.promptChanges
-      ? s.promptChanges.map((pc: any) => ({
-          promptIndex: pc.promptIndex,
-          promptText: pc.promptText,
-          filesChanged: JSON.parse(pc.filesChanged || '[]'),
-          diff: pc.diff || '',
-          uncommittedDiff: pc.uncommittedDiff || '',
-          createdAt: pc.createdAt,
-        }))
+      ? (() => {
+          // Deduplicate by promptIndex (race condition can create duplicates)
+          const seen = new Set<number>();
+          return s.promptChanges
+            .map((pc: any) => ({
+              promptIndex: pc.promptIndex,
+              promptText: pc.promptText,
+              filesChanged: JSON.parse(pc.filesChanged || '[]'),
+              diff: pc.diff || '',
+              uncommittedDiff: pc.uncommittedDiff || '',
+              createdAt: pc.createdAt,
+            }))
+            .filter((pc: any) => {
+              if (seen.has(pc.promptIndex)) return false;
+              seen.add(pc.promptIndex);
+              return true;
+            });
+        })()
       : [],
   };
 }
