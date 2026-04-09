@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
-import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat } from '../session-state.js';
+import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive } from '../session-state.js';
 
 interface LocalSession {
   sessionId: string;
@@ -98,7 +98,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
             localSessions.push({
               sessionId: state.sessionId,
               model: state.model || 'unknown',
-              status: (state as any).status === 'ENDED' ? 'ENDED' : 'RUNNING',
+              status: (state as any).status === 'ENDED' ? 'ENDED' : isHeartbeatAlive(state.sessionId) ? 'RUNNING' : 'ENDED',
               filesChanged: (state as any).filesChanged || [],
               costUsd: 0,
               tokensUsed: 0,
@@ -353,8 +353,11 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
 }
 
 export async function sessionDetailCommand(id: string) {
-  // ── Try API first (if connected) ──
-  if (isConnectedMode()) {
+  // ── Local-only sessions: skip API call ──
+  const isLocalSession = id.startsWith('local-');
+
+  // ── Try API first (if connected and not a local session) ──
+  if (!isLocalSession && isConnectedMode()) {
     try {
       const s = await api.getSession(id) as any;
 
@@ -411,7 +414,7 @@ export async function sessionDetailCommand(id: string) {
       session = {
         sessionId: stateMatch.sessionId,
         model: stateMatch.model || 'unknown',
-        status: (stateMatch as any).status === 'ENDED' ? 'ENDED' : 'RUNNING',
+        status: (stateMatch as any).status === 'ENDED' ? 'ENDED' : isHeartbeatAlive(stateMatch.sessionId) ? 'RUNNING' : 'ENDED',
         filesChanged: (stateMatch as any).filesChanged || [],
         costUsd: 0,
         tokensUsed: 0,
