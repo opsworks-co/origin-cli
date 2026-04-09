@@ -2083,10 +2083,10 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 }
 
 async function handleSessionEnd(input: Record<string, any>, agentSlug?: string): Promise<void> {
-  // Cursor fires sessionEnd after each prompt/task, NOT on actual exit.
+  // Many agents fire sessionEnd after each prompt/task, NOT on actual exit.
   // Treat it as an update (like Stop) so the session stays RUNNING.
-  // The heartbeat daemon detects when Cursor actually exits and ends the session.
-  const agentsWithFakeSessionEnd = ['cursor', 'codex'];
+  // The heartbeat daemon detects when the agent actually exits and ends the session.
+  const agentsWithFakeSessionEnd = ['cursor', 'codex', 'claude-code'];
   if (agentsWithFakeSessionEnd.includes(agentSlug || '')) {
     debugLog('session-end', 'redirecting to handleStop (fake sessionEnd for this agent)', { agentSlug });
     return handleStop(input, agentSlug);
