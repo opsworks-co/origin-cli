@@ -95,6 +95,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
         const existingIds = new Set(localSessions.map(s => s.sessionId));
         for (const state of activeStates) {
           if (!existingIds.has(state.sessionId)) {
+            existingIds.add(state.sessionId);
             localSessions.push({
               sessionId: state.sessionId,
               model: state.model || 'unknown',
@@ -131,6 +132,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
       const existingIds = new Set(localSessions.map(s => s.sessionId));
       for (const state of allStates) {
         if (!existingIds.has(state.sessionId)) {
+          existingIds.add(state.sessionId);
           localSessions.push({
             sessionId: state.sessionId,
             model: state.model || 'unknown',
