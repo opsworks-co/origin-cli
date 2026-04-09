@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { getGitRoot } from '../session-state.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
+import { isConnectedMode } from '../config.js';
 import path from 'path';
 
 interface CommitPromptInfo {
@@ -75,10 +76,17 @@ function getPromptsForSession(sessionId: string, cwd: string): string[] {
 }
 
 export async function promptsCommand(filePath: string, opts: { expand?: boolean; limit?: string }) {
+  // If the argument looks like a session ID (hex, 8+ chars, no path separators),
+  // show prompts for that session from the platform API
+  const isSessionId = /^[a-f0-9]{8,}$/i.test(filePath) && !filePath.includes('/') && !filePath.includes('.');
+  if (isSessionId) {
+    return showSessionPrompts(filePath);
+  }
+
   const cwd = process.cwd();
   const repoRoot = getGitRoot(cwd);
   if (!repoRoot) {
-    console.log(chalk.red('Not inside a git repository.'));
+    console.log(chalk.red('Not inside a git repository. Run from a repo, or pass a session ID to view prompts.'));
     process.exit(1);
   }
 
@@ -187,4 +195,66 @@ export async function promptsCommand(filePath: string, opts: { expand?: boolean;
 
   console.log(chalk.gray(`  Tip: Use ${chalk.cyan('--expand')} to see the actual code changes per prompt`));
   console.log(chalk.gray(`       Use ${chalk.cyan('origin session <id>')} to see the full transcript\n`));
+}
+
+/**
+ * Show prompts for a session by ID — fetches from platform API.
+ * Works from any directory (no git repo required).
+ */
+async function showSessionPrompts(sessionId: string): Promise<void> {
+  if (!isConnectedMode()) {
+    console.log(chalk.red('Not connected to Origin. Run `origin login` first, or use a file path instead.'));
+    process.exit(1);
+  }
+
+  const { api } = await import('../api.js');
+
+  try {
+    const session = await api.getSession(sessionId) as any;
+    if (!session) {
+      console.log(chalk.red(`Session ${sessionId} not found.`));
+      process.exit(1);
+    }
+
+    const model = session.model || session.agentName || 'unknown';
+    const status = (session.status || 'ENDED').toUpperCase();
+    const startedAt = session.startedAt || session.createdAt;
+    const dateStr = startedAt
+      ? new Date(startedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
+      : '—';
+
+    console.log(chalk.bold(`\n  Session ${chalk.cyan(sessionId.slice(0, 8))}`) +
+      chalk.gray(` — ${model} — ${status} — ${dateStr}\n`));
+
+    const prompts = session.promptChanges || [];
+    if (prompts.length === 0) {
+      // Fall back to session.prompt field
+      if (session.prompt) {
+        console.log(chalk.white(`  1. "${session.prompt}"`));
+        console.log(chalk.gray(`     (no per-prompt breakdown available)\n`));
+      } else {
+        console.log(chalk.yellow('  No prompts captured for this session.'));
+        console.log(chalk.gray('  Prompts are recorded when the session ends.\n'));
+      }
+      return;
+    }
+
+    for (const pc of prompts) {
+      const idx = (pc.promptIndex ?? 0) + 1;
+      const text = pc.promptText || '(empty)';
+      const files = Array.isArray(pc.filesChanged) ? pc.filesChanged : [];
+
+      console.log(chalk.white(`  ${idx}. "${text}"`));
+      if (files.length > 0) {
+        console.log(chalk.gray(`     Files: ${files.join(', ')}`));
+      }
+      console.log('');
+    }
+
+    console.log(chalk.gray(`  ${prompts.length} prompt${prompts.length === 1 ? '' : 's'} total`));
+    console.log(chalk.gray(`  View full session: ${chalk.cyan(`origin explain ${sessionId.slice(0, 8)}`)}\n`));
+  } catch (err: any) {
+    console.log(chalk.red(`Failed to fetch session: ${err.message || 'unknown error'}`));
+    process.exit(1);
+  }
 }

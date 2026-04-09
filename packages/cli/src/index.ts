@@ -118,8 +118,8 @@ program.command('ask <query>')
   .option('--limit <n>', 'Max results', '5')
   .action(askCommand);
 
-program.command('prompts <file>')
-  .description('Show AI prompts that led to changes in a file — like git log but for AI prompts')
+program.command('prompts <file-or-session-id>')
+  .description('Show AI prompts for a file or session — pass a file path or session ID')
   .option('-e, --expand', 'Show the actual code diff for each prompt')
   .option('--limit <n>', 'Max entries to show', '10')
   .action(promptsCommand);
