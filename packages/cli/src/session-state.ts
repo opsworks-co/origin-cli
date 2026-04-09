@@ -431,10 +431,11 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
     // session after 30 seconds. For these agents, pass parentPid=0 so the heartbeat
     // relies on state file staleness (15 min) instead.
     const LONG_RUNNING_AGENTS = ['claude-code', 'windsurf'];
-    const STALE_FILE_ONLY_AGENTS = ['cursor', 'codex'];
     const AGENT_PROCESS_PATTERNS: Record<string, RegExp> = {
       'gemini': /gemini/i,
       'aider': /aider/i,
+      'codex': /codex/i,
+      'cursor': /cursor/i,
     };
 
     let parentPid: number;
@@ -445,13 +446,16 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
       if (parentPid > 0) {
         try { process.kill(parentPid, 0); } catch { parentPid = 0; }
       }
-    } else if (agentSlug && STALE_FILE_ONLY_AGENTS.includes(agentSlug)) {
-      // For Cursor / Codex, ancestor PID detection is unreliable — the process
-      // tree has short-lived intermediaries. Use stale file check only.
-      parentPid = 0;
     } else {
+      // For all other agents, walk the process tree to find the agent process.
+      // If we find it, heartbeat monitors that PID. If not, fall back to stale file check.
       const pattern = agentSlug ? AGENT_PROCESS_PATTERNS[agentSlug] : undefined;
       parentPid = pattern ? findAncestorPid(pattern) : 0;
+      // If pattern search failed, try to find the shell/terminal as a fallback
+      // so the heartbeat dies when the terminal is closed
+      if (parentPid <= 0) {
+        parentPid = findAncestorPid(/bash|zsh|fish|sh$/i) || 0;
+      }
     }
 
     const child = spawn(process.execPath, [heartbeatScript, sessionId, apiUrl, '', pidFile, String(parentPid), stateFile || ''], {
