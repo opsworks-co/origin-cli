@@ -234,9 +234,15 @@ ping();
 // Ping every 30s
 const interval = setInterval(ping, PING_INTERVAL_MS);
 
-// Clean exit on signals
-process.on('SIGTERM', () => { clearInterval(interval); process.exit(0); });
-process.on('SIGINT', () => { clearInterval(interval); process.exit(0); });
+// Clean exit on signals — always call endSession so the server knows
+async function signalExit() {
+  clearInterval(interval);
+  await endSession();
+  process.exit(0);
+}
+process.on('SIGTERM', signalExit);
+process.on('SIGINT', signalExit);
+process.on('SIGHUP', signalExit);
 
 // Safety: auto-exit after 24 hours (prevents zombie processes)
 setTimeout(() => { clearInterval(interval); process.exit(0); }, 24 * 60 * 60 * 1000);
