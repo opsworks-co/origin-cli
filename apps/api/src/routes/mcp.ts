@@ -1,6 +1,20 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
+
+// ── In-memory mutex for session-start to prevent race conditions ────────
+// When multiple session-starts fire simultaneously (Cursor, Codex), they all
+// hit the dedup query before any of them commit. This lock serializes
+// session-start per agent+repo+machine combination.
+const sessionStartLocks = new Map<string, Promise<any>>();
+function withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = sessionStartLocks.get(key) || Promise.resolve();
+  const result = prev.catch(() => {}).then(() => fn());
+  sessionStartLocks.set(key, result.catch(() => {}));
+  // Cleanup stale entries
+  result.finally(() => { setTimeout(() => sessionStartLocks.delete(key), 10000); });
+  return result;
+}
 import { notifyOrgAdmins } from '../services/notifications.js';
 import { runAIReview } from '../services/ai-review.js';
 import { checkBudget, recordSpend } from '../services/budget.js';
@@ -383,11 +397,12 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       });
     }
 
-    // ── Server-side dedup: if a RUNNING session with a live heartbeat exists
-    //    for this machine + agent + repo, reuse it. Prevents duplicate sessions
-    //    when multiple session-starts fire simultaneously (Codex, Cursor).
-    //    Only match sessions whose heartbeat pinged recently (updatedAt < 2 min).
-    //    Zombie sessions (heartbeat dead) are ignored — a new session is created.
+    // ── Server-side dedup with mutex lock ──────────────────────────────────
+    // Serializes session-start per agent+repo+machine to prevent race conditions
+    // when multiple hooks fire simultaneously (Cursor, Codex).
+    const lockKey = `${agent?.id || 'null'}:${repo.id}:${machineId}`;
+    return withSessionLock(lockKey, async () => {
+
     const HEARTBEAT_ALIVE_MS = 2 * 60 * 1000; // 2 minutes — heartbeat pings every 30s
     const heartbeatCutoff = new Date(Date.now() - HEARTBEAT_ALIVE_MS);
     const existingSession = await prisma.codingSession.findFirst({
@@ -645,6 +660,8 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     } catch { /* non-critical */ }
 
     res.json({ sessionId: codingSession.id, parentSessionId, activePolicies, enforcementRules, agentSystemPrompt: fullSystemPrompt });
+
+    }); // end withSessionLock
   } catch (err) {
     console.error('Start session error:', err);
     res.status(500).json({ error: 'Internal server error' });
