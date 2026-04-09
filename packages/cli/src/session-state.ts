@@ -431,11 +431,13 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
     // session after 30 seconds. For these agents, pass parentPid=0 so the heartbeat
     // relies on state file staleness (15 min) instead.
     const LONG_RUNNING_AGENTS = ['claude-code', 'windsurf'];
+    // Cursor is an Electron app — its process tree has short-lived helpers that
+    // die immediately, causing false parent-death detection. Use stale file only.
+    const STALE_FILE_ONLY_AGENTS = ['cursor'];
     const AGENT_PROCESS_PATTERNS: Record<string, RegExp> = {
       'gemini': /gemini/i,
       'aider': /aider/i,
       'codex': /codex/i,
-      'cursor': /cursor/i,
     };
 
     let parentPid: number;
@@ -446,6 +448,9 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
       if (parentPid > 0) {
         try { process.kill(parentPid, 0); } catch { parentPid = 0; }
       }
+    } else if (agentSlug && STALE_FILE_ONLY_AGENTS.includes(agentSlug)) {
+      // Cursor: can't reliably detect parent — use stale file check only
+      parentPid = 0;
     } else {
       // For all other agents, walk the process tree to find the agent process.
       // If we find it, heartbeat monitors that PID. If not, fall back to stale file check.
