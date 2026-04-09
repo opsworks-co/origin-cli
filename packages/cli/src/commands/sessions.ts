@@ -276,7 +276,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
       displayModel = platform.agentName;
     }
 
-    // Status
+    // Status — simple: RUNNING / IDLE / ENDED
     let status: string;
     let statusColor: (s: string) => string;
     const rawStatus = (platform?.status || local?.status || '').toUpperCase();
@@ -284,21 +284,12 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     if (rawStatus === 'RUNNING') {
       status = 'RUNNING';
       statusColor = chalk.green;
-    } else if (platform?.review?.status === 'APPROVED') {
-      status = 'APPROVED';
-      statusColor = chalk.green;
-    } else if (platform?.review?.status === 'REJECTED') {
-      status = 'REJECTED';
-      statusColor = chalk.red;
-    } else if (platform?.review?.status === 'FLAGGED') {
-      status = 'FLAGGED';
+    } else if (rawStatus === 'IDLE') {
+      status = 'IDLE';
       statusColor = chalk.yellow;
-    } else if (isPlatform && !platform?.review) {
-      status = 'UNREVIEWED';
-      statusColor = chalk.gray;
     } else {
-      status = rawStatus === 'RUNNING' ? 'RUNNING' : 'ENDED';
-      statusColor = status === 'RUNNING' ? chalk.green : chalk.gray;
+      status = 'ENDED';
+      statusColor = chalk.gray;
     }
 
     // Files

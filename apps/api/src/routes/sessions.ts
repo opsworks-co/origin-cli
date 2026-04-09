@@ -35,7 +35,7 @@ import { runAIReview } from '../services/ai-review.js';
 const router = Router();
 router.use(requireAuth);
 
-const IDLE_THRESHOLD_MS = 5 * 60 * 1000; // 5 min without prompt activity → IDLE
+const IDLE_THRESHOLD_MS = 15 * 60 * 1000; // 15 min without prompt activity → IDLE
 // Safety net: if heartbeat hasn't pinged in 2 hours, the agent is truly dead.
 // This only catches cases where the heartbeat daemon crashed without sending session/end.
 const ABANDONED_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
