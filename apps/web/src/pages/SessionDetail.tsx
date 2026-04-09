@@ -84,15 +84,12 @@ export default function SessionDetail() {
       .finally(() => setFindingsLoading(false));
   }, [id]);
 
-  // Elapsed timer for running sessions — use durationMs when available
+  // Elapsed timer for running sessions — compute from startedAt so it survives refreshes
   useEffect(() => {
-    if (!session || session.status !== 'RUNNING') return;
-    // If CLI already reported a duration, use it as the starting point
-    const baseMs = session.durationMs > 0 ? session.durationMs : 0;
-    const timerStart = Date.now();
+    if (!session || (session.status !== 'RUNNING' && session.status !== 'IDLE')) return;
+    const startTime = session.startedAt ? new Date(session.startedAt).getTime() : Date.now();
     const update = () => {
-      const sincePageLoad = Date.now() - timerStart;
-      setElapsed(Math.floor((baseMs + sincePageLoad) / 1000));
+      setElapsed(Math.floor((Date.now() - startTime) / 1000));
     };
     update();
     const interval = setInterval(update, 1000);
