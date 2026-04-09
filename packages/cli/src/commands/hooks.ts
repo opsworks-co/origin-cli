@@ -926,8 +926,11 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
       } catch {}
       const isCursorReuse = agentSlug === 'cursor';
+      const isCodexReuse = agentSlug === 'codex';
       const outputKeyReuse = isCursorReuse ? 'additional_context' : 'systemMessage';
-      process.stdout.write(JSON.stringify({ [outputKeyReuse]: systemMsg }));
+      if (!isCodexReuse) {
+        process.stdout.write(JSON.stringify({ [outputKeyReuse]: systemMsg }));
+      }
 
       // Write rules file for reused sessions too
       try {
@@ -1205,10 +1208,15 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     }
 
     // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
+    // Codex displays hook stdout as warnings to the user — skip stdout for Codex
+    // (it reads context from rules files written by writeAgentRulesFile below)
     const isCursor = agentSlug === 'cursor';
+    const isCodex = agentSlug === 'codex';
     const outputKey = isCursor ? 'additional_context' : 'systemMessage';
-    const output = JSON.stringify({ [outputKey]: systemMsg });
-    process.stdout.write(output);
+    if (!isCodex) {
+      const output = JSON.stringify({ [outputKey]: systemMsg });
+      process.stdout.write(output);
+    }
     debugLog('session-start', 'system prompt injected', { key: outputKey, length: systemMsg.length });
 
     // Write rules files so agents natively see Origin policies
@@ -1663,10 +1671,14 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
 
     if (systemMsg) {
       // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
+      // Codex displays hook stdout as warnings — skip (reads from rules files instead)
       const cursorAgents = ['cursor'];
+      const isCodex = agentSlug === 'codex';
       const outputKey = (agentSlug && cursorAgents.includes(agentSlug)) ? 'additional_context' : 'systemMessage';
-      const output = JSON.stringify({ [outputKey]: systemMsg });
-      process.stdout.write(output);
+      if (!isCodex) {
+        const output = JSON.stringify({ [outputKey]: systemMsg });
+        process.stdout.write(output);
+      }
       debugLog('user-prompt-submit', 'systemMessage injected', { key: outputKey, length: systemMsg.length });
     }
   } catch (sysErr: any) {
