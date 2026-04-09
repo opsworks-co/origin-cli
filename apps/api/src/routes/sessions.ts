@@ -1308,7 +1308,15 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
 
     const promptsInfo: BlamePrompt[] = [];
 
-    for (const pc of session.promptChanges) {
+    // Deduplicate promptChanges by promptIndex (race condition can create duplicates)
+    const seenIdx = new Set<number>();
+    const dedupedChanges = session.promptChanges.filter((pc: any) => {
+      if (seenIdx.has(pc.promptIndex)) return false;
+      seenIdx.add(pc.promptIndex);
+      return true;
+    });
+
+    for (const pc of dedupedChanges) {
       const filesChanged: string[] = (() => {
         try {
           return JSON.parse(pc.filesChanged || '[]');
