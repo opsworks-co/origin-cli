@@ -383,85 +383,76 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       });
     }
 
-    // ── Server-side dedup: if a RUNNING session already exists for this
-    //    machine + agent + repo, reuse it. No audit log lookup — machineId
-    //    is stored directly on the session to avoid race conditions when
-    //    multiple session-starts fire simultaneously (Codex, Cursor).
-    const dedupCutoff = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hour window
-    const dedupWhere: any = {
-      commit: { repoId: repo.id },
-      startedAt: { gte: dedupCutoff },
-      status: 'RUNNING',
-    };
-    // Match by machineId (primary) or agentId (fallback for sessions before machineId field)
-    if (machineId) {
-      dedupWhere.OR = [
-        { machineId, agentId: agent?.id || null },
-        // Fallback: match by agentId only for old sessions without machineId field
-        { machineId: null, agentId: agent?.id || null },
-      ];
-    } else {
-      dedupWhere.agentId = agent?.id || null;
-    }
+    // ── Server-side dedup: if a RUNNING session with a live heartbeat exists
+    //    for this machine + agent + repo, reuse it. Prevents duplicate sessions
+    //    when multiple session-starts fire simultaneously (Codex, Cursor).
+    //    Only match sessions whose heartbeat pinged recently (updatedAt < 2 min).
+    //    Zombie sessions (heartbeat dead) are ignored — a new session is created.
+    const HEARTBEAT_ALIVE_MS = 2 * 60 * 1000; // 2 minutes — heartbeat pings every 30s
+    const heartbeatCutoff = new Date(Date.now() - HEARTBEAT_ALIVE_MS);
     const existingSession = await prisma.codingSession.findFirst({
-      where: dedupWhere,
+      where: {
+        agentId: agent?.id || null,
+        machineId: machineId || undefined,
+        commit: { repoId: repo.id },
+        status: 'RUNNING',
+        updatedAt: { gte: heartbeatCutoff }, // heartbeat must be alive
+      },
       include: { commit: { select: { repoId: true } } },
       orderBy: { startedAt: 'desc' },
     });
 
     if (existingSession) {
-      // For old sessions without machineId: verify via audit log
-      let isMatch = !!existingSession.machineId; // new sessions have machineId directly
-      if (!isMatch) {
-        const existingAudit = await prisma.auditLog.findFirst({
-          where: { resource: existingSession.id, action: 'SESSION_STARTED' },
-          orderBy: { createdAt: 'desc' },
-        });
-        const existingMachineId = existingAudit?.metadata
-          ? JSON.parse(existingAudit.metadata as string)?.machineId
-          : null;
-        isMatch = existingMachineId === machineId;
-      }
-      // Also match by agentSessionId
-      if (!isMatch && agentSessionId && existingSession.agentSessionId === agentSessionId) {
-        isMatch = true;
-      }
+      await prisma.codingSession.update({
+        where: { id: existingSession.id },
+        data: {
+          lastActivityAt: new Date(),
+          ...(!existingSession.machineId && machineId && { machineId }),
+        },
+      });
+      console.log('[session/start] DEDUP: returning existing session (heartbeat alive)', {
+        existingId: existingSession.id, machineId,
+      });
 
-      if (isMatch) {
-        // Update lastActivityAt + ensure machineId is set
+      // Re-evaluate system prompt
+      let dedupPrompt = agent?.systemPrompt || existingSession.agentSystemPrompt || null;
+      if (agent?.securityRulesEnabled === true) {
+        const securityBlock = agent?.securityRules?.trim() || DEFAULT_SECURITY_RULES;
+        dedupPrompt = dedupPrompt
+          ? `${dedupPrompt}\n\n<security-rules>\n${securityBlock}\n</security-rules>`
+          : `<security-rules>\n${securityBlock}\n</security-rules>`;
+      }
+      if (dedupPrompt !== existingSession.agentSystemPrompt) {
         await prisma.codingSession.update({
           where: { id: existingSession.id },
-          data: {
-            lastActivityAt: new Date(),
-            ...(existingSession.status === 'COMPLETED' && { status: 'RUNNING', endedAt: null }),
-            ...(!existingSession.machineId && machineId && { machineId }),
-          },
-        });
-        console.log('[session/start] DEDUP: returning existing session', {
-          existingId: existingSession.id, machineId, status: existingSession.status,
-        });
-
-        // Re-evaluate system prompt
-        let dedupPrompt = agent?.systemPrompt || existingSession.agentSystemPrompt || null;
-        if (agent?.securityRulesEnabled === true) {
-          const securityBlock = agent?.securityRules?.trim() || DEFAULT_SECURITY_RULES;
-          dedupPrompt = dedupPrompt
-            ? `${dedupPrompt}\n\n<security-rules>\n${securityBlock}\n</security-rules>`
-            : `<security-rules>\n${securityBlock}\n</security-rules>`;
-        }
-        if (dedupPrompt !== existingSession.agentSystemPrompt) {
-          await prisma.codingSession.update({
-            where: { id: existingSession.id },
-            data: { agentSystemPrompt: dedupPrompt },
-          });
-        }
-        return res.json({
-          sessionId: existingSession.id,
-          agentSystemPrompt: dedupPrompt || undefined,
-          activePolicies: [],
-          startedAt: existingSession.startedAt?.toISOString(),
+          data: { agentSystemPrompt: dedupPrompt },
         });
       }
+      return res.json({
+        sessionId: existingSession.id,
+        agentSystemPrompt: dedupPrompt || undefined,
+        activePolicies: [],
+        startedAt: existingSession.startedAt?.toISOString(),
+      });
+    }
+
+    // ── Clean up zombie RUNNING sessions (heartbeat dead, never got session/end) ──
+    // Mark them COMPLETED so they don't accumulate forever.
+    const zombieSessions = await prisma.codingSession.findMany({
+      where: {
+        agentId: agent?.id || null,
+        commit: { repoId: repo.id },
+        status: 'RUNNING',
+        updatedAt: { lt: heartbeatCutoff },
+      },
+      select: { id: true },
+    });
+    if (zombieSessions.length > 0) {
+      await prisma.codingSession.updateMany({
+        where: { id: { in: zombieSessions.map(s => s.id) } },
+        data: { status: 'COMPLETED', endedAt: new Date() },
+      });
+      console.log('[session/start] ZOMBIE CLEANUP: ended', zombieSessions.length, 'dead sessions for', agentSlug);
     }
 
     // ── Session chaining: link to prior session from same agent session ──
