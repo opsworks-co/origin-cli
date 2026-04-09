@@ -143,9 +143,26 @@ async function endSession() {
     } catch { /* best effort */ }
   }
 
-  // Clean up active state file
+  // Clean up ALL state files for this session (multiple hooks can create duplicates)
   if (stateFile) {
     try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
+    // Also clean sibling state files with the same session ID in the same directory
+    try {
+      const dir = stateFile.substring(0, stateFile.lastIndexOf('/'));
+      const entries = fs.readdirSync(dir);
+      for (const entry of entries) {
+        if (entry.startsWith('origin-session') && entry.endsWith('.json')) {
+          try {
+            const filePath = `${dir}/${entry}`;
+            const raw = fs.readFileSync(filePath, 'utf-8');
+            const data = JSON.parse(raw);
+            if (data.sessionId === sessionId) {
+              fs.unlinkSync(filePath);
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } catch { /* ignore */ }
   }
   try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
 }
