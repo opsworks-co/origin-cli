@@ -782,6 +782,48 @@ export default function MyDashboard() {
   const [sessionsOffset, setSessionsOffset] = useState(0);
   const LIMIT = 30;
 
+  // Session sorting
+  type SortField = 'agent' | 'repo' | 'duration' | 'cost' | 'tokens' | 'status' | 'date';
+  type SortDir = 'asc' | 'desc';
+  const [sortBy, setSortBy] = useState<SortField>('date');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const toggleSort = (field: SortField) => {
+    if (sortBy === field) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(field);
+      setSortDir(field === 'date' ? 'desc' : 'asc');
+    }
+  };
+  const sortedSessions = useMemo(() => {
+    const list = [...sessions];
+    list.sort((a, b) => {
+      const aRunning = a.status === 'RUNNING' ? 1 : 0;
+      const bRunning = b.status === 'RUNNING' ? 1 : 0;
+      if (aRunning !== bRunning) return bRunning - aRunning;
+      let cmp = 0;
+      switch (sortBy) {
+        case 'agent': cmp = (a.agentName || a.model || '').localeCompare(b.agentName || b.model || ''); break;
+        case 'repo': cmp = ((a as any).repoName || '').localeCompare((b as any).repoName || ''); break;
+        case 'duration': cmp = a.durationMs - b.durationMs; break;
+        case 'cost': cmp = a.costUsd - b.costUsd; break;
+        case 'tokens': cmp = a.tokensUsed - b.tokensUsed; break;
+        case 'status': cmp = (a.status || '').localeCompare(b.status || ''); break;
+        case 'date': default: cmp = new Date(a.startedAt || a.createdAt).getTime() - new Date(b.startedAt || b.createdAt).getTime(); break;
+      }
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+    return list;
+  }, [sessions, sortBy, sortDir]);
+  const SortHeader = ({ field, children, align, className = '' }: { field: SortField; children: React.ReactNode; align?: 'right'; className?: string }) => (
+    <th className={`px-4 py-3 font-medium cursor-pointer hover:text-gray-300 select-none ${align === 'right' ? 'text-right' : ''} ${className}`} onClick={() => toggleSort(field)}>
+      <span className="inline-flex items-center gap-1">
+        {children}
+        {sortBy === field && <span className="text-indigo-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+      </span>
+    </th>
+  );
+
   // Bookmarks
   const [bookmarkedIds, setBookmarkedIds] = useState<Set<string>>(new Set());
   const [bookmarkTags, setBookmarkTags] = useState<Record<string, string[]>>({});
@@ -1046,7 +1088,7 @@ export default function MyDashboard() {
 
   // Filter sessions by search text
   const filteredSessions = useMemo(() => {
-    const list = showBookmarked ? bookmarkedSessions : sessions;
+    const list = showBookmarked ? bookmarkedSessions : sortedSessions;
     if (!search.trim()) return list;
     const q = search.toLowerCase();
     return list.filter(
@@ -1056,7 +1098,7 @@ export default function MyDashboard() {
         (s.repoName || '').toLowerCase().includes(q) ||
         (s.branch || '').toLowerCase().includes(q),
     );
-  }, [sessions, bookmarkedSessions, showBookmarked, search]);
+  }, [sortedSessions, bookmarkedSessions, showBookmarked, search]);
 
   // Unique agents and repos for filter dropdowns
   const uniqueAgents = useMemo(() => {
@@ -1333,15 +1375,15 @@ export default function MyDashboard() {
                   <tr className="text-left text-xs text-gray-500 border-b border-gray-800">
                     <th className="px-2 py-3 font-medium w-8"></th>
                     <th className="px-4 py-3 font-medium w-8"></th>
-                    <th className="px-4 py-3 font-medium">Agent</th>
-                    <th className="px-4 py-3 font-medium">Repo</th>
+                    <SortHeader field="agent">Agent</SortHeader>
+                    <SortHeader field="repo">Repo</SortHeader>
                     <th className="px-4 py-3 font-medium hidden md:table-cell">Branch</th>
-                    <th className="px-4 py-3 font-medium">Duration</th>
-                    <th className="px-4 py-3 font-medium">Cost</th>
-                    <th className="px-4 py-3 font-medium hidden lg:table-cell">Tokens</th>
-                    <th className="px-4 py-3 font-medium">Status</th>
+                    <SortHeader field="duration">Duration</SortHeader>
+                    <SortHeader field="cost">Cost</SortHeader>
+                    <SortHeader field="tokens" className="hidden lg:table-cell">Tokens</SortHeader>
+                    <SortHeader field="status">Status</SortHeader>
                     <th className="px-4 py-3 font-medium hidden xl:table-cell">Tags</th>
-                    <th className="px-4 py-3 font-medium text-right">When</th>
+                    <SortHeader field="date" align="right">When</SortHeader>
                   </tr>
                 </thead>
                 <tbody>

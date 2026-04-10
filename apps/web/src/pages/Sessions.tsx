@@ -11,7 +11,7 @@ function statusBadge(status: string) {
   return <span className={getStatusBadgeClass(status)}>{status}</span>;
 }
 
-type SortField = 'model' | 'cost' | 'tokens' | 'duration' | 'toolCalls' | 'date' | 'score';
+type SortField = 'model' | 'agent' | 'repo' | 'status' | 'cost' | 'tokens' | 'duration' | 'toolCalls' | 'date' | 'score';
 type SortDir = 'asc' | 'desc';
 type ViewMode = 'list' | 'by-pr';
 
@@ -282,6 +282,15 @@ export default function Sessions() {
           break;
         case 'model':
           cmp = a.model.localeCompare(b.model);
+          break;
+        case 'agent':
+          cmp = (a.agentName || '').localeCompare(b.agentName || '');
+          break;
+        case 'repo':
+          cmp = (a.repoName || '').localeCompare(b.repoName || '');
+          break;
+        case 'status':
+          cmp = (a.status || '').localeCompare(b.status || '');
           break;
         case 'score':
           cmp = (a.review?.score ?? -1) - (b.review?.score ?? -1);
@@ -742,10 +751,10 @@ export default function Sessions() {
                     />
                   </th>
                   <SortHeader field="model">Model</SortHeader>
-                  <th className="px-6 py-3 font-medium">Status</th>
-                  <th className="px-6 py-3 font-medium">Agent</th>
+                  <SortHeader field="status">Status</SortHeader>
+                  <SortHeader field="agent">Agent</SortHeader>
                   {!isDev && <th className="px-6 py-3 font-medium">User</th>}
-                  <th className="px-6 py-3 font-medium">Repo</th>
+                  <SortHeader field="repo">Repo</SortHeader>
                   <th className="px-6 py-3 font-medium">Branch</th>
                   <SortHeader field="duration" align="right">
                     Duration
