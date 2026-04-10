@@ -21,6 +21,7 @@ import { hooksCommand, handlePostCommit, handlePrePush, handlePreCommit } from '
 import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
 import { promptsCommand } from './commands/prompts.js';
+import { whyCommand } from './commands/why.js';
 import { chatCommand } from './commands/chat.js';
 import { webCommand } from './commands/web.js';
 import { doctorCommand } from './commands/doctor.js';
@@ -123,6 +124,10 @@ program.command('prompts <file-or-session-id>')
   .option('-e, --expand', 'Show the actual code diff for each prompt')
   .option('--limit <n>', 'Max entries to show', '10')
   .action(promptsCommand);
+
+program.command('why <file[:line]>')
+  .description('Find which AI session and prompt wrote a specific line of code')
+  .action(whyCommand);
 
 program.command('chat')
   .description('Interactive AI assistant — ask questions about your AI-authored code in natural language')
