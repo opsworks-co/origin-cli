@@ -82,7 +82,14 @@ function mapSession(s: any, pullRequests?: any[]) {
     inputTokens: s.inputTokens,
     outputTokens: s.outputTokens,
     toolCalls: s.toolCalls,
-    durationMs: s.durationMs,
+    durationMs: (() => {
+      const status = computeStatus(s);
+      // For active sessions, compute live duration from startedAt
+      if ((status === 'RUNNING' || status === 'IDLE') && s.startedAt) {
+        return Date.now() - new Date(s.startedAt).getTime();
+      }
+      return s.durationMs;
+    })(),
     linesAdded: s.linesAdded,
     linesRemoved: s.linesRemoved,
     costUsd: s.costUsd,
