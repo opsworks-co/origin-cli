@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import { Check, X, Loader2, Minus } from 'lucide-react';
+import { safeHref } from '../utils/safe-url';
 
 type PRFilter = 'all' | 'open' | 'passing' | 'failing' | 'pending';
 
@@ -178,7 +179,7 @@ export default function PullRequests() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <a
-                      href={pr.url}
+                      href={safeHref(pr.url)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-sm font-medium text-gray-100 hover:text-indigo-400 truncate"
@@ -290,7 +291,7 @@ export default function PullRequests() {
 
                   <div className="flex items-center gap-3 text-xs">
                     <a
-                      href={pr.url}
+                      href={safeHref(pr.url)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-indigo-400 hover:text-indigo-300"

@@ -6,9 +6,68 @@ function getConfig() {
   return config;
 }
 
+// Default HTTP timeout for CLI→API calls. Without this, a stalled or
+// unresponsive Origin API would hang every CLI command indefinitely
+// (git hooks, session start/end, PR reviews). 30s is long enough for
+// slow networks but short enough that users get a real error instead
+// of an invisible hang. Override via ORIGIN_HTTP_TIMEOUT_MS.
+const DEFAULT_TIMEOUT_MS = Number(process.env.ORIGIN_HTTP_TIMEOUT_MS) || 30_000;
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Retry wrapper: exponential backoff on 5xx + network errors. 4xx responses
+// are NOT retried — those indicate client-side issues (bad auth, invalid
+// body, missing resource) that retrying won't fix. Transient 5xx + fetch
+// failures (DNS, connection refused, reset) get up to 2 retries with
+// jittered delays of ~200ms, ~500ms. Keeps hook commands responsive on
+// flaky networks without hammering a genuinely broken API.
+const MAX_RETRIES = 2;
+const RETRY_BASE_MS = 200;
+async function fetchWithRetry(url: string, init: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, init, timeoutMs);
+      // Retry server errors (5xx). Don't retry 4xx — those are deterministic.
+      if (res.status >= 500 && res.status <= 599 && attempt < MAX_RETRIES) {
+        const delay = RETRY_BASE_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      // Don't retry AbortError/timeouts — the user's command already waited
+      // the full budget; retrying just doubles the pain.
+      const msg = (err as Error).message || '';
+      if (msg.includes('timed out')) throw err;
+      if (attempt < MAX_RETRIES) {
+        const delay = RETRY_BASE_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 async function request(path: string, opts: RequestInit = {}) {
   const config = getConfig();
-  const res = await fetch(`${config.apiUrl}${path}`, {
+  const res = await fetchWithRetry(`${config.apiUrl}${path}`, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
@@ -29,7 +88,7 @@ async function request(path: string, opts: RequestInit = {}) {
 
 /** Make an API request using a specific profile (for multi-account) */
 export async function requestWithProfile(profile: Profile, path: string, opts: RequestInit = {}) {
-  const res = await fetch(`${profile.apiUrl}${path}`, {
+  const res = await fetchWithRetry(`${profile.apiUrl}${path}`, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',

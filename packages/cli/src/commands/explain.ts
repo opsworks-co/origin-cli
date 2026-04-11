@@ -6,8 +6,11 @@ import { loadConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { loadSessionState, getGitRoot, getHeadSha } from '../session-state.js';
 import { getPromptsBySession } from '../local-db.js';
-import { execSync } from 'child_process';
+import { git, runDetailed } from '../utils/exec.js';
 import { callLLM, getAnthropicKey } from '../llm.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -41,14 +44,11 @@ interface LocalSessionData {
 }
 
 function loadLocalSession(sessionId: string, repoPath: string): LocalSessionData | null {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoPath };
   try {
     const dir = resolveSessionDir(sessionId, repoPath);
-    if (!dir) return null;
-    const metadataJson = execSync(
-      `git show origin-sessions:sessions/${dir}/metadata.json`,
-      execOpts
-    ).trim();
+    if (!dir || !SAFE_ID.test(dir)) return null;
+    const metadataJson = git(['show', `origin-sessions:sessions/${dir}/metadata.json`], gitOpts).trim();
     return JSON.parse(metadataJson);
   } catch {
     return null;
@@ -56,15 +56,14 @@ function loadLocalSession(sessionId: string, repoPath: string): LocalSessionData
 }
 
 function resolveSessionDir(sessionId: string, repoPath: string): string | null {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  if (!SAFE_ID.test(sessionId)) return null;
+  const gitOpts = { cwd: repoPath };
   // Try exact match
-  try {
-    execSync(`git show origin-sessions:sessions/${sessionId}/metadata.json`, execOpts);
-    return sessionId;
-  } catch {}
+  const r = runDetailed('git', ['show', `origin-sessions:sessions/${sessionId}/metadata.json`], gitOpts);
+  if (r.status === 0) return sessionId;
   // Short ID prefix match
   try {
-    const raw = execSync('git ls-tree --name-only origin-sessions sessions/', execOpts).trim();
+    const raw = git(['ls-tree', '--name-only', 'origin-sessions', 'sessions/'], gitOpts).trim();
     if (!raw) return null;
     const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
     return dirs.find(d => d.startsWith(sessionId)) || null;
@@ -74,14 +73,10 @@ function resolveSessionDir(sessionId: string, repoPath: string): string | null {
 }
 
 function loadLocalPromptsMarkdown(sessionId: string, repoPath: string): string | null {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
   try {
     const dir = resolveSessionDir(sessionId, repoPath);
-    if (!dir) return null;
-    return execSync(
-      `git show origin-sessions:sessions/${dir}/prompts.md`,
-      execOpts
-    ).trim();
+    if (!dir || !SAFE_ID.test(dir)) return null;
+    return git(['show', `origin-sessions:sessions/${dir}/prompts.md`], { cwd: repoPath }).trim();
   } catch {
     return null;
   }
@@ -158,11 +153,10 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
   // If --commit flag, look up session by commit SHA
   if (opts?.commit && repoPath) {
     try {
-      const noteContent = execSync(
-        `git notes --ref=origin show ${opts.commit} 2>/dev/null`,
-        { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }
-      ).trim();
-      const noteData = JSON.parse(noteContent);
+      if (!HEX.test(opts.commit)) throw new Error('invalid sha');
+      const r = runDetailed('git', ['notes', '--ref=origin', 'show', opts.commit], { cwd: repoPath });
+      if (r.status !== 0) throw new Error('no note');
+      const noteData = JSON.parse(r.stdout.trim());
       sessionId = noteData?.origin?.sessionId || noteData?.sessionId;
       if (sessionId) {
         console.log(chalk.gray(`Found session ${sessionId} linked to commit ${opts.commit.slice(0, 8)}`));

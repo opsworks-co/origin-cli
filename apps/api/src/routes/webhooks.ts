@@ -1,8 +1,39 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
-import { verifyGitHubSignature, processGitHubPush, processGitHubPR, verifyGitLabToken, processGitLabPush, processGitLabMR } from '../services/webhook.js';
+import { verifyGitHubSignature, verifyGitLabToken } from '../services/webhook.js';
+import { enqueueDelivery } from '../services/webhook-queue.js';
 
 const router = Router();
+
+// ── Replay-attack protection ──────────────────────────────────────────────
+// In-memory LRU-ish cache of recently seen delivery IDs (GitHub's
+// x-github-delivery and GitLab's x-gitlab-event-uuid). An attacker who
+// captures a signed payload can replay it indefinitely because the HMAC
+// is still valid — so we track delivery IDs for 24 h and reject dupes.
+// Bounded at 50k entries; oldest evicted on overflow.
+const MAX_SEEN_DELIVERIES = 50_000;
+const SEEN_DELIVERY_TTL_MS = 24 * 60 * 60 * 1000;
+const seenDeliveries = new Map<string, number>();
+
+function isReplay(deliveryId: string | undefined): boolean {
+  if (!deliveryId) return false;
+  const now = Date.now();
+  // Lazy eviction: every call drops any expired entries it sees in the top slot.
+  if (seenDeliveries.size >= MAX_SEEN_DELIVERIES) {
+    // Drop the oldest ~10% so we don't churn on every request once full.
+    let drop = Math.max(1, Math.floor(MAX_SEEN_DELIVERIES * 0.1));
+    for (const key of seenDeliveries.keys()) {
+      seenDeliveries.delete(key);
+      if (--drop <= 0) break;
+    }
+  }
+  const existing = seenDeliveries.get(deliveryId);
+  if (existing && now - existing < SEEN_DELIVERY_TTL_MS) {
+    return true;
+  }
+  seenDeliveries.set(deliveryId, now);
+  return false;
+}
 
 // POST /github/:repoId — receive GitHub webhook events (public, authenticated via HMAC)
 router.post('/github/:repoId', async (req: Request, res: Response) => {
@@ -10,9 +41,15 @@ router.post('/github/:repoId', async (req: Request, res: Response) => {
     const repoId = req.params.repoId as string;
     const signature = req.headers['x-hub-signature-256'] as string;
     const event = req.headers['x-github-event'] as string;
+    const deliveryId = req.headers['x-github-delivery'] as string | undefined;
 
     if (!signature) {
       return res.status(401).json({ error: 'Missing signature' });
+    }
+
+    // Reject replays (attacker captured a signed payload and resends it).
+    if (isReplay(deliveryId ? `gh:${repoId}:${deliveryId}` : undefined)) {
+      return res.status(202).json({ accepted: true, duplicate: true });
     }
 
     // Find webhook for this repo
@@ -41,52 +78,17 @@ router.post('/github/:repoId', async (req: Request, res: Response) => {
     // Body already parsed by raw body middleware in index.ts
     const payload = req.body;
 
-    // Get repo for audit log
-    const repo = await prisma.repo.findUnique({ where: { id: repoId } });
-
-    // ── Handle push events ──
-    if (event === 'push') {
-      const result = await processGitHubPush(repoId, payload);
-
-      await prisma.auditLog.create({
-        data: {
-          orgId: repo?.orgId || '',
-          action: 'WEBHOOK_RECEIVED',
-          resource: repoId,
-          metadata: JSON.stringify({
-            event,
-            ref: payload.ref,
-            commitsCreated: result.created,
-            commitsSkipped: result.skipped,
-            repository: payload.repository?.full_name,
-          }),
-        },
+    // Persist delivery first — guarantees retry on processing failure
+    if (event === 'push' || event === 'pull_request') {
+      const deliveryId = await enqueueDelivery({
+        provider: 'github',
+        repoId,
+        event,
+        payload,
+        headers: { 'x-github-event': event },
       });
-
-      return res.json({ success: true, ...result });
-    }
-
-    // ── Handle pull_request events ──
-    if (event === 'pull_request') {
-      const result = await processGitHubPR(repoId, payload);
-
-      await prisma.auditLog.create({
-        data: {
-          orgId: repo?.orgId || '',
-          action: 'WEBHOOK_PR_RECEIVED',
-          resource: repoId,
-          metadata: JSON.stringify({
-            event,
-            action: result.action,
-            prNumber: result.number,
-            state: result.state,
-            commitShas: result.commitShas,
-            repository: payload.repository?.full_name,
-          }),
-        },
-      });
-
-      return res.json({ success: true, ...result });
+      // 202 Accepted: queued for processing. The delivery worker will retry on failure.
+      return res.status(202).json({ accepted: true, deliveryId });
     }
 
     // Ignore other events
@@ -105,9 +107,15 @@ router.post('/github-app', async (req: Request, res: Response) => {
   try {
     const signature = req.headers['x-hub-signature-256'] as string;
     const event = req.headers['x-github-event'] as string;
+    const ghDeliveryId = req.headers['x-github-delivery'] as string | undefined;
 
     if (!signature) {
       return res.status(401).json({ error: 'Missing signature' });
+    }
+
+    // Reject replays keyed on GitHub's delivery ID.
+    if (isReplay(ghDeliveryId ? `gh-app:${ghDeliveryId}` : undefined)) {
+      return res.status(202).json({ accepted: true, duplicate: true });
     }
 
     // Verify using the App's webhook secret from environment
@@ -139,9 +147,14 @@ router.post('/github-app', async (req: Request, res: Response) => {
       return res.json({ message: 'No installation or repository in payload' });
     }
 
-    // Find the IntegrationConfig with this installationId
+    // Find the IntegrationConfig with this installationId. Scanned
+    // linearly because installationId lives inside the JSON `settings`
+    // column. Cap at 10k — this is a webhook hot path and an unbounded
+    // scan over every github-app integration across every tenant
+    // grows with customer count.
     const integrations = await prisma.integrationConfig.findMany({
       where: { provider: 'github', authType: 'github_app' },
+      take: 10_000,
     });
 
     const matchingIntegration = integrations.find((i) => {
@@ -171,6 +184,7 @@ router.post('/github-app', async (req: Request, res: Response) => {
         orgId: matchingIntegration.orgId,
         provider: 'github',
       },
+      take: 5000,
     });
 
     const matchedRepo = allOrgRepos.find((r) => {
@@ -182,51 +196,16 @@ router.post('/github-app', async (req: Request, res: Response) => {
       return res.json({ message: `Repository ${repoFullName} not tracked in Origin` });
     }
 
-    // Handle push events
-    if (event === 'push') {
-      const result = await processGitHubPush(matchedRepo.id, payload);
-
-      await prisma.auditLog.create({
-        data: {
-          orgId: matchingIntegration.orgId,
-          action: 'WEBHOOK_RECEIVED',
-          resource: matchedRepo.id,
-          metadata: JSON.stringify({
-            event,
-            ref: payload.ref,
-            commitsCreated: result.created,
-            commitsSkipped: result.skipped,
-            repository: repoFullName,
-            source: 'github_app',
-          }),
-        },
+    // Persist delivery for retryable processing
+    if (event === 'push' || event === 'pull_request') {
+      const deliveryId = await enqueueDelivery({
+        provider: 'github-app',
+        repoId: matchedRepo.id,
+        event,
+        payload,
+        headers: { 'x-github-event': event, installationId },
       });
-
-      return res.json({ success: true, ...result });
-    }
-
-    // Handle pull_request events
-    if (event === 'pull_request') {
-      const result = await processGitHubPR(matchedRepo.id, payload);
-
-      await prisma.auditLog.create({
-        data: {
-          orgId: matchingIntegration.orgId,
-          action: 'WEBHOOK_PR_RECEIVED',
-          resource: matchedRepo.id,
-          metadata: JSON.stringify({
-            event,
-            action: result.action,
-            prNumber: result.number,
-            state: result.state,
-            commitShas: result.commitShas,
-            repository: repoFullName,
-            source: 'github_app',
-          }),
-        },
-      });
-
-      return res.json({ success: true, ...result });
+      return res.status(202).json({ accepted: true, deliveryId });
     }
 
     res.json({ message: `Event '${event}' ignored` });
@@ -243,9 +222,15 @@ router.post('/gitlab/:repoId', async (req: Request, res: Response) => {
     const repoId = req.params.repoId as string;
     const gitlabToken = req.headers['x-gitlab-token'] as string;
     const event = req.headers['x-gitlab-event'] as string;
+    const glEventUuid = req.headers['x-gitlab-event-uuid'] as string | undefined;
 
     if (!gitlabToken) {
       return res.status(401).json({ error: 'Missing token' });
+    }
+
+    // Reject replays keyed on GitLab's event UUID.
+    if (isReplay(glEventUuid ? `gl:${repoId}:${glEventUuid}` : undefined)) {
+      return res.status(202).json({ accepted: true, duplicate: true });
     }
 
     // Find webhook for this repo
@@ -264,57 +249,22 @@ router.post('/gitlab/:repoId', async (req: Request, res: Response) => {
 
     const payload = req.body;
 
-    // Get repo for audit log
-    const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+    // Map GitLab event names to canonical event types
+    let canonicalEvent: string | null = null;
+    if (event === 'Push Hook') canonicalEvent = 'push';
+    else if (event === 'Merge Request Hook') canonicalEvent = 'merge_request';
 
-    // ── Handle push events ──
-    if (event === 'Push Hook') {
-      const result = await processGitLabPush(repoId, payload);
-
-      await prisma.auditLog.create({
-        data: {
-          orgId: repo?.orgId || '',
-          action: 'WEBHOOK_RECEIVED',
-          resource: repoId,
-          metadata: JSON.stringify({
-            event,
-            ref: payload.ref,
-            commitsCreated: result.created,
-            commitsSkipped: result.skipped,
-            repository: payload.project?.path_with_namespace,
-            source: 'gitlab',
-          }),
-        },
+    if (canonicalEvent) {
+      const deliveryId = await enqueueDelivery({
+        provider: 'gitlab',
+        repoId,
+        event: canonicalEvent,
+        payload,
+        headers: { 'x-gitlab-event': event },
       });
-
-      return res.json({ success: true, ...result });
+      return res.status(202).json({ accepted: true, deliveryId });
     }
 
-    // ── Handle merge request events ──
-    if (event === 'Merge Request Hook') {
-      const result = await processGitLabMR(repoId, payload);
-
-      await prisma.auditLog.create({
-        data: {
-          orgId: repo?.orgId || '',
-          action: 'WEBHOOK_MR_RECEIVED',
-          resource: repoId,
-          metadata: JSON.stringify({
-            event,
-            action: result.action,
-            mrNumber: result.number,
-            state: result.state,
-            commitShas: result.commitShas,
-            repository: payload.project?.path_with_namespace,
-            source: 'gitlab',
-          }),
-        },
-      });
-
-      return res.json({ success: true, ...result });
-    }
-
-    // Ignore other events
     res.json({ message: `GitLab event '${event}' ignored` });
   } catch (err) {
     console.error('GitLab webhook error:', err);

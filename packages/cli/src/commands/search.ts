@@ -2,11 +2,14 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync } from 'child_process';
+import { git, gitDetailed } from '../utils/exec.js';
 import { searchPrompts, type PromptRecord } from '../local-db.js';
 import { getGitRoot, type SessionState } from '../session-state.js';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -229,13 +232,10 @@ function searchGitNotes(
   const results: SearchResult[] = [];
   const lowerQuery = query.toLowerCase();
 
-  try {
-    const notesList = execSync('git notes --ref=origin list', {
-      encoding: 'utf-8',
-      cwd: repoPath,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-
+  {
+    const r = gitDetailed(['notes', '--ref=origin', 'list'], { cwd: repoPath });
+    if (r.status !== 0) return results;
+    const notesList = r.stdout.trim();
     if (!notesList) return results;
 
     for (const line of notesList.split('\n').filter(Boolean)) {
@@ -243,13 +243,13 @@ function searchGitNotes(
       const parts = line.trim().split(/\s+/);
       const noteBlob = parts[0];
       if (!noteBlob) continue;
+      const target = parts[1] || noteBlob;
+      if (!HEX.test(target)) continue;
 
-      try {
-        const noteContent = execSync(`git notes --ref=origin show ${parts[1] || noteBlob}`, {
-          encoding: 'utf-8',
-          cwd: repoPath,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        }).trim();
+      {
+        const nr = gitDetailed(['notes', '--ref=origin', 'show', target], { cwd: repoPath });
+        if (nr.status !== 0) continue;
+        const noteContent = nr.stdout.trim();
 
         // Try to parse as JSON
         try {
@@ -265,7 +265,7 @@ function searchGitNotes(
               if (opts.agent && !matchesAgent(data.model || '', data.agentName, opts.agent)) continue;
 
               results.push({
-                sessionId: data.sessionId || parts[1]?.slice(0, 12) || 'unknown',
+                sessionId: data.sessionId || target.slice(0, 12) || 'unknown',
                 agentName: data.agentName || agentFromModel(data.model || 'unknown'),
                 timestamp: data.startedAt || '',
                 filesChanged: data.filesChanged || [],
@@ -277,7 +277,7 @@ function searchGitNotes(
           // Plain text note — search it directly
           if (noteContent.toLowerCase().includes(lowerQuery)) {
             results.push({
-              sessionId: (parts[1] || noteBlob).slice(0, 12),
+              sessionId: target.slice(0, 12),
               agentName: 'unknown',
               timestamp: '',
               filesChanged: [],
@@ -285,9 +285,9 @@ function searchGitNotes(
             });
           }
         }
-      } catch { /* skip */ }
+      }
     }
-  } catch { /* no git notes */ }
+  }
   return results;
 }
 
@@ -300,20 +300,15 @@ function searchSessionsBranch(
   opts: { limit: number; from?: Date; agent?: string },
 ): SearchResult[] {
   const results: SearchResult[] = [];
-  try {
-    execSync('git rev-parse refs/heads/origin-sessions', {
-      encoding: 'utf-8',
-      cwd: repoPath,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch {
-    return results;
+  {
+    const r = gitDetailed(['rev-parse', 'refs/heads/origin-sessions'], { cwd: repoPath });
+    if (r.status !== 0) return results;
   }
 
   try {
-    const listing = execSync(
-      'git ls-tree --name-only refs/heads/origin-sessions sessions/',
-      { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] },
+    const listing = git(
+      ['ls-tree', '--name-only', 'refs/heads/origin-sessions', 'sessions/'],
+      { cwd: repoPath },
     ).trim();
     if (!listing) return results;
 
@@ -322,6 +317,8 @@ function searchSessionsBranch(
 
     for (const dir of dirs) {
       if (results.length >= opts.limit) break;
+      const sessionId = dir.replace('sessions/', '');
+      if (!SAFE_ID.test(sessionId)) continue;
       try {
         let model = 'unknown';
         let agentName = '';
@@ -330,9 +327,9 @@ function searchSessionsBranch(
 
         // Read metadata
         try {
-          const metaRaw = execSync(
-            `git show refs/heads/origin-sessions:${dir}/metadata.json`,
-            { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] },
+          const metaRaw = git(
+            ['show', `refs/heads/origin-sessions:${dir}/metadata.json`],
+            { cwd: repoPath },
           ).trim();
           const meta = JSON.parse(metaRaw);
           model = meta.model || 'unknown';
@@ -346,14 +343,13 @@ function searchSessionsBranch(
         // Agent filter
         if (opts.agent && !matchesAgent(model, agentName, opts.agent)) continue;
 
-        const promptsMd = execSync(
-          `git show refs/heads/origin-sessions:${dir}/prompts.md`,
-          { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] },
+        const promptsMd = git(
+          ['show', `refs/heads/origin-sessions:${dir}/prompts.md`],
+          { cwd: repoPath },
         ).trim();
 
         if (!promptsMd.toLowerCase().includes(lowerQuery)) continue;
 
-        const sessionId = dir.replace('sessions/', '');
         const sections = promptsMd.split(/^## Prompt \d+/m).slice(1);
 
         for (const section of sections) {

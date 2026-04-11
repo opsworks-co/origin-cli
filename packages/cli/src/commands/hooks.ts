@@ -31,10 +31,10 @@ import { buildAttributionContext, buildFileAttributionContext } from '../attribu
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
 import { writeSessionMemory, buildMemoryContext } from '../memory.js';
 import { addTodosFromSession } from '../todo.js';
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { git, runDetailed, sqliteScalar, sqliteQuery } from '../utils/exec.js';
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
 
@@ -120,30 +120,39 @@ function filterUncommittedDiff(diffText: string, prePromptDirtyFiles: string[]):
 
 function getCursorModelFromDb(conversationId: string): string | null {
   try {
-    // Validate conversationId to prevent SQL injection via shell command
+    // Defense in depth: validate even though we use bound params below.
     if (!/^[a-zA-Z0-9_-]+$/.test(conversationId)) return null;
 
     const dbPath = path.join(os.homedir(), '.cursor', 'ai-tracking', 'ai-code-tracking.db');
     if (!fs.existsSync(dbPath)) return null;
 
-    // Use sqlite3 CLI to query — avoids native module dependency
-    const result = execSync(
-      `sqlite3 "${dbPath}" "SELECT model FROM conversation_summaries WHERE conversationId='${conversationId.replace(/'/g, "''")}' LIMIT 1"`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
-    ).trim();
+    const opts = { timeoutMs: 2000 };
+
+    // SQL is a static string; conversationId is bound via :p0 — no shell or
+    // SQL interpolation can reach the query.
+    const result = sqliteScalar(
+      dbPath,
+      "SELECT model FROM conversation_summaries WHERE conversationId = :p0 LIMIT 1",
+      [conversationId],
+      opts,
+    );
     if (result && result !== 'default' && result !== 'unknown') return result;
 
     // Fallback: check tracked_file_content or ai_code_hashes for this conversation
-    const result2 = execSync(
-      `sqlite3 "${dbPath}" "SELECT DISTINCT model FROM tracked_file_content WHERE conversationId='${conversationId.replace(/'/g, "''")}' AND model IS NOT NULL AND model != '' LIMIT 1"`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
-    ).trim();
+    const result2 = sqliteScalar(
+      dbPath,
+      "SELECT DISTINCT model FROM tracked_file_content WHERE conversationId = :p0 AND model IS NOT NULL AND model != '' LIMIT 1",
+      [conversationId],
+      opts,
+    );
     if (result2 && result2 !== 'default' && result2 !== 'unknown') return result2;
 
-    const result3 = execSync(
-      `sqlite3 "${dbPath}" "SELECT DISTINCT model FROM ai_code_hashes WHERE conversationId='${conversationId.replace(/'/g, "''")}' AND model IS NOT NULL AND model != '' LIMIT 1"`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
-    ).trim();
+    const result3 = sqliteScalar(
+      dbPath,
+      "SELECT DISTINCT model FROM ai_code_hashes WHERE conversationId = :p0 AND model IS NOT NULL AND model != '' LIMIT 1",
+      [conversationId],
+      opts,
+    );
     if (result3 && result3 !== 'default' && result3 !== 'unknown') return result3;
   } catch {
     // sqlite3 not available or DB locked — non-fatal
@@ -162,17 +171,19 @@ function getCursorConversationSummary(conversationId: string): { title: string; 
     const dbPath = path.join(os.homedir(), '.cursor', 'ai-tracking', 'ai-code-tracking.db');
     if (!fs.existsSync(dbPath)) return null;
 
-    const result = execSync(
-      `sqlite3 -separator '|||' "${dbPath}" "SELECT title, tldr, overview, summaryBullets FROM conversation_summaries WHERE conversationId='${conversationId.replace(/'/g, "''")}' LIMIT 1"`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
-    ).trim();
-    if (!result) return null;
-    const parts = result.split('|||');
+    const rows = sqliteQuery(
+      dbPath,
+      "SELECT title, tldr, overview, summaryBullets FROM conversation_summaries WHERE conversationId = :p0 LIMIT 1",
+      [conversationId],
+      { timeoutMs: 2000 },
+    );
+    if (rows.length === 0) return null;
+    const [title, tldr, overview, summaryBullets] = rows[0];
     return {
-      title: (parts[0] || '').trim(),
-      tldr: (parts[1] || '').trim(),
-      overview: (parts[2] || '').trim(),
-      summaryBullets: (parts[3] || '').trim(),
+      title: (title || '').trim(),
+      tldr: (tldr || '').trim(),
+      overview: (overview || '').trim(),
+      summaryBullets: (summaryBullets || '').trim(),
     };
   } catch {
     return null;
@@ -561,20 +572,20 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
 
     const dbPath = stateFiles[0].path;
 
-    // Find the most recent thread matching this repo's cwd
-    // Validate repoPath basename to prevent SQL/shell injection
+    // Defense in depth: validate repo basename even though we use bound params.
     const repoBasename = path.basename(repoPath);
     if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
-    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const threadQuery = `SELECT model, tokens_used, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
-    const raw = execSync(`sqlite3 "${dbPath}" "${threadQuery}"`, {
-      encoding: 'utf-8',
-      timeout: 3000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-
-    if (!raw) return null;
-    const parts = raw.split('|');
+    // Escape SQL LIKE wildcards in the basename so they're matched literally.
+    const escapedBasename = repoBasename.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    // Bound parameter — no shell or query interpolation.
+    const rows = sqliteQuery(
+      dbPath,
+      "SELECT model, tokens_used, first_user_message FROM threads WHERE cwd LIKE '%' || :p0 || '%' ESCAPE '\\' ORDER BY updated_at DESC LIMIT 1",
+      [escapedBasename],
+      { timeoutMs: 3000 },
+    );
+    if (rows.length === 0) return null;
+    const parts = rows[0];
     if (parts.length < 3) return null;
 
     return {
@@ -998,7 +1009,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   // Extract git remote origin URL for smarter repo matching on the API side
   let repoUrl = '';
   try {
-    repoUrl = execSync('git remote get-url origin', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    repoUrl = git(['remote', 'get-url', 'origin'], { cwd: repoPath }).trim();
     debugLog('session-start', 'git remote origin url', { repoUrl });
   } catch {
     debugLog('session-start', 'no git remote origin (non-fatal)');
@@ -1355,7 +1366,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         // Get git remote URL for better repo matching on the server
         let repoUrl = '';
         try {
-          repoUrl = execSync('git remote get-url origin', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          repoUrl = git(['remote', 'get-url', 'origin'], { cwd: repoPath }).trim();
         } catch { /* no remote — that's fine */ }
 
         let sessionId: string = `local-${crypto.randomUUID()}`;
@@ -1596,16 +1607,23 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           ? estimateCost(model, hbInputTokens, hbOutputTokens, parsed?.cacheReadTokens || 0, parsed?.cacheCreationTokens || 0)
           : 0;
 
-        // Redact secrets from prompts
+        // Redact secrets from prompts AND the full transcript before upload.
+        // Previously only the prompt strings were redacted — the raw
+        // displayTranscript (which includes assistant replies, tool
+        // outputs, and file contents) was sent unredacted, so a token
+        // that appeared in a tool result would leak to the API.
         const shouldRedact = config.secretRedaction !== false;
         const redactedPrompts = shouldRedact
           ? state.prompts.map(p => redactSecrets(p).redacted)
           : state.prompts;
         const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
+        const transcriptForUpload = shouldRedact && displayTranscript
+          ? redactSecrets(displayTranscript).redacted
+          : displayTranscript;
 
         const promptUpdateData = {
           prompt: joinedPrompt || undefined,
-          transcript: displayTranscript || undefined,
+          transcript: transcriptForUpload || undefined,
           model: model && model !== 'unknown' && model !== 'default' ? model : undefined,
           filesChanged: parsed?.filesChanged && parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
           tokensUsed: hbTokensUsed > 0 ? hbTokensUsed : undefined,
@@ -1835,6 +1853,9 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     // F9: Redact secrets before sending to API
     const config_ = loadConfig();
     const shouldRedact = config_?.secretRedaction !== false; // default: true
+    const transcriptForUpload = shouldRedact && displayTranscript
+      ? redactSecrets(displayTranscript).redacted
+      : displayTranscript;
     const redactedPrompts = shouldRedact
       ? prompts.map(p => redactSecrets(p).redacted)
       : prompts;
@@ -1956,7 +1977,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       });
       const stopUpdateData = {
         prompt: joinedPrompt || undefined,
-        transcript: displayTranscript || undefined,
+        transcript: transcriptForUpload || undefined,
         model: model !== 'unknown' ? model : undefined,
         filesChanged: sessionFilesChanged.length > 0 ? sessionFilesChanged : undefined,
         tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
@@ -1991,15 +2012,15 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         .map(c => c.sha)
         .filter(sha => /^[a-fA-F0-9]+$/.test(sha));
       if (noteCommits.length > 0) {
-        const execOptsNotes = { cwd: state.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
-        // Only write notes for commits that don't already have them
+        // Only write notes for commits that don't already have them.
+        // sha values are validated as hex above; passed as a positional arg
+        // (no shell interpolation possible).
         const missingNotes = noteCommits.filter(sha => {
-          try {
-            execSync(`git notes --ref=origin show ${sha}`, execOptsNotes);
-            return false; // already has a note
-          } catch {
-            return true; // no note yet
-          }
+          const r = runDetailed('git', ['notes', '--ref=origin', 'show', sha], {
+            cwd: state.repoPath,
+            timeoutMs: 5000,
+          });
+          return r.status !== 0; // 0 = note exists, anything else = missing
         });
         if (missingNotes.length > 0) {
           writeGitNotes(state.repoPath, missingNotes, {
@@ -2152,6 +2173,9 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     // F9: Redact secrets before sending to API
     const config_ = loadConfig();
     const shouldRedact = config_?.secretRedaction !== false; // default: true
+    const transcriptForUpload = shouldRedact && displayTranscript
+      ? redactSecrets(displayTranscript).redacted
+      : displayTranscript;
     const redactedPrompts = shouldRedact
       ? prompts.map(p => redactSecrets(p).redacted)
       : prompts;
@@ -2258,7 +2282,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         sessionId: state.sessionId,
         prompt: joinedPrompt || undefined,
         summary: parsed.summary || undefined,
-        transcript: displayTranscript || undefined,
+        transcript: transcriptForUpload || undefined,
         filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
         tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
         inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
@@ -2439,13 +2463,13 @@ export async function handlePostCommit(): Promise<void> {
     return;
   }
 
-  // Get latest commit info
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  // Get latest commit info — all calls go through the safe wrapper.
+  const gitOpts = { cwd: repoPath };
   let commitSha: string, commitMessage: string, commitAuthor: string;
   try {
-    commitSha = execSync('git rev-parse HEAD', execOpts).trim();
-    commitMessage = execSync('git log -1 --format=%s', execOpts).trim();
-    commitAuthor = execSync('git log -1 --format=%an', execOpts).trim();
+    commitSha = git(['rev-parse', 'HEAD'], gitOpts).trim();
+    commitMessage = git(['log', '-1', '--format=%s'], gitOpts).trim();
+    commitAuthor = git(['log', '-1', '--format=%an'], gitOpts).trim();
   } catch (err: any) {
     debugLog('post-commit', 'ERROR: cannot read commit', { message: err.message });
     return;
@@ -2453,7 +2477,9 @@ export async function handlePostCommit(): Promise<void> {
 
   debugLog('post-commit', 'commit info', { commitSha, commitMessage, commitAuthor });
 
-  // Validate commitSha is a hex string to prevent shell injection
+  // Validate commitSha is a hex string. Defense in depth — args are now
+  // passed positionally so injection isn't possible, but a malformed SHA
+  // is still a useful sanity check.
   if (!/^[a-fA-F0-9]+$/.test(commitSha)) {
     debugLog('post-commit', 'SKIP: invalid commit SHA', { commitSha });
     return;
@@ -2462,18 +2488,18 @@ export async function handlePostCommit(): Promise<void> {
   // Get files changed in this commit
   let filesChanged: string[] = [];
   try {
-    const raw = execSync(`git diff-tree --no-commit-id --name-only -r ${commitSha}`, execOpts).trim();
+    const raw = git(['diff-tree', '--no-commit-id', '--name-only', '-r', commitSha], gitOpts).trim();
     filesChanged = raw ? raw.split('\n').filter(Boolean) : [];
   } catch { /* ignore */ }
 
   // Get diff for this single commit
   let diff = '';
   try {
-    diff = execSync(`git diff ${commitSha}~1..${commitSha}`, execOpts).trim();
+    diff = git(['diff', `${commitSha}~1..${commitSha}`], gitOpts).trim();
   } catch {
     try {
       // First commit in repo — no parent
-      diff = execSync(`git show ${commitSha} --format= --diff-merges=first-parent`, execOpts).trim();
+      diff = git(['show', commitSha, '--format=', '--diff-merges=first-parent'], gitOpts).trim();
     } catch { /* ignore */ }
   }
 
@@ -2503,26 +2529,27 @@ export async function handlePostCommit(): Promise<void> {
   } else if (activeSessions.length > 1) {
     // Detect which agent made this commit via process detection
     let detectedSlug: string | null = null;
-    const agentChecks = [
-      { cmd: 'pgrep -f "claude.*stream-json"', slug: 'claude' },
-      { cmd: 'pgrep -f "gemini.*cli|/gemini "', slug: 'gemini' },
-      { cmd: 'pgrep -f "codex"', slug: 'codex' },
-      { cmd: 'pgrep -f "aider"', slug: 'aider' },
-      { cmd: 'pgrep -f "windsurf"', slug: 'windsurf' },
-      { cmd: 'pgrep -f "copilot.*cli|github-copilot"', slug: 'copilot' },
-      { cmd: 'pgrep -f "continue.*dev"', slug: 'continue' },
-      { cmd: 'pgrep -f "amp.*cli|/amp "', slug: 'amp' },
-      { cmd: 'pgrep -f "junie|jetbrains.*ai"', slug: 'junie' },
-      { cmd: 'pgrep -f "opencode"', slug: 'opencode' },
-      { cmd: 'pgrep -f "rovo.*dev"', slug: 'rovo' },
-      { cmd: 'pgrep -f "droid"', slug: 'droid' },
+    // Static regex patterns — passed as args to pgrep, not via shell.
+    const agentChecks: Array<{ pattern: string; slug: string }> = [
+      { pattern: 'claude.*stream-json', slug: 'claude' },
+      { pattern: 'gemini.*cli|/gemini ', slug: 'gemini' },
+      { pattern: 'codex', slug: 'codex' },
+      { pattern: 'aider', slug: 'aider' },
+      { pattern: 'windsurf', slug: 'windsurf' },
+      { pattern: 'copilot.*cli|github-copilot', slug: 'copilot' },
+      { pattern: 'continue.*dev', slug: 'continue' },
+      { pattern: 'amp.*cli|/amp ', slug: 'amp' },
+      { pattern: 'junie|jetbrains.*ai', slug: 'junie' },
+      { pattern: 'opencode', slug: 'opencode' },
+      { pattern: 'rovo.*dev', slug: 'rovo' },
+      { pattern: 'droid', slug: 'droid' },
     ];
     for (const check of agentChecks) {
-      try {
-        execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+      const r = runDetailed('pgrep', ['-f', check.pattern], { timeoutMs: 2000 });
+      if (r.status === 0) {
         detectedSlug = check.slug;
         break;
-      } catch { /* no match */ }
+      }
     }
 
     if (detectedSlug) {
@@ -2550,21 +2577,21 @@ export async function handlePostCommit(): Promise<void> {
     try {
       // Use pgrep for targeted process detection — look for CLI binaries only,
       // not desktop apps (Cursor/VS Code have many helper processes that would match)
-      const checks = [
-        { cmd: 'pgrep -f "gemini.*cli|bin/gemini"', model: 'gemini' },
-        { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
-        { cmd: 'pgrep -f "codex"', model: 'codex' },
-        { cmd: 'pgrep -f "bin/aider|aider.*--model"', model: 'aider' },
-        { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
-        { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
-        { cmd: 'pgrep -f "opencode"', model: 'opencode' },
+      const checks: Array<{ pattern: string; model: string }> = [
+        { pattern: 'gemini.*cli|bin/gemini', model: 'gemini' },
+        { pattern: 'claude.*stream-json', model: 'claude' },
+        { pattern: 'codex', model: 'codex' },
+        { pattern: 'bin/aider|aider.*--model', model: 'aider' },
+        { pattern: 'copilot.*cli|github-copilot', model: 'copilot' },
+        { pattern: 'amp.*cli|/amp ', model: 'amp' },
+        { pattern: 'opencode', model: 'opencode' },
       ];
       for (const check of checks) {
-        try {
-          execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+        const r = runDetailed('pgrep', ['-f', check.pattern], { timeoutMs: 2000 });
+        if (r.status === 0) {
           detectedModel = check.model;
           break;
-        } catch { /* pgrep exits 1 if no match */ }
+        }
       }
     } catch { /* ignore */ }
 
@@ -2607,16 +2634,17 @@ export async function handlePostCommit(): Promise<void> {
   if (state && commitLinkingConfig !== 'never') {
     try {
       // Only add trailer if not already present
-      const fullMessage = execSync('git log -1 --format=%B', execOpts).trim();
+      const fullMessage = git(['log', '-1', '--format=%B'], gitOpts).trim();
       if (!fullMessage.includes('Origin-Session:')) {
         const shortId = state.sessionId.slice(0, 12);
         const trailer = `Origin-Session: ${shortId}`;
-        // Amend the commit message to add the trailer
+        // Amend the commit message to add the trailer. Message is passed as
+        // a positional arg — no shell escaping needed because there's no shell.
         const newMessage = fullMessage + '\n\n' + trailer;
-        execSync(`git commit --amend -m ${escapeShellArg(newMessage)} --no-verify`, execOpts);
+        git(['commit', '--amend', '-m', newMessage, '--no-verify'], gitOpts);
         debugLog('post-commit', 'added Origin-Session trailer', { shortId });
         // Re-read commit SHA since amend changes it
-        commitSha = execSync('git rev-parse HEAD', execOpts).trim();
+        commitSha = git(['rev-parse', 'HEAD'], gitOpts).trim();
       }
     } catch (err: any) {
       debugLog('post-commit', 'trailer amend error (non-fatal)', { message: err.message });
@@ -2628,21 +2656,21 @@ export async function handlePostCommit(): Promise<void> {
   let noteModel = state?.model || '';
   if (!noteModel || noteModel === 'unknown') {
     try {
-      const fallbackChecks = [
-        { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
-        { cmd: 'pgrep -f "gemini.*cli|/gemini "', model: 'gemini' },
-        { cmd: 'pgrep -f "codex"', model: 'codex' },
-        { cmd: 'pgrep -f "aider"', model: 'aider' },
-        { cmd: 'pgrep -f "windsurf"', model: 'windsurf' },
-        { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
-        { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
+      const fallbackChecks: Array<{ pattern: string; model: string }> = [
+        { pattern: 'claude.*stream-json', model: 'claude' },
+        { pattern: 'gemini.*cli|/gemini ', model: 'gemini' },
+        { pattern: 'codex', model: 'codex' },
+        { pattern: 'aider', model: 'aider' },
+        { pattern: 'windsurf', model: 'windsurf' },
+        { pattern: 'copilot.*cli|github-copilot', model: 'copilot' },
+        { pattern: 'amp.*cli|/amp ', model: 'amp' },
       ];
       for (const check of fallbackChecks) {
-        try {
-          execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+        const r = runDetailed('pgrep', ['-f', check.pattern], { timeoutMs: 2000 });
+        if (r.status === 0) {
           noteModel = check.model;
           break;
-        } catch { /* no match */ }
+        }
       }
     } catch { /* ignore */ }
   }
@@ -2971,17 +2999,12 @@ export async function handlePreCommit(): Promise<void> {
 
   const repoConfig = loadRepoConfig(repoPath);
 
-  const execOpts = {
-    encoding: 'utf-8' as const,
-    cwd: repoPath,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    maxBuffer: 10 * 1024 * 1024, // 10MB for large diffs
-  };
+  const gitOpts = { cwd: repoPath, maxBuffer: 10 * 1024 * 1024 }; // 10MB for large diffs
 
   // Get staged diff (full context for CONTENT_FILTER matching)
   let stagedDiff: string;
   try {
-    stagedDiff = execSync('git diff --cached', execOpts).trim();
+    stagedDiff = git(['diff', '--cached'], gitOpts).trim();
   } catch (err: any) {
     debugLog('pre-commit', 'ERROR: cannot read staged diff', { message: err.message });
     return; // Don't block on error
@@ -2995,7 +3018,7 @@ export async function handlePreCommit(): Promise<void> {
   // Get staged file list
   let stagedFiles: string[] = [];
   try {
-    const raw = execSync('git diff --cached --name-only', execOpts).trim();
+    const raw = git(['diff', '--cached', '--name-only'], gitOpts).trim();
     stagedFiles = raw ? raw.split('\n') : [];
   } catch { /* ignore */ }
 
@@ -3387,17 +3410,10 @@ export async function handlePrePush(): Promise<void> {
     return;
   }
 
-  const execOpts = {
-    encoding: 'utf-8' as const,
-    cwd: repoPath,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    timeout: 15_000,
-  };
+  const gitOpts = { cwd: repoPath, timeoutMs: 15_000 };
 
   // Check if remote exists
-  try {
-    execSync('git remote get-url origin', execOpts);
-  } catch {
+  if (runDetailed('git', ['remote', 'get-url', 'origin'], gitOpts).status !== 0) {
     debugLog('pre-push', 'SKIP: no remote');
     return;
   }
@@ -3410,24 +3426,30 @@ export async function handlePrePush(): Promise<void> {
 
   if (!connected || config?.checkpointRepo || strategy === 'always') {
     // Push origin-sessions branch if it exists (standalone mode only)
-    try {
-      execSync('git rev-parse refs/heads/origin-sessions', execOpts);
-      execSync('git push origin origin-sessions --no-verify --quiet', execOpts);
-      debugLog('pre-push', 'pushed origin-sessions');
-    } catch (err: any) {
-      debugLog('pre-push', 'origin-sessions push skipped', { message: err.message });
+    if (runDetailed('git', ['rev-parse', 'refs/heads/origin-sessions'], gitOpts).status === 0) {
+      const r = runDetailed('git', ['push', 'origin', 'origin-sessions', '--no-verify', '--quiet'], gitOpts);
+      if (r.status === 0) {
+        debugLog('pre-push', 'pushed origin-sessions');
+      } else {
+        debugLog('pre-push', 'origin-sessions push skipped', { stderr: r.stderr.slice(0, 200) });
+      }
+    } else {
+      debugLog('pre-push', 'origin-sessions branch missing');
     }
   } else {
     debugLog('pre-push', 'SKIP origin-sessions push: connected mode');
   }
 
   // Push refs/notes/origin if they exist
-  try {
-    execSync('git rev-parse refs/notes/origin', execOpts);
-    execSync('git push origin refs/notes/origin --no-verify --quiet', execOpts);
-    debugLog('pre-push', 'pushed refs/notes/origin');
-  } catch (err: any) {
-    debugLog('pre-push', 'notes push skipped', { message: err.message });
+  if (runDetailed('git', ['rev-parse', 'refs/notes/origin'], gitOpts).status === 0) {
+    const r = runDetailed('git', ['push', 'origin', 'refs/notes/origin', '--no-verify', '--quiet'], gitOpts);
+    if (r.status === 0) {
+      debugLog('pre-push', 'pushed refs/notes/origin');
+    } else {
+      debugLog('pre-push', 'notes push skipped', { stderr: r.stderr.slice(0, 200) });
+    }
+  } else {
+    debugLog('pre-push', 'refs/notes/origin missing');
   }
 
   debugLog('pre-push', '=== GIT HOOK COMPLETE ===');

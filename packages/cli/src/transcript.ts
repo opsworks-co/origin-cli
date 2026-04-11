@@ -86,7 +86,29 @@ export function parseTranscript(transcriptPath: string): ParsedTranscript {
     return result;
   }
 
-  const raw = fs.readFileSync(transcriptPath, 'utf-8');
+  // Bound the file size we're willing to read into memory. A pathological
+  // 500MB transcript would OOM the CLI; 64MB is ~500k lines of chat which is
+  // more than any real session. Larger files are truncated from the head
+  // (most recent lines are at the tail).
+  const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+  let raw: string;
+  try {
+    const stat = fs.statSync(transcriptPath);
+    if (stat.size > MAX_TRANSCRIPT_BYTES) {
+      const fd = fs.openSync(transcriptPath, 'r');
+      try {
+        const buf = Buffer.alloc(MAX_TRANSCRIPT_BYTES);
+        fs.readSync(fd, buf, 0, MAX_TRANSCRIPT_BYTES, stat.size - MAX_TRANSCRIPT_BYTES);
+        raw = buf.toString('utf-8');
+      } finally {
+        fs.closeSync(fd);
+      }
+    } else {
+      raw = fs.readFileSync(transcriptPath, 'utf-8');
+    }
+  } catch {
+    return result;
+  }
   result.transcript = raw;
 
   // Detect format: Gemini uses a single JSON object { "messages": [...] }, Claude/Cursor use JSONL.

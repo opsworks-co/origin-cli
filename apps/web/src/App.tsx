@@ -1,59 +1,60 @@
-import React from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import React, { useEffect, Suspense, lazy } from 'react';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import Layout from './components/Layout';
 import DeveloperLayout from './components/DeveloperLayout';
 import PublicLayout from './components/PublicLayout';
 import { ToastProvider } from './components/Toast';
+import { ErrorBoundary } from './components/ErrorBoundary';
+// ── Eagerly loaded: first-paint critical, tiny, or always-visible pages ──
 import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import RegisterDeveloper from './pages/RegisterDeveloper';
 import Pricing from './pages/Pricing';
 import Dashboard from './pages/Dashboard';
-import Sessions from './pages/Sessions';
-import SessionDetail from './pages/SessionDetail';
-import Repos from './pages/Repos';
-import RepoDetail from './pages/RepoDetail';
-import Agents from './pages/Agents';
-import Policies from './pages/Policies';
-import AuditLog from './pages/AuditLog';
-import Insights from './pages/Insights';
-import Settings from './pages/Settings';
-import Integrations from './pages/Integrations';
-import ApiKeys from './pages/ApiKeys';
-import BudgetPage from './pages/Budget';
-import IAM from './pages/IAM';
-import Docs from './pages/Docs';
-import PolicyDetail from './pages/PolicyDetail';
-import AgentDetail from './pages/AgentDetail';
-import Notifications from './pages/Notifications';
-import Team from './pages/Team';
-import UserDetail from './pages/UserDetail';
-import Reports from './pages/Reports';
-import MachineDetail from './pages/MachineDetail';
-import Infrastructure from './pages/Infrastructure';
-import AcceptInvite from './pages/AcceptInvite';
-import PullRequests from './pages/PullRequests';
-import Leaderboard from './pages/Leaderboard';
-import Trails from './pages/Trails';
-import TrailDetail from './pages/TrailDetail';
-import Prompts from './pages/Prompts';
-import ComplianceDashboard from './pages/Compliance';
-import PublicPolicies from './pages/PublicPolicies';
-import SharedSession from './pages/SharedSession';
-import Admin from './pages/Admin';
-import Blog from './pages/Blog';
-import BlogPost from './pages/BlogPost';
-import Demo from './pages/Demo';
-import DemoPlatform from './pages/DemoPlatform';
-import DemoCLI from './pages/DemoCLI';
 import MyDashboard from './pages/MyDashboard';
-import SessionCompare from './pages/SessionCompare';
+import AcceptInvite from './pages/AcceptInvite';
 import OAuthCallback from './pages/OAuthCallback';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
 import VerifyEmail from './pages/VerifyEmail';
+import PublicPolicies from './pages/PublicPolicies';
+import SharedSession from './pages/SharedSession';
+
+// ── Lazy-loaded: content-heavy or rarely-visited routes. Each becomes its
+//    own chunk, which keeps the main bundle small and speeds up first paint
+//    for signed-out and first-visit users. ─────────────────────────────────
+const Docs = lazy(() => import('./pages/Docs'));
+const Blog = lazy(() => import('./pages/Blog'));
+const BlogPost = lazy(() => import('./pages/BlogPost'));
+const Demo = lazy(() => import('./pages/Demo'));
+const DemoPlatform = lazy(() => import('./pages/DemoPlatform'));
+const DemoCLI = lazy(() => import('./pages/DemoCLI'));
+const Sessions = lazy(() => import('./pages/Sessions'));
+const SessionDetail = lazy(() => import('./pages/SessionDetail'));
+const SessionCompare = lazy(() => import('./pages/SessionCompare'));
+const Repos = lazy(() => import('./pages/Repos'));
+const RepoDetail = lazy(() => import('./pages/RepoDetail'));
+const CommitDetail = lazy(() => import('./pages/CommitDetail'));
+const Agents = lazy(() => import('./pages/Agents'));
+const AgentDetail = lazy(() => import('./pages/AgentDetail'));
+const Policies = lazy(() => import('./pages/Policies'));
+const PolicyDetail = lazy(() => import('./pages/PolicyDetail'));
+const Insights = lazy(() => import('./pages/Insights'));
+const Settings = lazy(() => import('./pages/Settings'));
+const Integrations = lazy(() => import('./pages/Integrations'));
+const ApiKeys = lazy(() => import('./pages/ApiKeys'));
+const BudgetPage = lazy(() => import('./pages/Budget'));
+const IAM = lazy(() => import('./pages/IAM'));
+const Notifications = lazy(() => import('./pages/Notifications'));
+const UserDetail = lazy(() => import('./pages/UserDetail'));
+const MachineDetail = lazy(() => import('./pages/MachineDetail'));
+const Infrastructure = lazy(() => import('./pages/Infrastructure'));
+const PullRequests = lazy(() => import('./pages/PullRequests'));
+const Leaderboard = lazy(() => import('./pages/Leaderboard'));
+const TrailDetail = lazy(() => import('./pages/TrailDetail'));
+const Admin = lazy(() => import('./pages/Admin'));
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -91,9 +92,22 @@ function DashboardRedirect() {
   return <Layout><Dashboard /></Layout>;
 }
 
+// Scrolls the window to the top whenever the route path changes — avoids the
+// jarring "stuck scroll position" when navigating between pages.
+function ScrollToTop() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname]);
+  return null;
+}
+
 export default function App() {
   return (
     <ToastProvider>
+    <ScrollToTop />
+    <ErrorBoundary label="Origin">
+    <Suspense fallback={<div className="flex items-center justify-center min-h-screen"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500" /></div>}>
     <Routes>
       {/* Public routes — wrapped in PublicLayout */}
       <Route path="/" element={<PublicLayout><Landing /></PublicLayout>} />
@@ -153,6 +167,16 @@ export default function App() {
           <ProtectedRoute>
             <AppLayout>
               <RepoDetail />
+            </AppLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/repos/:id/commits/:sha"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <CommitDetail />
             </AppLayout>
           </ProtectedRoute>
         }
@@ -353,7 +377,7 @@ export default function App() {
       />
       <Route
         path="/models"
-        element={<Navigate to="/settings?tab=models" replace />}
+        element={<Navigate to="/insights" replace />}
       />
 
       <Route
@@ -370,6 +394,8 @@ export default function App() {
       {/* Catch-all */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </Suspense>
+    </ErrorBoundary>
     </ToastProvider>
   );
 }

@@ -42,21 +42,28 @@ router.get('/orgs', async (req: AuthRequest, res: Response) => {
   try {
     const search = ((req.query.search as string) ?? '').toLowerCase();
 
+    // Cap at 1000. The admin console is super-admin only, but even so
+    // an unbounded scan + the downstream repo/session joins OOMs the
+    // route as the customer list grows. 1000 is well above real tenancy
+    // today; the search filter is applied client-side after.
     const orgs = await prisma.org.findMany({
       include: {
         users: { select: { id: true } },
         _count: { select: { users: true } },
       },
       orderBy: { createdAt: 'desc' },
+      take: 1000,
     });
 
     // Gather session counts and total cost per org in bulk
     const orgIds = orgs.map((o) => o.id);
 
-    // Get repo IDs per org for session lookups
+    // Same rationale as the orgs cap — and the session scan below
+    // scales with this list, so cap hard.
     const repos = await prisma.repo.findMany({
       where: { orgId: { in: orgIds } },
       select: { id: true, orgId: true },
+      take: 50_000,
     });
 
     const repoIdsByOrg = new Map<string, string[]>();
@@ -68,9 +75,14 @@ router.get('/orgs', async (req: AuthRequest, res: Response) => {
 
     // Get session stats grouped by org
     const allRepoIds = repos.map((r) => r.id);
+    // Cap the session scan. Global aggregate over every session ever
+    // created is unbounded; a 500k sample is still representative for
+    // directional stats and keeps the admin console responsive.
     const sessions = await prisma.codingSession.findMany({
       where: { commit: { repoId: { in: allRepoIds } } },
       select: { costUsd: true, commit: { select: { repoId: true } } },
+      take: 500_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     // Build a map: orgId -> { sessionCount, totalCost }
@@ -122,20 +134,28 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
   try {
     const search = ((req.query.search as string) ?? '').toLowerCase();
 
+    // Cap at 5000 users. Unbounded global user scans OOM the admin
+    // console as the product grows; 5000 comfortably covers today's
+    // userbase with room to spare.
     const users = await prisma.user.findMany({
       include: {
         org: { select: { name: true, slug: true } },
         _count: { select: { sessions: true } },
       },
       orderBy: { createdAt: 'desc' },
+      take: 5000,
     });
 
-    // Get last active (most recent session) per user
+    // Get last active (most recent session) per user. Cap the underlying
+    // scan too — we only need enough rows to hit every listed user's
+    // latest session once, and the dedupe loop below naturally ignores
+    // older rows. 200k is generous for a 5k-user page.
     const userIds = users.map((u) => u.id);
     const latestSessions = await prisma.codingSession.findMany({
       where: { userId: { in: userIds } },
       select: { userId: true, createdAt: true },
       orderBy: { createdAt: 'desc' },
+      take: 200_000,
     });
 
     const lastActiveMap = new Map<string, Date>();
@@ -385,16 +405,30 @@ router.get('/check', async (_req: AuthRequest, res: Response) => {
   res.json({ isSuperAdmin: true });
 });
 
-// POST /api/admin/fix-orphaned-keys — assign all userId-null keys to a target user
+// POST /api/admin/fix-orphaned-keys — assign orphaned keys *in the same org
+// as the target user* to that user. Even as a super-admin action, the old
+// behavior — updateMany({where:{userId:null}}) — would sweep every orphaned
+// key across *every* org onto one user, which is almost never what the
+// operator wants and turns a routine cleanup into accidental cross-tenant
+// data comingling. Scope by org of the target user.
 router.post('/fix-orphaned-keys', async (req: AuthRequest, res: Response) => {
   try {
     const { targetUserId } = req.body as { targetUserId: string };
-    if (!targetUserId) return res.status(400).json({ error: 'targetUserId required' });
+    if (!targetUserId || typeof targetUserId !== 'string') {
+      return res.status(400).json({ error: 'targetUserId required' });
+    }
+    const targetUser = await prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { id: true, orgId: true },
+    });
+    if (!targetUser) {
+      return res.status(404).json({ error: 'target user not found' });
+    }
     const result = await prisma.apiKey.updateMany({
-      where: { userId: null },
+      where: { userId: null, orgId: targetUser.orgId },
       data: { userId: targetUserId },
     });
-    res.json({ updated: result.count });
+    res.json({ updated: result.count, orgId: targetUser.orgId });
   } catch (err) {
     console.error('Admin fix-orphaned-keys error:', err);
     res.status(500).json({ error: 'Failed to fix orphaned keys' });

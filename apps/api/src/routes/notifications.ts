@@ -1,6 +1,8 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { safeParseObject } from '../utils/safe-json.js';
+import { parseLimit, parseOffset } from '../utils/validate.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -9,8 +11,8 @@ router.use(requireAuth);
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const limit = parseLimit(req.query.limit, 50, 200);
+    const offset = parseOffset(req.query.offset);
     const unreadOnly = req.query.unread === 'true';
 
     const where: any = { userId };
@@ -29,7 +31,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     res.json({
       notifications: notifications.map(n => ({
         ...n,
-        metadata: JSON.parse(n.metadata),
+        // Previously a bare JSON.parse — one bad row would throw synchronously
+        // and 500 the whole list response, hiding every other notification.
+        metadata: safeParseObject(n.metadata, `notification.${n.id}.metadata`),
       })),
       total,
     });
@@ -56,17 +60,24 @@ router.get('/unread-count', async (req: AuthRequest, res: Response) => {
 router.put('/:id/read', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const notification = await prisma.notification.findFirst({
+    // Defense in depth: use updateMany with a compound (id, userId) where
+    // instead of a precheck-then-update-by-id pattern. The Notification
+    // schema has no compound unique, so update({ where: { id } }) would
+    // silently succeed even if a future refactor dropped the precheck,
+    // letting any authenticated user mark any other user's notifications
+    // as read by guessing the UUID. updateMany scopes authorization at
+    // the DB call itself.
+    const result = await prisma.notification.updateMany({
       where: { id, userId: req.user!.id },
+      data: { read: true, readAt: new Date() },
     });
 
-    if (!notification) {
+    if (result.count === 0) {
       return res.status(404).json({ error: 'Notification not found' });
     }
 
-    const updated = await prisma.notification.update({
-      where: { id },
-      data: { read: true, readAt: new Date() },
+    const updated = await prisma.notification.findFirst({
+      where: { id, userId: req.user!.id },
     });
 
     res.json(updated);

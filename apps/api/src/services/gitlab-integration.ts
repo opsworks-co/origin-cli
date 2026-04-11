@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { assertSafeExternalUrl } from '../utils/ssrf-guard.js';
 import {
   buildSessionSummaryComment,
   computeCheckStatus,
@@ -25,7 +26,23 @@ function gitlabHeaders(token: string, authType?: string) {
 
 // ── GitLab OAuth Token Management ────────────────────────────────
 
+// Size-bounded cache (see github-app.ts rememberToken for rationale).
+const MAX_OAUTH_TOKEN_CACHE_ENTRIES = 5000;
 const oauthTokenCache = new Map<string, { token: string; expiresAt: Date }>();
+
+function rememberOAuthToken(key: string, value: { token: string; expiresAt: Date }): void {
+  oauthTokenCache.delete(key);
+  oauthTokenCache.set(key, value);
+  if (oauthTokenCache.size > MAX_OAUTH_TOKEN_CACHE_ENTRIES) {
+    const evictCount = Math.floor(MAX_OAUTH_TOKEN_CACHE_ENTRIES / 2);
+    const iter = oauthTokenCache.keys();
+    for (let i = 0; i < evictCount; i++) {
+      const next = iter.next();
+      if (next.done) break;
+      oauthTokenCache.delete(next.value);
+    }
+  }
+}
 
 export function getGitLabOAuthConfig() {
   const clientId = process.env.GITLAB_APP_ID || process.env.GITLAB_CLIENT_ID;
@@ -91,7 +108,9 @@ export async function exchangeGitLabOAuthCode(
   const config = oauthConfig || getGitLabOAuthConfig();
   if (!('clientId' in config) || !config.clientId) throw new Error('GitLab OAuth not configured');
 
-  const res = await fetch(`${baseUrl}/oauth/token`, {
+  const oauthUrl = `${baseUrl}/oauth/token`;
+  assertSafeExternalUrl(oauthUrl, 'gitlab-integration.exchangeOAuthCode');
+  const res = await fetch(oauthUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -119,7 +138,9 @@ export async function refreshGitLabOAuthToken(
   const config = oauthConfig || getGitLabOAuthConfig();
   if (!('clientId' in config) || !config.clientId) throw new Error('GitLab OAuth not configured');
 
-  const res = await fetch(`${baseUrl}/oauth/token`, {
+  const refreshUrl = `${baseUrl}/oauth/token`;
+  assertSafeExternalUrl(refreshUrl, 'gitlab-integration.refreshOAuthToken');
+  const res = await fetch(refreshUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -170,7 +191,7 @@ export async function getValidGitLabOAuthToken(config: {
   if (settings.tokenExpiresAt && config.token) {
     const expiresAt = new Date(settings.tokenExpiresAt);
     if (expiresAt.getTime() - Date.now() > SAFETY_MARGIN_MS) {
-      oauthTokenCache.set(config.id, { token: config.token, expiresAt });
+      rememberOAuthToken(config.id, { token: config.token, expiresAt });
       return config.token;
     }
   }
@@ -192,7 +213,7 @@ export async function getValidGitLabOAuthToken(config: {
 
   // 5. Update cache
   const expiresAt = new Date((result.created_at + result.expires_in) * 1000);
-  oauthTokenCache.set(config.id, { token: result.access_token, expiresAt });
+  rememberOAuthToken(config.id, { token: result.access_token, expiresAt });
 
   // 6. Update DB (async, non-blocking)
   const updatedSettings = {
@@ -377,7 +398,9 @@ export async function testGitLabConnection(
   authType?: string,
 ): Promise<{ success: boolean; login?: string; error?: string }> {
   try {
-    const res = await fetch(`${baseUrl}/user`, {
+    const userUrl = `${baseUrl}/user`;
+    assertSafeExternalUrl(userUrl, 'gitlab-integration.testConnection');
+    const res = await fetch(userUrl, {
       headers: gitlabHeaders(token, authType),
     });
     if (!res.ok) {
@@ -656,7 +679,13 @@ export async function updateMRGitLabStatus(
   // Get valid token (handles OAuth refresh)
   const { token, authType } = await getValidGitLabToken(integration);
 
-  const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+  // Scope repo lookup by orgId. This is the same defense-in-depth pattern
+  // we use in the route layer: updateMRGitLabStatus is only called from
+  // webhook handlers that already verified the repo belongs to the
+  // org, but if a future refactor ever invokes it with a mismatched
+  // (orgId, repoId) pair we don't want this code to silently poke
+  // another org's MRs with our integration token.
+  const repo = await prisma.repo.findFirst({ where: { id: repoId, orgId } });
   if (!repo) return;
 
   const projectPath = parseGitLabProjectPath(repo.path);
@@ -779,6 +808,8 @@ export async function updateSessionMRChecks(
 
   const openMRs = await prisma.pullRequest.findMany({
     where: { repoId, state: 'open' },
+    take: 5000,
+    orderBy: { updatedAt: 'desc' },
   });
 
   const repo = await prisma.repo.findUnique({ where: { id: repoId } });

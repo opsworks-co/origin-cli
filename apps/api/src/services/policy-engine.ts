@@ -25,6 +25,32 @@
 import { prisma } from '../db.js';
 import { notifyOrgAdmins } from './notifications.js';
 
+// ── ReDoS guards ──────────────────────────────────────────────────
+// User-supplied regex patterns (policy rules, commit patterns) go straight
+// into `new RegExp(...)`. A pattern like `(a+)+b` against a large blob
+// causes exponential backtracking and pegs the event loop. We don't have
+// re2 as a dep, so we tame worst-case input two ways:
+//   1. Cap the pattern length itself — long patterns are the usual shape
+//      of pathological catastrophic-backtracking regexes.
+//   2. Cap the input we feed to .match / .test — backtracking cost is
+//      exponential in input size, so capping input bounds worst-case wall
+//      time even for nasty patterns.
+const MAX_REGEX_PATTERN_LEN = 512;
+const MAX_REGEX_INPUT_LEN = 256 * 1024; // 256KB
+
+function compileUserRegex(pattern: string, flags: string): RegExp | null {
+  if (pattern.length > MAX_REGEX_PATTERN_LEN) return null;
+  try {
+    return new RegExp(pattern, flags);
+  } catch {
+    return null;
+  }
+}
+
+function capInput(s: string): string {
+  return s.length > MAX_REGEX_INPUT_LEN ? s.slice(0, MAX_REGEX_INPUT_LEN) : s;
+}
+
 // ── Types ─────────────────────────────────────────────────────────
 
 export interface PolicyData {
@@ -318,16 +344,14 @@ export async function enforceSessionEnd(ctx: SessionContext): Promise<Enforcemen
         case 'CONTENT_FILTER': {
           const pattern = cond.pattern as string | undefined;
           if (pattern && ctx.diffContent) {
-            try {
-              const flags = (cond.caseSensitive === false) ? 'gi' : 'g';
-              const regex = new RegExp(pattern, flags);
-              const matches = ctx.diffContent.match(regex);
+            const flags = (cond.caseSensitive === false) ? 'gi' : 'g';
+            const regex = compileUserRegex(pattern, flags);
+            if (regex) {
+              const matches = capInput(ctx.diffContent).match(regex);
               if (matches && matches.length > 0) {
                 matched = true;
                 message = `Diff content matches pattern "${pattern}" (${matches.length} match${matches.length !== 1 ? 'es' : ''})`;
               }
-            } catch {
-              // Invalid regex — skip
             }
           }
           break;
@@ -339,30 +363,30 @@ export async function enforceSessionEnd(ctx: SessionContext): Promise<Enforcemen
           const messages = ctx.commitMessages || [];
 
           if (requiredPattern && messages.length > 0) {
-            try {
-              const regex = new RegExp(requiredPattern);
+            const regex = compileUserRegex(requiredPattern, '');
+            if (regex) {
               for (const msg of messages) {
-                if (!regex.test(msg)) {
+                if (!regex.test(capInput(msg))) {
                   matched = true;
                   message = `Commit message "${msg.slice(0, 80)}" does not match required format "${requiredPattern}"`;
                   break;
                 }
               }
-            } catch { /* invalid regex */ }
+            }
           }
 
           if (blockedPattern && messages.length > 0) {
-            try {
-              const flags = (cond.caseSensitive === false) ? 'i' : '';
-              const regex = new RegExp(blockedPattern, flags);
+            const flags = (cond.caseSensitive === false) ? 'i' : '';
+            const regex = compileUserRegex(blockedPattern, flags);
+            if (regex) {
               for (const msg of messages) {
-                if (regex.test(msg)) {
+                if (regex.test(capInput(msg))) {
                   matched = true;
                   message = `Commit message "${msg.slice(0, 80)}" matches blocked pattern "${blockedPattern}"`;
                   break;
                 }
               }
-            } catch { /* invalid regex */ }
+            }
           }
           break;
         }

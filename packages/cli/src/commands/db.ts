@@ -1,6 +1,8 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { git } from '../utils/exec.js';
 import { insertPrompts, getPromptCount, type PromptRecord } from '../local-db.js';
+
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 import { deduplicateStore } from '../local-db.js';
 import { getGitRoot } from '../session-state.js';
 import { loadConfig } from '../config.js';
@@ -15,13 +17,9 @@ function importFromSessionsBranch(repoPath: string): PromptRecord[] {
 
   try {
     // List all session directories
-    const listing = execSync(
-      `git ls-tree --name-only refs/heads/origin-sessions sessions/`,
-      {
-        encoding: 'utf-8',
-        cwd: repoPath,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
+    const listing = git(
+      ['ls-tree', '--name-only', 'refs/heads/origin-sessions', 'sessions/'],
+      { cwd: repoPath },
     ).trim();
 
     if (!listing) return records;
@@ -30,18 +28,15 @@ function importFromSessionsBranch(repoPath: string): PromptRecord[] {
 
     for (const dir of dirs) {
       const sessionId = dir.replace('sessions/', '');
+      if (!SAFE_ID.test(sessionId)) continue;
 
       // Read metadata for model info
       let model = 'unknown';
       let startedAt = '';
       try {
-        const metaRaw = execSync(
-          `git show refs/heads/origin-sessions:${dir}/metadata.json`,
-          {
-            encoding: 'utf-8',
-            cwd: repoPath,
-            stdio: ['pipe', 'pipe', 'pipe'],
-          },
+        const metaRaw = git(
+          ['show', `refs/heads/origin-sessions:${dir}/metadata.json`],
+          { cwd: repoPath },
         ).trim();
         const meta = JSON.parse(metaRaw);
         model = meta.model || 'unknown';
@@ -50,13 +45,9 @@ function importFromSessionsBranch(repoPath: string): PromptRecord[] {
 
       // Read prompts.md
       try {
-        const promptsMd = execSync(
-          `git show refs/heads/origin-sessions:${dir}/prompts.md`,
-          {
-            encoding: 'utf-8',
-            cwd: repoPath,
-            stdio: ['pipe', 'pipe', 'pipe'],
-          },
+        const promptsMd = git(
+          ['show', `refs/heads/origin-sessions:${dir}/prompts.md`],
+          { cwd: repoPath },
         ).trim();
 
         // Parse prompts from markdown
@@ -143,14 +134,9 @@ export async function dbImportCommand(opts?: { format?: string; file?: string })
   if (config?.checkpointRepo) {
     console.log(chalk.gray(`Fetching origin-sessions from checkpoint repo...`));
     try {
-      execSync(
-        `git fetch ${config.checkpointRepo} origin-sessions:origin-sessions --force`,
-        {
-          encoding: 'utf-8',
-          cwd: repoPath,
-          stdio: ['pipe', 'pipe', 'pipe'],
-          timeout: 30_000,
-        },
+      git(
+        ['fetch', config.checkpointRepo, 'origin-sessions:origin-sessions', '--force'],
+        { cwd: repoPath, timeoutMs: 30_000 },
       );
     } catch (err: any) {
       console.log(chalk.yellow(`Warning: Could not fetch from checkpoint repo: ${err.message}`));

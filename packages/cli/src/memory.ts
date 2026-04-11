@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { git, gitOrNull } from './utils/exec.js';
 import { getGitRoot } from './session-state.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -34,25 +34,19 @@ export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry):
     const payload = JSON.stringify({ version: 1, sessions: trimmed }, null, 2);
 
     // Write to a blob in git notes using a well-known tag
-    const execOpts = { cwd: repoPath, stdio: 'pipe' as const, timeout: 10000, encoding: 'utf-8' as const };
+    const opts = { cwd: repoPath, timeoutMs: 10_000 };
 
     // Get HEAD commit to attach note to (or use a fixed ref)
-    const head = execSync('git rev-parse HEAD', execOpts).trim();
+    const head = gitOrNull(['rev-parse', 'HEAD'], opts);
     if (!head) return;
 
     // Write the memory index as a note on a well-known ref
     // We use the root commit as anchor so it doesn't move with HEAD
-    let rootCommit: string;
-    try {
-      rootCommit = execSync('git rev-list --max-parents=0 HEAD', execOpts).trim().split('\n')[0];
-    } catch {
-      rootCommit = head;
-    }
+    const rootRaw = gitOrNull(['rev-list', '--max-parents=0', 'HEAD'], opts);
+    const rootCommit = rootRaw ? rootRaw.split('\n')[0] : head;
+    if (!/^[a-fA-F0-9]+$/.test(rootCommit)) return;
 
-    execSync(
-      `git notes --ref=origin-memory add -f -m ${escapeShellArg(payload)} ${rootCommit}`,
-      execOpts,
-    );
+    git(['notes', '--ref=origin-memory', 'add', '-f', '-m', payload, rootCommit], opts);
   } catch {
     // Non-fatal — memory is nice-to-have
   }
@@ -62,15 +56,13 @@ export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry):
 
 export function readAllSessionMemory(repoPath: string): SessionMemoryEntry[] {
   try {
-    const execOpts = { cwd: repoPath, stdio: 'pipe' as const, timeout: 10000, encoding: 'utf-8' as const };
-    let rootCommit: string;
-    try {
-      rootCommit = execSync('git rev-list --max-parents=0 HEAD', execOpts).trim().split('\n')[0];
-    } catch {
-      return [];
-    }
+    const opts = { cwd: repoPath, timeoutMs: 10_000 };
+    const rootRaw = gitOrNull(['rev-list', '--max-parents=0', 'HEAD'], opts);
+    if (!rootRaw) return [];
+    const rootCommit = rootRaw.split('\n')[0];
+    if (!/^[a-fA-F0-9]+$/.test(rootCommit)) return [];
 
-    const raw = execSync(`git notes --ref=origin-memory show ${rootCommit}`, execOpts).trim();
+    const raw = git(['notes', '--ref=origin-memory', 'show', rootCommit], opts).trim();
     const data = JSON.parse(raw);
     if (data.version === 1 && Array.isArray(data.sessions)) {
       return data.sessions;
@@ -129,14 +121,12 @@ export function buildMemoryContext(repoPath: string): string | null {
 
 export function clearSessionMemory(repoPath: string): boolean {
   try {
-    const execOpts = { cwd: repoPath, stdio: 'pipe' as const, timeout: 10000, encoding: 'utf-8' as const };
-    let rootCommit: string;
-    try {
-      rootCommit = execSync('git rev-list --max-parents=0 HEAD', execOpts).trim().split('\n')[0];
-    } catch {
-      return false;
-    }
-    execSync(`git notes --ref=origin-memory remove ${rootCommit}`, execOpts);
+    const opts = { cwd: repoPath, timeoutMs: 10_000 };
+    const rootRaw = gitOrNull(['rev-list', '--max-parents=0', 'HEAD'], opts);
+    if (!rootRaw) return false;
+    const rootCommit = rootRaw.split('\n')[0];
+    if (!/^[a-fA-F0-9]+$/.test(rootCommit)) return false;
+    git(['notes', '--ref=origin-memory', 'remove', rootCommit], opts);
     return true;
   } catch {
     return false;
@@ -144,10 +134,6 @@ export function clearSessionMemory(repoPath: string): boolean {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
-
-function escapeShellArg(arg: string): string {
-  return "'" + arg.replace(/'/g, "'\\''") + "'";
-}
 
 function formatAge(ms: number): string {
   const mins = Math.floor(ms / 60000);

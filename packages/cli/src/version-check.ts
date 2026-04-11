@@ -1,16 +1,18 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { loadConfig } from './config.js';
 
 const CACHE_PATH = path.join(os.homedir(), '.origin', 'last-update-check.json');
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const FETCH_TIMEOUT_MS = 3000;
-const PACKAGE_NAME = '@anthropic/origin-cli';
+const DEFAULT_API_URL = 'https://getorigin.io';
 
 interface UpdateCheckResult {
   current: string;
   latest: string;
   updateAvailable: boolean;
+  downloadUrl?: string;
 }
 
 interface CacheEntry {
@@ -41,12 +43,14 @@ export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
       };
     }
 
-    // Fetch from npm registry
+    // Fetch from Origin API (the CLI is distributed as a tarball, not via npm)
+    const config = loadConfig();
+    const apiUrl = (config?.apiUrl || DEFAULT_API_URL).replace(/\/$/, '');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
     try {
-      const res = await fetch(`https://registry.npmjs.org/${PACKAGE_NAME}/latest`, {
+      const res = await fetch(`${apiUrl}/api/v1/cli/version`, {
         signal: controller.signal,
         headers: { Accept: 'application/json' },
       });
@@ -55,7 +59,7 @@ export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
 
       if (!res.ok) return null;
 
-      const data = await res.json() as { version?: string };
+      const data = await res.json() as { version?: string; downloadUrl?: string };
       const latest = data.version;
       if (!latest) return null;
 
@@ -66,6 +70,7 @@ export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
         current,
         latest,
         updateAvailable: isNewer(latest, current),
+        downloadUrl: data.downloadUrl,
       };
     } catch {
       clearTimeout(timeout);
@@ -81,7 +86,8 @@ export async function checkForUpdate(): Promise<UpdateCheckResult | null> {
  */
 export function formatUpdateBanner(result: UpdateCheckResult): string {
   if (!result.updateAvailable) return '';
-  return `\n  Update available: ${result.current} -> ${result.latest}\n  Run: npm install -g ${PACKAGE_NAME}\n`;
+  const url = result.downloadUrl || 'https://getorigin.io/cli/origin-cli-latest.tgz';
+  return `\n  Update available: ${result.current} -> ${result.latest}\n  Run: npm install -g ${url}\n     or: origin upgrade\n`;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

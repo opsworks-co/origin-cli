@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'origin why: Ask any line of code which prompt wrote it',
+    slug: 'origin-why-line-level-prompt-attribution',
+    date: '2026-04-09',
+    author: 'Artem Dolobanko',
+    tags: ['developer-tools', 'ai-coding', 'attribution', 'cli'],
+    excerpt:
+      'You stare at a weird line of code and ask: "why is this here?" git blame shows the human who committed it. origin why shows the AI prompt that wrote it — with the exact session, model, cost, and reasoning. One command, zero mystery.',
+  },
+  {
     title: 'Why We Built Origin: The New Era of Source Code Management for AI',
     slug: 'new-era-source-code-management-ai',
     date: '2026-04-08',

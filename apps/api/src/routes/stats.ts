@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { parseLimit, parseOffset } from '../utils/validate.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -144,6 +145,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         createdAt: { gte: rangeFrom, lte: rangeTo },
       },
       select: { createdAt: true, costUsd: true, tokensUsed: true, durationMs: true, linesAdded: true, linesRemoved: true },
+      take: 500_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     const dayCounts: Record<string, number> = {};
@@ -191,13 +194,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       else durationBuckets[3].count++;
     }
 
-    // AI authorship over time — deterministic based on actual daily data
+    // AI authorship over time — deterministic based on actual daily data.
+    // Cap at 500k commits per window so huge monorepos can't OOM the API.
+    // Accuracy degrades beyond this only for the authorship chart, which
+    // is a coarse daily summary anyway.
     const totalCommitsByDay = await prisma.commit.findMany({
       where: {
         repoId: { in: repoIds },
         committedAt: { gte: rangeFrom, lte: rangeTo },
       },
       select: { committedAt: true },
+      take: 500_000,
+      orderBy: { committedAt: 'desc' },
     });
 
     const totalDayCounts: Record<string, number> = {};
@@ -219,10 +227,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       return { date: d.date, percent: Math.min(100, percent) };
     });
 
-    // Sessions by repo
+    // Sessions by repo — cap at 500k for DoS defense on large tenants.
     const commitRepos = await prisma.commit.findMany({
       where: { repoId: { in: repoIds }, session: { isNot: null } },
       select: { repoId: true },
+      take: 500_000,
+      orderBy: { committedAt: 'desc' },
     });
     const sessionsByRepoMap: Record<string, number> = {};
     for (const cr of commitRepos) {
@@ -346,10 +356,15 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Violations by policy type
+    // Violations by policy type. Cap at 50k rows — the histogram is
+    // directionally accurate well before that and auditLog grows
+    // monotonically, so an unbounded scan OOMs the stats dashboard
+    // for any org with a long violation history.
     const violationEntries = await prisma.auditLog.findMany({
       where: { orgId, action: { contains: 'VIOLATION' } },
       select: { metadata: true },
+      take: 50_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     const violationTypeCounts: Record<string, number> = {};
@@ -358,7 +373,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         const meta = JSON.parse(v.metadata);
         const type = meta.policyType || 'UNKNOWN';
         violationTypeCounts[type] = (violationTypeCounts[type] || 0) + 1;
-      } catch {}
+      } catch (err) {
+        console.warn('[stats] malformed audit metadata JSON:', (err as Error).message);
+        violationTypeCounts['UNKNOWN'] = (violationTypeCounts['UNKNOWN'] || 0) + 1;
+      }
     }
     const violationsByType = Object.entries(violationTypeCounts).map(([type, count]) => ({ type, count }));
 
@@ -396,13 +414,15 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         cost: parseFloat((g._sum.costUsd || 0).toFixed(2)),
       }));
 
-    // ── New: Cost by repo ────────────────────────────────────────
+    // ── New: Cost by repo (cap 500k) ─────────────────────────────
     const costByRepoAggs = await prisma.codingSession.findMany({
       where: {
         commit: { repoId: { in: repoIds } },
         createdAt: { gte: rangeFrom, lte: rangeTo },
       },
       select: { costUsd: true, commit: { select: { repoId: true } } },
+      take: 500_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     const costByRepoMap: Record<string, { cost: number; sessions: number }> = {};
@@ -622,9 +642,13 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
     const yearAgo = new Date();
     yearAgo.setFullYear(yearAgo.getFullYear() - 1);
 
+    // Cap heatmap at 200k sessions over 365 days — that's ~550/day,
+    // well above anything a single user could plausibly generate.
     const heatmapSessions = await prisma.codingSession.findMany({
       where: { ...baseWhere, createdAt: { gte: yearAgo } },
       select: { createdAt: true },
+      take: 200_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     const heatmap: Record<string, number> = {};
@@ -731,7 +755,11 @@ router.get('/me/agents', async (req: AuthRequest, res: Response) => {
     const orgId = req.user!.orgId;
 
     const repoIds = (
-      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+      await prisma.repo.findMany({
+        where: { orgId },
+        select: { id: true },
+        take: 5000,
+      })
     ).map((r) => r.id);
 
     const baseWhere = {
@@ -739,7 +767,7 @@ router.get('/me/agents', async (req: AuthRequest, res: Response) => {
       commit: { repoId: { in: repoIds } },
     };
 
-    // ── All sessions for this user ─────────────────────────────
+    // ── All sessions for this user (cap 100k for DoS defense) ─────
     const sessions = await prisma.codingSession.findMany({
       where: baseWhere,
       select: {
@@ -752,6 +780,8 @@ router.get('/me/agents', async (req: AuthRequest, res: Response) => {
         linesRemoved: true,
         createdAt: true,
       },
+      take: 100_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     // ── Group by agentId ───────────────────────────────────────
@@ -870,7 +900,11 @@ router.get('/me/patterns', async (req: AuthRequest, res: Response) => {
     const orgId = req.user!.orgId;
 
     const repoIds = (
-      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+      await prisma.repo.findMany({
+        where: { orgId },
+        select: { id: true },
+        take: 5000,
+      })
     ).map((r) => r.id);
 
     const baseWhere = {
@@ -881,6 +915,8 @@ router.get('/me/patterns', async (req: AuthRequest, res: Response) => {
     const sessions = await prisma.codingSession.findMany({
       where: baseWhere,
       select: { createdAt: true, durationMs: true, tokensUsed: true, costUsd: true },
+      take: 100_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     // Hourly distribution (24 buckets)
@@ -1014,6 +1050,8 @@ router.get('/me/efficiency', async (req: AuthRequest, res: Response) => {
         ],
       },
       select: { filesChanged: true },
+      take: 100_000,
+      orderBy: { committedAt: 'desc' },
     });
 
     let totalFilesChanged = 0;
@@ -1055,8 +1093,8 @@ router.get('/me/prompts', async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const orgId = req.user!.orgId;
 
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const limit = parseLimit(req.query.limit, 50, 200);
+    const offset = parseOffset(req.query.offset);
 
     const repoIds = (
       await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
@@ -1121,8 +1159,8 @@ router.get('/me/commits', async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const orgId = req.user!.orgId;
 
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const limit = parseLimit(req.query.limit, 50, 200);
+    const offset = parseOffset(req.query.offset);
     const sort = (req.query.sort as string) || 'date';
 
     const repoIds = (

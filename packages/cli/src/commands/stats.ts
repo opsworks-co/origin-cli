@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { gitDetailed } from '../utils/exec.js';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { computeAttributionStats, type AttributionStats } from '../attribution.js';
@@ -103,14 +103,15 @@ export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean
   const params: Record<string, string> = {};
   let repoName = '';
   if (!opts?.global && repoPath) {
-    try {
-      const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const r = gitDetailed(['remote', 'get-url', 'origin'], { cwd: repoPath });
+    if (r.status === 0) {
+      const remoteUrl = r.stdout.trim();
       const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
       if (match) {
         repoName = match[1];
         params.repoName = repoName;
       }
-    } catch {}
+    }
   }
 
   try {

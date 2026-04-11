@@ -19,6 +19,51 @@
 
 ---
 
+## Why Origin?
+
+AI now writes **30–70% of the code** that ships to production. But `git blame` still
+points at the human who pressed **Commit** — not the model, not the prompt, not the
+session. Once a line lands in `main`, the "why" is gone forever.
+
+Origin fixes that. It runs silently next to any AI coding agent (Claude Code, Cursor,
+Codex, Gemini, Aider, Windsurf, Continue, Copilot CLI, and more), captures the full
+session context — prompts, responses, tool calls, token counts, cost, duration —
+and attaches it to your commits as git notes. Everything stays in **your git repo**.
+No server. No login. No API keys. No data ever leaves your machine unless you
+explicitly push it.
+
+### The problems Origin solves
+
+| Pain | What Origin gives you |
+|---|---|
+| 🕵️ **`git blame` is lying to you** — you see the human, not the AI that wrote the line | `origin blame` shows the exact model, agent, session, and prompt behind every single line |
+| 💸 **You have no idea how much AI is costing you** | Per-session token + USD cost, broken down by model, repo, and developer |
+| 🧠 **Prompts disappear the moment you close the terminal** | Every prompt is recorded and searchable — `origin why <file>:<line>` replays the exact conversation that wrote it |
+| 🔁 **Context is lost every time you switch agents** | Cross-agent handoff: Claude can pick up where Cursor left off, automatically |
+| 🔐 **AI agents leak secrets into commits** | Built-in secret scanner blocks commits containing AWS keys, API tokens, JWTs, DB creds, and 40+ other patterns |
+| 📋 **No audit trail for SOC 2 / ISO 27001** | Full session history signed into git notes — tamper-evident, diffable, reviewable |
+| 🤷 **You don't know which model writes the best code** | `origin stats` compares approval rate, rework rate, avg cost, and avg lines across every model you use |
+| 🧩 **Monorepos and multi-repo workspaces break every tool** | Auto-detects every git repo under your working dir and tracks them all in a single session |
+
+### Why it's cool
+
+- **Zero config.** `origin init` auto-detects whichever AI agent you use and installs
+  the right hook. No YAML, no dashboards to set up, no accounts to create.
+- **100% local by default.** All data lives in git notes + the `origin-sessions`
+  branch. You own it. `git clone` your repo and everything comes with it.
+- **It works with every agent** — Claude Code, Cursor, Codex, Gemini CLI, Aider,
+  Windsurf, Continue, Copilot CLI, Roo, Cline, Kilo, and more. Same commands, same
+  output, no matter what you use.
+- **Fast.** Written in TypeScript, compiled to a single binary, runs in milliseconds.
+  Hooks add <50ms to your commits.
+- **Policy-aware.** Define rules in `.origin/policies.yml` (secret scanning, file
+  allowlists, model allowlists, cost limits) and Origin enforces them at commit
+  time — before bad code ever reaches `main`.
+- **Free forever for solo developers.** Open source, MIT licensed. Teams get an
+  optional hosted dashboard at [getorigin.io](https://getorigin.io).
+
+---
+
 ## Install
 
 ```bash
@@ -43,6 +88,7 @@ These are the commands you'll use every day:
 
 ```bash
 origin blame <file>              # Line-by-line AI/human attribution
+origin why <file>:<line>         # Which AI prompt wrote a specific line
 origin diff                      # Annotated diff — see AI changes in context
 origin stats                     # AI vs human breakdown for the repo
 origin sessions                  # List all AI coding sessions
@@ -62,12 +108,12 @@ origin backfill                  # Retroactively tag old commits as AI/human
 | <img src="https://cdn.simpleicons.org/openai/412991" width="14"> **Codex CLI** | Session hooks + process detection + npx cache | ✅ Supported |
 | <img src="https://cdn.simpleicons.org/google/4285F4" width="14"> **Gemini CLI** | Session hooks + process detection | ✅ Supported |
 | 🌊 **Windsurf** | Session hooks + CLI detection | ✅ Supported |
-| 🤖 **Aider** | Session hooks + CLI detection | ✅ Supported |
-| <img src="https://cdn.simpleicons.org/github/ffffff" width="14"> **GitHub Copilot** | IDE extension + GH CLI extension + process detection | ✅ Supported |
-| 🧠 **Cody** | IDE extension + CLI detection | ✅ Supported |
-| ▶️ **Continue** | IDE extension detection | ✅ Supported |
-| 💎 **Codeium** | IDE extension detection | ✅ Supported |
-| 🔧 **Cline** | IDE extension detection (Claude Dev) | ✅ Supported |
+| 🤖 **Aider** | Session hooks + CLI detection | 🚧 In Development |
+| <img src="https://cdn.simpleicons.org/github/ffffff" width="14"> **GitHub Copilot** | IDE extension + GH CLI extension + process detection | 🚧 In Development |
+| 🧠 **Cody** | IDE extension + CLI detection | 🚧 In Development |
+| ▶️ **Continue** | IDE extension detection | 🚧 In Development |
+| 💎 **Codeium** | IDE extension detection | 🚧 In Development |
+| 🔧 **Cline** | IDE extension detection (Claude Dev) | 🚧 In Development |
 
 **Detection methods:**
 - CLI availability (`which <tool>`)
@@ -343,7 +389,7 @@ AI Agent commits code → Post-commit hook fires → Origin detects AI process
 | Line-level attribution | **Yes** — per-line AI/human tags | Commit-level only | No |
 | Retroactive tagging | **Yes** — `origin backfill` | No | No |
 | Local-first / no server | **Yes** — git notes, zero setup | Yes | No — SaaS only |
-| Multi-agent support | **11 agents** | Claude only | GitHub Copilot only |
+| Multi-agent support | **5 agents** (6 more in dev) | Claude only | GitHub Copilot only |
 | Session transcripts | **Full prompts + responses** | No | No |
 | Per-file context injection | **Yes** — agents see authorship | No | No |
 | Secret scanning | **Built-in** pre-commit hook | No | No |

@@ -145,7 +145,19 @@ export function storeTranscript(content: string): string {
     };
 
     ensureManifestDir();
-    fs.writeFileSync(manifestPath(fullHash), JSON.stringify(manifest, null, 2));
+    // Atomic write: tmp + rename. A crash (or two concurrent CLIs racing on
+    // the same hash) can otherwise leave a half-written manifest on disk,
+    // which then fails JSON.parse forever on every subsequent read and
+    // effectively "loses" the transcript even though its chunks are intact.
+    const manifestFinal = manifestPath(fullHash);
+    const manifestTmp = `${manifestFinal}.tmp-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+    try {
+      fs.writeFileSync(manifestTmp, JSON.stringify(manifest, null, 2));
+      fs.renameSync(manifestTmp, manifestFinal);
+    } catch (err) {
+      try { fs.unlinkSync(manifestTmp); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   return fullHash;

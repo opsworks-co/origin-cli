@@ -17,19 +17,91 @@ export interface AuthRequest extends Request {
   apiKeyName?: string;         // Display name of the API key
 }
 
+/**
+ * Name of the httpOnly session cookie. Kept short + prefixed so ops can grep
+ * quickly in access logs.
+ */
+export const AUTH_COOKIE_NAME = 'origin_auth';
+
+/** Parse a single cookie by name from the Cookie header. Minimal + allocation-free. */
+function readCookie(req: Request, name: string): string | null {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  // Cookie header format: "k1=v1; k2=v2"
+  const parts = header.split(';');
+  for (const part of parts) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    if (k === name) {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    }
+  }
+  return null;
+}
+
+/**
+ * Set the session cookie. httpOnly blocks XSS from reading the token,
+ * SameSite=Strict blocks CSRF (the browser won't attach it on cross-site nav
+ * or subrequests), Secure forces HTTPS in production.
+ */
+export function setAuthCookie(res: Response, token: string) {
+  const isProd = process.env.NODE_ENV === 'production';
+  const maxAge = 7 * 24 * 60 * 60; // 7 days, must match JWT exp
+  const parts = [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'HttpOnly',
+    'Path=/',
+    'SameSite=Strict',
+    `Max-Age=${maxAge}`,
+  ];
+  if (isProd) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+export function clearAuthCookie(res: Response) {
+  const isProd = process.env.NODE_ENV === 'production';
+  const parts = [
+    `${AUTH_COOKIE_NAME}=`,
+    'HttpOnly',
+    'Path=/',
+    'SameSite=Strict',
+    'Max-Age=0',
+  ];
+  if (isProd) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
 export async function authMiddleware(req: AuthRequest, _res: Response, next: NextFunction) {
   // Support Bearer token in Authorization header
   const header = req.headers.authorization;
   if (header?.startsWith('Bearer ')) {
     try {
-      const payload = jwt.verify(header.slice(7), JWT_SECRET) as { id: string; orgId: string; role: string };
+      // Pin the algorithm to HS256. Without an explicit allowlist,
+      // jsonwebtoken will honor whatever `alg` header the attacker
+      // sets — including `none` (pre-defaults) and, more practically,
+      // asymmetric-to-symmetric key confusion. Locking to HS256 matches
+      // how we sign and closes the alg=none / key-confusion attack.
+      const payload = jwt.verify(header.slice(7), JWT_SECRET, { algorithms: ['HS256'] }) as { id: string; orgId: string; role: string };
       req.user = payload;
     } catch { /* ignore invalid tokens */ }
+  }
+  // Support httpOnly session cookie for the web UI. SameSite=Strict on the
+  // cookie is our CSRF defense — the browser will only attach it on
+  // same-origin requests, so forged cross-site POSTs can't authenticate.
+  if (!req.user) {
+    const cookieToken = readCookie(req, AUTH_COOKIE_NAME);
+    if (cookieToken) {
+      try {
+        const payload = jwt.verify(cookieToken, JWT_SECRET, { algorithms: ['HS256'] }) as { id: string; orgId: string; role: string };
+        req.user = payload;
+      } catch { /* ignore invalid cookie */ }
+    }
   }
   // Also support token in query param (for SSE EventSource which can't set headers)
   if (!req.user && req.query.token) {
     try {
-      const payload = jwt.verify(req.query.token as string, JWT_SECRET) as { id: string; orgId: string; role: string };
+      const payload = jwt.verify(req.query.token as string, JWT_SECRET, { algorithms: ['HS256'] }) as { id: string; orgId: string; role: string };
       req.user = payload;
     } catch { /* ignore invalid tokens */ }
   }

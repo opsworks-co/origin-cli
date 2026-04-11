@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { prisma } from '../db.js';
+import { assertSafeExternalUrl } from '../utils/ssrf-guard.js';
 
 // ── GitHub App Token Management ──────────────────────────────────
 
@@ -8,8 +9,29 @@ const GITHUB_API = 'https://api.github.com';
 /**
  * In-memory cache for installation access tokens.
  * Avoids DB reads/writes on every API call within the 1-hour token lifetime.
+ *
+ * Size-bounded: when the map exceeds MAX_TOKEN_CACHE_ENTRIES, we evict the
+ * oldest half of the entries (by insertion order). Unbounded growth was a
+ * real operational risk on multi-tenant deploys — every org that ever
+ * refreshed a token would stay resident forever.
  */
+const MAX_TOKEN_CACHE_ENTRIES = 5000;
 const tokenCache = new Map<string, { token: string; expiresAt: Date }>();
+
+function rememberToken(key: string, value: { token: string; expiresAt: Date }): void {
+  // Delete-then-set so LRU-ish eviction works via Map insertion order.
+  tokenCache.delete(key);
+  tokenCache.set(key, value);
+  if (tokenCache.size > MAX_TOKEN_CACHE_ENTRIES) {
+    const evictCount = Math.floor(MAX_TOKEN_CACHE_ENTRIES / 2);
+    const iter = tokenCache.keys();
+    for (let i = 0; i < evictCount; i++) {
+      const next = iter.next();
+      if (next.done) break;
+      tokenCache.delete(next.value);
+    }
+  }
+}
 
 /**
  * Generate a short-lived JWT signed with the GitHub App's private key.
@@ -45,6 +67,7 @@ export async function createInstallationToken(
   const appJwt = generateAppJWT(appId, privateKey);
 
   const url = `${baseUrl}/app/installations/${installationId}/access_tokens`;
+  assertSafeExternalUrl(url, 'github-app.createInstallationToken');
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -107,7 +130,7 @@ export async function getValidInstallationToken(config: {
     const expiresAt = new Date(tokenExpiresAt);
     if (expiresAt.getTime() - Date.now() > SAFETY_MARGIN_MS) {
       // DB token is still valid, cache it and return
-      tokenCache.set(config.id, { token: config.token, expiresAt });
+      rememberToken(config.id, { token: config.token, expiresAt });
       return config.token;
     }
   }
@@ -217,9 +240,14 @@ export async function listGitHubAppRepos(
   }> = [];
 
   let url: string | null = `${baseUrl}/installation/repositories?per_page=100`;
+  // Cap pagination: 50 pages × 100 per page = 5k repos max per call.
+  // Guards against OOM on very large orgs and runaway loops.
+  const MAX_PAGES = 50;
+  let pageCount = 0;
 
   try {
-    while (url) {
+    while (url && pageCount < MAX_PAGES) {
+      pageCount++;
       const currentUrl: string = url;
       const res: globalThis.Response = await fetch(currentUrl, {
         headers: {

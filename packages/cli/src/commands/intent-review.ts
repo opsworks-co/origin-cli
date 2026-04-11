@@ -1,7 +1,10 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import { writeFileSync } from 'fs';
+import { gitDetailed } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_REF = /^[a-zA-Z0-9_./~^-]+$/;
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -42,61 +45,56 @@ interface IntentReviewData {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-const execOpts = (cwd: string) => ({
-  encoding: 'utf-8' as const,
+const gitOpts = (cwd: string) => ({
   cwd,
-  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
   maxBuffer: 10 * 1024 * 1024,
 });
 
 function readOriginNote(repoPath: string, sha: string): Record<string, any> | null {
+  if (!HEX.test(sha)) return null;
+  const r = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts(repoPath));
+  if (r.status !== 0) return null;
   try {
-    const note = execSync(`git notes --ref=origin show ${sha}`, execOpts(repoPath)).trim();
-    return JSON.parse(note);
+    return JSON.parse(r.stdout.trim());
   } catch {
     return null;
   }
 }
 
 function getCommitTrailer(repoPath: string, sha: string, trailer: string): string | null {
-  try {
-    const value = execSync(
-      `git log -1 --format="%(trailers:key=${trailer},valueonly)" ${sha}`,
-      execOpts(repoPath),
-    ).trim();
-    return value || null;
-  } catch {
-    return null;
-  }
+  if (!HEX.test(sha)) return null;
+  if (!/^[a-zA-Z0-9_-]+$/.test(trailer)) return null;
+  const r = gitDetailed(
+    ['log', '-1', `--format=%(trailers:key=${trailer},valueonly)`, sha],
+    gitOpts(repoPath),
+  );
+  if (r.status !== 0) return null;
+  const value = r.stdout.trim();
+  return value || null;
 }
 
 function detectBaseBranch(repoPath: string): string {
   for (const candidate of ['main', 'master']) {
-    try {
-      execSync(`git rev-parse --verify ${candidate}`, execOpts(repoPath));
-      return candidate;
-    } catch { /* try next */ }
+    const r = gitDetailed(['rev-parse', '--verify', candidate], gitOpts(repoPath));
+    if (r.status === 0) return candidate;
   }
   return 'main';
 }
 
 function getCurrentBranch(repoPath: string): string {
-  try {
-    return execSync('git rev-parse --abbrev-ref HEAD', execOpts(repoPath)).trim();
-  } catch {
-    return 'unknown';
-  }
+  const r = gitDetailed(['rev-parse', '--abbrev-ref', 'HEAD'], gitOpts(repoPath));
+  if (r.status !== 0) return 'unknown';
+  return r.stdout.trim();
 }
 
 function getCommitFiles(repoPath: string, sha: string): string[] {
-  try {
-    return execSync(
-      `git diff-tree --no-commit-id --name-only -r ${sha}`,
-      execOpts(repoPath),
-    ).trim().split('\n').filter(Boolean);
-  } catch {
-    return [];
-  }
+  if (!HEX.test(sha)) return [];
+  const r = gitDetailed(
+    ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+    gitOpts(repoPath),
+  );
+  if (r.status !== 0) return [];
+  return r.stdout.trim().split('\n').filter(Boolean);
 }
 
 function timeAgo(date: Date): string {
@@ -210,21 +208,25 @@ function assessRisk(files: string[], allSessionFiles: Map<string, string[]>): { 
 function collectIntentData(repoPath: string, branch: string, baseBranch: string): IntentReviewData {
   // Get commits on branch not in base
   let commitLines: string[] = [];
-  try {
-    const log = execSync(
-      `git log ${baseBranch}..${branch} --format="%H %ae %ai %s" --reverse`,
-      execOpts(repoPath),
-    ).trim();
-    if (log) commitLines = log.split('\n').filter(Boolean);
-  } catch {
-    // Maybe baseBranch doesn't exist remotely, try origin/
-    try {
-      const log = execSync(
-        `git log origin/${baseBranch}..${branch} --format="%H %ae %ai %s" --reverse`,
-        execOpts(repoPath),
-      ).trim();
+  if (SAFE_REF.test(baseBranch) && SAFE_REF.test(branch)) {
+    const r = gitDetailed(
+      ['log', `${baseBranch}..${branch}`, '--format=%H %ae %ai %s', '--reverse'],
+      gitOpts(repoPath),
+    );
+    if (r.status === 0) {
+      const log = r.stdout.trim();
       if (log) commitLines = log.split('\n').filter(Boolean);
-    } catch { /* no commits */ }
+    } else {
+      // Maybe baseBranch doesn't exist remotely, try origin/
+      const r2 = gitDetailed(
+        ['log', `origin/${baseBranch}..${branch}`, '--format=%H %ae %ai %s', '--reverse'],
+        gitOpts(repoPath),
+      );
+      if (r2.status === 0) {
+        const log = r2.stdout.trim();
+        if (log) commitLines = log.split('\n').filter(Boolean);
+      }
+    }
   }
 
   if (commitLines.length === 0) {

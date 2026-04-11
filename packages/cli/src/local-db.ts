@@ -56,7 +56,22 @@ function loadPromptsDB(): PromptsDB {
 
 function savePromptsDB(db: PromptsDB): void {
   ensureDbDir();
-  fs.writeFileSync(PROMPTS_FILE, JSON.stringify(db, null, 2));
+  // Atomic write: serialize to a temp file in the same directory, then
+  // rename over the target. A plain writeFileSync on the target is not
+  // atomic — a concurrent CLI invocation (two Claude sessions, pre-commit
+  // hook vs. MCP server, etc.) can interleave read-modify-write cycles and
+  // silently drop one side's prompts. Rename is atomic on POSIX and on
+  // Windows when source+dest are on the same volume, which is guaranteed
+  // here since tmp lives next to PROMPTS_FILE.
+  const tmp = `${PROMPTS_FILE}.tmp-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
+    fs.renameSync(tmp, PROMPTS_FILE);
+  } catch (err) {
+    // Best-effort cleanup of the temp file if the rename failed.
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    throw err;
+  }
 }
 
 // ─── Prompt Operations ───────────────────────────────────────────────────

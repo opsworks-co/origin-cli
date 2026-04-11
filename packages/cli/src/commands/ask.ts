@@ -1,9 +1,12 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { gitDetailed } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 /**
  * origin ask <query> [--file <path>] [--line <n>] [--session <id>]
@@ -128,16 +131,18 @@ export async function askCommand(
 // ── File-based lookup: find which session wrote a file ───────────────────────
 
 async function askAboutFile(file: string, query: string, repoPath: string, line?: string): Promise<boolean> {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoPath };
 
   // Find recent commits that touched this file
   let commits: string[];
-  try {
-    const log = execSync(`git log --format=%H -20 -- "${file}"`, execOpts).trim();
-    commits = log ? log.split('\n') : [];
-  } catch {
-    console.log(chalk.yellow(`  Could not find git history for ${file}`));
-    return false;
+  {
+    const r = gitDetailed(['log', '--format=%H', '-20', '--', file], gitOpts);
+    if (r.status !== 0) {
+      console.log(chalk.yellow(`  Could not find git history for ${file}`));
+      return false;
+    }
+    const log = r.stdout.trim();
+    commits = log ? log.split('\n').filter(s => HEX.test(s)) : [];
   }
 
   if (commits.length === 0) {
@@ -150,12 +155,10 @@ async function askAboutFile(file: string, query: string, repoPath: string, line?
   const commitToSession: Record<string, string> = {};
 
   for (const sha of commits) {
+    const r = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts);
+    if (r.status !== 0) continue;
     try {
-      const noteContent = execSync(
-        `git notes --ref=origin show ${sha} 2>/dev/null`,
-        { ...execOpts, stdio: ['pipe', 'pipe', 'pipe'] }
-      ).trim();
-      const noteData = JSON.parse(noteContent);
+      const noteData = JSON.parse(r.stdout.trim());
       const sid = noteData?.origin?.sessionId || noteData?.sessionId;
       if (sid && !sessionIds.includes(sid)) {
         sessionIds.push(sid);
@@ -201,18 +204,16 @@ async function askAboutFile(file: string, query: string, repoPath: string, line?
       printPromptResult(p.promptIndex, p.promptText, p.filesChanged, p.model);
     }
 
-    if (relevant.length === 0 && prompts.length === 0) {
+    if (relevant.length === 0 && prompts.length === 0 && SAFE_ID.test(sid)) {
       // Try loading from git branch
-      try {
-        const md = execSync(
-          `git show origin-sessions:sessions/${sid}/prompts.md 2>/dev/null`,
-          execOpts
-        ).trim();
+      const r = gitDetailed(['show', `origin-sessions:sessions/${sid}/prompts.md`], gitOpts);
+      if (r.status === 0) {
+        const md = r.stdout.trim();
         if (md) {
           const preview = md.slice(0, 300).replace(/\n/g, ' ');
           console.log(chalk.white(`    ${preview}${md.length > 300 ? '...' : ''}`));
         }
-      } catch { /* no prompts.md */ }
+      }
     }
     console.log('');
   }
@@ -229,45 +230,41 @@ interface BranchSearchResult {
 }
 
 function searchOriginSessionsBranch(query: string, repoPath: string, limit: number): BranchSearchResult[] {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoPath };
   const results: BranchSearchResult[] = [];
 
-  try {
-    execSync('git rev-parse refs/heads/origin-sessions', execOpts);
-  } catch {
-    return results;
+  {
+    const r = gitDetailed(['rev-parse', 'refs/heads/origin-sessions'], gitOpts);
+    if (r.status !== 0) return results;
   }
 
-  try {
-    // List all session directories
-    const tree = execSync('git ls-tree --name-only origin-sessions:sessions/', execOpts).trim();
-    if (!tree) return results;
+  // List all session directories
+  const treeRes = gitDetailed(['ls-tree', '--name-only', 'origin-sessions:sessions/'], gitOpts);
+  if (treeRes.status !== 0) return results;
+  const tree = treeRes.stdout.trim();
+  if (!tree) return results;
 
-    const sessionDirs = tree.split('\n');
-    const lowerQuery = query.toLowerCase();
+  const sessionDirs = tree.split('\n');
+  const lowerQuery = query.toLowerCase();
 
-    for (const sid of sessionDirs) {
-      if (results.length >= limit) break;
+  for (const sid of sessionDirs) {
+    if (results.length >= limit) break;
+    if (!SAFE_ID.test(sid)) continue;
 
-      try {
-        // Search prompts.md
-        const md = execSync(
-          `git show origin-sessions:sessions/${sid}/prompts.md 2>/dev/null`,
-          execOpts
-        ).trim();
-        if (md.toLowerCase().includes(lowerQuery)) {
-          const idx = md.toLowerCase().indexOf(lowerQuery);
-          const start = Math.max(0, idx - 50);
-          const end = Math.min(md.length, idx + query.length + 100);
-          results.push({
-            sessionId: sid,
-            source: 'prompts.md',
-            snippet: md.slice(start, end).replace(/\n/g, ' '),
-          });
-        }
-      } catch { /* skip */ }
+    const r = gitDetailed(['show', `origin-sessions:sessions/${sid}/prompts.md`], gitOpts);
+    if (r.status !== 0) continue;
+    const md = r.stdout.trim();
+    if (md.toLowerCase().includes(lowerQuery)) {
+      const idx = md.toLowerCase().indexOf(lowerQuery);
+      const start = Math.max(0, idx - 50);
+      const end = Math.min(md.length, idx + query.length + 100);
+      results.push({
+        sessionId: sid,
+        source: 'prompts.md',
+        snippet: md.slice(start, end).replace(/\n/g, ' '),
+      });
     }
-  } catch { /* ignore */ }
+  }
 
   return results;
 }

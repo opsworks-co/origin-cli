@@ -1,7 +1,9 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { gitDetailed } from '../utils/exec.js';
 import { computeAttributionStats, type AttributionStats } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
+
+const SAFE_REF = /^[a-zA-Z0-9_./~^-]+$/;
 
 function renderBar(pct: number, width: number = 15): string {
   const filled = Math.round((pct / 100) * width);
@@ -125,21 +127,28 @@ export async function compareCommand(arg1: string, arg2?: string, opts?: { json?
     return;
   }
 
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoPath };
 
   if (arg2) {
     // Two branches: compare arg1 vs arg2
     // Find merge base for each branch
+    if (!SAFE_REF.test(arg1) || !SAFE_REF.test(arg2)) {
+      console.error(chalk.red('Error: Invalid branch/ref name.'));
+      return;
+    }
     let rangeA: string;
     let rangeB: string;
-    try {
-      const baseA = execSync(`git merge-base ${arg1} ${arg2}`, execOpts).trim();
-      rangeA = `${baseA}..${arg1}`;
-      rangeB = `${baseA}..${arg2}`;
-    } catch {
-      // Fallback: just use the branch names as ranges
-      rangeA = arg1;
-      rangeB = arg2;
+    {
+      const r = gitDetailed(['merge-base', arg1, arg2], gitOpts);
+      if (r.status === 0) {
+        const baseA = r.stdout.trim();
+        rangeA = `${baseA}..${arg1}`;
+        rangeB = `${baseA}..${arg2}`;
+      } else {
+        // Fallback: just use the branch names as ranges
+        rangeA = arg1;
+        rangeB = arg2;
+      }
     }
 
     const statsA = computeAttributionStats(repoPath, rangeA);
@@ -166,8 +175,13 @@ export async function compareCommand(arg1: string, arg2?: string, opts?: { json?
     displaySingle(arg1, stats);
   } else {
     // Single branch vs current HEAD
+    if (!SAFE_REF.test(arg1)) {
+      console.error(chalk.red('Error: Invalid branch/ref name.'));
+      return;
+    }
     const currentBranch = (() => {
-      try { return execSync('git rev-parse --abbrev-ref HEAD', execOpts).trim(); } catch { return 'HEAD'; }
+      const r = gitDetailed(['rev-parse', '--abbrev-ref', 'HEAD'], gitOpts);
+      return r.status === 0 ? r.stdout.trim() : 'HEAD';
     })();
 
     if (arg1 === currentBranch) {
@@ -184,13 +198,16 @@ export async function compareCommand(arg1: string, arg2?: string, opts?: { json?
     // Compare current branch divergence from arg1
     let rangeA: string;
     let rangeB: string;
-    try {
-      const base = execSync(`git merge-base ${arg1} ${currentBranch}`, execOpts).trim();
-      rangeA = `${base}..${arg1}`;
-      rangeB = `${base}..${currentBranch}`;
-    } catch {
-      rangeA = arg1;
-      rangeB = currentBranch;
+    {
+      const r = gitDetailed(['merge-base', arg1, currentBranch], gitOpts);
+      if (r.status === 0) {
+        const base = r.stdout.trim();
+        rangeA = `${base}..${arg1}`;
+        rangeB = `${base}..${currentBranch}`;
+      } else {
+        rangeA = arg1;
+        rangeB = currentBranch;
+      }
     }
 
     const statsA = computeAttributionStats(repoPath, rangeA);

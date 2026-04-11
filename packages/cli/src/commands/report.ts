@@ -1,9 +1,11 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import { writeFileSync } from 'fs';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
+import { gitDetailed } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -29,10 +31,8 @@ interface ReportData {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-const execOpts = (cwd: string) => ({
-  encoding: 'utf-8' as const,
+const gitOpts = (cwd: string) => ({
   cwd,
-  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
   maxBuffer: 10 * 1024 * 1024,
 });
 
@@ -42,11 +42,12 @@ function parseDaysFromRange(range: string): number {
 }
 
 function getRepoName(repoPath: string): string {
-  try {
-    const remoteUrl = execSync('git remote get-url origin', execOpts(repoPath)).trim();
+  const r = gitDetailed(['remote', 'get-url', 'origin'], gitOpts(repoPath));
+  if (r.status === 0) {
+    const remoteUrl = r.stdout.trim();
     const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
     if (match) return match[1];
-  } catch { /* ignore */ }
+  }
   // Fallback to directory name
   return repoPath.split('/').filter(Boolean).pop() || 'unknown';
 }
@@ -56,9 +57,11 @@ function formatDate(d: Date): string {
 }
 
 function readOriginNote(repoPath: string, sha: string): Record<string, any> | null {
+  if (!HEX.test(sha)) return null;
+  const r = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts(repoPath));
+  if (r.status !== 0) return null;
   try {
-    const note = execSync(`git notes --ref=origin show ${sha}`, execOpts(repoPath)).trim();
-    return JSON.parse(note);
+    return JSON.parse(r.stdout.trim());
   } catch {
     return null;
   }
@@ -160,24 +163,27 @@ function collectLocalGitData(repoPath: string, days: number): ReportData {
   const repoName = getRepoName(repoPath);
   const sinceStr = `${days} days ago`;
 
-  // Get commits in range
+  // Get commits in range (days validated as positive int)
   let commits: Array<{ sha: string; email: string; date: string; subject: string }> = [];
-  try {
-    const log = execSync(
-      `git log --since="${sinceStr}" --format="%H %ae %ai %s"`,
-      execOpts(repoPath),
-    ).trim();
-    if (log) {
-      commits = log.split('\n').filter(Boolean).map(line => {
-        const parts = line.split(' ');
-        const sha = parts[0];
-        const email = parts[1];
-        const date = parts[2]; // YYYY-MM-DD
-        const subject = parts.slice(4).join(' ');
-        return { sha, email, date, subject };
-      });
+  if (Number.isInteger(days) && days > 0 && days < 10000) {
+    const r = gitDetailed(
+      ['log', `--since=${sinceStr}`, '--format=%H %ae %ai %s'],
+      gitOpts(repoPath),
+    );
+    if (r.status === 0) {
+      const log = r.stdout.trim();
+      if (log) {
+        commits = log.split('\n').filter(Boolean).map(line => {
+          const parts = line.split(' ');
+          const sha = parts[0];
+          const email = parts[1];
+          const date = parts[2]; // YYYY-MM-DD
+          const subject = parts.slice(4).join(' ');
+          return { sha, email, date, subject };
+        });
+      }
     }
-  } catch { /* no commits */ }
+  }
 
   // Analyze each commit
   let aiCommits = 0;
@@ -224,18 +230,21 @@ function collectLocalGitData(repoPath: string, days: number): ReportData {
     }
 
     // Files changed
-    try {
-      const files = execSync(
-        `git diff-tree --no-commit-id --name-only -r ${commit.sha}`,
-        execOpts(repoPath),
-      ).trim().split('\n').filter(Boolean);
-      for (const f of files) {
-        allFiles.add(f);
-        if (isAi) {
-          fileHits.set(f, (fileHits.get(f) || 0) + 1);
+    if (HEX.test(commit.sha)) {
+      const r = gitDetailed(
+        ['diff-tree', '--no-commit-id', '--name-only', '-r', commit.sha],
+        gitOpts(repoPath),
+      );
+      if (r.status === 0) {
+        const files = r.stdout.trim().split('\n').filter(Boolean);
+        for (const f of files) {
+          allFiles.add(f);
+          if (isAi) {
+            fileHits.set(f, (fileHits.get(f) || 0) + 1);
+          }
         }
       }
-    } catch { /* skip */ }
+    }
   }
 
   // Build cost-by-model

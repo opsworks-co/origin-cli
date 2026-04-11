@@ -1,11 +1,19 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
+import { safeParseArray, safeParseObject } from '../utils/safe-json.js';
 
 const router = Router();
 
+// Wraps the shared util so callers in this file keep the old
+// `safeParse(val, fallback)` ergonomics but we get real logging instead
+// of a bare `catch {}` that silently swallows schema drift.
 function safeParse(val: string | null | undefined, fallback: any = []) {
-  if (!val) return fallback;
-  try { return JSON.parse(val); } catch { return fallback; }
+  if (val == null) return fallback;
+  if (Array.isArray(fallback)) {
+    const arr = safeParseArray(val, 'share.safeParse');
+    return arr.length === 0 && fallback.length > 0 ? fallback : arr;
+  }
+  return safeParseObject(val, 'share.safeParse', fallback);
 }
 
 // GET /:slug — public endpoint (NO auth) — returns full session data for the share page

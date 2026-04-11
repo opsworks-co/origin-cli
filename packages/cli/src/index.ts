@@ -46,6 +46,7 @@ import { explainCompareCommand } from './commands/explain.js';
 import { dbImportCommand, dbStatsCommand } from './commands/db.js';
 import { proxyInstallCommand, proxyUninstallCommand, proxyStatusCommand } from './commands/proxy.js';
 import { verifyCommand } from './commands/verify.js';
+import { verifyInstallCommand } from './commands/verify-install.js';
 import { ignoreListCommand, ignoreAddCommand, ignoreRemoveCommand, ignoreTestCommand } from './commands/ignore.js';
 import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
@@ -54,6 +55,7 @@ import { reportCommand } from './commands/report.js';
 import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
 import { checkForUpdate } from './version-check.js';
+import { BUILD_INFO } from './build-info.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -62,12 +64,45 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
 
+// Install a global sanitizer so every console.error / console.warn goes
+// through secret-redaction and home-directory collapsing before hitting
+// the user's terminal or shell history.
+import { installGlobalConsoleSanitizer } from './error-sanitize.js';
+installGlobalConsoleSanitizer();
+
 const program = new Command();
+
+// `--version` prints the package version. `--version --verbose` (or the
+// dedicated `version` subcommand below) additionally prints the git SHA and
+// build timestamp captured at build time. This is the only reliable way to
+// answer "what exactly is this binary?" after the fact.
+const verboseRequested = process.argv.includes('--verbose');
+const versionString = verboseRequested
+  ? `${pkg.version} (${BUILD_INFO.gitShortSha}${BUILD_INFO.gitDirty ? '-dirty' : ''}, built ${BUILD_INFO.builtAt})`
+  : pkg.version;
 
 program
   .name('origin')
   .description('Origin — AI Coding Agent Governance CLI')
-  .version(pkg.version);
+  .version(versionString);
+
+program.command('version')
+  .description('Show CLI version and build provenance')
+  .option('--verbose', 'Include git SHA, branch, and build timestamp')
+  .option('--json', 'Output as JSON')
+  .action((opts: { verbose?: boolean; json?: boolean }) => {
+    if (opts.json) {
+      const { version: _bv, ...rest } = BUILD_INFO;
+      console.log(JSON.stringify({ version: pkg.version, ...rest }, null, 2));
+      return;
+    }
+    console.log(`origin ${pkg.version}`);
+    if (opts.verbose) {
+      console.log(`  git:    ${BUILD_INFO.gitSha}${BUILD_INFO.gitDirty ? ' (dirty)' : ''}`);
+      console.log(`  branch: ${BUILD_INFO.gitBranch}`);
+      console.log(`  built:  ${BUILD_INFO.builtAt}`);
+    }
+  });
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -239,6 +274,12 @@ program.command('verify')
   .description('Health check — show agent config, repo config, mode, sessions, attribution')
   .option('--json', 'Output as JSON')
   .action(verifyCommand);
+
+program.command('verify-install')
+  .description('Verify the installed CLI binary against the canonical manifest (tamper check)')
+  .option('--json', 'Output as JSON')
+  .option('--offline', 'Skip network fetches — only sanity-check what is on disk')
+  .action(verifyInstallCommand);
 
 program.command('rework')
   .description('Detect AI-generated code that was reverted or heavily modified (rework hotspots)')
@@ -433,6 +474,8 @@ proxy.command('status')
 program.command('upgrade')
   .description('Upgrade Origin CLI to latest version')
   .option('--check', 'Only check for updates, do not install')
+  .option('--dry-run', 'Show what would be downloaded and installed without touching anything')
+  .option('--rollback', 'Re-install the previous version from the last backup')
   .action(upgradeCommand);
 
 // ─── Internal Hook Handlers ──────────────────────────────────────────────

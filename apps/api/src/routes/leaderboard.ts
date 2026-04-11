@@ -1,6 +1,10 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { pickAllowed } from '../utils/validate.js';
+
+const LEADERBOARD_PERIODS = ['week', 'month', 'quarter', 'all'] as const;
+const LEADERBOARD_SORTS = ['sessions', 'cost', 'tokens', 'lines', 'quality'] as const;
 
 const router = Router();
 router.use(requireAuth);
@@ -9,13 +13,14 @@ router.use(requireAuth);
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
-    const period = (req.query.period as string) || 'month';
-    const sortBy = (req.query.sortBy as string) || 'sessions';
+    const period = pickAllowed(req.query.period, LEADERBOARD_PERIODS, 'month');
+    const sortBy = pickAllowed(req.query.sortBy, LEADERBOARD_SORTS, 'sessions');
 
-    // 1. Get repoIds for org
+    // 1. Get repoIds for org (cap — see prompts.ts rationale).
     const repos = await prisma.repo.findMany({
       where: { orgId },
       select: { id: true },
+      take: 5000,
     });
     const repoIds = repos.map((r) => r.id);
 
@@ -42,7 +47,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         break;
     }
 
-    // 3. Get all sessions in range
+    // 3. Get sessions in range. Cap at 100k rows — the leaderboard is a
+    // group-by-user histogram, so a partial scan still produces a
+    // directionally accurate ranking. Unbounded scans on large tenants
+    // would OOM the route; prefer pre-aggregated counters if the cap
+    // becomes a fidelity problem.
     const sessions = await prisma.codingSession.findMany({
       where: {
         commit: { repoId: { in: repoIds } },
@@ -59,6 +68,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         createdAt: true,
         review: { select: { status: true } },
       },
+      take: 100_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     // 4. Group by userId
@@ -116,7 +127,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // 5. Compute metrics per user
     const userIds = Array.from(userMap.keys());
 
-    // Get violation counts per user from audit log
+    // Get violation counts per user from audit log. Cap at 50k —
+    // unbounded scans over the auditLog table OOM this route as it
+    // grows, and leaderboard ranking only needs a directional
+    // per-user count.
     const violationLogs = await prisma.auditLog.findMany({
       where: {
         orgId,
@@ -125,6 +139,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         userId: { in: userIds },
       },
       select: { userId: true },
+      take: 50_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     for (const v of violationLogs) {

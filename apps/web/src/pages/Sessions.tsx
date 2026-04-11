@@ -6,6 +6,7 @@ import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../uti
 import { Archive, ArchiveRestore, GitBranch, GitMerge } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
+import { safeHref } from '../utils/safe-url';
 
 function statusBadge(status: string) {
   return <span className={getStatusBadgeClass(status)}>{status}</span>;
@@ -407,59 +408,71 @@ export default function Sessions() {
         </div>
       </div>
 
-      {/* Analytics Summary Bar */}
-      {viewMode === 'list' && analytics && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-          <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Total Cost</p>
-            <p className="text-lg font-semibold text-gray-200 mt-0.5">
-              ${analytics.totalCost.toFixed(2)}
-            </p>
+      {/* Analytics Summary Bar — gradient stat cards, matches Insights/MyDashboard */}
+      {viewMode === 'list' && analytics && (() => {
+        const gradients: Record<string, string> = {
+          indigo: 'from-indigo-500/20 to-indigo-500/0',
+          purple: 'from-purple-500/20 to-purple-500/0',
+          cyan: 'from-cyan-500/20 to-cyan-500/0',
+          amber: 'from-amber-500/20 to-amber-500/0',
+          green: 'from-emerald-500/20 to-emerald-500/0',
+          red: 'from-red-500/20 to-red-500/0',
+        };
+        const StatTile = ({
+          label,
+          value,
+          accent,
+          valueClassName,
+        }: {
+          label: string;
+          value: React.ReactNode;
+          accent: keyof typeof gradients;
+          valueClassName?: string;
+        }) => (
+          <div className="relative rounded-xl border border-gray-800/80 bg-gray-900/40 p-4 overflow-hidden hover:border-gray-700 transition-colors">
+            <div className={`absolute inset-0 bg-gradient-to-br ${gradients[accent]} opacity-60 pointer-events-none`} />
+            <div className="relative">
+              <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wider">{label}</p>
+              <p className={`text-xl font-semibold tabular-nums mt-1.5 ${valueClassName ?? 'text-gray-50'}`}>
+                {value}
+              </p>
+            </div>
           </div>
-          <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Avg Cost</p>
-            <p className="text-lg font-semibold text-gray-200 mt-0.5">
-              ${analytics.avgCost.toFixed(2)}
-            </p>
+        );
+        return (
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+            <StatTile label="Total Cost" value={`$${analytics.totalCost.toFixed(2)}`} accent="cyan" />
+            <StatTile label="Avg Cost" value={`$${analytics.avgCost.toFixed(2)}`} accent="cyan" />
+            <StatTile label="Tokens" value={`${(analytics.totalTokens / 1000).toFixed(1)}k`} accent="purple" />
+            <StatTile label="Avg Duration" value={formatDuration(analytics.avgDuration)} accent="indigo" />
+            <StatTile label="Tool Calls" value={analytics.totalTools} accent="amber" />
+            {!isDev && (
+              <StatTile
+                label="Avg Score"
+                value={analytics.avgScore ?? '—'}
+                accent="green"
+                valueClassName={
+                  analytics.avgScore == null
+                    ? 'text-gray-500'
+                    : analytics.avgScore >= 80
+                      ? 'text-emerald-400'
+                      : analytics.avgScore >= 50
+                        ? 'text-amber-400'
+                        : 'text-red-400'
+                }
+              />
+            )}
+            {!isDev && (
+              <StatTile
+                label="Flagged"
+                value={analytics.flaggedCount}
+                accent={analytics.flaggedCount > 0 ? 'red' : 'green'}
+                valueClassName={analytics.flaggedCount > 0 ? 'text-red-400' : 'text-emerald-400'}
+              />
+            )}
           </div>
-          <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Tokens</p>
-            <p className="text-lg font-semibold text-gray-200 mt-0.5">
-              {(analytics.totalTokens / 1000).toFixed(1)}k
-            </p>
-          </div>
-          <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Avg Duration</p>
-            <p className="text-lg font-semibold text-gray-200 mt-0.5">
-              {formatDuration(analytics.avgDuration)}
-            </p>
-          </div>
-          <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Tool Calls</p>
-            <p className="text-lg font-semibold text-gray-200 mt-0.5">{analytics.totalTools}</p>
-          </div>
-          {!isDev && (
-          <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Avg Score</p>
-            <p className={`text-lg font-semibold mt-0.5 ${
-              analytics.avgScore == null ? 'text-gray-500' :
-              analytics.avgScore >= 80 ? 'text-green-400' :
-              analytics.avgScore >= 50 ? 'text-amber-400' : 'text-red-400'
-            }`}>
-              {analytics.avgScore ?? '—'}
-            </p>
-          </div>
-          )}
-          {!isDev && (
-          <div className="card py-3 px-4">
-            <p className="text-xs text-gray-500 uppercase tracking-wider">Flagged</p>
-            <p className={`text-lg font-semibold mt-0.5 ${analytics.flaggedCount > 0 ? 'text-red-400' : 'text-green-400'}`}>
-              {analytics.flaggedCount}
-            </p>
-          </div>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {/* Filter Bar - only in list view */}
       {viewMode === 'list' && (
@@ -637,7 +650,7 @@ export default function Sessions() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
                         <a
-                          href={group.pr.url}
+                          href={safeHref(group.pr.url)}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-indigo-400 hover:text-indigo-300 font-medium transition-colors"

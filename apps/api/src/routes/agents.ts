@@ -2,9 +2,36 @@ import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { createAgentVersion } from '../services/versioning.js';
+import { safeParseObject } from '../utils/safe-json.js';
 
 const router = Router();
 router.use(requireAuth);
+
+// Length caps for user-supplied agent fields. Applied on create + update so
+// a client can't push multi-MB strings into the DB and bloat every listing
+// response. Caps are generous (10KB for prompts) and only reject pathological
+// payloads, not legitimate input.
+const AGENT_FIELD_LIMITS = {
+  name: 200,
+  slug: 100,
+  description: 2_000,
+  model: 100,
+  systemPrompt: 10_000,
+  securityRules: 10_000,
+} as const;
+function validateAgentFieldLengths(fields: Record<string, unknown>): string | null {
+  for (const [key, limit] of Object.entries(AGENT_FIELD_LIMITS)) {
+    const val = fields[key];
+    if (val == null) continue;
+    if (typeof val !== 'string') {
+      return `Field ${key} must be a string`;
+    }
+    if (val.length > limit) {
+      return `Field ${key} exceeds max length of ${limit} characters`;
+    }
+  }
+  return null;
+}
 
 // GET / — list agents for org
 router.get('/', async (req: AuthRequest, res: Response) => {
@@ -15,6 +42,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         _count: { select: { sessions: true, versions: true } },
       },
       orderBy: { createdAt: 'desc' },
+      take: 500,
     });
     res.json(agents);
   } catch (err) {
@@ -30,6 +58,14 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
 
     if (!name || !slug || !model) {
       return res.status(400).json({ error: 'Missing required fields: name, slug, model' });
+    }
+
+    // Per-field caps. Without these a client can pass multi-MB strings and
+    // bloat the DB + every response that lists agents. 10KB is generous for
+    // system prompts; description/name caps are normal form-field sizes.
+    const lenErr = validateAgentFieldLengths({ name, slug, description, model, systemPrompt, securityRules });
+    if (lenErr) {
+      return res.status(400).json({ error: lenErr });
     }
 
     // Check for duplicate slug within the org
@@ -84,6 +120,7 @@ router.get('/my', async (req: AuthRequest, res: Response) => {
     const allAgents = await prisma.agent.findMany({
       where: { orgId, status: 'ACTIVE' },
       orderBy: { name: 'asc' },
+      take: 500,
     });
     res.json(allAgents);
   } catch (err) {
@@ -126,6 +163,11 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
     const id = req.params.id as string;
     const { name, description, model, status, systemPrompt, securityRulesEnabled, securityRules, allowedTools, maxCostPerSession, maxTokensPerSession, permissions } = req.body;
 
+    const lenErr = validateAgentFieldLengths({ name, description, model, systemPrompt, securityRules });
+    if (lenErr) {
+      return res.status(400).json({ error: lenErr });
+    }
+
     const existing = await prisma.agent.findFirst({
       where: { id, orgId: req.user!.orgId },
     });
@@ -146,8 +188,10 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
       changeType = 'PERMISSIONS_CHANGED';
     }
 
-    const agent = await prisma.agent.update({
-      where: { id },
+    // Defense in depth: updateMany with compound (id, orgId) so authorization
+    // is enforced at the DB call, not just by the precheck above.
+    const updateResult = await prisma.agent.updateMany({
+      where: { id, orgId: req.user!.orgId },
       data: {
         ...(name !== undefined && { name }),
         ...(description !== undefined && { description }),
@@ -161,6 +205,12 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
         ...(maxTokensPerSession !== undefined && { maxTokensPerSession }),
         ...(permissions !== undefined && { permissions: JSON.stringify(permissions) }),
       },
+    });
+    if (updateResult.count === 0) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    const agent = await prisma.agent.findFirst({
+      where: { id, orgId: req.user!.orgId },
     });
 
     await createAgentVersion(id, req.user!.id, changeType);
@@ -204,11 +254,17 @@ router.post('/:id/restore/:versionId', requireRole('ADMIN'), async (req: AuthReq
       return res.status(404).json({ error: 'Version not found' });
     }
 
-    const snapshot = JSON.parse(version.snapshot);
+    // Safe-parse the snapshot — a malformed snapshot used to crash the
+    // whole restore with a raw JSON.parse throw.
+    const snapshot = safeParseObject<Record<string, any>>(
+      version.snapshot,
+      `agentVersion.${version.id}.snapshot`,
+    );
 
-    // Restore agent fields from snapshot
-    const agent = await prisma.agent.update({
-      where: { id },
+    // Restore agent fields from snapshot. updateMany with (id, orgId) to
+    // enforce org scope at the DB call itself.
+    const restoreResult = await prisma.agent.updateMany({
+      where: { id, orgId: req.user!.orgId },
       data: {
         name: snapshot.name ?? existing.name,
         description: snapshot.description ?? existing.description,
@@ -222,6 +278,12 @@ router.post('/:id/restore/:versionId', requireRole('ADMIN'), async (req: AuthReq
         maxTokensPerSession: snapshot.maxTokensPerSession ?? null,
         permissions: snapshot.permissions ? JSON.stringify(snapshot.permissions) : existing.permissions,
       },
+    });
+    if (restoreResult.count === 0) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    const agent = await prisma.agent.findFirst({
+      where: { id, orgId: req.user!.orgId },
     });
 
     // Create a new version for this restore action
@@ -275,7 +337,14 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       where: { agentId: id },
     });
 
-    await prisma.agent.delete({ where: { id } });
+    // deleteMany with compound (id, orgId) enforces authorization at the
+    // DB call even if the precheck above is ever dropped in a refactor.
+    const deleted = await prisma.agent.deleteMany({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (deleted.count === 0) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -309,7 +378,7 @@ router.get('/:id/versions', async (req: AuthRequest, res: Response) => {
     res.json({
       versions: versions.map(v => ({
         ...v,
-        snapshot: JSON.parse(v.snapshot),
+        snapshot: safeParseObject(v.snapshot, `agentVersion.${v.id}.snapshot`),
       })),
       total: versions.length,
     });

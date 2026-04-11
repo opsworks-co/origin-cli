@@ -198,7 +198,7 @@ export default function Integrations() {
   const fetchChatConfig = async () => {
     setChatLoading(true);
     try {
-      const res = await fetch('/api/settings/chat', { headers: { Authorization: `Bearer ${localStorage.getItem('origin_token')}` } });
+      const res = await fetch('/api/settings/chat', { credentials: 'same-origin' });
       const data = await res.json();
       setChatConfigured(data.configured || data.hasKey);
       setChatProvider(data.llmProvider || 'anthropic');
@@ -226,7 +226,8 @@ export default function Integrations() {
     try {
       const res = await fetch('/api/settings/chat', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('origin_token')}` },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({ apiKey: chatApiKey, model: chatModel, llmProvider: chatProvider }),
       });
       const data = await res.json();
@@ -250,7 +251,8 @@ export default function Integrations() {
     try {
       const res = await fetch('/api/settings/chat/test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('origin_token')}` },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({ apiKey: chatApiKey || undefined, llmProvider: chatProvider }),
       });
       const data = await res.json();
@@ -624,6 +626,29 @@ export default function Integrations() {
             </div>
           );
         })()}
+
+        {/* Weekly Email Report summary card */}
+        <div
+          className={`rounded-xl border p-4 cursor-pointer transition-all hover:border-gray-600 ${emailEnabled ? 'border-green-800/50 bg-green-900/5' : 'border-gray-800 bg-gray-900/50'}`}
+          onClick={() => toggleSection('email')}
+        >
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${emailEnabled ? 'bg-green-900/30' : 'bg-gray-800'}`}>
+              <svg className="w-5 h-5 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-200">Weekly Email Report</h3>
+                {emailEnabled ? (
+                  <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-green-900/30 text-green-400">Enabled</span>
+                ) : (
+                  <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-800 text-gray-500">Disabled</span>
+                )}
+              </div>
+              <p className="text-xs text-gray-500 mt-0.5">Automated weekly summary sent to your team</p>
+            </div>
+          </div>
+        </div>
 
         {/* AI Chat summary card */}
         <div
@@ -1427,7 +1452,8 @@ export default function Integrations() {
       </section>
       )}
 
-      {/* Email Reports — always visible (simple toggle, not a full integration) */}
+      {/* Email Reports */}
+      {expandedSection === 'email' && (
       <section className="card space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -1503,6 +1529,7 @@ export default function Integrations() {
 
         <p className="text-xs text-gray-600">Requires RESEND_API_KEY environment variable on the server.</p>
       </section>
+      )}
 
       {/* AI Chat Configuration */}
       {expandedSection === 'chat' && (

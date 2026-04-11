@@ -1,7 +1,9 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { gitDetailed } from '../utils/exec.js';
 import { isAiCommit } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -22,48 +24,43 @@ interface ReworkEntry {
 
 // ─── Git Helpers ──────────────────────────────────────────────────────────
 
-const execOpts = (cwd: string) => ({
-  encoding: 'utf-8' as const,
+const gitOpts = (cwd: string) => ({
   cwd,
-  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
   maxBuffer: 10 * 1024 * 1024,
 });
 
 function getCommitsInRange(repoPath: string, days: number): CommitInfo[] {
-  try {
-    const output = execSync(
-      `git log --since="${days} days ago" --format="%H %ae %ai %s"`,
-      execOpts(repoPath),
-    ).trim();
-    if (!output) return [];
-    return output.split('\n').filter(Boolean).map(line => {
-      const parts = line.match(/^([0-9a-f]+)\s+(\S+)\s+(\S+\s\S+\s\S+)\s+(.*)$/);
-      if (!parts) return null;
-      return { sha: parts[1], author: parts[2], date: parts[3], subject: parts[4] };
-    }).filter(Boolean) as CommitInfo[];
-  } catch {
-    return [];
-  }
+  if (!Number.isInteger(days) || days <= 0 || days > 10000) return [];
+  const r = gitDetailed(
+    ['log', `--since=${days} days ago`, '--format=%H %ae %ai %s'],
+    gitOpts(repoPath),
+  );
+  if (r.status !== 0) return [];
+  const output = r.stdout.trim();
+  if (!output) return [];
+  return output.split('\n').filter(Boolean).map(line => {
+    const parts = line.match(/^([0-9a-f]+)\s+(\S+)\s+(\S+\s\S+\s\S+)\s+(.*)$/);
+    if (!parts) return null;
+    return { sha: parts[1], author: parts[2], date: parts[3], subject: parts[4] };
+  }).filter(Boolean) as CommitInfo[];
 }
 
 function getCommitFiles(repoPath: string, sha: string): string[] {
-  try {
-    return execSync(
-      `git diff-tree --no-commit-id --name-only -r ${sha}`,
-      execOpts(repoPath),
-    ).trim().split('\n').filter(Boolean);
-  } catch {
-    return [];
-  }
+  if (!HEX.test(sha)) return [];
+  const r = gitDetailed(
+    ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+    gitOpts(repoPath),
+  );
+  if (r.status !== 0) return [];
+  return r.stdout.trim().split('\n').filter(Boolean);
 }
 
 function readOriginNote(repoPath: string, sha: string): Record<string, any> | null {
+  if (!HEX.test(sha)) return null;
+  const r = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts(repoPath));
+  if (r.status !== 0) return null;
   try {
-    const note = execSync(
-      `git notes --ref=origin show ${sha}`,
-      execOpts(repoPath),
-    ).trim();
-    return JSON.parse(note);
+    return JSON.parse(r.stdout.trim());
   } catch {
     return null;
   }
@@ -91,60 +88,58 @@ function detectAgentName(repoPath: string, sha: string): string {
   if (note?.agent) return note.agent;
 
   // Fallback: check commit message
-  try {
-    const message = execSync(
-      `git log -1 --format=%B ${sha}`,
-      execOpts(repoPath),
-    ).trim();
-    const lower = message.toLowerCase();
-    if (lower.includes('claude')) return 'Claude';
-    if (lower.includes('gemini')) return 'Gemini';
-    if (lower.includes('codex') || message.trim() === '-') return 'Codex';
-    if (lower.includes('cursor')) return 'Cursor';
-    if (lower.includes('copilot')) return 'Copilot';
-  } catch { /* ignore */ }
+  if (HEX.test(sha)) {
+    const r = gitDetailed(['log', '-1', '--format=%B', sha], gitOpts(repoPath));
+    if (r.status === 0) {
+      const message = r.stdout.trim();
+      const lower = message.toLowerCase();
+      if (lower.includes('claude')) return 'Claude';
+      if (lower.includes('gemini')) return 'Gemini';
+      if (lower.includes('codex') || message.trim() === '-') return 'Codex';
+      if (lower.includes('cursor')) return 'Cursor';
+      if (lower.includes('copilot')) return 'Copilot';
+    }
+  }
 
   return 'AI';
 }
 
 function countAiLinesInCommit(repoPath: string, sha: string, file: string): number {
-  try {
-    const diff = execSync(
-      `git diff-tree -p ${sha} -- ${JSON.stringify(file)}`,
-      execOpts(repoPath),
-    ).trim();
-    let added = 0;
-    for (const line of diff.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) {
-        added++;
-      }
+  if (!HEX.test(sha)) return 0;
+  const r = gitDetailed(
+    ['diff-tree', '-p', sha, '--', file],
+    gitOpts(repoPath),
+  );
+  if (r.status !== 0) return 0;
+  const diff = r.stdout.trim();
+  let added = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      added++;
     }
-    return added;
-  } catch {
-    return 0;
   }
+  return added;
 }
 
 function countChangedLines(repoPath: string, aiSha: string, laterSha: string, file: string): number {
-  try {
-    const diff = execSync(
-      `git diff ${aiSha} ${laterSha} -- ${JSON.stringify(file)}`,
-      execOpts(repoPath),
-    ).trim();
-    if (!diff) return 0;
-    let changed = 0;
-    for (const line of diff.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) {
-        changed++;
-      }
-      if (line.startsWith('-') && !line.startsWith('---')) {
-        changed++;
-      }
+  if (!HEX.test(aiSha) || !HEX.test(laterSha)) return 0;
+  const r = gitDetailed(
+    ['diff', aiSha, laterSha, '--', file],
+    gitOpts(repoPath),
+  );
+  if (r.status !== 0) return 0;
+  const diff = r.stdout.trim();
+  if (!diff) return 0;
+  let changed = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      changed++;
     }
-    return changed;
-  } catch {
-    return 0;
+    if (line.startsWith('-') && !line.startsWith('---')) {
+      changed++;
+    }
   }
+  return changed;
 }
 
 // ─── Command ──────────────────────────────────────────────────────────────

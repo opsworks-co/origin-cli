@@ -19,9 +19,14 @@ async function syncAllRepos() {
   const startTime = Date.now();
 
   try {
-    // Get all repos grouped by org (need orgId for GitHub token lookup)
+    // Get all repos grouped by org (need orgId for GitHub token lookup).
+    // Cap at 20k — the sync loop below runs serially per repo, so a
+    // monotonically growing global repo list would eventually exceed
+    // the tick interval. Above that cap we need to shard this job.
     const repos = await prisma.repo.findMany({
       select: { id: true, path: true, provider: true, orgId: true, syncedAt: true },
+      take: 20_000,
+      orderBy: { syncedAt: 'asc' },
     });
 
     if (repos.length === 0) return;
@@ -78,18 +83,25 @@ async function closeStaleSession() {
   try {
     const cutoff = new Date(Date.now() - STALE_SESSION_MS);
 
+    // Batch cap: process 5k stale sessions per tick. The scheduler
+    // re-runs every minute, so a backlog drains in 5k/min without
+    // loading the full table at once.
     const staleSessions = await prisma.codingSession.findMany({
       where: {
         status: 'RUNNING',
         updatedAt: { lt: cutoff },
       },
       select: { id: true, startedAt: true },
+      take: 5000,
+      orderBy: { updatedAt: 'asc' },
     });
 
     if (staleSessions.length === 0) return;
 
     for (const session of staleSessions) {
-      const durationMs = Date.now() - new Date(session.startedAt!).getTime();
+      const durationMs = session.startedAt
+        ? Date.now() - new Date(session.startedAt).getTime()
+        : 0;
       await prisma.codingSession.update({
         where: { id: session.id },
         data: {
@@ -107,15 +119,18 @@ async function closeStaleSession() {
 }
 
 export function startAutoSync() {
-  // Run first sync after a short delay (let the server finish starting)
+  // Run first sync after a short delay (let the server finish starting).
+  // All timer handles are .unref()'d so they never keep the Node event loop
+  // alive during graceful shutdown — without this, fly.io rolling deploys
+  // hit terminationGracePeriodSeconds and have to SIGKILL the old machine.
   setTimeout(() => {
     console.log(`[auto-sync] Starting — interval: ${SYNC_INTERVAL_MS / 60000}min`);
     syncAllRepos();
     closeStaleSession();
-  }, 5000);
+  }, 5000).unref();
 
   // Then repeat on interval
-  setInterval(syncAllRepos, SYNC_INTERVAL_MS);
+  setInterval(syncAllRepos, SYNC_INTERVAL_MS).unref();
   // Check for stale sessions more frequently (every 5 minutes)
-  setInterval(closeStaleSession, 5 * 60 * 1000);
+  setInterval(closeStaleSession, 5 * 60 * 1000).unref();
 }

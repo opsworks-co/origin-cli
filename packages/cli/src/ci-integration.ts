@@ -1,6 +1,6 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { git, gitOrNull, runDetailed } from './utils/exec.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -31,11 +31,7 @@ export interface SquashMergeResult {
  * @param commitRange - Optional range (e.g., "main..HEAD", or last N commits)
  */
 export function generateCIReport(repoPath: string, commitRange?: string): CIAttributionReport {
-  const execOpts = {
-    cwd: repoPath,
-    encoding: 'utf-8' as const,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-  };
+  const gitOpts = { cwd: repoPath, timeoutMs: 10_000 };
 
   const report: CIAttributionReport = {
     totalCommits: 0,
@@ -48,14 +44,17 @@ export function generateCIReport(repoPath: string, commitRange?: string): CIAttr
     models: [],
   };
 
-  // Get commit list
+  // Get commit list. Validate range to prevent command injection — only
+  // accept ranges made of hex SHAs, branch-safe chars, and `..`/`...`.
   const range = commitRange || 'HEAD~10..HEAD';
+  if (!/^[a-zA-Z0-9_./~^-]+(?:\.{2,3}[a-zA-Z0-9_./~^-]+)?$/.test(range)) {
+    return report;
+  }
   let commits: string[];
   try {
-    commits = execSync(
-      `git rev-list ${range} 2>/dev/null || git rev-list --max-count=10 HEAD`,
-      execOpts,
-    ).trim().split('\n').filter(Boolean);
+    const raw = gitOrNull(['rev-list', range], gitOpts)
+      ?? gitOrNull(['rev-list', '--max-count=10', 'HEAD'], gitOpts);
+    commits = (raw || '').split('\n').filter(Boolean);
   } catch {
     return report;
   }
@@ -65,12 +64,11 @@ export function generateCIReport(repoPath: string, commitRange?: string): CIAttr
   const modelsSet = new Set<string>();
 
   for (const sha of commits) {
+    if (!/^[a-fA-F0-9]+$/.test(sha)) continue;
     // Check for Origin note
     try {
-      const note = execSync(
-        `git notes --ref=origin show ${sha} 2>/dev/null`,
-        execOpts,
-      ).trim();
+      const r = runDetailed('git', ['notes', '--ref=origin', 'show', sha], gitOpts);
+      const note = r.status === 0 ? r.stdout.trim() : '';
 
       if (note) {
         const parsed = JSON.parse(note);
@@ -138,17 +136,18 @@ export function collectSquashMergeAttribution(
   repoPath: string,
   baseBranch: string,
 ): SquashMergeResult {
-  const execOpts = {
-    cwd: repoPath,
-    encoding: 'utf-8' as const,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-  };
+  const gitOpts = { cwd: repoPath, timeoutMs: 10_000 };
+
+  // Validate baseBranch — only allow safe branch-name characters.
+  if (!/^[a-zA-Z0-9_./-]+$/.test(baseBranch)) {
+    return { success: false, message: `Invalid base branch name: ${baseBranch}` };
+  }
 
   try {
     // Get commits between base branch and HEAD
-    const commits = execSync(
-      `git rev-list ${baseBranch}..HEAD`,
-      execOpts,
+    const commits = git(
+      ['rev-list', `${baseBranch}..HEAD`],
+      gitOpts,
     ).trim().split('\n').filter(Boolean);
 
     if (commits.length === 0) {
@@ -166,11 +165,10 @@ export function collectSquashMergeAttribution(
     let noteCount = 0;
 
     for (const sha of commits) {
+      if (!/^[a-fA-F0-9]+$/.test(sha)) continue;
       try {
-        const note = execSync(
-          `git notes --ref=origin show ${sha} 2>/dev/null`,
-          execOpts,
-        ).trim();
+        const r = runDetailed('git', ['notes', '--ref=origin', 'show', sha], gitOpts);
+        const note = r.status === 0 ? r.stdout.trim() : '';
 
         if (!note) continue;
 
@@ -227,15 +225,11 @@ export function collectSquashMergeAttribution(
  * Write a combined attribution note to a specific commit SHA.
  */
 export function writeCombinedNote(repoPath: string, commitSha: string, noteContent: string): boolean {
+  if (!/^[a-fA-F0-9]+$/.test(commitSha)) return false;
   try {
-    execSync(
-      `git notes --ref=origin add -f -m ${escapeShellArg(noteContent)} ${commitSha}`,
-      {
-        cwd: repoPath,
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 10000,
-      },
+    git(
+      ['notes', '--ref=origin', 'add', '-f', '-m', noteContent, commitSha],
+      { cwd: repoPath, timeoutMs: 10_000 },
     );
     return true;
   } catch {
@@ -287,8 +281,3 @@ jobs:
 `;
 }
 
-// ─── Utilities ─────────────────────────────────────────────────────────────
-
-function escapeShellArg(arg: string): string {
-  return "'" + arg.replace(/'/g, "'\\''") + "'";
-}

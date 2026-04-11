@@ -1,12 +1,15 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
+import { git, gitDetailed } from '../utils/exec.js';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 import { computeAttributionStats, isAiCommit } from '../attribution.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
+const SAFE_DATE = /^[0-9T:.Z+-]+$/;
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -60,26 +63,27 @@ interface AuditData {
 
 // ─── Git Helpers ─────────────────────────────────────────────────────────
 
-const execOpts = (cwd: string) => ({
-  encoding: 'utf-8' as const,
+const gitOpts = (cwd: string) => ({
   cwd,
-  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
   maxBuffer: 10 * 1024 * 1024,
 });
 
 function getRepoName(repoPath: string): string {
-  try {
-    const remoteUrl = execSync('git remote get-url origin', execOpts(repoPath)).trim();
+  const r = gitDetailed(['remote', 'get-url', 'origin'], gitOpts(repoPath));
+  if (r.status === 0) {
+    const remoteUrl = r.stdout.trim();
     const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
     if (match) return match[1];
-  } catch {}
+  }
   return path.basename(repoPath);
 }
 
 function readOriginNote(repoPath: string, sha: string): Record<string, any> | null {
+  if (!HEX.test(sha)) return null;
+  const r = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts(repoPath));
+  if (r.status !== 0) return null;
   try {
-    const note = execSync(`git notes --ref=origin show ${sha}`, execOpts(repoPath)).trim();
-    return JSON.parse(note);
+    return JSON.parse(r.stdout.trim());
   } catch {
     return null;
   }
@@ -109,21 +113,21 @@ function listLocalSessionsForAudit(repoPath: string, from: string, to: string): 
   const fromDate = new Date(from).getTime();
   const toDate = new Date(to).getTime();
 
-  try {
-    execSync('git rev-parse refs/heads/origin-sessions', execOpts(repoPath));
-  } catch {
-    return sessions;
+  {
+    const r = gitDetailed(['rev-parse', 'refs/heads/origin-sessions'], gitOpts(repoPath));
+    if (r.status !== 0) return sessions;
   }
 
   try {
-    const raw = execSync('git ls-tree --name-only origin-sessions sessions/', execOpts(repoPath)).trim();
+    const raw = git(['ls-tree', '--name-only', 'origin-sessions', 'sessions/'], gitOpts(repoPath)).trim();
     if (!raw) return sessions;
 
     const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
 
     for (const dir of dirs) {
+      if (!SAFE_ID.test(dir)) continue;
       try {
-        const metadataJson = execSync(`git show origin-sessions:sessions/${dir}/metadata.json`, execOpts(repoPath)).trim();
+        const metadataJson = git(['show', `origin-sessions:sessions/${dir}/metadata.json`], gitOpts(repoPath)).trim();
         const metadata = JSON.parse(metadataJson);
         const startedAt = metadata.startedAt || '';
         const sessionTime = new Date(startedAt).getTime();
@@ -207,9 +211,10 @@ function collectStandaloneData(repoPath: string, from: string, to: string, autho
   let totalAiCommits = 0;
   let totalHumanCommits = 0;
   try {
-    const logOutput = execSync(
-      `git log --since="${from}" --until="${to}" --format="%H %ae %ai %s"`,
-      execOpts(repoPath),
+    if (!SAFE_DATE.test(from) || !SAFE_DATE.test(to)) throw new Error('invalid date');
+    const logOutput = git(
+      ['log', `--since=${from}`, `--until=${to}`, '--format=%H %ae %ai %s'],
+      gitOpts(repoPath),
     ).trim();
 
     if (logOutput) {
@@ -278,11 +283,12 @@ async function collectConnectedData(repoPath: string | null, from: string, to: s
   };
 
   if (repoPath) {
-    try {
-      const remoteUrl = execSync('git remote get-url origin', execOpts(repoPath)).trim();
+    const r = gitDetailed(['remote', 'get-url', 'origin'], gitOpts(repoPath));
+    if (r.status === 0) {
+      const remoteUrl = r.stdout.trim();
       const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
       if (match) params.repoName = match[1];
-    } catch {}
+    }
   }
 
   if (authorFilter) params.author = authorFilter;

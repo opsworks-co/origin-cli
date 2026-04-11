@@ -9,10 +9,15 @@ router.use(requireAuth);
 router.get('/compliance', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
-    const fromDate = req.query.from
-      ? new Date(req.query.from as string)
-      : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const toDate = req.query.to ? new Date(req.query.to as string) : new Date();
+    // Parse dates with NaN guards — `new Date("not-a-date")` returns
+    // Invalid Date whose .getTime() is NaN, which silently corrupts Prisma
+    // range filters. Fall back to sensible defaults on parse failure.
+    const defaultFrom = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    let fromDate = req.query.from ? new Date(req.query.from as string) : defaultFrom;
+    if (isNaN(fromDate.getTime())) fromDate = defaultFrom;
+    let toDate = req.query.to ? new Date(req.query.to as string) : new Date();
+    if (isNaN(toDate.getTime())) toDate = new Date();
+    if (toDate < fromDate) toDate = new Date();
 
     // Get all repo IDs for this org
     const repos = await prisma.repo.findMany({
@@ -23,6 +28,8 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
 
     // ── Summary Metrics ──────────────────────────────────────────
 
+    // Cap to 100k rows. An org-wide sum/avg over 100k sessions is
+    // directionally accurate; unbounded scans on active orgs OOM.
     const sessions = await prisma.codingSession.findMany({
       where: {
         commit: { repoId: { in: repoIds } },
@@ -36,6 +43,7 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
         createdAt: true,
         review: { select: { status: true } },
       },
+      take: 100_000,
     });
 
     const totalSessions = sessions.length;
@@ -47,6 +55,9 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
 
     // ── Violations ───────────────────────────────────────────────
 
+    // Cap at 50k rows. Compliance reporting aggregates counts, so we
+    // only need enough rows to make the per-type histogram meaningful.
+    // An org with millions of violations would otherwise OOM this route.
     const violations = await prisma.auditLog.findMany({
       where: {
         orgId,
@@ -54,6 +65,7 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
         createdAt: { gte: fromDate, lte: toDate },
       },
       select: { metadata: true },
+      take: 50_000,
     });
 
     const violationTypeCounts: Record<string, number> = {};
@@ -62,7 +74,10 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
         const meta = JSON.parse(v.metadata);
         const type = meta.policyType || 'UNKNOWN';
         violationTypeCounts[type] = (violationTypeCounts[type] || 0) + 1;
-      } catch {}
+      } catch (err) {
+        console.warn('[reports] malformed violation metadata JSON:', (err as Error).message);
+        violationTypeCounts['UNKNOWN'] = (violationTypeCounts['UNKNOWN'] || 0) + 1;
+      }
     }
 
     // ── Security Findings ────────────────────────────────────────
@@ -125,12 +140,15 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
     });
 
     // ── Unreviewed Aging ──────────────────────────────────────────
+    // Cap at 20k — we only use createdAt for age bucketing, so even a
+    // partial scan produces a representative aging distribution.
     const unreviewedSessions = await prisma.codingSession.findMany({
       where: {
         commit: { repoId: { in: repoIds } },
         review: null,
       },
       select: { createdAt: true },
+      take: 20_000,
     });
 
     const nowDate = new Date();

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
 import type { User } from '../api';
+import { safeRemoveItem } from '../utils/safe-storage';
 
 interface AuthState {
   user: User | null;
@@ -21,27 +22,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Restore session on mount
+  // Restore session on mount. Auth is now carried by the httpOnly
+  // `origin_auth` cookie (set by the server on login/register) — we always
+  // try `getMe()` unconditionally, and the browser attaches the cookie for
+  // us. Any legacy `origin_token` still in localStorage is also sent via
+  // the Bearer header fallback in _client.ts and cleared on 401.
   useEffect(() => {
-    const token = localStorage.getItem('origin_token');
-    if (!token) {
-      setLoading(false);
-      return;
-    }
     api
       .getMe()
       .then((u) => setUser(u))
       .catch(() => {
-        localStorage.removeItem('origin_token');
+        // Not authenticated — clear any stale legacy token so the fallback
+        // header stops being sent on subsequent requests.
+        safeRemoveItem('origin_token');
       })
       .finally(() => setLoading(false));
   }, []);
 
+  // Login / register / setSession no longer touch localStorage — the server
+  // sets the `origin_auth` httpOnly cookie on the same response, which the
+  // browser attaches automatically on future requests. Keeping the token out
+  // of JS land defends against XSS token theft.
   const login = useCallback(async (email: string, password: string) => {
     setError(null);
     try {
       const res = await api.login(email, password);
-      localStorage.setItem('origin_token', res.token);
       setUser(res.user);
     } catch (err: any) {
       setError(err.message ?? 'Login failed');
@@ -54,7 +59,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setError(null);
       try {
         const res = await api.register(email, password, name, orgName, orgSlug);
-        localStorage.setItem('origin_token', res.token);
         setUser(res.user);
       } catch (err: any) {
         setError(err.message ?? 'Registration failed');
@@ -69,7 +73,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setError(null);
       try {
         const res = await api.registerDeveloper(email, password, name);
-        localStorage.setItem('origin_token', res.token);
         setUser(res.user);
       } catch (err: any) {
         setError(err.message ?? 'Registration failed');
@@ -79,8 +82,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
-  const setSession = useCallback((token: string, userData: User) => {
-    localStorage.setItem('origin_token', token);
+  const setSession = useCallback((_token: string, userData: User) => {
     setUser(userData);
   }, []);
 
@@ -89,7 +91,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem('origin_token');
+    safeRemoveItem('origin_token');
+    // Fire-and-forget: clear the httpOnly session cookie server-side.
+    // We don't await because logout should feel instant; if the request
+    // fails the cookie will still expire on its own.
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => { /* noop */ });
     setUser(null);
   }, []);
 

@@ -1,5 +1,7 @@
-import { execSync } from 'child_process';
+import { git, gitDetailed, runDetailed } from './utils/exec.js';
 import { listActiveSessions } from './session-state.js';
+
+const HEX = /^[a-fA-F0-9]+$/;
 
 // ─── Tool Detection ──────────────────────────────────────────────────────
 
@@ -75,9 +77,8 @@ export interface MoveDetection {
 // ─── Git Helpers ──────────────────────────────────────────────────────────
 
 const execOpts = (cwd: string) => ({
-  encoding: 'utf-8' as const,
   cwd,
-  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+  timeoutMs: 10_000,
   maxBuffer: 10 * 1024 * 1024,
 });
 
@@ -85,11 +86,11 @@ const execOpts = (cwd: string) => ({
  * Read Origin note data from a commit.
  */
 function readOriginNote(repoPath: string, commitSha: string): Record<string, any> | null {
+  if (!HEX.test(commitSha)) return null;
   try {
-    const note = execSync(
-      `git notes --ref=origin show ${commitSha}`,
-      execOpts(repoPath),
-    ).trim();
+    const r = runDetailed('git', ['notes', '--ref=origin', 'show', commitSha], execOpts(repoPath));
+    if (r.status !== 0) return null;
+    const note = r.stdout.trim();
     return JSON.parse(note);
   } catch {
     return null;
@@ -108,14 +109,13 @@ export function isAiCommit(repoPath: string, commitSha: string): boolean {
   if (note?.agent && note.agent !== 'Human') return true;
 
   // Check commit message for Origin-Session trailer
-  try {
-    const message = execSync(
-      `git log -1 --format=%B ${commitSha}`,
-      execOpts(repoPath),
-    ).trim();
-    if (message.includes('Origin-Session:')) return true;
-  } catch {
-    // ignore
+  if (HEX.test(commitSha)) {
+    try {
+      const message = git(['log', '-1', '--format=%B', commitSha], execOpts(repoPath)).trim();
+      if (message.includes('Origin-Session:')) return true;
+    } catch {
+      // ignore
+    }
   }
 
   // Check if commit falls within an active session's range
@@ -123,17 +123,15 @@ export function isAiCommit(repoPath: string, commitSha: string): boolean {
   try {
     const activeSessions = listActiveSessions(repoPath);
     for (const session of activeSessions) {
-      if (session.headShaAtStart) {
+      if (session.headShaAtStart && HEX.test(session.headShaAtStart) && HEX.test(commitSha)) {
         // Check if commitSha is an ancestor of HEAD and descendant of headShaAtStart
-        try {
-          execSync(
-            `git merge-base --is-ancestor ${session.headShaAtStart} ${commitSha}`,
-            execOpts(repoPath),
-          );
-          // If we get here, commitSha is after session start — it's an AI commit
+        const r = gitDetailed(
+          ['merge-base', '--is-ancestor', session.headShaAtStart, commitSha],
+          execOpts(repoPath),
+        );
+        if (r.status === 0) {
+          // commitSha is after session start — it's an AI commit
           return true;
-        } catch {
-          // Not an ancestor — commit is before session start
         }
       }
     }
@@ -193,11 +191,9 @@ function parseBlameOutput(output: string): Array<{ lineNumber: number; commitSha
 function detectAiFromCommit(repoPath: string, commitSha: string): { isAi: boolean; model?: string } | null {
   // Skip uncommitted lines (all zeros)
   if (commitSha === '0000000000000000000000000000000000000000') return null;
+  if (!HEX.test(commitSha)) return null;
   try {
-    const message = execSync(
-      `git log -1 --format=%B ${commitSha}`,
-      execOpts(repoPath),
-    ).trim();
+    const message = git(['log', '-1', '--format=%B', commitSha], execOpts(repoPath)).trim();
 
     // Check Origin-Session trailer
     if (message.includes('Origin-Session:')) {
@@ -260,8 +256,8 @@ function detectAiFromCommit(repoPath: string, commitSha: string): { isAi: boolea
  */
 export function getLineBlame(repoPath: string, filePath: string): LineAttribution[] {
   try {
-    const blameOutput = execSync(
-      `git blame --porcelain -- ${JSON.stringify(filePath)}`,
+    const blameOutput = git(
+      ['blame', '--porcelain', '--', filePath],
       execOpts(repoPath),
     ).trim();
 
@@ -347,9 +343,10 @@ export function computeFileAttribution(repoPath: string, filePath: string): File
  * Get files changed in a commit.
  */
 function getCommitFiles(repoPath: string, commitSha: string): string[] {
+  if (!HEX.test(commitSha)) return [];
   try {
-    return execSync(
-      `git diff-tree --no-commit-id --name-only -r ${commitSha}`,
+    return git(
+      ['diff-tree', '--no-commit-id', '--name-only', '-r', commitSha],
       execOpts(repoPath),
     ).trim().split('\n').filter(Boolean);
   } catch {
@@ -376,7 +373,8 @@ export function computeCommitAttribution(repoPath: string, commitSha: string): C
   for (const file of files) {
     try {
       // Check if file still exists at HEAD
-      execSync(`git cat-file -e HEAD:${JSON.stringify(file)}`, execOpts(repoPath));
+      const check = gitDetailed(['cat-file', '-e', `HEAD:${file}`], execOpts(repoPath));
+      if (check.status !== 0) continue;
       const attr = computeFileAttribution(repoPath, file);
       fileAttributions.push(attr);
       totalAi += attr.aiLines;
@@ -419,10 +417,14 @@ export function computeAcceptanceMetrics(
   let overriddenLines = 0;
   let deletedLines = 0;
 
+  // Validate range — allow hex SHAs, branch-safe chars, `..`/`...`.
+  if (!/^[a-zA-Z0-9_./~^-]+(?:\.{2,3}[a-zA-Z0-9_./~^-]+)?$/.test(range)) {
+    return { totalAiLines: 0, acceptedLines: 0, overriddenLines: 0, deletedLines: 0, acceptanceRate: 1 };
+  }
   try {
     // Get commits in range
-    const commits = execSync(
-      `git log --format=%H ${range}`,
+    const commits = git(
+      ['log', '--format=%H', range],
       execOpts(repoPath),
     ).trim().split('\n').filter(Boolean);
 
@@ -430,12 +432,13 @@ export function computeAcceptanceMetrics(
     const aiLineTracker = new Map<string, Set<number>>(); // file -> line numbers
 
     for (const sha of commits.reverse()) {
+      if (!HEX.test(sha)) continue;
       if (!isAiCommit(repoPath, sha)) continue;
 
       // Get added lines from this AI commit
       try {
-        const diff = execSync(
-          `git diff-tree -p ${sha}`,
+        const diff = git(
+          ['diff-tree', '-p', sha],
           execOpts(repoPath),
         ).trim();
 
@@ -505,8 +508,9 @@ export function computeAcceptanceMetrics(
 export function detectMoves(repoPath: string, commitSha: string): MoveDetection[] {
   const moves: MoveDetection[] = [];
   try {
-    const output = execSync(
-      `git diff-tree -r -M -C --find-renames --find-copies --diff-filter=R ${commitSha}`,
+    if (!HEX.test(commitSha)) return moves;
+    const output = git(
+      ['diff-tree', '-r', '-M', '-C', '--find-renames', '--find-copies', '--diff-filter=R', commitSha],
       execOpts(repoPath),
     ).trim();
 
@@ -548,10 +552,10 @@ export function preserveAttributionOnMove(
     }
   }
 
-  if (modified) {
+  if (modified && HEX.test(commitSha)) {
     try {
-      execSync(
-        `git notes --ref=origin add -f -m ${JSON.stringify(JSON.stringify(note))} ${commitSha}`,
+      git(
+        ['notes', '--ref=origin', 'add', '-f', '-m', JSON.stringify(note), commitSha],
         execOpts(repoPath),
       );
     } catch { /* best effort */ }
@@ -586,21 +590,27 @@ export function computeAttributionStats(
   let totalCommits = 0, aiCommits = 0, humanCommits = 0;
   let totalLinesAdded = 0, aiLinesAdded = 0, humanLinesAdded = 0, mixedLinesAdded = 0;
 
+  // Validate range when provided
+  if (commitRange && !/^[a-zA-Z0-9_./~^-]+(?:\.{2,3}[a-zA-Z0-9_./~^-]+)?$/.test(range)) {
+    return {
+      totalCommits: 0, aiCommits: 0, humanCommits: 0,
+      totalLinesAdded: 0, aiLinesAdded: 0, humanLinesAdded: 0, mixedLinesAdded: 0,
+      byTool, byModel,
+      acceptance: { totalAiLines: 0, acceptedLines: 0, overriddenLines: 0, deletedLines: 0, acceptanceRate: 1 },
+    };
+  }
   try {
     // Scope to current branch (HEAD) only
     // Check if origin-sessions branch exists to exclude it (it has session metadata, not code)
-    let excludeOriginSessions = '';
-    try {
-      execSync('git rev-parse --verify refs/heads/origin-sessions', execOpts(repoPath));
-      excludeOriginSessions = ' --not refs/heads/origin-sessions';
-    } catch { /* branch doesn't exist, nothing to exclude */ }
-    const logCmd = commitRange
-      ? `git log --first-parent --format=%H ${range}`
-      : `git log --first-parent --format=%H -50 HEAD${excludeOriginSessions}`;
-    const commits = execSync(
-      logCmd,
+    const hasOriginSessions = gitDetailed(
+      ['rev-parse', '--verify', 'refs/heads/origin-sessions'],
       execOpts(repoPath),
-    ).trim().split('\n').filter(Boolean);
+    ).status === 0;
+    const logArgs = commitRange
+      ? ['log', '--first-parent', '--format=%H', range]
+      : ['log', '--first-parent', '--format=%H', '-50', 'HEAD',
+         ...(hasOriginSessions ? ['--not', 'refs/heads/origin-sessions'] : [])];
+    const commits = git(logArgs, execOpts(repoPath)).trim().split('\n').filter(Boolean);
 
     for (const sha of commits) {
       totalCommits++;
@@ -628,8 +638,9 @@ export function computeAttributionStats(
 
         // Count lines from this commit
         try {
-          const stat = execSync(
-            `git show --numstat --format= ${sha} --`,
+          if (!HEX.test(sha)) continue;
+          const stat = git(
+            ['show', '--numstat', '--format=', sha, '--'],
             execOpts(repoPath),
           ).trim();
           let commitLines = 0;
@@ -658,8 +669,9 @@ export function computeAttributionStats(
       } else {
         humanCommits++;
         try {
-          const stat = execSync(
-            `git show --numstat --format= ${sha} --`,
+          if (!HEX.test(sha)) continue;
+          const stat = git(
+            ['show', '--numstat', '--format=', sha, '--'],
             execOpts(repoPath),
           ).trim();
           let commitLines = 0;
@@ -703,15 +715,15 @@ export function buildAttributionContext(repoPath: string): string | null {
     // Get last 30 commits quickly
     let logOutput: string;
     try {
-      let excludeOriginSessions = '';
-      try {
-        execSync('git rev-parse --verify refs/heads/origin-sessions', opts);
-        excludeOriginSessions = ' --not refs/heads/origin-sessions';
-      } catch {}
-      logOutput = execSync(
-        `git log --first-parent --format="%H|%an|%aI|%s" -30 HEAD${excludeOriginSessions}`,
-        { ...opts, timeout: 3000 },
-      ).trim();
+      const hasOriginSessions = gitDetailed(
+        ['rev-parse', '--verify', 'refs/heads/origin-sessions'],
+        opts,
+      ).status === 0;
+      const logArgs = [
+        'log', '--first-parent', '--format=%H|%an|%aI|%s', '-30', 'HEAD',
+        ...(hasOriginSessions ? ['--not', 'refs/heads/origin-sessions'] : []),
+      ];
+      logOutput = git(logArgs, { ...opts, timeoutMs: 3000 }).trim();
     } catch {
       return null;
     }
@@ -748,13 +760,15 @@ export function buildAttributionContext(repoPath: string): string | null {
 
       // Get files changed in this commit (lightweight)
       let changedFiles: string[] = [];
-      try {
-        const filesRaw = execSync(
-          `git diff-tree --no-commit-id --name-only -r ${sha}`,
-          { ...opts, timeout: 1000 },
-        ).trim();
-        changedFiles = filesRaw.split('\n').filter(Boolean).slice(0, 10);
-      } catch {}
+      if (HEX.test(sha)) {
+        try {
+          const filesRaw = git(
+            ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+            { ...opts, timeoutMs: 1000 },
+          ).trim();
+          changedFiles = filesRaw.split('\n').filter(Boolean).slice(0, 10);
+        } catch {}
+      }
 
       const tool = detectToolFromModel(model, note?.agent || undefined);
       const date = dateStr ? dateStr.split('T')[0] : '';

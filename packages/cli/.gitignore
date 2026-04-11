@@ -1,0 +1,9 @@
+node_modules/
+dist/
+
+# Build artifacts: do NOT commit packed tarballs. The canonical source of
+# truth is the TypeScript in src/. Built tarballs are produced by CI and
+# served from the upgrade endpoint — checking them into git lets the
+# pre-built JavaScript silently drift from the source, which is a real
+# supply-chain footgun.
+origin-cli-*.tgz

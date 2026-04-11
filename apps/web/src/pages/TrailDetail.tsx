@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { TrailDetail as TrailDetailType, Session } from '../api';
 import { timeAgo, formatCost, getStatusBadgeClass } from '../utils';
+import { safeHref } from '../utils/safe-url';
 
 const STATUS_OPTIONS = ['active', 'review', 'done', 'paused'];
 const PRIORITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
@@ -287,7 +288,7 @@ export default function TrailDetail() {
                 {trail.pullRequests.map((pr) => (
                   <a
                     key={pr.id}
-                    href={pr.url}
+                    href={safeHref(pr.url)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-center justify-between text-sm hover:bg-gray-800/50 rounded px-2 py-1 -mx-2 transition-colors"

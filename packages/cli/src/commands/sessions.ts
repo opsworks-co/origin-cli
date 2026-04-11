@@ -1,8 +1,10 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive } from '../session-state.js';
+import { git, gitOrNull } from '../utils/exec.js';
+
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 interface LocalSession {
   sessionId: string;
@@ -21,26 +23,27 @@ interface LocalSession {
 }
 
 function listLocalSessions(repoPath: string): LocalSession[] {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoPath };
   const sessions: LocalSession[] = [];
 
   try {
     // Check if origin-sessions branch exists
-    execSync('git rev-parse refs/heads/origin-sessions', execOpts);
+    git(['rev-parse', 'refs/heads/origin-sessions'], gitOpts);
   } catch {
     return sessions;
   }
 
   try {
     // List session directories on the origin-sessions branch
-    const raw = execSync('git ls-tree --name-only origin-sessions sessions/', execOpts).trim();
+    const raw = git(['ls-tree', '--name-only', 'origin-sessions', 'sessions/'], gitOpts).trim();
     if (!raw) return sessions;
 
     const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
 
     for (const dir of dirs) {
+      if (!SAFE_ID.test(dir)) continue;
       try {
-        const metadataJson = execSync(`git show origin-sessions:sessions/${dir}/metadata.json`, execOpts).trim();
+        const metadataJson = git(['show', `origin-sessions:sessions/${dir}/metadata.json`], gitOpts).trim();
         const metadata = JSON.parse(metadataJson);
         sessions.push({
           sessionId: metadata.sessionId || dir,
@@ -163,7 +166,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
       // Scope to current repo unless --all flag is passed
       if (!opts.all && repoPath) {
         try {
-          const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          const remoteUrl = git(['remote', 'get-url', 'origin'], { cwd: repoPath }).trim();
           // Extract repo name from URL: git@github.com:org/repo.git → org/repo
           const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
           if (match) params.repoName = match[1];
@@ -250,7 +253,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
   if (!opts.all && repoPath) {
     let repoName = '';
     try {
-      const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const remoteUrl = git(['remote', 'get-url', 'origin'], { cwd: repoPath }).trim();
       const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
       if (match) repoName = match[1];
     } catch {}
@@ -447,8 +450,8 @@ export async function sessionDetailCommand(id: string) {
   // Try to read prompts.md
   if (repoPath) {
     try {
-      const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
-      const prompts = execSync(`git show origin-sessions:sessions/${session.sessionId}/prompts.md`, execOpts).trim();
+      if (!SAFE_ID.test(session.sessionId)) throw new Error('invalid session id');
+      const prompts = git(['show', `origin-sessions:sessions/${session.sessionId}/prompts.md`], { cwd: repoPath }).trim();
       if (prompts) {
         console.log(chalk.bold('\n  Prompts:\n'));
         console.log(prompts.split('\n').map(l => '    ' + l).join('\n'));
@@ -543,18 +546,19 @@ export async function sessionEndCommand(id: string) {
   try {
     const repoPath = getGitRoot();
     if (repoPath) {
-      const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+      const gitOpts = { cwd: repoPath };
       const BRANCH = 'origin-sessions';
       // Check if branch exists
-      execSync(`git rev-parse refs/heads/${BRANCH}`, execOpts);
-      const tree = execSync(`git ls-tree --name-only refs/heads/${BRANCH} sessions/`, execOpts).trim();
+      git(['rev-parse', `refs/heads/${BRANCH}`], gitOpts);
+      const tree = git(['ls-tree', '--name-only', `refs/heads/${BRANCH}`, 'sessions/'], gitOpts).trim();
       const sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
 
       for (const dir of sessionDirs) {
         const safeId = dir.replace('sessions/', '');
+        if (!SAFE_ID.test(safeId)) continue;
         if (safeId === id || safeId.startsWith(id) || id.startsWith(safeId.slice(0, 8))) {
           try {
-            const metaRaw = execSync(`git show refs/heads/${BRANCH}:${dir}/metadata.json`, execOpts).trim();
+            const metaRaw = git(['show', `refs/heads/${BRANCH}:${dir}/metadata.json`], gitOpts).trim();
             const metadata = JSON.parse(metaRaw);
             if (metadata.status === 'running') {
               // Use writeSessionFiles to update the branch
@@ -605,15 +609,7 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
 
       let toEnd = sessions;
       if (!opts.all && repoPath) {
-        const repoUrl = (() => {
-          try {
-            return execSync('git remote get-url origin', {
-              encoding: 'utf-8',
-              cwd: repoPath,
-              stdio: ['pipe', 'pipe', 'pipe'],
-            }).trim();
-          } catch { return ''; }
-        })();
+        const repoUrl = gitOrNull(['remote', 'get-url', 'origin'], { cwd: repoPath }) || '';
         if (repoUrl) {
           toEnd = sessions.filter((s: any) => s.repoUrl === repoUrl);
         }
@@ -657,12 +653,12 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
   // ── Git branch — end all RUNNING sessions on origin-sessions branch ──
   if (repoPath) {
     try {
-      const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+      const gitOpts = { cwd: repoPath };
       const BRANCH = 'origin-sessions';
 
       // Check if branch exists
-      execSync(`git rev-parse refs/heads/${BRANCH}`, execOpts);
-      const tree = execSync(`git ls-tree --name-only refs/heads/${BRANCH} sessions/`, execOpts).trim();
+      git(['rev-parse', `refs/heads/${BRANCH}`], gitOpts);
+      const tree = git(['ls-tree', '--name-only', `refs/heads/${BRANCH}`, 'sessions/'], gitOpts).trim();
       if (!tree) return;
 
       const sessionDirs = tree.split('\n').filter(Boolean);
@@ -671,7 +667,8 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
 
       for (const dir of sessionDirs) {
         try {
-          const metaRaw = execSync(`git show refs/heads/${BRANCH}:${dir}/metadata.json`, execOpts).trim();
+          if (!/^sessions\/[a-zA-Z0-9_.-]+$/.test(dir)) continue;
+          const metaRaw = git(['show', `refs/heads/${BRANCH}:${dir}/metadata.json`], gitOpts).trim();
           const metadata = JSON.parse(metaRaw);
           if (metadata.status === 'running') {
             writeSessionFiles(repoPath, {

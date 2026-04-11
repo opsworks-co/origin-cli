@@ -32,7 +32,7 @@ setInterval(() => {
   for (const [ip, entry] of chatLimits) {
     if (now > entry.resetAt) chatLimits.delete(ip);
   }
-}, 30 * 60 * 1000);
+}, 30 * 60 * 1000).unref();
 
 // ---------------------------------------------------------------------------
 // Provider detection: figure out which provider a model belongs to
@@ -74,6 +74,18 @@ async function callAnthropic(
     .join('');
 }
 
+// Hard timeout for outbound LLM calls. Without this, a slow/misbehaving
+// upstream (OpenAI, Google, etc.) can pin a request thread indefinitely,
+// which is how "one flaky model endpoint" turns into "the whole API is
+// hung". 60s is generous enough for long-form generations at maxTokens
+// limits while still bounding worst-case latency.
+const LLM_FETCH_TIMEOUT_MS = 60_000;
+function llmFetchSignal(): AbortSignal {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), LLM_FETCH_TIMEOUT_MS).unref();
+  return controller.signal;
+}
+
 async function callOpenAI(
   apiKey: string,
   model: string,
@@ -95,6 +107,7 @@ async function callOpenAI(
         ...messages.map(m => ({ role: m.role, content: m.content })),
       ],
     }),
+    signal: llmFetchSignal(),
   });
 
   if (!response.ok) {
@@ -128,6 +141,7 @@ async function callGoogle(
         contents: geminiMessages,
         generationConfig: { maxOutputTokens: maxTokens },
       }),
+      signal: llmFetchSignal(),
     },
   );
 
@@ -255,7 +269,7 @@ setInterval(() => {
   for (const [key, entry] of assistantLimits) {
     if (now > entry.resetAt) assistantLimits.delete(key);
   }
-}, 30 * 60 * 1000);
+}, 30 * 60 * 1000).unref();
 
 router.post('/assistant', requireAuth, async (req: AuthRequest, res: Response) => {
   try {

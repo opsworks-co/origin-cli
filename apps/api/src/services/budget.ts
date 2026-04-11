@@ -83,6 +83,9 @@ export async function getDailySpend(orgId: string, days: number = 30): Promise<A
   const since = new Date();
   since.setDate(since.getDate() - days);
 
+  // Cap at 200k rows — daily spend is a day-bucket histogram, partial
+  // scans are still accurate, and unbounded scans OOM the budget panel
+  // on active tenants.
   const sessions = await prisma.codingSession.findMany({
     where: {
       createdAt: { gte: since },
@@ -90,6 +93,7 @@ export async function getDailySpend(orgId: string, days: number = 30): Promise<A
     },
     select: { costUsd: true, createdAt: true },
     orderBy: { createdAt: 'asc' },
+    take: 200_000,
   });
 
   // Group by day
@@ -112,6 +116,8 @@ export async function getSpendByModel(orgId: string): Promise<Array<{ model: str
       commit: { repo: { orgId } },
     },
     select: { model: true, costUsd: true },
+    take: 200_000,
+    orderBy: { createdAt: 'desc' },
   });
 
   const byModel: Record<string, { cost: number; sessions: number }> = {};
@@ -135,6 +141,8 @@ export async function getSpendByUser(orgId: string): Promise<Array<{ userId: str
       userId: { not: null },
     },
     select: { userId: true, costUsd: true, user: { select: { name: true } } },
+    take: 200_000,
+    orderBy: { createdAt: 'desc' },
   });
 
   const byUser: Record<string, { name: string; cost: number; sessions: number }> = {};
@@ -222,8 +230,13 @@ export async function recordSpend(orgId: string, amount: number): Promise<void> 
 
 // Reset alert tracking at the start of each month
 export async function resetMonthlyAlerts(): Promise<void> {
+  // Cap at 50k — a single unbounded scan across every tenant's budget
+  // config grows with customer count and would OOM on large fleets.
+  // A rerun picks up the tail.
   const budgetConfigs = await prisma.integrationConfig.findMany({
     where: { provider: 'budget' },
+    take: 50_000,
+    orderBy: { id: 'asc' },
   });
 
   for (const config of budgetConfigs) {

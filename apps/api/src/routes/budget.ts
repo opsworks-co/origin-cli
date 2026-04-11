@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { getSpendByUser } from '../services/budget.js';
+import { safeParseObject } from '../utils/safe-json.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -23,16 +24,21 @@ router.get('/agents', async (req: AuthRequest, res: Response) => {
     const agents = await prisma.agent.findMany({
       where: { orgId },
       select: { id: true, name: true, slug: true },
+      take: 500,
     });
     const agentMap = new Map(agents.map((a) => [a.id, a]));
 
-    // Get ALL sessions this month (with and without agentId)
+    // Get sessions this month (with and without agentId). Cap at 200k —
+    // histogram by agent is directionally accurate well before that;
+    // unbounded scans OOM the budget view for big tenants.
     const sessions = await prisma.codingSession.findMany({
       where: {
         createdAt: { gte: startOfMonth },
         commit: { repo: { orgId } },
       },
       select: { agentId: true, model: true, costUsd: true },
+      take: 200_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     // Group by registered agent. For sessions without agentId, infer agent from model name.
@@ -71,7 +77,7 @@ router.get('/agents', async (req: AuthRequest, res: Response) => {
       where: { orgId, provider: 'budget_agent_limits' },
     });
     const agentLimits: Record<string, number> = limitsConfig
-      ? JSON.parse(limitsConfig.settings || '{}')
+      ? safeParseObject<Record<string, number>>(limitsConfig.settings, 'budget_agent_limits.settings')
       : {};
 
     // Build result: one row per registered agent
@@ -112,12 +118,28 @@ router.put('/agents/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Re
     const agentId = req.params.id as string;
     const { monthlyLimit } = req.body;
 
+    // IDOR fix: previously an admin in org A could PUT a budget limit
+    // keyed by any agentId — including agents belonging to other orgs —
+    // because the handler never verified the agent was in the caller's
+    // org before writing it into the JSON blob. The blob was then read
+    // back by cross-org budget-agent-limits config in a subtle way via
+    // any future code that reuses this map. Enforce ownership here.
+    const ownedAgent = await prisma.agent.findFirst({
+      where: { id: agentId, orgId },
+      select: { id: true },
+    });
+    if (!ownedAgent) {
+      return res.status(404).json({ error: 'Agent not found in your organization' });
+    }
+
     const existing = await prisma.integrationConfig.findFirst({
       where: { orgId, provider: 'budget_agent_limits' },
     });
 
-    const limits = existing ? JSON.parse(existing.settings || '{}') : {};
-    if (monthlyLimit > 0) {
+    const limits = existing
+      ? safeParseObject<Record<string, number>>(existing.settings, 'budget_agent_limits.settings')
+      : {};
+    if (typeof monthlyLimit === 'number' && monthlyLimit > 0) {
       limits[agentId] = monthlyLimit;
     } else {
       delete limits[agentId];
@@ -162,7 +184,7 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
       where: { orgId, provider: 'budget_user_limits' },
     });
     const userLimits: Record<string, number> = limitsConfig
-      ? JSON.parse(limitsConfig.settings || '{}')
+      ? safeParseObject<Record<string, number>>(limitsConfig.settings, 'budget_user_limits.settings')
       : {};
 
     const result = byUser.map((u) => ({
@@ -190,12 +212,25 @@ router.put('/users/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Res
     const userId = req.params.id as string;
     const { monthlyLimit } = req.body;
 
+    // Same IDOR shape as budget/agents/:id — verify the target user
+    // actually belongs to this org before writing a limit keyed by
+    // their UUID into the settings blob.
+    const ownedUser = await prisma.user.findFirst({
+      where: { id: userId, orgId },
+      select: { id: true },
+    });
+    if (!ownedUser) {
+      return res.status(404).json({ error: 'User not found in your organization' });
+    }
+
     const existing = await prisma.integrationConfig.findFirst({
       where: { orgId, provider: 'budget_user_limits' },
     });
 
-    const limits = existing ? JSON.parse(existing.settings || '{}') : {};
-    if (monthlyLimit > 0) {
+    const limits = existing
+      ? safeParseObject<Record<string, number>>(existing.settings, 'budget_user_limits.settings')
+      : {};
+    if (typeof monthlyLimit === 'number' && monthlyLimit > 0) {
       limits[userId] = monthlyLimit;
     } else {
       delete limits[userId];
@@ -228,7 +263,9 @@ router.get('/anomalies', async (req: AuthRequest, res: Response) => {
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // Get all sessions this month with cost > 0
+    // Get sessions this month with cost > 0. Cap at 50k — the anomaly
+    // detector only uses the top-cost tail, which orderBy: costUsd desc
+    // already surfaces; a bounded sample is still correct.
     const sessions = await prisma.codingSession.findMany({
       where: {
         createdAt: { gte: startOfMonth },
@@ -243,6 +280,7 @@ router.get('/anomalies', async (req: AuthRequest, res: Response) => {
         user: { select: { name: true } },
       },
       orderBy: { costUsd: 'desc' },
+      take: 50_000,
     });
 
     if (sessions.length < 3) {
@@ -287,7 +325,9 @@ router.get('/pr-costs', async (req: AuthRequest, res: Response) => {
     const now = new Date();
     const since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // last 30 days
 
-    // Get sessions with branch info that have matching PRs
+    // Get sessions with branch info that have matching PRs. Cap at
+    // 100k — the downstream grouping is a per-PR histogram, so a
+    // bounded sample still matches the top PRs correctly.
     const sessions = await prisma.codingSession.findMany({
       where: {
         createdAt: { gte: since },
@@ -305,9 +345,13 @@ router.get('/pr-costs', async (req: AuthRequest, res: Response) => {
           },
         },
       },
+      take: 100_000,
+      orderBy: { createdAt: 'desc' },
     });
 
-    // Get PRs from last 30 days
+    // Get PRs from last 30 days. Cap at 10k — the matcher only uses
+    // branch+repo as a key, and 10k PRs in 30 days is already well
+    // past the point where a single response is meaningful.
     const prs = await prisma.pullRequest.findMany({
       where: {
         createdAt: { gte: since },
@@ -319,6 +363,8 @@ router.get('/pr-costs', async (req: AuthRequest, res: Response) => {
         headBranch: true,
         repo: { select: { name: true } },
       },
+      take: 10_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     // Match sessions to PRs by branch + repo

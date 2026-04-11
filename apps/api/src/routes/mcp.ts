@@ -29,6 +29,39 @@ import { detectAITool } from '../services/ai-commit-detector.js';
 
 const router = Router();
 
+// ── Input validation caps ────────────────────────────────────────
+// Centralized size limits for the session write path. These are deliberately
+// generous (real Claude transcripts go to ~5MB) but bound hostile payloads
+// that would otherwise balloon the DB or OOM the process.
+const MAX_PROMPT_LEN = 1_000_000;      // 1MB  — user prompt text
+const MAX_TRANSCRIPT_LEN = 10_000_000; // 10MB — full assistant transcript
+const MAX_DIFF_LEN = 10_000_000;       // 10MB — unified diff
+const MAX_COMMIT_DETAILS = 500;        // commits per session/end or PATCH
+const MAX_PROMPT_CHANGES = 500;        // prompt_changes rows per call
+const MAX_FILES_CHANGED = 2_000;       // filesChanged array length
+const MAX_FILE_PATH_LEN = 1024;        // single file path
+const MAX_SAFE_INT_FIELD = 1e12;       // cap for tokens / cost / duration
+
+/** Clamp a string to maxLen. Returns undefined if not a string. */
+function clampStr(v: unknown, maxLen: number): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  return v.length > maxLen ? v.slice(0, maxLen) : v;
+}
+
+/** Coerce to a finite non-negative number in [0, MAX_SAFE_INT_FIELD]. */
+function clampNum(v: unknown): number | undefined {
+  if (v === null || v === undefined) return undefined;
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return n > MAX_SAFE_INT_FIELD ? MAX_SAFE_INT_FIELD : n;
+}
+
+const ALLOWED_SESSION_STATUS = new Set(['RUNNING', 'COMPLETED', 'ERROR']);
+function clampStatus(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  return ALLOWED_SESSION_STATUS.has(v) ? v : undefined;
+}
+
 const DEFAULT_SECURITY_RULES = `CRITICAL: Follow these security rules at all times.
 
 1. NEVER commit, write, or output secrets, API keys, tokens, passwords, or credentials in code, config files, or logs.
@@ -171,6 +204,31 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
 
     if (!machineId || !model || !repoPath) {
       return res.status(400).json({ error: 'Missing required fields: machineId, model, repoPath' });
+    }
+
+    // Input size caps. /session/start accepts fields straight off an API key
+    // with no express.json() limit applied at this router, and abuse would
+    // turn a single request into arbitrary write amplification downstream
+    // (huge prompt columns, thousands of SessionRepo rows, matching regex
+    // engines against multi-megabyte blobs, etc.). Reject early.
+    const MAX_PROMPT_LEN = 1_000_000; // 1MB text
+    const MAX_ADDITIONAL_REPOS = 50;
+    const MAX_PATH_LEN = 1024;
+    const MAX_BRANCH_LEN = 512;
+    if (typeof prompt === 'string' && prompt.length > MAX_PROMPT_LEN) {
+      return res.status(413).json({ error: 'prompt exceeds maximum length' });
+    }
+    if (typeof repoPath === 'string' && repoPath.length > MAX_PATH_LEN) {
+      return res.status(413).json({ error: 'repoPath exceeds maximum length' });
+    }
+    if (typeof branch === 'string' && branch.length > MAX_BRANCH_LEN) {
+      return res.status(413).json({ error: 'branch exceeds maximum length' });
+    }
+    if (additionalRepoPaths !== undefined && !Array.isArray(additionalRepoPaths)) {
+      return res.status(400).json({ error: 'additionalRepoPaths must be an array' });
+    }
+    if (Array.isArray(additionalRepoPaths) && additionalRepoPaths.length > MAX_ADDITIONAL_REPOS) {
+      return res.status(413).json({ error: `additionalRepoPaths exceeds max of ${MAX_ADDITIONAL_REPOS}` });
     }
 
     const orgId = req.orgId as string;
@@ -405,6 +463,15 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
 
     const HEARTBEAT_ALIVE_MS = 2 * 60 * 1000; // 2 minutes — heartbeat pings every 30s
     const heartbeatCutoff = new Date(Date.now() - HEARTBEAT_ALIVE_MS);
+    // Zombie cleanup threshold: matches sessions.ts ABANDONED_THRESHOLD_MS (2h).
+    // IMPORTANT: Claude Code is hook-based (no continuous heartbeat daemon),
+    // so between prompts `updatedAt` is naturally stale for many minutes.
+    // Using HEARTBEAT_ALIVE_MS (2 min) here would mark every idle Claude Code
+    // session as COMPLETED on the next session/start — that's the "dies
+    // instead of going idle" bug. Let sessions.ts computeStatus render them
+    // as IDLE via lastActivityAt, and only reap after the genuine 2h abandon.
+    const ZOMBIE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+    const zombieCutoff = new Date(Date.now() - ZOMBIE_THRESHOLD_MS);
     const existingSession = await prisma.codingSession.findFirst({
       where: {
         agentId: agent?.id || null,
@@ -458,9 +525,10 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         agentId: agent?.id || null,
         commit: { repoId: repo.id },
         status: 'RUNNING',
-        updatedAt: { lt: heartbeatCutoff },
+        updatedAt: { lt: zombieCutoff },
       },
       select: { id: true },
+      take: 1000,
     });
     if (zombieSessions.length > 0) {
       await prisma.codingSession.updateMany({
@@ -586,20 +654,33 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     if (additionalRepoPaths && Array.isArray(additionalRepoPaths)) {
       for (const extraPath of additionalRepoPaths) {
         try {
-          // Resolve each additional repo path using the same fuzzy matching
+          // Resolve each additional repo path using the same fuzzy matching.
+          //
+          // Race note: two concurrent session/start calls with the same
+          // additionalRepoPaths were previously able to both fall through
+          // the findFirst branch, then both hit create, producing duplicate
+          // rows. There's no @@unique([orgId, path]) on Repo because some
+          // orgs already have duplicate rows from the pre-race era, so we
+          // can't use upsert. Instead, re-check inside an interactive
+          // transaction so the find/create is serialized per (orgId, path).
           let extraRepo = await prisma.repo.findFirst({ where: { orgId, path: extraPath } });
           if (!extraRepo) {
             const dirName = extraPath.split('/').filter(Boolean).pop()?.toLowerCase();
             if (dirName) {
-              const orgRepos = await prisma.repo.findMany({ where: { orgId } });
+              const orgRepos = await prisma.repo.findMany({ where: { orgId }, take: 5000 });
               extraRepo = orgRepos.find((r) => r.path.toLowerCase().endsWith(`/${dirName}`)) || null;
             }
           }
-          // Auto-register for solo devs
+          // Auto-register for solo devs — do it inside a tx so a concurrent
+          // request can't create the same row between our check and write.
           if (!extraRepo && isSoloKey) {
             const dirName = extraPath.split('/').filter(Boolean).pop() || extraPath;
-            extraRepo = await prisma.repo.create({
-              data: { orgId, name: dirName, path: extraPath, provider: 'local' },
+            extraRepo = await prisma.$transaction(async (tx) => {
+              const existing = await tx.repo.findFirst({ where: { orgId, path: extraPath } });
+              if (existing) return existing;
+              return tx.repo.create({
+                data: { orgId, name: dirName, path: extraPath, provider: 'local' },
+              });
             });
           }
           if (extraRepo) {
@@ -672,8 +753,13 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
 router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const session = await prisma.codingSession.findUnique({
-      where: { id },
+    const orgId = req.orgId as string;
+    // Scope the lookup by orgId. Previously this used findUnique({id})
+    // which let any org's API key resume (and flip RUNNING) a session in
+    // any other org — a classic cross-tenant IDOR via the MCP surface.
+    // Join through commit.repo.orgId so we can use a single query.
+    const session = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
       include: { agent: true },
     });
     if (!session) {
@@ -697,10 +783,16 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
         : `<security-rules>\n${securityBlock}\n</security-rules>`;
     }
 
-    // Fetch active policies
+    // Fetch active policies for THIS org only. The previous query read
+    // every active policy across every tenant — both a data leak (other
+    // orgs' policy names and descriptions) and an unbounded scan that
+    // grows with total customers.
     let activePolicies: string[] = [];
     try {
-      const allPolicies = await prisma.policy.findMany({ where: { active: true } });
+      const allPolicies = await prisma.policy.findMany({
+        where: { orgId, active: true },
+        take: 500,
+      });
       activePolicies = allPolicies
         .map((p: any) => `[${p.type}] ${p.name}: ${p.description || ''}`.trim());
     } catch { /* non-critical */ }
@@ -716,7 +808,13 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
 router.post('/session/:id/ping', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const session = await prisma.codingSession.findUnique({ where: { id }, select: { status: true } });
+    const orgId = req.orgId as string;
+    // Scope by org so one tenant's API key can't keepalive-tickle (and
+    // thereby influence IDLE detection on) sessions in another tenant.
+    const session = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
+      select: { status: true },
+    });
     if (!session) return res.json({ ok: true, status: 'NOT_FOUND' });
 
     if (session.status === 'RUNNING') {
@@ -732,31 +830,70 @@ router.post('/session/:id/ping', async (req: McpRequest, res: Response) => {
 router.patch('/session/:id', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
+    const orgId = req.orgId as string;
     const {
       prompt, transcript, filesChanged, tokensUsed, toolCalls,
       linesAdded, linesRemoved, model, inputTokens, outputTokens,
       durationMs, costUsd, promptChanges, branch, status,
     } = req.body;
 
+    // Org-scope check BEFORE the update. Previously the handler issued
+    // `update({where:{id}})` directly against a user-controlled id, so a
+    // valid API key in any tenant could mutate arbitrary sessions in
+    // any other tenant — prompt, transcript, tokens, cost, status.
+    // That's both an integrity break (attacker can rewrite another
+    // org's audit trail) and a pricing attack (zero a victim's costUsd).
+    const scopeCheck = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
+      select: { id: true },
+    });
+    if (!scopeCheck) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Clamp every field we're about to persist so a hostile client can't
+    // DoS us by shipping a 500MB prompt or NaN costs.
+    const cleanPrompt = clampStr(prompt, MAX_PROMPT_LEN);
+    const cleanTranscript = clampStr(transcript, MAX_TRANSCRIPT_LEN);
+    const cleanToolCalls = clampNum(toolCalls);
+    const cleanStatus = clampStatus(status);
+    const cleanTokensUsed = clampNum(tokensUsed);
+    const cleanInputTokens = clampNum(inputTokens);
+    const cleanOutputTokens = clampNum(outputTokens);
+    const cleanLinesAdded = clampNum(linesAdded);
+    const cleanLinesRemoved = clampNum(linesRemoved);
+    const cleanDurationMs = clampNum(durationMs);
+    const cleanCostUsd = clampNum(costUsd);
+    // Cap filesChanged array and per-path length before JSON.stringify.
+    let cleanFilesChangedStr: string | undefined;
+    if (filesChanged !== undefined) {
+      const arr = Array.isArray(filesChanged) ? filesChanged : [];
+      const capped = arr
+        .slice(0, MAX_FILES_CHANGED)
+        .filter((f): f is string => typeof f === 'string')
+        .map((f) => (f.length > MAX_FILE_PATH_LEN ? f.slice(0, MAX_FILE_PATH_LEN) : f));
+      cleanFilesChangedStr = JSON.stringify(capped);
+    }
+
     await prisma.codingSession.update({
       where: { id },
       data: {
-        ...(prompt !== undefined && { prompt }),
-        ...(transcript !== undefined && { transcript }),
-        ...(filesChanged !== undefined && { filesChanged: JSON.stringify(filesChanged) }),
-        ...(tokensUsed !== undefined && { tokensUsed }),
-        ...(toolCalls !== undefined && { toolCalls }),
-        ...(linesAdded !== undefined && { linesAdded }),
-        ...(linesRemoved !== undefined && { linesRemoved }),
-        ...(model !== undefined && { model }),
-        ...(inputTokens !== undefined && { inputTokens }),
-        ...(outputTokens !== undefined && { outputTokens }),
-        ...(durationMs !== undefined && { durationMs }),
-        ...(costUsd !== undefined && { costUsd }),
-        ...(branch !== undefined && { branch }),
-        ...(status !== undefined && { status }),
+        ...(cleanPrompt !== undefined && { prompt: cleanPrompt }),
+        ...(cleanTranscript !== undefined && { transcript: cleanTranscript }),
+        ...(cleanFilesChangedStr !== undefined && { filesChanged: cleanFilesChangedStr }),
+        ...(cleanTokensUsed !== undefined && { tokensUsed: cleanTokensUsed }),
+        ...(cleanToolCalls !== undefined && { toolCalls: cleanToolCalls }),
+        ...(cleanLinesAdded !== undefined && { linesAdded: cleanLinesAdded }),
+        ...(cleanLinesRemoved !== undefined && { linesRemoved: cleanLinesRemoved }),
+        ...(typeof model === 'string' && model.length <= 200 && { model }),
+        ...(cleanInputTokens !== undefined && { inputTokens: cleanInputTokens }),
+        ...(cleanOutputTokens !== undefined && { outputTokens: cleanOutputTokens }),
+        ...(cleanDurationMs !== undefined && { durationMs: cleanDurationMs }),
+        ...(cleanCostUsd !== undefined && { costUsd: cleanCostUsd }),
+        ...(typeof branch === 'string' && branch.length <= 500 && { branch }),
+        ...(cleanStatus !== undefined && { status: cleanStatus }),
         // Re-opening a completed session clears endedAt
-        ...(status === 'RUNNING' && { endedAt: null }),
+        ...(cleanStatus === 'RUNNING' && { endedAt: null }),
         // Track last real activity (prompt/tool use) for IDLE detection
         lastActivityAt: new Date(),
       },
@@ -771,42 +908,18 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
       });
 
       if (session?.commit?.repoId) {
-        const commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }> =
-          gitCapture.commitDetails || [];
-
-        // Create or link Commit records for each new commit
-        for (const detail of commitDetails) {
-          const existing = await prisma.commit.findFirst({ where: { sha: detail.sha, repoId: session.commit.repoId } });
-          if (existing) {
-            // Commit already exists (e.g., created by GitHub webhook) — link it to this session
-            if (!existing.sessionId) {
-              await prisma.commit.update({
-                where: { id: existing.id },
-                data: {
-                  sessionId: id,
-                  aiToolDetected: existing.aiToolDetected || session.model || 'unknown',
-                  aiDetectionMethod: existing.aiDetectionMethod || 'session',
-                },
-              });
-            }
-          } else {
-            await prisma.commit.create({
-              data: {
-                repoId: session.commit.repoId,
-                sha: detail.sha,
-                message: detail.message || '',
-                author: detail.author || 'ai-agent',
-                aiToolDetected: session.model || 'unknown',
-                aiDetectionMethod: 'session',
-                filesChanged: JSON.stringify(detail.filesChanged || []),
-                committedAt: new Date(),
-                sessionId: id,
-              },
-            });
-          }
+        const rawCommitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }> =
+          Array.isArray(gitCapture.commitDetails) ? gitCapture.commitDetails : [];
+        // Cap commit fan-out — without this a malicious client could fire
+        // thousands of INSERTs in a single PATCH.
+        const commitDetails = rawCommitDetails.slice(0, MAX_COMMIT_DETAILS);
+        // Cap diff size before any downstream storage / concat.
+        if (typeof gitCapture.diff === 'string' && gitCapture.diff.length > MAX_DIFF_LEN) {
+          gitCapture.diff = gitCapture.diff.slice(0, MAX_DIFF_LEN);
         }
 
-        // Count lines from diff if linesAdded/linesRemoved not provided
+        // Count lines from diff if linesAdded/linesRemoved not provided.
+        // This is pure computation so it runs before the transaction.
         let patchLinesAdded = gitCapture.linesAdded || 0;
         let patchLinesRemoved = gitCapture.linesRemoved || 0;
         if (patchLinesAdded === 0 && patchLinesRemoved === 0 && gitCapture.diff) {
@@ -817,48 +930,107 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           }
         }
 
-        // Upsert SessionDiff — merge with existing if present
-        const existingDiff = await prisma.sessionDiff.findUnique({ where: { sessionId: id } });
-        if (existingDiff) {
-          // Merge: append new diff, update headAfter, merge commitShas
-          const existingShas = JSON.parse(existingDiff.commitShas || '[]') as string[];
-          const newShas = (gitCapture.commitShas || []) as string[];
-          const mergedShas = [...new Set([...existingShas, ...newShas])];
-          await prisma.sessionDiff.update({
-            where: { sessionId: id },
-            data: {
-              headAfter: gitCapture.headAfter || existingDiff.headAfter,
-              commitShas: JSON.stringify(mergedShas),
-              diff: existingDiff.diff + '\n' + (gitCapture.diff || ''),
-              linesAdded: (existingDiff.linesAdded || 0) + patchLinesAdded,
-              linesRemoved: (existingDiff.linesRemoved || 0) + patchLinesRemoved,
-            },
-          });
-        } else {
-          await prisma.sessionDiff.create({
-            data: {
-              sessionId: id,
-              headBefore: gitCapture.headBefore || '',
-              headAfter: gitCapture.headAfter || '',
-              commitShas: JSON.stringify(gitCapture.commitShas || []),
-              diff: gitCapture.diff || '',
-              diffTruncated: gitCapture.diffTruncated || false,
-              linesAdded: patchLinesAdded,
-              linesRemoved: patchLinesRemoved,
-            },
-          });
-        }
+        // Everything below mutates related rows (Commit, SessionDiff,
+        // CodingSession) that must stay consistent with each other — e.g.
+        // if we create the commits but crash before writing SessionDiff,
+        // the dashboard would show a session with orphan commits but no
+        // diff, and the line counters on CodingSession would be off by
+        // however much we'd already merged from a prior partial call.
+        // Wrap in an interactive transaction so the whole block commits
+        // or rolls back as one unit. 15s timeout is generous for the
+        // largest real payloads we've observed.
+        const repoIdForCommit = session.commit.repoId;
+        await prisma.$transaction(
+          async (tx) => {
+            // Create or link Commit records for each new commit
+            for (const detail of commitDetails) {
+              const existing = await tx.commit.findFirst({ where: { sha: detail.sha, repoId: repoIdForCommit } });
+              if (existing) {
+                // Commit already exists (e.g., created by GitHub webhook) — link it to this session
+                if (!existing.sessionId) {
+                  await tx.commit.update({
+                    where: { id: existing.id },
+                    data: {
+                      sessionId: id,
+                      aiToolDetected: existing.aiToolDetected || session.model || 'unknown',
+                      aiDetectionMethod: existing.aiDetectionMethod || 'session',
+                    },
+                  });
+                }
+              } else {
+                await tx.commit.create({
+                  data: {
+                    repoId: repoIdForCommit,
+                    sha: detail.sha,
+                    message: detail.message || '',
+                    author: detail.author || 'ai-agent',
+                    aiToolDetected: session.model || 'unknown',
+                    aiDetectionMethod: 'session',
+                    filesChanged: JSON.stringify(detail.filesChanged || []),
+                    committedAt: new Date(),
+                    sessionId: id,
+                  },
+                });
+              }
+            }
 
-        // Update session line counts
-        if (patchLinesAdded || patchLinesRemoved) {
-          await prisma.codingSession.update({
-            where: { id },
-            data: {
-              linesAdded: { increment: patchLinesAdded },
-              linesRemoved: { increment: patchLinesRemoved },
-            },
-          });
-        }
+            // Upsert SessionDiff — merge with existing if present
+            const existingDiff = await tx.sessionDiff.findUnique({ where: { sessionId: id } });
+            if (existingDiff) {
+              // Merge: append new diff, update headAfter, merge commitShas.
+              // Guard the JSON.parse — a corrupt commitShas payload should
+              // not take down the whole session update; fall back to an
+              // empty list and log.
+              let existingShas: string[] = [];
+              try {
+                existingShas = JSON.parse(existingDiff.commitShas || '[]') as string[];
+                if (!Array.isArray(existingShas)) existingShas = [];
+              } catch (err) {
+                console.error('[mcp/session] failed to parse existing commitShas', {
+                  sessionId: id,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+              const newShas = (gitCapture.commitShas || []) as string[];
+              const mergedShas = [...new Set([...existingShas, ...newShas])];
+              await tx.sessionDiff.update({
+                where: { sessionId: id },
+                data: {
+                  headAfter: gitCapture.headAfter || existingDiff.headAfter,
+                  commitShas: JSON.stringify(mergedShas),
+                  diff: existingDiff.diff + '\n' + (gitCapture.diff || ''),
+                  linesAdded: (existingDiff.linesAdded || 0) + patchLinesAdded,
+                  linesRemoved: (existingDiff.linesRemoved || 0) + patchLinesRemoved,
+                },
+              });
+            } else {
+              await tx.sessionDiff.create({
+                data: {
+                  sessionId: id,
+                  headBefore: gitCapture.headBefore || '',
+                  headAfter: gitCapture.headAfter || '',
+                  commitShas: JSON.stringify(gitCapture.commitShas || []),
+                  diff: gitCapture.diff || '',
+                  diffTruncated: gitCapture.diffTruncated || false,
+                  linesAdded: patchLinesAdded,
+                  linesRemoved: patchLinesRemoved,
+                },
+              });
+            }
+
+            // Update session line counts
+            if (patchLinesAdded || patchLinesRemoved) {
+              await tx.codingSession.update({
+                where: { id },
+                data: {
+                  linesAdded: { increment: patchLinesAdded },
+                  linesRemoved: { increment: patchLinesRemoved },
+                },
+              });
+            }
+          },
+          { timeout: 15000 },
+        );
 
         // Scan incremental diff for secrets (fire-and-forget)
         if (gitCapture.diff && session?.commit?.repoId) {
@@ -873,15 +1045,21 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
 
     // Replace prompt→file change mappings (delete old, create new — bulk)
     if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
+      // Cap row count so a client can't ask us to insert a million rows.
+      const capped = promptChanges.slice(0, MAX_PROMPT_CHANGES);
       await prisma.promptChange.deleteMany({ where: { sessionId: id } });
       await prisma.promptChange.createMany({
-        data: promptChanges.map((pc: any) => ({
+        data: capped.map((pc: any) => ({
           sessionId: id,
-          promptIndex: pc.promptIndex ?? 0,
-          promptText: (pc.promptText || '').slice(0, 1000),
-          filesChanged: JSON.stringify(pc.filesChanged || []),
-          diff: (pc.diff || '').slice(0, 200_000),
-          uncommittedDiff: (pc.uncommittedDiff || '').slice(0, 200_000),
+          promptIndex: Number.isFinite(Number(pc?.promptIndex)) ? Number(pc.promptIndex) : 0,
+          promptText: (typeof pc?.promptText === 'string' ? pc.promptText : '').slice(0, 1000),
+          filesChanged: JSON.stringify(
+            Array.isArray(pc?.filesChanged)
+              ? pc.filesChanged.slice(0, MAX_FILES_CHANGED).filter((f: unknown) => typeof f === 'string')
+              : [],
+          ),
+          diff: (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000),
+          uncommittedDiff: (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000),
         })),
       });
     }
@@ -970,27 +1148,53 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     // transcript field: prefer full transcript if provided, fall back to summary
     const transcriptValue = transcript || summary;
 
-    // Check session exists first
-    const existingSession = await prisma.codingSession.findUnique({ where: { id: sessionId } });
+    // Check session exists AND belongs to this org. The old findUnique
+    // lookup by id alone let any valid API key close (and mutate
+    // tokens/cost/transcript on) any session in any tenant. Scope
+    // through commit.repo.orgId.
+    const existingSession = await prisma.codingSession.findFirst({
+      where: { id: sessionId, commit: { repo: { orgId } } },
+    });
     if (!existingSession) {
       return res.status(404).json({ error: 'Session not found', sessionId });
+    }
+
+    // Same clamping as PATCH /session/:id — keep hostile payloads out of the DB.
+    const cleanPromptEnd = clampStr(prompt, MAX_PROMPT_LEN);
+    const cleanTranscriptEnd = clampStr(transcriptValue, MAX_TRANSCRIPT_LEN);
+    const cleanToolCallsEnd = clampNum(toolCalls);
+    const cleanTokensUsedEnd = clampNum(tokensUsed);
+    const cleanInputTokensEnd = clampNum(inputTokens);
+    const cleanOutputTokensEnd = clampNum(outputTokens);
+    const cleanLinesAddedEnd = clampNum(linesAdded);
+    const cleanLinesRemovedEnd = clampNum(linesRemoved);
+    const cleanCostUsdEnd = clampNum(costUsd);
+    const cleanDurationMsEnd = clampNum(durationMs);
+    let cleanFilesChangedEndStr: string | undefined;
+    if (filesChanged !== undefined) {
+      const arr = Array.isArray(filesChanged) ? filesChanged : [];
+      const capped = arr
+        .slice(0, MAX_FILES_CHANGED)
+        .filter((f): f is string => typeof f === 'string')
+        .map((f) => (f.length > MAX_FILE_PATH_LEN ? f.slice(0, MAX_FILE_PATH_LEN) : f));
+      cleanFilesChangedEndStr = JSON.stringify(capped);
     }
 
     const codingSession = await prisma.codingSession.update({
       where: { id: sessionId },
       data: {
-        ...(prompt !== undefined && { prompt }),
-        ...(transcriptValue !== undefined && { transcript: transcriptValue }),
-        ...(tokensUsed !== undefined && { tokensUsed }),
-        ...(inputTokens !== undefined && { inputTokens }),
-        ...(outputTokens !== undefined && { outputTokens }),
-        ...(toolCalls !== undefined && { toolCalls }),
-        ...(linesAdded !== undefined && { linesAdded }),
-        ...(linesRemoved !== undefined && { linesRemoved }),
-        ...(costUsd !== undefined && { costUsd }),
-        ...(filesChanged !== undefined && { filesChanged: JSON.stringify(filesChanged) }),
-        ...(durationMs !== undefined && { durationMs }),
-        ...(branch !== undefined && { branch }),
+        ...(cleanPromptEnd !== undefined && { prompt: cleanPromptEnd }),
+        ...(cleanTranscriptEnd !== undefined && { transcript: cleanTranscriptEnd }),
+        ...(cleanTokensUsedEnd !== undefined && { tokensUsed: cleanTokensUsedEnd }),
+        ...(cleanInputTokensEnd !== undefined && { inputTokens: cleanInputTokensEnd }),
+        ...(cleanOutputTokensEnd !== undefined && { outputTokens: cleanOutputTokensEnd }),
+        ...(cleanToolCallsEnd !== undefined && { toolCalls: cleanToolCallsEnd }),
+        ...(cleanLinesAddedEnd !== undefined && { linesAdded: cleanLinesAddedEnd }),
+        ...(cleanLinesRemovedEnd !== undefined && { linesRemoved: cleanLinesRemovedEnd }),
+        ...(cleanCostUsdEnd !== undefined && { costUsd: cleanCostUsdEnd }),
+        ...(cleanFilesChangedEndStr !== undefined && { filesChanged: cleanFilesChangedEndStr }),
+        ...(cleanDurationMsEnd !== undefined && { durationMs: cleanDurationMsEnd }),
+        ...(typeof branch === 'string' && branch.length <= 500 && { branch }),
         status: 'COMPLETED',
         endedAt: new Date(),
       },
@@ -1020,8 +1224,13 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
 
     if (gitCapture && typeof gitCapture === 'object') {
       const repoId = codingSession.commit.repoId;
-      const commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }> =
-        gitCapture.commitDetails || [];
+      // Cap commit fan-out and diff size to keep hostile payloads bounded.
+      const rawCommitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }> =
+        Array.isArray(gitCapture.commitDetails) ? gitCapture.commitDetails : [];
+      const commitDetails = rawCommitDetails.slice(0, MAX_COMMIT_DETAILS);
+      if (typeof gitCapture.diff === 'string' && gitCapture.diff.length > MAX_DIFF_LEN) {
+        gitCapture.diff = gitCapture.diff.slice(0, MAX_DIFF_LEN);
+      }
 
       // Update placeholder commit SHA with real value
       const realSha = (gitCapture.commitShas?.length > 0)
@@ -1149,19 +1358,60 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           },
         });
       }
+
+      // Bidirectional backlink: for each commit SHA in this session's diff,
+      // update any existing Commit rows in the same org to point at this session.
+      // This handles the case where the commit was already synced from
+      // GitHub/GitLab (and looked Human) before the CLI uploaded the session.
+      try {
+        const shas: string[] = Array.isArray(gitCapture.commitShas) ? gitCapture.commitShas : [];
+        if (shas.length > 0) {
+          const sess = await prisma.codingSession.findUnique({
+            where: { id: sessionId },
+            select: {
+              model: true,
+              commit: { select: { repo: { select: { orgId: true } } } },
+              agent: { select: { name: true } },
+            },
+          });
+          const tool = sess?.agent?.name?.toLowerCase() || sess?.model || 'ai';
+          const orgId = sess?.commit?.repo?.orgId;
+          if (orgId) {
+            await prisma.commit.updateMany({
+              where: {
+                sha: { in: shas },
+                sessionId: null,
+                repo: { orgId },
+              },
+              data: {
+                sessionId,
+                aiToolDetected: tool,
+                aiDetectionMethod: 'session-diff-link',
+              },
+            });
+          }
+        }
+      } catch (e) {
+        console.error('SessionDiff → Commit backlink failed:', e);
+      }
     }
 
     // Replace prompt→file change mappings (delete old, create new — prevents duplicates from race conditions)
     if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
+      const capped = promptChanges.slice(0, MAX_PROMPT_CHANGES);
       await prisma.promptChange.deleteMany({ where: { sessionId } });
       await prisma.promptChange.createMany({
-        data: promptChanges.map((pc: any) => ({
+        data: capped.map((pc: any) => ({
           sessionId,
-          promptIndex: pc.promptIndex ?? 0,
-          promptText: (pc.promptText || '').slice(0, 1000),
-          filesChanged: JSON.stringify(pc.filesChanged || []),
-          diff: (pc.diff || '').slice(0, 200_000),
-          uncommittedDiff: (pc.uncommittedDiff || '').slice(0, 200_000),
+          promptIndex: Number.isFinite(Number(pc?.promptIndex)) ? Number(pc.promptIndex) : 0,
+          promptText: (typeof pc?.promptText === 'string' ? pc.promptText : '').slice(0, 1000),
+          filesChanged: JSON.stringify(
+            Array.isArray(pc?.filesChanged)
+              ? pc.filesChanged.slice(0, MAX_FILES_CHANGED).filter((f: unknown) => typeof f === 'string')
+              : [],
+          ),
+          diff: (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000),
+          uncommittedDiff: (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000),
         })),
       });
     }
@@ -1191,7 +1441,16 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
 
     // Trigger AI auto-review in background (don't block response)
     let parsedFiles: string[] = [];
-    try { parsedFiles = Array.isArray(filesChanged) ? filesChanged : JSON.parse(filesChanged || '[]'); } catch {}
+    if (Array.isArray(filesChanged)) {
+      parsedFiles = filesChanged;
+    } else if (typeof filesChanged === 'string' && filesChanged) {
+      try {
+        const parsed = JSON.parse(filesChanged);
+        parsedFiles = Array.isArray(parsed) ? parsed : [];
+      } catch (err) {
+        console.warn(`[mcp] malformed filesChanged for session ${sessionId}:`, (err as Error).message);
+      }
+    }
 
     // Send Slack notification for session completion (fire-and-forget)
     const sessionCost = costUsd ?? 0;
@@ -1203,7 +1462,9 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       title: 'AI Session Completed',
       message: `*${codingSession.model}* session finished — $${sessionCost.toFixed(2)} • ${fileCount} file${fileCount !== 1 ? 's' : ''} • ${sessionDuration}`,
       link: `/sessions/${sessionId}`,
-    }).catch(() => {});
+    }).catch((err) => {
+      console.warn(`[mcp] Slack session-completed notification failed for org ${orgId}:`, (err as Error).message);
+    });
 
     // AI auto-review disabled by default — run manually via dashboard or origin review
     // TODO: add org-level setting to enable auto-review

@@ -254,57 +254,87 @@ function StatCardsRow({ stats, fmt, fmtCost }: { stats: MyStats; fmt: (n: number
     return (v / t) * 100;
   };
 
+  // ── Gradient stat card (same style used on Insights) ──────────────────
+  const renderCard = (
+    key: StatKey,
+    label: string,
+    Icon: React.ComponentType<{ className?: string }>,
+    value: React.ReactNode,
+    sub: React.ReactNode,
+    accent: 'indigo' | 'purple' | 'cyan' | 'amber',
+  ) => {
+    const accentMap: Record<string, { grad: string; text: string; ring: string }> = {
+      indigo: { grad: 'from-indigo-500/20 to-indigo-500/0', text: 'text-indigo-300', ring: 'ring-indigo-500/40' },
+      purple: { grad: 'from-purple-500/20 to-purple-500/0', text: 'text-purple-300', ring: 'ring-purple-500/40' },
+      cyan:   { grad: 'from-cyan-500/20 to-cyan-500/0',     text: 'text-cyan-300',   ring: 'ring-cyan-500/40' },
+      amber:  { grad: 'from-amber-500/20 to-amber-500/0',   text: 'text-amber-300',  ring: 'ring-amber-500/40' },
+    };
+    const a = accentMap[accent];
+    const isActive = expanded === key;
+    return (
+      <button
+        onClick={() => toggle(key)}
+        className={`relative rounded-xl border p-4 text-left overflow-hidden transition-all hover:border-gray-700 ${
+          isActive ? `border-gray-600 ring-1 ${a.ring}` : 'border-gray-800/80'
+        } bg-gray-900/40`}
+      >
+        <div className={`absolute inset-0 bg-gradient-to-br ${a.grad} opacity-60 pointer-events-none`} />
+        <div className="relative">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-medium text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
+              <Icon className={`w-3 h-3 ${a.text}`} />
+              {label}
+            </span>
+            <ChevronDown
+              className={`w-3 h-3 text-gray-600 transition-transform ${isActive ? 'rotate-180' : ''}`}
+            />
+          </div>
+          <div className="text-2xl font-semibold text-gray-50 tabular-nums">{value}</div>
+          <div className="text-[11px] text-gray-500 mt-1">{sub}</div>
+        </div>
+      </button>
+    );
+  };
+
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <button onClick={() => toggle('sessions')} className={`card py-4 text-left transition-all hover:border-indigo-500/30 cursor-pointer ${expanded === 'sessions' ? 'border-indigo-500/40 bg-indigo-500/5' : ''}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-              <Play className="w-3.5 h-3.5" />
-              Sessions
-            </div>
-            <ChevronDown className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded === 'sessions' ? 'rotate-180' : ''}`} />
-          </div>
-          <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalSessions)}</div>
-          <Trend current={stats.thisWeek.sessions} previous={stats.lastWeek.sessions} />
-        </button>
-        <button onClick={() => toggle('tokens')} className={`card py-4 text-left transition-all hover:border-indigo-500/30 cursor-pointer ${expanded === 'tokens' ? 'border-indigo-500/40 bg-indigo-500/5' : ''}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-              <Zap className="w-3.5 h-3.5" />
-              Tokens
-            </div>
-            <ChevronDown className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded === 'tokens' ? 'rotate-180' : ''}`} />
-          </div>
-          <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalTokens)}</div>
-          <Trend current={stats.thisWeek.tokens} previous={stats.lastWeek.tokens} />
-        </button>
-        <button onClick={() => toggle('cost')} className={`card py-4 text-left transition-all hover:border-indigo-500/30 cursor-pointer ${expanded === 'cost' ? 'border-indigo-500/40 bg-indigo-500/5' : ''}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-              <DollarSign className="w-3.5 h-3.5" />
-              Cost
-            </div>
-            <ChevronDown className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded === 'cost' ? 'rotate-180' : ''}`} />
-          </div>
-          <div className="text-2xl font-bold text-gray-100">{fmtCost(stats.totalCost)}</div>
-          <Trend current={stats.thisWeek.cost} previous={stats.lastWeek.cost} />
-        </button>
-        <button onClick={() => toggle('lines')} className={`card py-4 text-left transition-all hover:border-indigo-500/30 cursor-pointer ${expanded === 'lines' ? 'border-indigo-500/40 bg-indigo-500/5' : ''}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-              <Code2 className="w-3.5 h-3.5" />
-              Lines Written
-            </div>
-            <ChevronDown className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded === 'lines' ? 'rotate-180' : ''}`} />
-          </div>
-          <div className="text-2xl font-bold text-gray-100">{fmt(stats.totalLinesAdded)}</div>
-          <div className="text-xs text-gray-600">
-            <span className="text-green-500">+{fmt(stats.totalLinesAdded)}</span>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {renderCard(
+          'sessions',
+          'Sessions',
+          Play,
+          fmt(stats.totalSessions),
+          <Trend current={stats.thisWeek.sessions} previous={stats.lastWeek.sessions} />,
+          'indigo',
+        )}
+        {renderCard(
+          'tokens',
+          'Tokens',
+          Zap,
+          fmt(stats.totalTokens),
+          <Trend current={stats.thisWeek.tokens} previous={stats.lastWeek.tokens} />,
+          'purple',
+        )}
+        {renderCard(
+          'cost',
+          'Cost',
+          DollarSign,
+          fmtCost(stats.totalCost),
+          <Trend current={stats.thisWeek.cost} previous={stats.lastWeek.cost} />,
+          'cyan',
+        )}
+        {renderCard(
+          'lines',
+          'Lines Written',
+          Code2,
+          fmt(stats.totalLinesAdded),
+          <>
+            <span className="text-emerald-400">+{fmt(stats.totalLinesAdded)}</span>
             {' / '}
             <span className="text-red-400">-{fmt(stats.totalLinesRemoved)}</span>
-          </div>
-        </button>
+          </>,
+          'amber',
+        )}
       </div>
 
       {/* Agent breakdown panel */}
@@ -766,10 +796,13 @@ export default function MyDashboard() {
   // Stats
   const [stats, setStats] = useState<MyStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
-  const [hideGuide, setHideGuide] = useState(() => localStorage.getItem('origin:hide-guide') === '1');
+  const [hideGuide, setHideGuide] = useState(() => {
+    try { return localStorage.getItem('origin:hide-guide') === '1'; } catch { return false; }
+  });
 
-  // Force-show guide for users with zero sessions (even if previously dismissed)
-  const showGuide = !hideGuide || (!statsLoading && stats?.totalSessions === 0);
+  // Honour the user's dismissal regardless of session count — the earlier
+  // "force-show for zero sessions" fallback made the X button look broken.
+  const showGuide = !hideGuide;
 
   // Agent cards
   const [agentCards, setAgentCards] = useState<AgentCard[]>([]);
@@ -1156,15 +1189,17 @@ export default function MyDashboard() {
                 <p className="text-sm text-gray-500">Set up session tracking in under 2 minutes</p>
               </div>
             </div>
-            {(stats?.totalSessions ?? 0) > 0 && (
-              <button
-                onClick={() => { setHideGuide(true); localStorage.setItem('origin:hide-guide', '1'); }}
-                className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
-                title="Dismiss"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            )}
+            {/* Always show the close button — users who already know the
+                ropes shouldn't have to produce a session just to dismiss the
+                onboarding card. */}
+            <button
+              onClick={() => { setHideGuide(true); try { localStorage.setItem('origin:hide-guide', '1'); } catch { /* ignore */ } }}
+              className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+              title="Dismiss"
+              aria-label="Dismiss onboarding card"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

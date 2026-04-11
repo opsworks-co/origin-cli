@@ -10,6 +10,7 @@ import {
   getValidGitLabOAuthToken,
   testGitLabConnection,
 } from '../services/gitlab-integration.js';
+import { assertSafeExternalUrl } from '../utils/ssrf-guard.js';
 
 const router = Router();
 
@@ -52,7 +53,9 @@ router.get('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest
     }
 
     let settings: any = {};
-    try { settings = JSON.parse(dbConfig.settings); } catch {}
+    try { settings = JSON.parse(dbConfig.settings); } catch (err) {
+      console.warn('[gitlab-oauth] malformed dbConfig.settings JSON:', (err as Error).message);
+    }
 
     res.json({
       configured: !!(settings.clientId && settings.clientSecret && settings.redirectUri),
@@ -189,7 +192,9 @@ router.get('/callback', async (req: Request, res: Response) => {
     // Verify state token
     let statePayload: { orgId: string; userId: string };
     try {
-      statePayload = jwt.verify(state as string, JWT_SECRET) as { orgId: string; userId: string };
+      // Pin HS256 — we sign the state token with HS256 and must reject
+      // any other algorithm, including alg=none / key-confusion attacks.
+      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string };
     } catch {
       return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=invalid_state');
     }
@@ -222,11 +227,17 @@ router.get('/callback', async (req: Request, res: Response) => {
       return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=token_exchange_failed');
     }
 
-    // Fetch user info to store username
+    // Fetch user info to store username. Guard against SSRF: even though
+    // the baseUrl was written by an admin, we double-check here before
+    // sending the freshly minted OAuth access token over the wire, so a
+    // compromised/malicious baseUrl can't exfiltrate tokens to an
+    // attacker-controlled host.
     let username = '';
     try {
       const apiBase = existingConfig?.baseUrl || 'https://gitlab.com/api/v4';
-      const userRes = await fetch(`${apiBase}/user`, {
+      const userUrl = `${apiBase}/user`;
+      assertSafeExternalUrl(userUrl, 'gitlab-oauth.callback.user');
+      const userRes = await fetch(userUrl, {
         headers: { Authorization: `Bearer ${tokenResult.access_token}` },
       });
       if (userRes.ok) {
@@ -346,6 +357,7 @@ router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest,
     // Get valid token (auto-refresh if expired)
     const token = await getValidGitLabOAuthToken({ ...config, orgId: req.user!.orgId });
     const apiBase = config.baseUrl || 'https://gitlab.com/api/v4';
+    assertSafeExternalUrl(apiBase, 'gitlab-oauth.test');
     const result = await testGitLabConnection(token, apiBase, 'gitlab_oauth');
 
     res.json(result);
@@ -372,8 +384,10 @@ router.post('/disconnect', requireAuth, requireRole('ADMIN'), async (req: AuthRe
     try {
       const oauthConfig = await getGitLabOAuthConfigForOrg(req.user!.orgId);
       const gitlabBaseUrl = getGitLabOAuthBaseUrl(config.baseUrl || 'https://gitlab.com/api/v4');
+      const revokeUrl = `${gitlabBaseUrl}/oauth/revoke`;
+      assertSafeExternalUrl(revokeUrl, 'gitlab-oauth.disconnect');
       if (oauthConfig.configured) {
-        await fetch(`${gitlabBaseUrl}/oauth/revoke`, {
+        await fetch(revokeUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

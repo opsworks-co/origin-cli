@@ -1,6 +1,14 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { validateFieldLengths, COMMON_LIMITS } from '../utils/validate.js';
+
+const TRAIL_LIMITS = {
+  name: COMMON_LIMITS.name,
+  description: COMMON_LIMITS.description,
+  branch: 255,
+  priority: 50,
+};
 
 const router = Router();
 router.use(requireAuth);
@@ -81,6 +89,10 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
     if (!name) {
       return res.status(400).json({ error: 'Missing required field: name' });
+    }
+    const lenErr = validateFieldLengths({ name, description, branch, priority }, TRAIL_LIMITS);
+    if (lenErr) {
+      return res.status(400).json({ error: lenErr });
     }
 
     const trail = await prisma.trail.create({
@@ -173,9 +185,13 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       const shas = commits.map((c) => c.sha);
 
       if (repoIds.length > 0) {
+        // Cap at 5000 PRs — commitShas is a JSON column so we filter
+        // in memory; 5000 is well above realistic per-trail PR counts.
         const allPRs = await prisma.pullRequest.findMany({
           where: { repoId: { in: repoIds } },
           include: { repo: { select: { name: true } } },
+          take: 5000,
+          orderBy: { createdAt: 'desc' },
         });
 
         linkedPRs = allPRs.filter((pr) => {
@@ -234,6 +250,11 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
     const { name, description, status, priority, labels } = req.body;
 
+    const lenErr = validateFieldLengths({ name, description, priority }, TRAIL_LIMITS);
+    if (lenErr) {
+      return res.status(400).json({ error: lenErr });
+    }
+
     const data: any = {};
     if (name !== undefined) data.name = name;
     if (description !== undefined) data.description = description;
@@ -241,10 +262,19 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     if (priority !== undefined) data.priority = priority;
     if (labels !== undefined) data.labels = JSON.stringify(labels);
 
-    const updated = await prisma.trail.update({
-      where: { id },
+    // Defense-in-depth: compound-scope the update so a future refactor
+    // that drops the precheck above still can't touch another org's trail.
+    const updateResult = await prisma.trail.updateMany({
+      where: { id, orgId },
       data,
     });
+    if (updateResult.count === 0) {
+      return res.status(404).json({ error: 'Trail not found' });
+    }
+    const updated = await prisma.trail.findUnique({ where: { id } });
+    if (!updated) {
+      return res.status(404).json({ error: 'Trail not found' });
+    }
 
     res.json({
       ...updated,
@@ -256,8 +286,9 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// DELETE /:id — Delete trail
-router.delete('/:id', async (req: AuthRequest, res: Response) => {
+// DELETE /:id — Delete trail (admin-only — trails represent investigation
+// history and shouldn't be deletable by any org member).
+router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
     const id = req.params.id as string;
@@ -270,8 +301,15 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Trail not found' });
     }
 
-    // TrailSession cascade delete is handled by Prisma onDelete: Cascade
-    await prisma.trail.delete({ where: { id } });
+    // Defense-in-depth: compound-scope the delete so the precheck above
+    // isn't the only line preventing cross-org deletion.
+    // TrailSession cascade delete is handled by Prisma onDelete: Cascade.
+    const { count } = await prisma.trail.deleteMany({
+      where: { id, orgId },
+    });
+    if (count === 0) {
+      return res.status(404).json({ error: 'Trail not found' });
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -302,7 +340,29 @@ router.post('/:id/sessions', async (req: AuthRequest, res: Response) => {
     const added: string[] = [];
     const skipped: string[] = [];
 
-    for (const sessionId of sessionIds) {
+    // IDOR fix: validate every incoming sessionId belongs to a repo in this
+    // org before linking it into the trail. Previously the handler trusted
+    // whatever ids the client supplied, so an attacker who knew (or guessed)
+    // a session UUID in another org could attach that session into one of
+    // their own trails — and then read its contents through the trail
+    // endpoints, turning this into a cross-org data-leak vector.
+    const uniqueIds = Array.from(new Set(sessionIds.filter((s): s is string => typeof s === 'string')));
+    const ownedSessions = uniqueIds.length
+      ? await prisma.codingSession.findMany({
+          where: {
+            id: { in: uniqueIds },
+            commit: { repo: { orgId } },
+          },
+          select: { id: true },
+        })
+      : [];
+    const ownedIds = new Set(ownedSessions.map((s) => s.id));
+
+    for (const sessionId of uniqueIds) {
+      if (!ownedIds.has(sessionId)) {
+        skipped.push(sessionId);
+        continue;
+      }
       try {
         await prisma.trailSession.create({
           data: {
@@ -312,7 +372,7 @@ router.post('/:id/sessions', async (req: AuthRequest, res: Response) => {
         });
         added.push(sessionId);
       } catch {
-        // Duplicate or invalid — skip
+        // Duplicate — skip
         skipped.push(sessionId);
       }
     }

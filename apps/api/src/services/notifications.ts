@@ -31,9 +31,13 @@ export async function notifyOrgMembers(
   link?: string,
   metadata?: Record<string, any>
 ) {
+  // Cap fanout at 10k recipients. One triggering event on a large org
+  // already causes a massive createMany write; above this we'd risk
+  // throttling the Notification table and the Slack path below.
   const users = await prisma.user.findMany({
     where: { orgId, role: { in: ['MEMBER', 'ADMIN', 'OWNER'] } },
     select: { id: true },
+    take: 10_000,
   });
 
   const notifications = users.map(u => ({
@@ -62,6 +66,7 @@ export async function notifyOrgAdmins(
   const users = await prisma.user.findMany({
     where: { orgId, role: { in: ['ADMIN', 'OWNER'] } },
     select: { id: true },
+    take: 2000,
   });
 
   const notifications = users.map(u => ({
@@ -78,6 +83,13 @@ export async function notifyOrgAdmins(
     await prisma.notification.createMany({ data: notifications });
   }
 
-  // Also send to Slack (fire-and-forget — never blocks in-app flow)
-  sendSlackNotification({ orgId, type, title, message, link }).catch(() => {});
+  // Also send to Slack (fire-and-forget — never blocks in-app flow).
+  // Log failures so ops can see them in Fly logs; swallowing silently hid
+  // a broken webhook URL for days in prod before.
+  sendSlackNotification({ orgId, type, title, message, link }).catch((err) => {
+    console.warn(
+      `[notifications] Slack send failed for org ${orgId} type ${type}:`,
+      (err as Error).message,
+    );
+  });
 }

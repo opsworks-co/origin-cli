@@ -1,10 +1,11 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { git, gitDetailed } from '../utils/exec.js';
 import { getGitRoot, getBranch, loadSessionState, listActiveSessions } from '../session-state.js';
 
 const BRANCH = 'origin-sessions';
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 /**
  * origin resume [branch]
@@ -21,18 +22,15 @@ export async function resumeCommand(branch?: string, opts?: { json?: boolean }):
     process.exit(1);
   }
 
-  const execOpts = {
-    encoding: 'utf-8' as const,
-    cwd: repoPath,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-  };
+  const gitOpts = { cwd: repoPath };
 
   // Check if origin-sessions branch exists
-  try {
-    execSync(`git rev-parse refs/heads/${BRANCH}`, execOpts);
-  } catch {
-    console.error(chalk.yellow('No origin-sessions branch found. No session history available.'));
-    process.exit(1);
+  {
+    const r = gitDetailed(['rev-parse', `refs/heads/${BRANCH}`], gitOpts);
+    if (r.status !== 0) {
+      console.error(chalk.yellow('No origin-sessions branch found. No session history available.'));
+      process.exit(1);
+    }
   }
 
   // Find the target branch — use provided arg, current branch, or most recent session
@@ -40,15 +38,14 @@ export async function resumeCommand(branch?: string, opts?: { json?: boolean }):
 
   // List all sessions on origin-sessions branch
   let sessionDirs: string[] = [];
-  try {
-    const tree = execSync(
-      `git ls-tree --name-only refs/heads/${BRANCH} sessions/`,
-      execOpts,
-    ).trim();
+  {
+    const r = gitDetailed(['ls-tree', '--name-only', `refs/heads/${BRANCH}`, 'sessions/'], gitOpts);
+    if (r.status !== 0) {
+      console.error(chalk.yellow('No sessions found on origin-sessions branch.'));
+      process.exit(1);
+    }
+    const tree = r.stdout.trim();
     sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
-  } catch {
-    console.error(chalk.yellow('No sessions found on origin-sessions branch.'));
-    process.exit(1);
   }
 
   if (sessionDirs.length === 0) {
@@ -61,10 +58,12 @@ export async function resumeCommand(branch?: string, opts?: { json?: boolean }):
   let bestTimestamp = '';
 
   for (const dir of sessionDirs) {
+    const dirName = dir.replace(/^sessions\//, '');
+    if (!SAFE_ID.test(dirName)) continue;
     try {
-      const metaRaw = execSync(
-        `git show refs/heads/${BRANCH}:${dir}/metadata.json`,
-        execOpts,
+      const metaRaw = git(
+        ['show', `refs/heads/${BRANCH}:${dir}/metadata.json`],
+        gitOpts,
       ).trim();
       const metadata = JSON.parse(metaRaw);
 
@@ -85,10 +84,12 @@ export async function resumeCommand(branch?: string, opts?: { json?: boolean }):
     // Show available branches
     const branches = new Set<string>();
     for (const dir of sessionDirs) {
+      const dirName = dir.replace(/^sessions\//, '');
+      if (!SAFE_ID.test(dirName)) continue;
       try {
-        const metaRaw = execSync(
-          `git show refs/heads/${BRANCH}:${dir}/metadata.json`,
-          execOpts,
+        const metaRaw = git(
+          ['show', `refs/heads/${BRANCH}:${dir}/metadata.json`],
+          gitOpts,
         ).trim();
         const metadata = JSON.parse(metaRaw);
         if (metadata.git?.branch) branches.add(metadata.git.branch);
@@ -100,21 +101,21 @@ export async function resumeCommand(branch?: string, opts?: { json?: boolean }):
     process.exit(1);
   }
 
-  // Read prompts.md
+  // Read prompts.md (dir already validated above)
   let promptsMd = '';
   try {
-    promptsMd = execSync(
-      `git show refs/heads/${BRANCH}:${bestSession.dir}/prompts.md`,
-      execOpts,
+    promptsMd = git(
+      ['show', `refs/heads/${BRANCH}:${bestSession.dir}/prompts.md`],
+      gitOpts,
     ).trim();
   } catch { /* no prompts file */ }
 
   // Read changes
   let changes: any = null;
   try {
-    const changesRaw = execSync(
-      `git show refs/heads/${BRANCH}:${bestSession.dir}/changes.json`,
-      execOpts,
+    const changesRaw = git(
+      ['show', `refs/heads/${BRANCH}:${bestSession.dir}/changes.json`],
+      gitOpts,
     ).trim();
     changes = JSON.parse(changesRaw);
   } catch { /* no changes file */ }

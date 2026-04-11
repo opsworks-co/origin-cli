@@ -1,9 +1,12 @@
 import http from 'http';
-import { execSync } from 'child_process';
 import chalk from 'chalk';
+import { gitDetailed, runDetailed } from '../utils/exec.js';
 import { getGitRoot, getBranch } from '../session-state.js';
 import { getAllPrompts } from '../local-db.js';
 import { loadAgentConfig } from '../config.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 /**
  * origin web — Launch a local web dashboard for your repo's AI attribution data.
@@ -32,7 +35,7 @@ interface SessionInfo {
 }
 
 function gatherData(repoRoot: string) {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoRoot };
   const branch = getBranch(repoRoot) || 'unknown';
 
   // Commits with notes
@@ -44,8 +47,9 @@ function gatherData(repoRoot: string) {
   const toolCounts: Record<string, number> = {};
   const modelCounts: Record<string, number> = {};
 
-  try {
-    const log = execSync('git log --format="%H|%aI|%s|%an" -100 2>/dev/null', execOpts).trim();
+  {
+    const logRes = gitDetailed(['log', '--format=%H|%aI|%s|%an', '-100'], gitOpts);
+    const log = logRes.status === 0 ? logRes.stdout.trim() : '';
     if (log) {
       for (const line of log.split('\n').filter(Boolean)) {
         const [sha, date, ...rest] = line.split('|');
@@ -58,27 +62,32 @@ function gatherData(repoRoot: string) {
         let linesAdded = 0;
         let linesRemoved = 0;
 
-        try {
-          const note = execSync(`git notes --ref=origin show ${sha} 2>/dev/null`, execOpts).trim();
-          const parsed = JSON.parse(note);
-          const data = parsed.origin || parsed;
-          isAi = true;
-          model = data.model;
-          sessionId = data.sessionId;
-          linesAdded = data.linesAdded || 0;
-          linesRemoved = data.linesRemoved || 0;
-        } catch { /* no note */ }
+        if (HEX.test(sha)) {
+          const noteRes = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts);
+          if (noteRes.status === 0) {
+            try {
+              const parsed = JSON.parse(noteRes.stdout.trim());
+              const data = parsed.origin || parsed;
+              isAi = true;
+              model = data.model;
+              sessionId = data.sessionId;
+              linesAdded = data.linesAdded || 0;
+              linesRemoved = data.linesRemoved || 0;
+            } catch { /* bad json */ }
+          }
 
-        // Get line stats if not from note
-        if (!linesAdded && !linesRemoved) {
-          try {
-            const stat = execSync(`git diff-tree --root --numstat ${sha} 2>/dev/null`, execOpts).trim();
-            for (const s of stat.split('\n').slice(1)) {
-              const [a, r] = s.split('\t');
-              if (a !== '-') linesAdded += parseInt(a) || 0;
-              if (r !== '-') linesRemoved += parseInt(r) || 0;
+          // Get line stats if not from note
+          if (!linesAdded && !linesRemoved) {
+            const statRes = gitDetailed(['diff-tree', '--root', '--numstat', sha], gitOpts);
+            if (statRes.status === 0) {
+              const stat = statRes.stdout.trim();
+              for (const s of stat.split('\n').slice(1)) {
+                const [a, r] = s.split('\t');
+                if (a !== '-') linesAdded += parseInt(a) || 0;
+                if (r !== '-') linesRemoved += parseInt(r) || 0;
+              }
             }
-          } catch { /* ignore */ }
+          }
         }
 
         if (isAi) {
@@ -95,34 +104,38 @@ function gatherData(repoRoot: string) {
         commits.push({ sha, date, message, author, isAi, model, sessionId, linesAdded, linesRemoved });
       }
     }
-  } catch { /* ignore */ }
+  }
 
   // Sessions
   const sessions: SessionInfo[] = [];
-  try {
-    const tree = execSync('git ls-tree --name-only origin-sessions:sessions/ 2>/dev/null', execOpts).trim();
-    if (tree) {
-      for (const sid of tree.split('\n').filter(Boolean).slice(-30)) {
-        let model = 'unknown';
-        let date = '';
-        let cost: number | undefined;
-        let tokens: number | undefined;
-        let promptCount: number | undefined;
-        try {
-          const meta = execSync(`git show origin-sessions:sessions/${sid}/metadata.json 2>/dev/null`, execOpts).trim();
-          if (meta) {
-            const m = JSON.parse(meta);
-            model = m.model || 'unknown';
-            date = m.startedAt || m.timestamp || '';
-            cost = m.costUsd;
-            tokens = m.tokensUsed;
-            promptCount = m.promptCount;
+  {
+    const treeRes = gitDetailed(['ls-tree', '--name-only', 'origin-sessions:sessions/'], gitOpts);
+    if (treeRes.status === 0) {
+      const tree = treeRes.stdout.trim();
+      if (tree) {
+        for (const sid of tree.split('\n').filter(Boolean).slice(-30)) {
+          if (!SAFE_ID.test(sid)) continue;
+          let model = 'unknown';
+          let date = '';
+          let cost: number | undefined;
+          let tokens: number | undefined;
+          let promptCount: number | undefined;
+          const metaRes = gitDetailed(['show', `origin-sessions:sessions/${sid}/metadata.json`], gitOpts);
+          if (metaRes.status === 0) {
+            try {
+              const m = JSON.parse(metaRes.stdout.trim());
+              model = m.model || 'unknown';
+              date = m.startedAt || m.timestamp || '';
+              cost = m.costUsd;
+              tokens = m.tokensUsed;
+              promptCount = m.promptCount;
+            } catch { /* ignore */ }
           }
-        } catch { /* ignore */ }
-        sessions.push({ id: sid, model, date, cost, tokens, promptCount });
+          sessions.push({ id: sid, model, date, cost, tokens, promptCount });
+        }
       }
     }
-  } catch { /* ignore */ }
+  }
 
   // Prompts from local DB
   const prompts = getAllPrompts();
@@ -406,10 +419,10 @@ export async function webCommand(opts: { port?: string }) {
     console.log(chalk.gray(`  ${data.stats.totalCommits} commits · ${data.stats.aiCommits} AI · ${data.sessions.length} sessions · ${data.prompts.length} prompts`));
     console.log(chalk.gray('\n  Press Ctrl+C to stop.\n'));
 
-    // Open browser
-    try {
+    // Open browser — only allow http/https URLs
+    if (/^https?:\/\//.test(url)) {
       const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-      execSync(`${openCmd} ${url}`, { stdio: 'ignore' });
-    } catch { /* ignore */ }
+      runDetailed(openCmd, [url], { stdio: 'ignore' });
+    }
   });
 }

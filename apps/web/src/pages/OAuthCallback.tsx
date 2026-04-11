@@ -17,8 +17,11 @@ export default function OAuthCallback() {
       return;
     }
 
-    const accountType = localStorage.getItem('origin_oauth_account_type') || undefined;
-    localStorage.removeItem('origin_oauth_account_type');
+    let accountType: string | undefined;
+    try {
+      accountType = localStorage.getItem('origin_oauth_account_type') || undefined;
+      localStorage.removeItem('origin_oauth_account_type');
+    } catch { accountType = undefined; }
 
     api.oauthCallback(provider, code, accountType)
       .then((res) => {

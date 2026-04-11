@@ -34,15 +34,31 @@ export async function callLLM(
     messages: messages.map(m => ({ role: m.role, content: m.content })),
   };
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(body),
-  });
+  // 2-minute timeout: Anthropic calls are slower than Origin API calls
+  // but must still be bounded so a stalled connection doesn't freeze
+  // the CLI forever.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000);
+  let res;
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error('Anthropic API request timed out after 120s');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const err = await res.text();

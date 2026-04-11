@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { parseLimit, parseOffset } from '../utils/validate.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -14,13 +15,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const repoId = req.query.repoId as string | undefined;
     const userId = req.query.userId as string | undefined;
     const file = req.query.file as string | undefined;
-    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const limit = parseLimit(req.query.limit, 20, 100);
+    const offset = parseOffset(req.query.offset);
 
-    // Get repo IDs for org
+    // Get repo IDs for org. Cap at 5000 — this list only exists to build
+    // the `repoId IN (...)` filter; an org with more repos than that is
+    // already past the point where a single-page search scales well, and
+    // materializing unbounded repo lists on every prompt query is a DoS
+    // vector on large tenants.
     const repos = await prisma.repo.findMany({
       where: { orgId },
       select: { id: true },
+      take: 5000,
     });
     const repoIds = repos.map((r) => r.id);
 
@@ -44,11 +50,30 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     if (repoId) {
+      // IDOR fix: the old code did `where.session.commit.repoId = repoId`
+      // which replaced the `{ in: repoIds }` org-scope filter with a
+      // raw user-supplied id, meaning a caller could query prompts for
+      // any repo in the entire database by passing its UUID. Enforce
+      // that the requested repoId is actually in this org before
+      // narrowing the filter; otherwise return an empty page.
+      if (!repoIds.includes(repoId)) {
+        return res.json({ prompts: [], total: 0 });
+      }
       where.session.commit.repoId = repoId;
     }
 
+    // Non-admins can only filter prompts by their own userId — previously
+    // any org member could read a coworker's entire prompt history just
+    // by guessing/knowing their user UUID.
+    const role = (req.user!.role || '').toUpperCase();
+    const canViewOthers = role === 'ADMIN' || role === 'OWNER';
     if (userId) {
+      if (!canViewOthers && userId !== req.user!.id) {
+        return res.status(403).json({ error: 'Insufficient permissions to view other users\' prompts' });
+      }
       where.session.userId = userId;
+    } else if (!canViewOthers) {
+      where.session.userId = req.user!.id;
     }
 
     if (file) {
@@ -114,10 +139,11 @@ router.get('/patterns', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
 
-    // Get repo IDs for org
+    // Get repo IDs for org (same cap as the search endpoint).
     const repos = await prisma.repo.findMany({
       where: { orgId },
       select: { id: true },
+      take: 5000,
     });
     const repoIds = repos.map((r) => r.id);
 
@@ -125,7 +151,10 @@ router.get('/patterns', async (req: AuthRequest, res: Response) => {
       return res.json({ patterns: [] });
     }
 
-    // Fetch all prompts with their session review status
+    // Fetch prompts with their session review status. Cap at 50k rows —
+    // pattern analysis is a histogram over categories, so a partial scan
+    // is still directionally accurate for an org with millions of
+    // prompts, and unbounded scans OOM the route on active tenants.
     const prompts = await prisma.promptChange.findMany({
       where: {
         session: {
@@ -140,6 +169,8 @@ router.get('/patterns', async (req: AuthRequest, res: Response) => {
           },
         },
       },
+      take: 50_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     // Categorize each prompt by keyword matching

@@ -8,6 +8,225 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'origin-why-line-level-prompt-attribution': (
+    <>
+      <p>
+        It&rsquo;s Monday morning. A production bug landed over the weekend. You open the file, jump to the broken line, and ask the question every developer asks a hundred times a week:
+      </p>
+      <p className="text-center text-xl text-gray-200 italic my-6">
+        &ldquo;Why is this line here?&rdquo;
+      </p>
+      <p>
+        You run <code>git blame</code>. It tells you <em>Alex committed this three weeks ago</em>. Cool. But Alex didn&rsquo;t <em>write</em> it. Claude did. In a session that lasted 47 minutes and cost $3.20 and had 8 prompts. And now Alex is on vacation and nobody on the team remembers why that line exists at all.
+      </p>
+      <p>
+        This is the AI coding era&rsquo;s most annoying papercut. We can ship 5x faster, but we&rsquo;ve lost the ability to ask <em>why</em>. Today we&rsquo;re fixing it with one command:
+      </p>
+
+      {/* The hero command */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-emerald-700/50 bg-gradient-to-b from-emerald-950/30 to-[#0a0b14] overflow-hidden shadow-2xl shadow-emerald-900/10">
+          <div className="px-4 py-2 border-b border-emerald-800/30 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">~/projects/api-server</span>
+          </div>
+          <div className="p-5 font-mono text-sm">
+            <div className="text-gray-300">
+              <span className="text-emerald-400">$</span> origin why <span className="text-indigo-300">src/auth.ts:42</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h2>What you actually see</h2>
+      <p>
+        Run <code>origin why</code> on any line in any file tracked by Origin. In under a second, you get the full story of that line &mdash; who wrote it, when, which AI session, which prompt, and why.
+      </p>
+
+      {/* Main output mock */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">Terminal</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin why src/auth.ts:42</div>
+            <div className="h-2" />
+            <div className="text-gray-100 font-bold">  Line 42 in src/auth.ts</div>
+            <div className="text-gray-500">  if (!bcrypt.compareSync(password, user.passwordHash)) throw new AuthError(&apos;invalid&apos;);</div>
+            <div className="h-2" />
+            <div className="text-gray-200">  Written by <span className="text-cyan-400">claude-sonnet-4</span> &middot; Apr 7, 2026 &middot; Session <span className="text-cyan-400">a3f1e2d8</span></div>
+            <div className="text-emerald-400">  Prompt: &ldquo;add user authentication with JWT and bcrypt, hash passwords on signup&rdquo;</div>
+            <div className="text-gray-600">  Files: src/auth.ts, src/models/user.ts, src/routes/login.ts</div>
+            <div className="h-2" />
+            <div className="text-gray-600">  Session: 8 turns &middot; $3.24 &middot; 5 files &middot; 47m</div>
+            <div className="text-gray-600">  Run <span className="text-cyan-400">origin explain a3f1e2d8</span> for full details</div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        That&rsquo;s the whole mystery solved in one screen. You know the <strong className="text-gray-100">agent</strong> (Claude Sonnet 4), the <strong className="text-gray-100">prompt</strong> (&ldquo;add user authentication with JWT and bcrypt&rdquo;), the <strong className="text-gray-100">session</strong>, and what it <strong className="text-gray-100">cost</strong>. No Slack threads. No digging through PR comments. No asking Alex on vacation.
+      </p>
+
+      <h2>File-level mode</h2>
+      <p>
+        Drop the line number and you get a bird&rsquo;s-eye view of the whole file &mdash; how much of it is AI, how much is human, and which sessions contributed.
+      </p>
+
+      {/* File mode output */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">Terminal</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin why src/auth.ts</div>
+            <div className="h-2" />
+            <div className="text-gray-100 font-bold">  src/auth.ts</div>
+            <div className="text-gray-500">  184 lines &mdash; <span className="text-emerald-400">78% AI (143)</span> &middot; <span className="text-gray-200">22% human (41)</span></div>
+            <div className="h-2" />
+            <div>
+              <span className="text-cyan-400">  claude-sonnet-4     </span>
+              <span className="text-emerald-400"> 112 lines   61%</span>
+              <span className="text-gray-600">  session a3f1e2d8</span>
+            </div>
+            <div>
+              <span className="text-cyan-400">  cursor-composer     </span>
+              <span className="text-emerald-400">  31 lines   17%</span>
+              <span className="text-gray-600">  session 9b2c4e1a</span>
+            </div>
+            <div>
+              <span className="text-gray-200">  Human               </span>
+              <span>  41 lines   22%</span>
+            </div>
+            <div className="h-2" />
+            <div className="text-gray-600">  Tip: <span className="text-cyan-400">origin why src/auth.ts:42</span> to see which prompt wrote a specific line</div>
+          </div>
+        </div>
+      </div>
+
+      <h2>How it works under the hood</h2>
+      <p>
+        <code>origin why</code> chains four boring-but-critical pieces of data together. None of them are magic &mdash; they&rsquo;ve been quietly building up in your repo since the day you installed Origin.
+      </p>
+
+      {/* How it works flow */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-gradient-to-b from-gray-950 to-[#0a0b14] p-6 sm:p-8">
+          <p className="text-[11px] text-gray-500 font-medium uppercase tracking-widest text-center mb-6">From line number to prompt</p>
+          <div className="space-y-3">
+            {[
+              { n: '1', title: 'git blame', sub: 'Find the commit SHA that last touched the line', color: 'border-gray-700 bg-gray-900/40' },
+              { n: '2', title: 'git notes --ref=origin', sub: 'Pull Origin session metadata attached to that commit', color: 'border-indigo-700/60 bg-indigo-950/20' },
+              { n: '3', title: 'Session API lookup', sub: 'Fetch all prompts, diffs and file changes for the session', color: 'border-indigo-700/60 bg-indigo-950/20' },
+              { n: '4', title: 'Prompt match', sub: 'Walk prompts in reverse, match by file + diff hunk + content', color: 'border-emerald-600/60 bg-emerald-950/20' },
+            ].map((step) => (
+              <div key={step.n} className={`flex items-start gap-4 ${step.color} border rounded-lg px-4 py-3`}>
+                <div className="w-7 h-7 rounded-full bg-gray-900 border border-gray-700 flex items-center justify-center text-xs text-gray-300 font-mono font-bold flex-shrink-0">{step.n}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold text-gray-100 font-mono">{step.title}</div>
+                  <div className="text-[11px] text-gray-500 mt-0.5">{step.sub}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <p>
+        The clever bit is step 4. A single session can contain 10 prompts, each one editing the same file. To figure out which <em>specific prompt</em> wrote a given line, Origin walks the session&rsquo;s prompt history in reverse, checks which prompts touched that file, and matches the line content against the added lines in each prompt&rsquo;s diff. The most recent matching prompt wins.
+      </p>
+
+      <h2>Why this matters</h2>
+      <p>
+        Debugging AI-written code used to feel like archaeology. You&rsquo;d find a strange pattern, a questionable dependency, a weird comment, and have no way to reconstruct the reasoning. The developer didn&rsquo;t write it &mdash; they just accepted it. The AI that wrote it is long gone, its session buried in a log file somewhere.
+      </p>
+
+      {/* Before/after comparison */}
+      <div className="not-prose my-8 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="rounded-xl border border-red-900/40 bg-red-950/10 p-5">
+          <div className="text-[10px] font-medium text-red-400 uppercase tracking-widest mb-3">Before</div>
+          <div className="space-y-2 text-sm text-gray-400">
+            <p>&ldquo;Alex, why is this bcrypt call using compareSync instead of compare?&rdquo;</p>
+            <p className="text-gray-600 italic">&mdash; Alex is on vacation &mdash;</p>
+            <p>&ldquo;I&rsquo;ll just rewrite it.&rdquo;</p>
+          </div>
+          <div className="mt-4 pt-3 border-t border-red-900/30 text-[11px] text-red-400/70">
+            45 minutes lost &middot; potential bug reintroduced
+          </div>
+        </div>
+        <div className="rounded-xl border border-emerald-900/40 bg-emerald-950/10 p-5">
+          <div className="text-[10px] font-medium text-emerald-400 uppercase tracking-widest mb-3">After</div>
+          <div className="space-y-2 text-sm text-gray-300">
+            <p className="font-mono text-xs text-emerald-300">$ origin why src/auth.ts:42</p>
+            <p>&ldquo;Ah, Claude used compareSync because the prompt was &lsquo;make login synchronous for the test suite.&rsquo; Now I know what to fix.&rdquo;</p>
+          </div>
+          <div className="mt-4 pt-3 border-t border-emerald-900/30 text-[11px] text-emerald-400/70">
+            30 seconds &middot; full context recovered
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <code>origin why</code> turns AI-generated code from a black box into a first-class artifact with full provenance. The prompt is the intent. The session is the reasoning. The diff is the execution. Now they&rsquo;re all one command away.
+      </p>
+
+      <h2>Code review just got weird (in a good way)</h2>
+      <p>
+        Once you start using it, you notice something: code review habits change. Instead of asking &ldquo;why did you write this?&rdquo; in a PR comment, reviewers run <code>origin why</code> on the suspicious line and see the original prompt. If the prompt was lazy (&ldquo;fix the auth&rdquo;), that&rsquo;s a signal. If the prompt was precise (&ldquo;refactor auth to use async bcrypt.compare with proper error handling&rdquo;), that&rsquo;s another signal.
+      </p>
+      <p>
+        You&rsquo;re not just reviewing code anymore. You&rsquo;re reviewing the <em>prompt quality</em> of your team.
+      </p>
+
+      <h2>Try it</h2>
+      <p>
+        Upgrade the CLI and point it at any file in a repo that already has Origin sessions:
+      </p>
+
+      {/* Install / try block */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-800 text-[10px] text-gray-600">Terminal</div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1.5">
+            <div><span className="text-gray-600"># upgrade</span></div>
+            <div><span className="text-emerald-400">$</span> <span className="text-gray-200">npm i -g @origin/cli</span></div>
+            <div className="h-2" />
+            <div><span className="text-gray-600"># ask why a specific line exists</span></div>
+            <div><span className="text-emerald-400">$</span> <span className="text-gray-200">origin why src/auth.ts:42</span></div>
+            <div className="h-2" />
+            <div><span className="text-gray-600"># file-level attribution summary</span></div>
+            <div><span className="text-emerald-400">$</span> <span className="text-gray-200">origin why src/auth.ts</span></div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        It works in connected mode (full prompt text from the platform) and local-only mode (session summary from git notes). If the line was committed before Origin was installed, you&rsquo;ll see the human author and a helpful note &mdash; no false attribution.
+      </p>
+      <p>
+        This is the question every developer has been silently asking AI-generated code for the last two years. Finally, there&rsquo;s an answer.
+      </p>
+      <p>
+        <a href="/register?type=developer" className="text-emerald-400 hover:text-emerald-300 font-medium">Start tracking your AI sessions &rarr;</a>
+      </p>
+    </>
+  ),
   'new-era-source-code-management-ai': (
     <>
       <p>

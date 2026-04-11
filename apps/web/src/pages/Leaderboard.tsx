@@ -33,7 +33,7 @@ export default function Leaderboard() {
 
   const chartData = useMemo(
     () => entries.slice(0, 8).map((e) => ({
-      name: e.name.split(' ')[0],
+      name: (e.name || 'Unknown').split(' ')[0],
       value: sortBy === 'sessions' ? e.sessions
         : sortBy === 'lines' ? e.lines
         : sortBy === 'cost' ? e.cost
@@ -99,11 +99,11 @@ export default function Leaderboard() {
                   <p className="text-xs text-gray-500">{selectedEntry.email}</p>
                 </div>
                 <div className="flex items-center gap-4 text-xs text-gray-500">
-                  <span>{selectedEntry.sessions} sessions</span>
-                  <span>{selectedEntry.lines.toLocaleString()} lines</span>
-                  <span>${selectedEntry.cost.toFixed(2)} cost</span>
-                  <span className={`font-medium ${selectedEntry.qualityScore >= 80 ? 'text-green-400' : selectedEntry.qualityScore >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
-                    Quality: {selectedEntry.qualityScore}
+                  <span>{selectedEntry.sessions ?? 0} sessions</span>
+                  <span>{(selectedEntry.lines ?? 0).toLocaleString()} lines</span>
+                  <span>${(selectedEntry.cost ?? 0).toFixed(2)} cost</span>
+                  <span className={`font-medium ${(selectedEntry.qualityScore ?? 0) >= 80 ? 'text-green-400' : (selectedEntry.qualityScore ?? 0) >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
+                    Quality: {selectedEntry.qualityScore ?? 0}
                   </span>
                 </div>
               </div>

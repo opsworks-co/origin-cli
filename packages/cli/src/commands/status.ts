@@ -2,7 +2,9 @@ import chalk from 'chalk';
 import { loadConfig, loadAgentConfig, loadRepoConfig, listProfiles } from '../config.js';
 import { api } from '../api.js';
 import { loadSessionState, listActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
-import { execSync } from 'child_process';
+import { git, gitDetailed } from '../utils/exec.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -98,11 +100,13 @@ export async function statusCommand() {
       // Show new commits since session started
       if (state.headShaAtStart && headSha && state.headShaAtStart !== headSha) {
         try {
-          const commitCount = execSync(
-            `git rev-list --count ${state.headShaAtStart}..${headSha}`,
-            { encoding: 'utf-8', cwd: repoPath || cwd, stdio: ['pipe', 'pipe', 'pipe'] }
-          ).trim();
-          console.log(chalk.gray(`    New commits: ${chalk.green(commitCount)}`));
+          if (HEX.test(state.headShaAtStart) && HEX.test(headSha)) {
+            const commitCount = git(
+              ['rev-list', '--count', `${state.headShaAtStart}..${headSha}`],
+              { cwd: repoPath || cwd }
+            ).trim();
+            console.log(chalk.gray(`    New commits: ${chalk.green(commitCount)}`));
+          }
         } catch { /* ignore */ }
       }
 
@@ -130,23 +134,23 @@ export async function statusCommand() {
 
     // Check for origin-sessions branch (entrypoints)
     try {
-      const entrypointCount = execSync(
-        'git log origin-sessions --oneline 2>/dev/null | wc -l',
-        { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }
-      ).trim();
-      if (parseInt(entrypointCount) > 0) {
-        console.log(chalk.gray(`    Entrypoints: ${chalk.green(entrypointCount)} sessions on origin-sessions branch`));
+      const r = gitDetailed(['log', 'origin-sessions', '--oneline'], { cwd: repoPath });
+      if (r.status === 0) {
+        const count = r.stdout.split('\n').filter(Boolean).length;
+        if (count > 0) {
+          console.log(chalk.gray(`    Entrypoints: ${chalk.green(String(count))} sessions on origin-sessions branch`));
+        }
       }
     } catch { /* ignore */ }
 
     // Check for git notes
     try {
-      const noteCount = execSync(
-        'git notes --ref=origin list 2>/dev/null | wc -l',
-        { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }
-      ).trim();
-      if (parseInt(noteCount) > 0) {
-        console.log(chalk.gray(`    Git notes:   ${chalk.green(noteCount)} commits annotated`));
+      const r = gitDetailed(['notes', '--ref=origin', 'list'], { cwd: repoPath });
+      if (r.status === 0) {
+        const count = r.stdout.split('\n').filter(Boolean).length;
+        if (count > 0) {
+          console.log(chalk.gray(`    Git notes:   ${chalk.green(String(count))} commits annotated`));
+        }
       }
     } catch { /* ignore */ }
   }

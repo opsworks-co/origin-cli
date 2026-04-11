@@ -49,6 +49,17 @@ router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Res
       return res.status(400).json({ error: 'Invalid role. Must be VIEWER, MEMBER, or ADMIN.' });
     }
 
+    // DoS caps on scope arrays — nobody legitimately scopes a key to
+    // 10k+ repos/agents, and without caps a client can force huge
+    // validation queries and createMany batches.
+    const MAX_SCOPE_ITEMS = 500;
+    if (Array.isArray(repoIds) && repoIds.length > MAX_SCOPE_ITEMS) {
+      return res.status(400).json({ error: `repoIds cannot exceed ${MAX_SCOPE_ITEMS} items` });
+    }
+    if (Array.isArray(agentIds) && agentIds.length > MAX_SCOPE_ITEMS) {
+      return res.status(400).json({ error: `agentIds cannot exceed ${MAX_SCOPE_ITEMS} items` });
+    }
+
     // Validate repoIds belong to this org
     if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
       const validRepos = await prisma.repo.findMany({
@@ -113,6 +124,15 @@ router.put('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: 
   try {
     const id = req.params.id as string;
     const { agentIds, repoIds } = req.body;
+
+    // Same DoS cap as POST /api-keys.
+    const MAX_SCOPE_ITEMS = 500;
+    if (Array.isArray(repoIds) && repoIds.length > MAX_SCOPE_ITEMS) {
+      return res.status(400).json({ error: `repoIds cannot exceed ${MAX_SCOPE_ITEMS} items` });
+    }
+    if (Array.isArray(agentIds) && agentIds.length > MAX_SCOPE_ITEMS) {
+      return res.status(400).json({ error: `agentIds cannot exceed ${MAX_SCOPE_ITEMS} items` });
+    }
 
     const key = await prisma.apiKey.findFirst({ where: { id, orgId: req.user!.orgId } });
     if (!key) return res.status(404).json({ error: 'API key not found' });
@@ -360,7 +380,9 @@ router.get('/chat', async (req: AuthRequest, res: Response) => {
     }
 
     let settings: Record<string, any> = {};
-    try { settings = JSON.parse(config.settings); } catch {}
+    try { settings = JSON.parse(config.settings); } catch (err) {
+      console.warn('[settings] malformed config.settings JSON:', (err as Error).message);
+    }
 
     res.json({
       configured: true,

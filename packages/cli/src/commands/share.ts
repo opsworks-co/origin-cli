@@ -1,13 +1,12 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import fs from 'fs';
-import path from 'path';
-import os from 'os';
+import { run, runDetailed, git, gitDetailed } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
 import { loadConfig } from '../config.js';
 import { api } from '../api.js';
 
 const BRANCH = 'origin-sessions';
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 /**
  * origin share <session-id> [--prompt <index>] [--public]
@@ -41,19 +40,9 @@ export async function shareCommand(sessionId: string, opts?: { prompt?: string; 
       console.log('');
 
       // Also copy to clipboard
-      try {
-        if (process.platform === 'darwin') {
-          execSync('pbcopy', { input: result.url, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-          console.log(chalk.gray('  (copied to clipboard)'));
-        } else if (process.platform === 'linux') {
-          try {
-            execSync('xclip -selection clipboard', { input: result.url, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-          } catch {
-            execSync('xsel --clipboard --input', { input: result.url, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-          }
-          console.log(chalk.gray('  (copied to clipboard)'));
-        }
-      } catch { /* clipboard not available */ }
+      if (copyToClipboard(result.url)) {
+        console.log(chalk.gray('  (copied to clipboard)'));
+      }
 
       return;
     } catch (err: any) {
@@ -71,31 +60,29 @@ export async function shareCommand(sessionId: string, opts?: { prompt?: string; 
     process.exit(1);
   }
 
-  const execOpts = {
-    encoding: 'utf-8' as const,
-    cwd: repoPath,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-  };
+  const gitOpts = { cwd: repoPath };
 
   // Check if origin-sessions branch exists
-  try {
-    execSync(`git rev-parse refs/heads/${BRANCH}`, execOpts);
-  } catch {
-    console.error(chalk.yellow('No origin-sessions branch found.'));
-    process.exit(1);
+  {
+    const r = gitDetailed(['rev-parse', `refs/heads/${BRANCH}`], gitOpts);
+    if (r.status !== 0) {
+      console.error(chalk.yellow('No origin-sessions branch found.'));
+      process.exit(1);
+    }
   }
 
   // Find the session — match by prefix
   let sessionDir = '';
   try {
-    const tree = execSync(
-      `git ls-tree --name-only refs/heads/${BRANCH} sessions/`,
-      execOpts,
+    const tree = git(
+      ['ls-tree', '--name-only', `refs/heads/${BRANCH}`, 'sessions/'],
+      gitOpts,
     ).trim();
     const dirs = tree ? tree.split('\n').filter(Boolean) : [];
 
     for (const dir of dirs) {
       const dirName = dir.replace('sessions/', '');
+      if (!SAFE_ID.test(dirName)) continue;
       if (dirName.startsWith(sessionId) || dirName === sessionId) {
         sessionDir = dir;
         break;
@@ -111,9 +98,9 @@ export async function shareCommand(sessionId: string, opts?: { prompt?: string; 
   // Read metadata
   let metadata: any = {};
   try {
-    const raw = execSync(
-      `git show refs/heads/${BRANCH}:${sessionDir}/metadata.json`,
-      execOpts,
+    const raw = git(
+      ['show', `refs/heads/${BRANCH}:${sessionDir}/metadata.json`],
+      gitOpts,
     ).trim();
     metadata = JSON.parse(raw);
   } catch {
@@ -124,18 +111,18 @@ export async function shareCommand(sessionId: string, opts?: { prompt?: string; 
   // Read prompts
   let promptsMd = '';
   try {
-    promptsMd = execSync(
-      `git show refs/heads/${BRANCH}:${sessionDir}/prompts.md`,
-      execOpts,
+    promptsMd = git(
+      ['show', `refs/heads/${BRANCH}:${sessionDir}/prompts.md`],
+      gitOpts,
     ).trim();
   } catch { /* no prompts */ }
 
   // Read changes
   let changes: any = null;
   try {
-    const raw = execSync(
-      `git show refs/heads/${BRANCH}:${sessionDir}/changes.json`,
-      execOpts,
+    const raw = git(
+      ['show', `refs/heads/${BRANCH}:${sessionDir}/changes.json`],
+      gitOpts,
     ).trim();
     changes = JSON.parse(raw);
   } catch { /* no changes */ }
@@ -218,25 +205,27 @@ export async function shareCommand(sessionId: string, opts?: { prompt?: string; 
   }
 
   // Try to copy to clipboard
-  try {
-    if (process.platform === 'darwin') {
-      execSync('pbcopy', { input: bundle, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-      console.log(chalk.green(`Session ${sessionId.slice(0, 8)} copied to clipboard!`));
-    } else if (process.platform === 'linux') {
-      try {
-        execSync('xclip -selection clipboard', { input: bundle, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-      } catch {
-        execSync('xsel --clipboard --input', { input: bundle, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-      }
-      console.log(chalk.green(`Session ${sessionId.slice(0, 8)} copied to clipboard!`));
-    } else {
-      // Windows or unsupported — print to stdout
-      console.log(bundle);
-    }
-  } catch {
+  if (copyToClipboard(bundle)) {
+    console.log(chalk.green(`Session ${sessionId.slice(0, 8)} copied to clipboard!`));
+  } else {
     // Fallback: print to stdout
     console.log(bundle);
   }
+}
+
+function copyToClipboard(text: string): boolean {
+  try {
+    if (process.platform === 'darwin') {
+      run('pbcopy', [], { input: text });
+      return true;
+    } else if (process.platform === 'linux') {
+      const r = runDetailed('xclip', ['-selection', 'clipboard'], { input: text });
+      if (r.status === 0) return true;
+      const r2 = runDetailed('xsel', ['--clipboard', '--input'], { input: text });
+      return r2.status === 0;
+    }
+  } catch { /* ignore */ }
+  return false;
 }
 
 function formatDuration(ms: number): string {

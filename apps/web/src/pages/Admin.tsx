@@ -70,7 +70,7 @@ function roleBadge(role: string) {
     MEMBER: 'bg-gray-500/10 text-gray-400 ring-gray-500/20',
     VIEWER: 'bg-gray-500/10 text-gray-500 ring-gray-500/20',
   };
-  return colors[role.toUpperCase()] ?? colors.MEMBER;
+  return colors[(role || '').toUpperCase()] ?? colors.MEMBER;
 }
 
 // ---------------------------------------------------------------------------

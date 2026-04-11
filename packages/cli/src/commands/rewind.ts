@@ -1,7 +1,10 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import readline from 'readline';
 import { getGitRoot, loadSessionState } from '../session-state.js';
+import { git, gitDetailed } from '../utils/exec.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_REF = /^[a-zA-Z0-9_./~^-]+$/;
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -19,10 +22,8 @@ interface Checkpoint {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-const execOpts = (cwd: string) => ({
-  encoding: 'utf-8' as const,
+const gitOpts = (cwd: string) => ({
   cwd,
-  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
   maxBuffer: 10 * 1024 * 1024,
 });
 
@@ -32,9 +33,15 @@ const execOpts = (cwd: string) => ({
 function getCheckpoints(repoPath: string, range: string): Checkpoint[] {
   const checkpoints: Checkpoint[] = [];
   try {
-    const log = execSync(
-      `git log --format=%H%x00%h%x00%s%x00%an%x00%aI ${range}`,
-      execOpts(repoPath),
+    // Validate range: allow "a..b", "a..HEAD", "HEAD~50..HEAD", or a single ref
+    const parts = range.split('..');
+    for (const p of parts) {
+      if (!p) continue;
+      if (!HEX.test(p) && !SAFE_REF.test(p)) return checkpoints;
+    }
+    const log = git(
+      ['log', '--format=%H%x00%h%x00%s%x00%an%x00%aI', range],
+      gitOpts(repoPath),
     ).trim();
 
     if (!log) return checkpoints;
@@ -48,27 +55,29 @@ function getCheckpoints(repoPath: string, range: string): Checkpoint[] {
 
       // Get files changed
       let filesChanged: string[] = [];
-      try {
-        const files = execSync(
-          `git diff-tree --no-commit-id --name-only -r ${sha}`,
-          execOpts(repoPath),
-        ).trim();
-        filesChanged = files ? files.split('\n').filter(Boolean) : [];
-      } catch { /* ignore */ }
+      if (HEX.test(sha)) {
+        try {
+          const files = git(
+            ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+            gitOpts(repoPath),
+          ).trim();
+          filesChanged = files ? files.split('\n').filter(Boolean) : [];
+        } catch { /* ignore */ }
+      }
 
       // Check for Origin note (model/session info)
       let model: string | undefined;
       let sessionId: string | undefined;
-      try {
-        const note = execSync(
-          `git notes --ref=origin show ${sha}`,
-          execOpts(repoPath),
-        ).trim();
-        const noteData = JSON.parse(note);
-        model = noteData?.origin?.model || noteData?.model;
-        sessionId = noteData?.origin?.sessionId || noteData?.sessionId;
-      } catch { /* no note */ }
-
+      if (HEX.test(sha)) {
+        const r = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts(repoPath));
+        if (r.status === 0) {
+          try {
+            const noteData = JSON.parse(r.stdout.trim());
+            model = noteData?.origin?.model || noteData?.model;
+            sessionId = noteData?.origin?.sessionId || noteData?.sessionId;
+          } catch { /* ignore */ }
+        }
+      }
       checkpoints.push({
         index: i + 1,
         sha,
@@ -166,20 +175,25 @@ export async function rewindCommand(
     const targetSha = opts.to;
 
     // Verify the SHA exists
-    try {
-      execSync(`git cat-file -e ${targetSha}^{commit}`, execOpts(repoPath));
-    } catch {
-      console.error(chalk.red(`Error: Commit ${targetSha} not found.`));
+    if (!HEX.test(targetSha) && !SAFE_REF.test(targetSha)) {
+      console.error(chalk.red(`Error: Invalid commit: ${targetSha}`));
       return;
+    }
+    {
+      const r = gitDetailed(['cat-file', '-e', `${targetSha}^{commit}`], gitOpts(repoPath));
+      if (r.status !== 0) {
+        console.error(chalk.red(`Error: Commit ${targetSha} not found.`));
+        return;
+      }
     }
 
     // Safety: stash any uncommitted changes
     let hasStashed = false;
     try {
-      const status = execSync('git status --porcelain', execOpts(repoPath)).trim();
+      const status = git(['status', '--porcelain'], gitOpts(repoPath)).trim();
       if (status) {
         console.log(chalk.yellow('Stashing uncommitted changes...'));
-        execSync('git stash push -m "origin-rewind-backup"', execOpts(repoPath));
+        git(['stash', 'push', '-m', 'origin-rewind-backup'], gitOpts(repoPath));
         hasStashed = true;
       }
     } catch { /* ignore */ }
@@ -199,14 +213,14 @@ export async function rewindCommand(
       if (hasStashed) {
         console.log(chalk.gray('Restoring stashed changes...'));
         try {
-          execSync('git stash pop', execOpts(repoPath));
+          git(['stash', 'pop'], gitOpts(repoPath));
         } catch { /* ignore */ }
       }
       return;
     }
 
     try {
-      execSync(`git checkout ${targetSha} -- .`, execOpts(repoPath));
+      git(['checkout', targetSha, '--', '.'], gitOpts(repoPath));
       console.log(chalk.green(`Rewound to ${desc}.`));
       if (hasStashed) {
         console.log(chalk.gray(`Your uncommitted changes are stashed. Run "git stash pop" to restore them.`));
@@ -216,7 +230,7 @@ export async function rewindCommand(
       if (hasStashed) {
         console.log(chalk.gray('Restoring stashed changes...'));
         try {
-          execSync('git stash pop', execOpts(repoPath));
+          git(['stash', 'pop'], gitOpts(repoPath));
         } catch { /* ignore */ }
       }
     }

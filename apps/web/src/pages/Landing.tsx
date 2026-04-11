@@ -524,8 +524,10 @@ export default function Landing() {
           <div className="rounded-lg overflow-hidden border border-white/[0.06] shadow-2xl shadow-black/40">
             <div style={{ position: 'relative', paddingBottom: '56.25%', height: 0 }}>
               <iframe
-                src="https://www.loom.com/embed/9916f9b26b5142b399f8e6822bc2ca02?sid=auto&hide_owner=true&hide_share=true&hide_title=true&hideEmbedTopBar=true"
+                src="https://www.loom.com/embed/9916f9b26b5142b399f8e6822bc2ca02?hide_owner=true&hide_share=true&hide_title=true&hideEmbedTopBar=true"
+                title="Origin demo"
                 frameBorder="0"
+                allow="autoplay; fullscreen; picture-in-picture"
                 allowFullScreen
                 style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
               />

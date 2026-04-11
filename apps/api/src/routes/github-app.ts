@@ -8,6 +8,7 @@ import {
   testGitHubAppConnection,
   getGitHubAppConfig,
 } from '../services/github-app.js';
+import { assertSafeExternalUrl } from '../utils/ssrf-guard.js';
 
 const router = Router();
 
@@ -51,7 +52,9 @@ router.get('/callback', async (req: Request, res: Response) => {
     // Verify state token
     let statePayload: { orgId: string; userId: string };
     try {
-      statePayload = jwt.verify(state as string, JWT_SECRET) as { orgId: string; userId: string };
+      // Pin HS256 — we sign the state token with HS256 and must reject
+      // any other algorithm, including alg=none / key-confusion attacks.
+      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string };
     } catch {
       return res.redirect('/settings?tab=integrations&github_app=error&msg=invalid_state');
     }
@@ -206,6 +209,7 @@ router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest,
     }
 
     const apiBase = config.baseUrl || 'https://api.github.com';
+    assertSafeExternalUrl(apiBase, 'github-app.test');
     const result = await testGitHubAppConnection(
       settings.appId,
       settings.privateKey,

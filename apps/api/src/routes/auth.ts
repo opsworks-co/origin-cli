@@ -3,7 +3,8 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, setAuthCookie, clearAuthCookie } from '../middleware/auth.js';
+import { passwordResetLimiter } from '../middleware/rate-limit.js';
 import { sendEmail } from '../services/email.js';
 
 const router = Router();
@@ -27,6 +28,26 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
+// Password length validation helper. bcrypt silently truncates inputs past
+// 72 bytes, which means "passwordAAAA...72 chars" and "passwordAAAA...72 chars + extra"
+// produce the same hash. Cap above 72 to surface the issue instead of
+// silently accepting weak equivalence classes. 8 is our documented minimum.
+// Returns a string error message, or null when valid.
+function validatePasswordLen(pw: unknown): string | null {
+  if (typeof pw !== 'string') return 'Password is required';
+  if (pw.length < 8) return 'Password must be at least 8 characters';
+  // Byte length, not char length, is what bcrypt cares about.
+  if (Buffer.byteLength(pw, 'utf8') > 72) return 'Password must be 72 bytes or fewer';
+  return null;
+}
+
+// bcrypt cost factor. Bumped from 10 → 12 for stronger password hashing at
+// rest. Cost 10 was ~60ms on modern hardware, cost 12 is ~250ms — still
+// imperceptible on signup/login but quadruples brute-force cost if the
+// passwordHash column ever leaks. Existing hashes remain verifiable (bcrypt
+// self-describes the cost in the hash prefix); only new writes use 12.
+const BCRYPT_COST = 12;
+
 function signToken(payload: { id: string; orgId: string; role: string }): string {
   // Update lastLoginAt (fire and forget)
   prisma.user.update({ where: { id: payload.id }, data: { lastLoginAt: new Date() } }).catch(() => {});
@@ -47,9 +68,10 @@ router.post('/register', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Invalid email format' });
     }
 
-    // Password strength
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    // Password strength (length floor + bcrypt 72-byte cap)
+    {
+      const pwErr = validatePasswordLen(password);
+      if (pwErr) return res.status(400).json({ error: pwErr });
     }
 
     // Slug format validation
@@ -67,7 +89,7 @@ router.post('/register', async (req: AuthRequest, res: Response) => {
       return res.status(409).json({ error: 'Organization slug already taken' });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
 
     const org = await prisma.org.create({
       data: { name: orgName, slug: orgSlug },
@@ -84,6 +106,7 @@ router.post('/register', async (req: AuthRequest, res: Response) => {
     });
 
     const token = signToken({ id: user.id, orgId: org.id, role: user.role });
+    setAuthCookie(res, token);
 
     res.status(201).json({
       token,
@@ -108,8 +131,9 @@ router.post('/register/developer', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Invalid email format' });
     }
 
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    {
+      const pwErr = validatePasswordLen(password);
+      if (pwErr) return res.status(400).json({ error: pwErr });
     }
 
     const existingUser = await prisma.user.findUnique({ where: { email } });
@@ -126,7 +150,7 @@ router.post('/register/developer', async (req: AuthRequest, res: Response) => {
       slug = `${baseSlug}-personal-${attempt}`;
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
 
     const org = await prisma.org.create({
       data: { name: `${name}'s workspace`, slug },
@@ -144,6 +168,7 @@ router.post('/register/developer', async (req: AuthRequest, res: Response) => {
     });
 
     const token = signToken({ id: user.id, orgId: org.id, role: user.role });
+    setAuthCookie(res, token);
 
     res.status(201).json({
       token,
@@ -162,6 +187,17 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
 
     if (!email || !password) {
       return res.status(400).json({ error: 'Missing email or password' });
+    }
+
+    // Cap input lengths before hitting bcrypt.compare. A multi-MB string
+    // would burn CPU (bcrypt does a keyed hash over the full input even
+    // though only the first 72 bytes matter) and becomes a trivial DoS
+    // vector. 1KB is absurdly more than any real password.
+    if (typeof email !== 'string' || email.length > 320) {
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+    if (typeof password !== 'string' || password.length > 1024) {
+      return res.status(400).json({ error: 'Invalid credentials' });
     }
 
     // Rate limiting
@@ -201,6 +237,7 @@ router.post('/login', async (req: AuthRequest, res: Response) => {
     loginAttempts.delete(ip);
 
     const token = signToken({ id: user.id, orgId: user.orgId, role: user.role });
+    setAuthCookie(res, token);
 
     res.json({
       token,
@@ -240,6 +277,14 @@ router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
     console.error('Me error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// POST /logout — clear the httpOnly session cookie.
+// The Bearer token stored client-side (localStorage / CLI keyring) must be
+// discarded by the caller; this endpoint only invalidates the cookie session.
+router.post('/logout', async (_req: AuthRequest, res: Response) => {
+  clearAuthCookie(res);
+  res.json({ success: true });
 });
 
 // PATCH /profile — update current user's profile (name, email, avatarUrl)
@@ -290,8 +335,14 @@ router.post('/change-password', requireAuth, async (req: AuthRequest, res: Respo
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Current and new password are required' });
     }
-    if (newPassword.length < 8) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters' });
+    {
+      const pwErr = validatePasswordLen(newPassword);
+      if (pwErr) return res.status(400).json({ error: `New password invalid: ${pwErr}` });
+    }
+    // Also cap currentPassword input length to avoid an attacker burning
+    // CPU on bcrypt.compare with a multi-MB string.
+    if (typeof currentPassword !== 'string' || currentPassword.length > 1024) {
+      return res.status(400).json({ error: 'Current password invalid' });
     }
 
     const user = await prisma.user.findUnique({ where: { id: req.user!.id } });
@@ -307,7 +358,7 @@ router.post('/change-password', requireAuth, async (req: AuthRequest, res: Respo
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
 
-    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
     await prisma.user.update({
       where: { id: user.id },
       data: { passwordHash },
@@ -329,8 +380,9 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Missing required fields: token, name, email, password' });
     }
 
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    {
+      const pwErr = validatePasswordLen(password);
+      if (pwErr) return res.status(400).json({ error: pwErr });
     }
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -379,7 +431,7 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
       });
     } else {
       // New user — create account
-      const passwordHash = await bcrypt.hash(password, 10);
+      const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
       user = await prisma.user.create({
         data: {
           orgId: invitation.orgId,
@@ -415,6 +467,7 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
     });
 
     const jwtToken = signToken({ id: user.id, orgId: invitation.orgId, role: updatedUser.role });
+    setAuthCookie(res, jwtToken);
 
     res.status(201).json({
       token: jwtToken,
@@ -439,9 +492,19 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
 router.get('/invite/:token', async (req: AuthRequest, res: Response) => {
   try {
     const { token } = req.params;
+    // Validate the path param before it reaches Prisma. Express gives us
+    // `token` as string | undefined, but with param regex assertions and
+    // middleware in the mix, it's safer to fail explicitly with a 400
+    // than to send `undefined` or a non-string into a Prisma where clause.
+    // Invitation tokens are always ASCII hex/base64url — a length cap
+    // also bounds the size of the DB query and protects against pathological
+    // inputs from a crafted URL.
+    if (typeof token !== 'string' || token.length < 8 || token.length > 128) {
+      return res.status(400).json({ error: 'Invalid invitation token' });
+    }
     const invitation = await prisma.invitation.findFirst({
       where: {
-        token: token as string,
+        token,
         usedAt: null,
         expiresAt: { gt: new Date() },
       },
@@ -467,6 +530,25 @@ router.get('/invite/:token', async (req: AuthRequest, res: Response) => {
 router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { name, repoIds, agentIds } = req.body;
+
+    // Cap scope array sizes up front. Without this, an attacker can POST
+    // thousands of IDs and force N large findMany + N inserts below.
+    const MAX_SCOPE = 200;
+    if (repoIds !== undefined && !Array.isArray(repoIds)) {
+      return res.status(400).json({ error: 'repoIds must be an array' });
+    }
+    if (agentIds !== undefined && !Array.isArray(agentIds)) {
+      return res.status(400).json({ error: 'agentIds must be an array' });
+    }
+    if (Array.isArray(repoIds) && repoIds.length > MAX_SCOPE) {
+      return res.status(400).json({ error: `repoIds exceeds max of ${MAX_SCOPE}` });
+    }
+    if (Array.isArray(agentIds) && agentIds.length > MAX_SCOPE) {
+      return res.status(400).json({ error: `agentIds exceeds max of ${MAX_SCOPE}` });
+    }
+    if (typeof name === 'string' && name.length > 256) {
+      return res.status(400).json({ error: 'name exceeds max length' });
+    }
 
     // Validate repoIds belong to this org
     if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
@@ -546,6 +628,9 @@ router.post('/api-keys', requireAuth, async (req: AuthRequest, res: Response) =>
 // GET /api-keys — list API keys
 router.get('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
+    // Cap at 2000 — each row joins through repoScopes + agentScopes so the
+    // response can balloon with nested data on orgs with many keys + scopes.
+    // 2000 is well above realistic human-admin key counts.
     const keys = await prisma.apiKey.findMany({
       where: { orgId: req.user!.orgId },
       select: {
@@ -556,6 +641,7 @@ router.get('/api-keys', requireAuth, async (req: AuthRequest, res: Response) => 
         agentScopes: { include: { agent: { select: { id: true, name: true, slug: true } } } },
       },
       orderBy: { createdAt: 'desc' },
+      take: 2000,
     });
     res.json(keys.map((k) => ({
       ...k,
@@ -581,7 +667,16 @@ router.delete('/api-keys/:id', requireAuth, async (req: AuthRequest, res: Respon
       return res.status(404).json({ error: 'API key not found' });
     }
 
-    await prisma.apiKey.delete({ where: { id } });
+    // Scope the delete to (id, orgId) so auth is enforced at the DB layer,
+    // not just by the precheck above. If a future refactor drops that
+    // precheck, this prevents an IDOR where an attacker could delete
+    // another org's API key by guessing UUIDs.
+    const deleted = await prisma.apiKey.deleteMany({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (deleted.count === 0) {
+      return res.status(404).json({ error: 'API key not found' });
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -605,7 +700,7 @@ router.delete('/api-keys/:id', requireAuth, async (req: AuthRequest, res: Respon
 const WEB_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
 
 // POST /forgot-password — send password reset email
-router.post('/forgot-password', async (req: AuthRequest, res: Response) => {
+router.post('/forgot-password', passwordResetLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'Email is required' });
@@ -663,7 +758,10 @@ router.post('/reset-password', async (req: AuthRequest, res: Response) => {
   try {
     const { token, password } = req.body;
     if (!token || !password) return res.status(400).json({ error: 'Token and password are required' });
-    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    {
+      const pwErr = validatePasswordLen(password);
+      if (pwErr) return res.status(400).json({ error: pwErr });
+    }
 
     const authToken = await prisma.authToken.findFirst({
       where: { token, type: 'password_reset', usedAt: null, expiresAt: { gt: new Date() } },
@@ -671,7 +769,7 @@ router.post('/reset-password', async (req: AuthRequest, res: Response) => {
 
     if (!authToken) return res.status(400).json({ error: 'Invalid or expired reset link' });
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
     await prisma.user.update({ where: { id: authToken.userId }, data: { passwordHash } });
     await prisma.authToken.update({ where: { id: authToken.id }, data: { usedAt: new Date() } });
 
@@ -945,7 +1043,7 @@ router.post('/oauth/:provider/callback', async (req: AuthRequest, res: Response)
           data: { name: isTeam ? `${userName}'s org` : `${userName}'s workspace`, slug },
         });
 
-        const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+        const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), BCRYPT_COST);
         user = await prisma.user.create({
           data: {
             orgId: org.id,
@@ -978,6 +1076,7 @@ router.post('/oauth/:provider/callback', async (req: AuthRequest, res: Response)
     }
 
     const token = signToken({ id: user.id, orgId: user.orgId, role: user.role });
+    setAuthCookie(res, token);
     res.json({
       token,
       user: {

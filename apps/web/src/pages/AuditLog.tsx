@@ -149,7 +149,7 @@ export default function AuditLog() {
 
                   {/* Timestamp */}
                   <span className="text-xs text-gray-600 flex-shrink-0 whitespace-nowrap">
-                    {new Date(entry.createdAt).toLocaleString()}
+                    {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : '—'}
                   </span>
                 </div>
               </div>

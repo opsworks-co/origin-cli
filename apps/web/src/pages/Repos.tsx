@@ -6,19 +6,47 @@ import { timeAgo } from '../utils';
 import { Package, Plus, RefreshCw, Archive, Trash2, GitFork } from 'lucide-react';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
+import { useAuth } from '../context/AuthContext';
+
+/**
+ * Derive the effective provider for grouping.
+ *
+ * Prefer the server-computed `effectiveProvider` (which already checks
+ * whether the org has a matching integration connected) and fall back to
+ * a path-based guess for older API responses that don't include it.
+ *
+ * The key case this handles: a repo stored with provider='github' and path
+ * 'github.com/foo/bar', but the org has never connected a GitHub
+ * integration. The server will return effectiveProvider='local' so the UI
+ * groups it under "Local" — because without integration credentials we
+ * literally cannot pull anything from GitHub for it, so treating it as a
+ * remote repo would just produce failing "Sync all" clicks.
+ */
+function effectiveProvider(repo: Repo): 'github' | 'gitlab' | 'local' {
+  if (repo.effectiveProvider) return repo.effectiveProvider;
+  const path = repo.path || '';
+  if (/github\.com\//.test(path)) return 'github';
+  if (/gitlab\.com\//.test(path)) return 'gitlab';
+  return 'local';
+}
 
 /** Extract org/owner from repo path, e.g. "github.com/dolobanko/origin" → "dolobanko" */
 function extractOrg(repo: Repo): string {
-  const path = repo.path;
+  // If the server says this repo is effectively local (e.g. because the
+  // GitHub integration isn't connected), group it under "Local" regardless
+  // of what the path looks like — otherwise a disconnected github.com/…
+  // repo would still show up under the owner group with a broken sync
+  // button.
+  if (repo.effectiveProvider === 'local') return 'Local';
+  const path = repo.path || '';
   // GitHub: "github.com/owner/repo" or "https://github.com/owner/repo"
   const ghMatch = path.match(/github\.com\/([^/]+)/);
   if (ghMatch) return ghMatch[1];
   // GitLab: "gitlab.com/owner/repo" or "https://gitlab.com/owner/repo"
   const glMatch = path.match(/gitlab\.com\/([^/]+)/);
   if (glMatch) return glMatch[1];
-  // Local: group under path prefix or "Local"
-  if (repo.provider === 'local') return 'Local';
-  return 'Other';
+  // Anything else (including stale provider=github on session-uploaded repos) → Local
+  return 'Local';
 }
 
 interface OrgGroup {
@@ -33,10 +61,11 @@ function groupByOrg(repos: Repo[]): OrgGroup[] {
   const map = new Map<string, OrgGroup>();
   for (const repo of repos) {
     const org = extractOrg(repo);
+    const provider = effectiveProvider(repo);
     if (!map.has(org)) {
       map.set(org, {
         org,
-        provider: repo.provider,
+        provider,
         repos: [],
         totalCommits: 0,
         totalSessions: 0,
@@ -47,7 +76,7 @@ function groupByOrg(repos: Repo[]): OrgGroup[] {
     group.totalCommits += repo._count?.commits ?? 0;
     group.totalSessions += repo._count?.sessions ?? 0;
   }
-  // Sort: github orgs first, then local
+  // Sort: github/gitlab orgs first, then local
   return Array.from(map.values()).sort((a, b) => {
     if (a.provider === 'local' && b.provider !== 'local') return 1;
     if (a.provider !== 'local' && b.provider === 'local') return -1;
@@ -57,6 +86,8 @@ function groupByOrg(repos: Repo[]): OrgGroup[] {
 
 export default function Repos() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isSolo = user?.accountType === 'developer';
   const [repos, setRepos] = useState<Repo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -326,6 +357,16 @@ export default function Repos() {
       );
       setImportResults(result.results);
       setSelectedRepos(new Set());
+      // Kick off a sync for every newly imported repo so the commit history
+      // and AI detection metadata show up without the user having to click
+      // "Sync" manually. Fire-and-forget — sync can take a while on big
+      // repos and we don't want to block the UI.
+      const newRepoIds = result.results
+        .filter((r) => r.success && r.repoId)
+        .map((r) => r.repoId as string);
+      for (const id of newRepoIds) {
+        api.syncRepo(id).catch(() => { /* background best-effort */ });
+      }
       fetchRepos();
       const updated = await api.discoverGitHubRepos();
       setGithubRepos(updated.repos);
@@ -396,6 +437,14 @@ export default function Repos() {
       );
       setGitlabImportResults(result.results);
       setSelectedGitLabRepos(new Set());
+      // Auto-sync each freshly imported repo in the background (see the
+      // GitHub handler above for rationale).
+      const newRepoIds = result.results
+        .filter((r) => r.success && r.repoId)
+        .map((r) => r.repoId as string);
+      for (const id of newRepoIds) {
+        api.syncRepo(id).catch(() => { /* background best-effort */ });
+      }
       fetchRepos();
       const updated = await api.discoverGitLabRepos();
       setGitlabRepos(updated.repos);
@@ -430,12 +479,12 @@ export default function Repos() {
         </div>
         {repos.length > 0 && (
           <div className="flex items-center gap-2">
-            {hasGitHub && (
+            {hasGitHub && !showImport && (
               <button
-                onClick={showImport ? () => setShowImport(false) : () => { handleDiscover(); setShowGitLabImport(false); setShowForm(false); }}
+                onClick={() => { handleDiscover(); setShowGitLabImport(false); setShowForm(false); }}
                 className="btn-primary text-sm"
               >
-                {showImport ? 'Close' : 'Import from GitHub'}
+                Import from GitHub
               </button>
             )}
             {!hasGitHub && (
@@ -454,13 +503,13 @@ export default function Repos() {
                 Connect GitLab
               </button>
             )}
-            {hasGitLab && (
+            {hasGitLab && !showGitLabImport && (
               <button
-                onClick={showGitLabImport ? () => setShowGitLabImport(false) : () => { handleDiscoverGitLab(); setShowImport(false); setShowForm(false); }}
+                onClick={() => { handleDiscoverGitLab(); setShowImport(false); setShowForm(false); }}
                 className="btn-primary text-sm"
                 style={{ background: '#FC6D26' }}
               >
-                {showGitLabImport ? 'Close' : 'Import from GitLab'}
+                Import from GitLab
               </button>
             )}
             <button
@@ -569,20 +618,35 @@ export default function Repos() {
 
               <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-500">Webhooks created automatically</p>
-                <button
-                  onClick={handleImport}
-                  disabled={selectedRepos.size === 0 || importing}
-                  className="btn-primary text-sm"
-                >
-                  {importing ? (
-                    <span className="flex items-center gap-2">
-                      <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
-                      Importing...
-                    </span>
-                  ) : (
-                    `Import ${selectedRepos.size} Selected`
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowImport(false);
+                      setSelectedRepos(new Set());
+                      setImportResults([]);
+                      setSearchFilter('');
+                    }}
+                    disabled={importing}
+                    className="btn-secondary text-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleImport}
+                    disabled={selectedRepos.size === 0 || importing}
+                    className="btn-primary text-sm"
+                  >
+                    {importing ? (
+                      <span className="flex items-center gap-2">
+                        <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
+                        Importing...
+                      </span>
+                    ) : (
+                      `Import ${selectedRepos.size} Selected`
+                    )}
+                  </button>
+                </div>
               </div>
             </>
           )}
@@ -687,21 +751,36 @@ export default function Repos() {
 
               <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-500">Webhooks created automatically</p>
-                <button
-                  onClick={handleGitLabImport}
-                  disabled={selectedGitLabRepos.size === 0 || importingGitLab}
-                  className="btn-primary text-sm"
-                  style={{ background: '#FC6D26' }}
-                >
-                  {importingGitLab ? (
-                    <span className="flex items-center gap-2">
-                      <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
-                      Importing...
-                    </span>
-                  ) : (
-                    `Import ${selectedGitLabRepos.size} Selected`
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowGitLabImport(false);
+                      setSelectedGitLabRepos(new Set());
+                      setGitlabImportResults([]);
+                      setGitlabSearchFilter('');
+                    }}
+                    disabled={importingGitLab}
+                    className="btn-secondary text-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleGitLabImport}
+                    disabled={selectedGitLabRepos.size === 0 || importingGitLab}
+                    className="btn-primary text-sm"
+                    style={{ background: '#FC6D26' }}
+                  >
+                    {importingGitLab ? (
+                      <span className="flex items-center gap-2">
+                        <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
+                        Importing...
+                      </span>
+                    ) : (
+                      `Import ${selectedGitLabRepos.size} Selected`
+                    )}
+                  </button>
+                </div>
               </div>
             </>
           )}
@@ -760,9 +839,11 @@ export default function Repos() {
               <Package className="w-6 h-6 text-indigo-400" />
             </div>
             <p className="text-lg font-medium text-gray-200 mb-1">No repositories yet</p>
-            <p className="text-sm text-gray-500">
-              Agents can only run sessions in registered repositories.
-            </p>
+            {!isSolo && (
+              <p className="text-sm text-gray-500">
+                Agents can only run sessions in registered repositories.
+              </p>
+            )}
           </div>
 
           <div className="grid sm:grid-cols-3 gap-4 max-w-3xl mx-auto">
@@ -921,11 +1002,16 @@ export default function Repos() {
                       <path d="M29.133 12.576H21.323L24.666 2.279C24.845 1.736 25.607 1.736 25.786 2.279L29.133 12.576Z" />
                     </svg>
                   ) : (
-                    <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+                    <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" />
                     </svg>
                   )}
                   <span className="font-semibold text-gray-200 text-sm">{group.org}</span>
+                  {group.provider === 'local' && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-medium uppercase tracking-wider">
+                      Local
+                    </span>
+                  )}
                   <span className="text-xs text-gray-500">
                     {group.repos.length} {group.repos.length === 1 ? 'repo' : 'repos'}
                   </span>

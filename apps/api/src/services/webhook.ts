@@ -3,17 +3,28 @@ import { prisma } from '../db.js';
 import { updatePRGitHubStatus, listPRCommits, getIntegrationConfig, parseRepoFullName } from './github-integration.js';
 import { updateMRGitLabStatus, listMRCommits, getGitLabIntegrationConfig, parseGitLabProjectPath } from './gitlab-integration.js';
 import { detectAITool } from './ai-commit-detector.js';
+import { isGitNotesMetadataCommit } from '../utils/commit-filter.js';
 
 export function generateWebhookSecret(): string {
   return crypto.randomBytes(32).toString('hex');
 }
 
 export function verifyGitHubSignature(payload: string | Buffer, signature: string, secret: string): boolean {
+  if (!signature || !secret) return false;
   const hmac = crypto.createHmac('sha256', secret);
   hmac.update(payload);
   const expected = 'sha256=' + hmac.digest('hex');
+  // timingSafeEqual requires equal-length buffers. Reject length mismatch
+  // explicitly — comparing equal-length buffers is the only scenario
+  // where the timing-safe guarantee actually matters, and feeding
+  // unequal lengths would throw, leaking "valid prefix" info via the
+  // exception path. A hash-based length check is still constant time
+  // relative to the signature content.
+  const expectedBuf = Buffer.from(expected, 'utf-8');
+  const receivedBuf = Buffer.from(signature, 'utf-8');
+  if (expectedBuf.length !== receivedBuf.length) return false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+    return crypto.timingSafeEqual(expectedBuf, receivedBuf);
   } catch {
     return false;
   }
@@ -43,27 +54,39 @@ export async function processGitHubPush(repoId: string, payload: GitHubPushPaylo
   // Extract branch name from ref (e.g., "refs/heads/main" → "main")
   const branch = payload.ref?.replace('refs/heads/', '') || null;
 
-  for (const commit of payload.commits) {
-    // Check for duplicate by SHA
-    const existing = await prisma.commit.findFirst({
-      where: { repoId, sha: commit.id },
-    });
+  // Cap the commit loop. A single webhook can legally carry ~2000 commits
+  // (GitHub's own limit), but a malicious or catastrophically misconfigured
+  // sender could post many more, turning one request into thousands of
+  // sequential DB writes. Process the first N and log the rest; we can
+  // still resync the tail later via the manual sync path.
+  const MAX_COMMITS_PER_PUSH = 2000;
+  const commits = Array.isArray(payload.commits)
+    ? payload.commits.slice(0, MAX_COMMITS_PER_PUSH)
+    : [];
+  if (Array.isArray(payload.commits) && payload.commits.length > MAX_COMMITS_PER_PUSH) {
+    console.warn(`[webhook] GitHub push truncated: ${payload.commits.length} > ${MAX_COMMITS_PER_PUSH}`);
+  }
 
-    if (existing) {
-      // Update branch on existing commit if not set
-      if (!existing.branch && branch) {
-        await prisma.commit.update({
-          where: { id: existing.id },
-          data: { branch },
-        });
-      }
+  for (const commit of commits) {
+    // Drop git-notes metadata commits at the ingest boundary. These leak
+    // in when refs/notes/origin gets mirrored alongside refs/heads/*.
+    // They're Origin's own bookkeeping, not user work — keeping them out
+    // of the Commit table prevents UI noise and duplicate rows for the
+    // same underlying SHA.
+    if (isGitNotesMetadataCommit(commit.message)) {
       results.skipped++;
       continue;
     }
 
+    // Atomic upsert on the (repoId, sha) unique index: concurrent webhook
+    // deliveries for the same push collapse into a single row instead of
+    // racing between findFirst() and create(). On a "first write wins"
+    // concurrent push, the second delivery will take the update branch and
+    // only fill in `branch` if it was empty.
     const detection = detectAITool(commit.message, commit.author.name);
-    await prisma.commit.create({
-      data: {
+    const result = await prisma.commit.upsert({
+      where: { repoId_sha: { repoId, sha: commit.id } },
+      create: {
         repoId,
         sha: commit.id,
         message: commit.message,
@@ -73,8 +96,23 @@ export async function processGitHubPush(repoId: string, payload: GitHubPushPaylo
         branch,
         committedAt: new Date(commit.timestamp),
       },
+      update: {}, // on collision keep existing row; branch backfill below
     });
-    results.created++;
+    if (branch && !result.branch) {
+      // Backfill branch only when it was previously unknown. updateMany with
+      // a `branch: null` guard makes this safe under concurrency.
+      await prisma.commit.updateMany({
+        where: { id: result.id, branch: null },
+        data: { branch },
+      });
+    }
+    // Rough created/skipped signal — upsert doesn't tell us which path ran.
+    // Treat rows whose createdAt matches the upsert as "created".
+    if (Math.abs(Date.now() - new Date(result.createdAt).getTime()) < 5_000) {
+      results.created++;
+    } else {
+      results.skipped++;
+    }
   }
 
   // Update repo syncedAt
@@ -217,8 +255,16 @@ export async function processGitHubPR(repoId: string, payload: GitHubPRPayload) 
  */
 export function verifyGitLabToken(headerToken: string, secret: string): boolean {
   if (!headerToken || !secret) return false;
+  // Length-check up front so timingSafeEqual doesn't throw on mismatched
+  // buffer lengths (which would reveal *secret length* via timing: the
+  // throw path is faster than the constant-time compare path). By
+  // returning false on length mismatch *without* attempting compare,
+  // we leak the same bit either way and avoid the try/catch shortcut.
+  const headerBuf = Buffer.from(headerToken, 'utf8');
+  const secretBuf = Buffer.from(secret, 'utf8');
+  if (headerBuf.length !== secretBuf.length) return false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(headerToken), Buffer.from(secret));
+    return crypto.timingSafeEqual(headerBuf, secretBuf);
   } catch {
     return false;
   }
@@ -246,25 +292,28 @@ export async function processGitLabPush(repoId: string, payload: GitLabPushPaylo
   const results = { created: 0, skipped: 0 };
   const branch = payload.ref?.replace('refs/heads/', '') || null;
 
-  for (const commit of payload.commits) {
-    const existing = await prisma.commit.findFirst({
-      where: { repoId, sha: commit.id },
-    });
+  // Same cap as the GitHub path — see processGitHubPush for rationale.
+  const MAX_COMMITS_PER_PUSH = 2000;
+  const commits = Array.isArray(payload.commits)
+    ? payload.commits.slice(0, MAX_COMMITS_PER_PUSH)
+    : [];
+  if (Array.isArray(payload.commits) && payload.commits.length > MAX_COMMITS_PER_PUSH) {
+    console.warn(`[webhook] GitLab push truncated: ${payload.commits.length} > ${MAX_COMMITS_PER_PUSH}`);
+  }
 
-    if (existing) {
-      if (!existing.branch && branch) {
-        await prisma.commit.update({
-          where: { id: existing.id },
-          data: { branch },
-        });
-      }
+  for (const commit of commits) {
+    // Same filter as GitHub: git-notes metadata commits never belong in
+    // the Commits table — they're Origin's own bookkeeping.
+    if (isGitNotesMetadataCommit(commit.message)) {
       results.skipped++;
       continue;
     }
 
+    // Atomic upsert — see GitHub path above for rationale.
     const detection = detectAITool(commit.message, commit.author.name);
-    await prisma.commit.create({
-      data: {
+    const result = await prisma.commit.upsert({
+      where: { repoId_sha: { repoId, sha: commit.id } },
+      create: {
         repoId,
         sha: commit.id,
         message: commit.message,
@@ -274,8 +323,21 @@ export async function processGitLabPush(repoId: string, payload: GitLabPushPaylo
         branch,
         committedAt: new Date(commit.timestamp),
       },
+      update: {}, // on collision keep existing row; branch backfill below
     });
-    results.created++;
+    if (branch && !result.branch) {
+      // Backfill branch only when it was previously unknown. updateMany with
+      // a `branch: null` guard makes this safe under concurrency.
+      await prisma.commit.updateMany({
+        where: { id: result.id, branch: null },
+        data: { branch },
+      });
+    }
+    if (Math.abs(Date.now() - new Date(result.createdAt).getTime()) < 5_000) {
+      results.created++;
+    } else {
+      results.skipped++;
+    }
   }
 
   await prisma.repo.update({

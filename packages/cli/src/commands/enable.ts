@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { run, runDetailed } from '../utils/exec.js';
 import { loadConfig, saveConfig, saveRepoConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
@@ -26,7 +26,8 @@ function getOriginBinPath(): string {
 
   // 2. which origin
   try {
-    const binPath = execSync('which origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const r = runDetailed('which', ['origin'], { timeoutMs: 2000 });
+    const binPath = r.status === 0 ? r.stdout.trim() : '';
     if (binPath) return path.dirname(binPath);
   } catch { /* fallback */ }
 
@@ -465,11 +466,13 @@ function detectAgents(gitRoot: string): AgentType[] {
       continue;
     }
     // Check if binary exists on PATH
-    try {
-      execSync(`which ${agent.command}`, { stdio: 'ignore' });
-      detected.push(type);
-      continue;
-    } catch { /* not on PATH */ }
+    {
+      const r = runDetailed('which', [agent.command], { timeoutMs: 2000 });
+      if (r.status === 0 && r.stdout.trim()) {
+        detected.push(type);
+        continue;
+      }
+    }
     // Check npx cache (e.g. codex installed via npx)
     if (isInNpxCache(agent.command)) {
       detected.push(type);
@@ -527,10 +530,10 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
       // In global mode, detect which agent binaries are installed or config dirs exist
       agentsToEnable = GLOBAL_CAPABLE_AGENTS.filter((type) => {
         // Check CLI availability
-        try {
-          execSync(`which ${AGENTS[type].command}`, { stdio: 'ignore' });
-          return true;
-        } catch { /* not in PATH */ }
+        {
+          const r = runDetailed('which', [AGENTS[type].command], { timeoutMs: 2000 });
+          if (r.status === 0 && r.stdout.trim()) return true;
+        }
         // Fall back to config directory detection (e.g. Cursor may not install CLI to PATH)
         const detectDir = AGENTS[type].detectDir;
         if (detectDir && fs.existsSync(path.join(os.homedir(), detectDir))) {
@@ -649,7 +652,8 @@ function installGlobalGitHooks(): void {
   // Resolve full path to origin binary
   let originBin = 'origin';
   try {
-    originBin = execSync('which origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const r = runDetailed('which', ['origin'], { timeoutMs: 2000 });
+    if (r.status === 0 && r.stdout.trim()) originBin = r.stdout.trim();
   } catch { /* fallback to bare name */ }
 
   // Pre-commit hook — secret scanning (blocks commit on secrets found)
@@ -794,7 +798,7 @@ fi
 
   // Set git config to use our global hooks directory
   try {
-    execSync(`git config --global core.hooksPath ${globalHooksDir}`, { stdio: 'pipe' });
+    run('git', ['config', '--global', 'core.hooksPath', globalHooksDir]);
     console.log(chalk.green('\n  ✓ Global git hooks installed'));
     console.log(chalk.gray(`    Hooks directory: ${globalHooksDir}`));
     console.log(chalk.gray('    Local repo hooks are chained automatically'));

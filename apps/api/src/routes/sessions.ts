@@ -2,7 +2,9 @@ import { Router, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { expensiveLimiter } from '../middleware/rate-limit.js';
 import { notifyOrgAdmins, notifyOrgMembers } from '../services/notifications.js';
+import { safeParseArray, safeParseObject } from '../utils/safe-json.js';
 
 /** Check if user has admin/owner role */
 function isAdminUser(req: AuthRequest): boolean {
@@ -100,7 +102,11 @@ function mapSession(s: any, pullRequests?: any[]) {
     endedAt: s.endedAt || null,
     agentSystemPrompt: s.agentSystemPrompt || null,
     agentVersion: s.agentVersion || null,
-    mergedFrom: s.mergedFrom ? JSON.parse(s.mergedFrom) : null,
+    // safeParse* everywhere in this mapper: one corrupt row used to 500 the
+    // entire list endpoint because a single JSON.parse throw inside a .map
+    // callback bubbles all the way out. Logging + falling back to a sane
+    // default keeps the list rendering while still surfacing the bad row.
+    mergedFrom: s.mergedFrom ? safeParseObject(s.mergedFrom, `session.${s.id}.mergedFrom`, null as any) : null,
     mergedInto: s.mergedInto || null,
     agentSessionId: s.agentSessionId || null,
     parentSessionId: s.parentSessionId || null,
@@ -112,9 +118,11 @@ function mapSession(s: any, pullRequests?: any[]) {
           note: s.review.note,
           score: s.review.score ?? null,
           riskLevel: s.review.riskLevel ?? null,
-          concerns: s.review.concerns ? JSON.parse(s.review.concerns) : [],
-          suggestions: s.review.suggestions ? JSON.parse(s.review.suggestions) : [],
-          categories: s.review.categories ? JSON.parse(s.review.categories) : null,
+          concerns: safeParseArray(s.review.concerns, `session.${s.id}.review.concerns`),
+          suggestions: safeParseArray(s.review.suggestions, `session.${s.id}.review.suggestions`),
+          categories: s.review.categories
+            ? safeParseObject(s.review.categories, `session.${s.id}.review.categories`, null as any)
+            : null,
           isAutoReview: s.review.isAutoReview ?? false,
           reviewerName: s.review.user?.name || null,
           createdAt: s.review.createdAt,
@@ -138,7 +146,7 @@ function mapSession(s: any, pullRequests?: any[]) {
       ? {
           headBefore: s.sessionDiff.headBefore,
           headAfter: s.sessionDiff.headAfter,
-          commitShas: JSON.parse(s.sessionDiff.commitShas || '[]'),
+          commitShas: safeParseArray<string>(s.sessionDiff.commitShas, `session.${s.id}.sessionDiff.commitShas`),
           diff: s.sessionDiff.diff,
           diffTruncated: s.sessionDiff.diffTruncated,
           linesAdded: s.sessionDiff.linesAdded,
@@ -153,7 +161,7 @@ function mapSession(s: any, pullRequests?: any[]) {
             .map((pc: any) => ({
               promptIndex: pc.promptIndex,
               promptText: pc.promptText,
-              filesChanged: JSON.parse(pc.filesChanged || '[]'),
+              filesChanged: safeParseArray<string>(pc.filesChanged, `session.${s.id}.promptChanges.filesChanged`),
               diff: pc.diff || '',
               uncommittedDiff: pc.uncommittedDiff || '',
               createdAt: pc.createdAt,
@@ -348,6 +356,8 @@ router.get('/active', async (req: AuthRequest, res: Response) => {
       activeWhere.userId = req.user!.id;
     }
 
+    // Active sessions list — cap 500 since "active" should be small by
+    // definition (sessions still running in the last ~2h).
     const sessions = await prisma.codingSession.findMany({
       where: activeWhere,
       include: {
@@ -357,6 +367,7 @@ router.get('/active', async (req: AuthRequest, res: Response) => {
         review: { include: { user: true } },
       },
       orderBy: { createdAt: 'desc' },
+      take: 500,
     });
 
     res.json({ sessions: sessions.map((s) => mapSession(s)) });
@@ -371,10 +382,13 @@ router.get('/by-pr', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
 
-    // Get all repos for org
+    // Get all repos for org (cap — the in(...) filter below otherwise
+    // scales with total org repos, and unbounded materialization of
+    // the id list alone is a DoS on large tenants).
     const repos = await prisma.repo.findMany({
       where: { orgId },
       select: { id: true },
+      take: 5000,
     });
     const repoIds = repos.map((r) => r.id);
 
@@ -398,10 +412,11 @@ router.get('/by-pr', async (req: AuthRequest, res: Response) => {
 
       if (commitShas.length === 0) continue;
 
-      // Find commits for these SHAs
+      // Find commits for these SHAs (cap matches PR commit list ceiling)
       const commits = await prisma.commit.findMany({
         where: { repoId: pr.repoId, sha: { in: commitShas } },
         select: { id: true },
+        take: 5000,
       });
 
       const commitIds = commits.map((c) => c.id);
@@ -417,6 +432,7 @@ router.get('/by-pr', async (req: AuthRequest, res: Response) => {
           review: { include: { user: true } },
         },
         orderBy: { createdAt: 'desc' },
+        take: 5000,
       });
 
       if (sessions.length === 0) continue;
@@ -516,7 +532,9 @@ router.get('/by-commit', async (req: AuthRequest, res: Response) => {
     let filesChanged: string[] = [];
     try {
       filesChanged = JSON.parse(session.filesChanged || '[]');
-    } catch {}
+    } catch (err) {
+      console.warn(`[sessions] malformed filesChanged JSON for session ${session.id}:`, (err as Error).message);
+    }
 
     res.json({
       sessionId: session.id,
@@ -533,8 +551,22 @@ router.get('/by-commit', async (req: AuthRequest, res: Response) => {
 });
 
 // GET /stream — SSE real-time session events
+// Per-user concurrent stream cap. Without this an attacker who has a valid
+// token (or a misbehaving client) can open N streams within the 120/min
+// sessionLimiter budget and hold them indefinitely via server heartbeats,
+// pinning sockets + EventEmitter listeners on the server. 10 is generous
+// for legit use cases (multi-tab dashboards) and cheap to track in-memory.
+const MAX_STREAMS_PER_USER = 10;
+const activeStreamCounts = new Map<string, number>();
 router.get('/stream', async (req: AuthRequest, res: Response) => {
   const orgId = req.user!.orgId;
+  const streamUserId = req.user!.id;
+
+  const current = activeStreamCounts.get(streamUserId) || 0;
+  if (current >= MAX_STREAMS_PER_USER) {
+    return res.status(429).json({ error: 'Too many concurrent streams for this user' });
+  }
+  activeStreamCounts.set(streamUserId, current + 1);
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -546,7 +578,6 @@ router.get('/stream', async (req: AuthRequest, res: Response) => {
   res.write('data: {"type":"connected"}\n\n');
 
   const streamIsAdmin = isAdminUser(req);
-  const streamUserId = req.user!.id;
 
   const unsubscribe = onSessionEvent((event: SessionEvent) => {
     if (event.orgId === orgId && (streamIsAdmin || event.userId === streamUserId)) {
@@ -559,10 +590,18 @@ router.get('/stream', async (req: AuthRequest, res: Response) => {
     res.write(': heartbeat\n\n');
   }, 30000);
 
-  req.on('close', () => {
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
     unsubscribe();
     clearInterval(heartbeat);
-  });
+    const next = (activeStreamCounts.get(streamUserId) || 1) - 1;
+    if (next <= 0) activeStreamCounts.delete(streamUserId);
+    else activeStreamCounts.set(streamUserId, next);
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
 });
 
 // PATCH /bulk/archive — bulk archive sessions
@@ -572,9 +611,15 @@ router.patch('/bulk/archive', requireRole('ADMIN'), async (req: AuthRequest, res
     if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
       return res.status(400).json({ error: 'sessionIds array required' });
     }
+    // DoS cap: one bulk-archive call can touch at most 1000 sessions.
+    // Without this a client could pass an arbitrarily long id list and
+    // force a huge UPDATE.
+    if (sessionIds.length > 1000) {
+      return res.status(400).json({ error: 'Cannot archive more than 1000 sessions at once' });
+    }
 
     const orgId = req.user!.orgId;
-    await prisma.codingSession.updateMany({
+    const result = await prisma.codingSession.updateMany({
       where: {
         id: { in: sessionIds },
         commit: { repo: { orgId } },
@@ -582,7 +627,7 @@ router.patch('/bulk/archive', requireRole('ADMIN'), async (req: AuthRequest, res
       data: { archived: archived !== false },
     });
 
-    res.json({ success: true, count: sessionIds.length });
+    res.json({ success: true, count: result.count });
   } catch (err) {
     console.error('Bulk archive error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -626,8 +671,15 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     // Find linked pull requests
     let pullRequests: any[] = [];
     if (session.commit?.sha && session.commit?.repoId) {
+      // Cap at 2000 PRs per repo. We can't narrow in SQL because
+      // commitShas is a JSON string column, not a relation, so we fetch
+      // and filter in memory. 2000 is well above typical per-repo PR
+      // counts; beyond that we should migrate commitShas to a proper
+      // join table.
       const allPRs = await prisma.pullRequest.findMany({
         where: { repoId: session.commit.repoId },
+        take: 2000,
+        orderBy: { createdAt: 'desc' },
       });
       pullRequests = allPRs.filter((pr) => {
         try {
@@ -650,6 +702,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       },
       select: { id: true, startedAt: true, endedAt: true, costUsd: true, tokensUsed: true, durationMs: true, status: true, model: true },
       orderBy: { startedAt: 'asc' },
+      take: 500,
     });
     if (chainSessions.length > 1) {
       mapped.chainSessions = chainSessions;
@@ -685,7 +738,7 @@ router.get('/:id/diff', async (req: AuthRequest, res: Response) => {
     res.json({
       headBefore: session.sessionDiff.headBefore,
       headAfter: session.sessionDiff.headAfter,
-      commitShas: JSON.parse(session.sessionDiff.commitShas || '[]'),
+      commitShas: safeParseArray<string>(session.sessionDiff.commitShas, `sessions.diff ${session.id}`),
       diff: session.sessionDiff.diff,
       diffTruncated: session.sessionDiff.diffTruncated,
       linesAdded: session.sessionDiff.linesAdded,
@@ -705,6 +758,12 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
 
     if (!status) {
       return res.status(400).json({ error: 'Missing required field: status' });
+    }
+    if (typeof status !== 'string' || status.length > 50) {
+      return res.status(400).json({ error: 'Field status must be a string ≤ 50 chars' });
+    }
+    if (note != null && (typeof note !== 'string' || note.length > 10_000)) {
+      return res.status(400).json({ error: 'Field note must be a string ≤ 10000 chars' });
     }
 
     const session = await prisma.codingSession.findFirst({
@@ -776,9 +835,12 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
         });
 
         if (commit?.sha && commit.repo) {
-          // Find PRs that include this commit
+          // Find PRs that include this commit. Cap at 2000 per repo
+          // (see identical comment above).
           const allPRs = await prisma.pullRequest.findMany({
             where: { repoId: commit.repoId },
+            take: 2000,
+            orderBy: { createdAt: 'desc' },
           });
 
           const linkedPRs = allPRs.filter((pr) => {
@@ -882,7 +944,11 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
 });
 
 // POST /:id/ai-review — trigger AI review on an existing session
-router.post('/:id/ai-review', async (req: AuthRequest, res: Response) => {
+// AI review hits the org's LLM key with the full session transcript —
+// the most expensive single op in the API. Gate behind the strict
+// limiter (10/min/user) so a compromised user token can't burn the
+// entire budget in a tight loop.
+router.post('/:id/ai-review', expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
 
@@ -911,7 +977,9 @@ router.post('/:id/ai-review', async (req: AuthRequest, res: Response) => {
     }
 
     let filesChanged: string[] = [];
-    try { filesChanged = JSON.parse(session.filesChanged); } catch {}
+    try { filesChanged = JSON.parse(session.filesChanged); } catch (err) {
+      console.warn(`[sessions] malformed filesChanged JSON for review session ${id}:`, (err as Error).message);
+    }
 
     const result = await runAIReview({
       sessionId: id,
@@ -952,9 +1020,9 @@ router.post('/:id/ai-review', async (req: AuthRequest, res: Response) => {
         note: review.note,
         score: review.score,
         riskLevel: review.riskLevel,
-        concerns: review.concerns ? JSON.parse(review.concerns) : [],
-        suggestions: review.suggestions ? JSON.parse(review.suggestions) : [],
-        categories: review.categories ? JSON.parse(review.categories) : null,
+        concerns: safeParseArray(review.concerns, `sessions.ai-review ${id}.concerns`),
+        suggestions: safeParseArray(review.suggestions, `sessions.ai-review ${id}.suggestions`),
+        categories: review.categories ? safeParseObject(review.categories, `sessions.ai-review ${id}.categories`, null as any) : null,
         isAutoReview: review.isAutoReview,
         reviewerName: review.user?.name || null,
         createdAt: review.createdAt,
@@ -1003,24 +1071,28 @@ router.post('/:id/end', async (req: AuthRequest, res: Response) => {
       ? now.getTime() - new Date(session.startedAt).getTime()
       : session.durationMs;
 
-    await prisma.codingSession.update({
-      where: { id: session.id },
-      data: {
-        status: 'COMPLETED',
-        endedAt: now,
-        durationMs,
-      },
-    });
-
-    await prisma.auditLog.create({
-      data: {
-        orgId: req.user!.orgId,
-        userId: req.user!.id,
-        action: 'SESSION_ENDED',
-        resource: session.id,
-        metadata: JSON.stringify({ sessionId: session.id }),
-      },
-    });
+    // Wrap the status flip + audit log in a single transaction so a crash or
+    // connection drop can't leave a RUNNING session with an orphan audit row
+    // (or vice versa). Both writes succeed or neither does.
+    await prisma.$transaction([
+      prisma.codingSession.update({
+        where: { id: session.id },
+        data: {
+          status: 'COMPLETED',
+          endedAt: now,
+          durationMs,
+        },
+      }),
+      prisma.auditLog.create({
+        data: {
+          orgId: req.user!.orgId,
+          userId: req.user!.id,
+          action: 'SESSION_ENDED',
+          resource: session.id,
+          metadata: JSON.stringify({ sessionId: session.id }),
+        },
+      }),
+    ]);
 
     res.json({ success: true });
   } catch (err) {
@@ -1084,13 +1156,17 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Delete related records first (cascade)
-    await prisma.sessionDiff.deleteMany({ where: { sessionId: id } });
-    await prisma.promptChange.deleteMany({ where: { sessionId: id } });
-    await prisma.secretFinding.deleteMany({ where: { sessionId: id } });
-    await prisma.sessionReview.deleteMany({ where: { sessionId: id } });
-    await prisma.codingSession.delete({ where: { id } });
-    await prisma.commit.delete({ where: { id: session.commitId } });
+    // Cascade delete in a single transaction so a partial failure can't
+    // leave orphan child rows (sessionDiff, promptChange, etc.) referencing
+    // a non-existent session.
+    await prisma.$transaction([
+      prisma.sessionDiff.deleteMany({ where: { sessionId: id } }),
+      prisma.promptChange.deleteMany({ where: { sessionId: id } }),
+      prisma.secretFinding.deleteMany({ where: { sessionId: id } }),
+      prisma.sessionReview.deleteMany({ where: { sessionId: id } }),
+      prisma.codingSession.delete({ where: { id } }),
+      prisma.commit.delete({ where: { id: session.commitId } }),
+    ]);
 
     await prisma.auditLog.create({
       data: {
@@ -1452,13 +1528,44 @@ When answering:
 - Format responses in markdown when helpful
 `;
 
-router.post('/:id/ask', async (req: AuthRequest, res: Response) => {
+router.post('/:id/ask', expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const { question, context, messages: conversationHistory } = req.body;
 
     if (!question && (!conversationHistory || conversationHistory.length === 0)) {
       return res.status(400).json({ error: 'question is required' });
+    }
+
+    // Cost-burning defense. /ask sends `question` + `conversationHistory`
+    // straight into an LLM call, and every request here spends the org's
+    // LLM credits. Without a cap, a member could post a 50MB question and
+    // blow a five-figure hole in a single request. Cap the question
+    // itself, the per-message content, and the total history size.
+    const MAX_QUESTION_LEN = 8 * 1024;   // 8KB per question
+    const MAX_HISTORY_BYTES = 50 * 1024; // 50KB aggregate history
+    const MAX_HISTORY_MSGS = 50;         // even with slice(-10), cap incoming array
+    if (question !== undefined && typeof question !== 'string') {
+      return res.status(400).json({ error: 'question must be a string' });
+    }
+    if (typeof question === 'string' && question.length > MAX_QUESTION_LEN) {
+      return res.status(413).json({ error: 'question exceeds maximum length' });
+    }
+    if (conversationHistory !== undefined && !Array.isArray(conversationHistory)) {
+      return res.status(400).json({ error: 'messages must be an array' });
+    }
+    if (Array.isArray(conversationHistory)) {
+      if (conversationHistory.length > MAX_HISTORY_MSGS) {
+        return res.status(413).json({ error: 'messages array exceeds maximum length' });
+      }
+      let total = 0;
+      for (const m of conversationHistory) {
+        const c = typeof m?.content === 'string' ? m.content : '';
+        total += c.length;
+        if (total > MAX_HISTORY_BYTES) {
+          return res.status(413).json({ error: 'messages aggregate size exceeds limit' });
+        }
+      }
     }
 
     const session = await prisma.codingSession.findFirst({
@@ -1599,6 +1706,12 @@ router.post('/:id/secrets', async (req: AuthRequest, res: Response) => {
     if (!findings || !Array.isArray(findings) || findings.length === 0) {
       return res.status(400).json({ error: 'findings array is required' });
     }
+    // Cap findings array. Each entry writes a SecretFinding row below, so
+    // an unbounded POST turns into an unbounded sequential DB-write amp.
+    const MAX_FINDINGS = 500;
+    if (findings.length > MAX_FINDINGS) {
+      return res.status(413).json({ error: `findings exceeds max of ${MAX_FINDINGS}` });
+    }
 
     // Verify session exists and belongs to user's org
     const session = await prisma.codingSession.findFirst({
@@ -1700,8 +1813,21 @@ router.post('/:id/share', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Generate random 8-char alphanumeric slug
-    const slug = crypto.randomBytes(6).toString('base64url').slice(0, 8);
+    // Generate a 22-char base64url slug from 128 bits of entropy.
+    //
+    // The previous implementation used 6 bytes → 8 base64url chars ≈ 48
+    // bits, which is well within brute-force range for an unauthenticated
+    // URL that returns full prompts, transcripts, and diffs. At 48 bits an
+    // attacker enumerating the slug space finds a valid link after roughly
+    // 2^24 requests — minutes on a cheap VPS, even with our rate limits.
+    //
+    // 16 bytes → 22 base64url chars (trailing `=` stripped) → 128 bits. At
+    // that width, enumeration becomes computationally infeasible regardless
+    // of rate limits, matching the security posture of session UUIDs.
+    //
+    // Existing short slugs in the DB still work — they're looked up by
+    // exact match in GET /:slug, so the length change is forward-compatible.
+    const slug = crypto.randomBytes(16).toString('base64url').replace(/=+$/, '');
 
     const shared = await prisma.sharedSession.create({
       data: {
@@ -1784,7 +1910,7 @@ router.get('/bookmarked', async (req: AuthRequest, res: Response) => {
         ...mapSession(b.session),
         bookmark: {
           id: b.id,
-          tags: JSON.parse(b.tags || '[]'),
+          tags: safeParseArray<string>(b.tags, `bookmarks.list ${b.id}`),
           note: b.note,
           createdAt: b.createdAt,
         },
@@ -1820,7 +1946,7 @@ router.post('/:id/bookmark', async (req: AuthRequest, res: Response) => {
     res.json({
       id: bookmark.id,
       sessionId: bookmark.sessionId,
-      tags: JSON.parse(bookmark.tags || '[]'),
+      tags: safeParseArray<string>(bookmark.tags, `bookmarks.create ${bookmark.id}`),
       note: bookmark.note,
       createdAt: bookmark.createdAt,
     });
@@ -1855,6 +1981,11 @@ router.post('/merge', async (req: AuthRequest, res: Response) => {
 
     if (!sessionIds || !Array.isArray(sessionIds) || sessionIds.length < 2) {
       return res.status(400).json({ error: 'At least 2 session IDs are required' });
+    }
+    // Hard cap — merging 100 sessions already stresses diff serialization,
+    // and without a ceiling the client can make us load arbitrary rows.
+    if (sessionIds.length > 100) {
+      return res.status(400).json({ error: 'Cannot merge more than 100 sessions at once' });
     }
 
     // Fetch all sessions with their data

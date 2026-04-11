@@ -11,11 +11,25 @@ import { resetMonthlyAlerts, getMonthlySpend, getSpendByModel } from './budget.j
 export function startScheduler(): void {
   console.log('⏰ Scheduler started');
 
+  // Add per-instance jitter so multiple replicas don't all fire cron
+  // callbacks at the same wall-clock second — avoids thundering-herd
+  // spikes against Prisma, Resend, and Slack on schedule boundaries.
+  const jitter = (ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref());
+  const jitterMs = () => Math.floor(Math.random() * 60_000);
+
   // Weekly report: Monday at 9:00 AM
   cron.schedule('0 9 * * 1', async () => {
+    await jitter(jitterMs());
     console.log('[scheduler] Running weekly reports...');
     try {
-      const orgs = await prisma.org.findMany({ select: { id: true, name: true } });
+      // Cap at 10k orgs. The scheduler fans out weekly reports to every
+      // tenant serially, so a monotonically growing org list would
+      // eventually overrun the cron window. Above that cap we need a
+      // sharded scheduler anyway.
+      const orgs = await prisma.org.findMany({
+        select: { id: true, name: true },
+        take: 10_000,
+      });
       for (const org of orgs) {
         // Send email report
         await sendWeeklyReport(org.id).catch(err =>
@@ -40,6 +54,7 @@ export function startScheduler(): void {
 
   // Monthly budget alert reset: 1st of month at midnight
   cron.schedule('0 0 1 * *', async () => {
+    await jitter(jitterMs());
     console.log('[scheduler] Resetting monthly budget alerts...');
     try {
       await resetMonthlyAlerts();
@@ -62,6 +77,8 @@ async function sendWeeklySlackDigest(orgId: string): Promise<void> {
       commit: { repo: { orgId } },
     },
     select: { costUsd: true, linesAdded: true },
+    take: 100_000,
+    orderBy: { createdAt: 'desc' },
   });
 
   if (sessions.length === 0) return; // Nothing to report

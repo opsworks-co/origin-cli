@@ -5,6 +5,7 @@ import { testGitHubConnection } from '../services/github-integration.js';
 import { testGitHubAppConnection } from '../services/github-app.js';
 import { testGitLabConnection } from '../services/gitlab-integration.js';
 import { testSlackWebhook } from '../services/slack.js';
+import { checkSafeExternalUrl } from '../utils/ssrf-guard.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -46,6 +47,19 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
 
     if (!['github', 'gitlab', 'slack'].includes(provider)) {
       return res.status(400).json({ error: 'Provider must be "github", "gitlab", or "slack"' });
+    }
+
+    // SSRF guard: reject baseUrls that point at private/loopback/link-local
+    // addresses. Enterprise self-hosted GitHub/GitLab is a legitimate use
+    // case, so we can't hard-allowlist the SaaS domains — we instead block
+    // the specific ranges that turn this integration into an SSRF primitive
+    // (e.g. http://169.254.169.254 → cloud metadata, http://localhost →
+    // internal services on the same fly machine).
+    if (baseUrl) {
+      const urlCheck = checkSafeExternalUrl(baseUrl);
+      if (!urlCheck.ok) {
+        return res.status(400).json({ error: `Invalid baseUrl: ${urlCheck.reason}` });
+      }
     }
 
     // Check for existing integration of same provider
@@ -105,15 +119,31 @@ router.put('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response)
       return res.status(404).json({ error: 'Integration not found' });
     }
 
+    // Validate any new baseUrl before persisting — see SSRF comment on POST.
+    if (baseUrl !== undefined && baseUrl !== '') {
+      const urlCheck = checkSafeExternalUrl(baseUrl);
+      if (!urlCheck.ok) {
+        return res.status(400).json({ error: `Invalid baseUrl: ${urlCheck.reason}` });
+      }
+    }
+
     const data: any = {};
     if (token !== undefined) data.token = token;
     if (baseUrl !== undefined) data.baseUrl = baseUrl;
     if (settings !== undefined) data.settings = JSON.stringify(settings);
 
-    const integration = await prisma.integrationConfig.update({
-      where: { id },
+    // Defense-in-depth: scope by orgId in the update itself.
+    const updateResult = await prisma.integrationConfig.updateMany({
+      where: { id, orgId: req.user!.orgId },
       data,
     });
+    if (updateResult.count === 0) {
+      return res.status(404).json({ error: 'Integration not found' });
+    }
+    const integration = await prisma.integrationConfig.findUnique({ where: { id } });
+    if (!integration) {
+      return res.status(404).json({ error: 'Integration not found' });
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -153,7 +183,19 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       return res.status(404).json({ error: 'Integration not found' });
     }
 
-    await prisma.integrationConfig.delete({ where: { id } });
+    // Use deleteMany with an orgId scope instead of delete({ where: { id } }).
+    // The precheck above already enforces org ownership, but belt-and-suspenders:
+    // if a future refactor drops or reorders that check, a plain delete by id
+    // would silently become an IDOR (attacker in org A deletes integrations
+    // from org B by guessing UUIDs). deleteMany with a compound where makes
+    // the authorization boundary explicit at the DB call itself.
+    const deleted = await prisma.integrationConfig.deleteMany({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (deleted.count === 0) {
+      // Lost a race (deleted between precheck and delete) or authz drift.
+      return res.status(404).json({ error: 'Integration not found' });
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -186,6 +228,12 @@ router.post('/:id/test', requireRole('ADMIN'), async (req: AuthRequest, res: Res
 
     if (integration.provider === 'github') {
       const apiBase = integration.baseUrl || 'https://api.github.com';
+      try {
+        const check = checkSafeExternalUrl(apiBase);
+        if (!check.ok) return res.json({ success: false, error: `Invalid baseUrl: ${check.reason}` });
+      } catch {
+        return res.json({ success: false, error: 'Invalid baseUrl' });
+      }
       const authType = (integration as any).authType || 'pat';
 
       if (authType === 'github_app') {
@@ -206,6 +254,8 @@ router.post('/:id/test', requireRole('ADMIN'), async (req: AuthRequest, res: Res
       res.json(result);
     } else if (integration.provider === 'gitlab') {
       const apiBase = integration.baseUrl || 'https://gitlab.com/api/v4';
+      const check = checkSafeExternalUrl(apiBase);
+      if (!check.ok) return res.json({ success: false, error: `Invalid baseUrl: ${check.reason}` });
       const result = await testGitLabConnection(integration.token, apiBase);
       res.json(result);
     } else if (integration.provider === 'slack') {

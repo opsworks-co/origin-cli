@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import fsSync from 'fs';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { prisma } from './db.js';
@@ -21,8 +22,10 @@ try {
 }
 
 import { authMiddleware } from './middleware/auth.js';
+import { authLimiter, sessionLimiter, mcpLimiter, webhookLimiter, apiLimiter } from './middleware/rate-limit.js';
 import { startAutoSync } from './services/auto-sync.js';
 import { startScheduler } from './services/scheduler.js';
+import { startWebhookQueue } from './services/webhook-queue.js';
 import authRoutes from './routes/auth.js';
 import repoRoutes from './routes/repos.js';
 import sessionRoutes from './routes/sessions.js';
@@ -58,6 +61,10 @@ const app = express();
 
 app.set('trust proxy', 1);
 
+// Don't leak Express version in X-Powered-By — fingerprinting aid for
+// attackers, provides zero value to legitimate clients.
+app.disable('x-powered-by');
+
 // Security headers
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -65,19 +72,40 @@ app.use((req, res, next) => {
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // Baseline CSP. 'unsafe-inline' is required for the Vite-bundled app's
+  // style tags; script-src stays 'self' so injected scripts can't execute.
+  // connect-src allows the API itself plus https for outbound SSE/fetch.
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; " +
+      "script-src 'self'; " +
+      "style-src 'self' 'unsafe-inline'; " +
+      "img-src 'self' data: https:; " +
+      "font-src 'self' data:; " +
+      "connect-src 'self' https:; " +
+      // Whitelist the embedded demo video host. Without this, the CSP falls
+      // back to default-src 'self' and blocks the Loom iframe on the landing
+      // page — the symptom is a broken-file icon where the video should be.
+      "frame-src 'self' https://www.loom.com https://loom.com; " +
+      "frame-ancestors 'none'; " +
+      "base-uri 'self'; " +
+      "form-action 'self'",
+  );
   next();
 });
 
 app.use(cors({
+  // Trim whitespace so CORS_ORIGIN="a, b, c" doesn't silently admit
+  // " b" but reject "b" because the list is space-prefixed.
   origin: process.env.CORS_ORIGIN
-    ? process.env.CORS_ORIGIN.split(',')
+    ? process.env.CORS_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean)
     : ['http://localhost:5176', 'http://localhost:4002'],
   credentials: true,
 }));
 
 // Webhook routes need the raw body for HMAC signature verification.
 // Mount them BEFORE the JSON body parser so we can capture raw bytes.
-app.use('/api/webhooks', express.raw({ type: '*/*', limit: '10mb' }), (req, _res, next) => {
+app.use('/api/webhooks', webhookLimiter, express.raw({ type: '*/*', limit: '10mb' }), (req, _res, next) => {
   // Store raw buffer for HMAC, then parse as JSON for route handlers
   (req as any).rawBody = req.body;
   if (Buffer.isBuffer(req.body)) {
@@ -100,38 +128,56 @@ app.use(express.json({ limit: '50mb' }));
 
 // Public routes (no auth required) — mount BEFORE authMiddleware
 app.use('/api/share', shareRoutes);
+app.use('/api/v1/share', shareRoutes);
+
+// Auth endpoints get strict per-IP brute-force protection BEFORE auth middleware
+app.use('/api/auth', authLimiter);
+app.use('/api/v1/auth', authLimiter);
 
 app.use(authMiddleware);
 
-app.use('/api/auth', authRoutes);
-app.use('/api/repos', repoRoutes);
-app.use('/api/sessions', sessionRoutes);
-app.use('/api/agents', agentRoutes);
-app.use('/api/policies/public', publicPolicyRoutes);
-app.use('/api/policies', policyRoutes);
-app.use('/api/audit', auditRoutes);
-app.use('/api/stats', statsRoutes);
-app.use('/api/machines', machineRoutes);
-app.use('/api/mcp', mcpRoutes);
-app.use('/api/settings', settingsRoutes);
-app.use('/api/notifications', notificationRoutes);
+// General per-user rate limit on all authenticated API traffic
+app.use('/api', apiLimiter);
+
+// ── Route mounting ───────────────────────────────────────────────────────
+// Each route group is mounted under /api/* (current) and /api/v1/* (versioned).
+// Once a CLI version starts using /v1, breaking changes can ship under /v2
+// without disrupting older clients. The unversioned /api/* path stays as the
+// implicit "v1" for now.
+function mountRoute(path: string, router: any, extraMiddleware: any[] = []) {
+  app.use(`/api${path}`, ...extraMiddleware, router);
+  app.use(`/api/v1${path}`, ...extraMiddleware, router);
+}
+
+mountRoute('/auth', authRoutes);
+mountRoute('/repos', repoRoutes);
+mountRoute('/sessions', sessionRoutes, [sessionLimiter]);
+mountRoute('/agents', agentRoutes);
+mountRoute('/policies/public', publicPolicyRoutes);
+mountRoute('/policies', policyRoutes);
+mountRoute('/audit', auditRoutes);
+mountRoute('/stats', statsRoutes);
+mountRoute('/machines', machineRoutes);
+mountRoute('/mcp', mcpRoutes, [mcpLimiter]);
+mountRoute('/settings', settingsRoutes);
+mountRoute('/notifications', notificationRoutes);
 // webhookRoutes already mounted above (before JSON parser, for raw body HMAC)
-app.use('/api/integrations', integrationRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/chat', chatRoutes);
-app.use('/api/scanning', scanningRoutes);
-app.use('/api/reports', reportRoutes);
-app.use('/api/pull-requests', pullRequestRoutes);
-app.use('/api/github-app', githubAppRoutes);
-app.use('/api/gitlab-oauth', gitlabOAuthRoutes);
-app.use('/api/trails', trailRoutes);
-app.use('/api/leaderboard', leaderboardRoutes);
-app.use('/api/prompts', promptRoutes);
-app.use('/api/models', modelRoutes);
-app.use('/api/pricing', pricingRoutes);
-app.use('/api/forecast', forecastRoutes);
-app.use('/api/budget', budgetRoutes);
-app.use('/api/admin', adminRoutes);
+mountRoute('/integrations', integrationRoutes);
+mountRoute('/users', userRoutes);
+mountRoute('/chat', chatRoutes);
+mountRoute('/scanning', scanningRoutes);
+mountRoute('/reports', reportRoutes);
+mountRoute('/pull-requests', pullRequestRoutes);
+mountRoute('/github-app', githubAppRoutes);
+mountRoute('/gitlab-oauth', gitlabOAuthRoutes);
+mountRoute('/trails', trailRoutes);
+mountRoute('/leaderboard', leaderboardRoutes);
+mountRoute('/prompts', promptRoutes);
+mountRoute('/models', modelRoutes);
+mountRoute('/pricing', pricingRoutes);
+mountRoute('/forecast', forecastRoutes);
+mountRoute('/budget', budgetRoutes);
+mountRoute('/admin', adminRoutes);
 
 // Serve CLI install script
 app.get('/install.sh', (_req, res) => {
@@ -190,11 +236,47 @@ echo ""
 const publicDir = path.join(__dirname, '../public');
 app.use('/cli', express.static(path.join(publicDir, 'cli')));
 
+// CLI version endpoint — read by `origin` CLI to detect updates.
+// Reads the version.json written by the Dockerfile's CLI build step.
+const cliVersionHandler = (_req: express.Request, res: express.Response) => {
+  try {
+    // Try the canonical Dockerfile location first: web/dist/cli/version.json
+    const candidates = [
+      path.join(__dirname, '../../web/dist/cli/version.json'),
+      path.join(publicDir, 'cli', 'version.json'),
+    ];
+    for (const candidate of candidates) {
+      if (fsSync.existsSync(candidate)) {
+        const data = JSON.parse(fsSync.readFileSync(candidate, 'utf-8'));
+        // Return both `downloadUrl` (legacy field name) and `url` + `sha256`
+        // so the hardened upgrader in packages/cli/src/commands/upgrade.ts
+        // can verify the tarball digest. Missing sha256 triggers fail-closed
+        // behavior in the client — see F1.4 in the CLI.
+        return res.json({
+          version: data.version,
+          url: data.url || 'https://getorigin.io/cli/origin-cli-latest.tgz',
+          downloadUrl: data.url || 'https://getorigin.io/cli/origin-cli-latest.tgz',
+          sha256: data.sha256 || null,
+        });
+      }
+    }
+    res.status(404).json({ error: 'cli version metadata not found' });
+  } catch (err) {
+    console.error('[cli-version] failed to resolve CLI version:', err);
+    res.status(500).json({ error: 'unable to resolve cli version' });
+  }
+};
+app.get('/api/cli/version', cliVersionHandler);
+app.get('/api/v1/cli/version', cliVersionHandler);
+
 // Serve React app in production
 const webDist = path.join(__dirname, '../../web/dist');
 app.use(express.static(webDist));
 app.get('{*path}', (req, res) => {
-  if (!req.path.startsWith('/api')) {
+  // NOTE: trailing slash matters — `/api-keys` is a SPA route, not an API call,
+  // so we must only bail out for paths under `/api/`, not anything starting
+  // with the literal string `/api`.
+  if (!req.path.startsWith('/api/') && req.path !== '/api') {
     res.sendFile(path.join(webDist, 'index.html'));
   }
 });
@@ -206,6 +288,7 @@ app.listen(Number(PORT), HOST, () => {
   startAutoSync();
   seedDefaultPricing();
   startScheduler();
+  startWebhookQueue();
 
   // Auto-complete stale RUNNING sessions periodically.
   // CLI sends heartbeat pings every 30s, but the daemon can die when the
@@ -233,5 +316,20 @@ app.listen(Number(PORT), HOST, () => {
     } catch (err) {
       console.error('Stale session cleanup error:', err);
     }
-  }, STALE_SESSION_CHECK_MS);
+  }, STALE_SESSION_CHECK_MS).unref();
 });
+
+// Graceful shutdown — allow in-flight HTTP requests to finish before
+// Fly sends SIGKILL. The listen() callback keeps the server ref; the
+// .unref()'d intervals above don't need explicit teardown because they
+// already let the loop exit once HTTP is closed.
+function gracefulShutdown(signal: string) {
+  console.log(`[shutdown] received ${signal}, draining connections...`);
+  // Give Fly's proxy time to stop sending new requests, then exit.
+  setTimeout(() => {
+    console.log('[shutdown] exiting');
+    process.exit(0);
+  }, 5000).unref();
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

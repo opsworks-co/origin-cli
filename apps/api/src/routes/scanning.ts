@@ -50,18 +50,23 @@ router.get('/session/:sessionId', async (req: AuthRequest, res: Response) => {
   try {
     const sessionId = req.params.sessionId as string;
 
-    // Verify the session belongs to this user's org
+    // Defense-in-depth: scope the lookup via the repo join so a future
+    // refactor that drops the post-hoc orgId check still can't leak.
     const session = await prisma.codingSession.findFirst({
-      where: { id: sessionId },
-      include: { commit: { include: { repo: { select: { orgId: true } } } } },
+      where: {
+        id: sessionId,
+        commit: { repo: { orgId: req.user!.orgId } },
+      },
+      select: { id: true },
     });
-    if (!session || session.commit?.repo?.orgId !== req.user!.orgId) {
+    if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
     const findings = await prisma.secretFinding.findMany({
       where: { sessionId },
       orderBy: [{ severity: 'desc' }, { createdAt: 'desc' }],
+      take: 5000,
     });
 
     res.json(findings);

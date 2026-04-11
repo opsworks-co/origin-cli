@@ -13,6 +13,7 @@
 
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
 
 const args = process.argv.slice(2);
 const sessionId = args[0];
@@ -148,12 +149,16 @@ async function endSession() {
     try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
     // Also clean sibling state files with the same session ID in the same directory
     try {
-      const dir = stateFile.substring(0, stateFile.lastIndexOf('/'));
+      // path.dirname handles all edge cases (windows paths, missing
+      // separator, trailing slash). The old stateFile.lastIndexOf('/')
+      // returned -1 on any path without '/', which then produced
+      // substring(0, -1) === '' and readdirSync('') scanned cwd.
+      const dir = path.dirname(stateFile);
       const entries = fs.readdirSync(dir);
       for (const entry of entries) {
         if (entry.startsWith('origin-session') && entry.endsWith('.json')) {
           try {
-            const filePath = `${dir}/${entry}`;
+            const filePath = path.join(dir, entry);
             const raw = fs.readFileSync(filePath, 'utf-8');
             const data = JSON.parse(raw);
             if (data.sessionId === sessionId) {

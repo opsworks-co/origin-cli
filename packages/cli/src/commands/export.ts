@@ -1,7 +1,9 @@
 import chalk from 'chalk';
 import fs from 'fs';
-import { execSync } from 'child_process';
+import { git, gitDetailed } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
+
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 interface ExportSession {
   sessionId: string;
@@ -20,24 +22,24 @@ interface ExportSession {
 }
 
 function listLocalSessions(repoPath: string): ExportSession[] {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoPath };
   const sessions: ExportSession[] = [];
 
-  try {
-    execSync('git rev-parse refs/heads/origin-sessions', execOpts);
-  } catch {
-    return sessions;
+  {
+    const r = gitDetailed(['rev-parse', 'refs/heads/origin-sessions'], gitOpts);
+    if (r.status !== 0) return sessions;
   }
 
   try {
-    const raw = execSync('git ls-tree --name-only origin-sessions sessions/', execOpts).trim();
+    const raw = git(['ls-tree', '--name-only', 'origin-sessions', 'sessions/'], gitOpts).trim();
     if (!raw) return sessions;
 
     const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
 
     for (const dir of dirs) {
+      if (!SAFE_ID.test(dir)) continue;
       try {
-        const metadataJson = execSync(`git show origin-sessions:sessions/${dir}/metadata.json`, execOpts).trim();
+        const metadataJson = git(['show', `origin-sessions:sessions/${dir}/metadata.json`], gitOpts).trim();
         const m = JSON.parse(metadataJson);
         sessions.push({
           sessionId: m.sessionId || dir,

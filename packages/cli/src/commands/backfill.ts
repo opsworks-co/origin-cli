@@ -1,10 +1,13 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { isAiCommit } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
 import * as readline from 'readline';
+import { git, gitDetailed } from '../utils/exec.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -34,18 +37,17 @@ interface CommitInfo {
 
 // ─── Git Helpers ──────────────────────────────────────────────────────────
 
-const execOpts = (cwd: string) => ({
-  encoding: 'utf-8' as const,
+const gitOpts = (cwd: string) => ({
   cwd,
-  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
   maxBuffer: 10 * 1024 * 1024,
 });
 
 function getCommitsInRange(repoPath: string, days: number): CommitInfo[] {
+  if (!Number.isFinite(days) || days < 0) return [];
   try {
-    const output = execSync(
-      `git log --since="${days} days ago" --format="%H|%aI|%at|%s|%an|%ae|%cn|%ce"`,
-      execOpts(repoPath),
+    const output = git(
+      ['log', `--since=${days} days ago`, '--format=%H|%aI|%at|%s|%an|%ae|%cn|%ce'],
+      gitOpts(repoPath),
     ).trim();
     if (!output) return [];
     return output.split('\n').filter(Boolean).map(line => {
@@ -68,10 +70,11 @@ function getCommitsInRange(repoPath: string, days: number): CommitInfo[] {
 }
 
 function getCommitMessage(repoPath: string, sha: string): string {
+  if (!HEX.test(sha)) return '';
   try {
-    return execSync(
-      `git log -1 --format=%B ${sha}`,
-      execOpts(repoPath),
+    return git(
+      ['log', '-1', '--format=%B', sha],
+      gitOpts(repoPath),
     ).trim();
   } catch {
     return '';
@@ -79,10 +82,11 @@ function getCommitMessage(repoPath: string, sha: string): string {
 }
 
 function getCommitDiff(repoPath: string, sha: string): string {
+  if (!HEX.test(sha)) return '';
   try {
-    return execSync(
-      `git diff-tree -p ${sha} --`,
-      { ...execOpts(repoPath), maxBuffer: 2 * 1024 * 1024 },
+    return git(
+      ['diff-tree', '-p', sha, '--'],
+      { ...gitOpts(repoPath), maxBuffer: 2 * 1024 * 1024 },
     ).trim();
   } catch {
     return '';
@@ -312,18 +316,19 @@ function scanOriginSessionsBranch(repoPath: string): OriginSessionInfo[] {
   const results: OriginSessionInfo[] = [];
   try {
     // List all sessions in origin-sessions branch
-    const raw = execSync(
-      'git ls-tree --name-only origin-sessions sessions/',
-      execOpts(repoPath),
+    const raw = git(
+      ['ls-tree', '--name-only', 'origin-sessions', 'sessions/'],
+      gitOpts(repoPath),
     ).trim();
     if (!raw) return results;
 
     const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
     for (const dir of dirs) {
+      if (!SAFE_ID.test(dir)) continue;
       try {
-        const metaJson = execSync(
-          `git show origin-sessions:sessions/${dir}/metadata.json`,
-          execOpts(repoPath),
+        const metaJson = git(
+          ['show', `origin-sessions:sessions/${dir}/metadata.json`],
+          gitOpts(repoPath),
         ).trim();
         const meta = JSON.parse(metaJson);
         if (!meta) continue;
@@ -346,9 +351,9 @@ function scanOriginSessionsBranch(repoPath: string): OriginSessionInfo[] {
         if (meta.headShaAtStart) commits.push(meta.headShaAtStart);
         // Try to read commits list
         try {
-          const commitsJson = execSync(
-            `git show origin-sessions:sessions/${dir}/commits.json`,
-            execOpts(repoPath),
+          const commitsJson = git(
+            ['show', `origin-sessions:sessions/${dir}/commits.json`],
+            gitOpts(repoPath),
           ).trim();
           const commitsList = JSON.parse(commitsJson);
           if (Array.isArray(commitsList)) {
@@ -608,10 +613,11 @@ function detectFromFileChanges(
   repoPath: string,
   sha: string,
 ): { agent: string; confidence: Confidence; source: string } | null {
+  if (!HEX.test(sha)) return null;
   try {
-    const files = execSync(
-      `git diff-tree --no-commit-id --name-only -r ${sha}`,
-      execOpts(repoPath),
+    const files = git(
+      ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+      gitOpts(repoPath),
     ).trim().split('\n').filter(Boolean);
 
     if (files.length === 0) return null;
@@ -644,6 +650,7 @@ function detectFromFileChanges(
 // ─── Apply Tags ───────────────────────────────────────────────────────────
 
 function applyBackfillNote(repoPath: string, result: BackfillResult): boolean {
+  if (!HEX.test(result.sha)) return false;
   try {
     const noteData = JSON.stringify({
       sessionId: `backfill-${result.sha.slice(0, 8)}`,
@@ -653,9 +660,9 @@ function applyBackfillNote(repoPath: string, result: BackfillResult): boolean {
       confidence: result.confidence,
       source: result.source,
     });
-    execSync(
-      `git notes --ref=origin add -f -m ${JSON.stringify(noteData)} ${result.sha}`,
-      execOpts(repoPath),
+    git(
+      ['notes', '--ref=origin', 'add', '-f', '-m', noteData, result.sha],
+      gitOpts(repoPath),
     );
     return true;
   } catch {

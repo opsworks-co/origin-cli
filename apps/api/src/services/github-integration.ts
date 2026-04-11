@@ -1,6 +1,7 @@
 import { prisma } from '../db.js';
 import { getValidInstallationToken, listGitHubAppRepos } from './github-app.js';
 import { describeCondition, describeAction, policyTypeLabel } from '../utils/policy-descriptions.js';
+import { assertSafeExternalUrl } from '../utils/ssrf-guard.js';
 
 // ── GitHub API helpers ────────────────────────────────────────────
 
@@ -140,7 +141,9 @@ export async function testGitHubConnection(
   baseUrl: string = GITHUB_API,
 ): Promise<{ success: boolean; login?: string; error?: string }> {
   try {
-    const res = await fetch(`${baseUrl}/user`, {
+    const target = `${baseUrl}/user`;
+    assertSafeExternalUrl(target, 'github-integration.testConnection');
+    const res = await fetch(target, {
       headers: githubHeaders(token),
     });
     if (!res.ok) {
@@ -868,12 +871,17 @@ export async function getSessionsForPR(repoId: string, commitShas: string[]): Pr
   // Load policy violations from audit log for each session
   const sessionIds = Array.from(sessionMap.keys());
   if (sessionIds.length > 0) {
+    // Cap at 5000 — a single PR report aggregates violations across
+    // its sessions, and hitting this scan unbounded on a PR whose
+    // sessions accumulated huge violation counts would stall the
+    // GitHub status refresh path.
     const violationLogs = await prisma.auditLog.findMany({
       where: {
         action: 'POLICY_VIOLATION',
         resource: { in: sessionIds },
       },
       orderBy: { createdAt: 'desc' },
+      take: 5000,
     });
 
     for (const log of violationLogs) {
@@ -910,7 +918,11 @@ export async function updatePRGitHubStatus(
   const integration = await getIntegrationConfig(orgId);
   if (!integration) return;
 
-  const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+  // Scope repo lookup by orgId — belt-and-suspenders against a future
+  // caller passing a mismatched (orgId, repoId) pair, which would
+  // otherwise let us post checks/comments to another org's repo using
+  // our integration token.
+  const repo = await prisma.repo.findFirst({ where: { id: repoId, orgId } });
   if (!repo) return;
 
   const parsed = parseRepoFullName(repo.path);
@@ -1033,9 +1045,12 @@ export async function updateSessionPRChecks(
 
   if (sessionShas.length === 0) return 0;
 
-  // Find all open PRs for this repo
+  // Find all open PRs for this repo. Cap 5000 — realistic open-PR
+  // counts are <200, cap is just a safety ceiling.
   const openPRs = await prisma.pullRequest.findMany({
     where: { repoId, state: 'open' },
+    take: 5000,
+    orderBy: { updatedAt: 'desc' },
   });
 
   const repo = await prisma.repo.findUnique({ where: { id: repoId } });

@@ -1,9 +1,12 @@
 import chalk from 'chalk';
 import readline from 'readline';
-import { execSync } from 'child_process';
+import { gitDetailed } from '../utils/exec.js';
 import { getGitRoot, getBranch } from '../session-state.js';
 import { loadConfig, loadAgentConfig } from '../config.js';
 import { getAllPrompts, searchPrompts, getPromptsBySession } from '../local-db.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 /**
  * origin chat — Interactive AI assistant for your repo's AI context.
@@ -32,71 +35,84 @@ function gatherRepoContext(cwd: string): string {
   parts.push(`Repository: ${repoRoot}`);
   if (branch) parts.push(`Branch: ${branch}`);
 
+  const gitOpts = { cwd: repoRoot };
+
   // Git notes count
-  try {
-    const noteCount = execSync('git notes --ref=origin list 2>/dev/null | wc -l', {
-      encoding: 'utf-8', cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    parts.push(`AI-annotated commits: ${noteCount}`);
-  } catch { /* ignore */ }
+  {
+    const r = gitDetailed(['notes', '--ref=origin', 'list'], gitOpts);
+    if (r.status === 0) {
+      const noteCount = r.stdout.trim().split('\n').filter(Boolean).length;
+      parts.push(`AI-annotated commits: ${noteCount}`);
+    }
+  }
 
   // Recent AI commits with notes
-  try {
-    const log = execSync('git log --format="%H|%aI|%s|%an" -30 2>/dev/null', {
-      encoding: 'utf-8', cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    if (log) {
-      const commits = log.split('\n').filter(Boolean);
-      const aiCommits: string[] = [];
-      const humanCommits: string[] = [];
-      for (const line of commits) {
-        const [sha, date, msg, author] = line.split('|');
-        try {
-          const note = execSync(`git notes --ref=origin show ${sha} 2>/dev/null`, {
-            encoding: 'utf-8', cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'],
-          }).trim();
-          const parsed = JSON.parse(note);
-          const data = parsed.origin || parsed;
-          aiCommits.push(`  ${sha.slice(0, 8)} ${date.slice(0, 10)} [${data.model || 'AI'}] ${msg} (session: ${data.sessionId || 'unknown'})`);
-        } catch {
-          humanCommits.push(`  ${sha.slice(0, 8)} ${date.slice(0, 10)} [Human: ${author}] ${msg}`);
+  {
+    const logRes = gitDetailed(['log', '--format=%H|%aI|%s|%an', '-30'], gitOpts);
+    if (logRes.status === 0) {
+      const log = logRes.stdout.trim();
+      if (log) {
+        const commits = log.split('\n').filter(Boolean);
+        const aiCommits: string[] = [];
+        const humanCommits: string[] = [];
+        for (const line of commits) {
+          const [sha, date, msg, author] = line.split('|');
+          let isAi = false;
+          if (HEX.test(sha)) {
+            const noteRes = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts);
+            if (noteRes.status === 0) {
+              try {
+                const parsed = JSON.parse(noteRes.stdout.trim());
+                const data = parsed.origin || parsed;
+                aiCommits.push(`  ${sha.slice(0, 8)} ${date.slice(0, 10)} [${data.model || 'AI'}] ${msg} (session: ${data.sessionId || 'unknown'})`);
+                isAi = true;
+              } catch { /* bad json */ }
+            }
+          }
+          if (!isAi) {
+            humanCommits.push(`  ${sha.slice(0, 8)} ${date.slice(0, 10)} [Human: ${author}] ${msg}`);
+          }
+        }
+        if (aiCommits.length > 0) {
+          parts.push(`\nRecent AI commits (${aiCommits.length}):`);
+          parts.push(...aiCommits.slice(0, 15));
+        }
+        if (humanCommits.length > 0) {
+          parts.push(`\nRecent Human commits (${humanCommits.length}):`);
+          parts.push(...humanCommits.slice(0, 10));
         }
       }
-      if (aiCommits.length > 0) {
-        parts.push(`\nRecent AI commits (${aiCommits.length}):`);
-        parts.push(...aiCommits.slice(0, 15));
-      }
-      if (humanCommits.length > 0) {
-        parts.push(`\nRecent Human commits (${humanCommits.length}):`);
-        parts.push(...humanCommits.slice(0, 10));
-      }
     }
-  } catch { /* ignore */ }
+  }
 
   // Session list from origin-sessions branch
-  try {
-    const tree = execSync('git ls-tree --name-only origin-sessions:sessions/ 2>/dev/null', {
-      encoding: 'utf-8', cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    if (tree) {
-      const sessions = tree.split('\n').filter(Boolean);
-      parts.push(`\nTracked sessions: ${sessions.length}`);
-      // Get metadata for recent sessions
-      for (const sid of sessions.slice(-10)) {
-        try {
-          const meta = execSync(`git show origin-sessions:sessions/${sid}/metadata.json 2>/dev/null`, {
-            encoding: 'utf-8', cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'],
-          }).trim();
-          if (meta) {
-            const m = JSON.parse(meta);
-            parts.push(`  ${sid}: model=${m.model || '?'}, cost=$${m.costUsd?.toFixed(4) || '?'}, tokens=${m.tokensUsed || '?'}`);
+  {
+    const treeRes = gitDetailed(['ls-tree', '--name-only', 'origin-sessions:sessions/'], gitOpts);
+    if (treeRes.status === 0) {
+      const tree = treeRes.stdout.trim();
+      if (tree) {
+        const sessions = tree.split('\n').filter(Boolean);
+        parts.push(`\nTracked sessions: ${sessions.length}`);
+        for (const sid of sessions.slice(-10)) {
+          if (!SAFE_ID.test(sid)) {
+            parts.push(`  ${sid}`);
+            continue;
           }
-        } catch {
-          parts.push(`  ${sid}`);
+          const metaRes = gitDetailed(['show', `origin-sessions:sessions/${sid}/metadata.json`], gitOpts);
+          if (metaRes.status === 0) {
+            try {
+              const m = JSON.parse(metaRes.stdout.trim());
+              parts.push(`  ${sid}: model=${m.model || '?'}, cost=$${m.costUsd?.toFixed(4) || '?'}, tokens=${m.tokensUsed || '?'}`);
+            } catch {
+              parts.push(`  ${sid}`);
+            }
+          } else {
+            parts.push(`  ${sid}`);
+          }
         }
       }
     }
-  } catch { /* ignore */ }
+  }
 
   // Local DB prompts summary
   try {
@@ -121,14 +137,15 @@ function gatherRepoContext(cwd: string): string {
   }
 
   // Stats summary
-  try {
-    const shortlog = execSync('git shortlog -sn --all 2>/dev/null | head -10', {
-      encoding: 'utf-8', cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    if (shortlog) {
-      parts.push(`\nCommit authors:\n${shortlog}`);
+  {
+    const r = gitDetailed(['shortlog', '-sn', '--all'], gitOpts);
+    if (r.status === 0) {
+      const shortlog = r.stdout.trim().split('\n').slice(0, 10).join('\n');
+      if (shortlog) {
+        parts.push(`\nCommit authors:\n${shortlog}`);
+      }
     }
-  } catch { /* ignore */ }
+  }
 
   return parts.join('\n');
 }
@@ -145,15 +162,30 @@ async function callAnthropic(
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
   };
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(body),
-  });
+  // 2-minute bounded timeout so `origin chat` can't hang forever on a
+  // stalled Anthropic connection.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000);
+  let res;
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error('Anthropic API request timed out after 120s');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const err = await res.text();

@@ -1,9 +1,23 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { expensiveLimiter } from '../middleware/rate-limit.js';
 import { createPolicyVersion } from '../services/versioning.js';
 import { getOrgLLMKey, getOrgLLMModel, getOrgLLMProvider } from './settings.js';
 import { callLLM } from './chat.js';
+import { safeParseObject } from '../utils/safe-json.js';
+import { validateFieldLengths, COMMON_LIMITS } from '../utils/validate.js';
+
+const POLICY_LIMITS = {
+  name: COMMON_LIMITS.name,
+  description: COMMON_LIMITS.description,
+  type: 100,
+};
+const POLICY_RULE_LIMITS = {
+  condition: COMMON_LIMITS.condition,
+  action: COMMON_LIMITS.action,
+  severity: COMMON_LIMITS.severity,
+};
 
 const router = Router();
 router.use(requireAuth);
@@ -28,6 +42,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         },
       },
       orderBy: { createdAt: 'desc' },
+      take: 500,
     });
     res.json(policies);
   } catch (err) {
@@ -43,6 +58,10 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
 
     if (!name || !type) {
       return res.status(400).json({ error: 'Missing required fields: name, type' });
+    }
+    const lenErr = validateFieldLengths({ name, description, type }, POLICY_LIMITS);
+    if (lenErr) {
+      return res.status(400).json({ error: lenErr });
     }
 
     const policy = await prisma.policy.create({
@@ -79,6 +98,11 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
     const id = req.params.id as string;
     const { name, description, type, active } = req.body;
 
+    const lenErr = validateFieldLengths({ name, description, type }, POLICY_LIMITS);
+    if (lenErr) {
+      return res.status(400).json({ error: lenErr });
+    }
+
     const existing = await prisma.policy.findFirst({
       where: { id, orgId: req.user!.orgId },
     });
@@ -87,14 +111,24 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
       return res.status(404).json({ error: 'Policy not found' });
     }
 
-    const policy = await prisma.policy.update({
-      where: { id },
+    // Defense in depth: use updateMany with compound (id, orgId) where so
+    // authorization is enforced at the DB call itself, not just by the
+    // precheck above. Prevents a future refactor from silently turning
+    // this into a cross-org IDOR if the precheck is dropped or reordered.
+    const updated = await prisma.policy.updateMany({
+      where: { id, orgId: req.user!.orgId },
       data: {
         ...(name !== undefined && { name }),
         ...(description !== undefined && { description }),
         ...(type !== undefined && { type }),
         ...(active !== undefined && { active }),
       },
+    });
+    if (updated.count === 0) {
+      return res.status(404).json({ error: 'Policy not found' });
+    }
+    const policy = await prisma.policy.findFirst({
+      where: { id, orgId: req.user!.orgId },
     });
 
     await createPolicyVersion(id, req.user!.id, 'UPDATED');
@@ -129,11 +163,18 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       return res.status(404).json({ error: 'Policy not found' });
     }
 
-    // Delete related records first, then policy
+    // Delete related records first, then policy. Use deleteMany with
+    // compound (id, orgId) scope on the final delete so authorization is
+    // enforced at the DB call even if the precheck above is later removed.
     await prisma.policyVersion.deleteMany({ where: { policyId: id } });
     await prisma.policyRule.deleteMany({ where: { policyId: id } });
     await prisma.policyAssignment.deleteMany({ where: { policyId: id } });
-    await prisma.policy.delete({ where: { id } });
+    const deletedPolicy = await prisma.policy.deleteMany({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (deletedPolicy.count === 0) {
+      return res.status(404).json({ error: 'Policy not found' });
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -161,6 +202,10 @@ router.post('/:id/rules', requireRole('MEMBER'), async (req: AuthRequest, res: R
     if (!condition || !action) {
       return res.status(400).json({ error: 'Missing required fields: condition, action' });
     }
+    const ruleLenErr = validateFieldLengths({ condition, action, severity }, POLICY_RULE_LIMITS);
+    if (ruleLenErr) {
+      return res.status(400).json({ error: ruleLenErr });
+    }
 
     const policy = await prisma.policy.findFirst({
       where: { id, orgId: req.user!.orgId },
@@ -170,7 +215,14 @@ router.post('/:id/rules', requireRole('MEMBER'), async (req: AuthRequest, res: R
       return res.status(404).json({ error: 'Policy not found' });
     }
 
-    // Validate scope IDs belong to the same org
+    // Validate scope IDs belong to the same org. agentId used to be
+    // trusted blindly — an attacker could attach a rule scoped to an
+    // agent from another org, which would then fire on that foreign
+    // agent's sessions via the policy engine join path.
+    if (agentId) {
+      const agent = await prisma.agent.findFirst({ where: { id: agentId, orgId: req.user!.orgId } });
+      if (!agent) return res.status(400).json({ error: 'Agent not found in your organization' });
+    }
     if (machineId) {
       const machine = await prisma.machine.findFirst({ where: { id: machineId, orgId: req.user!.orgId } });
       if (!machine) return res.status(400).json({ error: 'Machine not found in your organization' });
@@ -228,7 +280,16 @@ router.delete('/:id/rules/:ruleId', requireRole('ADMIN'), async (req: AuthReques
       return res.status(404).json({ error: 'Rule not found' });
     }
 
-    await prisma.policyRule.delete({ where: { id: ruleId } });
+    // Scope the delete with a compound (id, policyId) where so the rule
+    // has to both match the id AND belong to the already-org-checked
+    // policy. Without policyId here, a future refactor that drops the
+    // precheck would let anyone delete any rule by guessing its UUID.
+    const deletedRule = await prisma.policyRule.deleteMany({
+      where: { id: ruleId, policyId: id },
+    });
+    if (deletedRule.count === 0) {
+      return res.status(404).json({ error: 'Rule not found' });
+    }
 
     await createPolicyVersion(id, req.user!.id, 'RULE_REMOVED');
 
@@ -254,7 +315,9 @@ router.get('/:id/versions', async (req: AuthRequest, res: Response) => {
     res.json({
       versions: versions.map(v => ({
         ...v,
-        snapshot: JSON.parse(v.snapshot),
+        // Previously a bare JSON.parse — one malformed snapshot would
+        // throw and 500 the whole versions list.
+        snapshot: safeParseObject(v.snapshot, `policyVersion.${v.id}.snapshot`),
       })),
       total: versions.length,
     });
@@ -274,6 +337,10 @@ router.put('/:id/assignments', requireRole('MEMBER'), async (req: AuthRequest, r
 
     if (!Array.isArray(agentIds)) {
       return res.status(400).json({ error: 'agentIds must be an array' });
+    }
+    // DoS cap — realistic orgs assign a policy to <50 agents.
+    if (agentIds.length > 500) {
+      return res.status(400).json({ error: 'agentIds cannot exceed 500 items' });
     }
 
     const policy = await prisma.policy.findFirst({
@@ -396,20 +463,29 @@ If the user mentions a specific agent (like "claude code", "cursor"), set agentS
 
 Multiple rules can be part of the same policy, or the user may describe multiple policies. Use your judgement.`;
 
-router.post('/from-natural-language', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
+router.post('/from-natural-language', expensiveLimiter, requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
     const { prompt } = req.body;
 
     if (!prompt || typeof prompt !== 'string') {
       return res.status(400).json({ error: 'Missing required field: prompt' });
     }
+    // Cap the natural-language prompt. Every call here burns org LLM
+    // credits, so an attacker with MEMBER role could drain budget by
+    // posting megabyte-scale prompts. 8KB is plenty for policy text.
+    if (prompt.length > 8 * 1024) {
+      return res.status(413).json({ error: 'prompt exceeds maximum length' });
+    }
 
     const orgId = req.user!.orgId;
 
-    // Fetch context: existing agents, repos for name resolution
+    // Fetch context: existing agents, repos for name resolution. Cap
+    // both — the LLM context is the limiter here, not the DB, and
+    // dumping 50k repo names into the system prompt would blow the
+    // token budget long before the SQL became the bottleneck.
     const [agents, repos] = await Promise.all([
-      prisma.agent.findMany({ where: { orgId }, select: { id: true, slug: true, name: true } }),
-      prisma.repo.findMany({ where: { orgId }, select: { id: true, name: true } }),
+      prisma.agent.findMany({ where: { orgId }, select: { id: true, slug: true, name: true }, take: 200 }),
+      prisma.repo.findMany({ where: { orgId }, select: { id: true, name: true }, take: 500 }),
     ]);
 
     const contextInfo = [

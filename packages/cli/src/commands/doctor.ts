@@ -2,8 +2,10 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync } from 'child_process';
+import { git, gitDetailed } from '../utils/exec.js';
 import { loadConfig, isConnectedMode } from '../config.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
 import { loadSessionState, clearSessionState, getGitRoot, getGitDir, listActiveSessions } from '../session-state.js';
 import { captureGitState } from '../git-capture.js';
 import { writeSessionFiles } from '../local-entrypoint.js';
@@ -118,13 +120,13 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
 
     // 1c. Fix stale "running" sessions on origin-sessions branch + orphaned entries
     try {
-      const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+      const gitOpts = { cwd: repoPath };
       // Check if origin-sessions branch exists
-      execSync('git rev-parse refs/heads/origin-sessions', execOpts);
+      git(['rev-parse', 'refs/heads/origin-sessions'], gitOpts);
 
-      const tree = execSync(
-        'git ls-tree --name-only refs/heads/origin-sessions sessions/',
-        execOpts,
+      const tree = git(
+        ['ls-tree', '--name-only', 'refs/heads/origin-sessions', 'sessions/'],
+        gitOpts,
       ).trim();
       const sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
       let orphanedEntries = 0;
@@ -135,9 +137,10 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
 
       for (const dir of sessionDirs) {
         try {
-          const metaRaw = execSync(
-            `git show refs/heads/origin-sessions:${dir}/metadata.json`,
-            execOpts,
+          if (!/^sessions\/[a-zA-Z0-9_.-]+$/.test(dir)) continue;
+          const metaRaw = git(
+            ['show', `refs/heads/origin-sessions:${dir}/metadata.json`],
+            gitOpts,
           ).trim();
           const metadata = JSON.parse(metaRaw);
 
@@ -207,9 +210,15 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
           // Check for orphaned entries (referencing non-existent commits)
           const headAfter = metadata.git?.headAfter;
           if (headAfter) {
-            try {
-              execSync(`git cat-file -t ${headAfter}`, execOpts);
-            } catch {
+            if (!HEX.test(headAfter)) {
+              orphanedEntries++;
+              if (opts?.verbose) {
+                console.log(chalk.gray(`    Orphaned: ${dir} (invalid sha)`));
+              }
+              continue;
+            }
+            const r = gitDetailed(['cat-file', '-t', headAfter], gitOpts);
+            if (r.status !== 0) {
               orphanedEntries++;
               if (opts?.verbose) {
                 console.log(chalk.gray(`    Orphaned: ${dir} (commit ${headAfter.slice(0, 8)} not found)`));

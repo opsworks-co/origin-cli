@@ -1,9 +1,11 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import path from 'path';
 import { getGitRoot } from '../session-state.js';
 import { getLineBlame, LineAttribution } from '../attribution.js';
 import { isConnectedMode } from '../config.js';
+import { git, runDetailed } from '../utils/exec.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -25,11 +27,11 @@ function parseFileAndLine(input: string): { file: string; line?: number } {
 }
 
 function readOriginNote(repoPath: string, sha: string): any | null {
+  if (!HEX.test(sha)) return null;
+  const r = runDetailed('git', ['notes', '--ref=origin', 'show', sha], { cwd: repoPath });
+  if (r.status !== 0) return null;
   try {
-    const raw = execSync(`git notes --ref=origin show ${sha} 2>/dev/null`, {
-      encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(r.stdout.trim());
     return parsed.origin || parsed;
   } catch {
     return null;
@@ -37,10 +39,11 @@ function readOriginNote(repoPath: string, sha: string): any | null {
 }
 
 function getCommitForLine(repoPath: string, filePath: string, lineNum: number): string | null {
+  if (!Number.isInteger(lineNum) || lineNum < 1) return null;
   try {
-    const output = execSync(
-      `git blame -L ${lineNum},${lineNum} --porcelain -- ${JSON.stringify(filePath)}`,
-      { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }
+    const output = git(
+      ['blame', '-L', `${lineNum},${lineNum}`, '--porcelain', '--', filePath],
+      { cwd: repoPath }
     ).trim();
     const match = output.match(/^([0-9a-f]{40})/);
     return match ? match[1] : null;
@@ -50,10 +53,11 @@ function getCommitForLine(repoPath: string, filePath: string, lineNum: number): 
 }
 
 function getCommitInfo(repoPath: string, sha: string): { date: string; author: string; message: string } | null {
+  if (!HEX.test(sha)) return null;
   try {
-    const info = execSync(
-      `git log -1 --format="%aI|%an|%s" ${sha}`,
-      { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }
+    const info = git(
+      ['log', '-1', '--format=%aI|%an|%s', sha],
+      { cwd: repoPath }
     ).trim();
     const [date, author, ...msgParts] = info.split('|');
     return { date, author, message: msgParts.join('|') };

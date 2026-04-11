@@ -1,21 +1,21 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { runDetailed } from './utils/exec.js';
 
 // ── CLI tools we check via `which` ───────────────────────────────────────────
-const CLI_CHECKS = [
-  { name: 'claude',    cmd: 'which claude' },
-  { name: 'cursor',    cmd: 'which cursor' },
-  { name: 'aider',     cmd: 'which aider' },
-  { name: 'gemini',    cmd: 'which gemini' },
-  { name: 'windsurf',  cmd: 'which windsurf' },
-  { name: 'copilot',   cmd: 'which github-copilot-cli' },
-  { name: 'cody',      cmd: 'which cody' },
-  { name: 'continue',  cmd: 'which continue' },
-  { name: 'code',      cmd: 'which code' },       // VS Code
-  { name: 'codium',    cmd: 'which codium' },      // VSCodium
-  { name: 'codex',     cmd: 'which codex' },       // OpenAI Codex CLI
+const CLI_CHECKS: Array<{ name: string; bin: string }> = [
+  { name: 'claude',    bin: 'claude' },
+  { name: 'cursor',    bin: 'cursor' },
+  { name: 'aider',     bin: 'aider' },
+  { name: 'gemini',    bin: 'gemini' },
+  { name: 'windsurf',  bin: 'windsurf' },
+  { name: 'copilot',   bin: 'github-copilot-cli' },
+  { name: 'cody',      bin: 'cody' },
+  { name: 'continue',  bin: 'continue' },
+  { name: 'code',      bin: 'code' },       // VS Code
+  { name: 'codium',    bin: 'codium' },     // VSCodium
+  { name: 'codex',     bin: 'codex' },      // OpenAI Codex CLI
 ];
 
 // ── IDE extensions that indicate AI tool usage ───────────────────────────────
@@ -59,18 +59,14 @@ export function detectTools(): string[] {
   const found = new Set<string>();
 
   // ── Layer 1: CLI availability ──────────────────────────────────────────────
-  for (const { name, cmd } of CLI_CHECKS) {
-    try {
-      execSync(cmd, { stdio: 'ignore', timeout: 3000 });
-      found.add(name);
-    } catch { /* not installed */ }
+  for (const { name, bin } of CLI_CHECKS) {
+    const r = runDetailed('which', [bin], { timeoutMs: 3000 });
+    if (r.status === 0 && r.stdout.trim()) found.add(name);
   }
 
   // Also check `gh copilot` sub-command (GitHub CLI extension)
-  try {
-    execSync('gh copilot --help', { stdio: 'ignore', timeout: 3000 });
-    found.add('copilot');
-  } catch { /* not installed */ }
+  const gh = runDetailed('gh', ['copilot', '--help'], { timeoutMs: 3000 });
+  if (gh.status === 0) found.add('copilot');
 
   // Check npx cache for tools installed via npx (e.g. codex)
   if (!found.has('codex')) {
@@ -117,19 +113,14 @@ export function detectIDEExtensions(): string[] {
   // Query CLIs that support --list-extensions
   const ideCLIs = ['code', 'codium', 'cursor'];
   for (const cli of ideCLIs) {
-    try {
-      const output = execSync(`${cli} --list-extensions 2>/dev/null`, {
-        encoding: 'utf-8',
-        timeout: 5000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      const extensions = output.toLowerCase().split('\n').map(e => e.trim());
-      for (const [extId, toolName] of Object.entries(AI_EXTENSIONS)) {
-        if (extensions.includes(extId.toLowerCase())) {
-          found.add(toolName);
-        }
+    const r = runDetailed(cli, ['--list-extensions'], { timeoutMs: 5000 });
+    if (r.status !== 0) continue;
+    const extensions = r.stdout.toLowerCase().split('\n').map(e => e.trim());
+    for (const [extId, toolName] of Object.entries(AI_EXTENSIONS)) {
+      if (extensions.includes(extId.toLowerCase())) {
+        found.add(toolName);
       }
-    } catch { /* CLI not available or timed out */ }
+    }
   }
 
   // Scan extension directories on disk

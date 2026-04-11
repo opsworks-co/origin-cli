@@ -33,6 +33,27 @@ const EVENT_SETTINGS_MAP: Record<string, keyof SlackSettings> = {
 
 const ORIGIN_WEB_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
 
+/**
+ * Validate that a URL is a legitimate Slack webhook endpoint before we
+ * POST to it. Without this, an IntegrationConfig row (settable by any
+ * org admin) could point at 127.0.0.1/metadata servers/internal hosts
+ * and turn this service into an SSRF primitive — POSTing notification
+ * payloads (which contain session/repo metadata) to attacker-chosen
+ * targets. Slack webhooks always live under https://hooks.slack.com/.
+ */
+function isValidSlackWebhookUrl(raw: string | null | undefined): boolean {
+  if (!raw || typeof raw !== 'string') return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.hostname !== 'hooks.slack.com') return false;
+  return true;
+}
+
 // ── Emoji map for notification types ───────────────────────────────
 
 function getTypeEmoji(type: string): string {
@@ -175,6 +196,10 @@ export async function sendSlackNotification(payload: SlackNotificationPayload): 
       blocks,
     };
 
+    if (!isValidSlackWebhookUrl(config.token)) {
+      console.error('[slack] Refusing to send — stored webhook URL is not a hooks.slack.com https URL');
+      return false;
+    }
     const res = await fetch(config.token, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -233,6 +258,9 @@ export async function testSlackWebhook(
       ],
     };
 
+    if (!isValidSlackWebhookUrl(webhookUrl)) {
+      return { success: false, error: 'Webhook URL must be an https://hooks.slack.com/... URL' };
+    }
     const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

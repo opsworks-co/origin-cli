@@ -10,10 +10,14 @@ router.get('/comparison', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
 
-    // 1. Get repoIds for org
+    // 1. Get repoIds for org. Cap at 5000 — see identical rationale in
+    // routes/stats.ts and routes/prompts.ts. An org with more repos than
+    // this is already past the point where a single-page comparison
+    // scales, and materializing the full list every call is a DoS vector.
     const repos = await prisma.repo.findMany({
       where: { orgId },
       select: { id: true },
+      take: 5000,
     });
     const repoIds = repos.map((r) => r.id);
 
@@ -33,7 +37,8 @@ router.get('/comparison', async (req: AuthRequest, res: Response) => {
     // 3. For each model: compute approval rate
     const allModels = modelGroups.map((g) => g.model);
 
-    // Get review data per model
+    // Get review data per model (cap 200k — approval rate is a ratio so
+    // a large-sample cap is fine without meaningfully skewing accuracy).
     const sessionsWithReviews = await prisma.codingSession.findMany({
       where: {
         commit: { repoId: { in: repoIds } },
@@ -44,6 +49,8 @@ router.get('/comparison', async (req: AuthRequest, res: Response) => {
         model: true,
         review: { select: { status: true } },
       },
+      take: 200_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     const reviewMap = new Map<
@@ -101,6 +108,8 @@ router.get('/comparison', async (req: AuthRequest, res: Response) => {
         model: true,
         createdAt: true,
       },
+      take: 200_000,
+      orderBy: { createdAt: 'desc' },
     });
 
     // Build week buckets

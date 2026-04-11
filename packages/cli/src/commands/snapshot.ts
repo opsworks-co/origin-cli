@@ -1,8 +1,11 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { getGitRoot, getGitDir, loadSessionState } from '../session-state.js';
+import { git, gitDetailed } from '../utils/exec.js';
+import { getGitRoot, getGitDir } from '../session-state.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_BRANCH = /^[a-zA-Z0-9_./-]+$/;
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -19,13 +22,7 @@ interface SnapshotMeta {
 
 const SHADOW_PREFIX = 'origin/shadow/';
 
-function git(cmd: string, cwd: string): string {
-  return execSync(`git ${cmd}`, {
-    encoding: 'utf-8',
-    cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  }).trim();
-}
+const gitOpts = (cwd: string) => ({ cwd });
 
 function getSessionTag(repoPath: string): string {
   // Try to read session tag from active session state
@@ -45,7 +42,7 @@ function getSessionTag(repoPath: string): string {
   }
   // Fallback: use current branch + date
   try {
-    const branch = git('rev-parse --abbrev-ref HEAD', repoPath);
+    const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], gitOpts(repoPath)).trim();
     return `${branch}-${new Date().toISOString().slice(0, 10)}`;
   } catch {
     return `session-${Date.now()}`;
@@ -55,15 +52,20 @@ function getSessionTag(repoPath: string): string {
 function shadowBranchName(sessionTag: string, timestamp: string): string {
   // Replace colons and other special chars for branch name safety
   const safestamp = timestamp.replace(/[:.]/g, '-');
-  return `${SHADOW_PREFIX}${sessionTag}-${safestamp}`;
+  const safeTag = sessionTag.replace(/[^a-zA-Z0-9_.-]/g, '-');
+  return `${SHADOW_PREFIX}${safeTag}-${safestamp}`;
 }
 
 function listShadowBranches(repoPath: string, sessionTag?: string): string[] {
   try {
-    const pattern = sessionTag
-      ? `refs/heads/${SHADOW_PREFIX}${sessionTag}-*`
+    const safeTag = sessionTag ? sessionTag.replace(/[^a-zA-Z0-9_.-]/g, '-') : '';
+    const pattern = safeTag
+      ? `refs/heads/${SHADOW_PREFIX}${safeTag}-*`
       : `refs/heads/${SHADOW_PREFIX}*`;
-    const output = git(`for-each-ref --format="%(refname:short)" "${pattern}"`, repoPath);
+    const output = git(
+      ['for-each-ref', '--format=%(refname:short)', pattern],
+      gitOpts(repoPath),
+    ).trim();
     if (!output) return [];
     return output.split('\n').filter(Boolean);
   } catch {
@@ -72,9 +74,10 @@ function listShadowBranches(repoPath: string, sessionTag?: string): string[] {
 }
 
 function parseSnapshotMeta(repoPath: string, branch: string): SnapshotMeta | null {
+  if (!SAFE_BRANCH.test(branch)) return null;
   try {
-    const message = git(`log -1 --format=%B "${branch}"`, repoPath);
-    const meta = JSON.parse(message);
+    const message = git(['log', '-1', '--format=%B', branch], gitOpts(repoPath));
+    const meta = JSON.parse(message.trim());
     return meta as SnapshotMeta;
   } catch {
     return null;
@@ -99,7 +102,7 @@ export async function snapshotSaveCommand(): Promise<void> {
     // Use git stash create to capture working tree state without affecting index
     let stashSha: string;
     try {
-      stashSha = git('stash create', repoPath);
+      stashSha = git(['stash', 'create'], gitOpts(repoPath)).trim();
     } catch {
       stashSha = '';
     }
@@ -107,17 +110,24 @@ export async function snapshotSaveCommand(): Promise<void> {
     if (!stashSha) {
       // No changes to snapshot — use HEAD tree instead
       console.log(chalk.yellow('  No uncommitted changes to snapshot. Saving HEAD state.'));
-      stashSha = git('rev-parse HEAD', repoPath);
+      stashSha = git(['rev-parse', 'HEAD'], gitOpts(repoPath)).trim();
+    }
+
+    if (!HEX.test(stashSha)) {
+      throw new Error('Invalid stash sha');
     }
 
     // Get the tree SHA from the stash/commit
-    const treeSha = git(`rev-parse "${stashSha}^{tree}"`, repoPath);
+    const treeSha = git(['rev-parse', `${stashSha}^{tree}`], gitOpts(repoPath)).trim();
+    if (!HEX.test(treeSha)) {
+      throw new Error('Invalid tree sha');
+    }
 
     // Determine changed files
     let filesChanged: string[] = [];
     try {
-      const diff = git('diff --name-only HEAD', repoPath);
-      const staged = git('diff --name-only --cached HEAD', repoPath);
+      const diff = git(['diff', '--name-only', 'HEAD'], gitOpts(repoPath));
+      const staged = git(['diff', '--name-only', '--cached', 'HEAD'], gitOpts(repoPath));
       const allFiles = new Set([
         ...diff.split('\n').filter(Boolean),
         ...staged.split('\n').filter(Boolean),
@@ -142,12 +152,15 @@ export async function snapshotSaveCommand(): Promise<void> {
 
     // Create orphan commit with the tree and metadata as the commit message
     const commitSha = git(
-      `commit-tree "${treeSha}" -m '${JSON.stringify(meta).replace(/'/g, "'\\''")}'`,
-      repoPath,
-    );
+      ['commit-tree', treeSha, '-m', JSON.stringify(meta)],
+      gitOpts(repoPath),
+    ).trim();
+    if (!HEX.test(commitSha)) {
+      throw new Error('Invalid commit sha');
+    }
 
     // Create the shadow branch pointing to this commit
-    git(`branch "${branchName}" "${commitSha}"`, repoPath);
+    git(['branch', branchName, commitSha], gitOpts(repoPath));
 
     console.log(chalk.green(`  Snapshot saved: ${chalk.bold(id)}`));
     console.log(chalk.gray(`  Branch: ${branchName}`));
@@ -243,12 +256,16 @@ export async function snapshotRestoreCommand(id: string): Promise<void> {
     console.log(chalk.gray('  Saving current state before restore...'));
     await snapshotSaveCommand();
 
+    if (!HEX.test(targetMeta.treeSha)) {
+      throw new Error('Invalid tree sha in snapshot');
+    }
+
     // Restore: use git read-tree + git checkout-index from the snapshot tree
-    git(`read-tree "${targetMeta.treeSha}"`, repoPath);
-    git('checkout-index -a -f', repoPath);
+    git(['read-tree', targetMeta.treeSha], gitOpts(repoPath));
+    git(['checkout-index', '-a', '-f'], gitOpts(repoPath));
 
     // Reset index back to HEAD to avoid staged changes confusion
-    git('read-tree HEAD', repoPath);
+    git(['read-tree', 'HEAD'], gitOpts(repoPath));
 
     console.log(chalk.green(`\n  Restored to snapshot ${chalk.bold(id)} from ${timeSince(new Date(targetMeta.timestamp))}`));
     if (targetMeta.filesChanged.length > 0) {
@@ -283,11 +300,15 @@ export async function snapshotCleanCommand(): Promise<void> {
 
   let removed = 0;
   for (const branch of allBranches) {
-    try {
-      git(`branch -D "${branch}"`, repoPath);
+    if (!SAFE_BRANCH.test(branch)) {
+      console.log(chalk.yellow(`  Skipped unsafe branch name: ${branch}`));
+      continue;
+    }
+    const r = gitDetailed(['branch', '-D', branch], gitOpts(repoPath));
+    if (r.status === 0) {
       removed++;
       console.log(chalk.gray(`  Removed: ${branch}`));
-    } catch {
+    } else {
       console.log(chalk.yellow(`  Failed to remove: ${branch}`));
     }
   }
@@ -304,11 +325,7 @@ export function createAutoSnapshot(repoPath: string, sessionTag?: string): strin
     // Use git stash create to capture working tree state
     let stashSha: string;
     try {
-      stashSha = execSync('git stash create', {
-        encoding: 'utf-8',
-        cwd: repoPath,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
+      stashSha = git(['stash', 'create'], gitOpts(repoPath)).trim();
     } catch {
       stashSha = '';
     }
@@ -318,11 +335,14 @@ export function createAutoSnapshot(repoPath: string, sessionTag?: string): strin
       return null;
     }
 
-    const treeSha = git(`rev-parse "${stashSha}^{tree}"`, repoPath);
+    if (!HEX.test(stashSha)) return null;
+
+    const treeSha = git(['rev-parse', `${stashSha}^{tree}`], gitOpts(repoPath)).trim();
+    if (!HEX.test(treeSha)) return null;
 
     let filesChanged: string[] = [];
     try {
-      const diff = git('diff --name-only HEAD', repoPath);
+      const diff = git(['diff', '--name-only', 'HEAD'], gitOpts(repoPath));
       filesChanged = diff.split('\n').filter(Boolean);
     } catch { /* ignore */ }
 
@@ -341,11 +361,12 @@ export function createAutoSnapshot(repoPath: string, sessionTag?: string): strin
     };
 
     const commitSha = git(
-      `commit-tree "${treeSha}" -m '${JSON.stringify(meta).replace(/'/g, "'\\''")}'`,
-      repoPath,
-    );
+      ['commit-tree', treeSha, '-m', JSON.stringify(meta)],
+      gitOpts(repoPath),
+    ).trim();
+    if (!HEX.test(commitSha)) return null;
 
-    git(`branch "${branchName}" "${commitSha}"`, repoPath);
+    git(['branch', branchName, commitSha], gitOpts(repoPath));
 
     return id;
   } catch {

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 
 const CONFIG_DIR = path.join(os.homedir(), '.origin');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
@@ -40,25 +41,89 @@ export interface AgentConfig {
 }
 
 export function ensureConfigDir() {
-  if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  if (!fs.existsSync(CONFIG_DIR)) {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  } else {
+    // Tighten existing dir — older releases may have created it with 0755.
+    // Best-effort: ignore chmod errors on platforms where it's a no-op.
+    try { fs.chmodSync(CONFIG_DIR, 0o700); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Write a file atomically with restrictive permissions (0600).
+ *
+ * Why not just pass `{ mode: 0o600 }` to writeFileSync? Because Node only
+ * honors the mode option when *creating* a new file. If the file already
+ * exists (from an older release or a buggy install) with 0644, the option
+ * is silently ignored and credentials sit on disk world-readable.
+ *
+ * This helper writes to a sibling temp file, chmods it to 0600, then
+ * renames over the target. The chmod is unconditional so existing files
+ * get their permissions fixed on the next save.
+ */
+function writeSecret(filePath: string, data: string): void {
+  // Temp name must be unique per call — not just per-process. Two concurrent
+  // Node processes could share a PID namespace (containers, forks), and even
+  // within one process, parallel saveConfig/saveAgentConfig calls would
+  // otherwise race on the same tmp path and corrupt each other's writes.
+  // 8 random bytes (64 bits) is plenty of entropy to make collisions
+  // astronomically unlikely for this local-file use case.
+  const tmp = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  try {
+    fs.writeFileSync(tmp, data, { mode: 0o600 });
+    try { fs.chmodSync(tmp, 0o600); } catch { /* ignore */ }
+    fs.renameSync(tmp, filePath);
+    // Belt-and-suspenders: chmod the final path too, in case rename preserved
+    // an older inode's mode on some filesystems.
+    try { fs.chmodSync(filePath, 0o600); } catch { /* ignore */ }
+  } catch (err) {
+    // If rename failed after successful write, clean up the orphan tmp file
+    // so `~/.origin/` doesn't accumulate stale writes on repeated failures.
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    throw err;
+  }
+}
+
+// Distinguish "file does not exist" (first run / logged out) from
+// "file exists but failed to parse" (corrupted by a crash mid-write).
+// The old `catch { return null }` silently degraded a corrupted config
+// into a logged-out state, which is confusing — the user sees their
+// sessions stop uploading without any warning. Log the parse error so
+// the next command surfaces the cause.
+function loadJsonFileOrNull<T>(filePath: string, label: string): T | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf-8');
+  } catch (err: any) {
+    if (err && err.code === 'ENOENT') return null;
+    console.error(`[origin] warning: failed to read ${label} at ${filePath}:`, err?.message || err);
+    return null;
+  }
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err: any) {
+    console.error(`[origin] warning: ${label} at ${filePath} is corrupted and could not be parsed:`, err?.message || err);
+    return null;
+  }
 }
 
 export function loadConfig(): OriginConfig | null {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch { return null; }
+  return loadJsonFileOrNull<OriginConfig>(CONFIG_PATH, 'config');
 }
 
 export function saveConfig(config: OriginConfig) {
   ensureConfigDir();
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
+  writeSecret(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
 export function loadAgentConfig(): AgentConfig | null {
-  try { return JSON.parse(fs.readFileSync(AGENT_PATH, 'utf-8')); } catch { return null; }
+  return loadJsonFileOrNull<AgentConfig>(AGENT_PATH, 'agent config');
 }
 
 export function saveAgentConfig(config: AgentConfig) {
   ensureConfigDir();
-  fs.writeFileSync(AGENT_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
+  writeSecret(AGENT_PATH, JSON.stringify(config, null, 2));
 }
 
 // ── Per-repo config (.origin.json in repo root) ─────────────────────────────
@@ -71,14 +136,33 @@ export interface RepoConfig {
 }
 
 export function loadRepoConfig(repoPath: string): RepoConfig | null {
-  try {
-    const configPath = path.join(repoPath, '.origin.json');
-    return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-  } catch { return null; }
+  const configPath = path.join(repoPath, '.origin.json');
+  let raw: string;
+  try { raw = fs.readFileSync(configPath, 'utf-8'); }
+  catch (err: any) {
+    if (err?.code === 'ENOENT') return null;
+    console.error(`[origin] warning: failed to read .origin.json at ${configPath}:`, err?.message || err);
+    return null;
+  }
+  try { return JSON.parse(raw); }
+  catch (err: any) {
+    console.error(`[origin] warning: .origin.json at ${configPath} is corrupted:`, err?.message || err);
+    return null;
+  }
 }
 
 export function saveRepoConfig(repoPath: string, config: RepoConfig) {
-  fs.writeFileSync(path.join(repoPath, '.origin.json'), JSON.stringify(config, null, 2) + '\n');
+  // Atomic write: temp file → rename, so concurrent `origin link` commands
+  // or crashes mid-write never leave a half-written .origin.json.
+  const target = path.join(repoPath, '.origin.json');
+  const tmp = `${target}.tmp-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n');
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    throw err;
+  }
 }
 
 export function clearRepoConfig(repoPath: string) {
@@ -124,13 +208,18 @@ export interface Profile {
 }
 
 function ensureProfilesDir() {
-  if (!fs.existsSync(PROFILES_DIR)) fs.mkdirSync(PROFILES_DIR, { recursive: true });
+  if (!fs.existsSync(PROFILES_DIR)) {
+    fs.mkdirSync(PROFILES_DIR, { recursive: true, mode: 0o700 });
+  } else {
+    try { fs.chmodSync(PROFILES_DIR, 0o700); } catch { /* ignore */ }
+  }
 }
 
 /** Save a named profile (e.g. "dev", "team") */
 export function saveProfile(name: string, profile: Profile) {
   ensureProfilesDir();
-  fs.writeFileSync(path.join(PROFILES_DIR, `${name}.json`), JSON.stringify(profile, null, 2), { mode: 0o600 });
+  // Profiles contain API keys — use the same atomic 0600 writer as config.
+  writeSecret(path.join(PROFILES_DIR, `${name}.json`), JSON.stringify(profile, null, 2));
 }
 
 /** Load a specific profile by name */

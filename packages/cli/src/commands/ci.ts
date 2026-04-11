@@ -1,6 +1,9 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { git, gitDetailed, runDetailed } from '../utils/exec.js';
 import { getGitRoot, getHeadSha } from '../session-state.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_REF = /^[a-zA-Z0-9_./~^-]+$/;
 import {
   generateCIReport,
   formatCIReport,
@@ -114,39 +117,43 @@ export async function ciSessionCheckCommand(opts: {
     process.exit(1);
   }
 
-  const execOpts = {
-    cwd: repoPath,
-    stdio: 'pipe' as const,
-    timeout: 30000,
-    encoding: 'utf-8' as const,
-  };
+  const gitOpts = { cwd: repoPath, timeoutMs: 30000 };
 
   // Determine the base: --since flag, or auto-detect branch point from main/master
   let base = opts.since || '';
+  if (base && !SAFE_REF.test(base) && !HEX.test(base)) {
+    console.error(chalk.red(`Invalid --since value: ${base}`));
+    process.exit(1);
+  }
   if (!base) {
     // Find the merge base with main or master
     for (const candidate of ['main', 'master', 'develop']) {
-      try {
-        execSync(`git rev-parse --verify ${candidate}`, { ...execOpts, stdio: 'pipe' });
-        base = execSync(`git merge-base ${candidate} HEAD`, { ...execOpts, stdio: 'pipe' }).toString().trim();
-        break;
-      } catch {
-        // branch doesn't exist, try next
+      const verify = gitDetailed(['rev-parse', '--verify', candidate], gitOpts);
+      if (verify.status === 0) {
+        const mb = gitDetailed(['merge-base', candidate, 'HEAD'], gitOpts);
+        if (mb.status === 0) {
+          base = mb.stdout.trim();
+          break;
+        }
       }
     }
     if (!base) {
-      // Fallback: check last 20 commits
-      base = execSync('git rev-list --max-parents=0 HEAD | head -1', execOpts).toString().trim();
+      // Fallback: root commit
+      const r = gitDetailed(['rev-list', '--max-parents=0', 'HEAD'], gitOpts);
+      if (r.status === 0) {
+        base = r.stdout.trim().split('\n')[0] || '';
+      }
     }
   }
 
   // Get commits from base to HEAD
   let commitLog: string;
   try {
-    commitLog = execSync(
-      `git log --format="%H|%h|%s|%an" ${base}..HEAD`,
-      execOpts,
-    ).toString().trim();
+    if (!base || (!HEX.test(base) && !SAFE_REF.test(base))) throw new Error('invalid base');
+    commitLog = git(
+      ['log', '--format=%H|%h|%s|%an', `${base}..HEAD`],
+      gitOpts,
+    ).trim();
   } catch {
     console.error(chalk.red('Failed to read git log.'));
     process.exit(1);
@@ -162,21 +169,17 @@ export async function ciSessionCheckCommand(opts: {
   let failures = 0;
 
   // Fetch origin notes ref so git notes show works
-  try {
-    execSync('git fetch origin refs/notes/origin:refs/notes/origin 2>/dev/null', { ...execOpts, stdio: 'pipe' });
-  } catch {
-    // Notes ref may not exist on remote yet
-  }
+  gitDetailed(['fetch', 'origin', 'refs/notes/origin:refs/notes/origin'], gitOpts);
 
   for (const line of commits) {
     const [sha, shortSha, message, author] = line.split('|');
     const result: SessionCheckResult = { sha, shortSha, message, author, hasSession: false };
 
     try {
-      const noteRaw = execSync(
-        `git notes --ref=origin show ${sha} 2>/dev/null`,
-        { ...execOpts, stdio: 'pipe' },
-      ).toString().trim();
+      if (!HEX.test(sha)) throw new Error('invalid sha');
+      const r = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts);
+      if (r.status !== 0) throw new Error('no note');
+      const noteRaw = r.stdout.trim();
 
       const note = JSON.parse(noteRaw);
       if (note?.origin?.sessionId) {

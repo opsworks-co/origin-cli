@@ -1,5 +1,7 @@
-import { execSync } from 'child_process';
+import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { shouldIgnoreFile } from './ignore-patterns.js';
+
+const HEX = /^[a-fA-F0-9]+$/;
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -36,30 +38,27 @@ const MAX_DIFF_SIZE = 500_000; // 500KB max diff size
  * - Full unified diff (committed + uncommitted changes)
  */
 export function captureGitState(repoPath: string, headBefore: string | null, opts?: { committedOnly?: boolean }): GitCaptureResult {
-  const execOpts = {
-    encoding: 'utf-8' as const,
+  const gitOpts = {
     cwd: repoPath,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    timeoutMs: 15_000,
     maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large diffs
   };
 
   // 1. Get current HEAD
-  let headAfter: string;
-  try {
-    headAfter = execSync('git rev-parse HEAD', execOpts).trim();
-  } catch {
+  const headAfter = gitOrNull(['rev-parse', 'HEAD'], gitOpts);
+  if (!headAfter || !HEX.test(headAfter)) {
     return emptyResult(headBefore || '');
   }
 
-  const safeBefore = headBefore || headAfter;
+  const safeBefore = headBefore && HEX.test(headBefore) ? headBefore : headAfter;
 
   // 2. Find commits created during session (between headBefore and headAfter)
   let commitShas: string[] = [];
   if (safeBefore !== headAfter) {
     try {
-      const log = execSync(
-        `git log --format=%H ${safeBefore}..${headAfter}`,
-        execOpts,
+      const log = git(
+        ['log', '--format=%H', `${safeBefore}..${headAfter}`],
+        gitOpts,
       ).trim();
       commitShas = log ? log.split('\n').filter(Boolean) : [];
     } catch {
@@ -71,12 +70,13 @@ export function captureGitState(repoPath: string, headBefore: string | null, opt
   // 3. Capture per-commit metadata (message, author, files changed)
   const commitDetails: CommitInfo[] = [];
   for (const sha of commitShas) {
+    if (!HEX.test(sha)) continue;
     try {
-      const message = execSync(`git log -1 --format=%s ${sha}`, execOpts).trim();
-      const author = execSync(`git log -1 --format=%an ${sha}`, execOpts).trim();
-      const filesRaw = execSync(
-        `git diff-tree --no-commit-id --name-only -r ${sha}`,
-        execOpts,
+      const message = git(['log', '-1', '--format=%s', sha], gitOpts).trim();
+      const author = git(['log', '-1', '--format=%an', sha], gitOpts).trim();
+      const filesRaw = git(
+        ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+        gitOpts,
       ).trim();
       const filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean).filter(f => !shouldIgnoreFile(f)) : [];
       commitDetails.push({ sha, message, author, filesChanged });
@@ -95,28 +95,27 @@ export function captureGitState(repoPath: string, headBefore: string | null, opt
   try {
     // Committed changes since session start
     if (safeBefore !== headAfter) {
-      committedDiff = execSync(`git diff ${safeBefore}..${headAfter}`, execOpts).trim();
+      committedDiff = git(['diff', `${safeBefore}..${headAfter}`], gitOpts).trim();
     }
 
     // Capture uncommitted changes (staged + unstaged + untracked)
     if (!opts?.committedOnly) {
-      uncommittedDiff = execSync('git diff HEAD', execOpts).trim();
+      uncommittedDiff = git(['diff', 'HEAD'], gitOpts).trim();
       // Also capture new untracked files as diff
       try {
-        const untracked = execSync(
-          'git ls-files --others --exclude-standard',
-          execOpts,
+        const untracked = git(
+          ['ls-files', '--others', '--exclude-standard'],
+          gitOpts,
         ).trim();
         if (untracked) {
           for (const file of untracked.split('\n').filter(Boolean)) {
-            try {
-              execSync(`git diff --no-index /dev/null "${file}"`, execOpts);
-            } catch (e: any) {
-              // git diff --no-index exits 1 on diff, stdout still has the diff
-              const out = (e.stdout || '').toString().trim();
-              if (out) {
-                uncommittedDiff = uncommittedDiff ? uncommittedDiff + '\n' + out : out;
-              }
+            // git diff --no-index exits 1 on diff; use gitDetailed to capture
+            // stdout regardless of status. Pass the file path as a positional
+            // arg — no shell, no quoting required.
+            const r = gitDetailed(['diff', '--no-index', '/dev/null', file], gitOpts);
+            const out = (r.stdout || '').trim();
+            if (out) {
+              uncommittedDiff = uncommittedDiff ? uncommittedDiff + '\n' + out : out;
             }
           }
         }
@@ -176,11 +175,11 @@ export function captureGitState(repoPath: string, headBefore: string | null, opt
  */
 export function getDirtyFiles(repoPath: string): string[] {
   try {
-    const execOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000 };
+    const gitOpts = { cwd: repoPath, timeoutMs: 5_000 };
     // Tracked files with changes (staged + unstaged)
-    const tracked = execSync('git diff --name-only HEAD', execOpts).trim();
+    const tracked = git(['diff', '--name-only', 'HEAD'], gitOpts).trim();
     // Untracked files
-    const untracked = execSync('git ls-files --others --exclude-standard', execOpts).trim();
+    const untracked = git(['ls-files', '--others', '--exclude-standard'], gitOpts).trim();
     const files = [
       ...(tracked ? tracked.split('\n').filter(Boolean) : []),
       ...(untracked ? untracked.split('\n').filter(Boolean) : []),

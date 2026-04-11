@@ -2,7 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { execSync, spawn } from 'child_process';
+import { spawn } from 'child_process';
+import { git, gitOrNull, run } from './utils/exec.js';
 import { fileURLToPath } from 'url';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -60,19 +61,11 @@ export interface SessionState {
 // ─── Git Directory ─────────────────────────────────────────────────────────
 
 export function getGitDir(cwd?: string): string | null {
-  try {
-    return execSync('git rev-parse --git-dir', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-  } catch {
-    return null;
-  }
+  return gitOrNull(['rev-parse', '--git-dir'], { cwd: cwd || undefined, timeoutMs: 5_000 });
 }
 
 export function getGitRoot(cwd?: string): string | null {
-  try {
-    return execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-  } catch {
-    return null;
-  }
+  return gitOrNull(['rev-parse', '--show-toplevel'], { cwd: cwd || undefined, timeoutMs: 5_000 });
 }
 
 /**
@@ -121,19 +114,12 @@ export function discoverGitRoot(cwd?: string): string | null {
 }
 
 export function getHeadSha(cwd?: string): string | null {
-  try {
-    return execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-  } catch {
-    return null;
-  }
+  return gitOrNull(['rev-parse', 'HEAD'], { cwd: cwd || undefined, timeoutMs: 5_000 });
 }
 
 export function getBranch(cwd?: string): string | null {
-  try {
-    return execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
-  } catch {
-    return null;
-  }
+  const v = gitOrNull(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: cwd || undefined, timeoutMs: 5_000 });
+  return v || null;
 }
 
 // ─── Session State Persistence ─────────────────────────────────────────────
@@ -239,7 +225,18 @@ export function listActiveSessions(cwd?: string): SessionState[] {
               if (tagMatch) state.sessionTag = tagMatch[1];
             }
             sessions.push(state);
-          } catch { /* skip corrupt files */ }
+          } catch (err) {
+            // A corrupt session file here is usually a truncated write from
+            // a crashed CLI or a concurrent reader catching a mid-write
+            // state. Silently skipping is correct, but we *must* surface
+            // the corruption so operators can investigate recurring cases
+            // (e.g. a disk filling up, a misbehaving hook). Use warn, not
+            // error — one bad file shouldn't spam stderr on every `origin
+            // sessions list` call.
+            if (process.env.ORIGIN_DEBUG) {
+              console.warn(`[origin] skipping corrupt session file ${entry}: ${(err as Error).message}`);
+            }
+          }
         }
       }
     } catch { /* ignore */ }
@@ -258,7 +255,11 @@ export function listActiveSessions(cwd?: string): SessionState[] {
           const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
           if (!state || typeof state !== 'object' || !state.sessionId) continue;
           sessions.push(state);
-        } catch { /* skip */ }
+        } catch (err) {
+          if (process.env.ORIGIN_DEBUG) {
+            console.warn(`[origin] skipping corrupt session file ${entry}: ${(err as Error).message}`);
+          }
+        }
       }
     }
   } catch { /* ignore */ }
@@ -338,7 +339,11 @@ export function listAllActiveSessions(): SessionState[] {
           }
 
           sessions.push(state);
-        } catch { /* skip */ }
+        } catch (err) {
+          if (process.env.ORIGIN_DEBUG) {
+            console.warn(`[origin] skipping corrupt session file ${entry}: ${(err as Error).message}`);
+          }
+        }
       }
     }
   } catch { /* ignore */ }
@@ -381,11 +386,11 @@ function findAncestorPid(pattern: RegExp, maxDepth = 10): number {
   try {
     let pid = process.ppid || 0;
     for (let i = 0; i < maxDepth && pid > 1; i++) {
-      // Get the command and parent of this PID
-      const info = execSync(`ps -p ${pid} -o ppid=,command=`, {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
+      // Numeric guard — pid should always be an integer, but defend anyway.
+      if (!Number.isInteger(pid) || pid <= 0) break;
+      // Get the command and parent of this PID. `ps` args are passed as
+      // an array (no shell), so pid is safe even though we validate above.
+      const info = run('ps', ['-p', String(pid), '-o', 'ppid=,command='], { timeoutMs: 2_000 }).trim();
       if (pattern.test(info)) return pid;
       // Move to parent
       const ppid = parseInt(info.trim().split(/\s+/)[0], 10);

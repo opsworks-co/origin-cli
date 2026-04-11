@@ -1,0 +1,274 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Release workflow for @origin/cli.
+#
+# Covers three security critical items from the review:
+#
+#   F2.3  Reproducible, CI-only builds with a GitHub-issued provenance
+#         attestation. We never publish from a developer laptop.
+#   F1.1  Tarball signing with sigstore/cosign keyless OIDC. The signature
+#         and certificate are uploaded alongside the tarball so clients can
+#         verify the artifact came from *this* repo + *this* workflow and
+#         nothing else.
+#   F2.2  `npm publish --provenance` so the npm registry records and
+#         displays an SLSA provenance statement for the published package.
+#
+# This workflow runs:
+#   - on a pushed tag matching `cli-v*` (canonical releases)
+#   - on manual dispatch (for emergency re-releases)
+#
+# Required repo-level secrets:
+#   NPM_TOKEN           — npm automation token with publish access to @origin/cli
+#
+# Required permissions (all set per-job below):
+#   id-token: write     — for keyless cosign signing + npm provenance
+#   contents: write     — to upload tarball + signatures to the GitHub Release
+#   attestations: write — for the native GitHub attestation action
+#   packages: write     — if we ever push to GHCR (not currently used)
+# ────────────────────────────────────────────────────────────────────────────
+
+name: release-cli
+
+on:
+  push:
+    tags:
+      - 'cli-v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — build, sign, but do NOT publish or create release'
+        type: boolean
+        default: false
+
+# Cancel superseded runs so only the latest tag publishes if two land
+# back-to-back.
+concurrency:
+  group: release-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build + pack (reproducible)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      tarball_name: ${{ steps.pack.outputs.tarball_name }}
+      tarball_sha256: ${{ steps.pack.outputs.tarball_sha256 }}
+      version: ${{ steps.pack.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so `git rev-parse HEAD` embeds the real SHA into
+          # build-info.ts via scripts/write-build-info.cjs.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Reproducible build env
+        # SOURCE_DATE_EPOCH is honored by npm pack to set the mtime of every
+        # file in the tarball, which is what actually makes the gzip bytes
+        # reproducible across runs. Without this, two identical commits
+        # produce different SHA-256 digests.
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build CLI
+        working-directory: packages/cli
+        run: pnpm run build
+
+      - name: Pack
+        id: pack
+        working-directory: packages/cli
+        run: |
+          set -euo pipefail
+          # `npm pack --json` prints a JSON array; we want the filename.
+          out=$(npm pack --json)
+          name=$(echo "$out" | jq -r '.[0].filename')
+          version=$(node -p "require('./package.json').version")
+          sha=$(sha256sum "$name" | awk '{print $1}')
+          echo "tarball_name=$name" >> "$GITHUB_OUTPUT"
+          echo "tarball_sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version"   >> "$GITHUB_OUTPUT"
+          echo "Packed $name"
+          echo "SHA-256: $sha"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-tarball
+          path: packages/cli/${{ steps.pack.outputs.tarball_name }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Generate SLSA build provenance (native attestation)
+        # GitHub's built-in attestation: signs a statement that says "this
+        # artifact was built from this commit by this workflow" and stores
+        # it on the ephemeral sigstore transparency log. Separate from the
+        # cosign signature below; defense in depth.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: packages/cli/${{ steps.pack.outputs.tarball_name }}
+
+  sign:
+    name: Sign tarball (cosign keyless)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download tarball artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-tarball
+          path: ./pkg
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign tarball with cosign (keyless OIDC)
+        # --yes skips the interactive browser flow; in GitHub Actions we
+        # have an ambient OIDC token and cosign will use it to get a
+        # short-lived signing certificate from Fulcio. The signature is
+        # anchored in the public Rekor transparency log, so anyone can
+        # later prove "this exact tarball was signed by this repo +
+        # this workflow on this commit".
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        working-directory: ./pkg
+        run: |
+          set -euo pipefail
+          tarball="${{ needs.build.outputs.tarball_name }}"
+          cosign sign-blob --yes \
+            --output-signature "${tarball}.sig" \
+            --output-certificate "${tarball}.pem" \
+            "${tarball}"
+          # Sanity check — verify what we just signed using the same OIDC
+          # identity. If this fails, publishing would produce an artifact
+          # that no client can verify.
+          cosign verify-blob \
+            --certificate "${tarball}.pem" \
+            --signature   "${tarball}.sig" \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${tarball}"
+
+      - name: Upload signature artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-signatures
+          path: |
+            ./pkg/*.sig
+            ./pkg/*.pem
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to npm + GitHub Release
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    if: ${{ !inputs.dry_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-tarball
+          path: ./pkg
+
+      - name: Download signatures
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-signatures
+          path: ./pkg
+
+      - name: Verify tarball digest matches build output
+        # Belt-and-suspenders: make sure the tarball we're about to publish
+        # is byte-for-byte the one the build job produced and signed.
+        run: |
+          set -euo pipefail
+          tarball="${{ needs.build.outputs.tarball_name }}"
+          expected="${{ needs.build.outputs.tarball_sha256 }}"
+          actual=$(sha256sum "./pkg/${tarball}" | awk '{print $1}')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Tarball digest mismatch"
+            echo "  expected: $expected"
+            echo "  actual:   $actual"
+            exit 1
+          fi
+          echo "Digest verified: $actual"
+
+      - name: Publish to npm with provenance
+        # `--provenance` makes npm publish a SLSA provenance statement
+        # derived from the ambient OIDC token. The npm registry exposes
+        # this on the package page so anyone can see "this version came
+        # from this commit of this repo".
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          tarball="${{ needs.build.outputs.tarball_name }}"
+          npm publish "./pkg/${tarball}" --provenance --access public
+
+      - name: Create GitHub Release with tarball + signatures
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ./pkg/${{ needs.build.outputs.tarball_name }}
+            ./pkg/${{ needs.build.outputs.tarball_name }}.sig
+            ./pkg/${{ needs.build.outputs.tarball_name }}.pem
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## @origin/cli v${{ needs.build.outputs.version }}
+
+            **Tarball SHA-256:** `${{ needs.build.outputs.tarball_sha256 }}`
+
+            ### Verification
+
+            Verify the cosign signature against this repo's OIDC identity:
+
+            ```bash
+            cosign verify-blob \
+              --certificate ${{ needs.build.outputs.tarball_name }}.pem \
+              --signature   ${{ needs.build.outputs.tarball_name }}.sig \
+              --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              ${{ needs.build.outputs.tarball_name }}
+            ```
+
+            Or run:
+
+            ```bash
+            origin verify-install
+            ```

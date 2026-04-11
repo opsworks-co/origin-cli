@@ -1,6 +1,6 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { git } from './utils/exec.js';
 import { listActiveSessions, getGitRoot, type SessionState } from './session-state.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -146,11 +146,11 @@ function getSessionModifiedFiles(repoPath: string, session: SessionState): strin
   const files = new Set<string>();
 
   // Method 1: Git diff from session start to current HEAD
-  if (session.headShaAtStart) {
+  if (session.headShaAtStart && /^[a-fA-F0-9]+$/.test(session.headShaAtStart)) {
     try {
-      const raw = execSync(
-        `git diff --name-only ${session.headShaAtStart}..HEAD`,
-        { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+      const raw = git(
+        ['diff', '--name-only', `${session.headShaAtStart}..HEAD`],
+        { cwd: repoPath, timeoutMs: 10_000 }
       ).trim();
       if (raw) {
         for (const f of raw.split('\n').filter(Boolean)) {
@@ -220,11 +220,12 @@ function getModifiedLines(repoPath: string, session: SessionState, file: string)
   const lines: number[] = [];
 
   if (!session.headShaAtStart) return lines;
+  if (!/^[a-fA-F0-9]+$/.test(session.headShaAtStart)) return lines;
 
   try {
-    const diff = execSync(
-      `git diff -U0 ${session.headShaAtStart}..HEAD -- ${escapeShellArg(file)}`,
-      { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    const diff = git(
+      ['diff', '-U0', `${session.headShaAtStart}..HEAD`, '--', file],
+      { cwd: repoPath, timeoutMs: 10_000 }
     ).trim();
 
     if (!diff) return lines;
@@ -303,9 +304,3 @@ function computeSeverity(
   return 'partial';
 }
 
-/**
- * Escape a string for safe use as a shell argument.
- */
-function escapeShellArg(arg: string): string {
-  return "'" + arg.replace(/'/g, "'\\''") + "'";
-}

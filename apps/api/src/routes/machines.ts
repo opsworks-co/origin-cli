@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -11,6 +11,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const machines = await prisma.machine.findMany({
       where: { orgId: req.user!.orgId },
       orderBy: { lastSeenAt: 'desc' },
+      take: 500,
     });
     res.json(machines);
   } catch (err) {
@@ -65,7 +66,13 @@ router.post('/', async (req: AuthRequest, res: Response) => {
           where: { machineId: { in: extraIds } },
           data: { machineId: keep.id },
         });
-        await prisma.machine.deleteMany({ where: { id: { in: extraIds } } });
+        // Defense in depth: include orgId in the delete scope. extraIds
+        // already came from an org-scoped findMany, but a compound where
+        // here means no future refactor can accidentally turn this into
+        // a cross-org mass delete if the source query changes.
+        await prisma.machine.deleteMany({
+          where: { id: { in: extraIds }, orgId: req.user!.orgId },
+        });
       }
       // Update the kept machine
       machine = await prisma.machine.update({
@@ -121,22 +128,36 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     res.json(machine);
   } catch (err: any) {
     console.error('Register machine error:', err);
-    const message = err?.code === 'P2003'
-      ? 'Organization not found — your API key may be linked to a deleted org.'
-      : 'Failed to register machine. Check server logs for details.';
-    res.status(500).json({ error: 'Internal server error', message });
+    // Map only the one known actionable error (stale API key → deleted org)
+    // to a client-visible hint. Everything else returns a generic error so
+    // we don't leak Prisma error codes, SQL state, or stack context.
+    if (err?.code === 'P2003') {
+      return res.status(400).json({
+        error: 'Organization not found — your API key may be linked to a deleted org.',
+      });
+    }
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// DELETE /:id — delete a machine
-router.delete('/:id', async (req: AuthRequest, res: Response) => {
+// DELETE /:id — delete a machine (admin only — deleting a machine
+// disrupts any sessions tied to it and wipes its policy state, so regular
+// members shouldn't be able to do it org-wide).
+router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const machine = await prisma.machine.findFirst({
       where: { id: req.params.id as string, orgId: req.user!.orgId },
     });
     if (!machine) return res.status(404).json({ error: 'Machine not found' });
 
-    await prisma.machine.delete({ where: { id: machine.id } });
+    // deleteMany with compound (id, orgId) enforces org scope at the DB
+    // call even if the precheck above is ever dropped.
+    const deleted = await prisma.machine.deleteMany({
+      where: { id: machine.id, orgId: req.user!.orgId },
+    });
+    if (deleted.count === 0) {
+      return res.status(404).json({ error: 'Machine not found' });
+    }
 
     try {
       await prisma.auditLog.create({

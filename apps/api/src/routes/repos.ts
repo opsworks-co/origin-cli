@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { expensiveLimiter } from '../middleware/rate-limit.js';
 import { syncCheckpoints } from '../services/checkpoint.js';
 import { generateWebhookSecret } from '../services/webhook.js';
 import {
@@ -19,6 +20,9 @@ import {
   parseGitLabProjectPath,
 } from '../services/gitlab-integration.js';
 import { detectAITool } from '../services/ai-commit-detector.js';
+import { safeParseArray } from '../utils/safe-json.js';
+import { validateFieldLengths, COMMON_LIMITS } from '../utils/validate.js';
+import { isGitNotesMetadataCommit } from '../utils/commit-filter.js';
 import { parseGitHubUrl } from '../services/github.js';
 
 const router = Router();
@@ -57,10 +61,43 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       // Gracefully handle if raw query fails (e.g. in test env)
     }
 
-    const result = repos.map((r) => ({
-      ...r,
-      _count: { ...r._count, sessions: sessionsPerRepo.get(r.id) || 0 },
-    }));
+    // Compute effective provider per repo. The stored `provider` column can
+    // lie in two directions:
+    //   1. A repo imported via CLI session upload gets provider='github' if
+    //      its path starts with "github.com/…", even though the org may
+    //      never have connected a GitHub integration — in that case we
+    //      can't actually pull anything from GitHub, so it should behave
+    //      like a local repo (UI grouping, sync semantics, etc).
+    //   2. A repo whose GitHub/GitLab integration was later disconnected
+    //      should also fall back to local until it's reconnected.
+    //
+    // Load integration state once per request rather than per-repo.
+    let hasGitHub = false;
+    let hasGitLab = false;
+    try {
+      hasGitHub = !!(await getIntegrationConfig(req.user!.orgId, 'github'));
+    } catch { /* treat as disconnected */ }
+    try {
+      hasGitLab = !!(await getGitLabIntegrationConfig(req.user!.orgId));
+    } catch { /* treat as disconnected */ }
+
+    const result = repos.map((r) => {
+      const path = r.path || '';
+      const looksGitHub = /github\.com\//.test(path);
+      const looksGitLab = /gitlab\.com\//.test(path);
+      let effectiveProvider: 'github' | 'gitlab' | 'local';
+      if (looksGitHub && hasGitHub) effectiveProvider = 'github';
+      else if (looksGitLab && hasGitLab) effectiveProvider = 'gitlab';
+      else effectiveProvider = 'local';
+      return {
+        ...r,
+        effectiveProvider,
+        // Preserve raw values so the UI can still show "would be X if you
+        // connected the integration" hints.
+        declaredProvider: r.provider,
+        _count: { ...r._count, sessions: sessionsPerRepo.get(r.id) || 0 },
+      };
+    });
     res.json(result);
   } catch (err) {
     console.error('List repos error:', err);
@@ -75,6 +112,13 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
 
     if (!name || !path) {
       return res.status(400).json({ error: 'Missing required fields: name, path' });
+    }
+    const lenErr = validateFieldLengths(
+      { name, path, provider },
+      { name: COMMON_LIMITS.name, path: COMMON_LIMITS.path, provider: 50 },
+    );
+    if (lenErr) {
+      return res.status(400).json({ error: lenErr });
     }
 
     const repo = await prisma.repo.create({
@@ -429,7 +473,7 @@ router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res
 });
 
 // POST /:id/sync — sync a repo
-router.post('/:id/sync', async (req: AuthRequest, res: Response) => {
+router.post('/:id/sync', expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
 
@@ -466,7 +510,7 @@ router.post('/:id/sync', async (req: AuthRequest, res: Response) => {
 });
 
 // POST /:id/import-sessions — import sessions from the origin-sessions git branch
-router.post('/:id/import-sessions', async (req: AuthRequest, res: Response) => {
+router.post('/:id/import-sessions', expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const repo = await prisma.repo.findFirst({
@@ -520,7 +564,11 @@ router.post('/:id/import-sessions', async (req: AuthRequest, res: Response) => {
       }
       treeData = await treeRes.json();
     } catch (err: any) {
-      return res.status(500).json({ error: `Failed to read origin-sessions branch: ${err.message}` });
+      // Don't echo err.message back — it can contain request URLs,
+      // internal hostnames, or stack traces from node-fetch. Log
+      // server-side, return a generic failure to the caller.
+      console.error('[repos] failed to read origin-sessions branch:', err);
+      return res.status(500).json({ error: 'Failed to read origin-sessions branch' });
     }
 
     // 2. Filter for session JSON files
@@ -532,12 +580,17 @@ router.post('/:id/import-sessions', async (req: AuthRequest, res: Response) => {
       return res.json({ imported: 0, skipped: 0, message: 'No session files found in origin-sessions branch' });
     }
 
-    // 3. Get existing session IDs to skip duplicates
+    // 3. Get existing session IDs to skip duplicates. Cap at 500k — the
+    // import path only dedupes against recently-seen ids, and pulling
+    // every session across the org would OOM the process on large
+    // tenants.
     const existingSessions = await prisma.codingSession.findMany({
       where: {
         commit: { repo: { orgId: req.user!.orgId } },
       },
       select: { id: true },
+      take: 500_000,
+      orderBy: { createdAt: 'desc' },
     });
     const existingIds = new Set(existingSessions.map((s) => s.id));
 
@@ -725,7 +778,7 @@ router.post('/:id/import-sessions', async (req: AuthRequest, res: Response) => {
 });
 
 // POST /:id/rescan — re-fetch full commit messages from GitHub and run AI detection
-router.post('/:id/rescan', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.post('/:id/rescan', requireRole('ADMIN'), expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const repo = await prisma.repo.findFirst({
@@ -768,13 +821,16 @@ router.post('/:id/rescan', requireRole('ADMIN'), async (req: AuthRequest, res: R
       }
     }
 
-    // Process all commits in the repo
+    // Process commits in the repo (cap 100k for DoS defense — rescan is
+    // a CLI-triggered admin op but still runs in-request).
     const commits = await prisma.commit.findMany({
       where: { repoId: id },
       include: {
         session: { select: { model: true } },
         codingSession: { select: { model: true } },
       },
+      take: 100_000,
+      orderBy: { committedAt: 'desc' },
     });
 
     let updated = 0;
@@ -1175,11 +1231,14 @@ router.get('/:id/branches', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Repo not found' });
     }
 
+    // Distinct branches — cap at 5000 branches worth of rows to scan.
+    // Realistic repos have <500 branches; 5000 keeps headroom.
     const commits = await prisma.commit.findMany({
       where: { repoId: id, branch: { not: null } },
       select: { branch: true },
       distinct: ['branch'],
       orderBy: { committedAt: 'desc' },
+      take: 5000,
     });
 
     const branches = commits.map((c) => c.branch).filter(Boolean) as string[];
@@ -1208,24 +1267,44 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
       commitWhere.branch = req.query.branch as string;
     }
 
-    const commits = await prisma.commit.findMany({
+    // Hard cap: /:id/commits returns the 1k most recent commits. The
+    // UI paginates via its own cursor; this ceiling exists to stop a
+    // single request from loading a monorepo's entire history (OOM).
+    const rawCommits = await prisma.commit.findMany({
       where: commitWhere,
       include: {
         session: {
           include: {
             promptChanges: { orderBy: { promptIndex: 'asc' } },
             review: true,
+            // Include the Agent relation so the UI can render the agent
+            // slug (e.g. "claude-code", "cursor") instead of the raw
+            // provider model name ("gemini-3-flash-preview").
+            agent: { select: { id: true, slug: true, name: true } },
           },
         },
         codingSession: {
           include: {
             promptChanges: { orderBy: { promptIndex: 'asc' } },
             review: true,
+            agent: { select: { id: true, slug: true, name: true } },
           },
         },
       },
       orderBy: { committedAt: 'desc' },
+      take: 1000,
     });
+
+    // Filter out git-notes metadata commits and dedupe by SHA.
+    // See utils/commit-filter.ts for full rationale.
+    const seen = new Set<string>();
+    const commits: typeof rawCommits = [];
+    for (const c of rawCommits) {
+      if (isGitNotesMetadataCommit(c.message)) continue;
+      if (seen.has(c.sha)) continue;
+      seen.add(c.sha);
+      commits.push(c);
+    }
 
     // Map promptChanges; fall back to parsing transcript for prompt texts
     const mapped = commits.map((c: any) => {
@@ -1239,7 +1318,7 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
       const dbPrompts = (sess.promptChanges || []).map((pc: any) => ({
         promptIndex: pc.promptIndex,
         promptText: pc.promptText,
-        filesChanged: JSON.parse(pc.filesChanged || '[]'),
+        filesChanged: safeParseArray<string>(pc.filesChanged, `repos.list prompt ${pc.promptIndex}`),
         diff: pc.diff || '',
         uncommittedDiff: pc.uncommittedDiff || '',
       }));
@@ -1266,8 +1345,7 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
       }
 
       // Filter promptChanges by file overlap with this commit's files
-      let commitFiles: string[] = [];
-      try { commitFiles = JSON.parse(c.filesChanged || '[]'); } catch {}
+      const commitFiles = safeParseArray<string>(c.filesChanged, `repos.list commit ${c.sha}`);
 
       if (commitFiles.length > 0 && promptChanges.length > 0) {
         const relevant = promptChanges.filter((pc: any) => {
@@ -1301,17 +1379,353 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /:id/commit/:sha — full commit detail: metadata, session, prompts, diff (one call)
+router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const sha = (req.params as any).sha as string;
+
+    const repo = await prisma.repo.findFirst({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+
+    const commit = await prisma.commit.findFirst({
+      where: { repoId: id, sha },
+      include: {
+        session: {
+          include: {
+            promptChanges: { orderBy: { promptIndex: 'asc' } },
+            review: true,
+            sessionDiff: true,
+          },
+        },
+        codingSession: {
+          include: {
+            promptChanges: { orderBy: { promptIndex: 'asc' } },
+            review: true,
+            sessionDiff: true,
+          },
+        },
+      },
+    });
+
+    if (!commit) return res.status(404).json({ error: 'Commit not found' });
+
+    let sess: any = (commit as any).session || (commit as any).codingSession;
+
+    // Fallback: if no direct FK link (e.g. commit synced from GitHub/GitLab
+    // without an Origin hook), look up a session whose SessionDiff.commitShas
+    // contains this SHA. This hydrates prompts/agent/model for provider-synced commits.
+    if (!sess) {
+      try {
+        const linkedDiff = await prisma.sessionDiff.findFirst({
+          where: {
+            commitShas: { contains: sha },
+            session: { commit: { repoId: id } },
+          },
+          include: {
+            session: {
+              include: {
+                promptChanges: { orderBy: { promptIndex: 'asc' } },
+                review: true,
+                sessionDiff: true,
+                agent: true,
+                user: { select: { id: true, name: true, email: true } },
+              },
+            },
+          },
+        });
+        if (linkedDiff?.session) {
+          sess = linkedDiff.session;
+        } else {
+          // Broader fallback: any session in this org whose sessionRepos points
+          // at this repo and whose time window brackets the commit time.
+          const commitTime = commit.committedAt.getTime();
+          const windowMs = 4 * 60 * 60 * 1000; // ±4h
+          const candidates = await prisma.codingSession.findMany({
+            where: {
+              commit: { repoId: id },
+              startedAt: { lte: new Date(commitTime + windowMs) },
+            },
+            include: {
+              promptChanges: { orderBy: { promptIndex: 'asc' } },
+              review: true,
+              sessionDiff: true,
+              agent: true,
+              user: { select: { id: true, name: true, email: true } },
+            },
+            orderBy: { startedAt: 'desc' },
+            take: 10,
+          });
+          // Pick the session whose files overlap this commit's files
+          const commitFiles = safeParseArray<string>(commit.filesChanged, `repos.detail commit ${commit.sha}`);
+          const match = candidates.find((c) => {
+            const sFiles = safeParseArray<string>(c.filesChanged, `repos.detail candidate ${c.id}`);
+            return sFiles.some((sf) =>
+              commitFiles.some((cf) => sf === cf || sf.endsWith(cf) || cf.endsWith(sf))
+            );
+          });
+          if (match) sess = match;
+        }
+      } catch (e) {
+        console.error('Session fallback lookup failed:', e);
+      }
+    }
+
+    // Build promptChanges list (like the list endpoint)
+    let promptChanges: any[] = [];
+    if (sess) {
+      promptChanges = (sess.promptChanges || []).map((pc: any) => ({
+        promptIndex: pc.promptIndex,
+        promptText: pc.promptText,
+        filesChanged: (() => { try { return JSON.parse(pc.filesChanged || '[]'); } catch { return []; } })(),
+        diff: pc.diff || '',
+      }));
+
+      // Fallback: extract from transcript if no promptChanges
+      if (promptChanges.length === 0 && sess.transcript) {
+        try {
+          const msgs = JSON.parse(sess.transcript);
+          if (Array.isArray(msgs)) {
+            let idx = 0;
+            promptChanges = msgs
+              .filter((m: any) => m.role === 'user' || m.role === 'human')
+              .map((m: any) => ({
+                promptIndex: idx++,
+                promptText: (typeof m.content === 'string' ? m.content : '').slice(0, 1000),
+                filesChanged: [],
+                diff: '',
+              }));
+          }
+        } catch {/* ignore */}
+      }
+
+      // Narrow to prompts that touched this commit's files
+      const commitFiles = safeParseArray<string>(commit.filesChanged, `repos.detail narrow ${commit.sha}`);
+      if (commitFiles.length > 0 && promptChanges.length > 0) {
+        const relevant = promptChanges.filter((pc: any) => {
+          const pcFiles: string[] = pc.filesChanged || [];
+          return pcFiles.some((f: string) =>
+            commitFiles.some((cf: string) => f === cf || f.endsWith(cf) || cf.endsWith(f))
+          );
+        });
+        if (relevant.length > 0) promptChanges = relevant;
+      }
+    }
+
+    // Build per-file diff (reuse sessionDiff / prompt diff parsing)
+    let rawDiff = sess?.sessionDiff?.diff || '';
+    if (!rawDiff && sess) {
+      const pcs = await prisma.promptChange.findMany({
+        where: { sessionId: sess.id },
+        orderBy: { promptIndex: 'asc' },
+      });
+      rawDiff = pcs.map((pc: any) => pc.diff || '').filter(Boolean).join('\n');
+    }
+
+    const files: any[] = [];
+    if (rawDiff) {
+      const sections = rawDiff.split(/^diff --git /m).filter(Boolean);
+      for (const section of sections) {
+        const lines = section.split('\n');
+        const headerMatch = lines[0]?.match(/a\/(.+?)\s+b\/(.+)/);
+        if (!headerMatch) continue;
+        const filenameA = headerMatch[1];
+        const filenameB = headerMatch[2];
+        const filename = filenameB;
+
+        let status = 'modified';
+        if (section.includes('new file mode')) status = 'added';
+        else if (section.includes('deleted file mode')) status = 'removed';
+        else if (filenameA !== filenameB) status = 'renamed';
+
+        const patchStart = section.indexOf('@@');
+        const patch = patchStart >= 0 ? section.slice(patchStart) : '';
+
+        let additions = 0;
+        let deletions = 0;
+        for (const patchLine of patch.split('\n')) {
+          if (patchLine.startsWith('+') && !patchLine.startsWith('+++')) additions++;
+          if (patchLine.startsWith('-') && !patchLine.startsWith('---')) deletions++;
+        }
+
+        files.push({
+          filename,
+          status,
+          additions,
+          deletions,
+          changes: additions + deletions,
+          patch,
+          previousFilename: filenameA !== filenameB ? filenameA : null,
+        });
+      }
+    }
+
+    // If no local diff and repo is GitLab-backed, fall back to GitLab API
+    if (files.length === 0 && repo.provider === 'gitlab') {
+      try {
+        const projectPath = parseGitLabProjectPath(repo.path);
+        const integration = await getGitLabIntegrationConfig(req.user!.orgId);
+        if (projectPath && integration) {
+          const { token } = await getValidGitLabToken(integration);
+          if (token) {
+            const apiBase = (integration as any).apiBaseUrl || 'https://gitlab.com/api/v4';
+            const encodedPath = encodeURIComponent(projectPath);
+            const headers: Record<string, string> = {
+              'PRIVATE-TOKEN': token,
+              Authorization: `Bearer ${token}`,
+              'User-Agent': 'Origin-App',
+            };
+            const glRes = await fetch(
+              `${apiBase}/projects/${encodedPath}/repository/commits/${sha}/diff?per_page=100`,
+              { headers },
+            );
+            if (glRes.ok) {
+              const diffs = await glRes.json() as any[];
+              if (Array.isArray(diffs)) {
+                for (const d of diffs) {
+                  let status = 'modified';
+                  if (d.new_file) status = 'added';
+                  else if (d.deleted_file) status = 'removed';
+                  else if (d.renamed_file) status = 'renamed';
+
+                  // GitLab returns `diff` as a patch starting with @@
+                  let patch: string = d.diff || '';
+                  if (patch && !patch.startsWith('@@')) {
+                    // GitLab sometimes omits @@ hunk header prefix; pass through as-is
+                  }
+                  let additions = 0;
+                  let deletions = 0;
+                  for (const line of patch.split('\n')) {
+                    if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+                    if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+                  }
+
+                  files.push({
+                    filename: d.new_path || d.old_path,
+                    status,
+                    additions,
+                    deletions,
+                    changes: additions + deletions,
+                    patch,
+                    previousFilename: d.renamed_file ? d.old_path : null,
+                  });
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('GitLab commit detail fetch failed:', err);
+      }
+    }
+
+    // If no local diff and repo is GitHub-backed, fall back to GitHub API
+    if (files.length === 0 && repo.provider === 'github') {
+      try {
+        const parsed = parseRepoFullName(repo.path);
+        if (parsed) {
+          let token: string | undefined;
+          const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+          if (integration?.token) token = integration.token;
+          else if (process.env.GITHUB_TOKEN) token = process.env.GITHUB_TOKEN;
+
+          const headers: Record<string, string> = {
+            Accept: 'application/vnd.github.v3+json',
+            'User-Agent': 'Origin-App',
+          };
+          if (token) headers.Authorization = `Bearer ${token}`;
+
+          const apiBase = integration?.apiBaseUrl || 'https://api.github.com';
+          const ghRes = await fetch(
+            `${apiBase}/repos/${parsed.owner}/${parsed.repo}/commits/${sha}`,
+            { headers },
+          );
+          if (ghRes.ok) {
+            const data = await ghRes.json() as any;
+            for (const f of (data.files || [])) {
+              files.push({
+                filename: f.filename,
+                status: f.status,
+                additions: f.additions,
+                deletions: f.deletions,
+                changes: f.changes,
+                patch: f.patch || '',
+                previousFilename: f.previous_filename || null,
+              });
+            }
+          }
+        }
+      } catch {/* ignore */}
+    }
+
+    // Map each file to the prompt(s) that touched it
+    const filesWithPromptIdx = files.map((f) => {
+      const matchingPromptIndexes: number[] = [];
+      for (const pc of promptChanges) {
+        const pcFiles: string[] = pc.filesChanged || [];
+        const touches = pcFiles.some((pf: string) =>
+          pf === f.filename || pf.endsWith(f.filename) || f.filename.endsWith(pf)
+        );
+        if (touches) matchingPromptIndexes.push(pc.promptIndex);
+      }
+      return { ...f, promptIndexes: matchingPromptIndexes };
+    });
+
+    const totalAdditions = filesWithPromptIdx.reduce((s, f) => s + f.additions, 0);
+    const totalDeletions = filesWithPromptIdx.reduce((s, f) => s + f.deletions, 0);
+
+    // Build minimal session payload (no transcript)
+    const sessionPayload = sess ? (() => {
+      const { transcript, promptChanges: _pc, sessionDiff: _sd, ...rest } = sess;
+      return {
+        ...rest,
+        filesChanged: (() => { try { return JSON.parse(sess.filesChanged || '[]'); } catch { return []; } })(),
+      };
+    })() : null;
+
+    return res.json({
+      sha: commit.sha,
+      message: commit.message,
+      author: commit.author,
+      branch: commit.branch,
+      committedAt: commit.committedAt?.toISOString() || '',
+      aiToolDetected: commit.aiToolDetected,
+      aiDetectionMethod: commit.aiDetectionMethod,
+      stats: {
+        additions: totalAdditions,
+        deletions: totalDeletions,
+        total: totalAdditions + totalDeletions,
+      },
+      files: filesWithPromptIdx,
+      session: sessionPayload,
+      promptChanges,
+      repo: { id: repo.id, name: repo.name, provider: repo.provider, path: repo.path },
+    });
+  } catch (err) {
+    console.error('Get commit detail error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // DELETE /:id/backfilled-sessions — remove sessions that have 0 tokens (backfilled placeholder data)
-router.delete('/:id/backfilled-sessions', async (req: AuthRequest, res: Response) => {
+// Admin-only: bulk-deletes placeholder session rows for a repo. A regular
+// member should not be able to erase audit history, even for zero-token
+// placeholders.
+router.delete('/:id/backfilled-sessions', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
-    // Find sessions with 0 tokens (placeholder backfills)
+    // Find sessions with 0 tokens (placeholder backfills). Cap at 100k
+    // per request; if the repo has more, re-run the cleanup.
     const commits = await prisma.commit.findMany({
       where: { repoId: id },
       include: { session: true, codingSession: true },
+      take: 100_000,
+      orderBy: { committedAt: 'desc' },
     });
 
     let deleted = 0;
@@ -1416,7 +1830,15 @@ router.delete('/:id/webhooks/:webhookId', requireRole('ADMIN'), async (req: Auth
     const webhook = await prisma.webhook.findFirst({ where: { id: webhookId, repoId: id } });
     if (!webhook) return res.status(404).json({ error: 'Webhook not found' });
 
-    await prisma.webhook.delete({ where: { id: webhookId } });
+    // Defense-in-depth: scope the delete by repoId so the two prechecks
+    // above aren't the only barrier between a guessed webhookId and a
+    // cross-repo webhook deletion.
+    const { count } = await prisma.webhook.deleteMany({
+      where: { id: webhookId, repoId: id },
+    });
+    if (count === 0) {
+      return res.status(404).json({ error: 'Webhook not found' });
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -1448,7 +1870,8 @@ router.get('/:id/health', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Repo not found' });
     }
 
-    // Get all sessions for this repo
+    // Get sessions for this repo — cap 100k for DoS defense (health
+    // score only needs a representative sample).
     const sessions = await prisma.codingSession.findMany({
       where: {
         commit: { repoId: id },
@@ -1462,6 +1885,7 @@ router.get('/:id/health', async (req: AuthRequest, res: Response) => {
         review: { select: { status: true } },
       },
       orderBy: { createdAt: 'desc' },
+      take: 100_000,
     });
 
     const sessionCount = sessions.length;

@@ -8,6 +8,7 @@ import AiBlameView from '../components/AiBlameView';
 import AskAuthorPanel from '../components/AskAuthorPanel';
 import TurnTimeline from '../components/TurnTimeline';
 import { formatCost, formatDuration, getStatusBadgeClass } from '../utils';
+import { safeHref } from '../utils/safe-url';
 
 function statusBadge(status: string) {
   return <span className={`${getStatusBadgeClass(status)} text-sm`}>{status}</span>;
@@ -690,7 +691,7 @@ export default function SessionDetail() {
                 <div key={pr.id} className="text-sm space-y-1">
                   <div className="flex items-center gap-2">
                     <a
-                      href={pr.url}
+                      href={safeHref(pr.url)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-indigo-400 hover:text-indigo-300 font-medium transition-colors"

@@ -71,7 +71,9 @@ export async function sendWeeklyReport(orgId: string): Promise<void> {
     if (emailConfig) {
       try {
         settings = { ...settings, ...JSON.parse(emailConfig.settings) };
-      } catch {}
+      } catch (err) {
+        console.warn(`[email] failed to parse emailConfig.settings for org ${orgId}:`, (err as Error).message);
+      }
     }
 
     if (!settings.enabled) return;
@@ -110,6 +112,8 @@ export async function sendWeeklyReport(orgId: string): Promise<void> {
           commit: { repo: { orgId } },
         },
         select: { costUsd: true, tokensUsed: true, linesAdded: true, linesRemoved: true, model: true, status: true },
+        take: 100_000,
+        orderBy: { createdAt: 'desc' },
       }),
       getMonthlySpend(orgId),
       getDailySpend(orgId, 7),
@@ -172,10 +176,14 @@ export async function generateWeeklyDigestData(orgId: string): Promise<WeeklyDig
     prisma.codingSession.findMany({
       where: { createdAt: { gte: weekAgo }, commit: { repo: { orgId } } },
       select: { costUsd: true, tokensUsed: true, model: true },
+      take: 100_000,
+      orderBy: { createdAt: 'desc' },
     }),
     prisma.codingSession.findMany({
       where: { createdAt: { gte: twoWeeksAgo, lt: weekAgo }, commit: { repo: { orgId } } },
       select: { costUsd: true },
+      take: 100_000,
+      orderBy: { createdAt: 'desc' },
     }),
     getSpendByModel(orgId),
     getSpendByUser(orgId),

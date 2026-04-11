@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { parseLimit, parseOffset } from '../utils/validate.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -9,8 +10,8 @@ router.use(requireAuth);
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.user!.orgId;
-    const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
-    const offset = parseInt(req.query.offset as string) || 0;
+    const limit = parseLimit(req.query.limit, 100, 500);
+    const offset = parseOffset(req.query.offset);
 
     const where: any = { orgId };
 
@@ -18,8 +19,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where.action = req.query.action as string;
     }
 
+    // Only admins/owners can filter audit logs by arbitrary userId.
+    // Non-privileged users are forced to see only their own entries —
+    // otherwise any org member could snoop on a coworker's audit trail
+    // just by passing `?userId=<coworker-id>`.
+    const role = (req.user!.role || '').toUpperCase();
+    const canViewOthers = role === 'ADMIN' || role === 'OWNER';
     if (req.query.userId) {
-      where.userId = req.query.userId as string;
+      const requestedUserId = req.query.userId as string;
+      if (!canViewOthers && requestedUserId !== req.user!.id) {
+        return res.status(403).json({ error: 'Insufficient permissions to view other users\' audit logs' });
+      }
+      where.userId = requestedUserId;
+    } else if (!canViewOthers) {
+      where.userId = req.user!.id;
     }
 
     const [logs, total] = await Promise.all([

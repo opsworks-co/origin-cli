@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { execSync } from 'child_process';
+import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { loadConfig } from './config.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -180,9 +180,8 @@ function buildChangesJson(data: SessionWriteData): string {
 export function writeSessionFiles(repoPath: string, data: SessionWriteData): void {
   try {
     const execOpts = {
-      encoding: 'utf-8' as const,
       cwd: repoPath,
-      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+      timeoutMs: 10_000,
       maxBuffer: 5 * 1024 * 1024,
     };
 
@@ -195,8 +194,8 @@ export function writeSessionFiles(repoPath: string, data: SessionWriteData): voi
     // This prevents the workspace post-commit hook (stale session with 0 prompts)
     // from overwriting good data written by the Stop hook (18+ prompts).
     try {
-      const existingMeta = execSync(
-        `git show refs/heads/${BRANCH}:${dir}/metadata.json`,
+      const existingMeta = git(
+        ['show', `refs/heads/${BRANCH}:${dir}/metadata.json`],
         execOpts,
       ).trim();
       const existing = JSON.parse(existingMeta) as SessionMetadata;
@@ -225,55 +224,48 @@ export function writeSessionFiles(repoPath: string, data: SessionWriteData): voi
     const indexOpts = { ...execOpts, env: envWithIndex };
 
     // 1. Seed temp index from existing branch tree (if any)
-    try {
-      const existingTree = execSync(
-        `git rev-parse refs/heads/${BRANCH}^{tree}`,
-        execOpts,
-      ).trim();
-      execSync(`git read-tree ${existingTree}`, indexOpts);
-    } catch {
-      // Branch doesn't exist yet — start with empty index (orphan)
+    const existingTree = gitOrNull(['rev-parse', `refs/heads/${BRANCH}^{tree}`], execOpts);
+    if (existingTree && /^[a-fA-F0-9]+$/.test(existingTree)) {
+      try {
+        git(['read-tree', existingTree], indexOpts);
+      } catch { /* best effort */ }
     }
 
     // 2. Write each file as a blob and add to temp index
     for (const [filepath, content] of files) {
-      const blobHash = execSync(
-        `git hash-object -w --stdin`,
-        { ...execOpts, input: content },
-      ).trim();
+      const blobRes = gitDetailed(['hash-object', '-w', '--stdin'], { ...execOpts, input: content });
+      if (blobRes.status !== 0) continue;
+      const blobHash = blobRes.stdout.trim();
+      if (!/^[a-fA-F0-9]+$/.test(blobHash)) continue;
 
-      execSync(
-        `git update-index --add --cacheinfo 100644,${blobHash},${filepath}`,
+      git(
+        ['update-index', '--add', '--cacheinfo', `100644,${blobHash},${filepath}`],
         indexOpts,
       );
     }
 
     // 3. Write the tree
-    const treeHash = execSync(`git write-tree`, indexOpts).trim();
+    const treeHash = git(['write-tree'], indexOpts).trim();
+    if (!/^[a-fA-F0-9]+$/.test(treeHash)) return;
 
     // 4. Create the commit
     const firstPrompt = (data.prompts[0]?.text || 'AI coding session').slice(0, 80);
     const commitMsg = `session ${safeId.slice(0, 8)}: ${data.model} — ${firstPrompt}`;
 
-    let parentArg = '';
-    try {
-      const parentHash = execSync(
-        `git rev-parse refs/heads/${BRANCH}`,
-        execOpts,
-      ).trim();
-      parentArg = `-p ${parentHash}`;
-    } catch {
-      // No parent — first commit on orphan branch
+    const parentHash = gitOrNull(['rev-parse', `refs/heads/${BRANCH}`], execOpts);
+    const commitArgs = ['commit-tree', treeHash];
+    if (parentHash && /^[a-fA-F0-9]+$/.test(parentHash)) {
+      commitArgs.push('-p', parentHash);
     }
-
-    const commitHash = execSync(
-      `git commit-tree ${treeHash} ${parentArg} -m -`,
-      { ...execOpts, input: commitMsg },
-    ).trim();
+    commitArgs.push('-m', commitMsg);
+    const commitRes = gitDetailed(commitArgs, execOpts);
+    if (commitRes.status !== 0) return;
+    const commitHash = commitRes.stdout.trim();
+    if (!/^[a-fA-F0-9]+$/.test(commitHash)) return;
 
     // 5. Update the branch ref
-    execSync(
-      `git update-ref refs/heads/${BRANCH} ${commitHash}`,
+    git(
+      ['update-ref', `refs/heads/${BRANCH}`, commitHash],
       execOpts,
     );
 
@@ -314,25 +306,27 @@ export function pushSessionBranch(repoPath: string): void {
     }
 
     const execOpts = {
-      encoding: 'utf-8' as const,
       cwd: repoPath,
-      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-      timeout: 15_000,
+      timeoutMs: 15_000,
     };
 
     const checkpointRepo = config?.checkpointRepo;
 
     if (checkpointRepo) {
-      // Push to external checkpoint repo
-      execSync(`git push ${checkpointRepo} ${BRANCH} --no-verify --quiet`, execOpts);
+      // Push to external checkpoint repo. Validate the repo value — it may
+      // be a remote name, path, or URL configured by the user, so allow a
+      // restricted set of characters to block injection via shell metachars.
+      // Reject anything that starts with '-' to block git option injection
+      // (e.g. --upload-pack=/tmp/evil would otherwise be parsed as a flag).
+      if (checkpointRepo.startsWith('-')) return;
+      if (!/^[a-zA-Z0-9_./:@+%~=-]+$/.test(checkpointRepo)) return;
+      // Use '--' as end-of-options marker for defense in depth.
+      git(['push', '--no-verify', '--quiet', '--', checkpointRepo, BRANCH], execOpts);
     } else {
       // Push to same repo's origin remote
-      try {
-        execSync('git remote get-url origin', execOpts);
-      } catch {
-        return; // no remote — nothing to push
-      }
-      execSync(`git push origin ${BRANCH} --no-verify --quiet`, execOpts);
+      const remote = gitDetailed(['remote', 'get-url', 'origin'], execOpts);
+      if (remote.status !== 0) return; // no remote — nothing to push
+      git(['push', 'origin', BRANCH, '--no-verify', '--quiet'], execOpts);
     }
   } catch {
     // Never fail — push is best-effort

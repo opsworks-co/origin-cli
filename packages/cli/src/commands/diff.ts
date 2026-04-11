@@ -1,7 +1,11 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { gitDetailed } from '../utils/exec.js';
 import { isAiCommit } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
+const SAFE_REF = /^[a-zA-Z0-9_./~^-]+$/;
+const SAFE_RANGE = /^[a-zA-Z0-9_./~^-]+(?:\.\.[a-zA-Z0-9_./~^-]+)?$/;
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -14,14 +18,10 @@ interface AnnotatedDiffLine {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-function execOpts(cwd: string) {
-  return {
-    encoding: 'utf-8' as const,
-    cwd,
-    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    maxBuffer: 10 * 1024 * 1024,
-  };
-}
+const gitOpts = (cwd: string) => ({
+  cwd,
+  maxBuffer: 10 * 1024 * 1024,
+});
 
 /**
  * Get commits in a range and classify each as AI or human.
@@ -31,17 +31,15 @@ function getCommitAuthorship(
   range: string,
 ): Map<string, 'ai' | 'human'> {
   const map = new Map<string, 'ai' | 'human'>();
-  try {
-    const commits = execSync(
-      `git log --format=%H ${range}`,
-      execOpts(repoPath),
-    ).trim().split('\n').filter(Boolean);
-    for (const sha of commits) {
-      if (/^[a-fA-F0-9]+$/.test(sha)) {
-        map.set(sha, isAiCommit(repoPath, sha) ? 'ai' : 'human');
-      }
+  if (!SAFE_RANGE.test(range)) return map;
+  const r = gitDetailed(['log', '--format=%H', range], gitOpts(repoPath));
+  if (r.status !== 0) return map;
+  const commits = r.stdout.trim().split('\n').filter(Boolean);
+  for (const sha of commits) {
+    if (HEX.test(sha)) {
+      map.set(sha, isAiCommit(repoPath, sha) ? 'ai' : 'human');
     }
-  } catch { /* ignore */ }
+  }
   return map;
 }
 
@@ -57,23 +55,25 @@ function blameLines(
   ref: string,
 ): Map<number, string> {
   const result = new Map<number, string>();
-  try {
-    const output = execSync(
-      `git blame -L ${startLine},${endLine} --porcelain ${ref} -- "${filePath}"`,
-      execOpts(repoPath),
-    );
-    let currentSha = '';
-    let currentLine = startLine;
-    for (const line of output.split('\n')) {
-      // Lines starting with a 40-char hex SHA are commit headers
-      const match = line.match(/^([a-f0-9]{40})\s+\d+\s+(\d+)/);
-      if (match) {
-        currentSha = match[1];
-        currentLine = parseInt(match[2], 10);
-        result.set(currentLine, currentSha);
-      }
+  if (!SAFE_REF.test(ref) && !HEX.test(ref)) return result;
+  if (!Number.isInteger(startLine) || !Number.isInteger(endLine)) return result;
+  const r = gitDetailed(
+    ['blame', '-L', `${startLine},${endLine}`, '--porcelain', ref, '--', filePath],
+    gitOpts(repoPath),
+  );
+  if (r.status !== 0) return result;
+  const output = r.stdout;
+  let currentSha = '';
+  let currentLine = startLine;
+  for (const line of output.split('\n')) {
+    // Lines starting with a 40-char hex SHA are commit headers
+    const match = line.match(/^([a-f0-9]{40})\s+\d+\s+(\d+)/);
+    if (match) {
+      currentSha = match[1];
+      currentLine = parseInt(match[2], 10);
+      result.set(currentLine, currentSha);
     }
-  } catch { /* blame can fail on new files, etc. */ }
+  }
   return result;
 }
 
@@ -236,23 +236,28 @@ export async function diffCommand(
   }
 
   // Get the diff
+  if (!SAFE_RANGE.test(diffRange)) {
+    console.error(chalk.red(`Error: Invalid diff range "${diffRange}".`));
+    return;
+  }
   let diffOutput: string;
-  try {
-    diffOutput = execSync(
-      `git diff ${diffRange}`,
-      execOpts(repoPath),
-    ).trim();
-  } catch {
-    // Maybe it's a single commit ref — try showing it
-    try {
-      diffOutput = execSync(
-        `git show ${diffRange} --format= --diff-merges=first-parent`,
-        execOpts(repoPath),
-      ).trim();
-      targetRef = diffRange;
-    } catch {
-      console.error(chalk.red(`Error: Invalid diff range "${diffRange}".`));
-      return;
+  {
+    const r = gitDetailed(['diff', diffRange], gitOpts(repoPath));
+    if (r.status === 0) {
+      diffOutput = r.stdout.trim();
+    } else {
+      // Maybe it's a single commit ref — try showing it
+      const r2 = gitDetailed(
+        ['show', diffRange, '--format=', '--diff-merges=first-parent'],
+        gitOpts(repoPath),
+      );
+      if (r2.status === 0) {
+        diffOutput = r2.stdout.trim();
+        targetRef = diffRange;
+      } else {
+        console.error(chalk.red(`Error: Invalid diff range "${diffRange}".`));
+        return;
+      }
     }
   }
 

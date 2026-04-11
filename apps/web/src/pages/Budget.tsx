@@ -64,8 +64,10 @@ export default function BudgetPage() {
 
   // ── ROI Calculator state ────────────────────────────────────────────────
   const [hourlyRate, setHourlyRate] = useState(() => {
-    const saved = localStorage.getItem('origin_hourly_rate');
-    return saved ? Number(saved) : 75;
+    try {
+      const saved = localStorage.getItem('origin_hourly_rate');
+      return saved ? Number(saved) : 75;
+    } catch { return 75; }
   });
 
   // ── Digest state ────────────────────────────────────────────────────────
@@ -259,7 +261,7 @@ export default function BudgetPage() {
                     onChange={(e) => {
                       const val = Number(e.target.value) || 0;
                       setHourlyRate(val);
-                      localStorage.setItem('origin_hourly_rate', String(val));
+                      try { localStorage.setItem('origin_hourly_rate', String(val)); } catch { /* ignore */ }
                     }}
                     className="input text-xs w-20 py-1 px-2"
                   />

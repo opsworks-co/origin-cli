@@ -12,11 +12,17 @@ RUN pnpm install --frozen-lockfile
 COPY apps/api ./apps/api
 COPY packages ./packages
 RUN cd apps/api && npx prisma generate && pnpm run build
-# Build & pack CLI for download (version comes from packages/cli/package.json)
+# Build & pack CLI for download (version comes from packages/cli/package.json).
+# The manifest MUST include sha256 — `origin upgrade` fail-closes without it
+# (see F1.4 hardening in packages/cli/src/commands/upgrade.ts). Compute the
+# digest of the exact tarball we just packed and write it into version.json.
 RUN cd packages/cli && \
     CLI_VERSION=$(node -p "require('./package.json').version") && \
     pnpm run build && rm -f origin-cli-*.tgz && npm pack && mv origin-cli-*.tgz origin-cli-latest.tgz && \
-    echo "{\"version\":\"$CLI_VERSION\",\"url\":\"https://getorigin.io/cli/origin-cli-latest.tgz\"}" > version.json
+    CLI_SHA256=$(sha256sum origin-cli-latest.tgz | awk '{print $1}') && \
+    printf '{"version":"%s","url":"https://getorigin.io/cli/origin-cli-latest.tgz","sha256":"%s"}\n' \
+      "$CLI_VERSION" "$CLI_SHA256" > version.json && \
+    cat version.json
 
 # Build Web
 FROM base AS web-builder
@@ -33,6 +39,10 @@ RUN pnpm --filter web build
 # Final runtime image
 FROM node:22-alpine
 WORKDIR /app
+
+# sqlite CLI is used by docker-start.sh for pre-migration dedup of rows that
+# would otherwise break a newly-introduced unique index (e.g. Commit.repoId+sha).
+RUN apk add --no-cache sqlite
 
 # Copy everything from api builder including root node_modules (has prisma binary)
 COPY --from=api-builder /app/node_modules ./node_modules

@@ -1,21 +1,17 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import { loadConfig } from '../config.js';
 import { api } from '../api.js';
+import { git, gitOrNull } from '../utils/exec.js';
 
 function getGitRoot(): string | null {
-  try {
-    return execSync('git rev-parse --show-toplevel', { encoding: 'utf-8' }).trim();
-  } catch {
-    return null;
-  }
+  return gitOrNull(['rev-parse', '--show-toplevel']);
 }
 
 function getRepoName(gitRoot: string): string {
   try {
-    const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', cwd: gitRoot }).trim();
+    const remoteUrl = git(['remote', 'get-url', 'origin'], { cwd: gitRoot }).trim();
     // Extract repo name from URL like git@github.com:org/repo.git or https://github.com/org/repo.git
     const match = remoteUrl.match(/\/([^/]+?)(?:\.git)?$/);
     return match ? match[1] : path.basename(gitRoot);

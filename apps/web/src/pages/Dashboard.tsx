@@ -109,8 +109,10 @@ function generateInsight(stats: Stats): InsightResult {
 function InsightBanner({ stats }: { stats: Stats }) {
   const storageKey = 'origin_insight_dismissed';
   const [dismissed, setDismissed] = useState(() => {
-    const val = localStorage.getItem(storageKey);
-    return val === 'true' || val === 'permanent';
+    try {
+      const val = localStorage.getItem(storageKey);
+      return val === 'true' || val === 'permanent';
+    } catch { return false; }
   });
   const [visible, setVisible] = useState(false);
 
@@ -126,7 +128,7 @@ function InsightBanner({ stats }: { stats: Stats }) {
   const { headline, advice } = generateInsight(stats);
 
   const handleDismiss = () => {
-    localStorage.setItem(storageKey, 'permanent');
+    try { localStorage.setItem(storageKey, 'permanent'); } catch { /* ignore */ }
     setVisible(false);
     setTimeout(() => setDismissed(true), 300);
   };
@@ -177,7 +179,9 @@ export default function Dashboard() {
   const [error, setError] = useState('');
   const [complianceScore, setComplianceScore] = useState<number | null>(null);
   const onboardingKey = `origin_onboarding_dismissed_${user?.orgId || ''}`;
-  const [onboardingDismissed, setOnboardingDismissed] = useState(() => localStorage.getItem(onboardingKey) === 'true');
+  const [onboardingDismissed, setOnboardingDismissed] = useState(() => {
+    try { return localStorage.getItem(onboardingKey) === 'true'; } catch { return false; }
+  });
 
   useEffect(() => {
     Promise.all([
@@ -344,7 +348,7 @@ export default function Dashboard() {
                 </div>
               </div>
               <button
-                onClick={() => { localStorage.setItem(onboardingKey, 'true'); setOnboardingDismissed(true); }}
+                onClick={() => { try { localStorage.setItem(onboardingKey, 'true'); } catch { /* ignore */ } setOnboardingDismissed(true); }}
                 className="text-gray-600 hover:text-gray-400 transition-colors"
                 title="Dismiss"
               >

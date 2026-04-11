@@ -5,6 +5,7 @@ import type { Repo, CommitDiff, RepoHealth } from '../api';
 import WebhookSettings from '../components/WebhookSettings';
 import ScoreGauge from '../components/ScoreGauge';
 import { timeAgo } from '../utils';
+import { safeHref } from '../utils/safe-url';
 
 interface PromptChangeData {
   promptIndex: number;
@@ -22,11 +23,15 @@ interface Commit {
   branch: string | null;
   aiToolDetected: string | null;
   aiDetectionMethod: string | null;
+  additions: number | null;
+  deletions: number | null;
+  fileCount: number | null;
   committedAt: string;
   createdAt: string;
   session: {
     id: string;
     model: string;
+    agent?: { id: string; slug: string; name: string } | null;
     filesChanged: string;
     tokensUsed: number;
     toolCalls: number;
@@ -40,7 +45,7 @@ interface Commit {
   } | null;
 }
 
-type Filter = 'all' | 'ai' | 'human' | 'unreviewed';
+type Filter = 'all' | 'ai' | 'human';
 
 // ─── Diff helpers ──────────────────────────────────────────────
 
@@ -241,7 +246,9 @@ function CommitDiffModal({
                 {commit.sha.slice(0, 7)}
               </code>
               {commit.session ? (
-                <span className="badge-blue text-xs">{commit.session.model}</span>
+                <span className="badge-blue text-xs">
+                  {commit.session.agent?.slug || commit.session.agent?.name || commit.session.model}
+                </span>
               ) : commit.aiToolDetected ? (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-500/10 text-purple-400 border border-dashed border-purple-500/40">
                   {commit.aiToolDetected}
@@ -252,7 +259,7 @@ function CommitDiffModal({
               )}
               {diff?.htmlUrl && (
                 <a
-                  href={diff.htmlUrl}
+                  href={safeHref(diff.htmlUrl)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-gray-500 hover:text-indigo-400 transition-colors"
@@ -394,7 +401,7 @@ function CommitDiffModal({
                       No file changes available for this commit.
                       {diff.htmlUrl && (
                         <a
-                          href={diff.htmlUrl}
+                          href={safeHref(diff.htmlUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="block mt-2 text-indigo-400 hover:text-indigo-300"
@@ -496,6 +503,7 @@ export default function RepoDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
+  const [commitSearch, setCommitSearch] = useState('');
 
   // Branch filter
   const [branches, setBranches] = useState<string[]>([]);
@@ -543,13 +551,32 @@ export default function RepoDetail() {
     fetchData();
   }, [fetchData]);
 
+  // Auto-sync on mount if the repo hasn't been synced recently.
+  // Provider-backed repos (github/gitlab) re-pull silently in the background.
+  useEffect(() => {
+    if (!id || !repo) return;
+    // Only auto-pull for repos whose integration is actually connected.
+    const eff = repo.effectiveProvider ?? repo.provider;
+    if (eff !== 'github' && eff !== 'gitlab') return;
+    const STALE_MS = 5 * 60 * 1000; // 5 min
+    const lastSync = repo.syncedAt ? new Date(repo.syncedAt).getTime() : 0;
+    if (Date.now() - lastSync < STALE_MS) return;
+    setSyncing(true);
+    api
+      .syncRepo(id)
+      .then(() => fetchData())
+      .catch(() => {})
+      .finally(() => setSyncing(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, repo?.id]);
+
   const handleSync = async () => {
     if (!id) return;
     setSyncing(true);
     setSyncMsg('');
     try {
       const result = await api.syncRepo(id);
-      setSyncMsg(`Synced ${result.synced} new sessions (${result.total} total)`);
+      setSyncMsg(`Synced ${result.synced} new commits (${result.total} total)`);
       fetchData();
     } catch (err: any) {
       setSyncMsg(`Sync failed: ${err.message}`);
@@ -627,18 +654,54 @@ export default function RepoDetail() {
         return isAI(c);
       case 'human':
         return !isAI(c);
-      case 'unreviewed':
-        return c.session !== null && !c.session.review;
       default:
         return true;
     }
   });
 
+  // Apply free-text search across commit message, sha, and author
+  const searchedCommits = useMemo(() => {
+    const q = commitSearch.trim().toLowerCase();
+    if (!q) return filteredCommits;
+    return filteredCommits.filter((c) =>
+      c.message.toLowerCase().includes(q) ||
+      c.sha.toLowerCase().includes(q) ||
+      c.author.toLowerCase().includes(q)
+    );
+  }, [filteredCommits, commitSearch]);
+
+  // Group commits by local calendar date (today, yesterday, full date)
+  const commitsByDate = useMemo(() => {
+    const groups = new Map<string, { label: string; items: Commit[] }>();
+    const now = new Date();
+    const todayKey = now.toDateString();
+    const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayKey = yesterday.toDateString();
+    for (const c of searchedCommits) {
+      const d = new Date(c.committedAt);
+      const key = d.toDateString();
+      let label: string;
+      if (key === todayKey) label = 'Today';
+      else if (key === yesterdayKey) label = 'Yesterday';
+      else {
+        label = d.toLocaleDateString(undefined, {
+          weekday: 'long',
+          day: 'numeric',
+          month: 'short',
+          year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric',
+        });
+      }
+      if (!groups.has(key)) groups.set(key, { label, items: [] });
+      groups.get(key)!.items.push(c);
+    }
+    // Sort groups by most recent date first
+    return Array.from(groups.entries())
+      .sort((a, b) => new Date(b[1].items[0].committedAt).getTime() - new Date(a[1].items[0].committedAt).getTime())
+      .map(([key, value]) => ({ key, ...value }));
+  }, [searchedCommits]);
+
   const aiCount = commits.filter(isAI).length;
   const humanCount = commits.filter((c) => !isAI(c)).length;
-  const unreviewedCount = commits.filter(
-    (c) => c.session !== null && !c.session.review
-  ).length;
 
   if (loading) {
     return (
@@ -660,137 +723,166 @@ export default function RepoDetail() {
     );
   }
 
+  // Use server-computed effectiveProvider so a repo whose integration isn't
+  // connected (e.g. github.com path but no GitHub token on the org) renders
+  // as "local" everywhere in this view — icon, badge, and webhook section.
+  const effProvider: 'github' | 'gitlab' | 'local' =
+    repo.effectiveProvider ?? (repo.provider as 'github' | 'gitlab' | 'local');
+
+  const providerIcon =
+    effProvider === 'github' ? (
+      <svg className="w-5 h-5 text-gray-300" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+      </svg>
+    ) : effProvider === 'gitlab' ? (
+      <svg className="w-5 h-5 text-orange-400" viewBox="0 0 32 32" fill="currentColor">
+        <path d="M16 28.896L21.323 12.576H10.677L16 28.896Z" />
+        <path d="M16 28.896L10.677 12.576H2.867L16 28.896Z" opacity="0.7" />
+        <path d="M2.867 12.576H10.677L7.334 2.279C7.155 1.736 6.393 1.736 6.214 2.279L2.867 12.576Z" />
+        <path d="M16 28.896L21.323 12.576H29.133L16 28.896Z" opacity="0.7" />
+        <path d="M29.133 12.576H21.323L24.666 2.279C24.845 1.736 25.607 1.736 25.786 2.279L29.133 12.576Z" />
+      </svg>
+    ) : (
+      <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25" />
+      </svg>
+    );
+
+  const aiPct = health?.aiPercentage ?? (commits.length > 0 ? (aiCount / commits.length) * 100 : 0);
+
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start justify-between flex-wrap gap-4">
-        <div>
-          <div className="flex items-center gap-3 mb-1">
-            <button
-              onClick={() => navigate('/repos')}
-              className="text-gray-500 hover:text-gray-300 transition-colors text-sm"
-            >
-              &larr; Repos
-            </button>
-            <h1 className="text-2xl font-bold">{repo.name}</h1>
-            <span
-              className={`badge ${
-                repo.provider === 'github' ? 'badge-purple' : 'badge-gray'
-              } text-xs`}
-            >
-              {repo.provider}
-            </span>
-          </div>
-          <p className="text-sm text-gray-500">{repo.path}</p>
-          {repo.syncedAt && (
-            <p className="text-xs text-gray-600 mt-1">
-              Last synced {timeAgo(repo.syncedAt)}
-            </p>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          {syncMsg && (
-            <span
-              className={`text-xs ${
-                syncMsg.startsWith('Sync failed') ? 'text-red-400' : 'text-green-400'
-              }`}
-            >
-              {syncMsg}
-            </span>
-          )}
-          <button onClick={handleSync} disabled={syncing || rescanning} className="btn-primary text-sm">
-            {syncing ? (
-              <span className="flex items-center gap-2">
-                <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
-                Syncing...
-              </span>
-            ) : (
-              'Sync Now'
-            )}
-          </button>
-          <button onClick={handleRescan} disabled={syncing || rescanning} className="text-sm px-3 py-1.5 rounded-lg bg-purple-600/20 text-purple-400 hover:bg-purple-600/30 border border-purple-500/30 transition-colors">
-            {rescanning ? (
-              <span className="flex items-center gap-2">
-                <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-purple-400" />
-                Scanning...
-              </span>
-            ) : (
-              'Rescan AI'
-            )}
-          </button>
-          {repo?.provider === 'github' && (
-            <button
-              onClick={handleImportSessions}
-              disabled={syncing || rescanning || importing}
-              className="text-sm px-3 py-1.5 rounded-lg bg-green-600/20 text-green-400 hover:bg-green-600/30 border border-green-500/30 transition-colors"
-            >
-              {importing ? (
-                <span className="flex items-center gap-2">
-                  <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-green-400" />
-                  Importing...
+    <div className="space-y-5">
+      {/* Back link */}
+      <div>
+        <button
+          onClick={() => navigate('/repos')}
+          className="text-gray-500 hover:text-gray-300 transition-colors text-xs flex items-center gap-1"
+        >
+          &larr; All repositories
+        </button>
+      </div>
+
+      {/* Hero card — compact single-row header */}
+      <div className="card py-3 px-4">
+        <div className="flex items-center gap-4 flex-wrap">
+          {/* Identity */}
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+            {providerIcon}
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className="text-base font-bold text-gray-100 truncate">{repo.name}</h1>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700 uppercase tracking-wider font-medium">
+                  {effProvider}
                 </span>
-              ) : (
-                'Import Sessions'
-              )}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Stats row */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <div className="card py-4">
-          <p className="text-xs text-gray-500 uppercase tracking-wider">Total Commits</p>
-          <p className="text-2xl font-bold mt-1">{commits.length}</p>
-        </div>
-        <div className="card py-4">
-          <p className="text-xs text-gray-500 uppercase tracking-wider">AI Authored</p>
-          <p className="text-2xl font-bold mt-1 text-indigo-400">{aiCount}</p>
-        </div>
-        <div className="card py-4">
-          <p className="text-xs text-gray-500 uppercase tracking-wider">Human</p>
-          <p className="text-2xl font-bold mt-1">{humanCount}</p>
-        </div>
-        <div className="card py-4">
-          <p className="text-xs text-gray-500 uppercase tracking-wider">Unreviewed</p>
-          <p className={`text-2xl font-bold mt-1 ${unreviewedCount > 0 ? 'text-amber-400' : 'text-green-400'}`}>
-            {unreviewedCount}
-          </p>
-        </div>
-      </div>
-
-      {/* Health Score */}
-      {health && (
-        <div className="card">
-          <div className="flex items-center gap-6">
-            <ScoreGauge score={health.healthScore} label="Repo Health" size={90} />
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 flex-1">
-              <div>
-                <p className="text-xs text-gray-500 uppercase tracking-wider">AI %</p>
-                <p className="text-lg font-bold text-indigo-400 mt-0.5">{health.aiPercentage.toFixed(0)}%</p>
               </div>
-              <div>
-                <p className="text-xs text-gray-500 uppercase tracking-wider">Review Coverage</p>
-                <p className={`text-lg font-bold mt-0.5 ${health.reviewCoverage >= 80 ? 'text-green-400' : health.reviewCoverage >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
-                  {health.reviewCoverage.toFixed(0)}%
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-gray-500 uppercase tracking-wider">Violations</p>
-                <p className={`text-lg font-bold mt-0.5 ${health.violations === 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {health.violations}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-gray-500 uppercase tracking-wider">Last Session</p>
-                <p className="text-sm text-gray-300 mt-1">
-                  {health.lastSession ? timeAgo(health.lastSession) : 'None'}
-                </p>
+              <div className="flex items-center gap-2 text-[10px] text-gray-600 mt-0.5">
+                <span className="font-mono truncate">{repo.path}</span>
+                <span>·</span>
+                {syncing ? (
+                  <span className="flex items-center gap-1 text-indigo-400">
+                    <div className="animate-spin rounded-full h-2 w-2 border-b border-indigo-400" />
+                    syncing…
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1">
+                    <span className="w-1 h-1 rounded-full bg-emerald-500/80" />
+                    {repo.syncedAt ? timeAgo(repo.syncedAt) : 'never synced'}
+                  </span>
+                )}
               </div>
             </div>
           </div>
+
+          {/* Inline metrics */}
+          <div className="flex items-center gap-5 text-xs">
+            {health && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-gray-500 uppercase tracking-wider text-[9px]">Health</span>
+                <span className={`text-sm font-bold tabular-nums ${health.healthScore >= 80 ? 'text-emerald-400' : health.healthScore >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
+                  {health.healthScore}
+                </span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5">
+              <span className="text-gray-500 uppercase tracking-wider text-[9px]">Total</span>
+              <span className="text-sm font-bold text-gray-100 tabular-nums">{commits.length}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-gray-500 uppercase tracking-wider text-[9px]">AI</span>
+              <span className="text-sm font-bold text-indigo-400 tabular-nums">{aiCount}</span>
+              <span className="text-[10px] text-gray-500">({aiPct.toFixed(0)}%)</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-gray-500 uppercase tracking-wider text-[9px]">Human</span>
+              <span className="text-sm font-bold text-gray-200 tabular-nums">{humanCount}</span>
+            </div>
+          </div>
+
+          {/* Action menu — kebab */}
+          <div className="relative">
+            <details className="group">
+              <summary className="list-none cursor-pointer p-1.5 rounded-md hover:bg-gray-800 text-gray-500 hover:text-gray-300 transition-colors">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v.01M12 12v.01M12 19v.01" />
+                </svg>
+              </summary>
+              <div className="absolute right-0 mt-1 w-52 rounded-lg border border-gray-800 bg-gray-950 shadow-xl z-20 overflow-hidden">
+                <button
+                  onClick={handleSync}
+                  disabled={syncing || rescanning}
+                  className="w-full text-left px-4 py-2.5 text-xs text-gray-300 hover:bg-gray-800/60 disabled:opacity-50"
+                >
+                  Resync now
+                </button>
+                <button
+                  onClick={handleRescan}
+                  disabled={syncing || rescanning}
+                  className="w-full text-left px-4 py-2.5 text-xs text-gray-300 hover:bg-gray-800/60 disabled:opacity-50"
+                >
+                  Rescan AI attribution
+                </button>
+                {effProvider === 'github' && (
+                  <button
+                    onClick={handleImportSessions}
+                    disabled={syncing || rescanning || importing}
+                    className="w-full text-left px-4 py-2.5 text-xs text-gray-300 hover:bg-gray-800/60 disabled:opacity-50"
+                  >
+                    Import sessions from branch
+                  </button>
+                )}
+              </div>
+            </details>
+          </div>
         </div>
-      )}
+
+        {/* AI authorship ratio bar — labelled so the meaning is obvious */}
+        {commits.length > 0 && (
+          <div className="mt-3 space-y-1.5">
+            <div className="flex items-center justify-between text-[10px] text-gray-500">
+              <span className="uppercase tracking-wider">AI authorship</span>
+              <span className="flex items-center gap-3 text-gray-400">
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
+                  AI {aiPct}% <span className="text-gray-600">({aiCount})</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-gray-500" />
+                  Human {100 - aiPct}% <span className="text-gray-600">({humanCount})</span>
+                </span>
+              </span>
+            </div>
+            <div className="h-1 rounded-full bg-gray-800 overflow-hidden flex">
+              <div className="bg-indigo-500" style={{ width: `${aiPct}%` }} title={`${aiCount} AI commits`} />
+              <div className="bg-gray-500" style={{ width: `${100 - aiPct}%` }} title={`${humanCount} human commits`} />
+            </div>
+          </div>
+        )}
+        {syncMsg && (
+          <div className={`mt-1.5 text-[10px] ${syncMsg.startsWith('Sync failed') ? 'text-red-400' : 'text-emerald-400'}`}>
+            {syncMsg}
+          </div>
+        )}
+      </div>
 
       {/* Filters */}
       <div className="flex gap-2 flex-wrap items-center">
@@ -799,7 +891,6 @@ export default function RepoDetail() {
             { key: 'all', label: 'All', count: commits.length },
             { key: 'ai', label: 'AI Authored', count: aiCount },
             { key: 'human', label: 'Human', count: humanCount },
-            { key: 'unreviewed', label: 'Unreviewed', count: unreviewedCount },
           ] as { key: Filter; label: string; count: number }[]
         ).map(({ key, label, count }) => (
           <button
@@ -835,129 +926,155 @@ export default function RepoDetail() {
         )}
       </div>
 
-      {/* Webhooks Section */}
-      {repo.provider === 'github' && (
+      {/* Webhooks Section — only for repos we can actually talk to GitHub
+          for. Hidden on local repos (no integration, no GitHub remote to
+          point a webhook at) so it doesn't eat half the screen with a
+          setup guide the user can't act on. */}
+      {effProvider === 'github' && (
         <div className="card">
           <WebhookSettings repoId={id!} />
         </div>
       )}
 
-      {/* Commits List */}
+      {/* Commits — Checkpoints-style date-grouped list */}
       <div className="card p-0 overflow-hidden">
-        <div className="px-6 py-3 border-b border-gray-800 flex items-center justify-between">
-          <p className="text-xs text-gray-500">Click any commit to view code changes and AI prompts</p>
+        {/* Search header */}
+        <div className="px-5 py-3 border-b border-gray-800 flex items-center gap-3">
+          <div className="relative flex-1 max-w-xl">
+            <svg
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35m0 0A7.5 7.5 0 106.15 6.15a7.5 7.5 0 0010.5 10.5z" />
+            </svg>
+            <input
+              type="text"
+              value={commitSearch}
+              onChange={(e) => setCommitSearch(e.target.value)}
+              placeholder="Search commits, SHA, or author…"
+              className="w-full bg-gray-900/60 border border-gray-800 rounded-lg pl-9 pr-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-indigo-600/60 transition-colors"
+            />
+          </div>
+          <div className="text-xs text-gray-600 whitespace-nowrap ml-auto">
+            {searchedCommits.length} commit{searchedCommits.length === 1 ? '' : 's'}
+          </div>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
-                <th className="px-6 py-3 font-medium">Type</th>
-                <th className="px-6 py-3 font-medium">SHA</th>
-                <th className="px-6 py-3 font-medium">Message</th>
-                <th className="px-6 py-3 font-medium">Branch</th>
-                <th className="px-6 py-3 font-medium">Author</th>
-                <th className="px-6 py-3 font-medium text-center">Prompts</th>
-                <th className="px-6 py-3 font-medium text-right">Files</th>
-                <th className="px-6 py-3 font-medium">Status</th>
-                <th className="px-6 py-3 font-medium text-center">Session</th>
-                <th className="px-6 py-3 font-medium text-right">Date</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800/50">
-              {filteredCommits.length === 0 ? (
-                <tr>
-                  <td colSpan={10} className="px-6 py-12 text-center text-gray-500">
-                    No commits match this filter
-                  </td>
-                </tr>
-              ) : (
-                filteredCommits.map((commit) => {
-                  let filesCount = 0;
-                  try {
-                    filesCount = commit.session
-                      ? JSON.parse(commit.session.filesChanged).length
-                      : 0;
-                  } catch {
-                    // ignore parse errors
-                  }
-                  const promptCount = commit.session?.promptChanges?.length || 0;
 
-                  return (
-                    <tr
-                      key={commit.id}
-                      onClick={() => openDiff(commit)}
-                      className="hover:bg-gray-800/30 transition-colors cursor-pointer"
-                    >
-                      <td className="px-6 py-3">
-                        {commit.session ? (
-                          <span className="badge-blue text-xs">{commit.session.model}</span>
-                        ) : commit.aiToolDetected ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-500/10 text-purple-400 border border-dashed border-purple-500/40">
-                            {commit.aiToolDetected}
-                            <span className="text-[9px] opacity-60">detected</span>
-                          </span>
-                        ) : (
-                          <span className="badge-gray text-xs">Human</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-3">
-                        <code className="text-xs text-indigo-400 bg-indigo-950/30 px-1.5 py-0.5 rounded">
+        {/* Date-grouped commits */}
+        {searchedCommits.length === 0 ? (
+          <div className="px-6 py-16 text-center text-gray-600 text-sm">
+            {commitSearch ? 'No commits match your search.' : 'No commits match this filter.'}
+          </div>
+        ) : (
+          <div>
+            {commitsByDate.map((group) => (
+              <div key={group.key}>
+                {/* Date header */}
+                <div className="px-5 py-2.5 border-b border-gray-800 bg-gray-900/30 flex items-center justify-between sticky top-0 z-10 backdrop-blur">
+                  <p className="text-xs text-gray-400 font-semibold">{group.label}</p>
+                  <p className="text-[10px] text-gray-600 uppercase tracking-wider">
+                    {group.items.length} commit{group.items.length === 1 ? '' : 's'}
+                  </p>
+                </div>
+
+                {/* Commit rows */}
+                <div className="divide-y divide-gray-800/40">
+                  {group.items.map((commit) => {
+                    const promptCount = commit.session?.promptChanges?.length || 0;
+                    const sessionFilesCount = (() => {
+                      try {
+                        return commit.session ? JSON.parse(commit.session.filesChanged).length : 0;
+                      } catch {
+                        return 0;
+                      }
+                    })();
+                    const fileCount = commit.fileCount ?? sessionFilesCount ?? 0;
+                    const additions = commit.additions ?? commit.session?.linesAdded ?? null;
+                    const deletions = commit.deletions ?? commit.session?.linesRemoved ?? null;
+                    const firstLine = commit.message.split('\n')[0];
+                    const isAiCommit = !!commit.session || !!commit.aiToolDetected;
+
+                    return (
+                      <div
+                        key={commit.id}
+                        onClick={() => navigate(`/repos/${id}/commits/${commit.sha}`)}
+                        className="group flex items-center gap-4 px-5 py-3 hover:bg-gray-800/30 transition-colors cursor-pointer"
+                      >
+                        {/* SHA */}
+                        <code className="text-[11px] text-gray-500 font-mono w-16 flex-shrink-0">
                           {commit.sha.slice(0, 7)}
                         </code>
-                      </td>
-                      <td className="px-6 py-3 text-gray-300 max-w-[300px] truncate">
-                        {commit.message}
-                      </td>
-                      <td className="px-6 py-3">
-                        {commit.branch ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 max-w-[120px] truncate">
-                            {commit.branch}
-                          </span>
-                        ) : (
-                          <span className="text-gray-600 text-xs">{'\u2014'}</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-3 text-gray-400">{commit.author}</td>
-                      <td className="px-6 py-3 text-center">
-                        {promptCount > 0 ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/30">
-                            {promptCount}
-                          </span>
-                        ) : (
-                          <span className="text-gray-600 text-xs">{'\u2014'}</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-3 text-right text-gray-400">
-                        {commit.session ? filesCount : '\u2014'}
-                      </td>
-                      <td className="px-6 py-3">
-                        {commit.session
-                          ? statusBadge(commit.session.review?.status ?? null)
-                          : <span className="text-gray-600 text-xs">{'\u2014'}</span>}
-                      </td>
-                      <td className="px-6 py-3 text-center">
-                        {commit.session ? (
-                          <Link
-                            to={`/sessions/${commit.session.id}`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30 border border-indigo-500/30 transition-colors"
-                          >
-                            View &rarr;
-                          </Link>
-                        ) : (
-                          <span className="text-gray-600 text-xs">{'\u2014'}</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-3 text-right text-gray-500">
-                        {timeAgo(commit.committedAt)}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+
+                        {/* Message + badges */}
+                        <div className="flex-1 min-w-0 flex items-center gap-2">
+                          <p className="text-sm text-gray-200 truncate group-hover:text-white transition-colors">
+                            {firstLine}
+                          </p>
+                          {isAiCommit && (
+                            <span
+                              className={`flex-shrink-0 text-[9px] px-1.5 py-0.5 rounded-full font-medium ${
+                                commit.session
+                                  ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/30'
+                                  : 'bg-purple-500/10 text-purple-400 border border-dashed border-purple-500/40'
+                              }`}
+                            >
+                              {/* Prefer the agent slug/name over the raw model string —
+                                  the model (e.g. "gemini-3-flash-preview") is an
+                                  implementation detail; the agent ("claude-code",
+                                  "cursor", etc.) is what the user cares about. */}
+                              {commit.session
+                                ? (commit.session.agent?.slug || commit.session.agent?.name || commit.session.model)
+                                : commit.aiToolDetected}
+                            </span>
+                          )}
+                          {promptCount > 0 && (
+                            <span
+                              className="flex-shrink-0 inline-flex items-center gap-1 text-[10px] text-indigo-400"
+                              title={`${promptCount} AI prompts produced this commit`}
+                            >
+                              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                              </svg>
+                              {promptCount}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* +/- stats */}
+                        <div className="flex items-center gap-1.5 text-xs font-mono flex-shrink-0 w-24 justify-end">
+                          {additions !== null && additions > 0 && (
+                            <span className="text-emerald-400">+{additions}</span>
+                          )}
+                          {additions !== null && deletions !== null && (additions > 0 || deletions > 0) && (
+                            <span className="text-gray-700">/</span>
+                          )}
+                          {deletions !== null && deletions > 0 && (
+                            <span className="text-red-400">−{deletions}</span>
+                          )}
+                          {(additions === null || additions === 0) && (deletions === null || deletions === 0) && (
+                            <span className="text-gray-700 text-[10px]">—</span>
+                          )}
+                        </div>
+
+                        {/* File count */}
+                        <div className="text-[11px] text-gray-500 w-14 text-right flex-shrink-0">
+                          {fileCount > 0 ? `${fileCount} file${fileCount === 1 ? '' : 's'}` : '—'}
+                        </div>
+
+                        {/* Author (hidden on narrow screens) */}
+                        <div className="hidden xl:block text-[11px] text-gray-500 truncate w-32 text-right flex-shrink-0">
+                          {commit.author}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Diff Modal */}

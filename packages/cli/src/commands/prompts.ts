@@ -1,9 +1,11 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
 import { getGitRoot } from '../session-state.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
 import { isConnectedMode } from '../config.js';
 import path from 'path';
+import { git, runDetailed } from '../utils/exec.js';
+
+const HEX = /^[a-fA-F0-9]{4,64}$/;
 
 interface CommitPromptInfo {
   sha: string;
@@ -16,11 +18,11 @@ interface CommitPromptInfo {
 }
 
 function readNoteForSha(sha: string, cwd: string): { sessionId?: string; model?: string } | null {
+  if (!HEX.test(sha)) return null;
+  const r = runDetailed('git', ['notes', '--ref=origin', 'show', sha], { cwd });
+  if (r.status !== 0) return null;
   try {
-    const raw = execSync(`git notes --ref=origin show ${sha} 2>/dev/null`, {
-      encoding: 'utf-8', cwd, stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(r.stdout.trim());
     const data = parsed.origin || parsed;
     return { sessionId: data.sessionId, model: data.model };
   } catch {
@@ -29,24 +31,15 @@ function readNoteForSha(sha: string, cwd: string): { sessionId?: string; model?:
 }
 
 function getCommitDiff(sha: string, cwd: string, filePath?: string): string {
-  try {
-    const fileArg = filePath ? `-- "${filePath}"` : '';
-    return execSync(`git diff ${sha}~1..${sha} --stat --patch ${fileArg} 2>/dev/null`, {
-      encoding: 'utf-8', cwd, stdio: ['pipe', 'pipe', 'pipe'],
-      maxBuffer: 1024 * 1024,
-    }).trim();
-  } catch {
-    // Might be the initial commit
-    try {
-      const fileArg = filePath ? `-- "${filePath}"` : '';
-      return execSync(`git diff --root ${sha} --stat --patch ${fileArg} 2>/dev/null`, {
-        encoding: 'utf-8', cwd, stdio: ['pipe', 'pipe', 'pipe'],
-        maxBuffer: 1024 * 1024,
-      }).trim();
-    } catch {
-      return '';
-    }
-  }
+  if (!HEX.test(sha)) return '';
+  const fileArgs = filePath ? ['--', filePath] : [];
+  const opts = { cwd, maxBuffer: 1024 * 1024 };
+  const r = runDetailed('git', ['diff', `${sha}~1..${sha}`, '--stat', '--patch', ...fileArgs], opts);
+  if (r.status === 0) return r.stdout.trim();
+  // Might be the initial commit
+  const r2 = runDetailed('git', ['diff', '--root', sha, '--stat', '--patch', ...fileArgs], opts);
+  if (r2.status === 0) return r2.stdout.trim();
+  return '';
 }
 
 function getPromptsForSession(sessionId: string, cwd: string): string[] {
@@ -57,11 +50,11 @@ function getPromptsForSession(sessionId: string, cwd: string): string[] {
   }
 
   // Try origin-sessions branch
+  if (!/^[a-zA-Z0-9_.-]+$/.test(sessionId)) return [];
+  const r = runDetailed('git', ['show', `origin-sessions:sessions/${sessionId}/prompts.md`], { cwd });
+  if (r.status !== 0) return [];
   try {
-    const raw = execSync(
-      `git show origin-sessions:sessions/${sessionId}/prompts.md 2>/dev/null`,
-      { encoding: 'utf-8', cwd, stdio: ['pipe', 'pipe', 'pipe'] }
-    ).trim();
+    const raw = r.stdout.trim();
     // Parse prompts from markdown — each prompt starts with ## Prompt
     const prompts: string[] = [];
     const sections = raw.split(/^## Prompt \d+/m).slice(1);
@@ -100,10 +93,12 @@ export async function promptsCommand(filePath: string, opts: { expand?: boolean;
   // Get all commits that touched this file
   let commits: { sha: string; date: string; message: string }[];
   try {
-    const log = execSync(
-      `git log --follow --format="%H|%aI|%s" -n ${limit * 2} -- "${relPath}" 2>/dev/null`,
-      { encoding: 'utf-8', cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'] }
-    ).trim();
+    const r = runDetailed(
+      'git',
+      ['log', '--follow', '--format=%H|%aI|%s', '-n', String(limit * 2), '--', relPath],
+      { cwd: repoRoot }
+    );
+    const log = r.status === 0 ? r.stdout.trim() : '';
     if (!log) {
       console.log(chalk.yellow(`\n  No commits found for ${relPath}\n`));
       return;

@@ -1,6 +1,8 @@
-import { execSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
+import { git, gitDetailed, gitOrNull } from './utils/exec.js';
+
+const SAFE_ID = /^[a-zA-Z0-9_-]+$/;
 
 // ─── Trail Model ──────────────────────────────────────────────────────────
 //
@@ -29,9 +31,8 @@ const BRANCH = 'origin-sessions';
 // ─── Git Plumbing Helpers ─────────────────────────────────────────────────
 
 const execOpts = (cwd: string) => ({
-  encoding: 'utf-8' as const,
   cwd,
-  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+  timeoutMs: 10_000,
   maxBuffer: 5 * 1024 * 1024,
 });
 
@@ -46,9 +47,10 @@ export function generateTrailId(): string {
  * Read a trail from the origin-sessions branch.
  */
 export function readTrail(repoPath: string, trailId: string): Trail | null {
+  if (!SAFE_ID.test(trailId)) return null;
   try {
-    const content = execSync(
-      `git show refs/heads/${BRANCH}:trails/${trailId}.json`,
+    const content = git(
+      ['show', `refs/heads/${BRANCH}:trails/${trailId}.json`],
       execOpts(repoPath),
     ).trim();
     return JSON.parse(content);
@@ -63,8 +65,8 @@ export function readTrail(repoPath: string, trailId: string): Trail | null {
 export function listTrails(repoPath: string): Trail[] {
   const trails: Trail[] = [];
   try {
-    const listing = execSync(
-      `git ls-tree --name-only refs/heads/${BRANCH} trails/`,
+    const listing = git(
+      ['ls-tree', '--name-only', `refs/heads/${BRANCH}`, 'trails/'],
       execOpts(repoPath),
     ).trim();
 
@@ -72,9 +74,12 @@ export function listTrails(repoPath: string): Trail[] {
 
     const files = listing.split('\n').filter(f => f.endsWith('.json'));
     for (const file of files) {
+      // Only allow trails/<id>.json with a safe id — defense against
+      // weird paths that might have ended up in the tree.
+      if (!/^trails\/[a-zA-Z0-9_-]+\.json$/.test(file)) continue;
       try {
-        const content = execSync(
-          `git show refs/heads/${BRANCH}:${file}`,
+        const content = git(
+          ['show', `refs/heads/${BRANCH}:${file}`],
           execOpts(repoPath),
         ).trim();
         trails.push(JSON.parse(content));
@@ -90,6 +95,7 @@ export function listTrails(repoPath: string): Trail[] {
  * Never touches the working directory or current branch.
  */
 export function writeTrail(repoPath: string, trail: Trail): void {
+  if (!SAFE_ID.test(trail.id)) return;
   try {
     const opts = execOpts(repoPath);
     const filePath = `trails/${trail.id}.json`;
@@ -101,49 +107,44 @@ export function writeTrail(repoPath: string, trail: Trail): void {
     const indexOpts = { ...opts, env: envWithIndex };
 
     // Seed from existing branch tree
-    try {
-      const existingTree = execSync(
-        `git rev-parse refs/heads/${BRANCH}^{tree}`,
-        opts,
-      ).trim();
-      execSync(`git read-tree ${existingTree}`, indexOpts);
-    } catch {
-      // Branch doesn't exist yet
+    const existingTree = gitOrNull(['rev-parse', `refs/heads/${BRANCH}^{tree}`], opts);
+    if (existingTree && /^[a-fA-F0-9]+$/.test(existingTree)) {
+      try {
+        git(['read-tree', existingTree], indexOpts);
+      } catch { /* best effort */ }
     }
 
-    // Write blob
-    const blobHash = execSync(
-      `git hash-object -w --stdin`,
-      { ...opts, input: content },
-    ).trim();
+    // Write blob (needs stdin → use gitDetailed with input)
+    const blobRes = gitDetailed(['hash-object', '-w', '--stdin'], { ...opts, input: content });
+    if (blobRes.status !== 0) return;
+    const blobHash = blobRes.stdout.trim();
+    if (!/^[a-fA-F0-9]+$/.test(blobHash)) return;
 
     // Add to index
-    execSync(
-      `git update-index --add --cacheinfo 100644,${blobHash},${filePath}`,
+    git(
+      ['update-index', '--add', '--cacheinfo', `100644,${blobHash},${filePath}`],
       indexOpts,
     );
 
     // Write tree
-    const treeHash = execSync(`git write-tree`, indexOpts).trim();
+    const treeHash = git(['write-tree'], indexOpts).trim();
+    if (!/^[a-fA-F0-9]+$/.test(treeHash)) return;
 
     // Create commit
     const commitMsg = `trail ${trail.id.slice(0, 8)}: ${trail.name} [${trail.status}]`;
-    let parentArg = '';
-    try {
-      const parentHash = execSync(
-        `git rev-parse refs/heads/${BRANCH}`,
-        opts,
-      ).trim();
-      parentArg = `-p ${parentHash}`;
-    } catch { /* first commit */ }
-
-    const commitHash = execSync(
-      `git commit-tree ${treeHash} ${parentArg} -m -`,
-      { ...opts, input: commitMsg },
-    ).trim();
+    const parentHash = gitOrNull(['rev-parse', `refs/heads/${BRANCH}`], opts);
+    const commitArgs = ['commit-tree', treeHash];
+    if (parentHash && /^[a-fA-F0-9]+$/.test(parentHash)) {
+      commitArgs.push('-p', parentHash);
+    }
+    commitArgs.push('-m', commitMsg);
+    const commitRes = gitDetailed(commitArgs, opts);
+    if (commitRes.status !== 0) return;
+    const commitHash = commitRes.stdout.trim();
+    if (!/^[a-fA-F0-9]+$/.test(commitHash)) return;
 
     // Update ref
-    execSync(`git update-ref refs/heads/${BRANCH} ${commitHash}`, opts);
+    git(['update-ref', `refs/heads/${BRANCH}`, commitHash], opts);
 
     // Clean up
     try {

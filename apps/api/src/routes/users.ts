@@ -34,6 +34,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         },
       },
       orderBy: { createdAt: 'asc' },
+      take: 5000,
     });
 
     // Get cost and last active per user
@@ -218,10 +219,16 @@ router.patch('/:id/role', requireRole('ADMIN'), async (req: AuthRequest, res: Re
       }
     }
 
-    await prisma.user.update({
-      where: { id: targetId },
+    // Defense in depth: scope the role update by (id, orgId) so we can
+    // never accidentally flip a user's role in another org if the
+    // precheck is ever dropped or reordered in a future refactor.
+    const updated = await prisma.user.updateMany({
+      where: { id: targetId, orgId },
       data: { role: role.toUpperCase() },
     });
+    if (updated.count === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -270,7 +277,12 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     // Unlink sessions (keep them, just remove user reference)
     await prisma.codingSession.updateMany({ where: { userId: targetId }, data: { userId: null } });
 
-    await prisma.user.delete({ where: { id: targetId } });
+    const deleted = await prisma.user.deleteMany({
+      where: { id: targetId, orgId },
+    });
+    if (deleted.count === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     await prisma.auditLog.create({
       data: {
@@ -595,7 +607,16 @@ router.delete('/invites/:id', requireRole('ADMIN'), async (req: AuthRequest, res
       return res.status(404).json({ error: 'Invitation not found' });
     }
 
-    await prisma.invitation.delete({ where: { id } });
+    // Defense-in-depth: compound-scoped delete so a future refactor that
+    // drops the precheck above can't turn this into a cross-tenant wipe.
+    // invitation.delete({id}) accepts only the @id field, so we use
+    // deleteMany with {id, orgId} and verify count===1.
+    const { count } = await prisma.invitation.deleteMany({
+      where: { id, orgId: req.user!.orgId },
+    });
+    if (count === 0) {
+      return res.status(404).json({ error: 'Invitation not found' });
+    }
 
     res.json({ success: true });
   } catch (err) {

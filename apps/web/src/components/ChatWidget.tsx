@@ -78,10 +78,6 @@ export default function ChatWidget({ endpoint, title, placeholder, requireAuth, 
 
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (requireAuth) {
-        const token = localStorage.getItem('origin_token');
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-      }
 
       // Only send user/assistant messages (not the welcome message if it was injected)
       const apiMessages = updatedMessages
@@ -91,6 +87,9 @@ export default function ChatWidget({ endpoint, title, placeholder, requireAuth, 
       const res = await fetch(endpoint, {
         method: 'POST',
         headers,
+        // Authenticated chat requests rely on the httpOnly `origin_auth`
+        // cookie — no localStorage token reads here anymore.
+        credentials: requireAuth ? 'same-origin' : 'omit',
         body: JSON.stringify({ messages: apiMessages }),
       });
 

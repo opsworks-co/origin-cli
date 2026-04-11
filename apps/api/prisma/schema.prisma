@@ -47,6 +47,8 @@ model User {
   apiKeys       ApiKey[]
   bookmarks     SessionBookmark[]
   authTokens    AuthToken[]
+
+  @@index([orgId])
 }
 
 model AuthToken {
@@ -58,6 +60,9 @@ model AuthToken {
   expiresAt DateTime
   usedAt    DateTime?
   createdAt DateTime @default(now())
+
+  @@index([userId, type])
+  @@index([expiresAt])
 }
 
 model Invitation {
@@ -72,6 +77,9 @@ model Invitation {
   usedAt    DateTime?
   usedBy    String?
   createdAt DateTime  @default(now())
+
+  @@index([orgId])
+  @@index([expiresAt])
 }
 
 model ApiKey {
@@ -88,6 +96,10 @@ model ApiKey {
   createdAt DateTime @default(now())
   repoScopes  ApiKeyRepoScope[]
   agentScopes ApiKeyAgentScope[]
+
+  @@index([orgId])
+  @@index([userId])
+  @@index([keyPrefix])
 }
 
 model ApiKeyRepoScope {
@@ -128,6 +140,8 @@ model Repo {
   policyRules  PolicyRule[]
   apiKeyScopes ApiKeyRepoScope[]
   sessionRepos SessionRepo[]
+
+  @@index([orgId, archived])
 }
 
 model Commit {
@@ -141,11 +155,19 @@ model Commit {
   aiDetectionMethod String?        // How: "session", "co-author-trailer", "author-pattern", "commit-message"
   branch            String?        // Git branch this commit was pushed to
   filesChanged      String         @default("[]") // JSON array of file paths changed in this commit
+  additions         Int?           // Lines added across all files
+  deletions         Int?           // Lines deleted across all files
+  fileCount         Int?           // Number of files changed
   committedAt       DateTime
   createdAt         DateTime       @default(now())
   session           CodingSession? @relation("primaryCommit")
   sessionId         String?
   codingSession     CodingSession? @relation("sessionCommits", fields: [sessionId], references: [id])
+
+  @@unique([repoId, sha])
+  @@index([repoId, committedAt])
+  @@index([sha])
+  @@index([sessionId])
 }
 
 model CodingSession {
@@ -194,6 +216,14 @@ model CodingSession {
   sharedSessions SharedSession[]
   bookmarks      SessionBookmark[]
   sessionRepos   SessionRepo[]
+
+  @@index([userId, createdAt])
+  @@index([agentId])
+  @@index([status])
+  @@index([machineId])
+  @@index([agentSessionId])
+  @@index([parentSessionId])
+  @@index([apiKeyId])
 }
 
 model SessionDiff {
@@ -220,6 +250,8 @@ model PromptChange {
   diff            String        @default("") // Unified diff of committed edits from this prompt
   uncommittedDiff String        @default("") // Unified diff of uncommitted (staged+unstaged) changes
   createdAt       DateTime      @default(now())
+
+  @@index([sessionId])
 }
 
 model SessionRepo {
@@ -309,6 +341,10 @@ model PolicyRule {
   condition String
   action    String
   severity  String   @default("MEDIUM")
+
+  @@index([policyId])
+  @@index([agentId])
+  @@index([repoId])
 }
 
 model PolicyAssignment {
@@ -334,6 +370,8 @@ model Machine {
   lastSeenAt    DateTime     @default(now())
   createdAt     DateTime     @default(now())
   policyRules   PolicyRule[]
+
+  @@index([orgId])
 }
 
 // ── Audit Log ───────────────────────────────────────────────────
@@ -348,6 +386,9 @@ model AuditLog {
   resource  String?
   metadata  String   @default("{}")
   createdAt DateTime @default(now())
+
+  @@index([orgId, createdAt])
+  @@index([userId])
 }
 
 // ── Versioning ──────────────────────────────────────────────────
@@ -386,6 +427,37 @@ model Webhook {
   githubWebhookId Int?     // GitHub's webhook ID (for auto-cleanup on delete)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  @@index([repoId])
+}
+
+// ── Webhook Delivery Queue ──────────────────────────────────────
+// Persists every incoming webhook so processing failures can be retried.
+// Status lifecycle: PENDING → PROCESSING → DELIVERED | FAILED | DEAD
+//   - PENDING:    queued, not yet attempted
+//   - PROCESSING: actively being processed (claimed by a worker)
+//   - DELIVERED:  processed successfully
+//   - FAILED:     last attempt failed, will be retried
+//   - DEAD:       max attempts reached, abandoned (manual intervention required)
+
+model WebhookDelivery {
+  id            String    @id @default(uuid())
+  provider      String    // "github" | "gitlab" | "github-app"
+  repoId        String?
+  event         String    // "push" | "pull_request" | etc.
+  payload       String    // JSON-stringified webhook body
+  headers       String    // JSON-stringified relevant headers
+  status        String    @default("PENDING")
+  attempts      Int       @default(0)
+  maxAttempts   Int       @default(5)
+  lastError     String?
+  nextAttemptAt DateTime  @default(now())
+  receivedAt    DateTime  @default(now())
+  deliveredAt   DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([repoId])
 }
 
 // ── Pull Requests ─────────────────────────────────────────────────
@@ -406,6 +478,8 @@ model PullRequest {
   commentId   String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  @@index([repoId, state])
 }
 
 // ── Integrations ──────────────────────────────────────────────────
@@ -421,6 +495,8 @@ model IntegrationConfig {
   authType  String   @default("pat") // "pat" or "github_app"
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([orgId, provider])
 }
 
 // ── Notifications ────────────────────────────────────────────────
@@ -441,6 +517,9 @@ model Notification {
   emailSent   Boolean   @default(false)
   emailSentAt DateTime?
   createdAt   DateTime  @default(now())
+
+  @@index([userId, read])
+  @@index([orgId, createdAt])
 }
 
 // ── Secret/PII Scanning ──────────────────────────────────────────
@@ -456,6 +535,8 @@ model SecretFinding {
   match       String        // Redacted snippet
   ruleName    String        // Which regex rule matched
   createdAt   DateTime      @default(now())
+
+  @@index([sessionId])
 }
 
 // ── Trails (Feature Tracking) ─────────────────────────────────────
@@ -474,6 +555,8 @@ model Trail {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @default(now()) @updatedAt
   sessions    TrailSession[]
+
+  @@index([orgId, status])
 }
 
 model TrailSession {

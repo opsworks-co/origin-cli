@@ -1,4 +1,5 @@
-import { execSync, spawn } from 'child_process';
+import { spawn } from 'child_process';
+import { runDetailed } from './utils/exec.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -156,13 +157,16 @@ export function executePlugin(
 
       let stdout = '';
       let stderr = '';
+      const MAX_BUF = 5 * 1024 * 1024; // 5MB cap per stream
 
       child.stdout.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString();
+        if (stdout.length < MAX_BUF) stdout += chunk.toString();
+        else try { child.kill('SIGKILL'); } catch { /* noop */ }
       });
 
       child.stderr.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
+        if (stderr.length < MAX_BUF) stderr += chunk.toString();
+        else try { child.kill('SIGKILL'); } catch { /* noop */ }
       });
 
       child.on('error', (err) => {
@@ -271,13 +275,10 @@ function isCommandAccessible(command: string): boolean {
     return fs.existsSync(cmd);
   }
 
-  // Check PATH
-  try {
-    execSync(`which ${cmd}`, { stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
+  // Check PATH. Only allow safe executable names to avoid injection via `which`.
+  if (!/^[a-zA-Z0-9_.-]+$/.test(cmd)) return false;
+  const r = runDetailed('which', [cmd], { timeoutMs: 2_000 });
+  return r.status === 0;
 }
 
 /**

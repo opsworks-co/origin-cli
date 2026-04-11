@@ -7,6 +7,7 @@ import {
   updatePRGitHubStatus,
 } from '../services/github-integration.js';
 import { updateMRGitLabStatus } from '../services/gitlab-integration.js';
+import { safeParseArray } from '../utils/safe-json.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -17,17 +18,32 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const orgId = req.user!.orgId;
     const { repoId, status, state } = req.query;
 
-    // First find all repo IDs belonging to this org
+    // First find all repo IDs belonging to this org (cap for DoS
+    // protection on large tenants — see identical pattern in prompts.ts).
     const orgRepos = await prisma.repo.findMany({
       where: { orgId },
       select: { id: true },
+      take: 5000,
     });
     const orgRepoIds = orgRepos.map((r) => r.id);
 
+    // IDOR fix: previously `if (repoId) whereClause.repoId = repoId as string;`
+    // replaced the `{ in: orgRepoIds }` constraint with a raw user-supplied
+    // id — meaning a caller could request PRs for any repo in the entire
+    // database just by passing its UUID. Now the supplied repoId has to
+    // *also* belong to the caller's org; otherwise we return empty instead
+    // of leaking data.
+    const orgRepoIdSet = new Set(orgRepoIds);
     const whereClause: Record<string, unknown> = {
       repoId: { in: orgRepoIds },
     };
-    if (repoId) whereClause.repoId = repoId as string;
+    if (repoId) {
+      const requested = repoId as string;
+      if (!orgRepoIdSet.has(requested)) {
+        return res.json([]);
+      }
+      whereClause.repoId = requested;
+    }
     if (state) whereClause.state = state as string;
     if (status) whereClause.checkStatus = status as string;
 
@@ -38,23 +54,30 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     });
 
     // Fetch repo info for all PRs
-    const repoIds = [...new Set(prs.map((pr) => pr.repoId))];
+    const prRepoIds = [...new Set(prs.map((pr) => pr.repoId))];
     const repos = await prisma.repo.findMany({
-      where: { id: { in: repoIds } },
+      where: { id: { in: prRepoIds } },
       select: { id: true, name: true, path: true },
     });
     const repoMap = new Map(repos.map((r) => [r.id, r]));
 
-    // Enrich with session counts
-    const enriched = await Promise.all(
-      prs.map(async (pr) => {
-        let commitShas: string[];
-        try {
-          commitShas = JSON.parse(pr.commitShas);
-        } catch {
-          commitShas = [];
-        }
+    // Parse commitShas once per PR — safeParseArray logs instead of silently
+    // eating errors, which hid schema drift before.
+    const prShas = prs.map((pr) => ({
+      pr,
+      commitShas: safeParseArray<string>(pr.commitShas, `pr.${pr.id}.commitShas`),
+    }));
 
+    // Enrich with session counts. Still runs in parallel via Promise.all,
+    // but every PR fires its own commits.findMany + auditLog.findMany
+    // inside getSessionsForPR — 2 round-trips × N PRs. A proper batch
+    // fix (flatten all (repoId, sha) pairs into one global query, then
+    // group in memory) needs a restructure of getSessionsForPR that
+    // affects GitHub PR comments too; leaving that for a dedicated pass.
+    // The immediate wins here are IDOR fix + safeParse + less duplicate
+    // parsing (shas parsed once above, passed in below).
+    const enriched = await Promise.all(
+      prShas.map(async ({ pr, commitShas }) => {
         const sessions = await getSessionsForPR(pr.repoId, commitShas);
         const { state: checkState, description } = computeCheckStatus(sessions);
         const repo = repoMap.get(pr.repoId);
@@ -95,17 +118,23 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 // GET /:id — single PR with full session details
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const pr = await prisma.pullRequest.findUnique({
-      where: { id: req.params.id as string },
+    // IDOR defense: scope the PR lookup to the caller's org via the repo
+    // join in one query, so we never fetch a PR row for a tenant that
+    // isn't ours. The post-hoc repo findFirst was correct but relied on
+    // two queries staying in sync; collapsing into one removes the risk.
+    const pr = await prisma.pullRequest.findFirst({
+      where: {
+        id: req.params.id as string,
+        repo: { orgId: req.user!.orgId },
+      },
     });
 
     if (!pr) {
       return res.status(404).json({ error: 'Pull request not found' });
     }
 
-    // Check org access
-    const repo = await prisma.repo.findFirst({
-      where: { id: pr.repoId, orgId: req.user!.orgId },
+    const repo = await prisma.repo.findUnique({
+      where: { id: pr.repoId },
       select: { id: true, name: true, path: true },
     });
 
@@ -113,12 +142,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Pull request not found' });
     }
 
-    let commitShas: string[];
-    try {
-      commitShas = JSON.parse(pr.commitShas);
-    } catch {
-      commitShas = [];
-    }
+    const commitShas = safeParseArray<string>(pr.commitShas, `pr.${pr.id}.commitShas`);
 
     const sessions = await getSessionsForPR(pr.repoId, commitShas);
     const { state: checkState, description } = computeCheckStatus(sessions);
@@ -191,12 +215,7 @@ router.get('/review', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: `PR #${prNumber} not found for ${owner}/${repoName}` });
     }
 
-    let commitShas: string[];
-    try {
-      commitShas = JSON.parse(pr.commitShas);
-    } catch {
-      commitShas = [];
-    }
+    const commitShas = safeParseArray<string>(pr.commitShas, `pr.${pr.id}.commitShas`);
 
     const sessions = await getSessionsForPR(pr.repoId, commitShas);
 
@@ -271,29 +290,26 @@ router.get('/review', async (req: AuthRequest, res: Response) => {
 // POST /:id/recheck — manually re-run policy check and update GitHub
 router.post('/:id/recheck', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const pr = await prisma.pullRequest.findUnique({
-      where: { id: req.params.id as string },
+    const pr = await prisma.pullRequest.findFirst({
+      where: {
+        id: req.params.id as string,
+        repo: { orgId: req.user!.orgId },
+      },
     });
 
     if (!pr) {
       return res.status(404).json({ error: 'Pull request not found' });
     }
 
-    // Check org access
-    const repo = await prisma.repo.findFirst({
-      where: { id: pr.repoId, orgId: req.user!.orgId },
+    const repo = await prisma.repo.findUnique({
+      where: { id: pr.repoId },
     });
 
     if (!repo) {
       return res.status(404).json({ error: 'Pull request not found' });
     }
 
-    let commitShas: string[];
-    try {
-      commitShas = JSON.parse(pr.commitShas);
-    } catch {
-      commitShas = [];
-    }
+    const commitShas = safeParseArray<string>(pr.commitShas, `pr.${pr.id}.commitShas`);
 
     // Find the head SHA (last commit in the list)
     const headSha = commitShas[commitShas.length - 1];
