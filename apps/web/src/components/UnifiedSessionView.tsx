@@ -184,37 +184,16 @@ function FormattedMessage({ text }: { text: string }) {
         displayName = `${server}: ${tool}`;
       }
 
-      // Color by tool category
-      const getToolStyle = (name: string): { color: string; icon: string } => {
-        if (name === 'Read') return { color: 'bg-blue-500/15 text-blue-400 border-blue-500/30', icon: '📄' };
-        if (name === 'Edit') return { color: 'bg-amber-500/15 text-amber-400 border-amber-500/30', icon: '✏️' };
-        if (name === 'Write') return { color: 'bg-amber-500/15 text-amber-400 border-amber-500/30', icon: '📝' };
-        if (name === 'Bash') return { color: 'bg-green-500/15 text-green-400 border-green-500/30', icon: '⚡' };
-        if (name === 'Grep') return { color: 'bg-purple-500/15 text-purple-400 border-purple-500/30', icon: '🔍' };
-        if (name === 'Glob') return { color: 'bg-purple-500/15 text-purple-400 border-purple-500/30', icon: '📂' };
-        if (name === 'Task') return { color: 'bg-indigo-500/15 text-indigo-400 border-indigo-500/30', icon: '🔧' };
-        if (name === 'TaskOutput') return { color: 'bg-indigo-500/15 text-indigo-400 border-indigo-500/30', icon: '📋' };
-        if (name === 'WebFetch' || name === 'WebSearch') return { color: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30', icon: '🌐' };
-        if (name === 'TodoWrite') return { color: 'bg-pink-500/15 text-pink-400 border-pink-500/30', icon: '✅' };
-        if (name === 'EnterPlanMode' || name === 'ExitPlanMode') return { color: 'bg-violet-500/15 text-violet-400 border-violet-500/30', icon: '📐' };
-        if (rawName.includes('Preview') || rawName.includes('preview')) return { color: 'bg-teal-500/15 text-teal-400 border-teal-500/30', icon: '🖥️' };
-        if (rawName.includes('Chrome') || rawName.includes('chrome')) return { color: 'bg-orange-500/15 text-orange-400 border-orange-500/30', icon: '🌐' };
-        return { color: 'bg-gray-700/30 text-gray-400 border-gray-600/30', icon: '🔧' };
-      };
-
-      const style = getToolStyle(rawName);
-
+      // Plain-text rendering — the colored/emoji badges felt too fancy.
+      // Keep tool calls as a single mono line that reads like terminal output.
       elements.push(
-        <div key={key++} className="my-1 flex items-center gap-2">
-          <span
-            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono border ${style.color}`}
-          >
-            <span className="text-[10px]">{style.icon}</span>
-            {displayName}
-            {toolArg && (
-              <span className="opacity-60 ml-0.5 truncate max-w-[200px]">{toolArg}</span>
-            )}
-          </span>
+        <div
+          key={key++}
+          className="my-0.5 font-mono text-[12px] text-gray-400 leading-[1.6]"
+        >
+          <span className="text-gray-500">›</span>{' '}
+          <span className="text-gray-300">{displayName}</span>
+          {toolArg && <span className="text-gray-500"> {toolArg}</span>}
         </div>,
       );
       i++;
