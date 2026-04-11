@@ -41,7 +41,7 @@ explicitly push it.
 | 🧠 **Prompts disappear the moment you close the terminal** | Every prompt is recorded and searchable — `origin why <file>:<line>` replays the exact conversation that wrote it |
 | 🔁 **Context is lost every time you switch agents** | Cross-agent handoff: Claude can pick up where Cursor left off, automatically |
 | 🔐 **AI agents leak secrets into commits** | Built-in secret scanner blocks commits containing AWS keys, API tokens, JWTs, DB creds, and 40+ other patterns |
-| 📋 **No audit trail for SOC 2 / ISO 27001** | Full session history signed into git notes — tamper-evident, diffable, reviewable |
+| 🛰️ **Your prompts are being logged by someone else's cloud** | 100% local by default — prompts, responses, and costs live in your own git repo. No accounts, no telemetry, no server required |
 | 🤷 **You don't know which model writes the best code** | `origin stats` compares approval rate, rework rate, avg cost, and avg lines across every model you use |
 | 🧩 **Monorepos and multi-repo workspaces break every tool** | Auto-detects every git repo under your working dir and tracks them all in a single session |
 
