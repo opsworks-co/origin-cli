@@ -50,6 +50,7 @@ export const api = {
   getMachines: () => request('/api/machines'),
   syncRepo: (id: string) => request(`/api/repos/${id}/sync`, { method: 'POST' }),
   getRepos: () => request('/api/repos'),
+  getWhoami: () => request('/api/mcp/whoami'),
   getMe: async () => {
     const res = await request('/api/auth/me');
     assertObj(res, 'getMe');
