@@ -1,8 +1,20 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Apply theme before first paint to avoid FOUC -->
+    <script>
+      (function() {
+        var stored = localStorage.getItem('theme');
+        var theme = stored === 'light' ? 'light'
+          : stored === 'dark' ? 'dark'
+          : window.matchMedia('(prefers-color-scheme: light)').matches ? 'light'
+          : 'dark';
+        if (theme === 'dark') document.documentElement.classList.add('dark');
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
     <title>Origin — AI Code Governance Platform</title>
     <meta name="description" content="Origin is the AI code governance platform. Track what AI coding agents write, attribute every line, enforce policies, and maintain audit trails for compliance." />
     <meta name="keywords" content="AI code governance, AI coding agent monitoring, AI code attribution, AI code audit trail, AI code compliance, AI generated code policy, Claude Code tracking, Cursor tracking, AI code security" />
@@ -30,7 +42,7 @@
       gtag('config', 'G-1GRK1KDD9P');
     </script>
   </head>
-  <body class="bg-gray-950 text-gray-100 min-h-screen antialiased">
+  <body class="min-h-screen">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

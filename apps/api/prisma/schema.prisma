@@ -47,6 +47,7 @@ model User {
   apiKeys       ApiKey[]
   bookmarks     SessionBookmark[]
   authTokens    AuthToken[]
+  annotations   SessionAnnotation[]
 
   @@index([orgId])
 }
@@ -216,6 +217,7 @@ model CodingSession {
   sharedSessions SharedSession[]
   bookmarks      SessionBookmark[]
   sessionRepos   SessionRepo[]
+  annotations    SessionAnnotation[]
 
   @@index([userId, createdAt])
   @@index([agentId])
@@ -580,6 +582,23 @@ model SharedSession {
   expiresAt   DateTime?              // null = never expires
   createdAt   DateTime      @default(now())
   createdById String?
+}
+
+// ── Session Annotations ──────────────────────────────────────────────
+
+model SessionAnnotation {
+  id        String        @id @default(cuid())
+  sessionId String
+  session   CodingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  turnIndex Int           // which turn/prompt this annotation is on
+  text      String
+  authorId  String
+  author    User          @relation(fields: [authorId], references: [id])
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([sessionId])
+  @@index([authorId])
 }
 
 // ── Session Bookmarks ────────────────────────────────────────────────

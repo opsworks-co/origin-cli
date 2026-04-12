@@ -25,6 +25,36 @@ export * from './api/auth.js';
 export * from './api/repos.js';
 export * from './api/sessions.js';
 
+// ---- Annotations ----------------------------------------------------------
+
+export interface SessionAnnotation {
+  id: string;
+  sessionId: string;
+  turnIndex: number;
+  text: string;
+  authorId: string;
+  authorName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function getAnnotations(sessionId: string) {
+  return request<SessionAnnotation[]>(`/api/sessions/${sessionId}/annotations`);
+}
+
+export function createAnnotation(sessionId: string, data: { turnIndex: number; text: string }) {
+  return request<SessionAnnotation>(`/api/sessions/${sessionId}/annotations`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteAnnotation(sessionId: string, annotationId: string) {
+  return request<void>(`/api/sessions/${sessionId}/annotations/${annotationId}`, {
+    method: 'DELETE',
+  });
+}
+
 // ---- Ask the Author -------------------------------------------------------
 
 export function askSessionAuthor(

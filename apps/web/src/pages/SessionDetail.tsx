@@ -9,6 +9,7 @@ import AskAuthorPanel from '../components/AskAuthorPanel';
 import TurnTimeline from '../components/TurnTimeline';
 import { formatCost, formatDuration, getStatusBadgeClass } from '../utils';
 import { safeHref } from '../utils/safe-url';
+import { useToast } from '../components/Toast';
 
 function statusBadge(status: string) {
   return <span className={`${getStatusBadgeClass(status)} text-sm`}>{status}</span>;
@@ -18,6 +19,7 @@ export default function SessionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { toast } = useToast();
   const isDev = user?.accountType === 'developer';
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -45,6 +47,9 @@ export default function SessionDetail() {
   // AI Review
   const [aiReviewLoading, setAiReviewLoading] = useState(false);
   const [reviewExpanded, setReviewExpanded] = useState(false);
+
+  // Annotations
+  const [annotations, setAnnotations] = useState<api.SessionAnnotation[]>([]);
 
   // Delete
   const [deleting, setDeleting] = useState(false);
@@ -83,6 +88,9 @@ export default function SessionDetail() {
       .then(setFindings)
       .catch(() => {}) // Silently fail — new feature
       .finally(() => setFindingsLoading(false));
+
+    // Load annotations
+    api.getAnnotations(id).then(setAnnotations).catch(() => {});
   }, [id]);
 
   // Elapsed timer for running sessions — compute from startedAt so it survives refreshes
@@ -269,6 +277,51 @@ export default function SessionDetail() {
     setShowExportMenu(false);
   };
 
+  const exportAsGist = async () => {
+    if (!session) return;
+    const date = new Date(session.createdAt).toISOString().split('T')[0];
+    const repo = (session.repoNames && session.repoNames.length > 1 ? session.repoNames.join(', ') : session.repoName) ?? 'Unknown Repo';
+    const lines = [
+      `# Origin Session: ${session.model} on ${repo} (${date})`,
+      '',
+      '## Metadata',
+      '',
+      `| Field | Value |`,
+      `|-------|-------|`,
+      `| Model | ${session.model} |`,
+      `| Cost | ${formatCost(session.costUsd)} |`,
+      `| Tokens | ${session.tokensUsed.toLocaleString()} |`,
+      `| Duration | ${formatDuration(session.durationMs)} |`,
+      `| Files changed | ${(() => { try { return JSON.parse(session.filesChanged).length; } catch { return 0; } })()} |`,
+      `| Lines | +${session.linesAdded} / -${session.linesRemoved} |`,
+      `| Branch | ${session.branch || '—'} |`,
+      `| Agent | ${session.agentName || 'Unknown'} |`,
+      '',
+    ];
+    if (session.promptChanges?.length) {
+      lines.push('## Prompts', '');
+      session.promptChanges.forEach((p: any, i: number) => {
+        lines.push(`### Turn ${i + 1}`, '', p.promptText || '_(empty)_', '');
+        if (p.filesChanged) {
+          try {
+            const files = typeof p.filesChanged === 'string' ? JSON.parse(p.filesChanged) : p.filesChanged;
+            if (files.length) lines.push('**Files changed:** ' + files.join(', '), '');
+          } catch {}
+        }
+      });
+    }
+    lines.push('---', '', '*Exported from [Origin](https://getorigin.io)*');
+    const markdown = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(markdown);
+      window.open('https://gist.github.com', '_blank');
+      toast('success', 'Session copied to clipboard — paste into the Gist editor');
+    } catch {
+      toast('error', 'Failed to copy to clipboard');
+    }
+    setShowExportMenu(false);
+  };
+
   const [archiving, setArchiving] = useState(false);
 
   const handleToggleArchive = async () => {
@@ -387,6 +440,13 @@ export default function SessionDetail() {
                     className="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
                   >
                     Export as Markdown
+                  </button>
+                  <button
+                    onClick={exportAsGist}
+                    className="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 transition-colors flex items-center gap-1.5"
+                  >
+                    <svg className="w-3.5 h-3.5 text-gray-400" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" /></svg>
+                    Export as Gist
                   </button>
                 </div>
               )}
@@ -917,6 +977,17 @@ export default function SessionDetail() {
             <TurnTimeline
               promptChanges={session.promptChanges || []}
               model={session.model}
+              annotations={annotations}
+              canAnnotate={!!(session.userId === user?.id || ['ADMIN', 'OWNER'].includes((user?.role || '').toUpperCase()))}
+              currentUserId={user?.id}
+              onAddAnnotation={async (turnIndex, text) => {
+                const created = await api.createAnnotation(id!, { turnIndex, text });
+                setAnnotations((prev) => [...prev, created]);
+              }}
+              onDeleteAnnotation={async (annotationId) => {
+                await api.deleteAnnotation(id!, annotationId);
+                setAnnotations((prev) => prev.filter((a) => a.id !== annotationId));
+              }}
             />
           )}
           {activeTab === 'security' && (

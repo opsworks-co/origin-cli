@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
 import { request } from '../api';
 import NotificationBell from './NotificationBell';
 import { LogoMark } from './Logo';
@@ -21,6 +22,8 @@ import {
   LogOut,
   Menu,
   X,
+  Sun,
+  Moon,
 } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -41,6 +44,7 @@ const ADMIN_NAV_ITEM = { to: '/admin', label: 'Admin', icon: ShieldAlert };
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
@@ -147,6 +151,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <p className="text-[11px] text-gray-500 truncate">{user?.orgName}</p>
             </div>
             <NotificationBell />
+            <button
+              onClick={toggleTheme}
+              className="p-1.5 text-gray-500 hover:text-gray-300 hover:bg-white/[0.06] rounded-lg transition-colors"
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
           </div>
           <button
             onClick={handleLogout}

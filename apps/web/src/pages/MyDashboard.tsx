@@ -52,6 +52,7 @@ interface Session {
   tokensUsed: number;
   linesAdded: number;
   linesRemoved: number;
+  filesChanged: string;
   status: string;
   createdAt: string;
   startedAt: string | null;
@@ -670,6 +671,109 @@ function SessionTimeline({ sessions, navigate }: { sessions: Session[]; navigate
   );
 }
 
+// ── Today's Activity Feed ───────────────────────────────────────────────────
+
+function TodayActivityFeed({
+  sessions,
+  loading,
+  navigate,
+}: {
+  sessions: Session[];
+  loading: boolean;
+  navigate: (path: string) => void;
+}) {
+  if (loading) {
+    return (
+      <div className="space-y-2">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i} className="h-10 bg-gray-800/50 rounded-lg animate-pulse" />
+        ))}
+      </div>
+    );
+  }
+
+  if (sessions.length === 0) {
+    return (
+      <div className="text-xs text-gray-600 py-4 text-center">
+        No AI sessions yet today — start coding!
+      </div>
+    );
+  }
+
+  // Sort newest first
+  const sorted = [...sessions].sort(
+    (a, b) =>
+      new Date(b.startedAt || b.createdAt).getTime() -
+      new Date(a.startedAt || a.createdAt).getTime()
+  );
+
+  function buildLabel(s: Session): string {
+    const agent = s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || 'AI';
+    const filesJson = s.filesChanged;
+    let fileCount = 0;
+    let firstFile = '';
+    try {
+      const files: string[] = JSON.parse(filesJson);
+      fileCount = files.length;
+      firstFile = files[0] ? files[0].split('/').pop() || '' : '';
+    } catch {
+      // filesChanged may be a raw count or empty
+    }
+
+    if (s.linesAdded > 0 && firstFile) {
+      return `${agent} wrote ${s.linesAdded} line${s.linesAdded !== 1 ? 's' : ''} in ${firstFile}`;
+    }
+    if (fileCount > 0 && s.repoName) {
+      return `${agent} edited ${fileCount} file${fileCount !== 1 ? 's' : ''} in ${s.repoName}`;
+    }
+    if (s.repoName) {
+      return `${agent} session in ${s.repoName}`;
+    }
+    return `${agent} session completed`;
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {sorted.map((s) => {
+        const color = agentColor(s.agentName);
+        const label = buildLabel(s);
+        const isRunning = s.status === 'RUNNING';
+        return (
+          <button
+            key={s.id}
+            onClick={() => navigate(`/sessions/${s.id}`)}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg bg-gray-900/40 border border-gray-800/60 hover:border-gray-700 hover:bg-gray-900/70 transition-all text-left group"
+          >
+            {/* Agent dot */}
+            <div
+              className="w-2 h-2 rounded-full flex-shrink-0"
+              style={{ backgroundColor: color }}
+            />
+            {/* Label */}
+            <span className="flex-1 text-xs text-gray-300 truncate group-hover:text-gray-100 transition-colors">
+              {label}
+            </span>
+            {/* Metadata pills */}
+            <div className="flex items-center gap-2 flex-shrink-0 text-[11px] text-gray-500">
+              {s.costUsd > 0 && (
+                <span className="font-medium text-gray-400">{fmtCost(s.costUsd)}</span>
+              )}
+              {isRunning ? (
+                <span className="text-green-400 font-medium flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block" />
+                  live
+                </span>
+              ) : (
+                <span>{timeAgo(s.startedAt || s.createdAt)}</span>
+              )}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Agent Cards ─────────────────────────────────────────────────────────────
 
 function AgentCards({ agents }: { agents: AgentCard[] }) {
@@ -863,6 +967,10 @@ export default function MyDashboard() {
   const [showBookmarked, setShowBookmarked] = useState(false);
   const [bookmarkedSessions, setBookmarkedSessions] = useState<Session[]>([]);
 
+  // Today's activity feed
+  const [todaySessions, setTodaySessions] = useState<Session[]>([]);
+  const [todayLoading, setTodayLoading] = useState(true);
+
   // Timeline sessions (all recent, no pagination)
   const [timelineSessions, setTimelineSessions] = useState<Session[]>([]);
   const [timelineLoading, setTimelineLoading] = useState(true);
@@ -951,6 +1059,24 @@ export default function MyDashboard() {
   useEffect(() => {
     fetchSessions();
   }, [fetchSessions]);
+
+  // ── Fetch today's sessions for activity feed ──────────────────────
+  useEffect(() => {
+    setTodayLoading(true);
+    const params = new URLSearchParams();
+    params.set('mine', 'true');
+    params.set('limit', '50');
+    params.set('offset', '0');
+    request<{ sessions: Session[]; total: number }>(`/api/sessions?${params.toString()}`)
+      .then((data) => {
+        const todayStr = new Date().toDateString();
+        setTodaySessions(
+          data.sessions.filter((s) => new Date(s.startedAt || s.createdAt).toDateString() === todayStr)
+        );
+      })
+      .catch(() => {})
+      .finally(() => setTodayLoading(false));
+  }, []);
 
   // ── Fetch timeline sessions (last 100, no offset) ─────────────────
   useEffect(() => {
@@ -1293,6 +1419,32 @@ export default function MyDashboard() {
       ) : stats ? (
         <StatCardsRow stats={stats} fmt={fmt} fmtCost={fmtCost} />
       ) : null}
+
+      {/* Today's Activity feed */}
+      {(todayLoading || todaySessions.length > 0) && (
+        <div className="rounded-xl border border-gray-800/80 bg-gray-900/30 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Activity className="w-3.5 h-3.5 text-indigo-400" />
+              <span className="text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                What did AI write today?
+              </span>
+            </div>
+            {!todayLoading && todaySessions.length > 0 && (
+              <span className="text-[11px] text-gray-600">
+                {todaySessions.length} session{todaySessions.length !== 1 ? 's' : ''}
+                {' · '}
+                {fmtCost(todaySessions.reduce((sum, s) => sum + s.costUsd, 0))} total
+              </span>
+            )}
+          </div>
+          <TodayActivityFeed
+            sessions={todaySessions}
+            loading={todayLoading}
+            navigate={navigate}
+          />
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex items-center gap-1 border-b border-gray-800 pb-0 overflow-x-auto">

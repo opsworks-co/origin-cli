@@ -6,7 +6,7 @@ import { api } from '../api.js';
 import { enableCommand } from './enable.js';
 import { detectTools } from '../tools-detector.js';
 
-export async function initCommand(opts: { standalone?: boolean } = {}) {
+export async function initCommand(opts: { standalone?: boolean; hooks?: boolean } = {}) {
   const config = loadConfig();
   let connected = isConnectedMode();
 
@@ -66,9 +66,12 @@ export async function initCommand(opts: { standalone?: boolean } = {}) {
   saveAgentConfig({ machineId, hostname, detectedTools, orgId: config?.orgId || 'local' });
   console.log(chalk.gray('  Agent config saved to ~/.origin/agent.json'));
 
-  // Auto-install global hooks so all repos are tracked
-  console.log(chalk.bold('\n📡 Installing global hooks...\n'));
-  await enableCommand({ global: true });
+  // Auto-install global hooks so all repos are tracked (skip with --no-hooks)
+  if (opts.hooks !== false) {
+    console.log(chalk.bold('\n📡 Installing global hooks...\n'));
+    await enableCommand({ global: true });
+    console.log(chalk.green('\n✓ Global hooks installed — Origin is now tracking all AI sessions'));
+  }
 
   if (!connected) {
     console.log(chalk.green('\n✓ Standalone mode ready — sessions will be tracked locally in git.'));

@@ -14,6 +14,7 @@ import { agentsCommand, agentCreateCommand } from './commands/agents.js';
 import { reposCommand, repoAddCommand } from './commands/repos.js';
 import { auditCommand } from './commands/audit.js';
 import { statsCommand } from './commands/stats.js';
+import { recapCommand } from './commands/recap.js';
 import { enableCommand } from './commands/enable.js';
 import { disableCommand } from './commands/disable.js';
 import { linkCommand } from './commands/link.js';
@@ -54,6 +55,8 @@ import { reworkCommand } from './commands/rework.js';
 import { reportCommand } from './commands/report.js';
 import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
+import { promptStatusCommand } from './commands/prompt-status.js';
+import { shellPromptCommand } from './commands/shell-prompt.js';
 import { checkForUpdate } from './version-check.js';
 import { BUILD_INFO } from './build-info.js';
 import { readFileSync } from 'fs';
@@ -115,6 +118,7 @@ program.command('login')
 program.command('init')
   .description('Register this machine as an agent host')
   .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
+  .option('--no-hooks', 'Skip automatic global hook installation')
   .action(initCommand);
 program.command('enable')
   .description('Install Origin hooks for session tracking')
@@ -135,6 +139,12 @@ program.command('link [slug]')
   .option('--unlink', 'Remove link')
   .action(linkCommand);
 program.command('status').description('Show current status (active session, branch, repo info)').action(statusCommand);
+program.command('prompt-status')
+  .description('Output a short PS1/prompt string for the current session state (fast, local-only)')
+  .action(promptStatusCommand);
+program.command('shell-prompt')
+  .description('Output shell integration script to stdout — pipe to eval in .bashrc/.zshrc')
+  .action(shellPromptCommand);
 program.command('whoami').description('Show current user and org info').action(whoamiCommand);
 
 // ─── Session Management ──────────────────────────────────────────────────
@@ -262,6 +272,11 @@ program.command('stats')
   .option('-g, --global', 'Show stats across all repos (default: current repo only)')
   .option('-r, --range <range>', 'Commit range (e.g., HEAD~50..HEAD)')
   .action(statsCommand);
+
+program.command('recap')
+  .description('End-of-day summary: sessions, cost, tokens, files, commits, TODOs, top model')
+  .option('-d, --days <n>', 'Number of days to include (default: 1 = today only)', '1')
+  .action(recapCommand);
 
 program.command('report')
   .description('Generate a markdown sprint report summarizing AI activity')

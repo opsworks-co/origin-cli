@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
 import NotificationBell from './NotificationBell';
 import ChatWidget from './ChatWidget';
 import { LogoMark } from './Logo';
@@ -16,6 +17,8 @@ import {
   LogOut,
   Menu,
   X,
+  Sun,
+  Moon,
 } from 'lucide-react';
 
 const DEV_NAV_ITEMS = [
@@ -30,6 +33,7 @@ const DEV_NAV_ITEMS = [
 
 export default function DeveloperLayout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -111,6 +115,13 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
               <p className="text-[11px] text-emerald-500/70 truncate">Solo</p>
             </div>
             <NotificationBell />
+            <button
+              onClick={toggleTheme}
+              className="p-1.5 text-gray-500 hover:text-gray-300 hover:bg-white/[0.06] rounded-lg transition-colors"
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
           </div>
           <button
             onClick={handleLogout}

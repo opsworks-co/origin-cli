@@ -73,6 +73,7 @@ import forecastRoutes from './routes/forecast.js';
 import shareRoutes from './routes/share.js';
 import budgetRoutes from './routes/budget.js';
 import adminRoutes from './routes/admin.js';
+import annotationRoutes from './routes/annotations.js';
 
 const app = express();
 
@@ -221,6 +222,7 @@ mountRoute('/pricing', pricingRoutes);
 mountRoute('/forecast', forecastRoutes);
 mountRoute('/budget', budgetRoutes);
 mountRoute('/admin', adminRoutes);
+mountRoute('/sessions/:sessionId/annotations', annotationRoutes);
 
 // Serve CLI install script
 app.get('/install.sh', (_req, res) => {

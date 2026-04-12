@@ -2,13 +2,36 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Theme CSS variables ──────────────────────────────────────────────────── */
+:root {
+  --bg-primary: #f9fafb;    /* gray-50  */
+  --bg-card:    #ffffff;
+  --text-primary:   #111827; /* gray-900 */
+  --text-secondary: #6b7280; /* gray-500 */
+  --border:     #e5e7eb;     /* gray-200 */
+}
+
+.dark {
+  --bg-primary: #030712;    /* gray-950 */
+  --bg-card:    #111827;    /* gray-900 */
+  --text-primary:   #f3f4f6; /* gray-100 */
+  --text-secondary: #9ca3af; /* gray-400 */
+  --border:     #374151;     /* gray-700 */
+}
+
 @layer base {
   html {
     color-scheme: dark;
   }
 
+  html:not(.dark) {
+    color-scheme: light;
+  }
+
   body {
-    @apply bg-gray-950 text-gray-100 antialiased;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    @apply antialiased;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 
@@ -32,14 +55,17 @@
 
   /* Focus ring */
   *:focus-visible {
-    @apply outline-none ring-2 ring-indigo-500/40 ring-offset-2 ring-offset-gray-950;
+    outline: none;
+    box-shadow: 0 0 0 2px var(--bg-primary), 0 0 0 4px rgb(99 102 241 / 0.4);
   }
 }
 
 @layer components {
   /* Cards */
   .card {
-    @apply bg-gray-900/50 border border-white/[0.06] rounded-xl p-6 backdrop-blur-sm;
+    @apply border rounded-xl p-6 backdrop-blur-sm;
+    background-color: var(--bg-card);
+    border-color: var(--border);
   }
 
   /* Buttons */
@@ -48,7 +74,13 @@
   }
 
   .btn-secondary {
-    @apply bg-white/[0.04] hover:bg-white/[0.08] text-gray-200 font-medium px-4 py-2 rounded-lg border border-white/[0.06] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply font-medium px-4 py-2 rounded-lg transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
+    background-color: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover {
+    background-color: var(--bg-primary);
   }
 
   .btn-danger {
@@ -61,11 +93,23 @@
 
   /* Inputs */
   .input {
-    @apply bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-gray-100 placeholder-gray-500 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 outline-none transition-all duration-150 w-full;
+    @apply rounded-lg px-3 py-2 placeholder-gray-500 focus:ring-1 focus:ring-indigo-500/30 outline-none transition-all duration-150 w-full;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+  }
+  .input:focus {
+    border-color: rgb(99 102 241 / 0.5);
   }
 
   .select {
-    @apply bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-gray-100 focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 outline-none transition-all duration-150;
+    @apply rounded-lg px-3 py-2 focus:ring-1 focus:ring-indigo-500/30 outline-none transition-all duration-150;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+  }
+  .select:focus {
+    border-color: rgb(99 102 241 / 0.5);
   }
 
   /* Badges */
