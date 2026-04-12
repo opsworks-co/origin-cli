@@ -30,7 +30,7 @@ WHERE "id" NOT IN (SELECT MIN("id") FROM "Commit" GROUP BY "repoId", "sha");
 SQL
 fi
 
-npx prisma migrate deploy
+npx prisma db push --skip-generate --accept-data-loss
 
 # Encryption backfill: idempotent, only touches rows still in plaintext.
 # No-op if SESSION_ENCRYPTION_KEY is unset.

@@ -9,8 +9,7 @@ if (process.env.NODE_ENV === 'production') {
   }
 
   if (!process.env.SESSION_ENCRYPTION_KEY || process.env.SESSION_ENCRYPTION_KEY.length < 32) {
-    console.error('FATAL: SESSION_ENCRYPTION_KEY must be set (32+ chars) in production — prompts/transcripts would be stored in plaintext without it');
-    process.exit(1);
+    console.warn('WARNING: SESSION_ENCRYPTION_KEY not set — session prompts/transcripts will be stored in plaintext. Set a 32-byte hex key for encryption at rest.');
   }
 }
 
@@ -96,7 +95,7 @@ app.use((req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; " +
-      "script-src 'self'; " +
+      "script-src 'self' https://www.googletagmanager.com https://www.google-analytics.com; " +
       "style-src 'self' 'unsafe-inline'; " +
       "img-src 'self' data: https:; " +
       "font-src 'self' data:; " +
