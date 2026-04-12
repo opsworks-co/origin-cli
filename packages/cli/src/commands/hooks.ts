@@ -490,6 +490,142 @@ function discoverGeminiTranscriptPath(): string | null {
   }
 }
 
+// ─── Cursor Transcript Discovery ──────────────────────────────────────────
+
+interface CursorTranscriptData {
+  inputTokens: number;
+  outputTokens: number;
+  tokensUsed: number;
+  transcript: string;  // JSON stringified [{role, content}]
+}
+
+/**
+ * Cursor stores agent conversation transcripts as JSONL at:
+ *   ~/.cursor/projects/<workspace>/agent-transcripts/<id>/<id>.jsonl
+ *
+ * Each line: { role: "user"|"assistant", message: { content: [{ type, text }] } }
+ *
+ * There are no token counts in these files, but we can compute accurate
+ * estimates by counting the actual conversation text (much better than
+ * the previous chars/4 heuristic that only counted user prompts).
+ */
+function discoverCursorTranscript(conversationId?: string, hookCwd?: string): CursorTranscriptData | null {
+  try {
+    const cursorProjectsDir = path.join(os.homedir(), '.cursor', 'projects');
+    if (!fs.existsSync(cursorProjectsDir)) return null;
+
+    // Strategy: if we have a conversation_id, search for a matching file.
+    // Otherwise, find the most recently modified transcript.
+    let transcriptFile = '';
+    let bestMtime = 0;
+
+    const workspaces = fs.readdirSync(cursorProjectsDir);
+    for (const ws of workspaces) {
+      const agentDir = path.join(cursorProjectsDir, ws, 'agent-transcripts');
+      if (!fs.existsSync(agentDir)) continue;
+
+      const convDirs = fs.readdirSync(agentDir);
+      for (const convDir of convDirs) {
+        const jsonlPath = path.join(agentDir, convDir, `${convDir}.jsonl`);
+        if (!fs.existsSync(jsonlPath)) continue;
+
+        // Direct match on conversation ID
+        if (conversationId && convDir === conversationId) {
+          transcriptFile = jsonlPath;
+          break;
+        }
+
+        // Otherwise track the newest
+        const stat = fs.statSync(jsonlPath);
+        if (stat.mtimeMs > bestMtime) {
+          bestMtime = stat.mtimeMs;
+          transcriptFile = jsonlPath;
+        }
+      }
+      if (transcriptFile && conversationId) break;
+    }
+
+    // Only use non-ID-matched files if modified within last 30 minutes
+    if (!conversationId && transcriptFile && (Date.now() - bestMtime) > 30 * 60 * 1000) {
+      return null;
+    }
+    if (!transcriptFile) return null;
+
+    // Parse the JSONL
+    const raw = fs.readFileSync(transcriptFile, 'utf-8');
+    const lines = raw.split('\n').filter(l => l.trim());
+
+    const turns: Array<{ role: string; content: string }> = [];
+    let totalInputChars = 0;
+    let totalOutputChars = 0;
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        const role = entry.role || 'unknown';
+        const content = entry.message?.content;
+        let text = '';
+
+        if (typeof content === 'string') {
+          text = content;
+        } else if (Array.isArray(content)) {
+          text = content
+            .filter((c: any) => c.type === 'text')
+            .map((c: any) => c.text || '')
+            .join('');
+        }
+
+        if (!text) continue;
+
+        // Strip XML wrappers like <user_query>...</user_query>
+        text = text.replace(/<\/?user_query>/g, '').trim();
+
+        turns.push({ role, content: text });
+
+        if (role === 'user') {
+          totalInputChars += text.length;
+        } else {
+          totalOutputChars += text.length;
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+
+    if (turns.length === 0) return null;
+
+    // Token estimation from actual conversation text.
+    // ~3.5 chars per token for code-heavy content (better than the old 4.0).
+    // Input includes: user prompts + file context sent by Cursor (estimate 3x
+    // the visible prompt text for attached files, codebase context, etc.)
+    const CHARS_PER_TOKEN = 3.5;
+    const CONTEXT_MULTIPLIER = 3;  // Cursor sends ~3x the prompt text as file context
+    const visibleInputTokens = Math.round(totalInputChars / CHARS_PER_TOKEN);
+    const estimatedInputTokens = visibleInputTokens * CONTEXT_MULTIPLIER;
+    const estimatedOutputTokens = Math.round(totalOutputChars / CHARS_PER_TOKEN);
+    const totalTokens = estimatedInputTokens + estimatedOutputTokens;
+
+    debugLog('cursor', 'parsed agent transcript', {
+      turns: turns.length,
+      inputChars: totalInputChars,
+      outputChars: totalOutputChars,
+      estimatedInputTokens,
+      estimatedOutputTokens,
+      totalTokens,
+    });
+
+    return {
+      inputTokens: estimatedInputTokens,
+      outputTokens: estimatedOutputTokens,
+      tokensUsed: totalTokens,
+      transcript: JSON.stringify(turns),
+    };
+  } catch (err) {
+    debugLog('cursor', 'discoverCursorTranscript error', { error: String(err) });
+    return null;
+  }
+}
+
 // ─── Codex Session Data Discovery ─────────────────────────────────────────
 
 interface CodexSessionData {
@@ -1947,26 +2083,39 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     let displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
     debugLog('stop', 'formatted transcript', { displayLength: displayTranscript.length });
 
-    // For Cursor: synthesize transcript from conversation_summaries DB when no real transcript
-    if (!displayTranscript && agentSlug === 'cursor' && input.conversation_id) {
-      const summary = getCursorConversationSummary(input.conversation_id);
-      if (summary) {
-        debugLog('stop', 'cursor summary from DB', { title: summary.title, hasTldr: !!summary.tldr });
-        const turns: Array<{ role: string; content: string }> = [];
-        // Add user prompts
-        for (const p of state.prompts) {
-          turns.push({ role: 'user', content: p });
-          // Build a response from available summary data
-          const responseParts: string[] = [];
-          if (summary.tldr) responseParts.push(summary.tldr);
-          if (summary.overview && summary.overview !== summary.tldr) responseParts.push(summary.overview);
-          if (summary.summaryBullets) responseParts.push(summary.summaryBullets);
-          if (responseParts.length > 0) {
-            turns.push({ role: 'assistant', content: responseParts.join('\n\n') });
-          }
+    // For Cursor: discover agent transcript JSONL for real conversation data + better token estimates
+    if (agentSlug === 'cursor' && parsed.tokensUsed === 0) {
+      const cursorData = discoverCursorTranscript(input.conversation_id, state.repoPath);
+      if (cursorData) {
+        debugLog('stop', 'supplementing with Cursor transcript data', {
+          tokens: cursorData.tokensUsed,
+          hasTranscript: !!cursorData.transcript,
+        });
+        parsed.tokensUsed = cursorData.tokensUsed;
+        parsed.inputTokens = cursorData.inputTokens;
+        parsed.outputTokens = cursorData.outputTokens;
+        if (cursorData.transcript && !displayTranscript) {
+          displayTranscript = cursorData.transcript;
         }
-        if (turns.length > 0) {
-          displayTranscript = JSON.stringify(turns);
+      } else if (!displayTranscript && input.conversation_id) {
+        // Fallback: use conversation_summaries DB for a minimal transcript
+        const summary = getCursorConversationSummary(input.conversation_id);
+        if (summary) {
+          debugLog('stop', 'cursor summary from DB (fallback)', { title: summary.title });
+          const turns: Array<{ role: string; content: string }> = [];
+          for (const p of state.prompts) {
+            turns.push({ role: 'user', content: p });
+            const responseParts: string[] = [];
+            if (summary.tldr) responseParts.push(summary.tldr);
+            if (summary.overview && summary.overview !== summary.tldr) responseParts.push(summary.overview);
+            if (summary.summaryBullets) responseParts.push(summary.summaryBullets);
+            if (responseParts.length > 0) {
+              turns.push({ role: 'assistant', content: responseParts.join('\n\n') });
+            }
+          }
+          if (turns.length > 0) {
+            displayTranscript = JSON.stringify(turns);
+          }
         }
       }
     }
