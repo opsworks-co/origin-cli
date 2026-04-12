@@ -8,6 +8,238 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'repositories-sentry-for-ai-code': (
+    <>
+      <p>
+        If you&rsquo;ve used Sentry, you know the pattern: connect your repos, and suddenly errors aren&rsquo;t just stack traces &mdash; they&rsquo;re linked to commits, releases, and the developers who wrote the code. Sentry turned &ldquo;something broke&rdquo; into &ldquo;this commit by this person in this PR broke this function.&rdquo;
+      </p>
+      <p>
+        Origin does the same thing for AI-written code. Connect your repositories, and every commit gets tagged with <strong className="text-gray-100">who (or what) actually wrote it</strong> &mdash; which AI agent, which model, which session, which prompt, and how much it cost.
+      </p>
+
+      <h2>Why repositories matter</h2>
+      <p>
+        Without repo-level tracking, AI coding data is just floating sessions. You know <em>someone</em> used Claude for 47 minutes, but you don&rsquo;t know <em>what they built</em>. Repositories anchor everything to real code:
+      </p>
+      <ul>
+        <li><strong>Every commit is classified</strong> &mdash; AI-authored, human-authored, or mixed. Not by heuristics &mdash; by actual session data from the agent that wrote it.</li>
+        <li><strong>AI authorship percentage</strong> is tracked per-repo over time. You can see your codebase shifting from 20% AI to 60% AI across months.</li>
+        <li><strong>Sessions link to commits</strong> &mdash; click any session and see exactly which commits it produced. Click any commit and see the full AI session behind it.</li>
+        <li><strong>Cost maps to code</strong> &mdash; not just &ldquo;we spent $400 on Claude this month&rdquo; but &ldquo;the auth module cost $120 across 8 sessions in the api-server repo.&rdquo;</li>
+      </ul>
+
+      <h2>How it works</h2>
+
+      {/* Step 1: Import */}
+      <h3>1. Import from GitHub or GitLab</h3>
+      <p>
+        Connect your GitHub org or GitLab group, and Origin discovers all your repos. One click to import. Origin pulls your full commit history and starts classifying every commit as AI or human.
+      </p>
+
+      {/* GitHub import mock */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-700/50 bg-gray-900/80 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <span className="text-sm font-medium text-gray-300">Import from GitHub</span>
+            <span className="text-[10px] px-2 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-800/40">Connected</span>
+          </div>
+          <div className="divide-y divide-gray-800/50">
+            {[
+              { name: 'api-server', lang: 'TypeScript', commits: 1247, selected: true },
+              { name: 'web-dashboard', lang: 'TypeScript', commits: 892, selected: true },
+              { name: 'mobile-app', lang: 'Swift', commits: 634, selected: false },
+              { name: 'ml-pipeline', lang: 'Python', commits: 2103, selected: true },
+            ].map((repo) => (
+              <div key={repo.name} className="px-4 py-2.5 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={`w-4 h-4 rounded border ${repo.selected ? 'bg-emerald-500 border-emerald-500' : 'border-gray-600'} flex items-center justify-center`}>
+                    {repo.selected && <span className="text-[10px] text-white">&#10003;</span>}
+                  </div>
+                  <span className="text-sm text-gray-200 font-mono">{repo.name}</span>
+                  <span className="text-[10px] text-gray-500">{repo.lang}</span>
+                </div>
+                <span className="text-xs text-gray-500">{repo.commits.toLocaleString()} commits</span>
+              </div>
+            ))}
+          </div>
+          <div className="px-4 py-3 border-t border-gray-800 flex justify-end">
+            <span className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm font-medium">Import 3 repos</span>
+          </div>
+        </div>
+      </div>
+
+      <h3>2. Automatic commit sync</h3>
+      <p>
+        Once imported, Origin keeps your repos in sync. Every new commit is pulled automatically &mdash; no webhooks required (though you can add them for instant sync). Origin classifies each commit by checking:
+      </p>
+      <ul>
+        <li>Was there an active Origin session when this commit was made?</li>
+        <li>Does the commit message contain <code>Co-Authored-By</code> markers from AI agents?</li>
+        <li>Does the author match a known AI bot pattern?</li>
+      </ul>
+
+      {/* Commit list mock */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-700/50 bg-gray-900/80 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-gray-300">api-server</span>
+              <span className="text-[10px] text-gray-500">main</span>
+            </div>
+            <div className="flex gap-2 text-[10px]">
+              <span className="text-indigo-400">AI 43%</span>
+              <span className="text-gray-500">&middot;</span>
+              <span className="text-gray-400">Human 57%</span>
+            </div>
+          </div>
+          <div className="divide-y divide-gray-800/30">
+            {[
+              { sha: 'a1b2c3d', msg: 'Add rate limiting to auth endpoints', add: 147, del: 12, author: 'claude', tag: 'AI' },
+              { sha: 'e4f5g6h', msg: 'Fix password validation edge case', add: 8, del: 3, author: 'alex', tag: 'Human' },
+              { sha: 'i7j8k9l', msg: 'Refactor database connection pool', add: 89, del: 45, author: 'claude', tag: 'AI' },
+              { sha: 'm0n1o2p', msg: 'Update README with deployment docs', add: 34, del: 5, author: 'sarah', tag: 'Human' },
+              { sha: 'q3r4s5t', msg: 'Add webhook retry queue with exponential backoff', add: 203, del: 0, author: 'cursor', tag: 'AI' },
+            ].map((c) => (
+              <div key={c.sha} className="px-4 py-2 flex items-center justify-between text-xs">
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-gray-500 w-16">{c.sha}</span>
+                  <span className="text-gray-300 truncate max-w-[300px]">{c.msg}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-green-500">+{c.add}</span>
+                  <span className="text-red-400">-{c.del}</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] ${c.tag === 'AI' ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-800/40' : 'bg-gray-800/60 text-gray-400 border border-gray-700/40'}`}>{c.tag}</span>
+                  <span className="text-gray-500 w-14 text-right">{c.author}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <h3>3. AI authorship ratio</h3>
+      <p>
+        Every repo gets an AI authorship bar showing the split over time. This isn&rsquo;t a guess &mdash; it&rsquo;s calculated from actual session data. You can filter to see only AI-authored or human-authored commits, and drill into any commit to see the full session that produced it.
+      </p>
+
+      <h2>The API: build on top of Origin</h2>
+      <p>
+        Just like Sentry gives you an API to query errors programmatically, Origin exposes a full REST API for repositories. Everything you see in the dashboard is available via API.
+      </p>
+
+      {/* API endpoints mock */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-700/50 bg-gray-900/80 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800">
+            <span className="text-sm font-medium text-gray-300">Repository API</span>
+            <span className="text-[10px] text-gray-500 ml-2">api.getorigin.io/api/v1</span>
+          </div>
+          <div className="divide-y divide-gray-800/30 font-mono text-xs">
+            {[
+              { method: 'GET', path: '/repos', desc: 'List all repos in your org' },
+              { method: 'POST', path: '/repos', desc: 'Register a new repo' },
+              { method: 'GET', path: '/repos/:id', desc: 'Get repo details + AI stats' },
+              { method: 'GET', path: '/repos/:id/commits', desc: 'List commits with AI/human tags' },
+              { method: 'GET', path: '/repos/:id/commits/:sha', desc: 'Get commit detail + linked session' },
+              { method: 'GET', path: '/repos/:id/commits/:sha/diff', desc: 'Get commit diff with AI line attribution' },
+              { method: 'GET', path: '/repos/:id/branches', desc: 'List branches with commit counts' },
+              { method: 'POST', path: '/repos/:id/sync', desc: 'Trigger manual sync from remote' },
+              { method: 'GET', path: '/repos/:id/health', desc: 'Sync status, webhook health, last activity' },
+              { method: 'POST', path: '/repos/github/import', desc: 'Bulk import from GitHub org' },
+              { method: 'POST', path: '/repos/gitlab/import', desc: 'Bulk import from GitLab group' },
+            ].map((ep) => (
+              <div key={ep.path + ep.method} className="px-4 py-2 flex items-center gap-3">
+                <span className={`w-12 text-center text-[10px] font-bold rounded px-1 py-0.5 ${ep.method === 'GET' ? 'bg-blue-900/40 text-blue-300' : 'bg-green-900/40 text-green-300'}`}>{ep.method}</span>
+                <span className="text-gray-300 w-64">{ep.path}</span>
+                <span className="text-gray-500">{ep.desc}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <h3>Example: query AI authorship for a repo</h3>
+
+      {/* API request/response mock */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-emerald-700/50 bg-gradient-to-b from-emerald-950/30 to-[#0a0b14] overflow-hidden">
+          <div className="px-4 py-2 border-b border-emerald-800/30 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">curl</span>
+          </div>
+          <div className="p-4 font-mono text-xs">
+            <div className="text-gray-400">
+              <span className="text-emerald-400">$</span>{' '}
+              <span className="text-gray-300">curl -H &quot;Authorization: Bearer $ORIGIN_API_KEY&quot; \</span>
+            </div>
+            <div className="text-gray-300 ml-4">https://getorigin.io/api/v1/repos/:id/commits?aiOnly=true</div>
+            <div className="mt-3 text-gray-500"># Response:</div>
+            <div className="text-gray-300">{'{'}</div>
+            <div className="text-gray-300 ml-4">&quot;commits&quot;: [</div>
+            <div className="text-gray-300 ml-8">{'{'}</div>
+            <div className="text-gray-300 ml-12">&quot;sha&quot;: &quot;a1b2c3d&quot;,</div>
+            <div className="text-gray-300 ml-12">&quot;message&quot;: &quot;Add rate limiting to auth endpoints&quot;,</div>
+            <div className="text-indigo-300 ml-12">&quot;aiTool&quot;: &quot;claude-code&quot;,</div>
+            <div className="text-indigo-300 ml-12">&quot;aiModel&quot;: &quot;claude-opus-4-6&quot;,</div>
+            <div className="text-indigo-300 ml-12">&quot;sessionId&quot;: &quot;ses_abc123&quot;,</div>
+            <div className="text-amber-300 ml-12">&quot;costUsd&quot;: 0.47,</div>
+            <div className="text-amber-300 ml-12">&quot;tokensUsed&quot;: 84200,</div>
+            <div className="text-gray-300 ml-12">&quot;filesChanged&quot;: [&quot;src/auth.ts&quot;, &quot;src/middleware/rate-limit.ts&quot;],</div>
+            <div className="text-gray-300 ml-12">&quot;linesAdded&quot;: 147,</div>
+            <div className="text-gray-300 ml-12">&quot;linesDeleted&quot;: 12</div>
+            <div className="text-gray-300 ml-8">{'}'},</div>
+            <div className="text-gray-500 ml-8">// ...</div>
+            <div className="text-gray-300 ml-4">],</div>
+            <div className="text-gray-300 ml-4">&quot;total&quot;: 537,</div>
+            <div className="text-gray-300 ml-4">&quot;aiPercentage&quot;: 43</div>
+            <div className="text-gray-300">{'}'}</div>
+          </div>
+        </div>
+      </div>
+
+      <h2>What you can build with the API</h2>
+      <p>
+        The repo API unlocks integrations that weren&rsquo;t possible before:
+      </p>
+      <ul>
+        <li><strong>CI/CD gates</strong> &mdash; block deploys if AI authorship exceeds a threshold without human review</li>
+        <li><strong>Slack/Teams alerts</strong> &mdash; &ldquo;api-server just crossed 50% AI authorship this sprint&rdquo;</li>
+        <li><strong>Compliance reports</strong> &mdash; auto-generate per-repo AI usage reports for SOC 2 audits</li>
+        <li><strong>Cost dashboards</strong> &mdash; pipe per-repo AI costs into your internal analytics</li>
+        <li><strong>PR reviewers</strong> &mdash; annotate pull requests with which lines were AI-generated and the prompts behind them</li>
+      </ul>
+
+      <h2>The Sentry analogy</h2>
+      <p>
+        Before Sentry, errors were log lines. After Sentry, errors were <em>incidents</em> &mdash; linked to commits, releases, users, and teams. The data was always there; Sentry just made it structured and queryable.
+      </p>
+      <p>
+        AI coding data is in the same state today. The sessions happen, the code gets committed, but nothing connects them. Origin is the layer that makes AI coding <em>observable</em> &mdash; structured, queryable, and actionable. Repositories are where that data meets your actual codebase.
+      </p>
+
+      <h2>Get started</h2>
+      <p>
+        Import your first repo in under 2 minutes. Connect GitHub or GitLab on the Integrations page, then import repos from Settings. Or use the CLI:
+      </p>
+
+      <div className="not-prose my-6">
+        <div className="rounded-xl border border-gray-700/50 bg-gray-900/80 overflow-hidden">
+          <div className="p-4 font-mono text-sm">
+            <div className="text-gray-300"><span className="text-emerald-400">$</span> origin init</div>
+            <div className="text-gray-500 mt-1">  Auto-detects repos, installs hooks, starts tracking.</div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <a href="/register?type=developer" className="text-emerald-400 hover:text-emerald-300 font-medium">Start tracking your repos &rarr;</a>
+      </p>
+    </>
+  ),
   'origin-why-line-level-prompt-attribution': (
     <>
       <p>

@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Repositories in Origin: Your Sentry for AI-Written Code',
+    slug: 'repositories-sentry-for-ai-code',
+    date: '2026-04-12',
+    author: 'Artem Dolobanko',
+    tags: ['developer-tools', 'repositories', 'api', 'integrations', 'ai-governance'],
+    excerpt:
+      'Sentry tracks errors across your repos. Origin tracks AI. Auto-import from GitHub/GitLab, real-time commit sync, AI vs human attribution per commit, and a full API to integrate into your workflow. Here\'s how repositories work in Origin and what you can build with them.',
+  },
+  {
     title: 'origin why: Ask any line of code which prompt wrote it',
     slug: 'origin-why-line-level-prompt-attribution',
     date: '2026-04-09',
