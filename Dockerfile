@@ -50,6 +50,8 @@ COPY --from=api-builder /app/apps/api/dist ./apps/api/dist
 COPY --from=api-builder /app/apps/api/prisma ./apps/api/prisma
 COPY --from=api-builder /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=api-builder /app/apps/api/package.json ./apps/api/package.json
+# CACHE_BUST arg busts the final stage cache so web assets are always fresh
+ARG CACHE_BUST=1
 COPY --from=web-builder /app/apps/web/dist ./apps/web/dist
 # CLI tarball for download
 RUN mkdir -p ./apps/web/dist/cli
