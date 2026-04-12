@@ -1,7 +1,7 @@
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { git, gitOrNull } from './utils/exec.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -23,23 +23,27 @@ interface RewriteMapping {
  */
 export function preserveAttributionOnRewrite(repoPath: string, oldSha: string, newSha: string): void {
   if (!oldSha || !newSha || oldSha === newSha) return;
-  if (!/^[a-fA-F0-9]+$/.test(oldSha) || !/^[a-fA-F0-9]+$/.test(newSha)) return;
 
-  const opts = { cwd: repoPath, timeoutMs: 10_000 };
+  const execOpts = {
+    cwd: repoPath,
+    encoding: 'utf-8' as const,
+    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    timeout: 10000,
+  };
 
   try {
     // Read the existing note from the old SHA
-    const note = git(
-      ['notes', '--ref=origin', 'show', oldSha],
-      opts,
+    const note = execSync(
+      `git notes --ref=origin show ${oldSha}`,
+      execOpts,
     ).trim();
 
     if (!note) return;
 
     // Write the note to the new SHA (overwrite if exists)
-    git(
-      ['notes', '--ref=origin', 'add', '-f', '-m', note, newSha],
-      opts,
+    execSync(
+      `git notes --ref=origin add -f -m ${escapeShellArg(note)} ${newSha}`,
+      execOpts,
     );
 
     debugLog(`Preserved attribution: ${oldSha.slice(0, 8)} -> ${newSha.slice(0, 8)}`);
@@ -109,7 +113,11 @@ export function handleCherryPick(repoPath: string): void {
     if (!originalSha) return;
 
     // Get the newly created commit SHA
-    const newSha = git(['rev-parse', 'HEAD'], { cwd: repoPath, timeoutMs: 10_000 }).trim();
+    const newSha = execSync('git rev-parse HEAD', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
 
     if (newSha && newSha !== originalSha) {
       preserveAttributionOnRewrite(repoPath, originalSha, newSha);
@@ -227,10 +235,11 @@ export function handlePostCheckout(repoPath: string, prevHead: string, newHead: 
   // Check for stash-related refs
   try {
     // If there are stash entries, check if any of them match the transition
-    const stashList = git(
-      ['stash', 'list', '--format=%H'],
-      { cwd: repoPath, timeoutMs: 10_000 },
-    ).trim();
+    const stashList = execSync('git stash list --format=%H', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
 
     if (!stashList) return;
 
@@ -247,17 +256,39 @@ export function handlePostCheckout(repoPath: string, prevHead: string, newHead: 
  * Get the .git directory path for a repository.
  */
 function getGitDir(repoPath: string): string | null {
-  const gitDir = gitOrNull(['rev-parse', '--git-dir'], { cwd: repoPath, timeoutMs: 10_000 });
-  if (!gitDir) return null;
-  return path.isAbsolute(gitDir) ? gitDir : path.resolve(repoPath, gitDir);
+  try {
+    const gitDir = execSync('git rev-parse --git-dir', {
+      cwd: repoPath,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    return path.isAbsolute(gitDir) ? gitDir : path.resolve(repoPath, gitDir);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Escape a string for safe use as a shell argument.
+ */
+function escapeShellArg(arg: string): string {
+  return "'" + arg.replace(/'/g, "'\\''") + "'";
 }
 
 /**
  * Write a debug log entry to ~/.origin/hooks.log.
+ * Rotates the log file when it exceeds 5 MB.
  */
 function debugLog(message: string): void {
   try {
     const logPath = path.join(os.homedir(), '.origin', 'hooks.log');
+    try {
+      const stats = fs.statSync(logPath);
+      if (stats.size >= 5 * 1024 * 1024) {
+        fs.renameSync(logPath, logPath + '.old');
+      }
+    } catch { /* file may not exist yet */ }
     const timestamp = new Date().toISOString();
     fs.appendFileSync(logPath, `[${timestamp}] [history-preservation] ${message}\n`);
   } catch {

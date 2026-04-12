@@ -1,9 +1,7 @@
+import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
-import { git, gitDetailed, runDetailed } from './utils/exec.js';
 import { getLineBlame, type LineAttribution } from './attribution.js';
 import { getGitRoot, getHeadSha } from './session-state.js';
-
-const HEX = /^[a-fA-F0-9]+$/;
 
 // ─── Agent Trace Types (v0.1.0) ─────────────────────────────────────────
 
@@ -82,28 +80,23 @@ function modelIdToOriginAgent(modelId: string): string {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const execOpts = (cwd: string) => ({
+  encoding: 'utf-8' as const,
   cwd,
-  timeoutMs: 10_000,
+  stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
   maxBuffer: 10 * 1024 * 1024,
 });
 
 function getToolVersion(repoPath: string): string {
   try {
-    // Safe: node is a fixed file, all other args are literal strings — no shell.
-    const r = runDetailed(
-      'node',
-      ['-e', "process.stdout.write(require('@origin/cli/package.json').version)"],
-      execOpts(repoPath),
-    );
-    const v = (r.stdout || '').trim();
-    if (r.status === 0 && v) return v;
+    const pkgJson = execFileSync('node', ['-e', "process.stdout.write(require('@origin/cli/package.json').version)"], execOpts(repoPath)).trim();
+    if (pkgJson) return pkgJson;
   } catch { /* fallback */ }
   return '0.0.0';
 }
 
 function getTrackedFiles(repoPath: string): string[] {
   try {
-    return git(['ls-files'], execOpts(repoPath))
+    return execFileSync('git', ['ls-files'], execOpts(repoPath))
       .trim()
       .split('\n')
       .filter(Boolean);
@@ -116,23 +109,15 @@ function getFilesForSession(repoPath: string, sessionId: string): string[] {
   // Look for commits with this sessionId in their origin notes
   const files = new Set<string>();
   try {
-    const commits = git(
-      ['log', '--format=%H', '-100', 'HEAD'],
-      execOpts(repoPath),
-    ).trim().split('\n').filter(Boolean);
+    const commits = execFileSync('git', ['log', '--format=%H', '-100', 'HEAD'], execOpts(repoPath)).trim().split('\n').filter(Boolean);
 
     for (const sha of commits) {
-      if (!HEX.test(sha)) continue;
       try {
-        const r = runDetailed('git', ['notes', '--ref=origin', 'show', sha], execOpts(repoPath));
-        if (r.status !== 0) continue;
-        const note = JSON.parse(r.stdout.trim());
+        const noteRaw = execFileSync('git', ['notes', '--ref=origin', 'show', sha], execOpts(repoPath)).trim();
+        const note = JSON.parse(noteRaw);
         const data = note?.origin || note;
         if (data?.sessionId === sessionId) {
-          const changed = git(
-            ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
-            execOpts(repoPath),
-          ).trim().split('\n').filter(Boolean);
+          const changed = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', sha], execOpts(repoPath)).trim().split('\n').filter(Boolean);
           for (const f of changed) files.add(f);
         }
       } catch { /* skip */ }
@@ -144,14 +129,13 @@ function getFilesForSession(repoPath: string, sessionId: string): string[] {
 function getDiffFiles(repoPath: string): string[] {
   // Get files that have been changed in recent commits (HEAD~20..HEAD as default scope)
   try {
-    const r = gitDetailed(['diff', '--name-only', 'HEAD~20..HEAD'], execOpts(repoPath));
-    if (r.status === 0) {
-      return r.stdout.trim().split('\n').filter(Boolean);
-    }
-    return git(['diff', '--name-only', 'HEAD'], execOpts(repoPath))
-      .trim().split('\n').filter(Boolean);
+    return execFileSync('git', ['diff', '--name-only', 'HEAD~20..HEAD'], execOpts(repoPath)).trim().split('\n').filter(Boolean);
   } catch {
-    return getTrackedFiles(repoPath);
+    try {
+      return execFileSync('git', ['diff', '--name-only', 'HEAD'], execOpts(repoPath)).trim().split('\n').filter(Boolean);
+    } catch {
+      return getTrackedFiles(repoPath);
+    }
   }
 }
 
@@ -260,8 +244,11 @@ export function exportAgentTrace(repoPath: string, sessionId?: string): AgentTra
 
   for (const filePath of files) {
     // Verify file exists at HEAD
-    const exists = gitDetailed(['cat-file', '-e', `HEAD:${filePath}`], execOpts(repoPath));
-    if (exists.status !== 0) continue; // file deleted
+    try {
+      execFileSync('git', ['cat-file', '-e', `HEAD:${filePath}`], execOpts(repoPath));
+    } catch {
+      continue; // file deleted
+    }
 
     const lines = getLineBlame(repoPath, filePath);
     if (lines.length === 0) continue;
@@ -312,12 +299,10 @@ export function importAgentTrace(repoPath: string, traceData: AgentTraceRecord):
     throw new Error('Agent trace record has no valid VCS revision.');
   }
 
-  // Verify the revision exists in this repo. Only allow safe ref characters.
-  if (!/^[a-zA-Z0-9_./~^-]+$/.test(revision)) {
-    throw new Error(`Invalid revision format: ${revision}`);
-  }
-  const exists = gitDetailed(['cat-file', '-e', revision], execOpts(repoPath));
-  if (exists.status !== 0) {
+  // Verify the revision exists in this repo
+  try {
+    execFileSync('git', ['cat-file', '-e', revision], execOpts(repoPath));
+  } catch {
     throw new Error(`Revision ${revision} not found in repository.`);
   }
 
@@ -371,10 +356,7 @@ export function importAgentTrace(repoPath: string, traceData: AgentTraceRecord):
 
   // Write git note
   try {
-    git(
-      ['notes', '--ref=origin', 'add', '-f', '-m', JSON.stringify(noteData), revision],
-      execOpts(repoPath),
-    );
+    execFileSync('git', ['notes', '--ref=origin', 'add', '-f', '-m', JSON.stringify(noteData), revision], execOpts(repoPath));
   } catch (err: any) {
     throw new Error(`Failed to write git note: ${err.message}`);
   }

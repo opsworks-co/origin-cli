@@ -2,8 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { spawn } from 'child_process';
-import { git, gitOrNull, run } from './utils/exec.js';
+import { execSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -53,19 +52,33 @@ export interface SessionState {
   trailId?: string;           // Trail ID if session is linked to an active trail
   status?: string;            // RUNNING | ENDED | COMPLETED
   endedAt?: string;           // ISO timestamp when session ended
-  teamProfile?: string;       // Multi-account: team profile name (if session was duplicated to team)
-  teamSessionId?: string;     // Multi-account: session ID on team account
-  agentSlug?: string;         // Agent slug that created this session (claude-code, gemini, codex, etc.)
+  // Multi-repo support: when cwd contains multiple git repos
+  repoPaths?: string[];       // All git repo roots discovered under cwd
+  perRepoState?: Record<string, {
+    headShaAtStart: string | null;
+    headShaAtLastStop: string | null;
+    prePromptSha: string | null;
+    prePromptDirtyFiles: string[];
+    branch: string | null;
+  }>;
 }
 
 // ─── Git Directory ─────────────────────────────────────────────────────────
 
 export function getGitDir(cwd?: string): string | null {
-  return gitOrNull(['rev-parse', '--git-dir'], { cwd: cwd || undefined, timeoutMs: 5_000 });
+  try {
+    return execSync('git rev-parse --git-dir', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return null;
+  }
 }
 
 export function getGitRoot(cwd?: string): string | null {
-  return gitOrNull(['rev-parse', '--show-toplevel'], { cwd: cwd || undefined, timeoutMs: 5_000 });
+  try {
+    return execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -113,13 +126,67 @@ export function discoverGitRoot(cwd?: string): string | null {
   return null;
 }
 
+/**
+ * Discover ALL git repos under a directory (immediate subdirectories).
+ * Used when the cwd itself is not a git repo but contains multiple repos.
+ */
+export function discoverAllGitRoots(cwd?: string): string[] {
+  const dir = cwd || process.cwd();
+
+  // If the directory itself is a git repo, return just that
+  const direct = getGitRoot(dir);
+  if (direct) return [direct];
+
+  const roots: string[] = [];
+
+  // Check common workspace patterns
+  const workspacePatterns = [
+    path.join(dir, '.openclaw', 'workspace'),
+    path.join(dir, 'workspace'),
+  ];
+  for (const wsDir of workspacePatterns) {
+    try {
+      if (!fs.existsSync(wsDir)) continue;
+      const entries = fs.readdirSync(wsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidate = path.join(wsDir, entry.name);
+        const found = getGitRoot(candidate);
+        if (found && !roots.includes(found)) roots.push(found);
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Scan immediate subdirectories
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const candidate = path.join(dir, entry.name);
+      if (fs.existsSync(path.join(candidate, '.git'))) {
+        const found = getGitRoot(candidate);
+        if (found && !roots.includes(found)) roots.push(found);
+      }
+    }
+  } catch { /* ignore */ }
+
+  return roots;
+}
+
 export function getHeadSha(cwd?: string): string | null {
-  return gitOrNull(['rev-parse', 'HEAD'], { cwd: cwd || undefined, timeoutMs: 5_000 });
+  try {
+    return execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return null;
+  }
 }
 
 export function getBranch(cwd?: string): string | null {
-  const v = gitOrNull(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: cwd || undefined, timeoutMs: 5_000 });
-  return v || null;
+  try {
+    return execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Session State Persistence ─────────────────────────────────────────────
@@ -150,7 +217,9 @@ export function getStatePath(cwd?: string, sessionTag?: string): string {
 
 export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string): void {
   const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  const tmpStatePath = statePath + '.tmp.' + process.pid;
+  fs.writeFileSync(tmpStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  fs.renameSync(tmpStatePath, statePath);
 
   // Also mirror to ~/.origin/sessions/ for global discovery (origin sessions --all)
   // Always mark as RUNNING since this is an active save
@@ -159,7 +228,9 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
     fs.mkdirSync(globalDir, { recursive: true, mode: 0o700 });
     const globalPath = path.join(globalDir, `${state.sessionId.slice(0, 12)}.json`);
     const globalState = { ...state, status: 'RUNNING' };
-    fs.writeFileSync(globalPath, JSON.stringify(globalState, null, 2), { mode: 0o600 });
+    const tmpGlobalPath = globalPath + '.tmp.' + process.pid;
+    fs.writeFileSync(tmpGlobalPath, JSON.stringify(globalState, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpGlobalPath, globalPath);
   } catch { /* non-fatal */ }
 }
 
@@ -189,7 +260,9 @@ export function clearSessionState(cwd?: string, sessionTag?: string): void {
     const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
     fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
     const archivePath = path.join(archiveDir, `${state.sessionId.slice(0, 12)}.json`);
-    fs.writeFileSync(archivePath, JSON.stringify(state), { mode: 0o600 });
+    const tmpArchivePath = archivePath + '.tmp.' + process.pid;
+    fs.writeFileSync(tmpArchivePath, JSON.stringify(state), { mode: 0o600 });
+    fs.renameSync(tmpArchivePath, archivePath);
 
     // Remove active state file
     fs.unlinkSync(statePath);
@@ -225,18 +298,7 @@ export function listActiveSessions(cwd?: string): SessionState[] {
               if (tagMatch) state.sessionTag = tagMatch[1];
             }
             sessions.push(state);
-          } catch (err) {
-            // A corrupt session file here is usually a truncated write from
-            // a crashed CLI or a concurrent reader catching a mid-write
-            // state. Silently skipping is correct, but we *must* surface
-            // the corruption so operators can investigate recurring cases
-            // (e.g. a disk filling up, a misbehaving hook). Use warn, not
-            // error — one bad file shouldn't spam stderr on every `origin
-            // sessions list` call.
-            if (process.env.ORIGIN_DEBUG) {
-              console.warn(`[origin] skipping corrupt session file ${entry}: ${(err as Error).message}`);
-            }
-          }
+          } catch { /* skip corrupt files */ }
         }
       }
     } catch { /* ignore */ }
@@ -255,11 +317,7 @@ export function listActiveSessions(cwd?: string): SessionState[] {
           const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
           if (!state || typeof state !== 'object' || !state.sessionId) continue;
           sessions.push(state);
-        } catch (err) {
-          if (process.env.ORIGIN_DEBUG) {
-            console.warn(`[origin] skipping corrupt session file ${entry}: ${(err as Error).message}`);
-          }
-        }
+        } catch { /* skip */ }
       }
     }
   } catch { /* ignore */ }
@@ -334,16 +392,16 @@ export function listAllActiveSessions(): SessionState[] {
               state.status = 'ENDED';
               state.endedAt = state.endedAt || new Date().toISOString();
               // Persist the correction
-              try { fs.writeFileSync(filePath, JSON.stringify(state), { mode: 0o600 }); } catch { /* best effort */ }
+              try {
+                const tmpFilePath = filePath + '.tmp.' + process.pid;
+                fs.writeFileSync(tmpFilePath, JSON.stringify(state), { mode: 0o600 });
+                fs.renameSync(tmpFilePath, filePath);
+              } catch { /* best effort */ }
             }
           }
 
           sessions.push(state);
-        } catch (err) {
-          if (process.env.ORIGIN_DEBUG) {
-            console.warn(`[origin] skipping corrupt session file ${entry}: ${(err as Error).message}`);
-          }
-        }
+        } catch { /* skip */ }
       }
     }
   } catch { /* ignore */ }
@@ -386,11 +444,11 @@ function findAncestorPid(pattern: RegExp, maxDepth = 10): number {
   try {
     let pid = process.ppid || 0;
     for (let i = 0; i < maxDepth && pid > 1; i++) {
-      // Numeric guard — pid should always be an integer, but defend anyway.
-      if (!Number.isInteger(pid) || pid <= 0) break;
-      // Get the command and parent of this PID. `ps` args are passed as
-      // an array (no shell), so pid is safe even though we validate above.
-      const info = run('ps', ['-p', String(pid), '-o', 'ppid=,command='], { timeoutMs: 2_000 }).trim();
+      // Get the command and parent of this PID
+      const info = execSync(`ps -p ${pid} -o ppid=,command=`, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
       if (pattern.test(info)) return pid;
       // Move to parent
       const ppid = parseInt(info.trim().split(/\s+/)[0], 10);

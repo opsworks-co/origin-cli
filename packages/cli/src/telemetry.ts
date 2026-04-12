@@ -131,6 +131,6 @@ function saveQueue(queue: TelemetryQueue): void {
   try {
     const dir = path.dirname(QUEUE_PATH);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(QUEUE_PATH, JSON.stringify(queue));
+    fs.writeFileSync(QUEUE_PATH, JSON.stringify(queue), { mode: 0o600 });
   } catch { /* best effort */ }
 }

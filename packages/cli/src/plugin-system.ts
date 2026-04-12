@@ -1,5 +1,4 @@
-import { spawn } from 'child_process';
-import { runDetailed } from './utils/exec.js';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -35,6 +34,21 @@ interface PluginRegistry {
 
 const PLUGINS_PATH = path.join(os.homedir(), '.origin', 'plugins.json');
 const PLUGIN_TIMEOUT_MS = 30_000; // 30 seconds per plugin call
+
+/** Environment variable names that must be stripped before executing plugins. */
+const SENSITIVE_ENV_VARS = [
+  'ORIGIN_API_KEY',
+  'API_KEY',
+  'SECRET_KEY',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'NPM_TOKEN',
+  'DOCKER_PASSWORD',
+];
 
 // ─── Plugin Registry ───────────────────────────────────────────────────────
 
@@ -140,6 +154,16 @@ export function executePlugin(
     const requestJson = JSON.stringify(request);
 
     try {
+      // Warn about plugin access
+      console.warn(`\u26a0\ufe0f Loading plugin: ${plugin.name} — plugins have access to your filesystem`);
+      debugLog(`Executing plugin "${plugin.name}" for event "${event}"`);
+
+      // Build a sanitized environment, stripping sensitive keys
+      const sanitizedEnv: Record<string, string | undefined> = { ...process.env };
+      for (const key of SENSITIVE_ENV_VARS) {
+        delete sanitizedEnv[key];
+      }
+
       // Split command into parts for spawn
       const parts = plugin.command.split(/\s+/);
       const cmd = parts[0];
@@ -149,7 +173,7 @@ export function executePlugin(
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: PLUGIN_TIMEOUT_MS,
         env: {
-          ...process.env,
+          ...sanitizedEnv,
           ORIGIN_PLUGIN_EVENT: event,
           ORIGIN_PLUGIN_NAME: plugin.name,
         },
@@ -157,16 +181,13 @@ export function executePlugin(
 
       let stdout = '';
       let stderr = '';
-      const MAX_BUF = 5 * 1024 * 1024; // 5MB cap per stream
 
       child.stdout.on('data', (chunk: Buffer) => {
-        if (stdout.length < MAX_BUF) stdout += chunk.toString();
-        else try { child.kill('SIGKILL'); } catch { /* noop */ }
+        stdout += chunk.toString();
       });
 
       child.stderr.on('data', (chunk: Buffer) => {
-        if (stderr.length < MAX_BUF) stderr += chunk.toString();
-        else try { child.kill('SIGKILL'); } catch { /* noop */ }
+        stderr += chunk.toString();
       });
 
       child.on('error', (err) => {
@@ -275,18 +296,28 @@ function isCommandAccessible(command: string): boolean {
     return fs.existsSync(cmd);
   }
 
-  // Check PATH. Only allow safe executable names to avoid injection via `which`.
-  if (!/^[a-zA-Z0-9_.-]+$/.test(cmd)) return false;
-  const r = runDetailed('which', [cmd], { timeoutMs: 2_000 });
-  return r.status === 0;
+  // Check PATH
+  try {
+    execSync(`which ${cmd}`, { stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Write a debug log entry.
+ * Rotates the log file when it exceeds 5 MB.
  */
 function debugLog(message: string): void {
   try {
     const logPath = path.join(os.homedir(), '.origin', 'hooks.log');
+    try {
+      const stats = fs.statSync(logPath);
+      if (stats.size >= 5 * 1024 * 1024) {
+        fs.renameSync(logPath, logPath + '.old');
+      }
+    } catch { /* file may not exist yet */ }
     const timestamp = new Date().toISOString();
     fs.appendFileSync(logPath, `[${timestamp}] [plugin-system] ${message}\n`);
   } catch {

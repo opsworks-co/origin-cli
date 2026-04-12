@@ -15,17 +15,20 @@ interface SecretPattern {
 const SECRET_PATTERNS: SecretPattern[] = [
   // AWS
   { name: 'AWS Access Key', regex: /\b(AKIA[0-9A-Z]{16})\b/g },
-  { name: 'AWS Secret Key', regex: /\b([A-Za-z0-9/+=]{40})\b/g },
+  // AWS Secret Key: only match 40-char base64 strings on lines with AWS context keywords
+  { name: 'AWS Secret Key', regex: /(?:aws.?secret.?access.?key|aws.?secret.?key|secret.?access.?key|AWS_SECRET_ACCESS_KEY|aws_secret|SecretAccessKey)\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})['"]?/gi },
   // GitHub
   { name: 'GitHub Token', regex: /\b(ghp_[A-Za-z0-9]{36,})\b/g },
   { name: 'GitHub OAuth', regex: /\b(gho_[A-Za-z0-9]{36,})\b/g },
   { name: 'GitHub App Token', regex: /\b(ghu_[A-Za-z0-9]{36,})\b/g },
   { name: 'GitHub App Install', regex: /\b(ghs_[A-Za-z0-9]{36,})\b/g },
   { name: 'GitHub PAT Fine', regex: /\b(github_pat_[A-Za-z0-9_]{50,})\b/g },
-  // Generic API keys
-  { name: 'OpenAI Key', regex: /\b(sk-[A-Za-z0-9]{32,})\b/g },
+  // API keys — specific prefixes first (order matters: most specific before general)
   { name: 'Anthropic Key', regex: /\b(sk-ant-[A-Za-z0-9-]{32,})\b/g },
-  { name: 'Stripe Key', regex: /\b(sk_(?:live|test)_[A-Za-z0-9]{24,})\b/g },
+  { name: 'Stripe Secret Key', regex: /\b(sk_(?:live|test)_[A-Za-z0-9]{24,})\b/g },
+  { name: 'Stripe Publishable Key', regex: /\b(pk_(?:live|test)_[A-Za-z0-9]{24,})\b/g },
+  // OpenAI key: sk- prefix but NOT sk-ant- (Anthropic) or sk_live_/sk_test_ (Stripe)
+  { name: 'OpenAI Key', regex: /\b(sk-(?!ant-)[A-Za-z0-9]{32,})\b/g },
   { name: 'Slack Token', regex: /\b(xoxb-[0-9]{10,}-[A-Za-z0-9]{24,})\b/g },
   { name: 'Slack Webhook', regex: /\b(xoxp-[0-9]{10,}-[A-Za-z0-9]{24,})\b/g },
   // Private keys
@@ -38,8 +41,8 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { name: 'Bearer Token', regex: /\b(Bearer\s+[A-Za-z0-9_\-.]{20,})\b/g },
   // npm tokens
   { name: 'npm Token', regex: /\b(npm_[A-Za-z0-9]{36,})\b/g },
-  // Heroku
-  { name: 'Heroku API Key', regex: /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/g },
+  // Heroku: only match UUIDs on lines with Heroku context
+  { name: 'Heroku API Key', regex: /(?:HEROKU_API_KEY|heroku.?api.?key|heroku.?token|heroku.?auth)\s*[:=]\s*['"]?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})['"]?/gi },
 ];
 
 // ─── Entropy Detection ───────────────────────────────────────────────────
@@ -70,7 +73,7 @@ function isHighEntropySecret(token: string): boolean {
   // Skip common non-secrets
   if (/^[a-z]+$/i.test(token)) return false;  // all letters
   if (/^[0-9]+$/.test(token)) return false;     // all numbers
-  if (/^[a-f0-9]+$/i.test(token) && token.length < 20) return false; // short hex (likely SHA)
+  if (/^[a-f0-9]+$/i.test(token) && token.length <= 40) return false; // hex up to 40 chars (git SHA, short hashes)
   // Must have mixed character classes
   const hasUpper = /[A-Z]/.test(token);
   const hasLower = /[a-z]/.test(token);

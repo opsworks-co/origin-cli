@@ -1,4 +1,4 @@
-import { loadConfig, type Profile } from './config.js';
+import { loadConfig } from './config.js';
 
 function getConfig() {
   const config = loadConfig();
@@ -6,68 +6,26 @@ function getConfig() {
   return config;
 }
 
-// Default HTTP timeout for CLI→API calls. Without this, a stalled or
-// unresponsive Origin API would hang every CLI command indefinitely
-// (git hooks, session start/end, PR reviews). 30s is long enough for
-// slow networks but short enough that users get a real error instead
-// of an invisible hang. Override via ORIGIN_HTTP_TIMEOUT_MS.
-const DEFAULT_TIMEOUT_MS = Number(process.env.ORIGIN_HTTP_TIMEOUT_MS) || 30_000;
-
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } catch (err) {
-    if ((err as Error).name === 'AbortError') {
-      throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
+/** Ensure a parsed API response is a non-null object. */
+function assertObj(res: unknown, label: string): asserts res is Record<string, unknown> {
+  if (!res || typeof res !== 'object' || Array.isArray(res)) {
+    throw new Error(`Invalid API response for ${label}: expected object, got ${res === null ? 'null' : typeof res}`);
   }
 }
 
-// Retry wrapper: exponential backoff on 5xx + network errors. 4xx responses
-// are NOT retried — those indicate client-side issues (bad auth, invalid
-// body, missing resource) that retrying won't fix. Transient 5xx + fetch
-// failures (DNS, connection refused, reset) get up to 2 retries with
-// jittered delays of ~200ms, ~500ms. Keeps hook commands responsive on
-// flaky networks without hammering a genuinely broken API.
-const MAX_RETRIES = 2;
-const RETRY_BASE_MS = 200;
-async function fetchWithRetry(url: string, init: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS) {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await fetchWithTimeout(url, init, timeoutMs);
-      // Retry server errors (5xx). Don't retry 4xx — those are deterministic.
-      if (res.status >= 500 && res.status <= 599 && attempt < MAX_RETRIES) {
-        const delay = RETRY_BASE_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-      return res;
-    } catch (err) {
-      lastErr = err;
-      // Don't retry AbortError/timeouts — the user's command already waited
-      // the full budget; retrying just doubles the pain.
-      const msg = (err as Error).message || '';
-      if (msg.includes('timed out')) throw err;
-      if (attempt < MAX_RETRIES) {
-        const delay = RETRY_BASE_MS * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-      throw err;
+/** Ensure a parsed API response is a non-null object with specific required fields. */
+function assertFields(res: unknown, label: string, fields: string[]): asserts res is Record<string, unknown> {
+  assertObj(res, label);
+  for (const f of fields) {
+    if ((res as Record<string, unknown>)[f] === undefined) {
+      throw new Error(`Invalid API response for ${label}: missing required field '${f}'`);
     }
   }
-  throw lastErr;
 }
 
 async function request(path: string, opts: RequestInit = {}) {
   const config = getConfig();
-  const res = await fetchWithRetry(`${config.apiUrl}${path}`, {
+  const res = await fetch(`${config.apiUrl}${path}`, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
@@ -86,35 +44,20 @@ async function request(path: string, opts: RequestInit = {}) {
   return res.json();
 }
 
-/** Make an API request using a specific profile (for multi-account) */
-export async function requestWithProfile(profile: Profile, path: string, opts: RequestInit = {}) {
-  const res = await fetchWithRetry(`${profile.apiUrl}${path}`, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': profile.apiKey,
-      ...opts.headers as Record<string, string>,
-    },
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as any;
-    throw new Error(body?.message || body?.error || res.statusText);
-  }
-  return res.json();
-}
-
 export const api = {
-  request,
-  getWhoami: () => request('/api/mcp/whoami'),
   getPolicies: () => request('/api/mcp/policies'),
   registerMachine: (data: any) => request('/api/machines', { method: 'POST', body: JSON.stringify(data) }),
   getMachines: () => request('/api/machines'),
   syncRepo: (id: string) => request(`/api/repos/${id}/sync`, { method: 'POST' }),
   getRepos: () => request('/api/repos'),
-  getMe: () => request('/api/auth/me'),
+  getMe: async () => {
+    const res = await request('/api/auth/me');
+    assertObj(res, 'getMe');
+    return res;
+  },
 
   // Session lifecycle (MCP API — used by hooks)
-  startSession: (data: {
+  startSession: async (data: {
     machineId: string;
     prompt: string;
     model: string;
@@ -123,15 +66,28 @@ export const api = {
     agentSlug?: string;
     branch?: string;
     hostname?: string;
+    additionalRepoPaths?: string[];
     agentSessionId?: string;
-  }) =>
-    request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) }),
-  updateSession: (id: string, data: any) =>
-    request(`/api/mcp/session/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  resumeSession: (id: string) =>
-    request(`/api/mcp/session/${id}/resume`, { method: 'POST' }),
-  endSession: (data: any) =>
-    request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(data) }),
+  }) => {
+    const res = await request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) });
+    assertFields(res, 'startSession', ['sessionId']);
+    return res;
+  },
+  updateSession: async (id: string, data: any) => {
+    const res = await request(`/api/mcp/session/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+    assertObj(res, 'updateSession');
+    return res;
+  },
+  resumeSession: async (id: string) => {
+    const res = await request(`/api/mcp/session/${id}/resume`, { method: 'POST' });
+    assertObj(res, 'resumeSession');
+    return res;
+  },
+  endSession: async (data: any) => {
+    const res = await request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(data) });
+    assertObj(res, 'endSession');
+    return res;
+  },
   pingSession: (id: string) =>
     request(`/api/mcp/session/${id}/ping`, { method: 'POST' }),
 
@@ -140,7 +96,11 @@ export const api = {
     const q = new URLSearchParams(params).toString();
     return request(`/api/sessions${q ? `?${q}` : ''}`);
   },
-  getSession: (id: string) => request(`/api/sessions/${id}`),
+  getSession: async (id: string) => {
+    const res = await request(`/api/sessions/${id}`);
+    assertObj(res, 'getSession');
+    return res;
+  },
   reviewSession: (id: string, status: string, note?: string) =>
     request(`/api/sessions/${id}/review`, { method: 'POST', body: JSON.stringify({ status, note }) }),
   shareSession: (id: string) =>
@@ -174,9 +134,11 @@ export const api = {
   },
 
   // Stats
-  getStats: (params?: Record<string, string>) => {
+  getStats: async (params?: Record<string, string>) => {
     const q = new URLSearchParams(params).toString();
-    return request(`/api/stats${q ? `?${q}` : ''}`);
+    const res = await request(`/api/stats${q ? `?${q}` : ''}`);
+    assertObj(res, 'getStats');
+    return res;
   },
 
   // Versioning
@@ -196,7 +158,11 @@ export const api = {
   getUser: (id: string) => request(`/api/users/${id}`),
 
   // Pricing
-  getPricing: () => request('/api/pricing'),
+  getPricing: async () => {
+    const res = await request('/api/pricing');
+    assertObj(res, 'getPricing');
+    return res;
+  },
 
   // Secret findings (pre-commit hook)
   reportSecrets: (sessionId: string, findings: any[]) =>

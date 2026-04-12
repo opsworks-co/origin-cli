@@ -1,4 +1,4 @@
-import { git } from './utils/exec.js';
+import { execFileSync } from 'child_process';
 
 /**
  * Write Origin metadata as Git Notes on each commit SHA.
@@ -36,7 +36,12 @@ export function writeGitNotes(
   commitShas: string[],
   data: GitNoteData,
 ): void {
-  const opts = { cwd: repoPath, timeoutMs: 10_000 };
+  const execOpts = {
+    cwd: repoPath,
+    stdio: 'pipe' as const,
+    timeout: 10000,
+    encoding: 'utf-8' as const,
+  };
 
   const notePayload = JSON.stringify(
     {
@@ -67,16 +72,14 @@ export function writeGitNotes(
   );
 
   for (const sha of commitShas) {
-    // Defense in depth: only operate on hex SHAs
-    if (!/^[a-fA-F0-9]+$/.test(sha)) continue;
     try {
       // Use --ref=origin to keep notes in a separate namespace
-      // Use -f to overwrite if note already exists (handles re-runs).
-      // notePayload and sha are passed as positional args — no shell, no escaping.
-      git(['notes', '--ref=origin', 'add', '-f', '-m', notePayload, sha], opts);
+      // Use -f to overwrite if note already exists (handles re-runs)
+      execFileSync('git', ['notes', '--ref=origin', 'add', '-f', '-m', notePayload, sha], execOpts);
     } catch {
       // Never fail session-end because of a notes error
       // Notes are a nice-to-have, not critical
     }
   }
 }
+

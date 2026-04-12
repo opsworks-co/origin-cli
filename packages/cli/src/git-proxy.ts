@@ -1,6 +1,4 @@
-import { git, gitOrNull, run, runDetailed } from './utils/exec.js';
-
-const HEX = /^[a-fA-F0-9]+$/;
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -261,34 +259,37 @@ function handlePostRebase(repoPath: string, headBefore: string, headAfter: strin
     //   sha2 HEAD@{1}: rebase (pick): commit message
     //   sha3 HEAD@{2}: rebase (start): checkout upstream
 
-    // Only proceed if both HEAD refs are hex SHAs (defense in depth).
-    if (!HEX.test(headBefore) || !HEX.test(headAfter)) return;
-
-    const gitOpts = { cwd: repoPath, timeoutMs: 10_000 };
+    const execOpts = {
+      cwd: repoPath,
+      encoding: 'utf-8' as const,
+      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    };
 
     // Get commits between old HEAD and new HEAD
     // Old branch commits (before rebase)
-    const oldCommits = (gitOrNull(['rev-list', headBefore, '--not', headAfter], gitOpts) || '')
-      .split('\n').filter(Boolean);
+    const oldCommits = execSync(
+      `git rev-list ${headBefore} --not ${headAfter} 2>/dev/null || true`,
+      execOpts,
+    ).trim().split('\n').filter(Boolean);
 
     // New branch commits (after rebase)
-    const newCommits = (gitOrNull(['rev-list', headAfter, '--not', headBefore], gitOpts) || '')
-      .split('\n').filter(Boolean);
+    const newCommits = execSync(
+      `git rev-list ${headAfter} --not ${headBefore} 2>/dev/null || true`,
+      execOpts,
+    ).trim().split('\n').filter(Boolean);
 
     // Match old to new by commit message (best effort)
     const oldMessages = new Map<string, string>();
     for (const sha of oldCommits) {
-      if (!HEX.test(sha)) continue;
       try {
-        const msg = git(['log', '-1', '--format=%s', sha], gitOpts).trim();
+        const msg = execSync(`git log -1 --format=%s ${sha}`, execOpts).trim();
         oldMessages.set(msg, sha);
       } catch { /* skip */ }
     }
 
     for (const newSha of newCommits) {
-      if (!HEX.test(newSha)) continue;
       try {
-        const msg = git(['log', '-1', '--format=%s', newSha], gitOpts).trim();
+        const msg = execSync(`git log -1 --format=%s ${newSha}`, execOpts).trim();
         const oldSha = oldMessages.get(msg);
         if (oldSha) {
           preserveAttributionOnRewrite(repoPath, oldSha, newSha);
@@ -340,13 +341,11 @@ function generateWrapperScript(realGitPath: string): string {
  */
 function findRealGit(): string | null {
   try {
-    // Use `which -a git` to find all git binaries, skip our wrapper.
-    // `which` is invoked without a shell — its positional arg is a literal string.
-    const r = runDetailed('which', ['-a', 'git'], { timeoutMs: 2_000 });
-    const raw = r.status === 0 && r.stdout
-      ? r.stdout
-      : (runDetailed('command', ['-v', 'git'], { timeoutMs: 2_000 }).stdout || '');
-    const allGits = raw.trim().split('\n').filter(Boolean);
+    // Use `which -a git` to find all git binaries, skip our wrapper
+    const allGits = execSync('which -a git 2>/dev/null || command -v git', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim().split('\n').filter(Boolean);
 
     for (const gitPath of allGits) {
       const resolved = gitPath.trim();
@@ -392,10 +391,17 @@ function isKillSwitchActive(): boolean {
 
 /**
  * Write a debug log entry to ~/.origin/hooks.log.
+ * Rotates the log file when it exceeds 5 MB.
  */
 function debugLog(message: string): void {
   try {
     const logPath = path.join(os.homedir(), '.origin', 'hooks.log');
+    try {
+      const stats = fs.statSync(logPath);
+      if (stats.size >= 5 * 1024 * 1024) {
+        fs.renameSync(logPath, logPath + '.old');
+      }
+    } catch { /* file may not exist yet */ }
     const timestamp = new Date().toISOString();
     fs.appendFileSync(logPath, `[${timestamp}] [git-proxy] ${message}\n`);
   } catch {

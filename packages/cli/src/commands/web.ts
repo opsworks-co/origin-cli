@@ -1,12 +1,9 @@
 import http from 'http';
+import { execSync } from 'child_process';
 import chalk from 'chalk';
-import { gitDetailed, runDetailed } from '../utils/exec.js';
 import { getGitRoot, getBranch } from '../session-state.js';
 import { getAllPrompts } from '../local-db.js';
 import { loadAgentConfig } from '../config.js';
-
-const HEX = /^[a-fA-F0-9]{4,64}$/;
-const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
 /**
  * origin web — Launch a local web dashboard for your repo's AI attribution data.
@@ -35,7 +32,7 @@ interface SessionInfo {
 }
 
 function gatherData(repoRoot: string) {
-  const gitOpts = { cwd: repoRoot };
+  const execOpts = { encoding: 'utf-8' as const, cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
   const branch = getBranch(repoRoot) || 'unknown';
 
   // Commits with notes
@@ -47,9 +44,8 @@ function gatherData(repoRoot: string) {
   const toolCounts: Record<string, number> = {};
   const modelCounts: Record<string, number> = {};
 
-  {
-    const logRes = gitDetailed(['log', '--format=%H|%aI|%s|%an', '-100'], gitOpts);
-    const log = logRes.status === 0 ? logRes.stdout.trim() : '';
+  try {
+    const log = execSync('git log --format="%H|%aI|%s|%an" -100 2>/dev/null', execOpts).trim();
     if (log) {
       for (const line of log.split('\n').filter(Boolean)) {
         const [sha, date, ...rest] = line.split('|');
@@ -62,32 +58,27 @@ function gatherData(repoRoot: string) {
         let linesAdded = 0;
         let linesRemoved = 0;
 
-        if (HEX.test(sha)) {
-          const noteRes = gitDetailed(['notes', '--ref=origin', 'show', sha], gitOpts);
-          if (noteRes.status === 0) {
-            try {
-              const parsed = JSON.parse(noteRes.stdout.trim());
-              const data = parsed.origin || parsed;
-              isAi = true;
-              model = data.model;
-              sessionId = data.sessionId;
-              linesAdded = data.linesAdded || 0;
-              linesRemoved = data.linesRemoved || 0;
-            } catch { /* bad json */ }
-          }
+        try {
+          const note = execSync(`git notes --ref=origin show ${sha} 2>/dev/null`, execOpts).trim();
+          const parsed = JSON.parse(note);
+          const data = parsed.origin || parsed;
+          isAi = true;
+          model = data.model;
+          sessionId = data.sessionId;
+          linesAdded = data.linesAdded || 0;
+          linesRemoved = data.linesRemoved || 0;
+        } catch { /* no note */ }
 
-          // Get line stats if not from note
-          if (!linesAdded && !linesRemoved) {
-            const statRes = gitDetailed(['diff-tree', '--root', '--numstat', sha], gitOpts);
-            if (statRes.status === 0) {
-              const stat = statRes.stdout.trim();
-              for (const s of stat.split('\n').slice(1)) {
-                const [a, r] = s.split('\t');
-                if (a !== '-') linesAdded += parseInt(a) || 0;
-                if (r !== '-') linesRemoved += parseInt(r) || 0;
-              }
+        // Get line stats if not from note
+        if (!linesAdded && !linesRemoved) {
+          try {
+            const stat = execSync(`git diff-tree --root --numstat ${sha} 2>/dev/null`, execOpts).trim();
+            for (const s of stat.split('\n').slice(1)) {
+              const [a, r] = s.split('\t');
+              if (a !== '-') linesAdded += parseInt(a) || 0;
+              if (r !== '-') linesRemoved += parseInt(r) || 0;
             }
-          }
+          } catch { /* ignore */ }
         }
 
         if (isAi) {
@@ -104,38 +95,34 @@ function gatherData(repoRoot: string) {
         commits.push({ sha, date, message, author, isAi, model, sessionId, linesAdded, linesRemoved });
       }
     }
-  }
+  } catch { /* ignore */ }
 
   // Sessions
   const sessions: SessionInfo[] = [];
-  {
-    const treeRes = gitDetailed(['ls-tree', '--name-only', 'origin-sessions:sessions/'], gitOpts);
-    if (treeRes.status === 0) {
-      const tree = treeRes.stdout.trim();
-      if (tree) {
-        for (const sid of tree.split('\n').filter(Boolean).slice(-30)) {
-          if (!SAFE_ID.test(sid)) continue;
-          let model = 'unknown';
-          let date = '';
-          let cost: number | undefined;
-          let tokens: number | undefined;
-          let promptCount: number | undefined;
-          const metaRes = gitDetailed(['show', `origin-sessions:sessions/${sid}/metadata.json`], gitOpts);
-          if (metaRes.status === 0) {
-            try {
-              const m = JSON.parse(metaRes.stdout.trim());
-              model = m.model || 'unknown';
-              date = m.startedAt || m.timestamp || '';
-              cost = m.costUsd;
-              tokens = m.tokensUsed;
-              promptCount = m.promptCount;
-            } catch { /* ignore */ }
+  try {
+    const tree = execSync('git ls-tree --name-only origin-sessions:sessions/ 2>/dev/null', execOpts).trim();
+    if (tree) {
+      for (const sid of tree.split('\n').filter(Boolean).slice(-30)) {
+        let model = 'unknown';
+        let date = '';
+        let cost: number | undefined;
+        let tokens: number | undefined;
+        let promptCount: number | undefined;
+        try {
+          const meta = execSync(`git show origin-sessions:sessions/${sid}/metadata.json 2>/dev/null`, execOpts).trim();
+          if (meta) {
+            const m = JSON.parse(meta);
+            model = m.model || 'unknown';
+            date = m.startedAt || m.timestamp || '';
+            cost = m.costUsd;
+            tokens = m.tokensUsed;
+            promptCount = m.promptCount;
           }
-          sessions.push({ id: sid, model, date, cost, tokens, promptCount });
-        }
+        } catch { /* ignore */ }
+        sessions.push({ id: sid, model, date, cost, tokens, promptCount });
       }
     }
-  }
+  } catch { /* ignore */ }
 
   // Prompts from local DB
   const prompts = getAllPrompts();
@@ -177,7 +164,7 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Origin — ${repoName}</title>
+<title>Origin — ${escapeHtml(repoName)}</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
@@ -251,8 +238,8 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
 
 <div class="header">
   <h1>Origin</h1>
-  <span class="repo">${repoName}</span>
-  <span class="branch">${branch}</span>
+  <span class="repo">${escapeHtml(repoName)}</span>
+  <span class="branch">${escapeHtml(branch)}</span>
 </div>
 
 <div class="nav">
@@ -293,7 +280,7 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
       ${Object.entries(stats.toolCounts).sort((a, b) => b[1] - a[1]).map(([tool, count]) => {
         const pct = stats.aiCommits ? Math.round((count / stats.aiCommits) * 100) : 0;
         return `<div class="bar-row">
-          <span class="bar-label">${tool}</span>
+          <span class="bar-label">${escapeHtml(tool)}</span>
           <div class="bar-track"><div class="bar-fill ai" style="width: ${Math.max(pct, 5)}%">${count} commits (${pct}%)</div></div>
         </div>`;
       }).join('\n') || '<div class="empty">No AI commits detected yet</div>'}
@@ -304,7 +291,7 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
       ${Object.entries(stats.modelCounts).sort((a, b) => b[1] - a[1]).map(([model, count]) => {
         const pct = stats.aiCommits ? Math.round((count / stats.aiCommits) * 100) : 0;
         return `<div class="bar-row">
-          <span class="bar-label">${model}</span>
+          <span class="bar-label">${escapeHtml(model)}</span>
           <div class="bar-track"><div class="bar-fill ai" style="width: ${Math.max(pct, 5)}%">${count} commits (${pct}%)</div></div>
         </div>`;
       }).join('\n') || '<div class="empty">No AI commits detected yet</div>'}
@@ -330,8 +317,8 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
         <div class="commit-item">
           <span class="badge ${c.isAi ? 'ai' : 'human'}">${c.isAi ? 'AI' : 'HU'}</span>
           <span class="commit-msg">${escapeHtml(c.message)}</span>
-          <span class="commit-model">${c.isAi ? (c.model || '') : ''}</span>
-          <span class="commit-author">${c.isAi ? '' : c.author}</span>
+          <span class="commit-model">${c.isAi ? escapeHtml(c.model || '') : ''}</span>
+          <span class="commit-author">${c.isAi ? '' : escapeHtml(c.author)}</span>
           <span class="commit-lines"><span class="add">+${c.linesAdded || 0}</span> <span class="del">-${c.linesRemoved || 0}</span></span>
           <span class="commit-sha">${c.sha.slice(0, 7)}</span>
           <span class="commit-date">${new Date(c.date).toLocaleDateString()}</span>
@@ -345,8 +332,8 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
     <div class="commit-list">
       ${sessions.length === 0 ? '<div class="empty">No sessions tracked yet.<br>Sessions appear after AI agents make commits.</div>' : sessions.reverse().map(s => `
         <div class="session-item">
-          <span class="session-id">${s.id.slice(0, 16)}</span>
-          <span class="session-model">${s.model}</span>
+          <span class="session-id">${escapeHtml(s.id.slice(0, 16))}</span>
+          <span class="session-model">${escapeHtml(s.model)}</span>
           <span class="session-meta">${s.date ? new Date(s.date).toLocaleString() : ''}</span>
           <span class="session-meta">${s.tokens ? s.tokens.toLocaleString() + ' tokens' : ''}</span>
           <span class="session-meta">${s.cost ? '$' + s.cost.toFixed(4) : ''}</span>
@@ -363,11 +350,11 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
         <div class="prompt-item">
           <div class="prompt-text">${escapeHtml(p.promptText.slice(0, 200))}${p.promptText.length > 200 ? '...' : ''}</div>
           <div class="prompt-meta">
-            <span>${p.model}</span>
-            <span>${p.sessionId.slice(0, 12)}</span>
+            <span>${escapeHtml(p.model)}</span>
+            <span>${escapeHtml(p.sessionId.slice(0, 12))}</span>
             <span>${p.timestamp ? new Date(p.timestamp).toLocaleString() : ''}</span>
           </div>
-          ${p.filesChanged.length > 0 ? `<div class="prompt-files">${p.filesChanged.slice(0, 5).join(', ')}${p.filesChanged.length > 5 ? ` +${p.filesChanged.length - 5} more` : ''}</div>` : ''}
+          ${p.filesChanged.length > 0 ? `<div class="prompt-files">${p.filesChanged.slice(0, 5).map((f: string) => escapeHtml(f)).join(', ')}${p.filesChanged.length > 5 ? ` +${p.filesChanged.length - 5} more` : ''}</div>` : ''}
         </div>
       `).join('')}
     </div>
@@ -419,10 +406,10 @@ export async function webCommand(opts: { port?: string }) {
     console.log(chalk.gray(`  ${data.stats.totalCommits} commits · ${data.stats.aiCommits} AI · ${data.sessions.length} sessions · ${data.prompts.length} prompts`));
     console.log(chalk.gray('\n  Press Ctrl+C to stop.\n'));
 
-    // Open browser — only allow http/https URLs
-    if (/^https?:\/\//.test(url)) {
+    // Open browser
+    try {
       const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-      runDetailed(openCmd, [url], { stdio: 'ignore' });
-    }
+      execSync(`${openCmd} ${url}`, { stdio: 'ignore' });
+    } catch { /* ignore */ }
   });
 }
