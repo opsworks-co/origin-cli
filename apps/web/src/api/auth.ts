@@ -95,10 +95,10 @@ export function getOAuthUrl(provider: 'github' | 'gitlab' | 'google') {
   return request<{ url: string }>(`/api/auth/oauth/${provider}`);
 }
 
-export function oauthCallback(provider: string, code: string, accountType?: string) {
+export function oauthCallback(provider: string, code: string, state: string, accountType?: string) {
   return request<AuthResponse>(`/api/auth/oauth/${provider}/callback`, {
     method: 'POST',
-    body: JSON.stringify({ code, accountType }),
+    body: JSON.stringify({ code, state, accountType }),
   });
 }
 

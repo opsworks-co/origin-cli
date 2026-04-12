@@ -476,7 +476,10 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       where: {
         agentId: agent?.id || null,
         machineId: machineId || undefined,
-        commit: { repoId: repo.id },
+        // Explicit orgId scope prevents cross-tenant collisions — even though
+        // repo.id is already org-scoped, defense-in-depth ensures a bug in
+        // repo resolution can't leak sessions across tenants.
+        commit: { repoId: repo.id, repo: { orgId } },
         status: 'RUNNING',
         updatedAt: { gte: heartbeatCutoff }, // heartbeat must be alive
       },
@@ -523,7 +526,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     const zombieSessions = await prisma.codingSession.findMany({
       where: {
         agentId: agent?.id || null,
-        commit: { repoId: repo.id },
+        commit: { repoId: repo.id, repo: { orgId } },
         status: 'RUNNING',
         updatedAt: { lt: zombieCutoff },
       },

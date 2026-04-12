@@ -1,9 +1,9 @@
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, setAuthCookie, clearAuthCookie } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, setAuthCookie, clearAuthCookie, generateSseToken } from '../middleware/auth.js';
 import { passwordResetLimiter } from '../middleware/rate-limit.js';
 import { sendEmail } from '../services/email.js';
 
@@ -716,15 +716,19 @@ router.post('/forgot-password', passwordResetLimiter, async (req: AuthRequest, r
     });
 
     const token = crypto.randomBytes(32).toString('hex');
+    // Store the SHA-256 hash of the token, not the plaintext. If the DB is
+    // compromised, an attacker can't use leaked hashes to reset passwords.
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     await prisma.authToken.create({
       data: {
         userId: user.id,
-        token,
+        token: tokenHash,
         type: 'password_reset',
         expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 hour
       },
     });
 
+    // The URL contains the raw token; we hash it on verification to compare.
     const resetUrl = `${WEB_URL}/reset-password?token=${token}`;
     await sendEmail(email, 'Reset your Origin password', `
       <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
@@ -763,8 +767,10 @@ router.post('/reset-password', async (req: AuthRequest, res: Response) => {
       if (pwErr) return res.status(400).json({ error: pwErr });
     }
 
+    // Hash the incoming token to compare against the stored hash
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const authToken = await prisma.authToken.findFirst({
-      where: { token, type: 'password_reset', usedAt: null, expiresAt: { gt: new Date() } },
+      where: { token: tokenHash, type: 'password_reset', usedAt: null, expiresAt: { gt: new Date() } },
     });
 
     if (!authToken) return res.status(400).json({ error: 'Invalid or expired reset link' });
@@ -784,8 +790,10 @@ router.post('/reset-password', async (req: AuthRequest, res: Response) => {
 router.get('/verify-token/:token', async (req: AuthRequest, res: Response) => {
   try {
     const { token } = req.params;
+    // Hash incoming token to compare against stored hash
+    const tokenHash = crypto.createHash('sha256').update(token as string).digest('hex');
     const authToken = await prisma.authToken.findFirst({
-      where: { token: token as string, usedAt: null, expiresAt: { gt: new Date() } },
+      where: { token: tokenHash, usedAt: null, expiresAt: { gt: new Date() } },
     });
     res.json({ valid: !!authToken, type: authToken?.type || null });
   } catch (err) {
@@ -809,10 +817,11 @@ router.post('/send-verification', requireAuth, async (req: AuthRequest, res: Res
     });
 
     const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     await prisma.authToken.create({
       data: {
         userId: user.id,
-        token,
+        token: tokenHash,
         type: 'email_verification',
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
       },
@@ -857,8 +866,9 @@ router.post('/verify-email', async (req: AuthRequest, res: Response) => {
     const { token } = req.body;
     if (!token) return res.status(400).json({ error: 'Token is required' });
 
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const authToken = await prisma.authToken.findFirst({
-      where: { token, type: 'email_verification', usedAt: null, expiresAt: { gt: new Date() } },
+      where: { token: tokenHash, type: 'email_verification', usedAt: null, expiresAt: { gt: new Date() } },
     });
 
     if (!authToken) return res.status(400).json({ error: 'Invalid or expired verification link' });
@@ -915,7 +925,7 @@ function getOAuthRedirectUri(provider: string) {
 }
 
 // GET /oauth/:provider — redirect to provider's OAuth consent screen
-router.get('/oauth/:provider', (req: AuthRequest, res: Response) => {
+router.get('/oauth/:provider', (req: Request, res: Response) => {
   const provider = req.params.provider as string;
   const config = OAUTH_PROVIDERS[provider];
   if (!config) return res.status(400).json({ error: 'Unknown provider' });
@@ -923,12 +933,23 @@ router.get('/oauth/:provider', (req: AuthRequest, res: Response) => {
   const clientId = process.env[config.clientIdEnv];
   if (!clientId) return res.status(500).json({ error: `${provider} OAuth not configured` });
 
+  const state = crypto.randomUUID();
+
+  // Store state in httpOnly cookie for CSRF verification in callback
+  res.cookie('oauth_state', state, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 10 * 60 * 1000, // 10 minutes
+    path: '/',
+  });
+
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: getOAuthRedirectUri(provider),
     scope: config.scopes,
     response_type: 'code',
-    state: crypto.randomBytes(16).toString('hex'),
+    state,
   });
 
   // Google needs access_type for refresh tokens
@@ -938,12 +959,20 @@ router.get('/oauth/:provider', (req: AuthRequest, res: Response) => {
 });
 
 // POST /oauth/:provider/callback — exchange code for token, find or create user
-router.post('/oauth/:provider/callback', async (req: AuthRequest, res: Response) => {
+router.post('/oauth/:provider/callback', async (req: Request, res: Response) => {
   const provider = req.params.provider as string;
   const config = OAUTH_PROVIDERS[provider];
   if (!config) return res.status(400).json({ error: 'Unknown provider' });
 
-  const { code, accountType: requestedAccountType } = req.body;
+  // Verify OAuth state to prevent CSRF
+  const cookieState = req.cookies?.oauth_state;
+  const { code, state: queryState, accountType: requestedAccountType } = req.body;
+
+  if (!cookieState || !queryState || cookieState !== queryState) {
+    return res.status(403).json({ error: 'OAuth state mismatch — possible CSRF' });
+  }
+  res.clearCookie('oauth_state', { path: '/' });
+
   if (!code) return res.status(400).json({ error: 'Authorization code required' });
 
   const clientId = process.env[config.clientIdEnv];
@@ -1095,6 +1124,18 @@ router.post('/oauth/:provider/callback', async (req: AuthRequest, res: Response)
     console.error(`OAuth ${provider} callback error:`, err);
     res.status(500).json({ error: 'OAuth authentication failed' });
   }
+});
+
+// ── SSE Token ──────────────────────────────────────────────────────────────
+// Issue a short-lived opaque token for SSE EventSource connections.
+// The client POSTs here (with cookie/bearer auth), receives a one-time token,
+// then passes it as ?sseToken=xxx on the EventSource URL. The token is deleted
+// on first use and expires after 30 seconds, so the real JWT never leaks into
+// query strings, server access logs, or browser history.
+router.post('/sse-token', requireAuth, (_req: AuthRequest, res: Response) => {
+  const user = _req.user!;
+  const sseToken = generateSseToken({ id: user.id, orgId: user.orgId, role: user.role });
+  res.json({ token: sseToken });
 });
 
 export default router;

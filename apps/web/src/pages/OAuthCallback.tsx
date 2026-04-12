@@ -12,8 +12,9 @@ export default function OAuthCallback() {
 
   useEffect(() => {
     const code = searchParams.get('code');
-    if (!code || !provider) {
-      setError('Missing authorization code');
+    const state = searchParams.get('state');
+    if (!code || !state || !provider) {
+      setError('Missing authorization code or state');
       return;
     }
 
@@ -23,7 +24,7 @@ export default function OAuthCallback() {
       localStorage.removeItem('origin_oauth_account_type');
     } catch { accountType = undefined; }
 
-    api.oauthCallback(provider, code, accountType)
+    api.oauthCallback(provider, code, state, accountType)
       .then((res) => {
         setSession(res.token, res.user);
         navigate(res.user.accountType === 'developer' ? '/me' : '/dashboard', { replace: true });

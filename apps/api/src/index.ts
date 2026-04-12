@@ -1,5 +1,21 @@
 import 'dotenv/config';
+
+// --- Production security checks ---
+if (process.env.NODE_ENV === 'production') {
+  const jwtSecret = process.env.JWT_SECRET || '';
+  if (!jwtSecret || jwtSecret === 'CHANGE_ME_TO_A_RANDOM_SECRET' || jwtSecret.length < 32) {
+    console.error('FATAL: JWT_SECRET must be set to a random string of 32+ characters in production');
+    process.exit(1);
+  }
+
+  if (!process.env.SESSION_ENCRYPTION_KEY || process.env.SESSION_ENCRYPTION_KEY.length < 32) {
+    console.error('FATAL: SESSION_ENCRYPTION_KEY must be set (32+ chars) in production — prompts/transcripts would be stored in plaintext without it');
+    process.exit(1);
+  }
+}
+
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import path from 'path';
 import fsSync from 'fs';
@@ -9,16 +25,18 @@ import { prisma } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Run DB migrations on startup
-try {
-  execSync('npx prisma db push --skip-generate', {
-    cwd: path.join(__dirname, '../'),
-    stdio: 'pipe',
-    env: { ...process.env }
-  });
-  console.log('✅ Database ready');
-} catch (e) {
-  console.log('⚠️  DB push skipped:', (e as Error).message?.slice(0, 100));
+// Run DB schema sync on startup (dev only — production uses prisma migrate deploy in docker-start.sh)
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    execSync('npx prisma db push --skip-generate', {
+      cwd: path.join(__dirname, '../'),
+      stdio: 'pipe',
+      env: { ...process.env }
+    });
+    console.log('✅ Database ready');
+  } catch (e) {
+    console.log('⚠️  DB push skipped:', (e as Error).message?.slice(0, 100));
+  }
 }
 
 import { authMiddleware } from './middleware/auth.js';
@@ -124,7 +142,11 @@ app.use('/api/webhooks', webhookLimiter, express.raw({ type: '*/*', limit: '10mb
   next();
 }, webhookRoutes);
 
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '2mb' }));
+app.use(cookieParser());
+
+// Per-route override for endpoints that receive large payloads (transcripts, diffs)
+const largeBodyParser = express.json({ limit: '50mb' });
 
 // Public routes (no auth required) — mount BEFORE authMiddleware
 app.use('/api/share', shareRoutes);
@@ -135,6 +157,28 @@ app.use('/api/auth', authLimiter);
 app.use('/api/v1/auth', authLimiter);
 
 app.use(authMiddleware);
+
+// ── CSRF origin-check for cookie-authenticated mutations ────���───────────
+// SameSite=Strict on the auth cookie already blocks most CSRF, but older
+// browsers and certain redirect flows may not enforce it. This adds a
+// defense-in-depth layer: for state-changing methods authenticated via
+// cookie, verify the Origin/Referer header matches an allowed origin.
+// API-key and Bearer-token auth are exempt (not cookie-based).
+app.use((req, res, next) => {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    const hasCookie = req.headers.cookie?.includes('origin_auth=');
+    if (hasCookie) {
+      const origin = req.headers.origin || req.headers.referer;
+      const allowed = process.env.CORS_ORIGIN
+        ? process.env.CORS_ORIGIN.split(',').map(s => s.trim()).filter(Boolean)
+        : ['http://localhost:5176', 'http://localhost:4002'];
+      if (origin && !allowed.some(a => origin.startsWith(a))) {
+        return res.status(403).json({ error: 'CSRF check failed' });
+      }
+    }
+  }
+  next();
+});
 
 // General per-user rate limit on all authenticated API traffic
 app.use('/api', apiLimiter);
@@ -151,14 +195,14 @@ function mountRoute(path: string, router: any, extraMiddleware: any[] = []) {
 
 mountRoute('/auth', authRoutes);
 mountRoute('/repos', repoRoutes);
-mountRoute('/sessions', sessionRoutes, [sessionLimiter]);
+mountRoute('/sessions', sessionRoutes, [largeBodyParser, sessionLimiter]);
 mountRoute('/agents', agentRoutes);
 mountRoute('/policies/public', publicPolicyRoutes);
 mountRoute('/policies', policyRoutes);
 mountRoute('/audit', auditRoutes);
 mountRoute('/stats', statsRoutes);
 mountRoute('/machines', machineRoutes);
-mountRoute('/mcp', mcpRoutes, [mcpLimiter]);
+mountRoute('/mcp', mcpRoutes, [largeBodyParser, mcpLimiter]);
 mountRoute('/settings', settingsRoutes);
 mountRoute('/notifications', notificationRoutes);
 // webhookRoutes already mounted above (before JSON parser, for raw body HMAC)

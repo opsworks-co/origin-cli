@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://getorigin.io/sitemap.xml

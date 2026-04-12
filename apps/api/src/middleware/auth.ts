@@ -59,6 +59,33 @@ export function setAuthCookie(res: Response, token: string) {
   res.setHeader('Set-Cookie', parts.join('; '));
 }
 
+// ── Short-lived SSE tokens ──────────────────────────────────────────────────
+// EventSource can't set Authorization headers or custom headers, so we issue
+// an opaque one-time token (NOT the JWT) that's valid for 30 seconds and
+// deleted on first use. This avoids leaking the real JWT in query strings
+// (which end up in server access logs, CDN logs, browser history, etc.).
+const SSE_TOKEN_TTL_MS = 30_000; // 30 seconds
+interface SseTokenEntry {
+  payload: { id: string; orgId: string; role: string };
+  expiresAt: number;
+}
+export const sseTokenStore = new Map<string, SseTokenEntry>();
+
+// Periodic cleanup of expired SSE tokens (every 60s)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of sseTokenStore) {
+    if (now >= entry.expiresAt) sseTokenStore.delete(key);
+  }
+}, 60_000).unref();
+
+/** Generate a short-lived SSE token for the given user payload. */
+export function generateSseToken(payload: { id: string; orgId: string; role: string }): string {
+  const token = crypto.randomBytes(32).toString('hex');
+  sseTokenStore.set(token, { payload, expiresAt: Date.now() + SSE_TOKEN_TTL_MS });
+  return token;
+}
+
 export function clearAuthCookie(res: Response) {
   const isProd = process.env.NODE_ENV === 'production';
   const parts = [
@@ -98,12 +125,18 @@ export async function authMiddleware(req: AuthRequest, _res: Response, next: Nex
       } catch { /* ignore invalid cookie */ }
     }
   }
-  // Also support token in query param (for SSE EventSource which can't set headers)
-  if (!req.user && req.query.token) {
-    try {
-      const payload = jwt.verify(req.query.token as string, JWT_SECRET, { algorithms: ['HS256'] }) as { id: string; orgId: string; role: string };
-      req.user = payload;
-    } catch { /* ignore invalid tokens */ }
+  // Support short-lived SSE tokens for EventSource (which can't set headers).
+  // These are one-time tokens generated via POST /auth/sse-token, stored in
+  // memory with 30s expiry, and deleted on first use — so the JWT never
+  // appears in server access logs or browser history.
+  if (!req.user && req.query.sseToken) {
+    const entry = sseTokenStore.get(req.query.sseToken as string);
+    if (entry && Date.now() < entry.expiresAt) {
+      sseTokenStore.delete(req.query.sseToken as string);
+      req.user = entry.payload;
+    } else {
+      sseTokenStore.delete(req.query.sseToken as string); // clean up expired
+    }
   }
   // Support X-API-Key header (used by CLI)
   if (!req.user) {

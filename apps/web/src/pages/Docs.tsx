@@ -3088,10 +3088,15 @@ git fetch origin refs/notes/origin:refs/notes/origin
 
             <H2>API Usage</H2>
             <P>
-              To consume the stream programmatically, connect to the SSE endpoint with
-              your authentication token:
+              To consume the stream programmatically, first obtain a short-lived SSE token,
+              then connect to the SSE endpoint with it:
             </P>
-            <CodeBlock title="SSE endpoint">{`GET /api/sessions/stream?token=YOUR_JWT_TOKEN
+            <CodeBlock title="SSE endpoint">{`# Step 1: Get a short-lived SSE token (valid 30 seconds, single use)
+POST /api/auth/sse-token
+Authorization: Bearer YOUR_JWT_TOKEN
+
+# Step 2: Connect with the SSE token (not the JWT)
+GET /api/sessions/stream?sseToken=SHORT_LIVED_TOKEN
 
 # Response: Server-Sent Events
 data: {"type":"connected"}

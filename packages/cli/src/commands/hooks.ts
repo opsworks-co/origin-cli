@@ -3469,7 +3469,17 @@ export async function handlePreCommit(): Promise<void> {
     const addedLines = parseStagedDiffLines(stagedDiff);
     const seen = new Set<string>();
 
+    // Skip minified/bundled build artifacts — they trigger false positives on
+    // vendor library internals, example code in docs, and React/chart internals.
+    const SCAN_SKIP_PATHS = [
+      '/dist/', '/build/', '/public/', '/web-dist/',
+      '.min.js', '.min.css', '.bundle.js', '.chunk.js',
+      'node_modules/', 'vendor/', '.tgz',
+    ];
+
     for (const entry of addedLines) {
+      // Skip build artifacts and vendor bundles
+      if (SCAN_SKIP_PATHS.some(p => entry.file.includes(p))) continue;
       const trimmed = entry.content.trim();
       if (trimmed.length < 5) continue;
       if (trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('*') || trimmed.startsWith('<!--')) continue;
