@@ -86,29 +86,7 @@ export function parseTranscript(transcriptPath: string): ParsedTranscript {
     return result;
   }
 
-  // Bound the file size we're willing to read into memory. A pathological
-  // 500MB transcript would OOM the CLI; 64MB is ~500k lines of chat which is
-  // more than any real session. Larger files are truncated from the head
-  // (most recent lines are at the tail).
-  const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
-  let raw: string;
-  try {
-    const stat = fs.statSync(transcriptPath);
-    if (stat.size > MAX_TRANSCRIPT_BYTES) {
-      const fd = fs.openSync(transcriptPath, 'r');
-      try {
-        const buf = Buffer.alloc(MAX_TRANSCRIPT_BYTES);
-        fs.readSync(fd, buf, 0, MAX_TRANSCRIPT_BYTES, stat.size - MAX_TRANSCRIPT_BYTES);
-        raw = buf.toString('utf-8');
-      } finally {
-        fs.closeSync(fd);
-      }
-    } else {
-      raw = fs.readFileSync(transcriptPath, 'utf-8');
-    }
-  } catch {
-    return result;
-  }
+  const raw = fs.readFileSync(transcriptPath, 'utf-8');
   result.transcript = raw;
 
   // Detect format: Gemini uses a single JSON object { "messages": [...] }, Claude/Cursor use JSONL.
@@ -258,12 +236,27 @@ function cleanPrompt(text: string): string | null {
 
   if (!cleaned) return null;
 
+  // Skip prompts that are purely hook feedback or system messages
+  if (isSystemMessage(cleaned)) return null;
+
   // Truncate very long prompts
   if (cleaned.length > 1000) {
     cleaned = cleaned.slice(0, 1000) + '...';
   }
 
   return cleaned;
+}
+
+/** Detect prompts that are actually system/hook messages, not real user input */
+function isSystemMessage(text: string): boolean {
+  const systemPatterns = [
+    /^Stop hook feedback:/,
+    /^Stop:Callback hook blocking error/,
+    /^PostToolUse:.*hook/i,
+    /^PreToolUse:.*hook/i,
+    /^\[Image: original \d+x\d+/,
+  ];
+  return systemPatterns.some(p => p.test(text.trim()));
 }
 
 // ─── Gemini Transcript Parser ──────────────────────────────────────────────
@@ -337,7 +330,9 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
         if (msg.tokens) {
           result.inputTokens += msg.tokens.input ?? 0;
           result.cacheReadTokens += msg.tokens.cached ?? 0;
-          result.outputTokens += msg.tokens.output ?? 0;
+          // Gemini 2.5 thinking models report reasoning in `thoughts` — count
+          // those as output tokens since they're billed at the output rate.
+          result.outputTokens += (msg.tokens.output ?? 0) + (msg.tokens.thoughts ?? 0);
         }
       }
     }
@@ -792,7 +787,7 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'haiku': { input: 1, output: 5 },
   // Google
   'gemini-2.5-pro': { input: 1.25, output: 10 },
-  'gemini-2.5-flash': { input: 0.30, output: 2.50 },
+  'gemini-2.5-flash': { input: 0.15, output: 3.50 },
   'gemini-3-pro': { input: 1.25, output: 10 },
   'gemini-3-flash': { input: 0.15, output: 0.60 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
@@ -808,7 +803,10 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'gpt-5.3': { input: 2.00, output: 8.00 },
   'gpt-5.4': { input: 3.00, output: 12.00 },
   'codex': { input: 2.00, output: 8.00 },
-  // Cursor Composer models
+  // Cursor — default to sonnet pricing since most Cursor users are on claude-sonnet-4.
+  // If getCursorModelFromDb resolves the real model, estimateCost will match a more
+  // specific key (e.g. "gpt-4o") instead.
+  'cursor': { input: 3, output: 15 },
   'composer': { input: 2.50, output: 10.00 },
 };
 
@@ -837,9 +835,12 @@ export function estimateCost(
   const modelLower = model.toLowerCase();
 
   let pricing = activePricing['sonnet'] ?? DEFAULT_MODEL_PRICING['sonnet']; // default to sonnet pricing
-  for (const [key, value] of Object.entries(activePricing)) {
+  // Sort keys by length descending so "gemini-2.5-flash" matches before "gemini-2.0",
+  // and "gpt-4o-mini" matches before "gpt-4o". Longest match wins.
+  const sortedKeys = Object.keys(activePricing).sort((a, b) => b.length - a.length);
+  for (const key of sortedKeys) {
     if (modelLower.includes(key)) {
-      pricing = value;
+      pricing = activePricing[key];
       break;
     }
   }
