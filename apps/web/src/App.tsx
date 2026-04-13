@@ -31,6 +31,8 @@ const BlogPost = lazy(() => import('./pages/BlogPost'));
 const Demo = lazy(() => import('./pages/Demo'));
 const DemoPlatform = lazy(() => import('./pages/DemoPlatform'));
 const DemoCLI = lazy(() => import('./pages/DemoCLI'));
+const UseCases = lazy(() => import('./pages/UseCases'));
+const Onboarding = lazy(() => import('./pages/Onboarding'));
 const Sessions = lazy(() => import('./pages/Sessions'));
 const SessionDetail = lazy(() => import('./pages/SessionDetail'));
 const SessionCompare = lazy(() => import('./pages/SessionCompare'));
@@ -99,6 +101,8 @@ function ScrollToTop() {
   const { pathname } = useLocation();
   useEffect(() => {
     window.scrollTo(0, 0);
+    // Clear the chunk-reload guard so future deploys can auto-reload again
+    sessionStorage.removeItem('chunk_reload');
   }, [pathname]);
   return null;
 }
@@ -118,6 +122,7 @@ export default function App() {
       <Route path="/cli" element={<Navigate to="/docs#cli" replace />} />
       <Route path="/blog" element={<PublicLayout><Blog /></PublicLayout>} />
       <Route path="/blog/:slug" element={<PublicLayout><BlogPost /></PublicLayout>} />
+      <Route path="/use-cases" element={<PublicLayout><UseCases /></PublicLayout>} />
       <Route path="/demo" element={<PublicLayout><Demo /></PublicLayout>} />
       <Route path="/demo/platform" element={<PublicLayout><DemoPlatform /></PublicLayout>} />
       <Route path="/demo/cli" element={<PublicLayout><DemoCLI /></PublicLayout>} />
@@ -130,6 +135,7 @@ export default function App() {
       <Route path="/verify-email" element={<VerifyEmail />} />
       <Route path="/register" element={<Register />} />
       <Route path="/register/developer" element={<RegisterDeveloper />} />
+      <Route path="/onboarding" element={<ProtectedRoute><Onboarding /></ProtectedRoute>} />
       <Route path="/invite/:token" element={<AcceptInvite />} />
       <Route path="/accept-invite/:token" element={<AcceptInvite />} />
 

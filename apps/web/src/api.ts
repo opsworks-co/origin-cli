@@ -565,8 +565,9 @@ export function testIntegration(id: string) {
 
 // ---- GitHub App ---------------------------------------------------------------
 
-export function getGitHubAppInstallUrl() {
-  return request<{ installUrl: string }>('/api/github-app/install');
+export function getGitHubAppInstallUrl(opts?: { from?: string }) {
+  const q = opts?.from ? `?from=${encodeURIComponent(opts.from)}` : '';
+  return request<{ installUrl: string }>(`/api/github-app/install${q}`);
 }
 
 export function getGitHubAppStatus() {
@@ -623,8 +624,9 @@ export function deleteGitLabOAuthConfig() {
   return request<{ success: boolean }>('/api/gitlab-oauth/config', { method: 'DELETE' });
 }
 
-export function getGitLabOAuthInstallUrl() {
-  return request<{ authorizeUrl: string }>('/api/gitlab-oauth/install');
+export function getGitLabOAuthInstallUrl(opts?: { from?: string }) {
+  const q = opts?.from ? `?from=${encodeURIComponent(opts.from)}` : '';
+  return request<{ authorizeUrl: string }>(`/api/gitlab-oauth/install${q}`);
 }
 
 export function getGitLabOAuthStatus() {

@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
 
-const router = Router();
+const router = Router({ mergeParams: true });
 router.use(requireAuth);
 
 // Helper: serialize Issue for API response

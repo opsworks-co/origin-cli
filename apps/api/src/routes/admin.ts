@@ -257,6 +257,7 @@ router.delete('/orgs/:id', async (req: AuthRequest, res: Response) => {
         await tx.sessionDiff.deleteMany({ where: { sessionId: { in: sessionIds } } });
         await tx.sessionReview.deleteMany({ where: { sessionId: { in: sessionIds } } });
         await tx.sharedSession.deleteMany({ where: { sessionId: { in: sessionIds } } });
+        await tx.issueSession.deleteMany({ where: { sessionId: { in: sessionIds } } });
         await tx.codingSession.deleteMany({ where: { id: { in: sessionIds } } });
       }
       if (trailIds.length > 0) {
@@ -372,12 +373,15 @@ router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
         await tx.promptChange.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
         await tx.sessionDiff.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
         await tx.sessionReview.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
+        await tx.secretFinding.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
+        await tx.issueSession.deleteMany({ where: { issue: { repo: { orgId } } } });
+        await tx.sessionBookmark.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
         await tx.codingSession.deleteMany({ where: { commit: { repo: { orgId } } } });
         await tx.commit.deleteMany({ where: { repo: { orgId } } });
-        await tx.secretFinding.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
         await tx.pullRequest.deleteMany({ where: { repo: { orgId } } });
         await tx.webhook.deleteMany({ where: { repo: { orgId } } });
         await tx.apiKeyRepoScope.deleteMany({ where: { repo: { orgId } } });
+        await tx.issue.deleteMany({ where: { repo: { orgId } } });
         await tx.repo.deleteMany({ where: { orgId } });
         await tx.policyAssignment.deleteMany({ where: { policy: { orgId } } });
         await tx.policyRule.deleteMany({ where: { policy: { orgId } } });

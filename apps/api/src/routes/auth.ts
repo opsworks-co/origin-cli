@@ -167,11 +167,27 @@ router.post('/register/developer', async (req: AuthRequest, res: Response) => {
       },
     });
 
+    // Auto-generate an API key so the onboarding wizard can show it immediately
+    const rawApiKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
+    const keyHash = crypto.createHash('sha256').update(rawApiKey).digest('hex');
+    const keyPrefix = rawApiKey.slice(0, 14);
+
+    await prisma.apiKey.create({
+      data: {
+        orgId: org.id,
+        userId: user.id,
+        name: 'Default',
+        keyHash,
+        keyPrefix,
+      },
+    });
+
     const token = signToken({ id: user.id, orgId: org.id, role: user.role });
     setAuthCookie(res, token);
 
     res.status(201).json({
       token,
+      apiKey: rawApiKey,
       user: { id: user.id, email: user.email, name: user.name, role: user.role, accountType: 'developer', orgId: org.id, orgName: org.name, orgSlug: org.slug },
     });
   } catch (err) {
@@ -1050,6 +1066,9 @@ router.post('/oauth/:provider/callback', async (req: Request, res: Response) => 
       include: { org: true },
     });
 
+    let isNewAccount = false;
+    let newApiKey = '';
+
     if (!user) {
       // Check if email already exists (link OAuth to existing account)
       user = await prisma.user.findFirst({
@@ -1089,7 +1108,7 @@ router.post('/oauth/:provider/callback', async (req: Request, res: Response) => 
         });
 
         // Auto-generate API key for new OAuth user
-        const rawKey = `org_${crypto.randomBytes(32).toString('hex')}`;
+        const rawKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
         const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
         await prisma.apiKey.create({
           data: {
@@ -1097,10 +1116,12 @@ router.post('/oauth/:provider/callback', async (req: Request, res: Response) => 
             userId: user.id,
             name: 'Default',
             keyHash,
-            keyPrefix: rawKey.slice(0, 12),
-            keyType: 'solo',
+            keyPrefix: rawKey.slice(0, 14),
           },
         });
+
+        isNewAccount = true;
+        newApiKey = rawKey;
       }
     }
 
@@ -1108,6 +1129,7 @@ router.post('/oauth/:provider/callback', async (req: Request, res: Response) => 
     setAuthCookie(res, token);
     res.json({
       token,
+      ...(isNewAccount && newApiKey ? { apiKey: newApiKey, isNewAccount: true } : {}),
       user: {
         id: user.id,
         email: user.email,

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { LogoMark } from './Logo';
@@ -10,6 +10,99 @@ const NAV_LINKS = [
   { to: '/pricing', label: 'Pricing' },
   { to: '/blog', label: 'Blog' },
 ];
+
+const USE_CASES_SOLO = [
+  { title: 'Know Your AI Costs', desc: 'Track spend on Claude, Codex, Gemini across all projects', hash: 'costs' },
+  { title: 'Understand Your Code', desc: 'See which prompt wrote which line, months later', hash: 'understand' },
+  { title: 'Cross-Agent History', desc: 'One place for all agent sessions, forever', hash: 'history' },
+];
+
+const USE_CASES_TEAMS = [
+  { title: 'AI Code Governance', desc: 'Policies, cost limits, content filters before merge', hash: 'governance' },
+  { title: 'Team AI Visibility', desc: "See what every developer's agents are doing in real time", hash: 'visibility' },
+  { title: 'Prove AI ROI', desc: 'Show leadership the business case for AI tooling spend', hash: 'roi' },
+  { title: 'Audit Trail', desc: 'Full history of every AI session for compliance', hash: 'audit' },
+];
+
+function UseCasesDropdown({ scrollTop }: { scrollTop: () => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [open]);
+
+  const handleEnter = () => {
+    clearTimeout(timeoutRef.current);
+    setOpen(true);
+  };
+
+  const handleLeave = () => {
+    timeoutRef.current = setTimeout(() => setOpen(false), 150);
+  };
+
+  return (
+    <div ref={ref} className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+      <button
+        className={`flex items-center gap-1 transition-colors ${open ? 'text-gray-100' : 'text-gray-400 hover:text-gray-100'}`}
+        onClick={() => setOpen(!open)}
+      >
+        Use Cases
+        <svg className={`w-3.5 h-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute top-full left-1/2 -translate-x-1/2 pt-3 z-50">
+          <div className="w-[340px] rounded-xl border border-white/[0.08] bg-gray-900 shadow-2xl shadow-black/40 overflow-hidden">
+            {/* Solo section */}
+            <div className="px-4 pt-4 pb-1">
+              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-2">For Solo Developers</p>
+              {USE_CASES_SOLO.map((item) => (
+                <Link
+                  key={item.title}
+                  to={`/use-cases#${item.hash}`}
+                  onClick={() => { setOpen(false); }}
+                  className="block px-3 py-2.5 -mx-1 rounded-lg hover:bg-white/[0.04] transition-colors group"
+                >
+                  <p className="text-sm font-medium text-gray-200 group-hover:text-white transition-colors">{item.title}</p>
+                  <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{item.desc}</p>
+                </Link>
+              ))}
+            </div>
+
+            {/* Divider */}
+            <div className="mx-4 border-t border-white/[0.06]" />
+
+            {/* Teams section */}
+            <div className="px-4 pt-3 pb-3">
+              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-2">For Teams</p>
+              {USE_CASES_TEAMS.map((item) => (
+                <Link
+                  key={item.title}
+                  to={`/use-cases#${item.hash}`}
+                  onClick={() => { setOpen(false); }}
+                  className="block px-3 py-2.5 -mx-1 rounded-lg hover:bg-white/[0.04] transition-colors group"
+                >
+                  <p className="text-sm font-medium text-gray-200 group-hover:text-white transition-colors">{item.title}</p>
+                  <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{item.desc}</p>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function PublicLayout({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
@@ -39,20 +132,23 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
               <span className="text-lg font-semibold">Origin</span>
             </Link>
             <div className="hidden sm:flex items-center gap-6 text-sm">
-              {NAV_LINKS.map((link) => (
-                <NavLink
-                  key={link.to}
-                  to={link.to}
-                  end={link.to === '/'}
-                  onClick={scrollTop}
-                  className={({ isActive }) =>
-                    `transition-colors ${
-                      isActive ? 'text-gray-100 font-medium' : 'text-gray-400 hover:text-gray-100'
-                    }`
-                  }
-                >
-                  {link.label}
-                </NavLink>
+              {NAV_LINKS.map((link, i) => (
+                <React.Fragment key={link.to}>
+                  <NavLink
+                    to={link.to}
+                    end={link.to === '/'}
+                    onClick={scrollTop}
+                    className={({ isActive }) =>
+                      `transition-colors ${
+                        isActive ? 'text-gray-100 font-medium' : 'text-gray-400 hover:text-gray-100'
+                      }`
+                    }
+                  >
+                    {link.label}
+                  </NavLink>
+                  {/* Insert Use Cases dropdown after Docs */}
+                  {link.to === '/docs' && <UseCasesDropdown scrollTop={scrollTop} />}
+                </React.Fragment>
               ))}
             </div>
           </div>

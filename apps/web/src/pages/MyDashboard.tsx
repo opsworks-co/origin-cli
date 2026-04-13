@@ -950,8 +950,7 @@ export default function MyDashboard() {
     try { return localStorage.getItem('origin:hide-guide') === '1'; } catch { return false; }
   });
 
-  // Honour the user's dismissal regardless of session count — the earlier
-  // "force-show for zero sessions" fallback made the X button look broken.
+  // Show guide unless user dismissed it. Dismissal is always respected.
   const showGuide = !hideGuide;
 
   // Agent cards
@@ -1409,7 +1408,7 @@ export default function MyDashboard() {
                 <span className="text-sm font-semibold text-gray-200">Configure &amp; Init</span>
               </div>
               <div className="bg-gray-950 rounded-md p-3 font-mono text-xs text-gray-300 space-y-1 mb-3">
-                <div><span className="text-gray-500">$</span> origin login</div>
+                <div><span className="text-gray-500">$</span> origin login --key YOUR_KEY</div>
                 <div><span className="text-gray-500">$</span> origin init</div>
               </div>
               <p className="text-xs text-gray-500">Auto-detects Claude, Cursor, Copilot, Gemini &amp; more</p>

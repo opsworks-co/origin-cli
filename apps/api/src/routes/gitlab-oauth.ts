@@ -154,8 +154,9 @@ router.get('/install', requireAuth, requireRole('ADMIN'), async (req: AuthReques
   }
 
   // Create signed state token (CSRF protection + org association)
+  const from = (req.query.from as string) || '';
   const state = jwt.sign(
-    { orgId: req.user!.orgId, userId: req.user!.id },
+    { orgId: req.user!.orgId, userId: req.user!.id, from },
     JWT_SECRET,
     { expiresIn: '15m' },
   );
@@ -190,11 +191,11 @@ router.get('/callback', async (req: Request, res: Response) => {
     }
 
     // Verify state token
-    let statePayload: { orgId: string; userId: string };
+    let statePayload: { orgId: string; userId: string; from?: string };
     try {
       // Pin HS256 — we sign the state token with HS256 and must reject
       // any other algorithm, including alg=none / key-confusion attacks.
-      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string };
+      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string; from?: string };
     } catch {
       return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=invalid_state');
     }
@@ -296,9 +297,16 @@ router.get('/callback', async (req: Request, res: Response) => {
       },
     });
 
-    // Check if Solo user to redirect to repos page
+    // Redirect — onboarding flow goes back to /onboarding, solo to /repos, org to /settings
     const callbackUser = await prisma.user.findUnique({ where: { id: statePayload.userId }, select: { accountType: true } });
-    const successRedirect = callbackUser?.accountType === 'developer' ? '/repos?gitlab_oauth=success' : '/settings?tab=integrations&gitlab_oauth=success';
+    let successRedirect: string;
+    if (statePayload.from === 'onboarding') {
+      successRedirect = '/onboarding?step=1&gitlab_oauth=success';
+    } else if (callbackUser?.accountType === 'developer') {
+      successRedirect = '/repos?gitlab_oauth=success';
+    } else {
+      successRedirect = '/settings?tab=integrations&gitlab_oauth=success';
+    }
     res.redirect(successRedirect);
   } catch (err) {
     console.error('[gitlab-oauth] Callback error:', err);

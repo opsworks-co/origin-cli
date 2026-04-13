@@ -74,6 +74,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const res = await api.registerDeveloper(email, password, name);
         setUser(res.user);
+        // Stash the auto-generated API key for the onboarding wizard
+        if (res.apiKey) {
+          try { sessionStorage.setItem('origin:onboarding-key', res.apiKey); } catch { /* ignore */ }
+        }
       } catch (err: any) {
         setError(err.message ?? 'Registration failed');
         throw err;

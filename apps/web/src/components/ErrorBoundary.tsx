@@ -30,6 +30,19 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     // eslint-disable-next-line no-console
     console.error('[ErrorBoundary]', this.props.label ?? '', error, info.componentStack);
+
+    // Auto-reload on stale chunk errors (happens after deploys when browser
+    // has cached HTML referencing old JS filenames that no longer exist).
+    const msg = error.message || '';
+    if (
+      (msg.includes('Failed to fetch dynamically imported module') ||
+       msg.includes('Loading chunk') ||
+       msg.includes('Loading CSS chunk')) &&
+      !sessionStorage.getItem('chunk_reload')
+    ) {
+      sessionStorage.setItem('chunk_reload', '1');
+      window.location.reload();
+    }
   }
 
   reset = () => this.setState({ error: null });

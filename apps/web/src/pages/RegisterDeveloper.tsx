@@ -19,7 +19,7 @@ export default function RegisterDeveloper() {
     setLoading(true);
     try {
       await registerDeveloper(email, password, name);
-      navigate('/me');
+      navigate('/onboarding');
     } catch (err: any) {
       setError(err.message ?? 'Registration failed');
     } finally {

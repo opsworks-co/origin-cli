@@ -1028,6 +1028,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
         await prisma.promptChange.deleteMany({ where: { sessionId: { in: sessionIds } } });
         await prisma.sessionDiff.deleteMany({ where: { sessionId: { in: sessionIds } } });
         await prisma.sessionReview.deleteMany({ where: { sessionId: { in: sessionIds } } });
+        await prisma.issueSession.deleteMany({ where: { sessionId: { in: sessionIds } } });
       }
       await prisma.codingSession.deleteMany({
         where: { commitId: { in: commitIds } },
@@ -1035,6 +1036,8 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       await prisma.commit.deleteMany({ where: { repoId: id } });
     }
 
+    await prisma.issueSession.deleteMany({ where: { issue: { repoId: id } } });
+    await prisma.issue.deleteMany({ where: { repoId: id } });
     await prisma.repo.delete({ where: { id } });
 
     await prisma.auditLog.create({
@@ -1741,6 +1744,7 @@ router.delete('/:id/backfilled-sessions', requireRole('ADMIN'), async (req: Auth
         await prisma.sessionDiff.deleteMany({ where: { sessionId: sess.id } });
         await prisma.sessionReview.deleteMany({ where: { sessionId: sess.id } });
         await prisma.secretFinding.deleteMany({ where: { sessionId: sess.id } });
+        await prisma.issueSession.deleteMany({ where: { sessionId: sess.id } });
         await prisma.codingSession.delete({ where: { id: sess.id } });
         deleted++;
       }

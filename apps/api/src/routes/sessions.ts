@@ -1160,6 +1160,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     // leave orphan child rows (sessionDiff, promptChange, etc.) referencing
     // a non-existent session.
     await prisma.$transaction([
+      prisma.issueSession.deleteMany({ where: { sessionId: id } }),
       prisma.sessionDiff.deleteMany({ where: { sessionId: id } }),
       prisma.promptChange.deleteMany({ where: { sessionId: id } }),
       prisma.secretFinding.deleteMany({ where: { sessionId: id } }),

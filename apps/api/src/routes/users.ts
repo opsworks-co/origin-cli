@@ -271,6 +271,8 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 
     // Clean up related records before deleting user
     await prisma.notification.deleteMany({ where: { userId: targetId } });
+    await prisma.sessionBookmark.deleteMany({ where: { userId: targetId } });
+    await prisma.authToken.deleteMany({ where: { userId: targetId } });
     await prisma.apiKey.deleteMany({ where: { userId: targetId } });
     await prisma.sessionReview.deleteMany({ where: { userId: targetId } });
     await prisma.auditLog.deleteMany({ where: { userId: targetId } });

@@ -27,7 +27,13 @@ export default function OAuthCallback() {
     api.oauthCallback(provider, code, state, accountType)
       .then((res) => {
         setSession(res.token, res.user);
-        navigate(res.user.accountType === 'developer' ? '/me' : '/dashboard', { replace: true });
+        // New developer accounts go to onboarding wizard
+        if (res.apiKey && res.user.accountType === 'developer') {
+          try { sessionStorage.setItem('origin:onboarding-key', res.apiKey); } catch { /* ignore */ }
+          navigate('/onboarding', { replace: true });
+        } else {
+          navigate(res.user.accountType === 'developer' ? '/me' : '/dashboard', { replace: true });
+        }
       })
       .catch((err) => {
         setError(err.message || 'OAuth authentication failed');

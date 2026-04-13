@@ -4238,16 +4238,17 @@ GET /api/machines/:id`}</CodeBlock>
 
             <H2 id="solo-login">Step 3: Log In from the CLI</H2>
             <P>
-              Authenticate the CLI with your Solo account:
+              Authenticate the CLI with your Solo account using an API key:
             </P>
-            <CodeBlock title="Terminal">{`origin login`}</CodeBlock>
+            <ul className="space-y-1 mb-3">
+              <Li>Go to <a href="https://getorigin.io/me" className="text-emerald-400 hover:text-emerald-300 underline">getorigin.io/me</a> &rarr; Settings &rarr; API Keys tab</Li>
+              <Li>Create a new API key and copy it (it&rsquo;s only shown once)</Li>
+              <Li>Run the login command with your key:</Li>
+            </ul>
+            <CodeBlock title="Terminal">{`origin login --key YOUR_API_KEY`}</CodeBlock>
             <P>
-              Enter the same email and password you used during registration. Your credentials are stored locally at <code className="text-indigo-400">~/.origin/config.json</code>.
+              Your credentials are stored locally at <code className="text-indigo-400">~/.origin/config.json</code>.
             </P>
-            <Callout type="info">
-              If you signed up via OAuth (GitHub/GitLab/Google), set a password first from your dashboard settings, or use an API key instead:
-              go to <a href="https://getorigin.io/me" className="text-emerald-400 hover:text-emerald-300 underline">/me</a> &rarr; Settings &rarr; API Keys tab &rarr; create a key &rarr; run <code className="text-indigo-400">origin login --key YOUR_KEY</code>.
-            </Callout>
 
             <H2 id="solo-init">Step 4: Initialize Your Repository</H2>
             <P>

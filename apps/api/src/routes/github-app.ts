@@ -27,8 +27,9 @@ router.get('/install', requireAuth, requireRole('ADMIN'), (req: AuthRequest, res
   }
 
   // Create a signed state token with orgId to prevent CSRF and associate installation with org
+  const from = (req.query.from as string) || '';
   const state = jwt.sign(
-    { orgId: req.user!.orgId, userId: req.user!.id },
+    { orgId: req.user!.orgId, userId: req.user!.id, from },
     JWT_SECRET,
     { expiresIn: '15m' },
   );
@@ -50,11 +51,11 @@ router.get('/callback', async (req: Request, res: Response) => {
     }
 
     // Verify state token
-    let statePayload: { orgId: string; userId: string };
+    let statePayload: { orgId: string; userId: string; from?: string };
     try {
       // Pin HS256 — we sign the state token with HS256 and must reject
       // any other algorithm, including alg=none / key-confusion attacks.
-      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string };
+      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string; from?: string };
     } catch {
       return res.redirect('/settings?tab=integrations&github_app=error&msg=invalid_state');
     }
@@ -142,9 +143,16 @@ router.get('/callback', async (req: Request, res: Response) => {
       },
     });
 
-    // Redirect — Solo users go to /repos, org users to /settings
+    // Redirect — onboarding flow goes back to /onboarding, solo to /repos, org to /settings
     const cbUser = await prisma.user.findUnique({ where: { id: statePayload.userId }, select: { accountType: true } });
-    const successUrl = cbUser?.accountType === 'developer' ? '/repos?github_app=success' : '/settings?tab=integrations&github_app=success';
+    let successUrl: string;
+    if (statePayload.from === 'onboarding') {
+      successUrl = '/onboarding?step=1&github_app=success';
+    } else if (cbUser?.accountType === 'developer') {
+      successUrl = '/repos?github_app=success';
+    } else {
+      successUrl = '/settings?tab=integrations&github_app=success';
+    }
     res.redirect(successUrl);
   } catch (err) {
     console.error('[github-app] Callback error:', err);

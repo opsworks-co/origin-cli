@@ -39,7 +39,7 @@ export default function Register() {
     try {
       if (accountType === 'developer') {
         await registerDeveloper(email, password, name);
-        navigate('/me');
+        navigate('/onboarding');
       } else {
         await register(email, password, name, orgName, orgSlug);
         navigate('/dashboard');
