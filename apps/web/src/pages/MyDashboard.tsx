@@ -1507,6 +1507,7 @@ export default function MyDashboard() {
         {TABS.map((t) => (
           <button
             key={t.key}
+            data-tour={`tab-${t.key}`}
             onClick={() => setTab(t.key)}
             className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               tab === t.key
@@ -1792,7 +1793,7 @@ export default function MyDashboard() {
 
       {/* ═══════════════════ TIMELINE TAB ═══════════════════ */}
       {tab === 'timeline' && (
-        <div>
+        <div data-tour="tab-content-timeline">
           {timelineLoading ? (
             <div className="space-y-4">
               {Array.from({ length: 3 }).map((_, i) => (
@@ -1814,7 +1815,7 @@ export default function MyDashboard() {
 
       {/* ═══════════════════ AGENTS TAB ═══════════════════ */}
       {tab === 'agents' && (
-        <div>
+        <div data-tour="tab-content-agents">
           {agentsLoading ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
               {Array.from({ length: 4 }).map((_, i) => (
@@ -1832,7 +1833,7 @@ export default function MyDashboard() {
 
       {/* ═══════════════════ STATS TAB ═══════════════════ */}
       {tab === 'stats' && (
-        <div className="space-y-6">
+        <div className="space-y-6" data-tour="tab-content-stats">
           {statsLoading ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {Array.from({ length: 4 }).map((_, i) => (
@@ -1982,7 +1983,7 @@ export default function MyDashboard() {
 
       {/* ═══════════════════ PATTERNS TAB ═══════════════════ */}
       {tab === 'patterns' && (
-        <div className="space-y-6">
+        <div className="space-y-6" data-tour="tab-content-patterns">
           {patternsLoading ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {Array.from({ length: 4 }).map((_, i) => (
@@ -2085,7 +2086,7 @@ export default function MyDashboard() {
 
       {/* ═══════════════════ EFFICIENCY TAB ═══════════════════ */}
       {tab === 'efficiency' && (
-        <div className="space-y-6">
+        <div className="space-y-6" data-tour="tab-content-efficiency">
           {efficiencyLoading ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {Array.from({ length: 4 }).map((_, i) => (
@@ -2178,7 +2179,7 @@ export default function MyDashboard() {
 
       {/* ═══════════════════ PROMPTS TAB ═══════════════════ */}
       {tab === 'prompts' && (
-        <div className="space-y-4">
+        <div className="space-y-4" data-tour="tab-content-prompts">
           {/* Prompt search bar */}
           <div className="flex items-center gap-3">
             <div className="relative flex-1">
@@ -2342,7 +2343,7 @@ export default function MyDashboard() {
 
       {/* ═══════════════════ COMMITS TAB ═══════════════════ */}
       {tab === 'commits' && (
-        <div className="space-y-4">
+        <div className="space-y-4" data-tour="tab-content-commits">
           {/* Sort controls */}
           <div className="flex items-center justify-between">
             <span className="text-xs text-gray-500">{commitsTotal} commit{commitsTotal !== 1 ? 's' : ''}</span>
