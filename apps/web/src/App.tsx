@@ -34,6 +34,7 @@ const DemoCLI = lazy(() => import('./pages/DemoCLI'));
 const UseCases = lazy(() => import('./pages/UseCases'));
 const Onboarding = lazy(() => import('./pages/Onboarding'));
 const Sessions = lazy(() => import('./pages/Sessions'));
+const LiveFeed = lazy(() => import('./pages/LiveFeed'));
 const SessionDetail = lazy(() => import('./pages/SessionDetail'));
 const SessionCompare = lazy(() => import('./pages/SessionCompare'));
 const Repos = lazy(() => import('./pages/Repos'));
@@ -204,6 +205,16 @@ export default function App() {
           <ProtectedRoute>
             <AppLayout>
               <Sessions />
+            </AppLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/live"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <LiveFeed />
             </AppLayout>
           </ProtectedRoute>
         }

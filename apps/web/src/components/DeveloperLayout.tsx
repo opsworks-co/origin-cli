@@ -8,7 +8,7 @@ import ProductTour, { DASHBOARD_TOUR } from './ProductTour';
 import { LogoMark } from './Logo';
 import {
   LayoutDashboard,
-  Play,
+  Radio,
   FolderGit2,
   Settings,
   Lightbulb,
@@ -26,7 +26,7 @@ import {
 const DEV_NAV_ITEMS = [
   { to: '/me', label: 'My Dashboard', icon: LayoutDashboard },
   { to: '/repos', label: 'Repositories', icon: FolderGit2 },
-  { to: '/sessions', label: 'My Sessions', icon: Play },
+  { to: '/live', label: 'Live Feed', icon: Radio },
   { to: '/insights', label: 'Insights', icon: Lightbulb },
   { to: '/integrations', label: 'Integrations', icon: Plug },
   { to: '/api-keys', label: 'API Keys', icon: KeyRound },

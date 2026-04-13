@@ -164,11 +164,11 @@ export const DASHBOARD_TOUR: TourStep[] = [
     route: '/repos',
   },
   {
-    target: '[data-tour="nav-sessions"]',
-    title: 'Sessions Page',
-    content: 'The advanced sessions view with powerful filters: by agent, repo, model, branch, and status. You can also group sessions by pull request to see the full story of a PR.',
+    target: '[data-tour="nav-live"]',
+    title: 'Live Feed',
+    content: 'Watch your AI sessions in real time. See active sessions with live token counters, cost tickers, and an event log of everything happening across your projects.',
     placement: 'right',
-    route: '/sessions',
+    route: '/live',
   },
   {
     target: '[data-tour="nav-insights"]',
