@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import NotificationBell from './NotificationBell';
 import ChatWidget from './ChatWidget';
+import ProductTour, { DASHBOARD_TOUR } from './ProductTour';
 import { LogoMark } from './Logo';
 import {
   LayoutDashboard,
@@ -19,6 +20,7 @@ import {
   X,
   Sun,
   Moon,
+  Sparkles,
 } from 'lucide-react';
 
 const DEV_NAV_ITEMS = [
@@ -85,11 +87,12 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
         </div>
 
         {/* Nav links */}
-        <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
+        <nav data-tour="sidebar-nav" className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
           {DEV_NAV_ITEMS.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
+              data-tour={`nav-${item.to.replace('/', '') || 'dashboard'}`}
               className={linkClasses}
               onClick={() => setSidebarOpen(false)}
             >
@@ -123,6 +126,16 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
               {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
           </div>
+          <button
+            onClick={() => {
+              try { localStorage.removeItem('origin:tour-dashboard-v1'); } catch {}
+              window.location.href = '/me';
+            }}
+            className="w-full flex items-center gap-2 text-[13px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-3 py-2 rounded-lg transition-all duration-150 mt-1"
+          >
+            <Sparkles className="w-4 h-4" />
+            Platform tour
+          </button>
           <button
             onClick={handleLogout}
             className="w-full flex items-center gap-2 text-[13px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-3 py-2 rounded-lg transition-all duration-150 mt-1"
@@ -161,6 +174,9 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
         requireAuth
         welcomeMessage="Hi! I'm your Origin AI assistant. I can help with your sessions, stats, and more."
       />
+
+      {/* Product tour */}
+      <ProductTour steps={DASHBOARD_TOUR} tourId="dashboard-v1" />
     </div>
   );
 }

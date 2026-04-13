@@ -298,7 +298,7 @@ function StatCardsRow({ stats, fmt, fmtCost }: { stats: MyStats; fmt: (n: number
   };
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" data-tour="stat-cards">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {renderCard(
           'sessions',
@@ -1503,7 +1503,7 @@ export default function MyDashboard() {
       )}
 
       {/* Tabs */}
-      <div className="flex items-center gap-1 border-b border-gray-800 pb-0 overflow-x-auto">
+      <div data-tour="dashboard-tabs" className="flex items-center gap-1 border-b border-gray-800 pb-0 overflow-x-auto">
         {TABS.map((t) => (
           <button
             key={t.key}
@@ -1611,7 +1611,7 @@ export default function MyDashboard() {
           </div>
 
           {/* Sessions table */}
-          <div className="card overflow-hidden">
+          <div className="card overflow-hidden" data-tour="session-table">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -1845,7 +1845,7 @@ export default function MyDashboard() {
           ) : stats ? (
             <>
               {/* Activity heatmap */}
-              <div className="card">
+              <div className="card" data-tour="activity-heatmap">
                 <h3 className="text-sm font-semibold text-gray-300 mb-3">Activity</h3>
                 <ActivityHeatmap data={stats.heatmap} />
               </div>
