@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'origin issue: The AI-Native Issue Tracker That Shows What Bugs Actually Cost',
+    slug: 'origin-issue-ai-native-issue-tracker',
+    date: '2026-04-13',
+    author: 'Artem Dolobanko',
+    tags: ['developer-tools', 'ai-coding', 'issue-tracker', 'cli', 'productivity'],
+    excerpt:
+      'Every issue tracker tells you what\'s open and what\'s closed. None of them tell you how much AI time and money it took to fix each issue. origin issue does. Git-tracked, dependency-aware, and designed for AI agent workflows.',
+  },
+  {
     title: 'Repositories in Origin: Your Sentry for AI-Written Code',
     slug: 'repositories-sentry-for-ai-code',
     date: '2026-04-12',

@@ -73,17 +73,19 @@ Initialize Origin on this machine. Auto-detects installed AI tools, registers th
 ```bash
 origin init
 origin init --standalone
+origin init --no-hooks
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--standalone` | Force standalone mode (skip API, even when logged in) |
+| `--no-hooks` | Skip automatic hook installation (configure manually with `origin enable` later) |
 
 What it does:
 1. Detects installed AI coding tools
 2. Registers the machine with your org (connected mode)
 3. Saves agent config to `~/.origin/agent.json`
-4. Installs global hooks via `origin enable --global`
+4. Installs global hooks via `origin enable --global` (unless `--no-hooks`)
 
 ---
 
@@ -1054,6 +1056,223 @@ origin web --port 8080
 
 ---
 
+## Daily Workflow
+
+### `origin recap`
+
+End-of-day summary: sessions, cost, tokens, files changed, commits (with AI attribution %), top model, and open TODOs.
+
+```bash
+origin recap                           # Today's summary
+origin recap --days 7                  # Last 7 days
+origin recap --days 30                 # Last 30 days
+```
+
+| Flag | Description |
+|------|-------------|
+| `-d, --days <n>` | Number of days to look back (default: `1`) |
+
+---
+
+### `origin prompt-status`
+
+Ultra-fast (<50ms) filesystem-only check for an active Origin session. Designed for shell prompt integration.
+
+```bash
+origin prompt-status
+```
+
+Outputs a string like `[origin: tracking · $0.34]` if a session is active, or nothing if not. Reads only from `.git/origin-session-*.json` files — no API calls.
+
+---
+
+### `origin shell-prompt`
+
+Outputs a shell integration script that adds Origin session status to your terminal prompt.
+
+```bash
+eval "$(origin shell-prompt)"
+```
+
+Add to `~/.zshrc` or `~/.bashrc` to persist. Works with both bash (`PROMPT_COMMAND`) and zsh (`precmd` + `RPROMPT`). Shows session status in the right prompt when Origin is actively tracking.
+
+---
+
+## Issue Tracker
+
+Built-in issue tracking designed for AI agents. Issues live on the Origin server and support dependencies, priorities, labels, and session linking. The killer feature is `origin issue ready` — it returns the next unblocked issue for an AI agent to work on.
+
+### `origin issue create <title>`
+
+Create a new issue.
+
+```bash
+origin issue create "Add input validation"
+origin issue create "Fix login bug" --type bug --priority high --label security
+origin issue create "Refactor auth" --dep ISSUE-1 --dep ISSUE-2 --description "Depends on auth rewrite"
+```
+
+| Flag | Description |
+|------|-------------|
+| `-t, --type <type>` | Issue type: `task`, `bug`, `feature`, `chore` (default: `task`) |
+| `-p, --priority <priority>` | Priority: `low`, `medium`, `high`, `critical` (default: `medium`) |
+| `-l, --label <labels...>` | Labels to attach |
+| `--dep <ids...>` | Issue IDs this depends on (blocked until deps are closed) |
+| `-d, --description <text>` | Longer description |
+| `--json` | Output as JSON |
+
+---
+
+### `origin issue list`
+
+List issues with optional filters.
+
+```bash
+origin issue list
+origin issue list --status open --priority high
+origin issue list --label security --type bug --json
+```
+
+| Flag | Description |
+|------|-------------|
+| `-s, --status <status>` | Filter by status: `open`, `in_progress`, `closed` |
+| `-p, --priority <priority>` | Filter by priority |
+| `-l, --label <label>` | Filter by label |
+| `-t, --type <type>` | Filter by type |
+| `--json` | Output as JSON |
+
+---
+
+### `origin issue show <id>`
+
+Show full details for an issue including description, dependencies, linked sessions, and history.
+
+```bash
+origin issue show ISSUE-42
+origin issue show ISSUE-42 --json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+---
+
+### `origin issue update <id>`
+
+Update an existing issue.
+
+```bash
+origin issue update ISSUE-42 --priority critical
+origin issue update ISSUE-42 --status in_progress --label backend
+origin issue update ISSUE-42 --title "New title" --description "Updated scope"
+```
+
+| Flag | Description |
+|------|-------------|
+| `--title <title>` | New title |
+| `-d, --description <text>` | New description |
+| `-t, --type <type>` | New type |
+| `-p, --priority <priority>` | New priority |
+| `-s, --status <status>` | New status |
+| `-l, --label <labels...>` | Replace labels |
+| `--json` | Output as JSON |
+
+---
+
+### `origin issue close <id>`
+
+Close an issue.
+
+```bash
+origin issue close ISSUE-42
+origin issue close ISSUE-42 --json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+---
+
+### `origin issue ready`
+
+**The killer feature for AI agents.** Returns the highest-priority open issue that has no unresolved dependencies. Use this in agent loops to automatically pick up the next task.
+
+```bash
+origin issue ready
+origin issue ready --json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+Example agent workflow:
+```bash
+issue=$(origin issue ready --json)
+# Agent reads the issue, creates a branch, writes code, links the session
+origin issue close ISSUE-42
+```
+
+---
+
+### `origin issue blocked`
+
+List all issues that are blocked by unresolved dependencies.
+
+```bash
+origin issue blocked
+origin issue blocked --json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+---
+
+### `origin issue link <id> <sessionId>`
+
+Link an Origin session to an issue. Creates a bidirectional reference so you can trace which AI session worked on which issue.
+
+```bash
+origin issue link ISSUE-42 sess_abc123
+origin issue link ISSUE-42 sess_abc123 --json
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+---
+
+### `origin issue dep add <id> <depId>`
+
+Add a dependency between issues. The first issue becomes blocked until the dependency is closed.
+
+```bash
+origin issue dep add ISSUE-42 ISSUE-10
+```
+
+### `origin issue dep remove <id> <depId>`
+
+Remove a dependency.
+
+```bash
+origin issue dep remove ISSUE-42 ISSUE-10
+```
+
+### `origin issue dep tree <id>`
+
+Show the full dependency tree for an issue.
+
+```bash
+origin issue dep tree ISSUE-42
+```
+
+---
+
 ## Repository & Agent Management (Connected Mode)
 
 ### `origin repos`
@@ -1332,6 +1551,9 @@ Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, JWTs, dat
 | `origin reset` | Clear local session state |
 | `origin clean` | Remove orphaned data |
 | `origin web` | Local web dashboard |
+| `origin recap` | End-of-day summary (--days N) |
+| `origin prompt-status` | Fast session check for shell prompt |
+| `origin shell-prompt` | Shell integration script |
 | `origin upgrade` | Upgrade CLI |
 | `origin repos` | List repositories |
 | `origin repo:add` | Add a repository |
@@ -1344,3 +1566,13 @@ Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, JWTs, dat
 | `origin team` | List team members |
 | `origin user <id>` | View user detail |
 | `origin notifications` | View notifications |
+| `origin issue create <title>` | Create an issue (--type, --priority, --label, --dep) |
+| `origin issue list` | List issues (--status, --priority, --label, --type) |
+| `origin issue show <id>` | Show issue details |
+| `origin issue update <id>` | Update an issue |
+| `origin issue close <id>` | Close an issue |
+| `origin issue ready` | Next unblocked issue (for AI agents) |
+| `origin issue blocked` | List blocked issues |
+| `origin issue link <id> <sessionId>` | Link session to issue |
+| `origin issue dep add/remove` | Manage issue dependencies |
+| `origin issue dep tree <id>` | Show dependency tree |

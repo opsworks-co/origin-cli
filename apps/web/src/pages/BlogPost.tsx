@@ -8,6 +8,244 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'origin-issue-ai-native-issue-tracker': (
+    <>
+      <p>
+        Jira knows your issues are open. Linear knows they&rsquo;re prioritized. GitHub Issues knows who&rsquo;s assigned. None of them know that fixing <em>AUTH-142</em> took three AI sessions, 47,000 tokens, and $4.80 in Claude API calls.
+      </p>
+      <p>
+        We built <code>origin issue</code> to close that gap. It&rsquo;s an issue tracker designed from scratch for AI agent workflows &mdash; where every issue tracks exactly how much AI time and money went into resolving it.
+      </p>
+
+      <h2>The problem with current issue trackers</h2>
+      <p>
+        When an AI agent fixes a bug, three things happen that no existing tracker captures:
+      </p>
+      <ul>
+        <li><strong>Cost is invisible.</strong> Your team &ldquo;fixed 23 issues this sprint.&rdquo; Great. But did those fixes cost $12 or $200 in AI API calls? Nobody knows.</li>
+        <li><strong>Dependencies block agents.</strong> AI agents don&rsquo;t know what&rsquo;s ready to work on. They pick up an issue, hit a blocker that depends on something else, and waste tokens going in circles.</li>
+        <li><strong>Session context is lost.</strong> The AI that fixed the bug had a full conversation &mdash; prompts, reasoning, tool calls. Once the PR merges, that context disappears. Three months later when the fix regresses, you start from zero.</li>
+      </ul>
+
+      <h2>How origin issue works</h2>
+      <p>
+        Issues are stored as JSON files in <code>.origin/issues/</code> inside your git repo. No external database, no SaaS dependency. They&rsquo;re git-tracked, so any <code>git clone</code> gets the full issue history.
+      </p>
+
+      {/* Create command */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden shadow-2xl">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">~/projects/api-server</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin issue create &quot;Fix rate limiting on login&quot; --type bug --priority 1 --label security</div>
+            <div className="text-emerald-400">  &#10003; Created issue <span className="text-white font-bold">ori-a3f2</span>: Fix rate limiting on login</div>
+            <div className="text-gray-500">    P1 critical  bug  <span className="text-cyan-400">#security</span></div>
+            <div className="h-4" />
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin issue create &quot;Refactor auth middleware&quot; --priority 2 --dep ori-a3f2</div>
+            <div className="text-emerald-400">  &#10003; Created issue <span className="text-white font-bold">ori-b1c4</span>: Refactor auth middleware</div>
+            <div className="text-gray-500">    P2 high  task</div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        Hash-based IDs (<code>ori-a3f2</code>) prevent collisions when multiple AI agents create issues concurrently. Dependencies are first-class &mdash; not labels, not linked issues, but actual dependency edges that block work.
+      </p>
+
+      <h2>The killer feature: <code>origin issue ready</code></h2>
+      <p>
+        This is the command that makes AI agents productive. Instead of picking a random open issue, the agent asks: <em>&ldquo;What can I actually work on right now?&rdquo;</em>
+      </p>
+
+      {/* Ready command */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-emerald-700/50 bg-gradient-to-b from-emerald-950/30 to-[#0a0b14] overflow-hidden shadow-2xl shadow-emerald-900/10">
+          <div className="px-4 py-2 border-b border-emerald-800/30 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">Terminal</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin issue ready</div>
+            <div className="h-2" />
+            <div className="text-emerald-400 font-bold">  Ready to work (2)</div>
+            <div className="h-2" />
+            <div className="text-gray-100">  <span className="text-green-400">&#9675;</span> <span className="text-gray-500">ori-a3f2</span>  Fix rate limiting on login  <span className="text-red-400">P1 critical</span></div>
+            <div className="text-gray-500">    <span className="text-cyan-400">#security</span></div>
+            <div className="h-1" />
+            <div className="text-gray-100">  <span className="text-green-400">&#9675;</span> <span className="text-gray-500">ori-d8e1</span>  Add caching to API responses  <span className="text-blue-400">P3 medium</span></div>
+            <div className="h-4" />
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin issue ready --json  <span className="text-gray-700"># AI agents parse this</span></div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <code>origin issue ready</code> filters out everything with unresolved dependencies and returns only actionable issues, sorted by priority. The <code>--json</code> flag gives agents structured output they can parse programmatically. This closes the loop: agent calls <code>ready</code>, picks the top issue, works it, links the session, closes it, and the next blocked issue becomes ready.
+      </p>
+
+      <h2>Dependency trees</h2>
+      <p>
+        Real projects have complex dependency chains. <code>origin issue dep tree</code> visualizes the full graph:
+      </p>
+
+      {/* Dep tree */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">Terminal</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin issue dep tree ori-c7f3</div>
+            <div className="h-2" />
+            <div className="text-gray-500">  Dependency tree for <span className="text-white font-bold">ori-c7f3</span></div>
+            <div className="h-2" />
+            <div className="text-gray-100"><span className="text-yellow-400">&#9675;</span> ori-c7f3 Deploy auth v2 to production <span className="text-gray-600">[open]</span></div>
+            <div className="text-gray-100">&ensp;&ensp;&#9492;&#9472;&#9472; <span className="text-yellow-400">&#9675;</span> ori-b1c4 Refactor auth middleware <span className="text-gray-600">[in-progress]</span></div>
+            <div className="text-gray-100">&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&#9492;&#9472;&#9472; <span className="text-green-400">&#10003;</span> ori-a3f2 Fix rate limiting on login <span className="text-gray-600">[closed]</span></div>
+          </div>
+        </div>
+      </div>
+
+      <h2>Session linking &mdash; the cost story</h2>
+      <p>
+        When an AI agent finishes working on an issue, link the session:
+      </p>
+
+      {/* Link + show */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">Terminal</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin issue link ori-a3f2 a3f1e2d8</div>
+            <div className="text-emerald-400">  &#10003; Linked session a3f1e2d8 to ori-a3f2</div>
+            <div className="h-4" />
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin issue show ori-a3f2</div>
+            <div className="h-2" />
+            <div className="text-white font-bold">  ori-a3f2  Fix rate limiting on login</div>
+            <div className="h-2" />
+            <div className="text-gray-300">  Status:     <span className="text-gray-500">&#10003;</span> closed</div>
+            <div className="text-gray-300">  Type:       bug</div>
+            <div className="text-gray-300">  Priority:   <span className="text-red-400">P1 critical</span></div>
+            <div className="text-gray-300">  Labels:     <span className="text-cyan-400">#security</span></div>
+            <div className="text-gray-300">  Sessions:   <span className="text-gray-500">a3f1e2d8, b7c2d4e9</span></div>
+            <div className="text-gray-300">  Created:    2026-04-13T09:00:00Z (4h ago)</div>
+            <div className="text-gray-300">  Closed:     2026-04-13T13:14:22Z (15m ago)</div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        Now go to the Origin dashboard. Open the repo. Click <strong className="text-gray-100">Issues</strong>. Every issue shows its linked sessions with full cost breakdown &mdash; tokens, duration, model, lines changed. The stats cards at the top aggregate everything: <em>&ldquo;Your team spent $47 on issues this sprint. Top issue: auth refactor ($18, 5 sessions).&rdquo;</em>
+      </p>
+
+      {/* Dashboard mock */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden shadow-xl">
+          <div className="px-4 py-2 border-b border-gray-800">
+            <span className="text-[10px] text-gray-600">getorigin.io/repos/api-server/issues</span>
+          </div>
+          <div className="p-5 space-y-4">
+            {/* Stats row */}
+            <div className="grid grid-cols-5 gap-3">
+              {[
+                { label: 'Open', value: '7', color: 'text-green-400' },
+                { label: 'In Progress', value: '3', color: 'text-cyan-400' },
+                { label: 'Blocked', value: '2', color: 'text-red-400' },
+                { label: 'Closed', value: '14', color: 'text-gray-400' },
+                { label: 'Total AI Cost', value: '$47.20', color: 'text-indigo-400' },
+              ].map(({ label, value, color }) => (
+                <div key={label} className="rounded-lg border border-gray-800 bg-gray-900/50 p-3">
+                  <div className={`text-lg font-bold ${color}`}>{value}</div>
+                  <div className="text-[9px] text-gray-600 uppercase tracking-wider">{label}</div>
+                </div>
+              ))}
+            </div>
+            {/* Top issues */}
+            <div className="rounded-lg border border-gray-800 bg-gray-900/30 p-3">
+              <div className="text-[9px] text-gray-600 uppercase tracking-wider mb-2">Top Issues by AI Cost</div>
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between"><span className="text-gray-300"><span className="text-gray-600">ori-e2d1</span> Auth middleware refactor</span><span className="text-indigo-400">$18.40 &middot; 5 sessions</span></div>
+                <div className="flex justify-between"><span className="text-gray-300"><span className="text-gray-600">ori-a3f2</span> Fix rate limiting on login</span><span className="text-indigo-400">$4.80 &middot; 2 sessions</span></div>
+                <div className="flex justify-between"><span className="text-gray-300"><span className="text-gray-600">ori-f4a7</span> Add pagination to user list</span><span className="text-indigo-400">$3.12 &middot; 1 session</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h2>All commands</h2>
+      <p>The full CLI surface area:</p>
+
+      {/* Commands table */}
+      <div className="not-prose my-8 overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-gray-800">
+              <th className="text-left py-2 text-gray-500 font-medium">Command</th>
+              <th className="text-left py-2 text-gray-500 font-medium">Description</th>
+            </tr>
+          </thead>
+          <tbody className="text-gray-300">
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-indigo-400">origin issue create &lt;title&gt;</td><td className="py-2">Create with --type, --priority, --label, --dep</td></tr>
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-indigo-400">origin issue list</td><td className="py-2">Filter by --status, --priority, --label, --type</td></tr>
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-indigo-400">origin issue show &lt;id&gt;</td><td className="py-2">Full detail with deps and linked sessions</td></tr>
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-indigo-400">origin issue update &lt;id&gt;</td><td className="py-2">Change status, priority, title, labels</td></tr>
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-indigo-400">origin issue close &lt;id&gt;</td><td className="py-2">Close an issue (unblocks dependents)</td></tr>
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-emerald-400">origin issue ready</td><td className="py-2">Show only unblocked issues &mdash; <strong>the killer feature</strong></td></tr>
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-indigo-400">origin issue blocked</td><td className="py-2">Show issues waiting on dependencies</td></tr>
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-indigo-400">origin issue link &lt;id&gt; &lt;session&gt;</td><td className="py-2">Link an AI session to an issue</td></tr>
+            <tr className="border-b border-gray-800/50"><td className="py-2 font-mono text-indigo-400">origin issue dep add/remove</td><td className="py-2">Manage dependencies</td></tr>
+            <tr><td className="py-2 font-mono text-indigo-400">origin issue dep tree &lt;id&gt;</td><td className="py-2">Visualize the dependency graph</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        Every command supports <code>--json</code> for programmatic use. AI agents parse it. Humans get colored terminal output. Same data, different presentations.
+      </p>
+
+      <h2>Why this matters</h2>
+      <p>
+        The issue tracker you use shapes how you work. Jira was built for human sprints. Linear was built for fast-moving teams. <code>origin issue</code> is built for a world where AI agents do most of the coding and the question isn&rsquo;t &ldquo;who&rsquo;s assigned?&rdquo; but &ldquo;how much did this cost and what should the agent work on next?&rdquo;
+      </p>
+      <p>
+        Try it today:
+      </p>
+
+      {/* Install */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-indigo-700/50 bg-gradient-to-b from-indigo-950/30 to-[#0a0b14] overflow-hidden">
+          <div className="p-5 font-mono text-sm">
+            <div className="text-gray-300"><span className="text-indigo-400">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</div>
+            <div className="text-gray-300"><span className="text-indigo-400">$</span> origin issue create &quot;My first issue&quot; --type feature --priority 2</div>
+          </div>
+        </div>
+      </div>
+    </>
+  ),
   'repositories-sentry-for-ai-code': (
     <>
       <p>

@@ -74,6 +74,7 @@ import shareRoutes from './routes/share.js';
 import budgetRoutes from './routes/budget.js';
 import adminRoutes from './routes/admin.js';
 import annotationRoutes from './routes/annotations.js';
+import issueRoutes from './routes/issues.js';
 
 const app = express();
 
@@ -166,6 +167,13 @@ app.use(authMiddleware);
 // API-key and Bearer-token auth are exempt (not cookie-based).
 app.use((req, res, next) => {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    // Skip CSRF for auth routes (login creates sessions, not protects them)
+    // and for OAuth callback routes
+    const path = req.path;
+    if (path.startsWith('/api/auth') || path.startsWith('/api/v1/auth') ||
+        path.startsWith('/api/github-app') || path.startsWith('/api/gitlab-oauth')) {
+      return next();
+    }
     const hasCookie = req.headers.cookie?.includes('origin_auth=');
     if (hasCookie) {
       const origin = req.headers.origin || req.headers.referer;
@@ -223,6 +231,7 @@ mountRoute('/forecast', forecastRoutes);
 mountRoute('/budget', budgetRoutes);
 mountRoute('/admin', adminRoutes);
 mountRoute('/sessions/:sessionId/annotations', annotationRoutes);
+mountRoute('/repos/:repoId/issues', issueRoutes);
 
 // Serve CLI install script
 app.get('/install.sh', (_req, res) => {

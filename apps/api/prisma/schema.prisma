@@ -141,6 +141,7 @@ model Repo {
   policyRules  PolicyRule[]
   apiKeyScopes ApiKeyRepoScope[]
   sessionRepos SessionRepo[]
+  issues       Issue[]
 
   @@index([orgId, archived])
 }
@@ -218,6 +219,7 @@ model CodingSession {
   bookmarks      SessionBookmark[]
   sessionRepos   SessionRepo[]
   annotations    SessionAnnotation[]
+  issueSessions  IssueSession[]
 
   @@index([userId, createdAt])
   @@index([agentId])
@@ -614,4 +616,40 @@ model SessionBookmark {
   createdAt DateTime      @default(now())
 
   @@unique([sessionId, userId])
+}
+
+// ── Issues ──────────────────────────────────────────────────────────────
+
+model Issue {
+  id          String   @id @default(cuid())
+  repoId      String
+  repo        Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  shortId     String                              // human-friendly "ori-a3f2"
+  title       String
+  description String?
+  type        String   @default("task")           // bug, feature, task, chore
+  priority    Int      @default(3)                // 1 = critical … 4 = low
+  status      String   @default("open")           // open, in-progress, blocked, closed
+  labels      String   @default("[]")             // JSON array of strings
+  deps        String   @default("[]")             // JSON array of issue shortIds
+  closedAt    DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+  issueSessions IssueSession[]
+
+  @@unique([repoId, shortId])
+  @@index([repoId, status])
+  @@index([repoId, priority])
+}
+
+model IssueSession {
+  id        String        @id @default(cuid())
+  issueId   String
+  issue     Issue         @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  sessionId String
+  session   CodingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  createdAt DateTime      @default(now())
+
+  @@unique([issueId, sessionId])
+  @@index([sessionId])
 }

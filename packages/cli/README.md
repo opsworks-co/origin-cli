@@ -175,7 +175,7 @@ origin trail                    View audit trail entries
 <summary><strong>Setup & Maintenance</strong> (13 commands)</summary>
 
 ```
-origin init                     Initialize + install hooks
+origin init                     Initialize + install hooks (--no-hooks to skip)
 origin login                    Authenticate with Origin server
 origin whoami                   Show current user and connection info
 origin enable [--global]        Install hooks + secret scanner
@@ -188,6 +188,24 @@ origin verify                   Health check — agents, repo, sessions
 origin clean [--force]          Remove orphaned data
 origin reset                    Reset Origin data for this repo
 origin hooks                    Manage git hooks
+```
+
+</details>
+
+<details>
+<summary><strong>Issue Tracker</strong> (10 commands)</summary>
+
+```
+origin issue create <title>     Create an issue (--type, --priority, --label, --dep)
+origin issue list               List issues (--status, --priority, --label, --type)
+origin issue show <id>          Show issue details
+origin issue close <id>         Close an issue
+origin issue ready              Next unblocked issue (for AI agent loops)
+origin issue blocked            List blocked issues
+origin issue link <id> <sess>   Link a session to an issue
+origin issue dep add <id> <dep> Add a dependency
+origin issue dep remove <id> <dep>  Remove a dependency
+origin issue dep tree <id>      Show dependency tree
 ```
 
 </details>
@@ -218,7 +236,7 @@ origin policies                 List active governance policies
 </details>
 
 <details>
-<summary><strong>Productivity & AI</strong> (8 commands)</summary>
+<summary><strong>Productivity & AI</strong> (11 commands)</summary>
 
 ```
 origin handoff                  Cross-agent context handoff (show/clear)
@@ -229,6 +247,9 @@ origin resume                   Resume a previous session
 origin rewind                   Rewind to a previous session state
 origin snapshot                 Save a point-in-time snapshot
 origin analyze                  Deep analysis of session patterns
+origin recap                    End-of-day summary — sessions, cost, tokens (--days N)
+origin prompt-status            Fast session check for shell prompt (<50ms)
+origin shell-prompt             Shell integration script (eval "$(origin shell-prompt)")
 ```
 
 </details>

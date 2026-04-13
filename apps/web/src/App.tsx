@@ -36,6 +36,7 @@ const SessionDetail = lazy(() => import('./pages/SessionDetail'));
 const SessionCompare = lazy(() => import('./pages/SessionCompare'));
 const Repos = lazy(() => import('./pages/Repos'));
 const RepoDetail = lazy(() => import('./pages/RepoDetail'));
+const RepoIssues = lazy(() => import('./pages/RepoIssues'));
 const CommitDetail = lazy(() => import('./pages/CommitDetail'));
 const Agents = lazy(() => import('./pages/Agents'));
 const AgentDetail = lazy(() => import('./pages/AgentDetail'));
@@ -167,6 +168,16 @@ export default function App() {
           <ProtectedRoute>
             <AppLayout>
               <RepoDetail />
+            </AppLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/repos/:id/issues"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <RepoIssues />
             </AppLayout>
           </ProtectedRoute>
         }

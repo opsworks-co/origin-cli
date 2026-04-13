@@ -39,6 +39,7 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 - **Trail System** — branch-centric work tracking linking sessions to features
 - **Secret Scanner** — pre-commit hook blocks commits containing hardcoded secrets, API keys, and credentials
 - **Attribution Preservation** — AI tags survive `git rebase`, `git commit --amend`, `git cherry-pick`, and stash operations
+- **AI-Native Issue Tracker** — `origin issue ready` returns the next unblocked issue for AI agents to pick up automatically
 - **Auto-Detection** — 13 agents: Claude Code, Gemini CLI, Cursor, Codex, Aider, Windsurf, Copilot, Continue, Amp, Junie, OpenCode, Rovo, Droid
 - **Git Notes** — per-commit AI metadata stored in `refs/notes/origin`
 
@@ -55,6 +56,10 @@ Git blame shows you *who committed*. Origin shows you *what AI wrote it, why, an
 - **Slack Notifications** — real-time alerts for violations, reviews, and budget
 - **GitHub App** — one-click install with bot identity on status checks
 - **MCP Server** — native integration with Claude Code and Cursor
+- **Dark/Light Mode** — theme toggle in sidebar, persists across sessions
+- **Session Annotations** — add notes to individual turns in a session transcript
+- **Export as Gist** — one-click export of session transcripts to GitHub Gist
+- **Activity Feed** — collapsible AI-summarized activity feed on the dashboard
 
 ---
 
@@ -69,7 +74,7 @@ npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ### 2. Enable tracking
 
 ```bash
-origin enable --global    # Install global hooks for all repos
+origin init               # Auto-detects agents, installs hooks
 ```
 
 ### 3. Code with any AI agent
@@ -197,10 +202,11 @@ origin/
 
 ```
 Setup:
+  origin init                     Register machine + detect AI tools + install hooks
+  origin init --no-hooks          Init without auto-installing hooks
   origin enable [--global]        Install hooks + secret scanner (standalone or connected)
   origin disable [--global]       Remove hooks
   origin login                    Authenticate with Origin server (connected mode)
-  origin init                     Register machine + detect AI tools
   origin status                   Show system status
 
 Attribution:
@@ -222,6 +228,15 @@ Sessions:
   origin resume [branch]          Resume session context for AI handoff
   origin explain [id]             Explain session with prompts and changes
   origin share <id>               Create shareable session bundle
+  origin recap                    End-of-day summary — sessions, cost, tokens, commits (--days N)
+
+Issues:
+  origin issue create <title>     Create an issue (--type, --priority, --label, --dep)
+  origin issue list               List issues (--status, --priority, --label, --type)
+  origin issue ready              Next unblocked issue — designed for AI agent loops
+  origin issue close <id>         Close an issue
+  origin issue link <id> <sess>   Link a session to an issue
+  origin issue dep tree <id>      Show dependency tree
 
 Configuration:
   origin config set <key> <val>   Set CLI config (secretScan, secretRedaction, etc.)
@@ -231,6 +246,10 @@ Configuration:
   origin ignore add <pattern>     Add ignore pattern to .origin.json
   origin ignore remove <pattern>  Remove ignore pattern
   origin ignore test <filepath>   Test if a file would be ignored
+
+Shell Integration:
+  origin prompt-status            Fast session status for shell prompt (<50ms)
+  origin shell-prompt             Outputs shell integration script for eval
 
 Time Travel:
   origin rewind                   Rewind to previous AI checkpoint

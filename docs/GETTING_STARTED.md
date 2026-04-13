@@ -59,35 +59,19 @@ Sessions on team repos appear in both dashboards. Personal repos only appear in 
 origin init
 ```
 
-This does three things:
+This does four things:
 1. Detects which AI coding agents are installed on your machine (Claude Code, Cursor, Gemini, Codex, etc.)
 2. Registers your machine with your Origin org
-3. Installs global hooks so all repos are tracked automatically
+3. Installs global hooks automatically so all repos are tracked
+4. Configures session-tracking hooks in each agent's config file
+
+That's it — one command. Origin now captures every AI coding session automatically — prompts, file changes, token usage, and costs.
+
+> **Tip:** Use `origin init --no-hooks` if you want to skip automatic hook installation and configure them manually later with `origin enable`.
 
 ---
 
-## Step 4: Enable hooks
-
-```bash
-origin enable
-```
-
-This installs session-tracking hooks into your AI agents' config files. Origin now captures every AI coding session automatically — prompts, file changes, token usage, and costs.
-
-What gets configured:
-
-| Agent | Config File |
-|-------|-------------|
-| Claude Code | `~/.claude/settings.json` |
-| Cursor | `~/.cursor/hooks.json` |
-| Codex CLI | `~/.codex/config.json` |
-| Gemini CLI | `~/.gemini/settings.json` |
-
-> **Tip:** Use `origin enable --global` to install hooks globally so every repo on your machine is tracked without per-repo setup.
-
----
-
-## Step 5: Code with your AI agent
+## Step 4: Code with your AI agent
 
 Open any project and start a coding session with your AI agent as you normally would. Origin runs silently in the background.
 
@@ -106,7 +90,7 @@ Origin automatically:
 
 ---
 
-## Step 6: View your session
+## Step 5: View your session
 
 ### From the CLI
 
@@ -171,8 +155,12 @@ Go to **Settings > Team** to invite other developers. Each person installs the C
 | View session detail | `origin session <id>` |
 | Line-level blame | `origin blame <file>` |
 | AI vs human stats | `origin stats` |
+| End-of-day recap | `origin recap` |
+| Shell prompt status | `eval "$(origin shell-prompt)"` |
 | Diagnose issues | `origin doctor` |
 | Upgrade CLI | `origin upgrade` |
+| Next issue for AI agent | `origin issue ready` |
+| Create an issue | `origin issue create <title>` |
 
 ---
 

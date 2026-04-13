@@ -1249,3 +1249,76 @@ export function adminUpdateUserRole(id: string, role: string) {
 export function adminDeleteUser(id: string) {
   return request<void>(`/api/admin/users/${id}`, { method: 'DELETE' });
 }
+
+// ---- Issues ---------------------------------------------------------------
+
+export interface IssueSession {
+  sessionId: string;
+  model: string;
+  costUsd: number;
+  tokensUsed: number;
+  durationMs: number;
+  linesAdded: number;
+  linesRemoved: number;
+  createdAt: string;
+}
+
+export interface Issue {
+  id: string;
+  repoId: string;
+  shortId: string;
+  title: string;
+  description?: string;
+  type: string;
+  priority: number;
+  status: string;
+  labels: string[];
+  deps: string[];
+  sessions: IssueSession[];
+  closedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IssueStats {
+  counts: { open: number; inProgress: number; blocked: number; closed: number; total: number };
+  cost: { totalCost: number; totalTokens: number; totalSessions: number; totalDurationMs: number };
+  topIssuesByCost: { id: string; title: string; cost: number; sessions: number }[];
+}
+
+export function getIssues(repoId: string, params?: { status?: string; priority?: string; type?: string }) {
+  const q = new URLSearchParams();
+  if (params?.status) q.set('status', params.status);
+  if (params?.priority) q.set('priority', params.priority);
+  if (params?.type) q.set('type', params.type);
+  const qs = q.toString();
+  return request<Issue[]>(`/api/repos/${repoId}/issues${qs ? `?${qs}` : ''}`);
+}
+
+export function getIssueStats(repoId: string) {
+  return request<IssueStats>(`/api/repos/${repoId}/issues/stats`);
+}
+
+export function getReadyIssues(repoId: string) {
+  return request<Issue[]>(`/api/repos/${repoId}/issues/ready`);
+}
+
+export function getIssue(repoId: string, shortId: string) {
+  return request<Issue>(`/api/repos/${repoId}/issues/${shortId}`);
+}
+
+export function createIssue(repoId: string, data: { shortId: string; title: string; description?: string; type?: string; priority?: number; labels?: string[]; deps?: string[] }) {
+  return request<Issue>(`/api/repos/${repoId}/issues`, { method: 'POST', body: JSON.stringify(data) });
+}
+
+export function updateIssue(repoId: string, shortId: string, data: Partial<{ title: string; description: string; type: string; priority: number; status: string; labels: string[]; deps: string[] }>) {
+  return request<Issue>(`/api/repos/${repoId}/issues/${shortId}`, { method: 'PATCH', body: JSON.stringify(data) });
+}
+
+export function deleteIssue(repoId: string, shortId: string) {
+  return request<void>(`/api/repos/${repoId}/issues/${shortId}`, { method: 'DELETE' });
+}
+
+export function linkIssueSession(repoId: string, shortId: string, sessionId: string) {
+  return request<{ ok: boolean }>(`/api/repos/${repoId}/issues/${shortId}/link`, { method: 'POST', body: JSON.stringify({ sessionId }) });
+}

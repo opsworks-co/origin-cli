@@ -57,6 +57,11 @@ import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
 import { promptStatusCommand } from './commands/prompt-status.js';
 import { shellPromptCommand } from './commands/shell-prompt.js';
+import {
+  issueCreateCommand, issueListCommand, issueShowCommand, issueUpdateCommand,
+  issueCloseCommand, issueReadyCommand, issueBlockedCommand,
+  issueDepAddCommand, issueDepRemoveCommand, issueDepTreeCommand, issueLinkCommand,
+} from './commands/issue.js';
 import { checkForUpdate } from './version-check.js';
 import { BUILD_INFO } from './build-info.js';
 import { readFileSync } from 'fs';
@@ -243,6 +248,83 @@ todo.command('add <text>')
 todo.command('remove <id>')
   .description('Remove a TODO')
   .action(todoRemoveCommand);
+
+// ─── AI Issue Tracker ───────────────────────────────────────────────────
+
+const issue = program.command('issue').description('AI-native issue tracker — git-tracked, dependency-aware');
+issue.action(issueListCommand);
+
+issue.command('create <title>')
+  .description('Create a new issue')
+  .option('-t, --type <type>', 'Issue type: bug, feature, task, chore', 'task')
+  .option('-p, --priority <n>', 'Priority: 1 (critical) to 4 (low)', '3')
+  .option('-l, --label <labels...>', 'Labels')
+  .option('-d, --dep <ids...>', 'Depends on issue IDs')
+  .option('--description <text>', 'Description')
+  .option('--json', 'Output as JSON')
+  .action(issueCreateCommand);
+
+issue.command('list')
+  .description('List issues')
+  .option('-s, --status <status>', 'Filter by status: open, in-progress, blocked, closed')
+  .option('-p, --priority <n>', 'Filter by priority')
+  .option('-l, --label <label>', 'Filter by label')
+  .option('-t, --type <type>', 'Filter by type')
+  .option('--json', 'Output as JSON')
+  .action(issueListCommand);
+
+issue.command('show <id>')
+  .description('Show issue details')
+  .option('--json', 'Output as JSON')
+  .action(issueShowCommand);
+
+issue.command('update <id>')
+  .description('Update an issue')
+  .option('-s, --status <status>', 'New status: open, in-progress, blocked, closed')
+  .option('-p, --priority <n>', 'New priority')
+  .option('-t, --title <title>', 'New title')
+  .option('--type <type>', 'New type')
+  .option('-l, --label <labels...>', 'Replace labels')
+  .option('--description <text>', 'New description')
+  .option('--json', 'Output as JSON')
+  .action(issueUpdateCommand);
+
+issue.command('close <id>')
+  .description('Close an issue')
+  .option('--json', 'Output as JSON')
+  .action(issueCloseCommand);
+
+issue.command('ready')
+  .description('Show issues with no unresolved dependencies — ready to work on')
+  .option('--json', 'Output as JSON')
+  .action(issueReadyCommand);
+
+issue.command('blocked')
+  .description('Show issues blocked by unresolved dependencies')
+  .option('--json', 'Output as JSON')
+  .action(issueBlockedCommand);
+
+issue.command('link <id> <sessionId>')
+  .description('Link a session to an issue')
+  .option('--json', 'Output as JSON')
+  .action(issueLinkCommand);
+
+const issueDep = issue.command('dep').description('Manage issue dependencies');
+
+issueDep.command('add <id> <blocksId>')
+  .description('Add a dependency: <id> depends on <blocksId>')
+  .option('--json', 'Output as JSON')
+  .action(issueDepAddCommand);
+
+issueDep.command('remove <id> <depId>')
+  .description('Remove a dependency')
+  .option('--json', 'Output as JSON')
+  .action(issueDepRemoveCommand);
+
+issueDep.command('tree <id>')
+  .description('Show dependency tree')
+  .option('--json', 'Output as JSON')
+  .action(issueDepTreeCommand);
 
 // ─── Session Compare ────────────────────────────────────────────────────
 
