@@ -53,6 +53,7 @@ import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
 import { reworkCommand } from './commands/rework.js';
 import { reportCommand } from './commands/report.js';
+import { attachCommand } from './commands/attach.js';
 import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
 import { promptStatusCommand } from './commands/prompt-status.js';
@@ -143,6 +144,9 @@ program.command('link [slug]')
   .option('--list', 'Show current link')
   .option('--unlink', 'Remove link')
   .action(linkCommand);
+program.command('attach [agent]')
+  .description('Attach Origin tracking to an already-running AI agent session')
+  .action(attachCommand);
 program.command('status').description('Show current status (active session, branch, repo info)').action(statusCommand);
 program.command('prompt-status')
   .description('Output a short PS1/prompt string for the current session state (fast, local-only)')

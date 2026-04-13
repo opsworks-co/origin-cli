@@ -129,13 +129,16 @@ export async function dbImportCommand(opts?: { format?: string; file?: string })
     return;
   }
 
-  // If checkpointRepo is configured, fetch origin-sessions from external repo first
+  // If checkpointRepo is configured, fetch origin-sessions from external repo first.
+  // Use --filter=blob:none for a partial (blobless) fetch — only tree objects are
+  // downloaded eagerly; blobs are fetched on demand when `git show` reads them.
+  // This dramatically reduces fetch time and disk usage as sessions accumulate.
   const config = loadConfig();
   if (config?.checkpointRepo) {
     console.log(chalk.gray(`Fetching origin-sessions from checkpoint repo...`));
     try {
       git(
-        ['fetch', config.checkpointRepo, 'origin-sessions:origin-sessions', '--force'],
+        ['fetch', '--filter=blob:none', config.checkpointRepo, 'origin-sessions:origin-sessions', '--force'],
         { cwd: repoPath, timeoutMs: 30_000 },
       );
     } catch (err: any) {

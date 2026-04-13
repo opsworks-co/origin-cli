@@ -75,6 +75,7 @@ import budgetRoutes from './routes/budget.js';
 import adminRoutes from './routes/admin.js';
 import annotationRoutes from './routes/annotations.js';
 import issueRoutes from './routes/issues.js';
+import feedRoutes from './routes/feed.js';
 
 const app = express();
 
@@ -150,6 +151,7 @@ app.use(cookieParser());
 const largeBodyParser = express.json({ limit: '50mb' });
 
 // Public routes (no auth required) — mount BEFORE authMiddleware
+app.use(feedRoutes); // /rss.xml and /feed.xml — no /api/ prefix
 app.use('/api/share', shareRoutes);
 app.use('/api/v1/share', shareRoutes);
 
