@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { LogoMark } from '../components/Logo';
 import { request } from '../api/_client';
 import * as api from '../api';
+import type { GitHubDiscoveredRepo, GitLabDiscoveredRepo } from '../api/repos';
 
 // ── Agent configs ───────────────────────────────────────────────────────────
 const AGENTS = [
@@ -17,11 +18,11 @@ const AGENTS = [
   { id: 'other', name: 'Other', icon: '➕', color: 'border-gray-600/40 bg-gray-600/10' },
 ];
 
-const TOTAL_STEPS = 4;
+const TOTAL_STEPS = 5;
 
 // ── Step indicator ──────────────────────────────────────────────────────────
 function Steps({ current }: { current: number }) {
-  const steps = ['AI Tools', 'Connect Repos', 'Install CLI', 'First Session'];
+  const steps = ['AI Tools', 'Connect', 'Import Repos', 'Install CLI', 'First Session'];
   return (
     <div className="flex items-center justify-center gap-1.5 mb-8">
       {steps.map((label, i) => (
@@ -68,12 +69,12 @@ function CopyBlock({ text }: { text: string }) {
 }
 
 // ── GitHub / GitLab SVGs ────────────────────────────────────────────────────
-function GitHubIcon() {
-  return <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>;
+function GitHubIcon({ className }: { className?: string }) {
+  return <svg className={className || 'w-6 h-6'} viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>;
 }
 
-function GitLabIcon() {
-  return <svg className="w-6 h-6" viewBox="0 0 24 24" fill="currentColor"><path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.452.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024"/></svg>;
+function GitLabIcon({ className }: { className?: string }) {
+  return <svg className={className || 'w-6 h-6'} viewBox="0 0 24 24" fill="currentColor"><path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.452.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024"/></svg>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -103,6 +104,15 @@ export default function Onboarding() {
   const [gitlabConnected, setGitlabConnected] = useState(false);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+
+  // Repo import state
+  const [discoveredRepos, setDiscoveredRepos] = useState<(GitHubDiscoveredRepo | GitLabDiscoveredRepo & { _provider: string })[]>([]);
+  const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set());
+  const [discovering, setDiscovering] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importDone, setImportDone] = useState(false);
+  const [importedCount, setImportedCount] = useState(0);
+  const [repoSearch, setRepoSearch] = useState('');
 
   // Check integrations on mount + handle OAuth return params
   useEffect(() => {
@@ -144,7 +154,7 @@ export default function Onboarding() {
 
   // Poll for first session in step 3
   useEffect(() => {
-    if (step !== 3 || !polling) return;
+    if (step !== 4 || !polling) return;
     const check = async () => {
       try {
         const stats = await request<{ totalSessions: number }>('/api/stats/me');
@@ -172,6 +182,78 @@ export default function Onboarding() {
       localStorage.setItem('origin:hide-guide', '1');
     } catch { /* ignore */ }
     navigate('/me', { replace: true });
+  };
+
+  // Discover repos from connected providers
+  const discoverRepos = async () => {
+    setDiscovering(true);
+    setDiscoveredRepos([]);
+    try {
+      const all: any[] = [];
+      if (githubConnected) {
+        try {
+          const gh = await api.discoverGitHubRepos();
+          all.push(...(gh.repos || []).map((r: any) => ({ ...r, _provider: 'github', _key: r.fullName })));
+        } catch { /* ignore */ }
+      }
+      if (gitlabConnected) {
+        try {
+          const gl = await api.discoverGitLabRepos();
+          all.push(...(gl.repos || []).map((r: any) => ({ ...r, _provider: 'gitlab', _key: r.fullPath })));
+        } catch { /* ignore */ }
+      }
+      setDiscoveredRepos(all);
+      // Auto-select repos that aren't already imported
+      const notImported = new Set(all.filter((r: any) => !r.alreadyImported).map((r: any) => r._key));
+      setSelectedRepos(notImported);
+    } catch { /* ignore */ }
+    setDiscovering(false);
+  };
+
+  const importSelectedRepos = async () => {
+    setImporting(true);
+    let count = 0;
+    try {
+      const ghRepos = discoveredRepos.filter((r: any) => r._provider === 'github' && selectedRepos.has(r._key) && !r.alreadyImported);
+      const glRepos = discoveredRepos.filter((r: any) => r._provider === 'gitlab' && selectedRepos.has(r._key) && !r.alreadyImported);
+
+      if (ghRepos.length > 0) {
+        const res = await api.importGitHubRepos(ghRepos.map((r: any) => ({ fullName: r.fullName, name: r.name })));
+        count += (res.results || []).filter((r: any) => r.success).length;
+        // Trigger sync for imported repos (fire and forget)
+        for (const r of (res.results || [])) {
+          if (r.success && r.repoId) api.syncRepo(r.repoId).catch(() => {});
+        }
+      }
+      if (glRepos.length > 0) {
+        const res = await api.importGitLabRepos(glRepos.map((r: any) => ({ fullPath: r.fullPath, name: r.name })));
+        count += (res.results || []).filter((r: any) => r.success).length;
+        for (const r of (res.results || [])) {
+          if (r.success && r.repoId) api.syncRepo(r.repoId).catch(() => {});
+        }
+      }
+    } catch { /* ignore */ }
+    setImportedCount(count);
+    setImportDone(true);
+    setImporting(false);
+  };
+
+  const toggleRepo = (key: string) => {
+    setSelectedRepos(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleAllRepos = () => {
+    const importable = discoveredRepos.filter((r: any) => !r.alreadyImported);
+    if (selectedRepos.size === importable.length) {
+      setSelectedRepos(new Set());
+    } else {
+      setSelectedRepos(new Set(importable.map((r: any) => r._key)));
+    }
   };
 
   const handleConnectGitHub = async () => {
@@ -367,7 +449,15 @@ export default function Onboarding() {
                 &larr; Back
               </button>
               <button
-                onClick={() => setStep(2)}
+                onClick={() => {
+                  if (githubConnected || gitlabConnected) {
+                    setStep(2);
+                    // Auto-discover repos when entering import step
+                    setTimeout(discoverRepos, 100);
+                  } else {
+                    setStep(3); // Skip import if nothing connected
+                  }
+                }}
                 className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
               >
                 {githubConnected || gitlabConnected ? 'Continue' : 'Skip for now'} &rarr;
@@ -376,8 +466,136 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* ─── STEP 3: Install & Connect ──────────────────────────────────── */}
+        {/* ─── STEP 3: Import Repos ──────────────────────────────────────── */}
         {step === 2 && (
+          <div className="animate-fade-in space-y-6">
+            <div className="text-center">
+              <h1 className="text-2xl font-bold text-white">Import your repositories</h1>
+              <p className="text-sm text-gray-400 mt-2">
+                Select repos to track. Sessions started in these repos will auto-link to them.
+              </p>
+            </div>
+
+            {discovering ? (
+              <div className="flex flex-col items-center gap-3 py-12">
+                <div className="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                <p className="text-sm text-gray-400">Discovering repositories...</p>
+              </div>
+            ) : discoveredRepos.length === 0 ? (
+              <div className="rounded-xl border border-white/[0.08] bg-gray-900/40 p-8 text-center">
+                <p className="text-sm text-gray-400">No repositories found. You can import repos later from the Repos page.</p>
+              </div>
+            ) : (
+              <>
+                {/* Search + Select All */}
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 relative">
+                    <input
+                      type="text"
+                      value={repoSearch}
+                      onChange={e => setRepoSearch(e.target.value)}
+                      placeholder="Search repos..."
+                      className="w-full bg-gray-950 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-indigo-500/50"
+                    />
+                  </div>
+                  <button
+                    onClick={toggleAllRepos}
+                    className="text-xs text-indigo-400 hover:text-indigo-300 whitespace-nowrap"
+                  >
+                    {selectedRepos.size === discoveredRepos.filter((r: any) => !r.alreadyImported).length ? 'Deselect all' : 'Select all'}
+                  </button>
+                </div>
+
+                {/* Repo list */}
+                <div className="max-h-[340px] overflow-y-auto space-y-1.5 rounded-xl border border-white/[0.06] bg-gray-950/50 p-2">
+                  {discoveredRepos
+                    .filter((r: any) => {
+                      if (!repoSearch) return true;
+                      const s = repoSearch.toLowerCase();
+                      return (r._key || '').toLowerCase().includes(s) || (r.name || '').toLowerCase().includes(s);
+                    })
+                    .map((repo: any) => {
+                      const isImported = repo.alreadyImported;
+                      const isSelected = selectedRepos.has(repo._key);
+                      return (
+                        <button
+                          key={repo._key}
+                          onClick={() => !isImported && toggleRepo(repo._key)}
+                          disabled={isImported}
+                          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left transition-all ${
+                            isImported
+                              ? 'opacity-40 cursor-not-allowed'
+                              : isSelected
+                                ? 'bg-indigo-500/10 border border-indigo-500/30'
+                                : 'hover:bg-gray-900/60 border border-transparent'
+                          }`}
+                        >
+                          {/* Checkbox */}
+                          <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+                            isImported ? 'border-gray-700 bg-gray-800' :
+                            isSelected ? 'border-indigo-500 bg-indigo-600' : 'border-gray-600'
+                          }`}>
+                            {(isSelected || isImported) && <span className="text-[10px] text-white">✓</span>}
+                          </div>
+                          {/* Provider icon */}
+                          <span className="text-gray-500 shrink-0">
+                            {repo._provider === 'github' ? <GitHubIcon className="w-4 h-4" /> : <GitLabIcon className="w-4 h-4" />}
+                          </span>
+                          {/* Name */}
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-gray-200 truncate">{repo._key}</p>
+                            {repo.private && <span className="text-[10px] text-gray-600">private</span>}
+                          </div>
+                          {isImported && (
+                            <span className="text-[10px] text-gray-500 shrink-0">already imported</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                </div>
+
+                {importDone && (
+                  <div className="p-3 rounded-lg bg-emerald-900/30 border border-emerald-800 text-emerald-400 text-sm">
+                    ✓ Imported {importedCount} repo{importedCount !== 1 ? 's' : ''}. Commits are syncing in the background.
+                  </div>
+                )}
+
+                {/* Import count */}
+                {!importDone && (
+                  <p className="text-xs text-gray-500 text-center">
+                    {selectedRepos.size} repo{selectedRepos.size !== 1 ? 's' : ''} selected
+                  </p>
+                )}
+              </>
+            )}
+
+            <div className="flex items-center justify-between pt-2">
+              <button onClick={() => setStep(1)} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+                &larr; Back
+              </button>
+              <div className="flex items-center gap-3">
+                {!importDone && selectedRepos.size > 0 && discoveredRepos.length > 0 && (
+                  <button
+                    onClick={importSelectedRepos}
+                    disabled={importing}
+                    className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors disabled:opacity-50"
+                  >
+                    {importing ? 'Importing...' : `Import ${selectedRepos.size} repo${selectedRepos.size !== 1 ? 's' : ''}`}
+                  </button>
+                )}
+                <button
+                  onClick={() => setStep(3)}
+                  className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+                >
+                  {importDone ? 'Continue' : discoveredRepos.length === 0 ? 'Continue' : 'Skip'} &rarr;
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ─── STEP 4: Install & Connect ──────────────────────────────────── */}
+        {step === 3 && (
           <div className="animate-fade-in space-y-6">
             <div className="text-center">
               <h1 className="text-2xl font-bold text-white">Install &amp; Connect the CLI</h1>
@@ -440,11 +658,11 @@ export default function Onboarding() {
             </div>
 
             <div className="flex items-center justify-between pt-2">
-              <button onClick={() => setStep(1)} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+              <button onClick={() => setStep(githubConnected || gitlabConnected ? 2 : 1)} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
                 &larr; Back
               </button>
               <button
-                onClick={() => { setStep(3); setPolling(true); }}
+                onClick={() => { setStep(4); setPolling(true); }}
                 className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
               >
                 I've run the commands &rarr;
@@ -453,8 +671,8 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* ─── STEP 4: Waiting for first session ──────────────────────────── */}
-        {step === 3 && (
+        {/* ─── STEP 5: Waiting for first session ──────────────────────────── */}
+        {step === 4 && (
           <div className="animate-fade-in space-y-6">
             <div className="text-center">
               {sessionFound ? (
@@ -503,7 +721,7 @@ export default function Onboarding() {
 
             <div className="flex items-center justify-between pt-2">
               <button
-                onClick={() => { setPolling(false); setStep(2); }}
+                onClick={() => { setPolling(false); setStep(3); }}
                 className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
               >
                 &larr; Back
