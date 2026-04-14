@@ -1914,7 +1914,25 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           // Transcript may not be readable mid-session for all agents
         }
 
-        // Synthesize transcript from captured prompts when no transcript file exists (Codex, etc.)
+        // For Codex: try reading the rollout JSONL for full transcript + token data
+        if (!displayTranscript && (agentSlug === 'codex' || (state as any).agentSlug === 'codex')) {
+          try {
+            const codexData = discoverCodexSessionData(state.repoPath || hookCwd);
+            if (codexData) {
+              if (codexData.transcript) displayTranscript = codexData.transcript;
+              if (!parsed && codexData.tokensUsed > 0) {
+                parsed = {
+                  prompts: [], filesChanged: [], summary: '', transcript: '',
+                  model: codexData.model, tokensUsed: codexData.tokensUsed,
+                  inputTokens: codexData.inputTokens, outputTokens: codexData.outputTokens,
+                  cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0,
+                };
+              }
+            }
+          } catch { /* best effort */ }
+        }
+
+        // Synthesize transcript from captured prompts when no transcript file exists
         if (!displayTranscript && state.prompts.length > 0) {
           const turns: Array<{ role: string; content: string }> = [];
           if (state.agentSystemPrompt) {

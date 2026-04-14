@@ -493,11 +493,15 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
     // the hook exits. Passing it to the heartbeat causes the heartbeat to kill the
     // session after 30 seconds. For these agents, pass parentPid=0 so the heartbeat
     // relies on state file staleness (15 min) instead.
-    const LONG_RUNNING_AGENTS = ['claude-code', 'windsurf'];
+    // Claude Code hooks run via MCP subprocesses — process.ppid points to
+    // a short-lived handler that dies after the hook returns, causing the
+    // heartbeat to think the agent exited. Use pattern-based PID detection instead.
+    const LONG_RUNNING_AGENTS = ['windsurf'];
     // Cursor is an Electron app — its process tree has short-lived helpers that
     // die immediately, causing false parent-death detection. Use stale file only.
     const STALE_FILE_ONLY_AGENTS = ['cursor'];
     const AGENT_PROCESS_PATTERNS: Record<string, RegExp> = {
+      'claude-code': /claude/i,
       'gemini': /gemini/i,
       'aider': /aider/i,
       'codex': /codex/i,

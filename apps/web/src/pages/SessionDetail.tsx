@@ -15,6 +15,88 @@ function statusBadge(status: string) {
   return <span className={`${getStatusBadgeClass(status)} text-sm`}>{status}</span>;
 }
 
+// ── Console View — formatted agent transcript ──────────────────────────────
+
+interface TranscriptTurn { role: string; content: string }
+
+function ConsoleView({ transcript }: { transcript: string }) {
+  if (!transcript) {
+    return (
+      <div className="text-center py-16">
+        <p className="text-sm text-gray-600">No console output captured for this session</p>
+      </div>
+    );
+  }
+
+  // Try parsing as JSON transcript
+  let turns: TranscriptTurn[] | null = null;
+  try {
+    const parsed = JSON.parse(transcript);
+    if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].role) {
+      turns = parsed;
+    } else if (parsed.role && parsed.content) {
+      turns = [parsed];
+    }
+  } catch { /* raw text */ }
+
+  if (turns) {
+    return (
+      <div className="p-4 space-y-3 overflow-y-auto">
+        {turns.map((turn, i) => {
+          const isUser = turn.role === 'user' || turn.role === 'human';
+          const isSystem = turn.role === 'system';
+          const isTool = turn.role === 'tool_use' || turn.role === 'tool_result';
+          const content = typeof turn.content === 'string' ? turn.content : JSON.stringify(turn.content, null, 2);
+          return (
+            <div key={i} className={`rounded-lg px-4 py-3 ${
+              isUser
+                ? 'bg-indigo-500/10 border border-indigo-500/20'
+                : isSystem
+                  ? 'bg-gray-800/50 border border-gray-700/30'
+                  : isTool
+                    ? 'bg-amber-500/5 border border-amber-500/10'
+                    : 'bg-gray-900/50 border border-white/[0.05]'
+            }`}>
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                  isUser ? 'text-indigo-400' : isSystem ? 'text-gray-500' : isTool ? 'text-amber-400' : 'text-emerald-400'
+                }`}>
+                  {isUser ? '▶ You' : isSystem ? '⚙ System' : isTool ? '🔧 Tool' : '◀ Agent'}
+                </span>
+              </div>
+              <div className="text-[12px] text-gray-300 leading-relaxed whitespace-pre-wrap font-mono">
+                {content.split('\n').map((line, j) => {
+                  let cls = '';
+                  if (line.startsWith('+') && !line.startsWith('+++')) cls = 'text-emerald-400/80';
+                  else if (line.startsWith('-') && !line.startsWith('---')) cls = 'text-red-400/80';
+                  else if (line.startsWith('@@')) cls = 'text-indigo-400/80';
+                  return <div key={j} className={cls}>{line || '\u00a0'}</div>;
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Raw text fallback
+  return (
+    <div className="p-4 font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-gray-400 overflow-y-auto">
+      {transcript.split('\n').map((line, i) => {
+        let cls = 'text-gray-400';
+        if (line.startsWith('> ') || line.startsWith('$ ')) cls = 'text-emerald-400';
+        else if (line.startsWith('Error') || line.startsWith('error')) cls = 'text-red-400';
+        else if (line.match(/^(Human|User|human|user):/i)) cls = 'text-indigo-400 font-semibold';
+        else if (line.match(/^(Assistant|assistant|Claude|claude):/i)) cls = 'text-cyan-400';
+        else if (line.startsWith('+') && !line.startsWith('+++')) cls = 'text-emerald-400/70';
+        else if (line.startsWith('-') && !line.startsWith('---')) cls = 'text-red-400/70';
+        return <div key={i} className={cls}>{line || '\u00a0'}</div>;
+      })}
+    </div>
+  );
+}
+
 export default function SessionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -26,7 +108,7 @@ export default function SessionDetail() {
   const [error, setError] = useState('');
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'session' | 'security' | 'blame' | 'turns'>('session');
+  const [activeTab, setActiveTab] = useState<'session' | 'console' | 'security' | 'blame' | 'turns'>('session');
 
   // Review state
   const [reviewNote, setReviewNote] = useState('');
@@ -892,6 +974,16 @@ export default function SessionDetail() {
             )}
           </button>
           <button
+            onClick={() => setActiveTab('console')}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              activeTab === 'console'
+                ? 'bg-emerald-600/20 text-emerald-400 font-medium'
+                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
+            }`}
+          >
+            Console
+          </button>
+          <button
             onClick={() => setActiveTab('blame')}
             className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
               activeTab === 'blame'
@@ -962,6 +1054,9 @@ export default function SessionDetail() {
               promptChanges={session.promptChanges || []}
               sessionDiff={session.sessionDiff}
             />
+          )}
+          {activeTab === 'console' && (
+            <ConsoleView transcript={session.transcript} />
           )}
           {activeTab === 'blame' && (
             <AiBlameView

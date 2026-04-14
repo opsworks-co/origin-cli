@@ -541,56 +541,96 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       console.log('[session/start] ZOMBIE CLEANUP: ended', zombieSessions.length, 'dead sessions for', agentSlug);
     }
 
-    // ── Session chaining: link to prior session from same agent session ──
+    // ── Session reuse & chaining ──────────────────────────────────────
+    // 1. IDLE/RUNNING sessions → resume them (return existing session, don't create new)
+    // 2. COMPLETED sessions ended < 10 min ago → chain as related sessions
+    // 3. COMPLETED sessions ended > 10 min ago → fresh session, no chain
     let parentSessionId: string | null = null;
+    let reuseSession: { id: string; status: string } | null = null;
 
-    if (agentSessionId) {
-      // Primary: match by agent's native session ID
-      const priorByAgent = await prisma.codingSession.findFirst({
-        where: {
-          agentSessionId,
-          mergedInto: null,
-        },
-        orderBy: { startedAt: 'desc' },
+    // First: check for IDLE or RUNNING session on same repo+branch+agent that we should resume
+    // MUST match the same agent — never reuse a Gemini session for Codex, etc.
+    const activeSession = agent?.id ? await prisma.codingSession.findFirst({
+      where: {
+        commit: { repoId: repo.id },
+        branch: branch || undefined,
+        status: { in: ['RUNNING', 'IDLE'] },
+        mergedInto: null,
+        agentId: agent.id,
+      },
+      orderBy: { startedAt: 'desc' },
+      select: { id: true, status: true },
+    }) : null;
+
+    if (activeSession) {
+      reuseSession = activeSession;
+      console.log('[session/start] REUSE: resuming existing session', {
+        sessionId: activeSession.id, status: activeSession.status, agentId: agent?.id,
       });
-      if (priorByAgent) {
-        parentSessionId = priorByAgent.parentSessionId || priorByAgent.id;
-        console.log('[session/start] CHAIN: linking to prior session via agentSessionId', {
-          priorId: priorByAgent.id, parentSessionId, agentSessionId,
-        });
-      }
     }
 
-    if (!parentSessionId) {
-      // Fallback: heuristic — same repo + branch + agent + machine within 24h
-      const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-      const priorByHeuristic = await prisma.codingSession.findFirst({
-        where: {
-          agentId: agent?.id || undefined,
-          commit: { repoId: repo.id },
-          branch: branch || undefined,
-          startedAt: { gte: cutoff24h },
-          status: 'COMPLETED',
-          mergedInto: null,
-        },
-        orderBy: { startedAt: 'desc' },
-      });
-      if (priorByHeuristic) {
-        // Verify same machine via audit log
-        const priorAudit = await prisma.auditLog.findFirst({
-          where: { resource: priorByHeuristic.id, action: 'SESSION_STARTED' },
-          orderBy: { createdAt: 'desc' },
+    // If no active session to reuse, check for recently completed sessions to chain
+    if (!reuseSession) {
+      if (agentSessionId) {
+        // Primary: match by agent's native session ID
+        const priorByAgent = await prisma.codingSession.findFirst({
+          where: {
+            agentSessionId,
+            mergedInto: null,
+          },
+          orderBy: { startedAt: 'desc' },
         });
-        const priorMachineId = priorAudit?.metadata
-          ? JSON.parse(priorAudit.metadata as string)?.machineId
-          : null;
-        if (priorMachineId === machineId) {
+        if (priorByAgent) {
+          parentSessionId = priorByAgent.parentSessionId || priorByAgent.id;
+          console.log('[session/start] CHAIN: linking to prior session via agentSessionId', {
+            priorId: priorByAgent.id, parentSessionId, agentSessionId,
+          });
+        }
+      }
+
+      if (!parentSessionId) {
+        // Heuristic: same repo + branch + agent + machine, completed within 10 minutes
+        const cutoff10m = new Date(Date.now() - 10 * 60 * 1000);
+        const priorByHeuristic = await prisma.codingSession.findFirst({
+          where: {
+            agentId: agent?.id || undefined,
+            commit: { repoId: repo.id },
+            branch: branch || undefined,
+            updatedAt: { gte: cutoff10m },
+            status: 'COMPLETED',
+            mergedInto: null,
+          },
+          orderBy: { updatedAt: 'desc' },
+        });
+        if (priorByHeuristic) {
           parentSessionId = priorByHeuristic.parentSessionId || priorByHeuristic.id;
-          console.log('[session/start] CHAIN: linking to prior session via heuristic', {
+          console.log('[session/start] CHAIN: linking to recently completed session', {
             priorId: priorByHeuristic.id, parentSessionId,
           });
         }
       }
+    }
+
+    // If reusing an existing session, update it to RUNNING and return it
+    if (reuseSession) {
+      await prisma.codingSession.update({
+        where: { id: reuseSession.id },
+        data: { status: 'RUNNING' },
+      });
+      // Emit session started event for Live Feed
+      emitSessionEvent({
+        type: 'session:started',
+        sessionId: reuseSession.id,
+        orgId,
+        userId: req.mcpUserId || undefined,
+        timestamp: new Date().toISOString(),
+        data: { repoPath: repoPath || repo.name, agentSlug: agentSlug || model, model, resumed: true },
+      });
+      return res.json({
+        sessionId: reuseSession.id,
+        systemPrompt: agent?.systemPrompt || null,
+        resumed: true,
+      });
     }
 
     // Generate a placeholder SHA (random 40-char hex)
@@ -1046,15 +1086,16 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
       }
     }
 
-    // Replace prompt→file change mappings (delete old, create new — bulk)
+    // Upsert prompt→file change mappings (append/update, never delete previous prompts)
+    // Count existing prompts BEFORE upsert so we know if new ones were added
+    let prevPromptCount = 0;
     if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
+      prevPromptCount = await prisma.promptChange.count({ where: { sessionId: id } });
       // Cap row count so a client can't ask us to insert a million rows.
       const capped = promptChanges.slice(0, MAX_PROMPT_CHANGES);
-      await prisma.promptChange.deleteMany({ where: { sessionId: id } });
-      await prisma.promptChange.createMany({
-        data: capped.map((pc: any) => ({
-          sessionId: id,
-          promptIndex: Number.isFinite(Number(pc?.promptIndex)) ? Number(pc.promptIndex) : 0,
+      await Promise.all(capped.map((pc: any) => {
+        const promptIndex = Number.isFinite(Number(pc?.promptIndex)) ? Number(pc.promptIndex) : 0;
+        const data = {
           promptText: (typeof pc?.promptText === 'string' ? pc.promptText : '').slice(0, 1000),
           filesChanged: JSON.stringify(
             Array.isArray(pc?.filesChanged)
@@ -1063,8 +1104,13 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           ),
           diff: (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000),
           uncommittedDiff: (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000),
-        })),
-      });
+        };
+        return prisma.promptChange.upsert({
+          where: { sessionId_promptIndex: { sessionId: id, promptIndex } },
+          update: data,
+          create: { sessionId: id, promptIndex, ...data },
+        });
+      }));
     }
 
     // Emit rich real-time events for Live Feed
@@ -1075,8 +1121,8 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
     // Always emit a generic update
     emitSessionEvent({ type: 'session:updated', sessionId: id, orgId: emitOrgId, userId: emitUserId, timestamp: now });
 
-    // Emit prompt event when new promptChanges arrive
-    if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
+    // Emit prompt event only when NEW prompts are added (not re-sent duplicates)
+    if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > prevPromptCount) {
       const latest = promptChanges[promptChanges.length - 1];
       emitSessionEvent({
         type: 'session:prompt',
@@ -1108,6 +1154,23 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           linesRemoved: cleanLinesRemoved,
           toolCalls: cleanToolCalls,
           durationMs: cleanDurationMs,
+        },
+      });
+    }
+
+    // Emit output event when transcript is updated (agent console output)
+    if (cleanTranscript) {
+      // Send last 2000 chars so the Live Feed has recent context
+      const tail = cleanTranscript.length > 2000 ? cleanTranscript.slice(-2000) : cleanTranscript;
+      emitSessionEvent({
+        type: 'session:output',
+        sessionId: id,
+        orgId: emitOrgId,
+        userId: emitUserId,
+        timestamp: now,
+        data: {
+          output: tail,
+          totalLength: cleanTranscript.length,
         },
       });
     }
@@ -1395,29 +1458,42 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         }
       }
 
-      // Create or update SessionDiff record with full diff
-      await prisma.sessionDiff.upsert({
-        where: { sessionId },
-        create: {
-          sessionId,
-          headBefore: gitCapture.headBefore || '',
-          headAfter: gitCapture.headAfter || '',
-          commitShas: JSON.stringify(gitCapture.commitShas || []),
-          diff: gitCapture.diff || '',
-          diffTruncated: gitCapture.diffTruncated || false,
-          linesAdded: diffLinesAdded,
-          linesRemoved: diffLinesRemoved,
-        },
-        update: {
-          headBefore: gitCapture.headBefore || '',
-          headAfter: gitCapture.headAfter || '',
-          commitShas: JSON.stringify(gitCapture.commitShas || []),
-          diff: gitCapture.diff || '',
-          diffTruncated: gitCapture.diffTruncated || false,
-          linesAdded: diffLinesAdded,
-          linesRemoved: diffLinesRemoved,
-        },
-      });
+      // Create or MERGE SessionDiff record — append new diff to existing
+      const existingEndDiff = await prisma.sessionDiff.findUnique({ where: { sessionId } });
+      if (existingEndDiff) {
+        // Merge: append new diff, combine commit SHAs, keep earliest headBefore
+        let existingEndShas: string[] = [];
+        try { existingEndShas = JSON.parse(existingEndDiff.commitShas || '[]'); } catch {}
+        const newEndShas = (gitCapture.commitShas || []) as string[];
+        const mergedEndShas = [...new Set([...existingEndShas, ...newEndShas])];
+        const mergedDiff = existingEndDiff.diff
+          ? existingEndDiff.diff + '\n' + (gitCapture.diff || '')
+          : (gitCapture.diff || '');
+        await prisma.sessionDiff.update({
+          where: { sessionId },
+          data: {
+            headAfter: gitCapture.headAfter || existingEndDiff.headAfter,
+            commitShas: JSON.stringify(mergedEndShas),
+            diff: mergedDiff,
+            diffTruncated: gitCapture.diffTruncated || existingEndDiff.diffTruncated,
+            linesAdded: (existingEndDiff.linesAdded || 0) + diffLinesAdded,
+            linesRemoved: (existingEndDiff.linesRemoved || 0) + diffLinesRemoved,
+          },
+        });
+      } else {
+        await prisma.sessionDiff.create({
+          data: {
+            sessionId,
+            headBefore: gitCapture.headBefore || '',
+            headAfter: gitCapture.headAfter || '',
+            commitShas: JSON.stringify(gitCapture.commitShas || []),
+            diff: gitCapture.diff || '',
+            diffTruncated: gitCapture.diffTruncated || false,
+            linesAdded: diffLinesAdded,
+            linesRemoved: diffLinesRemoved,
+          },
+        });
+      }
 
       // Update session lines from actual diff counts (more accurate than estimates)
       if (diffLinesAdded || diffLinesRemoved) {
@@ -1467,14 +1543,12 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       }
     }
 
-    // Replace prompt→file change mappings (delete old, create new — prevents duplicates from race conditions)
+    // Upsert prompt→file change mappings (same pattern as PATCH handler)
     if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
       const capped = promptChanges.slice(0, MAX_PROMPT_CHANGES);
-      await prisma.promptChange.deleteMany({ where: { sessionId } });
-      await prisma.promptChange.createMany({
-        data: capped.map((pc: any) => ({
-          sessionId,
-          promptIndex: Number.isFinite(Number(pc?.promptIndex)) ? Number(pc.promptIndex) : 0,
+      await Promise.all(capped.map((pc: any) => {
+        const promptIndex = Number.isFinite(Number(pc?.promptIndex)) ? Number(pc.promptIndex) : 0;
+        const data = {
           promptText: (typeof pc?.promptText === 'string' ? pc.promptText : '').slice(0, 1000),
           filesChanged: JSON.stringify(
             Array.isArray(pc?.filesChanged)
@@ -1483,8 +1557,13 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           ),
           diff: (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000),
           uncommittedDiff: (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000),
-        })),
-      });
+        };
+        return prisma.promptChange.upsert({
+          where: { sessionId_promptIndex: { sessionId, promptIndex } },
+          update: data,
+          create: { sessionId, promptIndex, ...data },
+        });
+      }));
     }
 
     // Log audit event

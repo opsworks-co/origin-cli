@@ -27,6 +27,12 @@ WHERE "id" NOT IN (SELECT MIN("id") FROM "Commit" GROUP BY "repoId", "sha");
 
 DELETE FROM "Commit"
 WHERE "id" NOT IN (SELECT MIN("id") FROM "Commit" GROUP BY "repoId", "sha");
+
+-- Dedup PromptChange: keep newest row per (sessionId, promptIndex)
+DELETE FROM "PromptChange"
+WHERE "id" NOT IN (
+  SELECT MAX("id") FROM "PromptChange" GROUP BY "sessionId", "promptIndex"
+);
 SQL
 fi
 

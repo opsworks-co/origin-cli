@@ -26,6 +26,7 @@ import SharedSession from './pages/SharedSession';
 //    own chunk, which keeps the main bundle small and speeds up first paint
 //    for signed-out and first-visit users. ─────────────────────────────────
 const Docs = lazy(() => import('./pages/Docs'));
+const CLICommands = lazy(() => import('./pages/CLICommands'));
 const Blog = lazy(() => import('./pages/Blog'));
 const BlogPost = lazy(() => import('./pages/BlogPost'));
 const Demo = lazy(() => import('./pages/Demo'));
@@ -119,8 +120,10 @@ export default function App() {
       <Route path="/" element={<PublicLayout><Landing /></PublicLayout>} />
       <Route path="/docs" element={<PublicLayout><Docs /></PublicLayout>} />
       <Route path="/docs/:section" element={<PublicLayout><Docs /></PublicLayout>} />
+      <Route path="/docs/cli/commands" element={<PublicLayout><CLICommands /></PublicLayout>} />
       <Route path="/pricing" element={<PublicLayout><Pricing /></PublicLayout>} />
       <Route path="/cli" element={<Navigate to="/docs#cli" replace />} />
+      <Route path="/cli/commands" element={<Navigate to="/docs/cli/commands" replace />} />
       <Route path="/blog" element={<PublicLayout><Blog /></PublicLayout>} />
       <Route path="/blog/:slug" element={<PublicLayout><BlogPost /></PublicLayout>} />
       <Route path="/use-cases" element={<PublicLayout><UseCases /></PublicLayout>} />

@@ -950,7 +950,7 @@ export function getSessionsByPR() {
 
 export interface SessionStreamEvent {
   type: 'connected' | 'session:started' | 'session:updated' | 'session:ended' | 'session:reviewed'
-    | 'session:prompt' | 'session:metrics' | 'session:files' | 'session:commit';
+    | 'session:prompt' | 'session:metrics' | 'session:files' | 'session:commit' | 'session:output';
   sessionId?: string;
   orgId?: string;
   data?: Record<string, unknown>;

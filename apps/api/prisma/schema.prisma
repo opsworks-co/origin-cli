@@ -255,6 +255,7 @@ model PromptChange {
   uncommittedDiff String        @default("") // Unified diff of uncommitted (staged+unstaged) changes
   createdAt       DateTime      @default(now())
 
+  @@unique([sessionId, promptIndex])
   @@index([sessionId])
 }
 

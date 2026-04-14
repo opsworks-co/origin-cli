@@ -11,7 +11,8 @@ export type SessionEventType =
   | 'session:prompt'       // New prompt received with file changes
   | 'session:metrics'      // Token/cost/lines update
   | 'session:files'        // Files changed during session
-  | 'session:commit';      // Git commit made during session
+  | 'session:commit'       // Git commit made during session
+  | 'session:output';      // Agent console output chunk
 
 export interface SessionEvent {
   type: SessionEventType;

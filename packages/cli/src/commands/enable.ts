@@ -379,7 +379,10 @@ function filterOriginHooks(entries: any[]): any[] {
   return entries.filter((entry: any) => {
     if (!entry.hooks) return true;
     return !entry.hooks.some((h: any) =>
-      h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks')
+      h.command && typeof h.command === 'string' && (
+        h.command.startsWith('origin hooks') ||
+        h.command.includes('origin hooks') // catches PATH=... prefix variants
+      )
     );
   });
 }
