@@ -324,6 +324,7 @@ function ActiveSessionCard({
   onOutputLoaded,
   onArchive,
   onDelete,
+  isArchived,
 }: {
   session: ActiveSession;
   activities: SessionActivity[];
@@ -331,8 +332,9 @@ function ActiveSessionCard({
   onOutputLoaded?: (sessionId: string, transcript: string) => void;
   onArchive?: (sessionId: string) => void;
   onDelete?: (sessionId: string) => void;
+  isArchived?: boolean;
 }) {
-  const [elapsed, setElapsed] = useState(liveTimer(session.startedAt, session.createdAt));
+  const [elapsed, setElapsed] = useState(isArchived ? (session.durationMs || 0) : liveTimer(session.startedAt, session.createdAt));
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -348,7 +350,7 @@ function ActiveSessionCard({
   }, [output, activeTab]);
 
   useEffect(() => {
-    if (session.status !== 'RUNNING') return;
+    if (isArchived || session.status !== 'RUNNING') return;
     const iv = setInterval(() => setElapsed(liveTimer(session.startedAt, session.createdAt)), 1000);
     return () => clearInterval(iv);
   }, [session.startedAt, session.createdAt, session.status]);
@@ -378,7 +380,9 @@ function ActiveSessionCard({
   }, [expanded, session.id]);
 
   const color = agentColor(session.agentName);
-  const isIdle = session.status === 'IDLE';
+  const isRunning = !isArchived && session.status === 'RUNNING';
+  const isIdle = !isArchived && session.status === 'IDLE';
+  const isEnded = isArchived || (!isRunning && !isIdle);
   const prompts = detail?.promptChanges || [];
 
   return (
@@ -386,8 +390,8 @@ function ActiveSessionCard({
       expanded ? 'border-white/[0.12] bg-gray-900/70 col-span-full' : 'border-white/[0.08] bg-gray-900/50'
     }`}>
       {/* Color bar */}
-      <div className="h-1 w-full relative" style={{ backgroundColor: `${color}33` }}>
-        {!isIdle && (
+      <div className="h-1 w-full relative" style={{ backgroundColor: `${color}${isEnded ? '1a' : '33'}` }}>
+        {isRunning && (
           <div className="h-full animate-pulse rounded-full" style={{ backgroundColor: color, width: '100%' }} />
         )}
       </div>
@@ -399,12 +403,13 @@ function ActiveSessionCard({
       >
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2.5">
-            <div className="w-2.5 h-2.5 rounded-full relative" style={{ backgroundColor: isIdle ? '#6b7280' : color }}>
-              {!isIdle && <div className="absolute inset-0 rounded-full animate-ping opacity-30" style={{ backgroundColor: color }} />}
+            <div className="w-2.5 h-2.5 rounded-full relative" style={{ backgroundColor: isEnded ? '#6b7280' : isIdle ? '#6b7280' : color }}>
+              {isRunning && <div className="absolute inset-0 rounded-full animate-ping opacity-30" style={{ backgroundColor: color }} />}
             </div>
-            <span className="text-sm font-semibold text-gray-200">{session.agentName || session.model}</span>
+            <span className={`text-sm font-semibold ${isEnded ? 'text-gray-400' : 'text-gray-200'}`}>{session.agentName || session.model}</span>
+            {isEnded && <span className="text-[10px] text-gray-500 px-1.5 py-0.5 rounded bg-gray-800 font-medium">ENDED</span>}
             {isIdle && <span className="text-[10px] text-gray-500 px-1.5 py-0.5 rounded bg-gray-800 font-medium">IDLE</span>}
-            {!isIdle && <span className="text-[10px] px-1.5 py-0.5 rounded font-medium" style={{ backgroundColor: `${color}15`, color }}>RUNNING</span>}
+            {isRunning && <span className="text-[10px] px-1.5 py-0.5 rounded font-medium" style={{ backgroundColor: `${color}15`, color }}>RUNNING</span>}
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs font-mono text-gray-400 tabular-nums">{fmtDuration(elapsed)}</span>
@@ -697,10 +702,13 @@ export default function LiveFeed() {
   // ── Fetch recent ended sessions for archive ───────────────────────
   const fetchArchived = useCallback(async () => {
     try {
-      const data = await request<{ sessions: ActiveSession[] }>('/api/sessions?status=COMPLETED&limit=20');
-      setArchivedSessions(data.sessions || []);
+      const data = await request<{ sessions: ActiveSession[] }>('/api/sessions?limit=50');
+      const activeIds = new Set(activeSessions.map(s => s.id));
+      // Everything not in the active sessions list goes to archive
+      const ended = (data.sessions || []).filter(s => !activeIds.has(s.id));
+      setArchivedSessions(ended.slice(0, 20));
     } catch {}
-  }, []);
+  }, [activeSessions]);
 
   // ── Archive / Delete handlers ──────────────────────────────────────
   const handleArchive = useCallback(async (sessionId: string) => {
@@ -869,6 +877,7 @@ export default function LiveFeed() {
                 onOutputLoaded={(sid, transcript) => setSessionOutputs(prev => ({ ...prev, [sid]: transcript }))}
                 onArchive={handleArchive}
                 onDelete={handleDelete}
+                isArchived
               />
             ))}
           </div>
