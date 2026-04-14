@@ -27,7 +27,6 @@ import {
   Code2,
   ExternalLink,
   Archive,
-  CheckCircle2,
 } from 'lucide-react';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -627,79 +626,12 @@ function eventStyle(type: string) {
   }
 }
 
-// ── Archived (ended) session card ──────────────────────────────────────────
-
-interface ArchivedSession {
-  id: string;
-  model: string;
-  agentName: string | null;
-  repoName: string | null;
-  branch: string | null;
-  status: string;
-  costUsd: number;
-  tokensUsed: number;
-  durationMs: number;
-  linesAdded: number;
-  linesRemoved: number;
-  toolCalls: number;
-  endedAt: string | null;
-  createdAt: string;
-}
-
-function ArchivedSessionCard({ session }: { session: ArchivedSession }) {
-  const color = agentColor(session.agentName);
-  return (
-    <Link
-      to={`/sessions/${session.id}`}
-      className="flex items-center gap-4 px-4 py-3 border-b border-white/[0.03] last:border-0 hover:bg-white/[0.02] transition-colors group"
-    >
-      {/* Agent dot + name */}
-      <div className="flex items-center gap-2.5 min-w-[140px]">
-        <div className="w-2 h-2 rounded-full opacity-50" style={{ backgroundColor: color }} />
-        <span className="text-sm font-medium text-gray-300 group-hover:text-gray-100 transition-colors">
-          {session.agentName || session.model}
-        </span>
-      </div>
-
-      {/* Repo */}
-      <div className="flex items-center gap-1.5 text-xs text-gray-500 min-w-0 flex-1">
-        <FolderGit2 className="w-3 h-3 shrink-0" />
-        <span className="truncate">{session.repoName || '—'}</span>
-        {session.branch && (
-          <>
-            <GitBranch className="w-3 h-3 ml-1 shrink-0" />
-            <span className="truncate">{session.branch}</span>
-          </>
-        )}
-      </div>
-
-      {/* Metrics */}
-      <div className="hidden sm:flex items-center gap-4 text-xs text-gray-500 shrink-0">
-        <span className="tabular-nums w-16 text-right">{fmt(session.tokensUsed)}</span>
-        <span className="tabular-nums w-14 text-right">{fmtCost(session.costUsd)}</span>
-        <span className="tabular-nums w-14 text-right">{fmtDuration(session.durationMs)}</span>
-        <span className="tabular-nums w-16 text-right">
-          <span className="text-emerald-400/60">+{session.linesAdded}</span>
-          <span className="text-gray-600">/</span>
-          <span className="text-red-400/60">-{session.linesRemoved}</span>
-        </span>
-      </div>
-
-      {/* Time ago */}
-      <span className="text-[10px] text-gray-600 shrink-0 w-14 text-right">
-        {timeAgo(session.endedAt || session.createdAt)}
-      </span>
-      <ExternalLink className="w-3 h-3 text-gray-700 group-hover:text-gray-400 shrink-0 transition-colors" />
-    </Link>
-  );
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export default function LiveFeed() {
   const [connected, setConnected] = useState(false);
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
-  const [archivedSessions, setArchivedSessions] = useState<ArchivedSession[]>([]);
+  const [archivedSessions, setArchivedSessions] = useState<ActiveSession[]>([]);
   const [sessionActivities, setSessionActivities] = useState<Record<string, SessionActivity[]>>({});
   const [sessionOutputs, setSessionOutputs] = useState<Record<string, string>>({});
   const [globalLog, setGlobalLog] = useState<SessionActivity[]>([]);
@@ -722,7 +654,7 @@ export default function LiveFeed() {
   // ── Fetch recent ended sessions for archive ───────────────────────
   const fetchArchived = useCallback(async () => {
     try {
-      const data = await request<{ sessions: ArchivedSession[] }>('/api/sessions?status=COMPLETED&limit=20');
+      const data = await request<{ sessions: ActiveSession[] }>('/api/sessions?status=COMPLETED&limit=20');
       setArchivedSessions(data.sessions || []);
     } catch {}
   }, []);
@@ -865,22 +797,15 @@ export default function LiveFeed() {
               </button>
             )}
           </div>
-          <div className="rounded-xl border border-white/[0.06] bg-gray-950/50 overflow-hidden">
-            {/* Column headers */}
-            <div className="flex items-center gap-4 px-4 py-2 border-b border-white/[0.06] text-[10px] text-gray-600 uppercase tracking-wider font-medium">
-              <span className="min-w-[140px]">Agent</span>
-              <span className="flex-1">Repository</span>
-              <div className="hidden sm:flex items-center gap-4 shrink-0">
-                <span className="w-16 text-right">Tokens</span>
-                <span className="w-14 text-right">Cost</span>
-                <span className="w-14 text-right">Duration</span>
-                <span className="w-16 text-right">Lines</span>
-              </div>
-              <span className="w-14 text-right">Ended</span>
-              <span className="w-3" />
-            </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {(showAllArchived ? archivedSessions : archivedSessions.slice(0, 5)).map(session => (
-              <ArchivedSessionCard key={session.id} session={session} />
+              <ActiveSessionCard
+                key={session.id}
+                session={session}
+                activities={sessionActivities[session.id] || []}
+                output={sessionOutputs[session.id] || ''}
+                onOutputLoaded={(sid, transcript) => setSessionOutputs(prev => ({ ...prev, [sid]: transcript }))}
+              />
             ))}
           </div>
         </div>
