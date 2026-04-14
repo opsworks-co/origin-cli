@@ -3,7 +3,15 @@ import { EventEmitter } from 'events';
 const sessionEvents = new EventEmitter();
 sessionEvents.setMaxListeners(100);
 
-export type SessionEventType = 'session:started' | 'session:updated' | 'session:ended' | 'session:reviewed';
+export type SessionEventType =
+  | 'session:started'
+  | 'session:updated'
+  | 'session:ended'
+  | 'session:reviewed'
+  | 'session:prompt'       // New prompt received with file changes
+  | 'session:metrics'      // Token/cost/lines update
+  | 'session:files'        // Files changed during session
+  | 'session:commit';      // Git commit made during session
 
 export interface SessionEvent {
   type: SessionEventType;

@@ -1067,12 +1067,80 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
       });
     }
 
-    emitSessionEvent({
-      type: 'session:updated',
-      sessionId: id,
-      orgId: req.orgId as string,
-      timestamp: new Date().toISOString(),
-    });
+    // Emit rich real-time events for Live Feed
+    const now = new Date().toISOString();
+    const emitOrgId = req.orgId as string;
+    const emitUserId = req.mcpUserId;
+
+    // Always emit a generic update
+    emitSessionEvent({ type: 'session:updated', sessionId: id, orgId: emitOrgId, userId: emitUserId, timestamp: now });
+
+    // Emit prompt event when new promptChanges arrive
+    if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
+      const latest = promptChanges[promptChanges.length - 1];
+      emitSessionEvent({
+        type: 'session:prompt',
+        sessionId: id,
+        orgId: emitOrgId,
+        userId: emitUserId,
+        timestamp: now,
+        data: {
+          promptIndex: latest?.promptIndex ?? promptChanges.length - 1,
+          promptText: (typeof latest?.promptText === 'string' ? latest.promptText : '').slice(0, 200),
+          filesChanged: Array.isArray(latest?.filesChanged) ? latest.filesChanged.slice(0, 10) : [],
+          promptCount: promptChanges.length,
+        },
+      });
+    }
+
+    // Emit metrics update when tokens/cost change
+    if (tokensUsed !== undefined || costUsd !== undefined) {
+      emitSessionEvent({
+        type: 'session:metrics',
+        sessionId: id,
+        orgId: emitOrgId,
+        userId: emitUserId,
+        timestamp: now,
+        data: {
+          tokensUsed: cleanTokensUsed,
+          costUsd: cleanCostUsd,
+          linesAdded: cleanLinesAdded,
+          linesRemoved: cleanLinesRemoved,
+          toolCalls: cleanToolCalls,
+          durationMs: cleanDurationMs,
+        },
+      });
+    }
+
+    // Emit files event when new files are changed
+    if (filesChanged && Array.isArray(filesChanged) && filesChanged.length > 0) {
+      emitSessionEvent({
+        type: 'session:files',
+        sessionId: id,
+        orgId: emitOrgId,
+        userId: emitUserId,
+        timestamp: now,
+        data: { files: filesChanged.slice(0, 20) },
+      });
+    }
+
+    // Emit commit event when git capture has new commits
+    if (gitCapture && Array.isArray(gitCapture.commitDetails) && gitCapture.commitDetails.length > 0) {
+      for (const detail of gitCapture.commitDetails.slice(0, 5)) {
+        emitSessionEvent({
+          type: 'session:commit',
+          sessionId: id,
+          orgId: emitOrgId,
+          userId: emitUserId,
+          timestamp: now,
+          data: {
+            sha: detail.sha?.slice(0, 8),
+            message: (detail.message || '').slice(0, 120),
+            filesChanged: Array.isArray(detail.filesChanged) ? detail.filesChanged.length : 0,
+          },
+        });
+      }
+    }
 
     // Real-time agent limit enforcement (check during active session, not just at end)
     // Run in background — never block the hook response

@@ -949,7 +949,8 @@ export function getSessionsByPR() {
 // ---- Real-Time Session Stream ------------------------------------------------
 
 export interface SessionStreamEvent {
-  type: 'connected' | 'session:started' | 'session:updated' | 'session:ended' | 'session:reviewed';
+  type: 'connected' | 'session:started' | 'session:updated' | 'session:ended' | 'session:reviewed'
+    | 'session:prompt' | 'session:metrics' | 'session:files' | 'session:commit';
   sessionId?: string;
   orgId?: string;
   data?: Record<string, unknown>;
