@@ -291,8 +291,15 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
 
     const el = document.querySelector(step.target);
     if (!el) {
-      setPos(null);
+      // Fallback: show tooltip centered on screen without highlight
       setTargetRect(null);
+      setPos({
+        top: Math.max(window.innerHeight / 2 - 100, 60),
+        left: Math.max(window.innerWidth / 2 - 180, 20),
+        arrowTop: undefined as any,
+        arrowLeft: undefined as any,
+        arrowDir: 'up' as const,
+      });
       return;
     }
 
@@ -345,9 +352,15 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
         if (cancelled) return;
       }
 
-      // 3. Small settle time then position
-      await wait(100);
-      if (cancelled) return;
+      // 3. Wait for target element to appear (retry up to 2s for lazy-loaded content)
+      let retries = 0;
+      while (retries < 10) {
+        await wait(200);
+        if (cancelled) return;
+        const el = document.querySelector(step.target);
+        if (el) break;
+        retries++;
+      }
 
       setTransitioning(false);
     };
