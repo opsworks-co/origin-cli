@@ -38,6 +38,8 @@ const router = Router();
 router.use(requireAuth);
 
 const IDLE_THRESHOLD_MS = 15 * 60 * 1000; // 15 min without prompt activity → IDLE
+// Auto-end sessions idle for 1 hour even if heartbeat is alive (agent stopped working)
+const AUTO_END_IDLE_MS = 60 * 60 * 1000; // 1 hour
 // Safety net: if heartbeat hasn't pinged in 2 hours, the agent is truly dead.
 // This only catches cases where the heartbeat daemon crashed without sending session/end.
 const ABANDONED_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
@@ -278,22 +280,30 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       }),
     ]);
 
-    // Safety net: expire truly abandoned sessions (heartbeat crashed without sending end).
-    // Uses updatedAt (set by heartbeat ping every 30s) — NOT lastActivityAt (set by prompts).
-    // If heartbeat is alive, updatedAt stays fresh even when user is idle.
+    // Safety net: expire abandoned or long-idle sessions.
     const now = Date.now();
     const abandonedIds: string[] = [];
     for (const s of sessions) {
       if (s.status === 'RUNNING') {
         const lastHeartbeat = new Date(s.updatedAt || s.createdAt).getTime();
+        const lastPrompt = s.lastActivityAt ? new Date(s.lastActivityAt).getTime() : 0;
+
+        // Heartbeat died
         if (now - lastHeartbeat > ABANDONED_THRESHOLD_MS) {
           abandonedIds.push(s.id);
           s.status = 'COMPLETED';
           s.endedAt = s.updatedAt || s.createdAt;
+          continue;
+        }
+        // Heartbeat alive but idle for 1 hour
+        if (lastPrompt && now - lastPrompt > AUTO_END_IDLE_MS) {
+          abandonedIds.push(s.id);
+          s.status = 'COMPLETED';
+          s.endedAt = new Date(lastPrompt + AUTO_END_IDLE_MS);
+          continue;
         }
       }
     }
-    // Update abandoned sessions in DB in background
     if (abandonedIds.length > 0) {
       prisma.codingSession.updateMany({
         where: { id: { in: abandonedIds } },
@@ -370,7 +380,41 @@ router.get('/active', async (req: AuthRequest, res: Response) => {
       take: 500,
     });
 
-    res.json({ sessions: sessions.map((s) => mapSession(s)) });
+    // Auto-end abandoned or long-idle sessions
+    const now = Date.now();
+    const endIds: string[] = [];
+    for (const s of sessions) {
+      const lastHeartbeat = new Date(s.updatedAt || s.createdAt).getTime();
+      const lastPrompt = s.lastActivityAt ? new Date(s.lastActivityAt).getTime() : 0;
+
+      // Heartbeat died — agent crashed
+      if (now - lastHeartbeat > ABANDONED_THRESHOLD_MS) {
+        endIds.push(s.id);
+        s.status = 'COMPLETED';
+        s.endedAt = s.updatedAt || s.createdAt;
+        continue;
+      }
+
+      // Heartbeat alive but no prompt activity for 1 hour — agent stopped working
+      if (lastPrompt && now - lastPrompt > AUTO_END_IDLE_MS) {
+        endIds.push(s.id);
+        s.status = 'COMPLETED';
+        s.endedAt = new Date(lastPrompt + AUTO_END_IDLE_MS);
+        continue;
+      }
+    }
+    if (endIds.length > 0) {
+      prisma.codingSession.updateMany({
+        where: { id: { in: endIds } },
+        data: { status: 'COMPLETED', endedAt: new Date() },
+      }).catch(() => {});
+    }
+
+    // Only return truly active sessions
+    const endSet = new Set(endIds);
+    const activeSessions = sessions.filter((s) => !endSet.has(s.id));
+
+    res.json({ sessions: activeSessions.map((s) => mapSession(s)) });
   } catch (err) {
     console.error('List active sessions error:', err);
     res.status(500).json({ error: 'Internal server error' });
