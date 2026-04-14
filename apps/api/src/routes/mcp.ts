@@ -588,12 +588,13 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         }
       }
 
-      if (!parentSessionId) {
+      if (!parentSessionId && agent?.id) {
         // Heuristic: same repo + branch + agent + machine, completed within 10 minutes
+        // MUST have a valid agentId — never chain across different agents
         const cutoff10m = new Date(Date.now() - 10 * 60 * 1000);
         const priorByHeuristic = await prisma.codingSession.findFirst({
           where: {
-            agentId: agent?.id || undefined,
+            agentId: agent.id,
             commit: { repoId: repo.id },
             branch: branch || undefined,
             updatedAt: { gte: cutoff10m },
@@ -605,7 +606,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         if (priorByHeuristic) {
           parentSessionId = priorByHeuristic.parentSessionId || priorByHeuristic.id;
           console.log('[session/start] CHAIN: linking to recently completed session', {
-            priorId: priorByHeuristic.id, parentSessionId,
+            priorId: priorByHeuristic.id, parentSessionId, agentId: agent.id,
           });
         }
       }

@@ -50,6 +50,7 @@ export interface SessionState {
   prePromptDirtyFiles?: string[]; // Files that were already dirty (uncommitted) before current prompt
   enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
   trailId?: string;           // Trail ID if session is linked to an active trail
+  agentSlug?: string;         // Agent slug (claude-code, cursor, codex, gemini, etc.)
   status?: string;            // RUNNING | ENDED | COMPLETED
   endedAt?: string;           // ISO timestamp when session ended
   // Multi-repo support: when cwd contains multiple git repos

@@ -305,6 +305,11 @@ const AGENT_MODEL_PATTERNS: Record<string, RegExp> = {
  * Check if a session's model field matches the given agent slug.
  */
 function sessionMatchesAgent(session: SessionState, agentSlug: string): boolean {
+  // Prefer stored agent slug — most reliable, avoids model pattern collisions
+  if (session.agentSlug) {
+    return session.agentSlug.toLowerCase() === agentSlug.toLowerCase();
+  }
+  // Fallback to model pattern matching for old sessions without agentSlug
   const model = (session.model || '').toLowerCase();
   const slug = agentSlug.toLowerCase();
   const pattern = AGENT_MODEL_PATTERNS[slug];
@@ -1035,7 +1040,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
   // Resolve agent slug: .origin.json → agentSlugs override → hook command slug → saved default → undefined
   const repoConfig = loadRepoConfig(repoPath);
-  const baseSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
+  const baseSlug = agentSlug || repoConfig?.agent || agentConfig.agentSlug || undefined;
   // Apply per-tool slug override from config (e.g. agentSlugs.claude-code = "claude-front")
   // Check both the hook command slug and the resolved base slug as override keys
   const slugOverrides = config?.agentSlugs || {};
@@ -1468,6 +1473,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       prePromptDirtyFiles: getDirtyFiles(repoPath),
       branch,
       sessionTag,
+      agentSlug: finalAgentSlug || agentSlug,
       agentSystemPrompt,
       activePolicies,
       enforcementRules,
@@ -1708,7 +1714,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           saveAgentConfig(autoAgentConfig);
         }
         const repoConfig = loadRepoConfig(repoPath);
-        const baseSlug = repoConfig?.agent || agentSlug || autoAgentConfig.agentSlug || undefined;
+        const baseSlug = agentSlug || repoConfig?.agent || autoAgentConfig.agentSlug || undefined;
         const autoSlugs = autoConfig?.agentSlugs || {};
         const slugOverride = (agentSlug && autoSlugs[agentSlug]) || (baseSlug && autoSlugs[baseSlug]) || undefined;
         const finalAgentSlug = slugOverride || baseSlug;
@@ -1760,6 +1766,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           prePromptDirtyFiles: getDirtyFiles(hookCwd),
           branch,
           sessionTag: autoTag,
+          agentSlug: finalAgentSlug || agentSlug,
           agentSystemPrompt,
           activePolicies,
           enforcementRules,
@@ -1825,6 +1832,11 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/g, '')
     .replace(/<output-file>[\s\S]*?<\/output-file>/g, '')
     .replace(/<command-name>[\s\S]*?<\/command-name>/g, '')
+    .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, '')
+    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, '')
+    .replace(/<command-message>[\s\S]*?<\/command-message>/g, '')
+    .replace(/<command-args>[\s\S]*?<\/command-args>/g, '')
+    .replace(/<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g, '')
     .trim();
   const isSystemMsg = !prompt || /^Stop hook feedback:|^Stop:Callback hook blocking error|^PostToolUse:.*hook|^PreToolUse:.*hook/i.test(prompt);
   if (prompt && !isSystemMsg) {
