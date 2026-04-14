@@ -1094,22 +1094,34 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
       prevPromptCount = await prisma.promptChange.count({ where: { sessionId: id } });
       // Cap row count so a client can't ask us to insert a million rows.
       const capped = promptChanges.slice(0, MAX_PROMPT_CHANGES);
-      await Promise.all(capped.map((pc: any) => {
+      await Promise.all(capped.map(async (pc: any) => {
         const promptIndex = Number.isFinite(Number(pc?.promptIndex)) ? Number(pc.promptIndex) : 0;
-        const data = {
-          promptText: (typeof pc?.promptText === 'string' ? pc.promptText : '').slice(0, 1000),
-          filesChanged: JSON.stringify(
-            Array.isArray(pc?.filesChanged)
-              ? pc.filesChanged.slice(0, MAX_FILES_CHANGED).filter((f: unknown) => typeof f === 'string')
-              : [],
-          ),
-          diff: (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000),
-          uncommittedDiff: (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000),
+        const promptText = (typeof pc?.promptText === 'string' ? pc.promptText : '').slice(0, 1000);
+        const filesChanged = JSON.stringify(
+          Array.isArray(pc?.filesChanged)
+            ? pc.filesChanged.slice(0, MAX_FILES_CHANGED).filter((f: unknown) => typeof f === 'string')
+            : [],
+        );
+        const diff = (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000);
+        const uncommittedDiff = (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000);
+
+        // Never overwrite non-empty data with empty data (prevents heartbeats from clearing diffs)
+        const existing = await prisma.promptChange.findUnique({
+          where: { sessionId_promptIndex: { sessionId: id, promptIndex } },
+          select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true },
+        });
+
+        const updateData = {
+          promptText: promptText || existing?.promptText || '',
+          filesChanged: (filesChanged && filesChanged !== '[]') ? filesChanged : (existing?.filesChanged || '[]'),
+          diff: diff || existing?.diff || '',
+          uncommittedDiff: uncommittedDiff || existing?.uncommittedDiff || '',
         };
+
         return prisma.promptChange.upsert({
           where: { sessionId_promptIndex: { sessionId: id, promptIndex } },
-          update: data,
-          create: { sessionId: id, promptIndex, ...data },
+          update: updateData,
+          create: { sessionId: id, promptIndex, ...updateData },
         });
       }));
     }
@@ -1161,8 +1173,8 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
 
     // Emit output event when transcript is updated (agent console output)
     if (cleanTranscript) {
-      // Send last 2000 chars so the Live Feed has recent context
-      const tail = cleanTranscript.length > 2000 ? cleanTranscript.slice(-2000) : cleanTranscript;
+      // Send last 20 000 chars so the Live Feed has full recent context
+      const tail = cleanTranscript.length > 20_000 ? cleanTranscript.slice(-20_000) : cleanTranscript;
       emitSessionEvent({
         type: 'session:output',
         sessionId: id,
@@ -1547,22 +1559,34 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     // Upsert prompt→file change mappings (same pattern as PATCH handler)
     if (promptChanges && Array.isArray(promptChanges) && promptChanges.length > 0) {
       const capped = promptChanges.slice(0, MAX_PROMPT_CHANGES);
-      await Promise.all(capped.map((pc: any) => {
+      await Promise.all(capped.map(async (pc: any) => {
         const promptIndex = Number.isFinite(Number(pc?.promptIndex)) ? Number(pc.promptIndex) : 0;
-        const data = {
-          promptText: (typeof pc?.promptText === 'string' ? pc.promptText : '').slice(0, 1000),
-          filesChanged: JSON.stringify(
-            Array.isArray(pc?.filesChanged)
-              ? pc.filesChanged.slice(0, MAX_FILES_CHANGED).filter((f: unknown) => typeof f === 'string')
-              : [],
-          ),
-          diff: (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000),
-          uncommittedDiff: (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000),
+        const promptText = (typeof pc?.promptText === 'string' ? pc.promptText : '').slice(0, 1000);
+        const filesChanged = JSON.stringify(
+          Array.isArray(pc?.filesChanged)
+            ? pc.filesChanged.slice(0, MAX_FILES_CHANGED).filter((f: unknown) => typeof f === 'string')
+            : [],
+        );
+        const diff = (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000);
+        const uncommittedDiff = (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000);
+
+        // Never overwrite non-empty data with empty data
+        const existing = await prisma.promptChange.findUnique({
+          where: { sessionId_promptIndex: { sessionId, promptIndex } },
+          select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true },
+        });
+
+        const updateData = {
+          promptText: promptText || existing?.promptText || '',
+          filesChanged: (filesChanged && filesChanged !== '[]') ? filesChanged : (existing?.filesChanged || '[]'),
+          diff: diff || existing?.diff || '',
+          uncommittedDiff: uncommittedDiff || existing?.uncommittedDiff || '',
         };
+
         return prisma.promptChange.upsert({
           where: { sessionId_promptIndex: { sessionId, promptIndex } },
-          update: data,
-          create: { sessionId, promptIndex, ...data },
+          update: updateData,
+          create: { sessionId, promptIndex, ...updateData },
         });
       }));
     }
