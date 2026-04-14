@@ -322,17 +322,22 @@ function ActiveSessionCard({
   activities,
   output,
   onOutputLoaded,
+  onArchive,
+  onDelete,
 }: {
   session: ActiveSession;
   activities: SessionActivity[];
   output: string;
   onOutputLoaded?: (sessionId: string, transcript: string) => void;
+  onArchive?: (sessionId: string) => void;
+  onDelete?: (sessionId: string) => void;
 }) {
   const [elapsed, setElapsed] = useState(liveTimer(session.startedAt, session.createdAt));
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [activeTab, setActiveTab] = useState<'prompts' | 'console' | 'activity'>('console');
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const consoleRef = React.useRef<HTMLDivElement>(null);
 
   // Auto-scroll console to bottom when new output arrives
@@ -471,12 +476,50 @@ function ActiveSessionCard({
                 </button>
               ))}
             </div>
-            <Link
-              to={`/sessions/${session.id}`}
-              className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors"
-            >
-              Full session <ExternalLink className="w-3 h-3" />
-            </Link>
+            <div className="flex items-center gap-2">
+              {onArchive && (
+                <button
+                  onClick={() => onArchive(session.id)}
+                  className="text-[11px] text-gray-600 hover:text-amber-400 flex items-center gap-1 transition-colors"
+                  title="Archive session"
+                >
+                  <Archive className="w-3 h-3" />
+                </button>
+              )}
+              {onDelete && (
+                confirmDelete ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-red-400">Delete?</span>
+                    <button
+                      onClick={() => { onDelete(session.id); setConfirmDelete(false); }}
+                      className="text-[10px] text-red-400 hover:text-red-300 font-medium transition-colors"
+                    >
+                      Yes
+                    </button>
+                    <button
+                      onClick={() => setConfirmDelete(false)}
+                      className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
+                    >
+                      No
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmDelete(true)}
+                    className="text-[11px] text-gray-600 hover:text-red-400 flex items-center gap-1 transition-colors"
+                    title="Delete session"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                )
+              )}
+              <Link
+                to={`/sessions/${session.id}`}
+                className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors"
+              >
+                Full session <ExternalLink className="w-3 h-3" />
+              </Link>
+            </div>
           </div>
 
           {/* Console output */}
@@ -659,6 +702,23 @@ export default function LiveFeed() {
     } catch {}
   }, []);
 
+  // ── Archive / Delete handlers ──────────────────────────────────────
+  const handleArchive = useCallback(async (sessionId: string) => {
+    try {
+      await request(`/api/sessions/${sessionId}/archive`, { method: 'PATCH', body: JSON.stringify({ archived: true }), headers: { 'Content-Type': 'application/json' } });
+      setActiveSessions(prev => prev.filter(s => s.id !== sessionId));
+      setArchivedSessions(prev => prev.filter(s => s.id !== sessionId));
+    } catch {}
+  }, []);
+
+  const handleDelete = useCallback(async (sessionId: string) => {
+    try {
+      await request(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      setActiveSessions(prev => prev.filter(s => s.id !== sessionId));
+      setArchivedSessions(prev => prev.filter(s => s.id !== sessionId));
+    } catch {}
+  }, []);
+
   useEffect(() => { fetchActive(); fetchArchived(); }, [fetchActive, fetchArchived]);
   useEffect(() => {
     const iv = setInterval(fetchActive, 5000);
@@ -774,6 +834,8 @@ export default function LiveFeed() {
                 activities={sessionActivities[session.id] || []}
                 output={sessionOutputs[session.id] || ''}
                 onOutputLoaded={(sid, transcript) => setSessionOutputs(prev => ({ ...prev, [sid]: transcript }))}
+                onArchive={handleArchive}
+                onDelete={handleDelete}
               />
             ))}
           </div>
@@ -805,6 +867,8 @@ export default function LiveFeed() {
                 activities={sessionActivities[session.id] || []}
                 output={sessionOutputs[session.id] || ''}
                 onOutputLoaded={(sid, transcript) => setSessionOutputs(prev => ({ ...prev, [sid]: transcript }))}
+                onArchive={handleArchive}
+                onDelete={handleDelete}
               />
             ))}
           </div>
