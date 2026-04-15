@@ -46,6 +46,8 @@ export const DASHBOARD_TOUR: TourStep[] = [
     title: 'Activity Heatmap',
     content: 'Your coding activity over the past year. Darker cells = more AI sessions that day. Hover any cell to see the exact count. Build a streak!',
     placement: 'bottom',
+    clickBefore: '[data-tour="tab-stats"]',
+    delay: 500,
   },
 
   // ── Sessions tab ──────────────────────────────────────────────────────
@@ -62,6 +64,7 @@ export const DASHBOARD_TOUR: TourStep[] = [
     content: 'Each row is one AI session — which agent, which repo, branch, duration, cost, and tokens. Click a row to see the full detail: every prompt, tool call, and file change.',
     placement: 'top',
     action: 'Click any session for details',
+    delay: 500,
   },
 
   // ── Timeline tab ──────────────────────────────────────────────────────
