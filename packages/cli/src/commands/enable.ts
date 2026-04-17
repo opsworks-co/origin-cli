@@ -578,6 +578,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
     installGlobalGitHooks();
   } else {
     installGitPreCommitHook(basePath);
+    installGitPrepareCommitMsgHook(basePath);
     installGitPostCommitHook(basePath);
     installGitPrePushHook(basePath);
     // Install rewrite hooks for attribution preservation through rebase/amend/cherry-pick
@@ -799,6 +800,44 @@ fi
   fs.writeFileSync(postRewritePath, postRewriteContent);
   fs.chmodSync(postRewritePath, '755');
 
+  // Prepare-commit-msg hook — writes Origin-Session trailer into COMMIT_EDITMSG.
+  // Must run SYNCHRONOUSLY (not backgrounded) because git waits for the hook
+  // to finish before reading the message file.
+  const prepareCommitMsgPath = path.join(globalHooksDir, 'prepare-commit-msg');
+  const prepareCommitMsgContent = `#!/bin/sh
+# origin-global-prepare-commit-msg
+# Installed by: origin enable --global
+#
+# git passes: $1 = path to COMMIT_EDITMSG, $2 = source, $3 = sha
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
+
+ORIGIN_BIN=""
+if [ -x "${originBin}" ]; then
+  ORIGIN_BIN="${originBin}"
+elif command -v origin >/dev/null 2>&1; then
+  ORIGIN_BIN="origin"
+elif [ -x "/opt/homebrew/bin/origin" ]; then
+  ORIGIN_BIN="/opt/homebrew/bin/origin"
+elif [ -x "/usr/local/bin/origin" ]; then
+  ORIGIN_BIN="/usr/local/bin/origin"
+fi
+
+# Synchronous — git waits for this to finish before reading the message.
+# Trailer-insertion errors are swallowed internally; never block the commit.
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-prepare-commit-msg "$1" "$2" "$3" || true
+fi
+
+# Chain to local repo hook if present.
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/prepare-commit-msg"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+`;
+  fs.writeFileSync(prepareCommitMsgPath, prepareCommitMsgContent);
+  fs.chmodSync(prepareCommitMsgPath, '755');
+
   // Set git config to use our global hooks directory
   try {
     run('git', ['config', '--global', 'core.hooksPath', globalHooksDir]);
@@ -844,6 +883,41 @@ function installGitPreCommitHook(gitRoot: string): void {
 }
 
 // ─── Git Post-Commit Hook ─────────────────────────────────────────────────
+
+// ─── Git Prepare-Commit-Msg Hook ─────────────────────────────────────────
+//
+// Fires before the commit is created. Writes Origin-Session trailers into
+// COMMIT_EDITMSG so the trailer is part of the commit from the start,
+// avoiding the old post-commit --amend --no-verify dance.
+
+function installGitPrepareCommitMsgHook(gitRoot: string): void {
+  const hooksDir = path.join(gitRoot, '.git', 'hooks');
+  const hookPath = path.join(hooksDir, 'prepare-commit-msg');
+
+  if (!fs.existsSync(hooksDir)) {
+    fs.mkdirSync(hooksDir, { recursive: true });
+  }
+
+  const ORIGIN_MARKER = '# origin-prepare-commit-msg';
+  // Pass git's hook args through: $1 = msgFile, $2 = source, $3 = sha
+  const hookScript = originCmd(`origin hooks git-prepare-commit-msg "$1" "$2" "$3"`);
+
+  if (fs.existsSync(hookPath)) {
+    const existing = fs.readFileSync(hookPath, 'utf-8');
+    if (existing.includes(ORIGIN_MARKER)) {
+      console.log(chalk.gray('  ✓ Git prepare-commit-msg hook already installed'));
+      return;
+    }
+    const append = `\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    fs.appendFileSync(hookPath, append);
+  } else {
+    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
+    fs.writeFileSync(hookPath, content);
+  }
+
+  fs.chmodSync(hookPath, '755');
+  console.log(chalk.green('  ✓ Git prepare-commit-msg hook installed (session trailer)'));
+}
 
 function installGitPostCommitHook(gitRoot: string): void {
   const hooksDir = path.join(gitRoot, '.git', 'hooks');

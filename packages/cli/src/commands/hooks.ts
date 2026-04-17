@@ -3228,45 +3228,12 @@ export async function handlePostCommit(): Promise<void> {
     }
   }
 
-  if (state && commitLinkingConfig !== 'never') {
-    try {
-      // Add Origin-Session + Origin-Checkpoint trailers (bidirectional linking)
-      const fullMessage = execFileSync('git', ['log', '-1', '--format=%B'], execOpts).trim();
-      if (!fullMessage.includes('Origin-Session:')) {
-        const shortId = state.sessionId.slice(0, 12);
-        // Build rich trailer: Origin-Session: abc123 | Claude Code | 3 prompts
-        const trailerParts = [shortId];
-        const m = (state.model || '').toLowerCase();
-        const agentName = m.includes('claude') || m.includes('sonnet') || m.includes('opus') ? 'Claude Code'
-          : m.includes('gpt') || m.includes('o1-') || m.includes('o3-') || m.includes('o4-') ? 'Cursor'
-          : m.includes('gemini') ? 'Gemini CLI'
-          : m.includes('codex') ? 'Codex'
-          : m.includes('windsurf') ? 'Windsurf'
-          : m.includes('aider') ? 'Aider'
-          : m.includes('copilot') ? 'Copilot'
-          : m.includes('amp') ? 'Amp'
-          : m.includes('junie') ? 'Junie'
-          : m.includes('opencode') ? 'Opencode'
-          : state.model || 'AI';
-        trailerParts.push(agentName);
-        const pCount = state.prompts?.length || 0;
-        if (pCount > 0) trailerParts.push(pCount === 1 ? '1 prompt' : `${pCount} prompts`);
-        let trailers = `Origin-Session: ${trailerParts.join(' | ')}`;
-        // Add Origin-Checkpoint trailer for bidirectional linking (like Entire-Checkpoint)
-        if (latestCheckpointId) {
-          trailers += `\nOrigin-Checkpoint: ${latestCheckpointId}`;
-        }
-        // Amend the commit message to add the trailers
-        const newMessage = fullMessage + '\n\n' + trailers;
-        execFileSync('git', ['commit', '--amend', '-m', newMessage, '--no-verify'], execOpts);
-        debugLog('post-commit', 'added trailers', { sessionId: shortId, checkpointId: latestCheckpointId });
-        // Re-read commit SHA since amend changes it
-        commitSha = execFileSync('git', ['rev-parse', 'HEAD'], execOpts).trim();
-      }
-    } catch (err: any) {
-      debugLog('post-commit', 'trailer amend error (non-fatal)', { message: err.message });
-    }
-  }
+  // Trailer insertion moved to prepare-commit-msg (see handlePrepareCommitMsg).
+  // Writing trailers via `git commit --amend --no-verify` was removed because:
+  //   1. Amend mutates the commit SHA, which creates divergence for pushed commits.
+  //   2. --no-verify skips the pre-commit secret scanner.
+  //   3. Amend breaks GPG signatures unless re-signed (which --no-verify doesn't do).
+  // The trailer is now part of the commit from the moment git creates it.
 
   // Write git notes on this commit immediately
   // If model is missing/unknown, try pgrep detection as fallback
@@ -4060,6 +4027,219 @@ function parseStagedDiffLines(diff: string): Array<{ file: string; line: number;
 }
 
 // ─── Git Hook: Pre-Push (F14) ─────────────────────────────────────────────
+
+// ─── Git Hook: Prepare-Commit-Msg ────────────────────────────────────────
+//
+// Fires BEFORE the commit is made, so the trailer is part of the commit from
+// the start. Replaces the old post-commit `--amend --no-verify` dance which
+// mutated commit SHAs, bypassed the secret scanner, and invalidated GPG
+// signatures. See docs/notes/SUBAGENT_AUDIT.md for the amend rationale and
+// its removal.
+//
+// Invocation: `origin hooks git-prepare-commit-msg <msgFile> [source] [sha]`
+//   msgFile — path to .git/COMMIT_EDITMSG
+//   source  — one of: message, template, merge, squash, commit (optional)
+//   sha     — commit SHA when source=commit (rebase/amend) (optional)
+//
+// Skip conditions:
+//   • source=merge  — merge commit; user didn't write this message
+//   • source=squash — squash merge; combining existing commits
+//   • source=commit — rebase or --amend; already has trailers if applicable
+
+/**
+ * Resolve an agent display name from a model identifier.
+ * Kept alongside the legacy post-commit block for consistency.
+ */
+function resolveAgentDisplayName(model: string | undefined): string {
+  const m = (model || '').toLowerCase();
+  // Check specific / composite names BEFORE generic ones. "copilot-gpt4" must
+  // resolve to Copilot, not Cursor. "amp-claude-opus" must resolve to Amp.
+  if (m.includes('copilot')) return 'Copilot';
+  if (m.includes('amp')) return 'Amp';
+  if (m.includes('junie')) return 'Junie';
+  if (m.includes('opencode')) return 'Opencode';
+  if (m.includes('aider')) return 'Aider';
+  if (m.includes('windsurf')) return 'Windsurf';
+  if (m.includes('codex')) return 'Codex';
+  if (m.includes('gemini')) return 'Gemini CLI';
+  if (m.includes('claude') || m.includes('sonnet') || m.includes('opus')) return 'Claude Code';
+  if (m.includes('gpt') || m.includes('o1-') || m.includes('o3-') || m.includes('o4-')) return 'Cursor';
+  return model || 'AI';
+}
+
+/**
+ * Build the Origin trailer lines for a session. Returns array of
+ * "Name: Value" strings (no trailing newlines). Each line is suitable for
+ * `git interpret-trailers --trailer=<line>`.
+ *
+ * Exported for testing.
+ */
+export function buildOriginTrailers(
+  sessionId: string,
+  model: string | undefined,
+  promptCount: number,
+  latestCheckpointId?: string | null,
+): string[] {
+  const shortId = sessionId.slice(0, 12);
+  const agentName = resolveAgentDisplayName(model);
+  const parts = [shortId, agentName];
+  if (promptCount > 0) parts.push(promptCount === 1 ? '1 prompt' : `${promptCount} prompts`);
+  const trailers: string[] = [`Origin-Session: ${parts.join(' | ')}`];
+  if (latestCheckpointId) trailers.push(`Origin-Checkpoint: ${latestCheckpointId}`);
+  return trailers;
+}
+
+/**
+ * Pick the single active session for this commit.
+ * Mirrors the logic in handlePostCommit — kept separate to avoid coupling
+ * that function's many other responsibilities.
+ */
+function pickActiveSessionForCommit(hookCwd: string): SessionState | null {
+  const activeSessions = listActiveSessions(hookCwd);
+  activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  if (activeSessions.length === 0) return null;
+  if (activeSessions.length === 1) return activeSessions[0];
+
+  // Multiple sessions — disambiguate via process detection.
+  const agentChecks = [
+    { cmd: 'pgrep -f "claude.*stream-json"', slug: 'claude' },
+    { cmd: 'pgrep -f "gemini.*cli|/gemini "', slug: 'gemini' },
+    { cmd: 'pgrep -f "codex"', slug: 'codex' },
+    { cmd: 'pgrep -f "aider"', slug: 'aider' },
+    { cmd: 'pgrep -f "windsurf"', slug: 'windsurf' },
+    { cmd: 'pgrep -f "copilot.*cli|github-copilot"', slug: 'copilot' },
+    { cmd: 'pgrep -f "continue.*dev"', slug: 'continue' },
+    { cmd: 'pgrep -f "amp.*cli|/amp "', slug: 'amp' },
+    { cmd: 'pgrep -f "junie|jetbrains.*ai"', slug: 'junie' },
+    { cmd: 'pgrep -f "opencode"', slug: 'opencode' },
+    { cmd: 'pgrep -f "rovo.*dev"', slug: 'rovo' },
+    { cmd: 'pgrep -f "droid"', slug: 'droid' },
+  ];
+  for (const check of agentChecks) {
+    try {
+      if (safePgrep(check.cmd)) {
+        const match = activeSessions.find((s) => sessionMatchesAgent(s, check.slug));
+        if (match) return match;
+      }
+    } catch { /* no match */ }
+  }
+  // Ambiguous — don't guess.
+  return null;
+}
+
+/**
+ * Called by .git/hooks/prepare-commit-msg.
+ * Adds Origin-Session and Origin-Checkpoint trailers to COMMIT_EDITMSG
+ * before the commit is created. Never throws.
+ */
+export async function handlePrepareCommitMsg(
+  msgFile: string,
+  source?: string,
+): Promise<void> {
+  debugLog('prepare-commit-msg', '=== GIT HOOK INVOKED ===', { msgFile, source });
+
+  // Skip cases where we shouldn't be adding trailers:
+  //   merge   — merge commit, author didn't write this
+  //   squash  — squash merge, user is combining commits
+  //   commit  — amend or rebase, existing message already has trailers if applicable
+  if (source === 'merge' || source === 'squash' || source === 'commit') {
+    debugLog('prepare-commit-msg', 'skip — source excluded', { source });
+    return;
+  }
+
+  try {
+    if (!msgFile || !fs.existsSync(msgFile)) {
+      debugLog('prepare-commit-msg', 'skip — msgFile missing', { msgFile });
+      return;
+    }
+
+    const hookCwd = process.cwd();
+    const repoPath = getGitRoot(hookCwd);
+    if (!repoPath) {
+      debugLog('prepare-commit-msg', 'skip — not a git repo');
+      return;
+    }
+
+    // Respect commitLinking config
+    const config = loadConfig();
+    const commitLinkingConfig = config?.commitLinking || 'always';
+    if (commitLinkingConfig === 'never') {
+      debugLog('prepare-commit-msg', 'skip — commitLinking=never');
+      return;
+    }
+
+    const state = pickActiveSessionForCommit(hookCwd);
+    if (!state) {
+      debugLog('prepare-commit-msg', 'skip — no unambiguous active session');
+      return;
+    }
+
+    // Check existing message for Origin-Session trailer. If present AND the
+    // session ID matches, we're done (interpret-trailers addIfDifferent would
+    // also handle this but a fast-path avoids the subprocess).
+    let existing: string;
+    try {
+      existing = fs.readFileSync(msgFile, 'utf-8');
+    } catch (readErr: any) {
+      debugLog('prepare-commit-msg', 'could not read msg file (non-fatal)', { message: readErr.message });
+      return;
+    }
+    const shortId = state.sessionId.slice(0, 12);
+    if (existing.includes(`Origin-Session: ${shortId}`)) {
+      debugLog('prepare-commit-msg', 'trailer already present for this session');
+      return;
+    }
+
+    // Find latest checkpoint for the Origin-Checkpoint trailer.
+    let latestCheckpointId: string | undefined;
+    if (state.sessionTag) {
+      try {
+        const checkpoints = listCheckpoints(repoPath, state.sessionTag);
+        if (checkpoints.length > 0) latestCheckpointId = checkpoints[checkpoints.length - 1].id;
+      } catch { /* no checkpoints is fine */ }
+    }
+
+    const trailers = buildOriginTrailers(
+      state.sessionId,
+      state.model,
+      state.prompts?.length || 0,
+      latestCheckpointId,
+    );
+
+    // Use git interpret-trailers to add the trailers in-place. This handles:
+    //   • Placing trailers after existing Co-Authored-By / Signed-off-by lines
+    //   • Adding the blank line separator if needed
+    //   • De-duplication via --if-exists=addIfDifferent (if a trailer with the
+    //     same name+value already exists, it's not added again)
+    const args = [
+      'interpret-trailers',
+      '--in-place',
+      '--if-exists=addIfDifferent',
+      '--if-missing=add',
+    ];
+    for (const t of trailers) args.push(`--trailer=${t}`);
+    args.push(msgFile);
+
+    try {
+      execFileSync('git', args, {
+        cwd: repoPath,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 5000,
+      });
+      debugLog('prepare-commit-msg', 'trailers written', {
+        sessionId: shortId,
+        checkpointId: latestCheckpointId,
+        trailerCount: trailers.length,
+      });
+    } catch (trailerErr: any) {
+      debugLog('prepare-commit-msg', 'interpret-trailers failed (non-fatal)', { message: trailerErr.message });
+    }
+  } catch (err: any) {
+    // Never fail the commit because of Origin's trailer hook.
+    debugLog('prepare-commit-msg', 'top-level error (non-fatal)', { message: err.message });
+  }
+}
 
 /**
  * Called by .git/hooks/pre-push.
