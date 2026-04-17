@@ -21,7 +21,7 @@ import {
   isHeartbeatAlive,
   getStatePath,
   type SessionState,
-  type SubagentRecord,
+  type ToolCallRecord,
 } from '../session-state.js';
 import { captureGitState, getDirtyFiles } from '../git-capture.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
@@ -3497,11 +3497,14 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
     }
   }
 
-  // Initialize subagents array if needed
+  // Initialize tool-call ring if needed
   if (!state.subagents) state.subagents = [];
 
-  const toolCallId = input.tool_call_id || `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-  const record: SubagentRecord = {
+  // Prefer the agent-provided ID so post-tool-use can match unambiguously
+  // even when tool calls run in parallel (R1 in SUBAGENT_AUDIT.md).
+  const toolCallId = input.tool_call_id || input.tool_use_id ||
+    `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const record: ToolCallRecord = {
     toolCallId,
     toolName: input.tool_name || 'unknown',
     startedAt: new Date().toISOString(),
@@ -3525,11 +3528,17 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
   const { state, saveCwd } = found;
 
   if (state.subagents && state.subagents.length > 0) {
-    // Find the matching pre-tool-use record (last unfinished one with matching tool name)
+    // Match the post-use to its pre-use record.
+    //
+    // Prefer toolCallId (R1 fix — parallel tool calls with the same toolName
+    // used to race through the reverse-find-by-name path). Fall back to the
+    // name-based reverse-find for agents that don't propagate an ID through
+    // both hooks (e.g., some older Gemini / Aider builds).
     const toolName = input.tool_name || 'unknown';
-    const record = [...state.subagents].reverse().find(
-      r => r.toolName === toolName && !r.endedAt
-    );
+    const toolCallId = input.tool_call_id || input.tool_use_id;
+    const record = toolCallId
+      ? state.subagents.find((r) => r.toolCallId === toolCallId)
+      : [...state.subagents].reverse().find((r) => r.toolName === toolName && !r.endedAt);
 
     if (record) {
       record.endedAt = new Date().toISOString();

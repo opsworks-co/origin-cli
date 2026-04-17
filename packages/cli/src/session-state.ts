@@ -7,7 +7,15 @@ import { fileURLToPath } from 'url';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-export interface SubagentRecord {
+/**
+ * One entry per pre-tool-use / post-tool-use pair. The historical name was
+ * `SubagentRecord` but this tracks ALL tool calls (Bash, Read, Edit, Task,
+ * etc.) — not just Task-spawned sub-agents. Renamed in the R2 audit cleanup.
+ *
+ * Real sub-agent spawns (Claude Code Task tool) need their own record type
+ * with model/subagent_type fields — see docs/notes/SUBAGENT_AUDIT.md (R3).
+ */
+export interface ToolCallRecord {
   toolCallId: string;
   toolName: string;
   startedAt: string;
@@ -43,7 +51,10 @@ export interface SessionState {
   }>;
   branch: string | null;      // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support
-  subagents?: SubagentRecord[];
+  // Ring buffer of tool-call pre/post records. Field kept as `subagents` for
+  // backward compat with serialized session-state files. See R2 in
+  // docs/notes/SUBAGENT_AUDIT.md.
+  subagents?: ToolCallRecord[];
   tabCompletions?: TabCompletionStats;
   agentSystemPrompt?: string; // Cached agent system prompt for session resume
   activePolicies?: string[];  // Cached active policies for session resume
