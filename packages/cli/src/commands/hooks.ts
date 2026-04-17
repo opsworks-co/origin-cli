@@ -32,7 +32,7 @@ import { buildAttributionContext, buildFileAttributionContext } from '../attribu
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
 import { writeSessionMemory, buildMemoryContext } from '../memory.js';
 import { addTodosFromSession } from '../todo.js';
-import { createCheckpoint, condenseCheckpoint, listCheckpoints, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
+import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -215,7 +215,7 @@ function buildSessionWriteData(opts: {
     };
   });
 
-  // Build PromptChange[] from mappings with checkpoint metadata
+  // Build PromptChange[] from mappings with snapshot metadata
   const changes: PromptChange[] = promptMappings.map(m => {
     // Compute per-prompt line counts from diff
     const diffLines = (m.diff || '').split('\n');
@@ -1314,9 +1314,9 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       // Touch the state file to keep it fresh
       saveSessionState(existing, repoPath, existing.sessionTag);
 
-      // Auto-checkpoint: capture pre-prompt state for rewind capability
+      // Auto-snapshot: capture pre-prompt state for rewind capability
       try {
-        createCheckpoint(repoPath, {
+        createSnapshot(repoPath, {
           sessionTag: existing.sessionTag,
           type: 'pre-prompt',
           model: existing.model,
@@ -2567,10 +2567,10 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         uncommittedDiff: pm.uncommittedDiff,
       }));
     }
-    // Auto-checkpoint: save working tree state after each AI turn
+    // Auto-snapshot: save working tree state after each AI turn
     // Includes attribution data (lines added/removed by AI)
     try {
-      const cpId = createCheckpoint(state.repoPath, {
+      const cpId = createSnapshot(state.repoPath, {
         sessionTag: state.sessionTag,
         prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
         model: model || state.model,
@@ -2583,10 +2583,10 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         transcriptPath: state.transcriptPath,
       });
       if (cpId) {
-        debugLog('stop', 'auto-checkpoint created', { checkpointId: cpId, promptIndex: prompts.length });
+        debugLog('stop', 'auto-snapshot created', { snapshotId: cpId, promptIndex: prompts.length });
       }
     } catch (cpErr: any) {
-      debugLog('stop', 'auto-checkpoint failed (non-fatal)', { message: cpErr.message });
+      debugLog('stop', 'auto-snapshot failed (non-fatal)', { message: cpErr.message });
     }
 
     // Re-save state with RUNNING status FIRST so it survives any errors below
@@ -2983,9 +2983,9 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
     }
   } finally {
-    // Create final session-end checkpoint with transcript
+    // Create final session-end snapshot with transcript
     try {
-      const finalCpId = createCheckpoint(state.repoPath, {
+      const finalCpId = createSnapshot(state.repoPath, {
         sessionTag: state.sessionTag,
         type: 'session-end',
         model: state.model,
@@ -2994,11 +2994,11 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         transcriptPath: state.transcriptPath,
       });
       if (finalCpId) {
-        debugLog('session-end', 'final checkpoint created', { checkpointId: finalCpId });
+        debugLog('session-end', 'final snapshot created', { snapshotId: finalCpId });
       }
     } catch { /* non-fatal */ }
 
-    // Condense all session checkpoints to permanent branch + clean up shadow branch
+    // Condense all session snapshots to permanent branch + clean up shadow branch
     try {
       const headSha = getHeadSha(state.repoPath) || 'unknown';
       const { condensed, cleaned } = condenseAndCleanupSession(
@@ -3007,9 +3007,9 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         headSha,
         state.transcriptPath,
       );
-      debugLog('session-end', 'checkpoints condensed + shadow cleaned', { condensed, cleaned });
+      debugLog('session-end', 'snapshots condensed + shadow cleaned', { condensed, cleaned });
     } catch (cpErr: any) {
-      debugLog('session-end', 'checkpoint condensation failed (non-fatal)', { message: cpErr.message });
+      debugLog('session-end', 'snapshot condensation failed (non-fatal)', { message: cpErr.message });
     }
 
     // Stop the heartbeat daemon
@@ -3093,7 +3093,7 @@ export async function handlePostCommit(): Promise<void> {
   // Detect current branch (may have changed since session started)
   const currentBranch = getBranch(hookCwd);
 
-  // Add Origin-Session trailer to commit message (like Entire's Entire-Checkpoint trailer)
+  // Add Origin-Session trailer to commit message (like Entire's Entire-Snapshot trailer)
   const apiUrl = config?.apiUrl || 'https://getorigin.io';
 
   // Get ALL active sessions for this repo (concurrent session support)
@@ -3211,20 +3211,20 @@ export async function handlePostCommit(): Promise<void> {
   // F13: Respect config.commitLinking setting (always|prompt|never)
   const commitLinkingConfig = config?.commitLinking || 'always';
 
-  // Condense active checkpoints to permanent storage + add bidirectional linking
-  let latestCheckpointId: string | undefined;
+  // Condense active snapshots to permanent storage + add bidirectional linking
+  let latestSnapshotId: string | undefined;
   if (state && state.sessionTag) {
     try {
-      const checkpoints = listCheckpoints(repoPath, state.sessionTag);
-      if (checkpoints.length > 0) {
-        const latest = checkpoints[checkpoints.length - 1];
-        latestCheckpointId = latest.id;
-        // Condense to permanent orphan branch with transcript (like Entire's entire/checkpoints/v1)
-        condenseCheckpoint(repoPath, latest.id, latest, commitSha, state.transcriptPath);
-        debugLog('post-commit', 'condensed checkpoint to permanent branch', { checkpointId: latest.id, hasTranscript: !!state.transcriptPath });
+      const snapshots = listSnapshots(repoPath, state.sessionTag);
+      if (snapshots.length > 0) {
+        const latest = snapshots[snapshots.length - 1];
+        latestSnapshotId = latest.id;
+        // Condense to permanent orphan branch with transcript (like Entire's entire/snapshots/v1)
+        condenseSnapshot(repoPath, latest.id, latest, commitSha, state.transcriptPath);
+        debugLog('post-commit', 'condensed snapshot to permanent branch', { snapshotId: latest.id, hasTranscript: !!state.transcriptPath });
       }
     } catch (cpErr: any) {
-      debugLog('post-commit', 'checkpoint condensation failed (non-fatal)', { message: cpErr.message });
+      debugLog('post-commit', 'snapshot condensation failed (non-fatal)', { message: cpErr.message });
     }
   }
 
@@ -3272,8 +3272,8 @@ export async function handlePostCommit(): Promise<void> {
       linesAdded,
       linesRemoved,
       originUrl: state ? `${apiUrl}/sessions/${state.sessionId}` : '',
-      checkpoint: true,
-      checkpointAt: new Date().toISOString(),
+      snapshot: true,
+      snapshotAt: new Date().toISOString(),
       filesChanged,
     });
     debugLog('post-commit', 'git notes written');
@@ -4087,14 +4087,14 @@ export function buildOriginTrailers(
   sessionId: string,
   model: string | undefined,
   promptCount: number,
-  latestCheckpointId?: string | null,
+  latestSnapshotId?: string | null,
 ): string[] {
   const shortId = sessionId.slice(0, 12);
   const agentName = resolveAgentDisplayName(model);
   const parts = [shortId, agentName];
   if (promptCount > 0) parts.push(promptCount === 1 ? '1 prompt' : `${promptCount} prompts`);
   const trailers: string[] = [`Origin-Session: ${parts.join(' | ')}`];
-  if (latestCheckpointId) trailers.push(`Origin-Checkpoint: ${latestCheckpointId}`);
+  if (latestSnapshotId) trailers.push(`Origin-Snapshot: ${latestSnapshotId}`);
   return trailers;
 }
 
@@ -4138,7 +4138,7 @@ function pickActiveSessionForCommit(hookCwd: string): SessionState | null {
 
 /**
  * Called by .git/hooks/prepare-commit-msg.
- * Adds Origin-Session and Origin-Checkpoint trailers to COMMIT_EDITMSG
+ * Adds Origin-Session and Origin-Snapshot trailers to COMMIT_EDITMSG
  * before the commit is created. Never throws.
  */
 export async function handlePrepareCommitMsg(
@@ -4199,20 +4199,20 @@ export async function handlePrepareCommitMsg(
       return;
     }
 
-    // Find latest checkpoint for the Origin-Checkpoint trailer.
-    let latestCheckpointId: string | undefined;
+    // Find latest snapshot for the Origin-Snapshot trailer.
+    let latestSnapshotId: string | undefined;
     if (state.sessionTag) {
       try {
-        const checkpoints = listCheckpoints(repoPath, state.sessionTag);
-        if (checkpoints.length > 0) latestCheckpointId = checkpoints[checkpoints.length - 1].id;
-      } catch { /* no checkpoints is fine */ }
+        const snapshots = listSnapshots(repoPath, state.sessionTag);
+        if (snapshots.length > 0) latestSnapshotId = snapshots[snapshots.length - 1].id;
+      } catch { /* no snapshots is fine */ }
     }
 
     const trailers = buildOriginTrailers(
       state.sessionId,
       state.model,
       state.prompts?.length || 0,
-      latestCheckpointId,
+      latestSnapshotId,
     );
 
     // Use git interpret-trailers to add the trailers in-place. This handles:
@@ -4238,7 +4238,7 @@ export async function handlePrepareCommitMsg(
       });
       debugLog('prepare-commit-msg', 'trailers written', {
         sessionId: shortId,
-        checkpointId: latestCheckpointId,
+        snapshotId: latestSnapshotId,
         trailerCount: trailers.length,
       });
     } catch (trailerErr: any) {
@@ -4285,7 +4285,7 @@ export async function handlePrePush(): Promise<void> {
   const connected = !!(config?.apiKey && config?.apiUrl);
   const strategy = config?.pushStrategy || 'auto';
 
-  if (!connected || config?.checkpointRepo || strategy === 'always') {
+  if (!connected || config?.snapshotRepo || strategy === 'always') {
     // Push origin-sessions branch if it exists (standalone mode only)
     try {
       execFileSync('git', ['rev-parse', 'refs/heads/origin-sessions'], execOpts);

@@ -26,8 +26,8 @@ export interface GitNoteData {
   aiPercentage?: number;
   humanPercentage?: number;
   mixedPercentage?: number;
-  checkpoint?: boolean;
-  checkpointAt?: string;
+  snapshot?: boolean;
+  snapshotAt?: string;
   filesChanged?: string[];
 }
 

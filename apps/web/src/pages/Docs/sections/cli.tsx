@@ -39,7 +39,7 @@ export default function CliSection() {
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin sync</code>
-                <P>Sync all repositories in the current directory. Discovers <code className="text-indigo-400">.entire/</code> checkpoints and uploads session data.</P>
+                <P>Sync all repositories in the current directory. Discovers <code className="text-indigo-400">.entire/</code> snapshots and uploads session data.</P>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -220,8 +220,8 @@ origin share abc123 --public
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin rewind</code>
-                <P>View and restore checkpoints (commits) from your current AI session. Lists commits with timestamps, files changed, and model info. Optionally rewind your working directory to a specific checkpoint.</P>
-                <CodeBlock>{`origin rewind                    # list checkpoints interactively
+                <P>View and restore snapshots (commits) from your current AI session. Lists commits with timestamps, files changed, and model info. Optionally rewind your working directory to a specific snapshot.</P>
+                <CodeBlock>{`origin rewind                    # list snapshots interactively
 origin rewind --to <sha>         # restore to a specific commit`}</CodeBlock>
               </div>
 
@@ -231,9 +231,9 @@ origin rewind --to <sha>         # restore to a specific commit`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set checkpoint-repo</code>
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set snapshot-repo</code>
                 <P>Store session data in a separate git repository. Useful when your codebase is public but session data is private, or when centralizing sessions across multiple repos.</P>
-                <CodeBlock>{`origin config set checkpoint-repo https://github.com/org/sessions-repo.git`}</CodeBlock>
+                <CodeBlock>{`origin config set snapshot-repo https://github.com/org/sessions-repo.git`}</CodeBlock>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">

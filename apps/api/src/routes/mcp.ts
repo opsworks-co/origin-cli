@@ -1152,7 +1152,7 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true },
         });
 
-        // Checkpoint metadata fields
+        // Snapshot metadata fields
         const pcLinesAdded = Number.isFinite(Number(pc?.linesAdded)) ? Number(pc.linesAdded) : 0;
         const pcLinesRemoved = Number.isFinite(Number(pc?.linesRemoved)) ? Number(pc.linesRemoved) : 0;
         const pcAiPercentage = Number.isFinite(Number(pc?.aiPercentage)) ? Number(pc.aiPercentage) : 100;
@@ -1631,7 +1631,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true },
         });
 
-        // Checkpoint metadata fields
+        // Snapshot metadata fields
         const pcLinesAdded = Number.isFinite(Number(pc?.linesAdded)) ? Number(pc.linesAdded) : 0;
         const pcLinesRemoved = Number.isFinite(Number(pc?.linesRemoved)) ? Number(pc.linesRemoved) : 0;
         const pcAiPercentage = Number.isFinite(Number(pc?.aiPercentage)) ? Number(pc.aiPercentage) : 100;

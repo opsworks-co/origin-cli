@@ -11,7 +11,7 @@ Origin Solo is the free, unrestricted version of Origin for individual developer
 - **All AI agents** — Claude Code, Cursor, Gemini CLI, Codex, Windsurf, Aider, and 7 more. Auto-detected.
 - **Full session replay** — every prompt, every response, every file change
 - **Per-prompt diffs** — see exactly which prompt caused which code changes
-- **Snapshots** — per-prompt checkpoints you can restore or branch from with one click
+- **Snapshots** — per-prompt snapshots you can restore or branch from with one click
 - **Token & cost tracking** — know how much each session costs across models
 - **CLI attribution tools** — `origin blame`, `origin diff`, `origin stats`, `origin log`, `origin show <sha>`
 - **Cross-agent handoff** — `origin context` passes state between Claude, Cursor, and any other agent
@@ -64,7 +64,7 @@ origin context               # cross-agent handoff + memory
 Open [getorigin.io](https://getorigin.io) to browse sessions visually. Key pages:
 
 - **Dashboard** — cost, sessions, AI % this week vs last
-- **Snapshots** — every AI prompt as a checkpoint, with restore + branch + compare
+- **Snapshots** — every AI prompt as a snapshot, with restore + branch + compare
 - **Live Feed** — real-time view of active AI sessions
 - **Repositories** — per-repo AI attribution and commit history
 - **Insights** — deep analytics on models, peak hours, rework hotspots

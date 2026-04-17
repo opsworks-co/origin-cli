@@ -17,7 +17,7 @@ const postContent: Record<string, React.ReactNode> = {
         Which prompt broke it? You have no idea. The session is one long conversation. The git history shows a single commit at the end. Everything in between &mdash; every intermediate state, every file change per prompt &mdash; is gone.
       </p>
       <p>
-        Not anymore. <strong className="text-gray-100">Origin Snapshots capture what changed after every single AI prompt.</strong> Files touched, lines added and removed, the exact diff, AI vs human attribution, commit SHA, and a link back to the session. Every prompt is a checkpoint.
+        Not anymore. <strong className="text-gray-100">Origin Snapshots capture what changed after every single AI prompt.</strong> Files touched, lines added and removed, the exact diff, AI vs human attribution, commit SHA, and a link back to the session. Every prompt is a snapshot.
       </p>
 
       <h2>What a snapshot looks like</h2>
@@ -94,7 +94,7 @@ const postContent: Record<string, React.ReactNode> = {
               { label: 'Files changed', desc: 'Which files were touched by this specific prompt', icon: '📁' },
               { label: 'Lines added / removed', desc: 'Exact line counts computed from the diff', icon: '📊' },
               { label: 'AI attribution %', desc: 'What percentage of changed lines are AI-written', icon: '🤖' },
-              { label: 'Checkpoint type', desc: 'auto, manual, session-start, or session-end', icon: '🏷️' },
+              { label: 'Snapshot type', desc: 'auto, manual, session-start, or session-end', icon: '🏷️' },
               { label: 'Commit SHA', desc: 'If a commit happened, the exact SHA is linked', icon: '🔗' },
             ].map((item) => (
               <div key={item.label} className="flex items-start gap-3 p-3 rounded-lg bg-gray-900/40 border border-gray-800/50">
@@ -214,7 +214,7 @@ const postContent: Record<string, React.ReactNode> = {
 
       <h2>Dashboard: the Snapshots page</h2>
       <p>
-        The web dashboard at <a href="https://getorigin.io" className="text-emerald-400 hover:text-emerald-300">getorigin.io</a> now has a dedicated Snapshots page. It shows every prompt-level checkpoint across all your sessions:
+        The web dashboard at <a href="https://getorigin.io" className="text-emerald-400 hover:text-emerald-300">getorigin.io</a> now has a dedicated Snapshots page. It shows every prompt-level snapshot across all your sessions:
       </p>
       <ul>
         <li><strong className="text-gray-100">Filter by type</strong> &mdash; see only auto, manual, session-start, or session-end snapshots</li>
@@ -1602,10 +1602,10 @@ const postContent: Record<string, React.ReactNode> = {
       </p>
 
       <p>
-        If you&rsquo;ve used Entire.io, this is our analog to their Checkpoints feature. But Origin goes further:
+        If you&rsquo;ve used Entire.io, this is our analog to their Snapshots feature. But Origin goes further:
       </p>
       <ul>
-        <li><strong>Entire</strong>: commit &rarr; diff + checkpoint</li>
+        <li><strong>Entire</strong>: commit &rarr; diff + snapshot</li>
         <li><strong>Origin</strong>: commit &rarr; diff + session + AI/human attribution + cost + which prompt wrote what</li>
       </ul>
 

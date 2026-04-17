@@ -16,7 +16,7 @@ Files in `apps/web/src/components/` (23 total):
 | `ChatWidget.tsx` | Floating AI assistant | used by both Layouts |
 | `NotificationBell.tsx` | Bell + unread count | used by both Layouts |
 | `Logo.tsx` | `<LogoMark />` brand mark | used by both Layouts |
-| `TurnTimeline.tsx` | Per-prompt timeline (the Checkpoints tab) | `SessionDetail` |
+| `TurnTimeline.tsx` | Per-prompt timeline (the Snapshots tab) | `SessionDetail` |
 | `UnifiedSessionView.tsx` | Transcript + diff reader (Session tab) | `SessionDetail` |
 | `AiBlameView.tsx` | File blame with line attribution (Blame tab) | `SessionDetail`, `RepoDetail` |
 | `AskAuthorPanel.tsx` | Side panel for "ask the author" queries | `SessionDetail` |

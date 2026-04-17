@@ -1124,7 +1124,7 @@ export default function SessionDetail() {
             { key: 'session' as const, label: 'Session' },
             { key: 'console' as const, label: 'Console' },
             { key: 'blame' as const, label: 'AI Blame' },
-            { key: 'turns' as const, label: 'Checkpoints' },
+            { key: 'turns' as const, label: 'Snapshots' },
             { key: 'security' as const, label: 'Security', count: findings.length },
           ] as const).map(tab => (
             <button

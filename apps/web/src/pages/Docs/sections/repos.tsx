@@ -69,7 +69,7 @@ export default function ReposSection() {
             <H2>Syncing</H2>
             <P>
               Click &ldquo;Sync Now&rdquo; on any repo to scan for new commits. Origin looks for
-              <code className="text-indigo-400"> .entire/</code> checkpoint directories that AI tools
+              <code className="text-indigo-400"> .entire/</code> snapshot directories that AI tools
               create, then imports the session data (model, prompt, transcript, files changed, etc.).
             </P>
 

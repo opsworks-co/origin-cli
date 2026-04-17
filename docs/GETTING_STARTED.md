@@ -123,7 +123,7 @@ Open [getorigin.io/dashboard](https://getorigin.io/dashboard) to see:
 Now that sessions are being tracked, here's how to get more value from Origin:
 
 ### Explore snapshots
-Every prompt during an AI session creates a snapshot — a checkpoint with the prompt text, files changed, diff, and cost. Visit **Snapshots** in the sidebar to browse them. You can:
+Every prompt during an AI session creates a snapshot — a snapshot with the prompt text, files changed, diff, and cost. Visit **Snapshots** in the sidebar to browse them. You can:
 - **Restore** to any snapshot (creates a branch at that commit, stashes uncommitted work)
 - **Branch** from any snapshot (bookmark for later exploration)
 - **Compare** any two snapshots side-by-side

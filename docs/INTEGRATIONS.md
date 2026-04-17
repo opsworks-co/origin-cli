@@ -2,7 +2,7 @@
 
 ## Entire.io
 
-[Entire.io](https://entire.io) captures AI agent sessions per git commit, storing them in `.entire/` inside your repo. Origin reads these checkpoints and surfaces them in the dashboard.
+[Entire.io](https://entire.io) captures AI agent sessions per git commit, storing them in `.entire/` inside your repo. Origin reads these snapshots and surfaces them in the dashboard.
 
 ### How it works
 
@@ -44,7 +44,7 @@ GITHUB_TOKEN=ghp_your_token bash dev.sh
 ### What gets synced
 
 - Commit history (SHA, message, author, timestamp)
-- Sessions from `.entire/` checkpoints in the repo
+- Sessions from `.entire/` snapshots in the repo
 - Links commits to sessions for session replay
 
 ### PR Status Checks

@@ -81,9 +81,9 @@ export async function fetchGitHubCommits(
 }
 
 /**
- * Check if .entire/ directory exists and list its checkpoint files
+ * Check if .entire/ directory exists and list its snapshot files
  */
-export async function fetchEntireCheckpoints(
+export async function fetchEntireSnapshots(
   owner: string,
   repo: string
 ): Promise<GitHubContent[]> {

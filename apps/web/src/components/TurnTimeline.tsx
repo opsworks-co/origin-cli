@@ -98,7 +98,7 @@ export default function TurnTimeline({
   return (
     <div className="p-4">
       <div className="flex items-center gap-2 mb-4 flex-wrap">
-        <h3 className="text-sm font-semibold text-gray-300">Checkpoint Timeline</h3>
+        <h3 className="text-sm font-semibold text-gray-300">Snapshot Timeline</h3>
         <span className="text-xs text-gray-600">
           {sorted.length} turn{sorted.length !== 1 ? 's' : ''} · {model}
         </span>
@@ -140,7 +140,7 @@ export default function TurnTimeline({
 
           return (
             <div key={pc.promptIndex} className="relative pl-8 pb-4 last:pb-0">
-              {/* Dot — colored by checkpoint type */}
+              {/* Dot — colored by snapshot type */}
               <div className={`absolute left-1.5 top-1.5 w-[14px] h-[14px] rounded-full ${
                 cpType === 'session-start' ? 'bg-green-400' :
                 cpType === 'session-end' ? 'bg-red-400' :
@@ -158,7 +158,7 @@ export default function TurnTimeline({
                       Turn {pc.promptIndex + 1}
                     </span>
 
-                    {/* Checkpoint type badge */}
+                    {/* Snapshot type badge */}
                     {cpBadge && (
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${cpBadge.color}`}>
                         {cpBadge.label}

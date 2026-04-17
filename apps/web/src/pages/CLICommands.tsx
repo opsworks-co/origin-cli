@@ -376,12 +376,12 @@ origin snapshot clean             # Remove all shadow snapshots`}</Code>
           {/* rewind */}
           <CommandBlock id="rewind" name="origin rewind">
             <p className="text-sm text-gray-400 mb-3">
-              View and restore checkpoints (commits) from your current AI session. Lists commits with timestamps, files changed, and model info.
+              View and restore snapshots (commits) from your current AI session. Lists commits with timestamps, files changed, and model info.
             </p>
-            <Code>{`origin rewind                     # list checkpoints
+            <Code>{`origin rewind                     # list snapshots
 origin rewind --to <sha>          # restore to a specific commit`}</Code>
             <FlagTable flags={[
-              { flag: '--to <sha>', description: 'Restore working directory to a specific checkpoint' },
+              { flag: '--to <sha>', description: 'Restore working directory to a specific snapshot' },
             ]} />
             <Warning>Rewinding modifies your working directory. Uncommitted changes will be stashed automatically.</Warning>
           </CommandBlock>
@@ -779,7 +779,7 @@ origin web --port 8080            # Custom port`}</Code>
             <Code>{`origin config set apiKey <key>
 origin config set api-url <url>
 origin config set mode <auto|standalone>
-origin config set checkpoint-repo <url>
+origin config set snapshot-repo <url>
 origin config set auto-snapshot true`}</Code>
             <FlagTable flags={[
               { flag: 'set <key> <value>', description: 'Set a configuration value' },
@@ -792,7 +792,7 @@ origin config set auto-snapshot true`}</Code>
           {/* sync */}
           <CommandBlock id="sync" name="origin sync">
             <p className="text-sm text-gray-400 mb-3">
-              Sync all repositories in the current directory. Discovers checkpoints and uploads session data.
+              Sync all repositories in the current directory. Discovers snapshots and uploads session data.
             </p>
             <Code>{`origin sync`}</Code>
           </CommandBlock>

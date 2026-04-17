@@ -315,12 +315,12 @@ Admins can restore agents to any previous version.
 - **Model Comparison**: Per-model analytics (cost, tokens, approval rates)
 - **Prompt Analytics**: Searchable prompt log with keyword pattern detection
 - **Activity Heatmaps**: Team activity patterns by day/time
-- **Snapshots**: Per-prompt checkpoints across every session with restore, branch, and compare actions
+- **Snapshots**: Per-prompt snapshots across every session with restore, branch, and compare actions
 - **Live Feed**: Real-time view of active AI sessions
 
 ### Snapshots
 
-Every AI prompt creates a snapshot — a point-in-time checkpoint stored in git with the prompt text, files changed, diff, AI attribution %, commit SHA, and tree SHA.
+Every AI prompt creates a snapshot — a point-in-time snapshot stored in git with the prompt text, files changed, diff, AI attribution %, commit SHA, and tree SHA.
 
 Three actions per snapshot from the dashboard:
 
@@ -498,7 +498,7 @@ Dual-mode authentication via middleware (`apps/api/src/middleware/auth.ts`):
 | `versioning` | Agent and policy version snapshot creation |
 | `webhook` | GitHub webhook processing (push, pull_request events) |
 | `slack` | Slack webhook message formatting and delivery |
-| `checkpoint` | Session diff capture (before/after HEAD, unified diff) |
+| `snapshot` | Session diff capture (before/after HEAD, unified diff) |
 | `chat-context` | Context preparation for Claude Q&A about sessions |
 | `auto-sync` | Periodic repo sync and commit detection |
 

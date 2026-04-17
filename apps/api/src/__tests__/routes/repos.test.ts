@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mockPrisma, createTestApp, resetAllMocks } from '../helpers.js';
 import request from 'supertest';
 
-// Mock checkpoint service before route import
-vi.mock('../../services/checkpoint.js', () => ({
-  syncCheckpoints: vi.fn().mockResolvedValue({ synced: 5, total: 10 }),
+// Mock snapshot service before route import
+vi.mock('../../services/snapshot.js', () => ({
+  syncSnapshots: vi.fn().mockResolvedValue({ synced: 5, total: 10 }),
 }));
 
 // Mock github-integration service

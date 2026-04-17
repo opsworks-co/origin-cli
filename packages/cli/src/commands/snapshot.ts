@@ -17,31 +17,31 @@ export interface SnapshotMeta {
   filesChanged: string[];
   treeSha: string;
   branch: string;
-  // Enhanced checkpoint metadata
-  prompt?: string;       // User prompt that triggered this checkpoint
+  // Enhanced snapshot metadata
+  prompt?: string;       // User prompt that triggered this snapshot
   model?: string;        // AI model used
   tokensUsed?: number;   // Tokens consumed
   costUsd?: number;      // Estimated cost
   promptIndex?: number;  // Prompt number in session
   type?: 'auto' | 'manual' | 'session-start' | 'session-end' | 'pre-prompt';
-  commitSha?: string;    // HEAD commit SHA at checkpoint time
-  parentCheckpointId?: string; // Previous checkpoint ID (for chain)
+  commitSha?: string;    // HEAD commit SHA at snapshot time
+  parentSnapshotId?: string; // Previous snapshot ID (for chain)
   // Attribution data (like Entire's human vs AI percentages)
   attribution?: {
-    linesAdded: number;    // Total lines added in this checkpoint
+    linesAdded: number;    // Total lines added in this snapshot
     linesRemoved: number;  // Total lines removed
-    aiLinesAdded: number;  // Lines added by AI (all of them during auto-checkpoint)
-    humanLinesAdded: number; // Lines added by human (manual checkpoints)
+    aiLinesAdded: number;  // Lines added by AI (all of them during auto-snapshot)
+    humanLinesAdded: number; // Lines added by human (manual snapshots)
     aiPercentage: number;  // Percentage of lines attributed to AI
   };
   // Session context for multi-session condensation
-  sessionIndex?: number;   // Session number (for multi-session per checkpoint)
+  sessionIndex?: number;   // Session number (for multi-session per snapshot)
 }
 
 /**
- * Options for creating an auto-checkpoint with rich metadata.
+ * Options for creating an auto-snapshot with rich metadata.
  */
-export interface CheckpointOptions {
+export interface SnapshotOptions {
   sessionTag?: string;
   prompt?: string;
   model?: string;
@@ -49,7 +49,7 @@ export interface CheckpointOptions {
   costUsd?: number;
   promptIndex?: number;
   type?: 'auto' | 'manual' | 'session-start' | 'session-end' | 'pre-prompt';
-  // Attribution: lines changed by AI in this checkpoint
+  // Attribution: lines changed by AI in this snapshot
   linesAdded?: number;
   linesRemoved?: number;
   // Transcript path for condensation
@@ -63,10 +63,10 @@ export interface CheckpointOptions {
 // Shadow branch prefix — one branch per session with chained commits (like Entire)
 const SHADOW_PREFIX = 'origin/shadow/';
 
-// Permanent orphan branch for condensed checkpoint storage (like Entire's entire/checkpoints/v1)
-const PERMANENT_BRANCH = 'origin/checkpoints/v1';
+// Permanent orphan branch for condensed snapshot storage (like Entire's entire/snapshots/v1)
+const PERMANENT_BRANCH = 'origin/snapshots/v1';
 
-// Legacy: old per-checkpoint branches (for migration)
+// Legacy: old per-snapshot branches (for migration)
 const LEGACY_SHADOW_PREFIX = 'origin/shadow/';
 
 const gitOpts = (cwd: string) => ({ cwd });
@@ -100,7 +100,7 @@ export function getSessionTag(repoPath: string): string {
 
 /**
  * Get the shadow branch name for a session.
- * Unlike before (one branch per checkpoint), we now use ONE branch per session
+ * Unlike before (one branch per snapshot), we now use ONE branch per session
  * with chained commits — like Entire's `entire/<HEAD-hash>-<worktreeHash>`.
  */
 function shadowBranchForSession(sessionTag: string): string {
@@ -109,9 +109,9 @@ function shadowBranchForSession(sessionTag: string): string {
 }
 
 /**
- * Get the latest checkpoint commit SHA on a shadow branch (tip of chain).
+ * Get the latest snapshot commit SHA on a shadow branch (tip of chain).
  */
-function getLatestCheckpointSha(repoPath: string, branch: string): string | null {
+function getLatestSnapshotSha(repoPath: string, branch: string): string | null {
   if (!SAFE_BRANCH.test(branch)) return null;
   const r = gitDetailed(['rev-parse', branch], gitOpts(repoPath));
   if (r.status !== 0) return null;
@@ -120,9 +120,9 @@ function getLatestCheckpointSha(repoPath: string, branch: string): string | null
 }
 
 /**
- * Parse checkpoint metadata from a commit message on a shadow branch.
+ * Parse snapshot metadata from a commit message on a shadow branch.
  */
-function parseCheckpointMeta(repoPath: string, commitSha: string): SnapshotMeta | null {
+function parseSnapshotMeta(repoPath: string, commitSha: string): SnapshotMeta | null {
   if (!HEX.test(commitSha)) return null;
   try {
     const message = git(['log', '-1', '--format=%B', commitSha], gitOpts(repoPath));
@@ -134,9 +134,9 @@ function parseCheckpointMeta(repoPath: string, commitSha: string): SnapshotMeta 
 }
 
 /**
- * List all checkpoints on a shadow branch by walking the commit chain.
+ * List all snapshots on a shadow branch by walking the commit chain.
  */
-function walkCheckpointChain(repoPath: string, branch: string): SnapshotMeta[] {
+function walkSnapshotChain(repoPath: string, branch: string): SnapshotMeta[] {
   if (!SAFE_BRANCH.test(branch)) return [];
   const metas: SnapshotMeta[] = [];
   try {
@@ -148,7 +148,7 @@ function walkCheckpointChain(repoPath: string, branch: string): SnapshotMeta[] {
     if (!log) return [];
 
     for (const sha of log.split('\n').filter(Boolean).reverse()) {
-      const meta = parseCheckpointMeta(repoPath, sha);
+      const meta = parseSnapshotMeta(repoPath, sha);
       if (meta) metas.push(meta);
     }
   } catch { /* branch doesn't exist yet */ }
@@ -156,9 +156,9 @@ function walkCheckpointChain(repoPath: string, branch: string): SnapshotMeta[] {
 }
 
 /**
- * Generate a unique checkpoint ID (12-char hex, like Entire).
+ * Generate a unique snapshot ID (12-char hex, like Entire).
  */
-function generateCheckpointId(): string {
+function generateSnapshotId(): string {
   return crypto.randomBytes(6).toString('hex');
 }
 
@@ -181,7 +181,7 @@ function listShadowBranches(repoPath: string, sessionTag?: string): string[] {
   }
 }
 
-function parseSnapshotMeta(repoPath: string, branch: string): SnapshotMeta | null {
+function parseLegacyShadowMeta(repoPath: string, branch: string): SnapshotMeta | null {
   if (!SAFE_BRANCH.test(branch)) return null;
   try {
     const message = git(['log', '-1', '--format=%B', branch], gitOpts(repoPath));
@@ -192,19 +192,19 @@ function parseSnapshotMeta(repoPath: string, branch: string): SnapshotMeta | nul
   }
 }
 
-// ─── Core Checkpoint Engine ──────────────────────────────────────────────
+// ─── Core Snapshot Engine ──────────────────────────────────────────────
 
 /**
- * Create a checkpoint as a chained commit on the session's shadow branch.
+ * Create a snapshot as a chained commit on the session's shadow branch.
  *
  * Architecture (like Entire CLI):
  * - One shadow branch per session: origin/shadow/<sessionTag>
- * - Each checkpoint is a commit with the previous checkpoint as parent
+ * - Each snapshot is a commit with the previous snapshot as parent
  * - Metadata stored as JSON in commit message
- * - Tree SHA deduplication: skips if tree unchanged from last checkpoint
- * - On user commit: condenses to permanent orphan branch origin/checkpoints/v1
+ * - Tree SHA deduplication: skips if tree unchanged from last snapshot
+ * - On user commit: condenses to permanent orphan branch origin/snapshots/v1
  */
-export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): string | null {
+export function createSnapshot(repoPath: string, opts?: SnapshotOptions): string | null {
   try {
     // Capture working tree state without affecting index
     let stashSha: string;
@@ -233,11 +233,11 @@ export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): st
     const branch = shadowBranchForSession(tag);
 
     // Get the tip of the existing chain (if any)
-    const parentSha = getLatestCheckpointSha(repoPath, branch);
+    const parentSha = getLatestSnapshotSha(repoPath, branch);
 
-    // Dedup: skip if tree SHA is identical to the last checkpoint
+    // Dedup: skip if tree SHA is identical to the last snapshot
     if (parentSha) {
-      const parentMeta = parseCheckpointMeta(repoPath, parentSha);
+      const parentMeta = parseSnapshotMeta(repoPath, parentSha);
       if (parentMeta && parentMeta.treeSha === treeSha) {
         return null; // Tree unchanged, skip
       }
@@ -256,29 +256,29 @@ export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): st
     } catch { /* ignore */ }
 
     // Get current HEAD SHA
-    let commitShaAtCheckpoint = '';
+    let commitShaAtSnapshot = '';
     try {
-      commitShaAtCheckpoint = git(['rev-parse', 'HEAD'], gitOpts(repoPath)).trim();
+      commitShaAtSnapshot = git(['rev-parse', 'HEAD'], gitOpts(repoPath)).trim();
     } catch { /* ignore */ }
 
-    const id = generateCheckpointId();
+    const id = generateSnapshotId();
     const timestamp = new Date().toISOString();
 
-    // Get parent checkpoint ID for chaining
-    let parentCheckpointId: string | undefined;
+    // Get parent snapshot ID for chaining
+    let parentSnapshotId: string | undefined;
     if (parentSha) {
-      const parentMeta = parseCheckpointMeta(repoPath, parentSha);
-      parentCheckpointId = parentMeta?.id;
+      const parentMeta = parseSnapshotMeta(repoPath, parentSha);
+      parentSnapshotId = parentMeta?.id;
     }
 
     // Compute attribution: count lines changed and attribute to AI or human
     let attribution: SnapshotMeta['attribution'];
-    const isAiCheckpoint = opts?.type === 'auto' || opts?.type === 'session-end';
+    const isAiSnapshot = opts?.type === 'auto' || opts?.type === 'session-end';
     try {
-      // Get diff stats between previous checkpoint tree and current tree
+      // Get diff stats between previous snapshot tree and current tree
       let diffStat = '';
       if (parentSha) {
-        const parentMeta2 = parseCheckpointMeta(repoPath, parentSha);
+        const parentMeta2 = parseSnapshotMeta(repoPath, parentSha);
         if (parentMeta2?.treeSha && HEX.test(parentMeta2.treeSha)) {
           diffStat = git(
             ['diff-tree', '--stat', parentMeta2.treeSha, treeSha],
@@ -286,7 +286,7 @@ export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): st
           );
         }
       } else {
-        // First checkpoint — diff against HEAD tree
+        // First snapshot — diff against HEAD tree
         try {
           const headTree = git(['rev-parse', 'HEAD^{tree}'], gitOpts(repoPath)).trim();
           if (HEX.test(headTree) && headTree !== treeSha) {
@@ -306,7 +306,7 @@ export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): st
         // Count from diff-tree --numstat for accuracy
         try {
           const parentTree = parentSha
-            ? parseCheckpointMeta(repoPath, parentSha)?.treeSha
+            ? parseSnapshotMeta(repoPath, parentSha)?.treeSha
             : git(['rev-parse', 'HEAD^{tree}'], gitOpts(repoPath)).trim();
           if (parentTree && HEX.test(parentTree)) {
             const numstat = git(
@@ -327,9 +327,9 @@ export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): st
         attribution = {
           linesAdded,
           linesRemoved,
-          aiLinesAdded: isAiCheckpoint ? linesAdded : 0,
-          humanLinesAdded: isAiCheckpoint ? 0 : linesAdded,
-          aiPercentage: isAiCheckpoint ? 100 : 0,
+          aiLinesAdded: isAiSnapshot ? linesAdded : 0,
+          humanLinesAdded: isAiSnapshot ? 0 : linesAdded,
+          aiPercentage: isAiSnapshot ? 100 : 0,
         };
       }
     } catch { /* non-fatal */ }
@@ -347,8 +347,8 @@ export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): st
       costUsd: opts?.costUsd,
       promptIndex: opts?.promptIndex,
       type: opts?.type || 'auto',
-      commitSha: commitShaAtCheckpoint || undefined,
-      parentCheckpointId,
+      commitSha: commitShaAtSnapshot || undefined,
+      parentSnapshotId,
       attribution,
       sessionIndex: opts?.sessionIndex,
     };
@@ -356,7 +356,7 @@ export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): st
     // Create commit with parent chain (like Entire's chained shadow commits)
     const commitArgs = ['commit-tree', treeSha, '-m', JSON.stringify(meta)];
     if (parentSha) {
-      commitArgs.push('-p', parentSha); // Chain to previous checkpoint
+      commitArgs.push('-p', parentSha); // Chain to previous snapshot
     }
 
     const newCommitSha = git(commitArgs, gitOpts(repoPath)).trim();
@@ -382,28 +382,28 @@ export function createCheckpoint(repoPath: string, opts?: CheckpointOptions): st
  * Returns the snapshot ID or null on failure.
  */
 export function createAutoSnapshot(repoPath: string, sessionTag?: string): string | null {
-  return createCheckpoint(repoPath, { sessionTag });
+  return createSnapshot(repoPath, { sessionTag });
 }
 
 // ─── Permanent Storage (Orphan Branch) ──────────────────────────────────
 
 /**
- * Condense checkpoint data to the permanent orphan branch on user commit.
- * Called from post-commit hook. Like Entire's condensation to entire/checkpoints/v1.
+ * Condense snapshot data to the permanent orphan branch on user commit.
+ * Called from post-commit hook. Like Entire's condensation to entire/snapshots/v1.
  *
  * Directory structure on the orphan branch:
- *   origin/checkpoints/v1
+ *   origin/snapshots/v1
  *   └── <id-prefix>/<id>/
- *       ├── metadata.json       (full checkpoint metadata)
+ *       ├── metadata.json       (full snapshot metadata)
  *       ├── prompt.txt          (user prompt text)
  *       ├── full.jsonl          (complete transcript, if available)
  *       └── <sessionIndex>/     (multi-session subdirectory)
  *           ├── prompt.txt
  *           └── full.jsonl
  */
-export function condenseCheckpoint(
+export function condenseSnapshot(
   repoPath: string,
-  checkpointId: string,
+  snapshotId: string,
   meta: SnapshotMeta,
   commitSha: string,
   transcriptPath?: string,
@@ -462,12 +462,12 @@ export function condenseCheckpoint(
       } catch { /* transcript file missing or unreadable — non-fatal */ }
     }
 
-    // Build a tree entry for this checkpoint's directory
+    // Build a tree entry for this snapshot's directory
     // Sharded by first 2 chars of ID: <prefix>/<id>/metadata.json
-    const prefix = checkpointId.slice(0, 2);
-    const suffix = checkpointId.slice(2);
+    const prefix = snapshotId.slice(0, 2);
+    const suffix = snapshotId.slice(2);
 
-    // Build inner tree (the checkpoint directory)
+    // Build inner tree (the snapshot directory)
     // If sessionIndex is provided, nest prompt/transcript under a numbered subdirectory
     let innerTreeEntries = `100644 blob ${metadataBlobSha}\tmetadata.json\n`;
 
@@ -521,7 +521,7 @@ export function condenseCheckpoint(
       }
     } catch { /* prefix doesn't exist yet */ }
 
-    // Add our new checkpoint entry
+    // Add our new snapshot entry
     prefixEntries += `040000 tree ${innerTreeSha}\t${suffix}\n`;
 
     const newPrefixTreeR = gitDetailed(
@@ -557,7 +557,7 @@ export function condenseCheckpoint(
     const parentRef = gitDetailed(['rev-parse', PERMANENT_BRANCH], gitOpts(repoPath));
     const commitArgs = [
       'commit-tree', newRootTreeSha,
-      '-m', `checkpoint: ${checkpointId}\n\nOrigin-Checkpoint: ${checkpointId}\nLinked-Commit: ${commitSha.slice(0, 12)}`,
+      '-m', `snapshot: ${snapshotId}\n\nOrigin-Snapshot: ${snapshotId}\nLinked-Commit: ${commitSha.slice(0, 12)}`,
     ];
     if (parentRef.status === 0 && HEX.test(parentRef.stdout.trim())) {
       commitArgs.push('-p', parentRef.stdout.trim());
@@ -580,9 +580,9 @@ export function condenseCheckpoint(
 }
 
 /**
- * Read all condensed checkpoints from the permanent orphan branch.
+ * Read all condensed snapshots from the permanent orphan branch.
  */
-export function listPermanentCheckpoints(repoPath: string): SnapshotMeta[] {
+export function listPermanentSnapshots(repoPath: string): SnapshotMeta[] {
   const results: SnapshotMeta[] = [];
   try {
     // List all entries recursively on the permanent branch
@@ -613,25 +613,25 @@ export function listPermanentCheckpoints(repoPath: string): SnapshotMeta[] {
 
 /**
  * Migrate shadow branch when HEAD changes (rebase, pull, merge).
- * Detects if the checkpoint's recorded commitSha no longer matches HEAD
+ * Detects if the snapshot's recorded commitSha no longer matches HEAD
  * and re-parents the shadow branch to continue working.
  */
 export function migrateShadowBranch(repoPath: string, sessionTag: string): void {
   try {
     const branch = shadowBranchForSession(sessionTag);
-    const tipSha = getLatestCheckpointSha(repoPath, branch);
+    const tipSha = getLatestSnapshotSha(repoPath, branch);
     if (!tipSha) return;
 
-    const tipMeta = parseCheckpointMeta(repoPath, tipSha);
+    const tipMeta = parseSnapshotMeta(repoPath, tipSha);
     if (!tipMeta?.commitSha) return;
 
     const currentHead = git(['rev-parse', 'HEAD'], gitOpts(repoPath)).trim();
     if (tipMeta.commitSha === currentHead) return; // No migration needed
 
-    // HEAD changed since last checkpoint — the shadow branch still works
-    // because our checkpoints track tree state, not commit history.
-    // Just create a new checkpoint noting the new HEAD.
-    // This way `origin checkpoint list` stays accurate.
+    // HEAD changed since last snapshot — the shadow branch still works
+    // because our snapshots track tree state, not commit history.
+    // Just create a new snapshot noting the new HEAD.
+    // This way `origin snapshot list` stays accurate.
   } catch { /* non-fatal */ }
 }
 
@@ -639,7 +639,7 @@ export function migrateShadowBranch(repoPath: string, sessionTag: string): void 
 
 /**
  * Clean up shadow branch for a session after it ends.
- * Called from session-end hook after all checkpoints have been condensed
+ * Called from session-end hook after all snapshots have been condensed
  * to the permanent branch. Like Entire's auto-cleanup.
  *
  * Only cleans the specific session's shadow branch, not other sessions'.
@@ -662,7 +662,7 @@ export function cleanupSessionShadowBranch(repoPath: string, sessionTag: string)
 }
 
 /**
- * Condense ALL checkpoints from a session's shadow branch to permanent storage,
+ * Condense ALL snapshots from a session's shadow branch to permanent storage,
  * then clean up the shadow branch. Called on session end.
  */
 export function condenseAndCleanupSession(
@@ -674,21 +674,21 @@ export function condenseAndCleanupSession(
   const result = { condensed: 0, cleaned: false };
 
   try {
-    const checkpoints = listCheckpoints(repoPath, sessionTag);
-    if (checkpoints.length === 0) return result;
+    const snapshots = listSnapshots(repoPath, sessionTag);
+    if (snapshots.length === 0) return result;
 
-    // Condense each checkpoint to permanent storage
-    for (let i = 0; i < checkpoints.length; i++) {
-      const cp = checkpoints[i];
-      // Only pass transcript for the latest checkpoint to avoid duplication
-      const isLast = i === checkpoints.length - 1;
-      const ok = condenseCheckpoint(
+    // Condense each snapshot to permanent storage
+    for (let i = 0; i < snapshots.length; i++) {
+      const cp = snapshots[i];
+      // Only pass transcript for the latest snapshot to avoid duplication
+      const isLast = i === snapshots.length - 1;
+      const ok = condenseSnapshot(
         repoPath,
         cp.id,
         cp,
         commitSha,
         isLast ? transcriptPath : undefined,
-        checkpoints.length > 1 ? i : undefined, // sessionIndex for multi-checkpoint
+        snapshots.length > 1 ? i : undefined, // sessionIndex for multi-snapshot
       );
       if (ok) result.condensed++;
     }
@@ -705,60 +705,60 @@ export function condenseAndCleanupSession(
 // ─── Public API ──────────────────────────────────────────────────────────
 
 /**
- * List all checkpoints for a session (from shadow branch chain).
+ * List all snapshots for a session (from shadow branch chain).
  */
-export function listCheckpoints(repoPath: string, sessionTag?: string): SnapshotMeta[] {
+export function listSnapshots(repoPath: string, sessionTag?: string): SnapshotMeta[] {
   const tag = sessionTag || getSessionTag(repoPath);
   const branch = shadowBranchForSession(tag);
-  const chainCheckpoints = walkCheckpointChain(repoPath, branch);
+  const chainSnapshots = walkSnapshotChain(repoPath, branch);
 
-  if (chainCheckpoints.length > 0) return chainCheckpoints;
+  if (chainSnapshots.length > 0) return chainSnapshots;
 
   // Fallback: check for legacy per-branch snapshots and all shadow branches
   const branches = listShadowBranches(repoPath, tag);
-  const legacyCheckpoints: SnapshotMeta[] = [];
+  const legacySnapshots: SnapshotMeta[] = [];
   for (const b of branches) {
     // Skip the session-level branch (it has chained commits, already handled)
     if (b === branch) continue;
-    const meta = parseSnapshotMeta(repoPath, b);
-    if (meta) legacyCheckpoints.push(meta);
+    const meta = parseLegacyShadowMeta(repoPath, b);
+    if (meta) legacySnapshots.push(meta);
   }
-  legacyCheckpoints.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  return legacyCheckpoints;
+  legacySnapshots.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return legacySnapshots;
 }
 
 /**
- * Find a checkpoint by ID across shadow branches and permanent storage.
+ * Find a snapshot by ID across shadow branches and permanent storage.
  */
-export function findCheckpointById(repoPath: string, id: string): SnapshotMeta | null {
+export function findSnapshotById(repoPath: string, id: string): SnapshotMeta | null {
   // Search all shadow branches
   const branches = listShadowBranches(repoPath);
   for (const branch of branches) {
-    const chain = walkCheckpointChain(repoPath, branch);
+    const chain = walkSnapshotChain(repoPath, branch);
     const found = chain.find(m => m.id === id);
     if (found) return found;
 
     // Legacy single-commit branches
-    const meta = parseSnapshotMeta(repoPath, branch);
+    const meta = parseLegacyShadowMeta(repoPath, branch);
     if (meta?.id === id) return meta;
   }
 
-  // Search permanent checkpoints
-  const permanent = listPermanentCheckpoints(repoPath);
+  // Search permanent snapshots
+  const permanent = listPermanentSnapshots(repoPath);
   return permanent.find(m => m.id === id) || null;
 }
 
 /**
- * Get the diff between two checkpoints (or between a checkpoint and current state).
+ * Get the diff between two snapshots (or between a snapshot and current state).
  */
-export function checkpointDiff(repoPath: string, fromId: string, toId?: string): string | null {
-  const fromMeta = findCheckpointById(repoPath, fromId);
+export function snapshotDiff(repoPath: string, fromId: string, toId?: string): string | null {
+  const fromMeta = findSnapshotById(repoPath, fromId);
   if (!fromMeta) return null;
   const fromTree = fromMeta.treeSha;
 
   let toTree = '';
   if (toId) {
-    const toMeta = findCheckpointById(repoPath, toId);
+    const toMeta = findSnapshotById(repoPath, toId);
     if (!toMeta) return null;
     toTree = toMeta.treeSha;
   } else {
@@ -802,7 +802,7 @@ export async function snapshotSaveCommand(): Promise<void> {
     process.exit(1);
   }
 
-  const id = createCheckpoint(repoPath, { type: 'manual' });
+  const id = createSnapshot(repoPath, { type: 'manual' });
   if (id) {
     console.log(chalk.green(`  Snapshot saved: ${chalk.bold(id)}`));
   } else {
@@ -823,16 +823,16 @@ export async function snapshotListCommand(): Promise<void> {
   }
 
   const sessionTag = getSessionTag(repoPath);
-  const checkpoints = listCheckpoints(repoPath, sessionTag);
+  const snapshots = listSnapshots(repoPath, sessionTag);
 
-  if (checkpoints.length === 0) {
+  if (snapshots.length === 0) {
     console.log(chalk.gray('  No snapshots found.'));
     return;
   }
 
   console.log(chalk.bold(`\n  Snapshots for session: ${sessionTag}\n`));
 
-  for (const meta of checkpoints) {
+  for (const meta of snapshots) {
     const age = timeSince(new Date(meta.timestamp));
     const files = meta.filesChanged.length > 0
       ? chalk.gray(`${meta.filesChanged.length} files`)
@@ -856,24 +856,24 @@ export async function snapshotRestoreCommand(id: string): Promise<void> {
     process.exit(1);
   }
 
-  const targetMeta = findCheckpointById(repoPath, id);
+  const targetMeta = findSnapshotById(repoPath, id);
 
   if (!targetMeta) {
-    console.error(chalk.red(`  Checkpoint not found: ${id}`));
-    console.log(chalk.gray('  Run: origin checkpoint list'));
+    console.error(chalk.red(`  Snapshot not found: ${id}`));
+    console.log(chalk.gray('  Run: origin snapshot list'));
     process.exit(1);
   }
 
   try {
-    // Save current state as a checkpoint first (safety net)
+    // Save current state as a snapshot first (safety net)
     console.log(chalk.gray('  Saving current state before restore...'));
-    createCheckpoint(repoPath, { type: 'manual' });
+    createSnapshot(repoPath, { type: 'manual' });
 
     if (!HEX.test(targetMeta.treeSha)) {
-      throw new Error('Invalid tree sha in checkpoint');
+      throw new Error('Invalid tree sha in snapshot');
     }
 
-    // Restore: use git read-tree + git checkout-index from the checkpoint tree
+    // Restore: use git read-tree + git checkout-index from the snapshot tree
     // This does NOT move HEAD — just restores file contents (like Entire)
     git(['read-tree', targetMeta.treeSha], gitOpts(repoPath));
     git(['checkout-index', '-a', '-f'], gitOpts(repoPath));
@@ -881,12 +881,12 @@ export async function snapshotRestoreCommand(id: string): Promise<void> {
     // Reset index back to HEAD to avoid staged changes confusion
     git(['read-tree', 'HEAD'], gitOpts(repoPath));
 
-    console.log(chalk.green(`\n  Restored to checkpoint ${chalk.bold(id)} from ${timeSince(new Date(targetMeta.timestamp))}`));
+    console.log(chalk.green(`\n  Restored to snapshot ${chalk.bold(id)} from ${timeSince(new Date(targetMeta.timestamp))}`));
     if (targetMeta.filesChanged.length > 0) {
       console.log(chalk.gray(`  Files affected: ${targetMeta.filesChanged.join(', ')}`));
     }
   } catch (err: any) {
-    console.error(chalk.red(`  Failed to restore checkpoint: ${err.message}`));
+    console.error(chalk.red(`  Failed to restore snapshot: ${err.message}`));
     process.exit(1);
   }
 }

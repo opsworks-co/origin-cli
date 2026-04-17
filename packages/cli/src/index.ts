@@ -58,7 +58,6 @@ import { showCommand } from './commands/show.js';
 import { attachCommand } from './commands/attach.js';
 import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
-import { checkpointListCommand, checkpointSaveCommand, checkpointRestoreCommand, checkpointDiffCommand, checkpointCleanCommand } from './commands/checkpoint.js';
 import { promptStatusCommand } from './commands/prompt-status.js';
 import { shellPromptCommand } from './commands/shell-prompt.js';
 import {
@@ -460,10 +459,10 @@ program.command('resume [branch]')
   .action(resumeCommand);
 
 program.command('rewind')
-  .description('Rewind to a previous AI checkpoint (time travel)')
-  .option('-i, --interactive', 'Interactive checkpoint browser')
+  .description('Rewind to a previous AI snapshot (time travel)')
+  .option('-i, --interactive', 'Interactive snapshot browser')
   .option('-t, --to <sha>', 'Rewind to specific commit SHA')
-  .option('--list', 'List checkpoints without rewinding')
+  .option('--list', 'List snapshots without rewinding')
   .action(rewindCommand);
 
 // ─── Snapshots ────────────────────────────────────────────────────────────
@@ -479,28 +478,6 @@ snapshot.command('restore <id>')
 snapshot.command('clean')
   .description('Remove all shadow snapshots')
   .action(snapshotCleanCommand);
-
-// ─── Checkpoints (unified timeline: snapshots + commits) ─────────────────
-
-const checkpoint = program.command('checkpoint').description('Time-travel checkpoints — auto-saved after each AI prompt');
-checkpoint.action(checkpointListCommand);
-checkpoint.command('list')
-  .description('List all checkpoints for current session')
-  .option('-a, --all', 'Show checkpoints from all sessions')
-  .action(checkpointListCommand);
-checkpoint.command('save')
-  .description('Manually save a checkpoint')
-  .option('-m, --message <msg>', 'Checkpoint description')
-  .action(checkpointSaveCommand);
-checkpoint.command('restore <id>')
-  .description('Restore working tree to a checkpoint')
-  .action(checkpointRestoreCommand);
-checkpoint.command('diff [fromId] [toId]')
-  .description('Show diff between checkpoints (or last checkpoint vs current)')
-  .action(checkpointDiffCommand);
-checkpoint.command('clean')
-  .description('Remove all checkpoint branches')
-  .action(checkpointCleanCommand);
 
 program.command('share <sessionId>')
   .description('Create a shareable prompt bundle from a session')
@@ -921,7 +898,7 @@ const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   },
   {
     label: 'TIME TRAVEL',
-    commands: ['rewind', 'snapshot', 'checkpoint'],
+    commands: ['rewind', 'snapshot'],
   },
   {
     label: 'CHAT / AI',

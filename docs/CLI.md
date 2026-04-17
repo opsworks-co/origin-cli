@@ -37,7 +37,7 @@ Origin commands are grouped by purpose. The primary surface below is what `origi
 | **See AI work** | `blame`, `diff`, `stats`, `chat` |
 | **Sessions** | `sessions`, `explain`, `resume`, `share` |
 | **Tracking** | `issue`, `context` |
-| **Time-travel** | `checkpoint` |
+| **Time-travel** | `snapshot` |
 | **Data** | `export`, `search`, `backfill` |
 | **Internal** | `hooks`, `upgrade`, `plugin`, `version` |
 
@@ -51,7 +51,7 @@ Origin commands are grouped by purpose. The primary surface below is what `origi
 | `explain` | `review`, `review-pr`, `intent-review` |
 | `context` | `handoff`, `memory` |
 | `issue` | `todo`, `trail` |
-| `checkpoint` | `rewind`, `snapshot` |
+| `snapshot` | `rewind`, `snapshot` |
 | `init` | `enable`, `disable`, `link`, `attach`, `whoami` |
 | `doctor` | `status`, `verify`, `verify-install`, `clean`, `reset` |
 | `export` / `search` / `backfill` | `repos`, `agents`, `sync`, `policies`, `audit`, `db`, `ignore` |
@@ -552,19 +552,19 @@ origin resume --json
 
 ### `origin rewind`
 
-Rewind to a previous AI checkpoint (time travel through session commits).
+Rewind to a previous AI snapshot (time travel through session commits).
 
 ```bash
-origin rewind --list                   # List checkpoints
+origin rewind --list                   # List snapshots
 origin rewind --to a1b2c3d            # Rewind to specific commit
-origin rewind --interactive            # Interactive checkpoint browser
+origin rewind --interactive            # Interactive snapshot browser
 ```
 
 | Flag | Description |
 |------|-------------|
-| `-i, --interactive` | Interactive checkpoint browser |
+| `-i, --interactive` | Interactive snapshot browser |
 | `-t, --to <sha>` | Rewind to specific commit SHA |
-| `--list` | List checkpoints without rewinding |
+| `--list` | List snapshots without rewinding |
 
 ---
 
@@ -637,25 +637,25 @@ origin share abc123 --output session.md
 
 Mid-session shadow snapshots (no commits required). Captures working tree state without affecting git index.
 
-### `origin checkpoint`
+### `origin snapshot`
 
-Per-prompt checkpoints — auto-saved after every AI turn. These are the snapshots you see on the dashboard at `getorigin.io/snapshots`.
+Per-prompt snapshots — auto-saved after every AI turn. These are the snapshots you see on the dashboard at `getorigin.io/snapshots`.
 
 ```bash
-origin checkpoint list              # list all checkpoints for current session
-origin checkpoint save              # manually save a checkpoint now
-origin checkpoint restore <id>      # restore working tree to a checkpoint
-origin checkpoint diff [from] [to]  # diff between two checkpoints
-origin checkpoint clean             # remove all checkpoints
+origin snapshot list              # list all snapshots for current session
+origin snapshot save              # manually save a snapshot now
+origin snapshot restore <id>      # restore working tree to a snapshot
+origin snapshot diff [from] [to]  # diff between two snapshots
+origin snapshot clean             # remove all snapshots
 ```
 
-Checkpoints capture: prompt text, files changed, diff, AI attribution %, commit SHA, tree SHA. Stored in git so they travel with `git clone`.
+Snapshots capture: prompt text, files changed, diff, AI attribution %, commit SHA, tree SHA. Stored in git so they travel with `git clone`.
 
-`origin snapshot` and `origin rewind` are preserved as hidden aliases of `origin checkpoint`.
+`origin snapshot` and `origin rewind` are preserved as hidden aliases of `origin snapshot`.
 
-### `origin snapshot` (alias of `origin checkpoint`)
+### `origin snapshot` (alias of `origin snapshot`)
 
-Still supported for backwards compatibility. Prefer `origin checkpoint` going forward.
+Still supported for backwards compatibility. Prefer `origin snapshot` going forward.
 
 ```bash
 origin snapshot                     # save a point-in-time snapshot
@@ -869,7 +869,7 @@ Set a config value.
 origin config set commitLinking always
 origin config set pushStrategy auto
 origin config set secretRedaction true
-origin config set checkpointRepo git@github.com:org/sessions.git
+origin config set snapshotRepo git@github.com:org/sessions.git
 ```
 
 ### `origin config list`
@@ -895,7 +895,7 @@ origin config list
 | `autoUpdate` | boolean | `true`, `false` | Check for CLI updates on startup |
 | `secretRedaction` | boolean | `true`, `false` | Redact secrets before sending to API |
 | `hookChaining` | boolean | `true`, `false` | Chain existing hooks when installing Origin hooks |
-| `checkpointRepo` | string | | External git remote URL for session data |
+| `snapshotRepo` | string | | External git remote URL for session data |
 | `mode` | enum | `auto`, `standalone` | Force standalone mode — skip all API calls, everything local |
 
 Kebab-case aliases are accepted (e.g., `commit-linking` for `commitLinking`).
@@ -1638,7 +1638,7 @@ Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, JWTs, dat
 | `origin ask <query>` | Ask about AI-authored code |
 | `origin chat` | Interactive AI assistant |
 | `origin resume [branch]` | Resume session from branch |
-| `origin rewind` | Time travel to checkpoint |
+| `origin rewind` | Time travel to snapshot |
 | `origin review <id>` | Approve/reject/flag session |
 | `origin review-pr <url>` | Analyze AI sessions in a PR |
 | `origin intent-review` | Intent-based review |

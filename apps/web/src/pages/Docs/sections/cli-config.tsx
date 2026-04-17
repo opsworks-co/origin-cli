@@ -28,7 +28,7 @@ export default function CliConfigSection() {
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set checkpoint-repo &lt;url&gt;</code>
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin config set snapshot-repo &lt;url&gt;</code>
                 <P>Store session data in a separate private git repo instead of the main codebase.</P>
               </div>
 
@@ -44,7 +44,7 @@ export default function CliConfigSection() {
   "apiUrl": "https://getorigin.io",
   "mode": "auto",
   "pushStrategy": "auto",
-  "checkpointRepo": null,
+  "snapshotRepo": null,
   "autoSnapshot": false
 }`}</CodeBlock>
 

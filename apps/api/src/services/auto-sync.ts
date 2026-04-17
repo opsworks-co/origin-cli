@@ -1,5 +1,5 @@
 import { prisma } from '../db.js';
-import { syncCheckpoints } from './checkpoint.js';
+import { syncSnapshots } from './snapshot.js';
 
 // Auto-sync interval: 15 minutes
 const SYNC_INTERVAL_MS = 15 * 60 * 1000;
@@ -43,7 +43,7 @@ async function syncAllRepos() {
       }
 
       try {
-        const result = await syncCheckpoints({
+        const result = await syncSnapshots({
           id: repo.id,
           path: repo.path,
           provider: repo.provider,

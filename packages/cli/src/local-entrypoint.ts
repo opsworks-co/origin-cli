@@ -299,9 +299,9 @@ export function pushSessionBranch(repoPath: string): void {
 
     // In connected mode, session data goes to the API — no need to push
     // session branches to the repo remote (which may be public).
-    // Only push if explicitly configured with a checkpointRepo or in standalone mode.
+    // Only push if explicitly configured with a snapshotRepo or in standalone mode.
     const connected = !!(config?.apiKey && config?.apiUrl);
-    if (connected && !config?.checkpointRepo && strategy !== 'always') {
+    if (connected && !config?.snapshotRepo && strategy !== 'always') {
       return; // Connected mode — data is on the platform, don't push to repo
     }
 
@@ -310,18 +310,18 @@ export function pushSessionBranch(repoPath: string): void {
       timeoutMs: 15_000,
     };
 
-    const checkpointRepo = config?.checkpointRepo;
+    const snapshotRepo = config?.snapshotRepo;
 
-    if (checkpointRepo) {
-      // Push to external checkpoint repo. Validate the repo value — it may
+    if (snapshotRepo) {
+      // Push to external snapshot repo. Validate the repo value — it may
       // be a remote name, path, or URL configured by the user, so allow a
       // restricted set of characters to block injection via shell metachars.
       // Reject anything that starts with '-' to block git option injection
       // (e.g. --upload-pack=/tmp/evil would otherwise be parsed as a flag).
-      if (checkpointRepo.startsWith('-')) return;
-      if (!/^[a-zA-Z0-9_./:@+%~=-]+$/.test(checkpointRepo)) return;
+      if (snapshotRepo.startsWith('-')) return;
+      if (!/^[a-zA-Z0-9_./:@+%~=-]+$/.test(snapshotRepo)) return;
       // Use '--' as end-of-options marker for defense in depth.
-      git(['push', '--no-verify', '--quiet', '--', checkpointRepo, BRANCH], execOpts);
+      git(['push', '--no-verify', '--quiet', '--', snapshotRepo, BRANCH], execOpts);
     } else {
       // Push to same repo's origin remote
       const remote = gitDetailed(['remote', 'get-url', 'origin'], execOpts);

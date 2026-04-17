@@ -15,7 +15,7 @@ import { loadConfig, saveConfig, type OriginConfig } from '../config.js';
 
 // Map kebab-case aliases to camelCase config keys
 const KEY_ALIASES: Record<string, string> = {
-  'checkpoint-repo': 'checkpointRepo',
+  'snapshot-repo': 'snapshotRepo',
   'commit-linking': 'commitLinking',
   'push-strategy': 'pushStrategy',
   'auto-update': 'autoUpdate',
@@ -47,7 +47,7 @@ const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum' | 'map';
   autoUpdate:      { type: 'boolean', description: 'Check for CLI updates on startup' },
   secretRedaction: { type: 'boolean', description: 'Redact secrets before sending to API' },
   hookChaining:    { type: 'boolean', description: 'Chain existing hooks when installing Origin hooks' },
-  checkpointRepo:  { type: 'string',  description: 'External git remote URL for session data (origin-sessions branch)' },
+  snapshotRepo:  { type: 'string',  description: 'External git remote URL for session data (origin-sessions branch)' },
   mode:            { type: 'enum',    values: ['auto', 'standalone'], description: 'Force standalone mode (skip API even when logged in)' },
   agentSlugs:      { type: 'map',     description: 'Per-tool agent slug overrides (e.g. agentSlugs.cursor = cursor-frontend)' },
 };

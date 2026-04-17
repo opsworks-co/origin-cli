@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { expensiveLimiter } from '../middleware/rate-limit.js';
-import { syncCheckpoints } from '../services/checkpoint.js';
+import { syncSnapshots } from '../services/snapshot.js';
 import { generateWebhookSecret } from '../services/webhook.js';
 import {
   getIntegrationConfig,
@@ -485,7 +485,7 @@ router.post('/:id/sync', expensiveLimiter, async (req: AuthRequest, res: Respons
       return res.status(404).json({ error: 'Repo not found' });
     }
 
-    const result = await syncCheckpoints({ ...repo, orgId: req.user!.orgId });
+    const result = await syncSnapshots({ ...repo, orgId: req.user!.orgId });
 
     await prisma.repo.update({
       where: { id },

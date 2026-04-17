@@ -44,7 +44,7 @@ Plus four git-level hooks fired by git itself (not by an agent):
 | Hook | When | Handler | Purpose |
 |---|---|---|---|
 | `git-pre-commit` | Before commit staged tree is turned into a tree object | `handlePreCommit` | Secret scanner blocks commits containing API keys / tokens / etc. (42 patterns) |
-| `git-prepare-commit-msg` | After git wrote `COMMIT_EDITMSG`, before the commit object is created | `handlePrepareCommitMsg` | Adds `Origin-Session:` and `Origin-Checkpoint:` trailers via `git interpret-trailers`. Does not amend. |
+| `git-prepare-commit-msg` | After git wrote `COMMIT_EDITMSG`, before the commit object is created | `handlePrepareCommitMsg` | Adds `Origin-Session:` and `Origin-Snapshot:` trailers via `git interpret-trailers`. Does not amend. |
 | `git-post-commit` | After a commit object has been written | `handlePostCommit` | Writes per-commit git notes (`refs/notes/origin`) with model, session, cost, token counts. Also accumulates file/line stats into session state. |
 | `git-pre-push` | Before `git push` sends refs to the remote | `handlePrePush` | Pushes the `origin-sessions` orphan branch + `refs/notes/origin` alongside the user's push. |
 | `git-post-rewrite` | After `git rebase`, `git commit --amend`, or `git cherry-pick` rewrites history | history preservation | Walks old→new SHA mappings and re-attaches git notes. |

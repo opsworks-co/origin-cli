@@ -254,11 +254,11 @@ origin config set mode auto`}</CodeBlock>
               </thead>
               <tbody className="text-gray-400">
                 {([
-                  ['Core approach', 'Session lifecycle hooks', 'Git hooks + checkpoint branches', 'Git notes + checkpoint markers'],
-                  ['What it captures', 'Full session: prompts, responses, tool calls, costs', 'Session transcripts + checkpoints', 'Line-level attribution (agent → line)'],
+                  ['Core approach', 'Session lifecycle hooks', 'Git hooks + snapshot branches', 'Git notes + snapshot markers'],
+                  ['What it captures', 'Full session: prompts, responses, tool calls, costs', 'Session transcripts + snapshots', 'Line-level attribution (agent → line)'],
                   ['', '', '', ''],
                   ['SESSION & TRACKING', '', '', ''],
-                  ['Session capture', '✓ Full lifecycle (6 events)', '✓ Transcripts + checkpoints', '—'],
+                  ['Session capture', '✓ Full lifecycle (6 events)', '✓ Transcripts + snapshots', '—'],
                   ['Session history', '✓ origin sessions', '✓ entire status', '—'],
                   ['Session explain', '✓ origin explain --summarize', '✓ entire explain', '—'],
                   ['Ask about code', '✓ origin ask (file/session/query)', '—', '—'],
@@ -352,7 +352,7 @@ origin config set mode auto`}</CodeBlock>
               <div className="card bg-gray-800/30 border-gray-700 p-4">
                 <h4 className="text-sm font-semibold text-gray-300 mb-2">When to use Entire</h4>
                 <p className="text-xs text-gray-400">
-                  Open-source (MIT) session recording with checkpoint branches. Full transcript capture, <code className="text-gray-300">entire explain</code> for AI summaries, and <code className="text-gray-300">entire rewind/resume</code> for checkpoint management. No policy enforcement or line-level blame.
+                  Open-source (MIT) session recording with snapshot branches. Full transcript capture, <code className="text-gray-300">entire explain</code> for AI summaries, and <code className="text-gray-300">entire rewind/resume</code> for snapshot management. No policy enforcement or line-level blame.
                 </p>
               </div>
               <div className="card bg-gray-800/30 border-gray-700 p-4">
@@ -607,20 +607,20 @@ origin analyze --json             # JSON output`}</CodeBlock>
           <h2 className="text-2xl font-bold mb-4">Time Travel & Resume</h2>
 
           <h3 className="text-lg font-semibold text-gray-200 mt-6 mb-2"><code className="text-indigo-400">origin rewind</code></h3>
-          <p className="text-gray-400 text-sm mb-2">Rewind to a previous AI checkpoint (time travel). Restore your code to any previous AI session state.</p>
-          <CodeBlock>{`# Interactive checkpoint browser
+          <p className="text-gray-400 text-sm mb-2">Rewind to a previous AI snapshot (time travel). Restore your code to any previous AI session state.</p>
+          <CodeBlock>{`# Interactive snapshot browser
 origin rewind --interactive
 # Shows:
-#   Checkpoints for session abc12345:
+#   Snapshots for session abc12345:
 #     1. [14:30] feat: add auth middleware      +45 -3  (claude-sonnet-4)
 #     2. [14:25] fix: route handler types       +12 -8  (claude-sonnet-4)
 #     3. [14:20] refactor: extract validators   +89 -34 (claude-sonnet-4)
-#   Select checkpoint (1-3):
+#   Select snapshot (1-3):
 
 # Rewind to specific commit
 origin rewind --to a1b2c3d
 
-# List checkpoints without rewinding
+# List snapshots without rewinding
 origin rewind --list`}</CodeBlock>
           <p className="text-gray-500 text-xs mt-2"><strong>Safety:</strong> Always stashes current changes before rewinding. Requires confirmation.</p>
 

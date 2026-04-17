@@ -8,7 +8,7 @@ const SAFE_REF = /^[a-zA-Z0-9_./~^-]+$/;
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
-interface Checkpoint {
+interface Snapshot {
   index: number;
   sha: string;
   shortSha: string;
@@ -28,23 +28,23 @@ const gitOpts = (cwd: string) => ({
 });
 
 /**
- * Get checkpoints (commits) from the session's commit range.
+ * Get snapshots (commits) from the session's commit range.
  */
-function getCheckpoints(repoPath: string, range: string): Checkpoint[] {
-  const checkpoints: Checkpoint[] = [];
+function getSnapshots(repoPath: string, range: string): Snapshot[] {
+  const snapshots: Snapshot[] = [];
   try {
     // Validate range: allow "a..b", "a..HEAD", "HEAD~50..HEAD", or a single ref
     const parts = range.split('..');
     for (const p of parts) {
       if (!p) continue;
-      if (!HEX.test(p) && !SAFE_REF.test(p)) return checkpoints;
+      if (!HEX.test(p) && !SAFE_REF.test(p)) return snapshots;
     }
     const log = git(
       ['log', '--format=%H%x00%h%x00%s%x00%an%x00%aI', range],
       gitOpts(repoPath),
     ).trim();
 
-    if (!log) return checkpoints;
+    if (!log) return snapshots;
 
     const lines = log.split('\n').filter(Boolean);
     for (let i = 0; i < lines.length; i++) {
@@ -78,7 +78,7 @@ function getCheckpoints(repoPath: string, range: string): Checkpoint[] {
           } catch { /* ignore */ }
         }
       }
-      checkpoints.push({
+      snapshots.push({
         index: i + 1,
         sha,
         shortSha,
@@ -92,7 +92,7 @@ function getCheckpoints(repoPath: string, range: string): Checkpoint[] {
     }
   } catch { /* ignore */ }
 
-  return checkpoints;
+  return snapshots;
 }
 
 /**
@@ -112,9 +112,9 @@ function confirm(question: string): Promise<boolean> {
 }
 
 /**
- * Prompt user to select a checkpoint by number.
+ * Prompt user to select a snapshot by number.
  */
-function selectCheckpoint(prompt: string): Promise<number | null> {
+function selectSnapshot(prompt: string): Promise<number | null> {
   return new Promise((resolve) => {
     const rl = readline.createInterface({
       input: process.stdin,
@@ -133,7 +133,7 @@ function selectCheckpoint(prompt: string): Promise<number | null> {
 /**
  * origin rewind [--to <sha>]
  *
- * Lists checkpoints (commits from the session) with timestamp, files, model.
+ * Lists snapshots (commits from the session) with timestamp, files, model.
  * --to restores the working directory to a specific commit.
  * Safety: git stash first, confirmation required.
  */
@@ -157,15 +157,15 @@ export async function rewindCommand(
     range = 'HEAD~50..HEAD';
   }
 
-  let checkpoints = getCheckpoints(repoPath, range);
+  let snapshots = getSnapshots(repoPath, range);
 
-  // Filter to only AI checkpoints (commits with Origin notes) unless in active session
+  // Filter to only AI snapshots (commits with Origin notes) unless in active session
   if (!state?.headShaAtStart) {
-    checkpoints = checkpoints.filter(c => c.sessionId || c.model);
+    snapshots = snapshots.filter(c => c.sessionId || c.model);
   }
 
-  if (checkpoints.length === 0) {
-    console.log(chalk.gray('No checkpoints found. AI commits are automatically tracked as checkpoints.'));
+  if (snapshots.length === 0) {
+    console.log(chalk.gray('No snapshots found. AI commits are automatically tracked as snapshots.'));
     console.log(chalk.gray('Run an AI session and make commits — they\'ll appear here.'));
     return;
   }
@@ -199,9 +199,9 @@ export async function rewindCommand(
     } catch { /* ignore */ }
 
     // Ask for confirmation
-    const targetCheckpoint = checkpoints.find(c => c.sha === targetSha || c.shortSha === targetSha);
-    const desc = targetCheckpoint
-      ? `${targetCheckpoint.shortSha} — "${targetCheckpoint.message}"`
+    const targetSnapshot = snapshots.find(c => c.sha === targetSha || c.shortSha === targetSha);
+    const desc = targetSnapshot
+      ? `${targetSnapshot.shortSha} — "${targetSnapshot.message}"`
       : targetSha.slice(0, 8);
 
     const confirmed = await confirm(
@@ -237,11 +237,11 @@ export async function rewindCommand(
     return;
   }
 
-  // No --to: show interactive checkpoint list
-  console.log(chalk.bold('\n  Session Checkpoints\n'));
+  // No --to: show interactive snapshot list
+  console.log(chalk.bold('\n  Session Snapshots\n'));
   console.log(chalk.gray(`  Range: ${range}\n`));
 
-  for (const cp of checkpoints) {
+  for (const cp of snapshots) {
     const date = new Date(cp.timestamp).toLocaleString();
     const modelStr = cp.model ? chalk.cyan(` [${cp.model}]`) : '';
     const fileCount = cp.filesChanged.length;
@@ -268,16 +268,16 @@ export async function rewindCommand(
   }
 
   // Prompt for selection
-  const selection = await selectCheckpoint(
-    chalk.white('  Enter checkpoint number to rewind to (or press Enter to cancel): '),
+  const selection = await selectSnapshot(
+    chalk.white('  Enter snapshot number to rewind to (or press Enter to cancel): '),
   );
 
-  if (selection === null || selection < 1 || selection > checkpoints.length) {
+  if (selection === null || selection < 1 || selection > snapshots.length) {
     console.log(chalk.gray('  Cancelled.'));
     return;
   }
 
-  const selected = checkpoints[selection - 1];
+  const selected = snapshots[selection - 1];
 
   // Re-run with --to
   await rewindCommand({ to: selected.sha });

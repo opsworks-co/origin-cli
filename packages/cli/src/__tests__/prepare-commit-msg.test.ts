@@ -22,16 +22,16 @@ import { buildOriginTrailers, handlePrepareCommitMsg } from '../commands/hooks.j
 // ─── Unit tests for buildOriginTrailers ─────────────────────────────────
 
 describe('buildOriginTrailers', () => {
-  it('produces a single Origin-Session trailer when no checkpoint', () => {
+  it('produces a single Origin-Session trailer when no snapshot', () => {
     const out = buildOriginTrailers('abcdef1234567890', 'claude-sonnet-4', 3);
     expect(out).toEqual(['Origin-Session: abcdef123456 | Claude Code | 3 prompts']);
   });
 
-  it('adds Origin-Checkpoint trailer when checkpoint id provided', () => {
+  it('adds Origin-Snapshot trailer when snapshot id provided', () => {
     const out = buildOriginTrailers('abcdef1234567890', 'claude-opus-4', 1, 'chk-abc');
     expect(out).toEqual([
       'Origin-Session: abcdef123456 | Claude Code | 1 prompt',
-      'Origin-Checkpoint: chk-abc',
+      'Origin-Snapshot: chk-abc',
     ]);
   });
 

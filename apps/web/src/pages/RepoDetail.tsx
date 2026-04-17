@@ -895,7 +895,7 @@ export default function RepoDetail() {
         </div>
       )}
 
-      {/* Commits — Checkpoints-style date-grouped list */}
+      {/* Commits — Snapshots-style date-grouped list */}
       <div className="card p-0 overflow-hidden">
         {/* Search header */}
         <div className="px-5 py-3 border-b border-gray-800 flex items-center gap-3">

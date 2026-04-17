@@ -15,7 +15,7 @@
  *
  * We filter these at BOTH ends:
  *
- *   1. Write side (webhook / checkpoint ingest): drop before insert so the
+ *   1. Write side (webhook / snapshot ingest): drop before insert so the
  *      table doesn't accumulate garbage over time.
  *   2. Read side (commits list endpoint): drop in the mapper so existing
  *      rows in the DB are hidden without requiring a backfill migration.
