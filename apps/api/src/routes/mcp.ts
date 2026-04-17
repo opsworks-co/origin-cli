@@ -919,6 +919,7 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
     const {
       prompt, transcript, filesChanged, tokensUsed, toolCalls,
       linesAdded, linesRemoved, model, inputTokens, outputTokens,
+      cacheReadTokens, cacheCreationTokens,
       durationMs, costUsd, promptChanges, branch, status,
     } = req.body;
 
@@ -945,6 +946,8 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
     const cleanTokensUsed = clampNum(tokensUsed);
     const cleanInputTokens = clampNum(inputTokens);
     const cleanOutputTokens = clampNum(outputTokens);
+    const cleanCacheReadTokens = clampNum(cacheReadTokens);
+    const cleanCacheCreationTokens = clampNum(cacheCreationTokens);
     const cleanLinesAdded = clampNum(linesAdded);
     const cleanLinesRemoved = clampNum(linesRemoved);
     const cleanDurationMs = clampNum(durationMs);
@@ -973,6 +976,8 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         ...(typeof model === 'string' && model.length <= 200 && { model }),
         ...(cleanInputTokens !== undefined && { inputTokens: cleanInputTokens }),
         ...(cleanOutputTokens !== undefined && { outputTokens: cleanOutputTokens }),
+        ...(cleanCacheReadTokens !== undefined && { cacheReadTokens: cleanCacheReadTokens }),
+        ...(cleanCacheCreationTokens !== undefined && { cacheCreationTokens: cleanCacheCreationTokens }),
         ...(cleanDurationMs !== undefined && { durationMs: cleanDurationMs }),
         ...(cleanCostUsd !== undefined && { costUsd: cleanCostUsd }),
         ...(typeof branch === 'string' && branch.length <= 500 && { branch }),
@@ -1331,6 +1336,8 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       tokensUsed,
       inputTokens,
       outputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
       toolCalls,
       linesAdded,
       linesRemoved,
@@ -1368,6 +1375,8 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     const cleanTokensUsedEnd = clampNum(tokensUsed);
     const cleanInputTokensEnd = clampNum(inputTokens);
     const cleanOutputTokensEnd = clampNum(outputTokens);
+    const cleanCacheReadTokensEnd = clampNum(cacheReadTokens);
+    const cleanCacheCreationTokensEnd = clampNum(cacheCreationTokens);
     const cleanLinesAddedEnd = clampNum(linesAdded);
     const cleanLinesRemovedEnd = clampNum(linesRemoved);
     const cleanCostUsdEnd = clampNum(costUsd);
@@ -1390,6 +1399,8 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         ...(cleanTokensUsedEnd !== undefined && { tokensUsed: cleanTokensUsedEnd }),
         ...(cleanInputTokensEnd !== undefined && { inputTokens: cleanInputTokensEnd }),
         ...(cleanOutputTokensEnd !== undefined && { outputTokens: cleanOutputTokensEnd }),
+        ...(cleanCacheReadTokensEnd !== undefined && { cacheReadTokens: cleanCacheReadTokensEnd }),
+        ...(cleanCacheCreationTokensEnd !== undefined && { cacheCreationTokens: cleanCacheCreationTokensEnd }),
         ...(cleanToolCallsEnd !== undefined && { toolCalls: cleanToolCallsEnd }),
         ...(cleanLinesAddedEnd !== undefined && { linesAdded: cleanLinesAddedEnd }),
         ...(cleanLinesRemovedEnd !== undefined && { linesRemoved: cleanLinesRemovedEnd }),

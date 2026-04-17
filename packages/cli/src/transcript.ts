@@ -181,7 +181,10 @@ export function parseTranscript(transcriptPath: string): ParsedTranscript {
     result.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
     result.outputTokens += usage.output_tokens ?? 0;
   }
-  result.tokensUsed = result.inputTokens + result.cacheReadTokens + result.cacheCreationTokens + result.outputTokens;
+  // `tokensUsed` is the "real" fresh-tokens total. Cache reads/creations are
+  // tracked on their own fields so they can be reported without inflating the
+  // headline number (cache reads are volumetrically huge but charged at 10%).
+  result.tokensUsed = result.inputTokens + result.outputTokens;
 
   // Deduplicated file list, filtered through ignore patterns
   result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));

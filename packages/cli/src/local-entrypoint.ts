@@ -61,6 +61,8 @@ export interface SessionWriteData {
   tokensUsed: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
   toolCalls: number;
   linesAdded: number;
   linesRemoved: number;
