@@ -852,7 +852,7 @@ fi
 
 // ─── Git Pre-Commit Hook (Secret Scan) ────────────────────────────────
 
-function installGitPreCommitHook(gitRoot: string): void {
+export function installGitPreCommitHook(gitRoot: string): void {
   const hooksDir = path.join(gitRoot, '.git', 'hooks');
   const hookPath = path.join(hooksDir, 'pre-commit');
 
@@ -890,7 +890,7 @@ function installGitPreCommitHook(gitRoot: string): void {
 // COMMIT_EDITMSG so the trailer is part of the commit from the start,
 // avoiding the old post-commit --amend --no-verify dance.
 
-function installGitPrepareCommitMsgHook(gitRoot: string): void {
+export function installGitPrepareCommitMsgHook(gitRoot: string): void {
   const hooksDir = path.join(gitRoot, '.git', 'hooks');
   const hookPath = path.join(hooksDir, 'prepare-commit-msg');
 
@@ -919,7 +919,7 @@ function installGitPrepareCommitMsgHook(gitRoot: string): void {
   console.log(chalk.green('  ✓ Git prepare-commit-msg hook installed (session trailer)'));
 }
 
-function installGitPostCommitHook(gitRoot: string): void {
+export function installGitPostCommitHook(gitRoot: string): void {
   const hooksDir = path.join(gitRoot, '.git', 'hooks');
   const hookPath = path.join(hooksDir, 'post-commit');
 
@@ -954,7 +954,7 @@ function installGitPostCommitHook(gitRoot: string): void {
 
 // ─── Git Pre-Push Hook (F14) ──────────────────────────────────────────────
 
-function installGitPrePushHook(gitRoot: string): void {
+export function installGitPrePushHook(gitRoot: string): void {
   const hooksDir = path.join(gitRoot, '.git', 'hooks');
   const hookPath = path.join(hooksDir, 'pre-push');
 
