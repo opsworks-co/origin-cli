@@ -122,6 +122,32 @@ Open [getorigin.io/dashboard](https://getorigin.io/dashboard) to see:
 
 Now that sessions are being tracked, here's how to get more value from Origin:
 
+### Explore snapshots
+Every prompt during an AI session creates a snapshot — a checkpoint with the prompt text, files changed, diff, and cost. Visit **Snapshots** in the sidebar to browse them. You can:
+- **Restore** to any snapshot (creates a branch at that commit, stashes uncommitted work)
+- **Branch** from any snapshot (bookmark for later exploration)
+- **Compare** any two snapshots side-by-side
+
+Requires the CLI heartbeat to be running, which happens automatically during an active AI session.
+
+### Link commits to sessions from the terminal
+Once you've got tracked sessions:
+
+```bash
+origin log                 # git log with agent + cost + prompt count inline
+origin show <commit-sha>   # full session that produced a commit
+```
+
+### Hand off context between agents
+Switching from Claude to Cursor mid-task? Origin preserves context automatically:
+
+```bash
+origin context        # show what will be passed to the next agent
+origin context clear  # reset if you want a clean start
+```
+
+The next session — regardless of which agent it is — gets the previous session's state injected into its system prompt.
+
 ### Connect GitHub for PR checks
 Go to **Settings > Integrations** and install the Origin GitHub App. Origin will post governance status checks on every PR, showing which commits were AI-authored and whether they comply with your policies. See [GITHUB_CHECKS.md](./GITHUB_CHECKS.md) for details.
 
@@ -149,15 +175,16 @@ Go to **Settings > Team** to invite other developers. Each person installs the C
 | Install CLI | `npm i -g https://getorigin.io/cli/origin-cli-latest.tgz` |
 | Log in | `origin login` |
 | Initialize machine | `origin init` |
-| Enable hooks | `origin enable` |
-| Check status | `origin status` |
 | List sessions | `origin sessions` |
 | View session detail | `origin session <id>` |
+| Git log with AI info | `origin log` |
+| Session behind a commit | `origin show <sha>` |
 | Line-level blame | `origin blame <file>` |
 | AI vs human stats | `origin stats` |
-| End-of-day recap | `origin recap` |
+| End-of-day recap | `origin stats --mode recap` (or `origin recap`) |
+| Cross-agent handoff | `origin context` |
 | Shell prompt status | `eval "$(origin shell-prompt)"` |
-| Diagnose issues | `origin doctor` |
+| Diagnose & repair | `origin doctor` |
 | Upgrade CLI | `origin upgrade` |
 | Next issue for AI agent | `origin issue ready` |
 | Create an issue | `origin issue create <title>` |

@@ -14,11 +14,26 @@ const PROMPT_COLORS = [
   { dot: 'bg-indigo-400', text: 'text-indigo-400', bg: 'bg-indigo-500/10', border: 'border-indigo-500/30' },
 ];
 
+const CHECKPOINT_TYPE_BADGES: Record<string, { label: string; color: string }> = {
+  'auto': { label: 'AI Turn', color: 'bg-blue-500/20 text-blue-400' },
+  'manual': { label: 'Manual', color: 'bg-gray-500/20 text-gray-400' },
+  'pre-prompt': { label: 'Pre-prompt', color: 'bg-amber-500/20 text-amber-400' },
+  'session-start': { label: 'Session Start', color: 'bg-green-500/20 text-green-400' },
+  'session-end': { label: 'Session End', color: 'bg-red-500/20 text-red-400' },
+};
+
 interface PromptChange {
   promptIndex: number;
   promptText: string;
   filesChanged: string[] | string;
   diff: string;
+  linesAdded?: number;
+  linesRemoved?: number;
+  aiPercentage?: number;
+  checkpointType?: string | null;
+  commitSha?: string | null;
+  treeSha?: string | null;
+  createdAt?: string;
 }
 
 interface TurnTimelineProps {
@@ -67,12 +82,33 @@ export default function TurnTimeline({
 
   const sorted = [...promptChanges].sort((a, b) => a.promptIndex - b.promptIndex);
 
+  // Compute cumulative stats
+  let cumulativeAdded = 0;
+  let cumulativeRemoved = 0;
+  let totalAiLines = 0;
+  let totalLines = 0;
+  for (const pc of sorted) {
+    const added = pc.linesAdded ?? (pc.diff || '').split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+    const removed = pc.linesRemoved ?? (pc.diff || '').split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+    totalLines += added + removed;
+    totalAiLines += (added + removed) * ((pc.aiPercentage ?? 100) / 100);
+  }
+  const overallAiPct = totalLines > 0 ? Math.round((totalAiLines / totalLines) * 100) : 100;
+
   return (
     <div className="p-4">
-      <div className="flex items-center gap-2 mb-4">
-        <h3 className="text-sm font-semibold text-gray-300">Turn Timeline</h3>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <h3 className="text-sm font-semibold text-gray-300">Checkpoint Timeline</h3>
         <span className="text-xs text-gray-600">
           {sorted.length} turn{sorted.length !== 1 ? 's' : ''} · {model}
+        </span>
+        {/* Overall AI attribution badge */}
+        <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+          overallAiPct >= 90 ? 'bg-blue-500/20 text-blue-400' :
+          overallAiPct >= 50 ? 'bg-purple-500/20 text-purple-400' :
+          'bg-green-500/20 text-green-400'
+        }`}>
+          {overallAiPct}% AI-generated
         </span>
       </div>
 
@@ -89,31 +125,68 @@ export default function TurnTimeline({
             files = Array.isArray(pc.filesChanged) ? pc.filesChanged : JSON.parse(pc.filesChanged || '[]');
           } catch {}
 
-          // Count lines from diff
-          const addedLines = (pc.diff || '').split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
-          const removedLines = (pc.diff || '').split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+          // Use stored line counts or compute from diff
+          const addedLines = pc.linesAdded ?? (pc.diff || '').split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+          const removedLines = pc.linesRemoved ?? (pc.diff || '').split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+
+          cumulativeAdded += addedLines;
+          cumulativeRemoved += removedLines;
+
+          const aiPct = pc.aiPercentage ?? 100;
+          const cpType = pc.checkpointType || null;
+          const cpBadge = cpType ? CHECKPOINT_TYPE_BADGES[cpType] : null;
 
           const turnAnnotations = annotations.filter(a => a.turnIndex === pc.promptIndex);
 
           return (
             <div key={pc.promptIndex} className="relative pl-8 pb-4 last:pb-0">
-              {/* Dot */}
-              <div className={`absolute left-1.5 top-1.5 w-[14px] h-[14px] rounded-full ${color.dot} ring-2 ring-gray-900 z-10`} />
+              {/* Dot — colored by checkpoint type */}
+              <div className={`absolute left-1.5 top-1.5 w-[14px] h-[14px] rounded-full ${
+                cpType === 'session-start' ? 'bg-green-400' :
+                cpType === 'session-end' ? 'bg-red-400' :
+                cpType === 'pre-prompt' ? 'bg-amber-400' :
+                color.dot
+              } ring-2 ring-gray-900 z-10`} />
 
               <div
                 className={`rounded-lg border ${isExpanded ? color.border : 'border-gray-800'} ${isExpanded ? color.bg : 'hover:bg-gray-800/30'} transition-all cursor-pointer`}
                 onClick={() => setExpandedTurn(isExpanded ? null : pc.promptIndex)}
               >
                 <div className="px-3 py-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className={`text-xs font-semibold ${color.text}`}>
                       Turn {pc.promptIndex + 1}
                     </span>
+
+                    {/* Checkpoint type badge */}
+                    {cpBadge && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${cpBadge.color}`}>
+                        {cpBadge.label}
+                      </span>
+                    )}
+
+                    {/* Lines changed */}
                     <span className="text-[10px] text-gray-600">
                       {files.length} file{files.length !== 1 ? 's' : ''}
                       {addedLines > 0 && <span className="text-green-500 ml-1">+{addedLines}</span>}
                       {removedLines > 0 && <span className="text-red-500 ml-1">-{removedLines}</span>}
                     </span>
+
+                    {/* AI attribution percentage */}
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                      aiPct >= 90 ? 'bg-blue-500/15 text-blue-400' :
+                      aiPct >= 50 ? 'bg-purple-500/15 text-purple-400' :
+                      aiPct > 0 ? 'bg-teal-500/15 text-teal-400' :
+                      'bg-gray-500/15 text-gray-400'
+                    }`}>
+                      {Math.round(aiPct)}% AI
+                    </span>
+
+                    {/* Cumulative progress */}
+                    <span className="text-[10px] text-gray-600 ml-auto">
+                      cumul: <span className="text-green-500">+{cumulativeAdded}</span>/<span className="text-red-500">-{cumulativeRemoved}</span>
+                    </span>
+
                     {turnAnnotations.length > 0 && (
                       <span className="text-[10px] bg-indigo-500/20 text-indigo-400 px-1.5 py-0.5 rounded-full">
                         {turnAnnotations.length} note{turnAnnotations.length !== 1 ? 's' : ''}
@@ -126,7 +199,7 @@ export default function TurnTimeline({
                           setAddingToTurn(isAddingNote ? null : pc.promptIndex);
                           setDraftText('');
                         }}
-                        className="ml-auto text-[10px] text-gray-500 hover:text-indigo-400 transition-colors px-1.5 py-0.5 rounded hover:bg-indigo-500/10"
+                        className="text-[10px] text-gray-500 hover:text-indigo-400 transition-colors px-1.5 py-0.5 rounded hover:bg-indigo-500/10"
                         title="Add annotation"
                       >
                         + note
@@ -140,6 +213,47 @@ export default function TurnTimeline({
 
                 {isExpanded && (
                   <div className="border-t border-gray-800/50 px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                    {/* Git reference info */}
+                    {(pc.commitSha || pc.treeSha) && (
+                      <div className="mb-2 flex items-center gap-3">
+                        {pc.commitSha && (
+                          <span className="text-[10px] text-gray-500">
+                            commit: <code className="text-gray-400 font-mono">{pc.commitSha.slice(0, 8)}</code>
+                          </span>
+                        )}
+                        {pc.treeSha && (
+                          <span className="text-[10px] text-gray-500">
+                            tree: <code className="text-gray-400 font-mono">{pc.treeSha.slice(0, 8)}</code>
+                          </span>
+                        )}
+                        {pc.createdAt && (
+                          <span className="text-[10px] text-gray-500">
+                            {new Date(pc.createdAt).toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* AI Attribution bar */}
+                    <div className="mb-2">
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-[10px] text-gray-600 uppercase tracking-wider">AI Attribution</span>
+                        <span className={`text-[10px] font-medium ${
+                          aiPct >= 90 ? 'text-blue-400' : aiPct >= 50 ? 'text-purple-400' : 'text-green-400'
+                        }`}>{Math.round(aiPct)}% AI · {100 - Math.round(aiPct)}% Human</span>
+                      </div>
+                      <div className="w-full bg-gray-800 rounded-full h-1.5 flex overflow-hidden">
+                        <div
+                          className="h-1.5 bg-blue-500/70 transition-all"
+                          style={{ width: `${aiPct}%` }}
+                        />
+                        <div
+                          className="h-1.5 bg-green-500/70 transition-all"
+                          style={{ width: `${100 - aiPct}%` }}
+                        />
+                      </div>
+                    </div>
+
                     {files.length > 0 && (
                       <div className="mb-2">
                         <span className="text-[10px] text-gray-600 uppercase tracking-wider">Files</span>

@@ -324,21 +324,21 @@ function formatInlineText(text: string): React.ReactNode[] {
 
 function DiffHunkRenderer({ hunks }: { hunks: string[] }) {
   return (
-    <pre className="text-[11px] leading-[1.6] font-mono">
+    <pre className="text-[11.5px] leading-[1.65] font-mono">
       {hunks.map((line, i) => {
         let className = 'px-4 ';
         if (line.startsWith('@@')) {
-          className += 'bg-blue-900/15 text-blue-400/80 py-0.5';
+          className += 'bg-indigo-950/30 text-indigo-400/70 py-0.5 border-t border-b border-indigo-500/10 text-[10.5px]';
         } else if (line.startsWith('+')) {
-          className += 'bg-green-900/15 text-green-300';
+          className += 'bg-emerald-950/25 text-emerald-300/90 border-l-2 border-emerald-500/40';
         } else if (line.startsWith('-')) {
-          className += 'bg-red-900/15 text-red-300';
+          className += 'bg-red-950/25 text-red-300/90 border-l-2 border-red-500/40';
         } else {
-          className += 'text-gray-600';
+          className += 'text-gray-600 border-l-2 border-transparent';
         }
         return (
           <div key={i} className={className}>
-            {line}
+            {line || '\u00a0'}
           </div>
         );
       })}
@@ -521,10 +521,10 @@ function TurnCard({
                   return (
                     <div
                       key={fileKey}
-                      className={`border rounded-md overflow-hidden ${
+                      className={`rounded-lg overflow-hidden ${
                         isUncommitted
-                          ? 'border-violet-600/40'
-                          : 'border-gray-800/60'
+                          ? 'ring-1 ring-violet-500/30'
+                          : 'ring-1 ring-gray-800/80'
                       }`}
                     >
                       <button
@@ -532,30 +532,32 @@ function TurnCard({
                           e.stopPropagation();
                           onToggleFile(fileKey);
                         }}
-                        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[11px] transition-colors ${
+                        className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-[11px] transition-colors ${
                           isUncommitted
-                            ? 'bg-violet-900/15 hover:bg-violet-900/25'
-                            : 'bg-gray-800/30 hover:bg-gray-800/60'
+                            ? 'bg-violet-950/30 hover:bg-violet-950/50'
+                            : 'bg-gray-800/40 hover:bg-gray-800/70'
                         }`}
                       >
-                        <span className="text-gray-600 text-[10px]">
-                          {isFileCollapsed ? '\u25B6' : '\u25BC'}
+                        <span className="text-gray-600 text-[10px] transition-transform" style={{ transform: isFileCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>
+                          {'\u25B6'}
                         </span>
-                        <span className={`font-mono flex-1 truncate ${
+                        <span className={`font-mono flex-1 truncate text-[11.5px] ${
                           isUncommitted ? 'text-violet-300/80' : 'text-gray-300'
                         }`}>
                           {shortenPath(file.path)}
                         </span>
                         {isUncommitted && (
-                          <span className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400/80 border border-violet-500/20">
+                          <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400/80">
                             uncommitted
                           </span>
                         )}
-                        <span className="text-green-400/70 font-mono">+{file.linesAdded}</span>
-                        <span className="text-red-400/70 font-mono">-{file.linesRemoved}</span>
+                        <span className="font-mono flex items-center gap-1.5">
+                          <span className="text-emerald-400/80 text-[11px]">+{file.linesAdded}</span>
+                          <span className="text-red-400/80 text-[11px]">-{file.linesRemoved}</span>
+                        </span>
                       </button>
                       {!isFileCollapsed && (
-                        <div className="overflow-x-auto border-t border-gray-800/40">
+                        <div className="overflow-x-auto border-t border-gray-800/30">
                           <DiffHunkRenderer hunks={file.hunks} />
                         </div>
                       )}

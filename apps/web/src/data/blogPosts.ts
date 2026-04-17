@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Snapshots: See What Your AI Changed After Every Prompt',
+    slug: 'snapshots-see-what-ai-changed-every-prompt',
+    date: '2026-04-16',
+    author: 'Artem Dolobanko',
+    tags: ['developer-tools', 'ai-coding', 'snapshots', 'cli', 'productivity'],
+    excerpt:
+      'Every AI prompt changes your codebase. But which prompt broke the build? Snapshots capture what changed after each prompt — files, lines, diffs, AI attribution — so you can trace any change back to the exact conversation that wrote it.',
+  },
+  {
     title: 'origin issue: The AI-Native Issue Tracker That Shows What Bugs Actually Cost',
     slug: 'origin-issue-ai-native-issue-tracker',
     date: '2026-04-13',

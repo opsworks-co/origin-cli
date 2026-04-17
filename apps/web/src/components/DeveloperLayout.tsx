@@ -14,7 +14,7 @@ import {
   Lightbulb,
   Plug,
   KeyRound,
-  User,
+  Camera,
   LogOut,
   Menu,
   X,
@@ -23,14 +23,28 @@ import {
   Sparkles,
 } from 'lucide-react';
 
-const DEV_NAV_ITEMS = [
-  { to: '/me', label: 'My Dashboard', icon: LayoutDashboard },
-  { to: '/repos', label: 'Repositories', icon: FolderGit2 },
-  { to: '/live', label: 'Live Feed', icon: Radio },
-  { to: '/insights', label: 'Insights', icon: Lightbulb },
-  { to: '/integrations', label: 'Integrations', icon: Plug },
-  { to: '/api-keys', label: 'API Keys', icon: KeyRound },
-  { to: '/settings', label: 'Settings', icon: Settings },
+// Navigation is grouped by frequency of use.
+// "Workspace" = things you interact with every session.
+// "Account" = one-time setup & configuration.
+const NAV_GROUPS = [
+  {
+    label: 'Workspace',
+    items: [
+      { to: '/me',         label: 'Dashboard',    icon: LayoutDashboard },
+      { to: '/repos',      label: 'Repositories', icon: FolderGit2 },
+      { to: '/snapshots',  label: 'Snapshots',    icon: Camera },
+      { to: '/live',       label: 'Live Feed',    icon: Radio },
+      { to: '/insights',   label: 'Insights',     icon: Lightbulb },
+    ],
+  },
+  {
+    label: 'Account',
+    items: [
+      { to: '/integrations', label: 'Integrations', icon: Plug },
+      { to: '/api-keys',     label: 'API Keys',     icon: KeyRound },
+      { to: '/settings',     label: 'Settings',     icon: Settings },
+    ],
+  },
 ];
 
 export default function DeveloperLayout({ children }: { children: React.ReactNode }) {
@@ -45,19 +59,19 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
   };
 
   const linkClasses = ({ isActive }: { isActive: boolean }) =>
-    `group flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium transition-all duration-150 ${
+    `group relative flex items-center gap-3 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-colors ${
       isActive
-        ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 shadow-sm shadow-emerald-500/5'
-        : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04]'
+        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+        : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-black/[0.04] dark:hover:bg-white/[0.04]'
     }`;
 
   const iconClasses = (isActive: boolean) =>
-    `w-[18px] h-[18px] transition-colors duration-150 ${
-      isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-400 dark:text-gray-500 group-hover:text-gray-600 dark:group-hover:text-gray-300'
+    `w-[17px] h-[17px] transition-colors ${
+      isActive ? 'text-emerald-600 dark:text-emerald-300' : 'text-gray-400 dark:text-gray-500 group-hover:text-gray-700 dark:group-hover:text-gray-200'
     }`;
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-100 dark:bg-gray-950">
+    <div className="flex h-screen overflow-hidden bg-gray-50 dark:bg-gray-950">
       {/* Mobile overlay */}
       {sidebarOpen && (
         <div
@@ -68,88 +82,104 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
 
       {/* Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-[260px] flex-col bg-white dark:bg-gray-900/80 backdrop-blur-xl border-r border-gray-200 dark:border-white/[0.06] shadow-sm dark:shadow-none transition-transform lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-[240px] flex-col bg-white dark:bg-[#0a0b14] border-r border-gray-200 dark:border-white/[0.05] transition-transform lg:static lg:translate-x-0 ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
         {/* Logo */}
-        <div className="flex items-center gap-3 px-5 h-[60px] border-b border-gray-200 dark:border-white/[0.06]">
-          <LogoMark size={32} variant="solo" />
-          <div>
-            <span className="text-[15px] font-semibold text-gray-900 dark:text-gray-100 tracking-tight">Origin Solo</span>
+        <div className="flex items-center gap-2.5 px-4 h-[56px] border-b border-gray-200 dark:border-white/[0.05]">
+          <LogoMark size={26} variant="solo" />
+          <div className="flex-1 min-w-0">
+            <span className="text-[14px] font-semibold text-gray-900 dark:text-gray-100 tracking-tight">Origin</span>
+            <span className="text-[10px] ml-1.5 uppercase tracking-wider text-emerald-600/80 dark:text-emerald-400/80 font-medium">Solo</span>
           </div>
           <button
             onClick={() => setSidebarOpen(false)}
-            className="ml-auto p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 lg:hidden"
+            className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 lg:hidden"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Nav links */}
-        <nav data-tour="sidebar-nav" className="flex-1 overflow-y-auto px-3 py-3 space-y-0.5">
-          {DEV_NAV_ITEMS.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              data-tour={`nav-${item.to.replace('/', '') || 'dashboard'}`}
-              className={linkClasses}
-              onClick={() => setSidebarOpen(false)}
-            >
-              {({ isActive }) => (
-                <>
-                  <item.icon className={iconClasses(isActive)} />
-                  {item.label}
-                </>
-              )}
-            </NavLink>
+        {/* Nav groups */}
+        <nav data-tour="sidebar-nav" className="flex-1 overflow-y-auto px-2 py-4 space-y-6">
+          {NAV_GROUPS.map((group) => (
+            <div key={group.label}>
+              <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-gray-400 dark:text-gray-600">
+                {group.label}
+              </p>
+              <div className="space-y-0.5">
+                {group.items.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    data-tour={`nav-${item.to.replace('/', '') || 'dashboard'}`}
+                    className={linkClasses}
+                    onClick={() => setSidebarOpen(false)}
+                    end={item.to === '/me'}
+                  >
+                    {({ isActive }) => (
+                      <>
+                        {/* Active indicator bar */}
+                        {isActive && (
+                          <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 bg-emerald-500 rounded-r-full" />
+                        )}
+                        <item.icon className={iconClasses(isActive)} />
+                        <span>{item.label}</span>
+                      </>
+                    )}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
-
         </nav>
 
         {/* User footer */}
-        <div className="border-t border-gray-200 dark:border-white/[0.06] px-3 py-3">
-          <div className="flex items-center gap-3 px-2 py-2">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500/20 to-emerald-600/20 ring-1 ring-emerald-500/20 flex items-center justify-center text-emerald-600 dark:text-emerald-400 text-sm font-medium">
+        <div className="border-t border-gray-200 dark:border-white/[0.05] px-2 py-3">
+          <div className="flex items-center gap-2.5 px-2 py-2 rounded-lg">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500/25 to-emerald-600/15 ring-1 ring-emerald-500/25 flex items-center justify-center text-emerald-600 dark:text-emerald-300 text-[12px] font-semibold">
               {user?.name?.charAt(0).toUpperCase() ?? '?'}
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">{user?.name}</p>
-              <p className="text-[11px] text-emerald-600/70 dark:text-emerald-500/70 truncate">Solo</p>
+              <p className="text-[13px] font-medium text-gray-800 dark:text-gray-100 truncate leading-tight">{user?.name}</p>
+              <p className="text-[10px] text-gray-500 dark:text-gray-500 truncate leading-tight">{user?.email}</p>
             </div>
             <NotificationBell />
             <button
               onClick={toggleTheme}
-              className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] rounded-lg transition-colors"
+              className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 rounded-md transition-colors"
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             >
-              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
             </button>
           </div>
-          <button
-            onClick={() => {
-              try { localStorage.removeItem('origin:tour-dashboard-v1'); } catch {}
-              window.location.href = '/me';
-            }}
-            className="w-full flex items-center gap-2 text-[13px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-3 py-2 rounded-lg transition-all duration-150 mt-1"
-          >
-            <Sparkles className="w-4 h-4" />
-            Platform tour
-          </button>
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center gap-2 text-[13px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-3 py-2 rounded-lg transition-all duration-150 mt-1"
-          >
-            <LogOut className="w-4 h-4" />
-            Sign out
-          </button>
+          <div className="flex items-center gap-1 mt-1">
+            <button
+              onClick={() => {
+                try { localStorage.removeItem('origin:tour-dashboard-v1'); } catch {}
+                window.location.href = '/me';
+              }}
+              className="flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              Tour
+            </button>
+            <button
+              onClick={handleLogout}
+              className="flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sign out
+            </button>
+          </div>
         </div>
       </aside>
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Mobile header */}
-        <header className="lg:hidden flex items-center gap-3 px-4 h-[52px] border-b border-gray-200 dark:border-white/[0.06] bg-white/80 dark:bg-gray-900/80 backdrop-blur-xl">
+        <header className="lg:hidden flex items-center gap-3 px-4 h-[52px] border-b border-gray-200 dark:border-white/[0.05] bg-white/80 dark:bg-[#0a0b14]/80 backdrop-blur-xl">
           <button
             onClick={() => setSidebarOpen(true)}
             className="p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 rounded-lg hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-colors"
@@ -157,13 +187,17 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
           >
             <Menu className="w-5 h-5" />
           </button>
-          <LogoMark size={24} variant="solo" />
+          <LogoMark size={22} variant="solo" />
           <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">Origin</span>
-          <span className="text-xs text-emerald-600/80 dark:text-emerald-500/80">Solo</span>
+          <span className="text-[10px] uppercase tracking-wider text-emerald-600/80 dark:text-emerald-400/80 font-medium">Solo</span>
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-4 md:p-6 lg:p-8">{children}</main>
+        <main className="flex-1 overflow-y-auto">
+          <div className="p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto w-full">
+            {children}
+          </div>
+        </main>
       </div>
 
       {/* AI Assistant */}

@@ -14,6 +14,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { execFileSync } from 'child_process';
 
 const args = process.argv.slice(2);
 const sessionId = args[0];
@@ -64,6 +65,190 @@ function isStateFileStale(): boolean {
     return age > STALE_THRESHOLD_MS;
   } catch {
     return true; // file gone = session ended
+  }
+}
+
+/**
+ * Report command execution result back to the dashboard.
+ */
+async function reportResult(type: string, status: 'success' | 'failed', message: string) {
+  if (!isConnected) return;
+  try {
+    await fetch(`${apiUrl}/api/mcp/session/${sessionId}/command-result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify({ type, status, message }),
+    });
+  } catch { /* ignore */ }
+}
+
+/**
+ * Handle a branch command from the dashboard.
+ * Creates a new branch at the snapshot's commit, optionally checks it out.
+ * Non-destructive by default — doesn't touch current HEAD or working tree.
+ */
+async function handleBranch(command: { commitSha?: string; branchName?: string; checkout?: boolean }) {
+  let repoPath = '';
+  if (stateFile) {
+    try {
+      const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+      repoPath = state.repoPath || '';
+    } catch { /* ignore */ }
+  }
+  if (!repoPath) {
+    await reportResult('branch', 'failed', 'Could not resolve repo path from session state');
+    return;
+  }
+  if (!command.commitSha || !/^[a-fA-F0-9]+$/.test(command.commitSha)) {
+    await reportResult('branch', 'failed', 'Invalid or missing commit SHA');
+    return;
+  }
+
+  const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: 'pipe' as const, timeout: 15000 };
+
+  try {
+    // Generate branch name if not provided
+    const shortSha = command.commitSha.slice(0, 7);
+    const sanitizedName = (command.branchName || `snapshot-${shortSha}`)
+      .replace(/[^a-zA-Z0-9/_-]/g, '-')
+      .slice(0, 80);
+
+    // Create the branch pointing to the commit (no checkout by default)
+    execFileSync('git', ['branch', sanitizedName, command.commitSha], gitOpts);
+
+    let msg = `Created branch "${sanitizedName}" at commit ${shortSha}.`;
+
+    // Optionally check it out
+    if (command.checkout) {
+      // Stash uncommitted work first so we don't lose anything
+      let stashed = false;
+      try {
+        const dirty = execFileSync('git', ['status', '--porcelain'], gitOpts).trim();
+        if (dirty) {
+          execFileSync('git', ['stash', 'push', '-u', '-m', `origin-branch-autostash-${Date.now()}`], gitOpts);
+          stashed = true;
+        }
+      } catch { /* ignore */ }
+
+      try {
+        execFileSync('git', ['checkout', sanitizedName], gitOpts);
+        msg += ` Checked out.${stashed ? ' Uncommitted changes stashed.' : ''}`;
+      } catch (err: any) {
+        if (stashed) {
+          try { execFileSync('git', ['stash', 'pop'], gitOpts); } catch { /* ignore */ }
+        }
+        msg += ` Could not checkout: ${err?.message || 'unknown error'}`;
+      }
+    } else {
+      msg += ` Run "git checkout ${sanitizedName}" when ready.`;
+    }
+
+    await reportResult('branch', 'success', msg);
+  } catch (err: any) {
+    const errMsg = err?.message || 'Unknown error';
+    // Common case: branch already exists
+    if (errMsg.includes('already exists')) {
+      await reportResult('branch', 'failed', `Branch already exists. Try a different name.`);
+    } else {
+      await reportResult('branch', 'failed', errMsg);
+    }
+  }
+}
+
+/**
+ * Handle a restore command from the dashboard.
+ * Creates a new branch at the snapshot's commit so HEAD moves cleanly
+ * and the user's current branch is preserved.
+ */
+async function handleRestore(command: { treeSha?: string; commitSha?: string }) {
+  // Get repo path from state file
+  let repoPath = '';
+  if (stateFile) {
+    try {
+      const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+      repoPath = state.repoPath || '';
+    } catch { /* ignore */ }
+  }
+  if (!repoPath) {
+    await reportResult('restore', 'failed', 'Could not resolve repo path from session state');
+    return;
+  }
+
+  const sha = command.commitSha || command.treeSha;
+  if (!sha || !/^[a-fA-F0-9]+$/.test(sha)) {
+    await reportResult('restore', 'failed', 'Invalid or missing SHA');
+    return;
+  }
+
+  const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: 'pipe' as const, timeout: 15000 };
+
+  try {
+    // Get current branch (fallback to HEAD sha if detached)
+    let originalBranch = '';
+    try {
+      originalBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], gitOpts).trim();
+    } catch { /* ignore */ }
+
+    // Stash any uncommitted work so we don't lose it
+    let stashed = false;
+    try {
+      const dirty = execFileSync('git', ['status', '--porcelain'], gitOpts).trim();
+      if (dirty) {
+        execFileSync('git', ['stash', 'push', '-u', '-m', `origin-restore-autostash-${Date.now()}`], gitOpts);
+        stashed = true;
+      }
+    } catch { /* ignore */ }
+
+    // If we have a commit SHA, branch off of it. Otherwise use tree SHA (still does soft restore).
+    if (command.commitSha) {
+      const branchName = `origin-restore-${command.commitSha.slice(0, 7)}-${Date.now().toString(36)}`;
+      try {
+        execFileSync('git', ['checkout', '-b', branchName, command.commitSha], gitOpts);
+      } catch (err: any) {
+        // Restore stash if checkout failed
+        if (stashed) {
+          try { execFileSync('git', ['stash', 'pop'], gitOpts); } catch { /* ignore */ }
+        }
+        throw err;
+      }
+
+      // Write marker file
+      const markerPath = path.join(repoPath, '.git', 'origin-restore-marker');
+      fs.writeFileSync(markerPath, JSON.stringify({
+        restoredAt: new Date().toISOString(),
+        commitSha: command.commitSha,
+        branch: branchName,
+        originalBranch,
+        stashed,
+        sessionId,
+      }), { mode: 0o600 });
+
+      const msg = `Checked out branch "${branchName}" at commit ${command.commitSha.slice(0, 7)}. ` +
+        (originalBranch ? `Original branch "${originalBranch}" preserved. ` : '') +
+        (stashed ? 'Uncommitted changes stashed. ' : '') +
+        `Run "git checkout ${originalBranch || 'main'}" to return.`;
+      await reportResult('restore', 'success', msg);
+      return;
+    }
+
+    // Fallback: no commitSha, only treeSha — do soft restore (working tree only)
+    const treeSha = command.treeSha!;
+    execFileSync('git', ['read-tree', treeSha], gitOpts);
+    execFileSync('git', ['checkout-index', '-a', '-f'], gitOpts);
+    execFileSync('git', ['read-tree', 'HEAD'], gitOpts);
+
+    const markerPath = path.join(repoPath, '.git', 'origin-restore-marker');
+    fs.writeFileSync(markerPath, JSON.stringify({
+      restoredAt: new Date().toISOString(),
+      treeSha,
+      sessionId,
+      mode: 'soft',
+    }), { mode: 0o600 });
+
+    await reportResult('restore', 'success',
+      `Soft-restored files to tree ${treeSha.slice(0, 7)}. HEAD unchanged — use "git diff" to review or "git checkout ." to revert.`);
+  } catch (err: any) {
+    await reportResult('restore', 'failed', err?.message || 'Unknown error during restore');
   }
 }
 
@@ -207,7 +392,16 @@ async function ping() {
           'X-API-Key': apiKey,
         },
       });
-      const data = await resp.json() as { ok: boolean; status?: string };
+      const data = await resp.json() as { ok: boolean; status?: string; command?: any };
+
+      // Handle pending commands from the dashboard
+      if (data.command && data.command.type === 'restore') {
+        handleRestore(data.command);
+      }
+      if (data.command && data.command.type === 'branch') {
+        handleBranch(data.command);
+      }
+
       // If server says session is ended/completed, self-terminate
       if (data.status && data.status !== 'RUNNING') {
         // Clean up PID and state files

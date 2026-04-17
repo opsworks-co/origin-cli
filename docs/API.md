@@ -16,9 +16,9 @@ Register a new org and user.
 {
   "orgName": "Acme Corp",
   "orgSlug": "acme",
-  "name": "Artem Dolobanko",
-  "email": "artem@acme.com",
-  "password": "password123"
+  "name": "Ada Lovelace",
+  "email": "ada@example.com",
+  "password": "<your-strong-password>"
 }
 ```
 
@@ -28,7 +28,7 @@ Returns: `{ token, user }`
 
 ### POST `/auth/login`
 ```json
-{ "email": "artem@acme.com", "password": "password123" }
+{ "email": "ada@example.com", "password": "<your-strong-password>" }
 ```
 Returns: `{ token, user }`
 

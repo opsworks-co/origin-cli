@@ -124,148 +124,85 @@ origin backfill                  # Retroactively tag old commits as AI/human
 
 ---
 
-## All Commands
+## CLI Commands
 
-<details>
-<summary><strong>Attribution & Analysis</strong> (9 commands)</summary>
+Origin groups commands by purpose. Every command name that has ever shipped is still supported — older names now resolve as hidden aliases of the primary surface below.
+
+### Setup
+
+```
+origin login                    Authenticate with Origin server
+origin init                     Register machine + install hooks
+origin doctor [--fix]           Diagnose, repair, and verify your install
+```
+
+### See AI work
 
 ```
 origin blame <file>             Line-by-line AI/human attribution
 origin diff [range]             Annotated diff with AI attribution
 origin stats                    AI vs human stats (--dashboard, --global)
-origin compare <a> [b]          Compare attribution between branches
-origin prompts <file>           AI prompts that touched a file
-origin search <query>           Full-text search across prompts (--from, --agent)
-origin ask <query>              Which AI session wrote specific code
-origin rework                   Detect AI code that got reworked (--days)
-origin backfill                 Retroactive AI tagging (--apply, --days, --min-confidence)
+origin chat                     Chat with Origin about your codebase
 ```
 
-</details>
-
-<details>
-<summary><strong>Sessions & Sharing</strong> (7 commands)</summary>
+### Sessions
 
 ```
-origin sessions                 List sessions for current repo (--all for everything)
-origin sessions end <id>        End a running session
-origin session <id>             View session with full transcript
-origin explain [id]             Explain session with prompts and changes
-origin export                   Export session data as CSV/JSON/agent-trace
-origin share <id>               Copy session link to clipboard
-origin share <id> --public      Create public link: getorigin.io/s/<slug>
+origin sessions                 List sessions (--all for every repo)
+origin explain [id]             Explain a session with prompts and changes
+origin resume [branch]          Resume a session from a previous branch
+origin share <id>               Share a session (clipboard or --public link)
 ```
 
-</details>
-
-<details>
-<summary><strong>Reporting & Compliance</strong> (3 commands)</summary>
+### Tracking
 
 ```
-origin report                   Sprint report — cost, models, users, ROI
-                                  --range 7d|14d|30d  --format md|json|csv
-origin audit                    SOC 2 / ISO 27001 compliance audit trail
-                                  --from <date>  --to <date>  --format md|json|csv
-origin trail                    View audit trail entries
+origin issue <subcommand>       AI-native issue tracker (create/list/ready/dep)
+origin context <subcommand>     Cross-agent handoff + accumulated session memory
 ```
 
-</details>
-
-<details>
-<summary><strong>Setup & Maintenance</strong> (13 commands)</summary>
+### Time-travel
 
 ```
-origin init                     Initialize + install hooks (--no-hooks to skip)
-origin login                    Authenticate with Origin server
-origin whoami                   Show current user and connection info
-origin enable [--global]        Install hooks + secret scanner
-origin disable [--global]       Remove hooks
-origin status                   Show system status
-origin config <key> [value]     Get/set configuration
-origin upgrade                  Upgrade CLI to latest version
-origin doctor [--fix]           Diagnose and fix issues
-origin verify                   Health check — agents, repo, sessions
-origin clean [--force]          Remove orphaned data
-origin reset                    Reset Origin data for this repo
-origin hooks                    Manage git hooks
+origin checkpoint               Snapshots, rewind, restore
 ```
 
-</details>
-
-<details>
-<summary><strong>Issue Tracker</strong> (10 commands)</summary>
+### Data
 
 ```
-origin issue create <title>     Create an issue (--type, --priority, --label, --dep)
-origin issue list               List issues (--status, --priority, --label, --type)
-origin issue show <id>          Show issue details
-origin issue close <id>         Close an issue
-origin issue ready              Next unblocked issue (for AI agent loops)
-origin issue blocked            List blocked issues
-origin issue link <id> <sess>   Link a session to an issue
-origin issue dep add <id> <dep> Add a dependency
-origin issue dep remove <id> <dep>  Remove a dependency
-origin issue dep tree <id>      Show dependency tree
+origin export                   Export as CSV / JSON / agent-trace
+origin search <query>           Full-text search across prompts
+origin backfill                 Retroactive AI tagging for old commits
 ```
 
-</details>
-
-<details>
-<summary><strong>Repos & Agents</strong> (5 commands)</summary>
+### Internal
 
 ```
-origin repos                    List tracked repositories
-origin agents                   List detected AI agents
-origin link                     Link current repo to Origin server
-origin sync                     Sync repos and upload session data
-origin ignore                   Manage ignored files/paths
+origin hooks                    Git & agent hook handlers
+origin upgrade                  Upgrade the CLI
+origin plugin                   Manage external agent plugins
+origin version                  Show version + build provenance
 ```
 
-</details>
+---
 
-<details>
-<summary><strong>Reviews & Policies</strong> (4 commands)</summary>
+### Aliases (hidden from `--help`, still supported forever)
 
-```
-origin review <id>              Review a session (approve/reject/flag)
-origin review-pr <url>          Review a pull request
-origin intent-review            AI intent verification for sessions
-origin policies                 List active governance policies
-```
+| Primary | Hidden aliases |
+|---------|---------------|
+| `blame` | `ask`, `why`, `prompts` |
+| `stats` | `recap`, `report`, `analyze`, `rework`, `compare` |
+| `sessions` | `session`, `log`, `show`, `session-compare` |
+| `explain` | `review`, `review-pr`, `intent-review` |
+| `context` | `handoff`, `memory` |
+| `issue` | `todo`, `trail` |
+| `checkpoint` | `rewind`, `snapshot` |
+| `init` | `enable`, `disable`, `link`, `attach`, `whoami` |
+| `doctor` | `status`, `verify`, `verify-install`, `clean`, `reset` |
+| `export`/`search`/`backfill` | `repos`, `agents`, `sync`, `policies`, `audit`, `db`, `ignore` |
+| `hooks` | `config`, `proxy`, `ci`, `prompt-status`, `shell-prompt`, `web` |
 
-</details>
-
-<details>
-<summary><strong>Productivity & AI</strong> (11 commands)</summary>
-
-```
-origin handoff                  Cross-agent context handoff (show/clear)
-origin memory                   Session memory across conversations (show/clear)
-origin todo                     AI-extracted TODO tracker (list/done/add)
-origin chat                     Chat with Origin AI about your codebase
-origin resume                   Resume a previous session
-origin rewind                   Rewind to a previous session state
-origin snapshot                 Save a point-in-time snapshot
-origin analyze                  Deep analysis of session patterns
-origin recap                    End-of-day summary — sessions, cost, tokens (--days N)
-origin prompt-status            Fast session check for shell prompt (<50ms)
-origin shell-prompt             Shell integration script (eval "$(origin shell-prompt)")
-```
-
-</details>
-
-<details>
-<summary><strong>Server & Integration</strong> (5 commands)</summary>
-
-```
-origin web                      Open Origin dashboard in browser
-origin proxy                    Local proxy for MCP integration
-origin plugin                   Manage plugins
-origin ci                       CI/CD integration commands
-origin db                       Local database management
-```
-
-</details>
+Every alias is a full command — if your scripts call `origin ask ...` or `origin recap --format json`, they keep working with identical output. Run `origin <alias> --help` to see the original flags.
 
 ---
 

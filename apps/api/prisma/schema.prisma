@@ -206,6 +206,8 @@ model CodingSession {
   parentSessionId String?                      // Root session of this chain (self-ref to CodingSession.id)
   lastActivityAt  DateTime?                    // Last prompt/tool activity (distinct from heartbeat updatedAt)
   machineId       String?                      // Machine that created this session (for dedup without audit log race)
+  pendingCommand  String?                      // JSON command for CLI to pick up via heartbeat (e.g. restore)
+  lastCommandResult String?                    // JSON result of last command executed by CLI
   startedAt    DateTime?                       // When session actually started (from session/start)
   endedAt      DateTime?                       // When session ended (from session/end)
   createdAt    DateTime       @default(now())
@@ -253,6 +255,12 @@ model PromptChange {
   filesChanged    String        // JSON array of file paths
   diff            String        @default("") // Unified diff of committed edits from this prompt
   uncommittedDiff String        @default("") // Unified diff of uncommitted (staged+unstaged) changes
+  linesAdded      Int           @default(0)  // Lines added in this prompt turn
+  linesRemoved    Int           @default(0)  // Lines removed in this prompt turn
+  aiPercentage    Float         @default(100) // Percentage of changes attributed to AI (0-100)
+  checkpointType  String?       // auto, manual, pre-prompt, session-start, session-end
+  commitSha       String?       // HEAD commit SHA at this checkpoint
+  treeSha         String?       // Git tree SHA at this checkpoint
   createdAt       DateTime      @default(now())
 
   @@unique([sessionId, promptIndex])

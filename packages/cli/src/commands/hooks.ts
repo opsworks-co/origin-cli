@@ -32,6 +32,7 @@ import { buildAttributionContext, buildFileAttributionContext } from '../attribu
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
 import { writeSessionMemory, buildMemoryContext } from '../memory.js';
 import { addTodosFromSession } from '../todo.js';
+import { createCheckpoint, condenseCheckpoint, listCheckpoints, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -214,13 +215,24 @@ function buildSessionWriteData(opts: {
     };
   });
 
-  // Build PromptChange[] from mappings
-  const changes: PromptChange[] = promptMappings.map(m => ({
-    promptIndex: m.promptIndex + 1,
-    promptText: m.promptText.slice(0, 200),
-    filesChanged: m.filesChanged.map(rel),
-    diff: m.diff,
-  }));
+  // Build PromptChange[] from mappings with checkpoint metadata
+  const changes: PromptChange[] = promptMappings.map(m => {
+    // Compute per-prompt line counts from diff
+    const diffLines = (m.diff || '').split('\n');
+    const added = diffLines.filter(l => l.startsWith('+') && !l.startsWith('+++')).length;
+    const removed = diffLines.filter(l => l.startsWith('-') && !l.startsWith('---')).length;
+    return {
+      promptIndex: m.promptIndex + 1,
+      promptText: m.promptText.slice(0, 200),
+      filesChanged: m.filesChanged.map(rel),
+      diff: m.diff,
+      linesAdded: added,
+      linesRemoved: removed,
+      aiPercentage: 100, // All auto-captured prompts are AI-generated changes
+      checkpointType: 'auto',
+      commitSha: gitCapture.headAfter || null,
+    };
+  });
 
   return {
     sessionId: state.sessionId,
@@ -1231,12 +1243,21 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           if (prevCapture.diff || filteredUncommitted || prevFiles.length > 0) {
             if (!existing.completedPromptMappings) existing.completedPromptMappings = [];
             const existingIdx = existing.completedPromptMappings.findIndex(m => m.promptIndex === prevPromptIdx);
+            // Get current HEAD and tree SHA for restore support
+            let mappingCommitSha: string | null = null;
+            let mappingTreeSha: string | null = null;
+            try {
+              mappingCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+              mappingTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            } catch { /* ignore */ }
             const mapping = {
               promptIndex: prevPromptIdx,
               promptText: (existing.prompts[prevPromptIdx] || '').slice(0, 1000),
               filesChanged: prevFiles,
               diff: (((prevCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
               uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+              commitSha: mappingCommitSha,
+              treeSha: mappingTreeSha,
             };
             if (existingIdx >= 0) existing.completedPromptMappings[existingIdx] = mapping;
             else existing.completedPromptMappings.push(mapping);
@@ -1265,12 +1286,21 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           await api.updateSession(existing.sessionId, {
             filesChanged: sessionFiles.length > 0 ? sessionFiles : undefined,
             durationMs: durationMs > 0 ? durationMs : undefined,
-            promptChanges: existing.completedPromptMappings.map(pm => ({
-              ...pm,
-              promptText: (pm.promptText || '').slice(0, 1000),
-              diff: (pm.diff || '').slice(0, 100_000),
-              uncommittedDiff: (pm.uncommittedDiff || '').slice(0, 100_000),
-            })),
+            promptChanges: existing.completedPromptMappings.map(pm => {
+              const dl = (pm.diff || '').split('\n');
+              return {
+                ...pm,
+                promptText: (pm.promptText || '').slice(0, 1000),
+                diff: (pm.diff || '').slice(0, 100_000),
+                uncommittedDiff: (pm.uncommittedDiff || '').slice(0, 100_000),
+                linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
+                linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
+                aiPercentage: 100,
+                checkpointType: 'auto',
+                commitSha: (pm as any).commitSha || null,
+                treeSha: (pm as any).treeSha || null,
+              };
+            }),
             status: 'RUNNING',
           });
           debugLog('session-start', 'sent accumulated promptChanges (reuse)', {
@@ -1283,6 +1313,16 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
       // Touch the state file to keep it fresh
       saveSessionState(existing, repoPath, existing.sessionTag);
+
+      // Auto-checkpoint: capture pre-prompt state for rewind capability
+      try {
+        createCheckpoint(repoPath, {
+          sessionTag: existing.sessionTag,
+          type: 'pre-prompt',
+          model: existing.model,
+          promptIndex: existing.prompts.length,
+        });
+      } catch { /* non-fatal */ }
 
       // Restart heartbeat to keep session alive between prompts
       const stateFileReuse = getStatePath(repoPath, existing.sessionTag);
@@ -1868,12 +1908,21 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         }
         const prevFilesChanged = Array.from(prevFilesSet);
         if (prevGitCapture.diff || filteredUncommitted || prevFilesChanged.length > 0) {
+          // Get current HEAD and tree SHA for restore support
+          let prevCommitSha: string | null = null;
+          let prevTreeSha: string | null = null;
+          try {
+            prevCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            prevTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          } catch { /* ignore */ }
           const prevMapping = {
             promptIndex: prevPromptIdx,
             promptText: (state.prompts[prevPromptIdx] || '').slice(0, 1000),
             filesChanged: prevFilesChanged,
             diff: (((prevGitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
             uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+            commitSha: prevCommitSha,
+            treeSha: prevTreeSha,
           };
           if (!state.completedPromptMappings) state.completedPromptMappings = [];
           // Replace if same promptIndex exists, else append
@@ -1992,11 +2041,18 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           status: 'RUNNING',
           // Send accumulated per-prompt diffs so they appear immediately on the platform
           promptChanges: state.completedPromptMappings && state.completedPromptMappings.length > 0
-            ? state.completedPromptMappings.map(pm => ({
-                ...pm,
-                promptText: (pm.promptText || '').slice(0, 1000),
-                diff: (pm.diff || '').slice(0, 100_000),
-              }))
+            ? state.completedPromptMappings.map(pm => {
+                const dl = (pm.diff || '').split('\n');
+                return {
+                  ...pm,
+                  promptText: (pm.promptText || '').slice(0, 1000),
+                  diff: (pm.diff || '').slice(0, 100_000),
+                  linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
+                  linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
+                  aiPercentage: 100,
+                  checkpointType: 'auto',
+                };
+              })
             : undefined,
         });
         debugLog('user-prompt-submit', 'heartbeat sent', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd, promptChanges: state.completedPromptMappings?.length || 0 });
@@ -2331,6 +2387,32 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         promptMappings = [...kept, ...promptMappings];
       }
 
+      // Safety net: ensure the CURRENT prompt has a mapping even if transcript
+      // parsing missed it. Without this, the latest prompt shows empty on the
+      // platform until the NEXT prompt fires (when user-prompt-submit captures it).
+      if (prompts.length > 0 && !promptMappings.some(pm => pm.promptIndex === currentPromptIdx)) {
+        const filteredUncommitted = filterUncommittedDiff(
+          gitCapture.uncommittedDiff || '', state.prePromptDirtyFiles || [],
+        );
+        const uncommittedFiles: string[] = [];
+        if (filteredUncommitted) {
+          for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+            if (m[1]) uncommittedFiles.push(m[1]);
+          }
+        }
+        const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
+        promptMappings.push({
+          promptIndex: currentPromptIdx,
+          promptText: currentPromptText.slice(0, 1000),
+          filesChanged: Array.from(allFiles),
+          diff: (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+          uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+        });
+        debugLog('stop', 'synthesized current prompt mapping (safety net)', {
+          promptIndex: currentPromptIdx, files: allFiles.size,
+        });
+      }
+
       debugLog('stop', 'prompt mappings (merged)', {
         currentPromptIdx,
         previousCount: previousMappings.length,
@@ -2485,6 +2567,28 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         uncommittedDiff: pm.uncommittedDiff,
       }));
     }
+    // Auto-checkpoint: save working tree state after each AI turn
+    // Includes attribution data (lines added/removed by AI)
+    try {
+      const cpId = createCheckpoint(state.repoPath, {
+        sessionTag: state.sessionTag,
+        prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
+        model: model || state.model,
+        tokensUsed: parsed.tokensUsed || 0,
+        costUsd: costUsd || 0,
+        promptIndex: prompts.length,
+        type: 'auto',
+        linesAdded: gitCapture.linesAdded || 0,
+        linesRemoved: gitCapture.linesRemoved || 0,
+        transcriptPath: state.transcriptPath,
+      });
+      if (cpId) {
+        debugLog('stop', 'auto-checkpoint created', { checkpointId: cpId, promptIndex: prompts.length });
+      }
+    } catch (cpErr: any) {
+      debugLog('stop', 'auto-checkpoint failed (non-fatal)', { message: cpErr.message });
+    }
+
     // Re-save state with RUNNING status FIRST so it survives any errors below
     state.status = 'RUNNING';
     saveSessionState(state, found!.saveCwd, state.sessionTag);
@@ -2879,6 +2983,35 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
     }
   } finally {
+    // Create final session-end checkpoint with transcript
+    try {
+      const finalCpId = createCheckpoint(state.repoPath, {
+        sessionTag: state.sessionTag,
+        type: 'session-end',
+        model: state.model,
+        prompt: state.prompts.length > 0 ? state.prompts[state.prompts.length - 1] : undefined,
+        promptIndex: state.prompts.length,
+        transcriptPath: state.transcriptPath,
+      });
+      if (finalCpId) {
+        debugLog('session-end', 'final checkpoint created', { checkpointId: finalCpId });
+      }
+    } catch { /* non-fatal */ }
+
+    // Condense all session checkpoints to permanent branch + clean up shadow branch
+    try {
+      const headSha = getHeadSha(state.repoPath) || 'unknown';
+      const { condensed, cleaned } = condenseAndCleanupSession(
+        state.repoPath,
+        state.sessionTag || '',
+        headSha,
+        state.transcriptPath,
+      );
+      debugLog('session-end', 'checkpoints condensed + shadow cleaned', { condensed, cleaned });
+    } catch (cpErr: any) {
+      debugLog('session-end', 'checkpoint condensation failed (non-fatal)', { message: cpErr.message });
+    }
+
     // Stop the heartbeat daemon
     stopHeartbeat(state.sessionId);
     debugLog('session-end', 'heartbeat stopped', { sessionId: state.sessionId });
@@ -3077,17 +3210,56 @@ export async function handlePostCommit(): Promise<void> {
 
   // F13: Respect config.commitLinking setting (always|prompt|never)
   const commitLinkingConfig = config?.commitLinking || 'always';
+
+  // Condense active checkpoints to permanent storage + add bidirectional linking
+  let latestCheckpointId: string | undefined;
+  if (state && state.sessionTag) {
+    try {
+      const checkpoints = listCheckpoints(repoPath, state.sessionTag);
+      if (checkpoints.length > 0) {
+        const latest = checkpoints[checkpoints.length - 1];
+        latestCheckpointId = latest.id;
+        // Condense to permanent orphan branch with transcript (like Entire's entire/checkpoints/v1)
+        condenseCheckpoint(repoPath, latest.id, latest, commitSha, state.transcriptPath);
+        debugLog('post-commit', 'condensed checkpoint to permanent branch', { checkpointId: latest.id, hasTranscript: !!state.transcriptPath });
+      }
+    } catch (cpErr: any) {
+      debugLog('post-commit', 'checkpoint condensation failed (non-fatal)', { message: cpErr.message });
+    }
+  }
+
   if (state && commitLinkingConfig !== 'never') {
     try {
-      // Only add trailer if not already present
+      // Add Origin-Session + Origin-Checkpoint trailers (bidirectional linking)
       const fullMessage = execFileSync('git', ['log', '-1', '--format=%B'], execOpts).trim();
       if (!fullMessage.includes('Origin-Session:')) {
         const shortId = state.sessionId.slice(0, 12);
-        const trailer = `Origin-Session: ${shortId}`;
-        // Amend the commit message to add the trailer
-        const newMessage = fullMessage + '\n\n' + trailer;
+        // Build rich trailer: Origin-Session: abc123 | Claude Code | 3 prompts
+        const trailerParts = [shortId];
+        const m = (state.model || '').toLowerCase();
+        const agentName = m.includes('claude') || m.includes('sonnet') || m.includes('opus') ? 'Claude Code'
+          : m.includes('gpt') || m.includes('o1-') || m.includes('o3-') || m.includes('o4-') ? 'Cursor'
+          : m.includes('gemini') ? 'Gemini CLI'
+          : m.includes('codex') ? 'Codex'
+          : m.includes('windsurf') ? 'Windsurf'
+          : m.includes('aider') ? 'Aider'
+          : m.includes('copilot') ? 'Copilot'
+          : m.includes('amp') ? 'Amp'
+          : m.includes('junie') ? 'Junie'
+          : m.includes('opencode') ? 'Opencode'
+          : state.model || 'AI';
+        trailerParts.push(agentName);
+        const pCount = state.prompts?.length || 0;
+        if (pCount > 0) trailerParts.push(pCount === 1 ? '1 prompt' : `${pCount} prompts`);
+        let trailers = `Origin-Session: ${trailerParts.join(' | ')}`;
+        // Add Origin-Checkpoint trailer for bidirectional linking (like Entire-Checkpoint)
+        if (latestCheckpointId) {
+          trailers += `\nOrigin-Checkpoint: ${latestCheckpointId}`;
+        }
+        // Amend the commit message to add the trailers
+        const newMessage = fullMessage + '\n\n' + trailers;
         execFileSync('git', ['commit', '--amend', '-m', newMessage, '--no-verify'], execOpts);
-        debugLog('post-commit', 'added Origin-Session trailer', { shortId });
+        debugLog('post-commit', 'added trailers', { sessionId: shortId, checkpointId: latestCheckpointId });
         // Re-read commit SHA since amend changes it
         commitSha = execFileSync('git', ['rev-parse', 'HEAD'], execOpts).trim();
       }

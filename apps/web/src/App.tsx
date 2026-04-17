@@ -59,6 +59,7 @@ const Infrastructure = lazy(() => import('./pages/Infrastructure'));
 const PullRequests = lazy(() => import('./pages/PullRequests'));
 const Leaderboard = lazy(() => import('./pages/Leaderboard'));
 const TrailDetail = lazy(() => import('./pages/TrailDetail'));
+const Snapshots = lazy(() => import('./pages/Snapshots'));
 const Admin = lazy(() => import('./pages/Admin'));
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -383,6 +384,10 @@ export default function App() {
       <Route
         path="/api-keys"
         element={<ProtectedRoute><AppLayout><ApiKeys /></AppLayout></ProtectedRoute>}
+      />
+      <Route
+        path="/snapshots"
+        element={<ProtectedRoute><AppLayout><Snapshots /></AppLayout></ProtectedRoute>}
       />
       <Route
         path="/trails"

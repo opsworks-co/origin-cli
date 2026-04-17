@@ -213,45 +213,37 @@ export default function CommitDetailPage() {
 
         {/* Session summary strip */}
         {commit.session && (
-          <div className="mt-4 pt-4 border-t border-gray-800 flex items-center gap-5 flex-wrap text-xs">
-            {commit.session.agent && (
+          <div className="mt-4 pt-4 border-t border-gray-800">
+            <Link
+              to={`/sessions/${commit.session.id}?tab=turns`}
+              className="flex items-center gap-4 flex-wrap px-4 py-3 -mx-1 rounded-lg bg-indigo-500/5 border border-indigo-500/20 hover:border-indigo-500/40 hover:bg-indigo-500/10 transition-all group"
+            >
               <div className="flex items-center gap-2">
-                {commit.session.agent.icon && (
+                {commit.session.agent?.icon && (
                   <span className="text-base leading-none">{commit.session.agent.icon}</span>
                 )}
-                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold bg-indigo-500/10 text-indigo-300 border border-indigo-500/40">
-                  {commit.session.agent.name}
+                <span className="text-[11px] font-semibold text-indigo-300">
+                  {commit.session.agent?.name || 'AI Session'}
                 </span>
               </div>
-            )}
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-mono bg-gray-800/60 text-gray-300 border border-gray-700/60">
-              {commit.session.model}
-            </span>
-            <Link
-              to={`/sessions/${commit.session.id}`}
-              className="flex items-center gap-1.5 text-indigo-400 hover:text-indigo-300 font-medium"
-            >
-              <span className="font-mono">session {commit.session.id.slice(0, 8)}</span>
-              <span>&rarr;</span>
-            </Link>
-            {commit.session.user && (
-              <span className="text-gray-500">
-                by <span className="text-gray-300">{commit.session.user.name || commit.session.user.email}</span>
+              <span className="text-[11px] font-mono text-gray-400 bg-gray-800/60 px-2 py-0.5 rounded">
+                {commit.session.model}
               </span>
-            )}
-            <span className="text-gray-500">
-              <span className="text-gray-300">{commit.promptChanges.length}</span>{' '}
-              prompt{commit.promptChanges.length === 1 ? '' : 's'}
-            </span>
-            <span className="text-gray-500">
-              <span className="text-gray-300">${commit.session.costUsd.toFixed(4)}</span> cost
-            </span>
-            <span className="text-gray-500">
-              <span className="text-gray-300">{(commit.session.tokensUsed / 1000).toFixed(1)}k</span> tokens
-            </span>
-            <span className="text-gray-500">
-              <span className="text-gray-300">{formatDuration(commit.session.durationMs)}</span>
-            </span>
+              {commit.session.user && (
+                <span className="text-[11px] text-gray-500">
+                  by <span className="text-gray-300">{commit.session.user.name || commit.session.user.email}</span>
+                </span>
+              )}
+              <span className="text-[11px] text-gray-400">
+                {commit.promptChanges.length} prompt{commit.promptChanges.length === 1 ? '' : 's'}
+              </span>
+              <span className="text-[11px] text-emerald-400">${commit.session.costUsd.toFixed(2)}</span>
+              <span className="text-[11px] text-gray-400">{(commit.session.tokensUsed / 1000).toFixed(1)}k tokens</span>
+              <span className="text-[11px] text-gray-500">{formatDuration(commit.session.durationMs)}</span>
+              <span className="ml-auto text-[11px] text-indigo-400 group-hover:text-indigo-300 font-medium flex items-center gap-1">
+                View full session <span>&rarr;</span>
+              </span>
+            </Link>
           </div>
         )}
       </div>

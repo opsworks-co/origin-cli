@@ -1,0 +1,33 @@
+app = "origin-platform-dev"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+  [build.args]
+    VITE_API_URL = "https://origin-platform-dev.fly.dev"
+
+[env]
+  PORT = "8080"
+  NODE_ENV = "production"
+  ORIGIN_WEB_URL = "https://origin-platform-dev.fly.dev"
+  # JWT_SECRET must be set via `fly secrets set -a origin-platform-dev JWT_SECRET=<value>`
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "origin_data_dev"
+  destination = "/data"

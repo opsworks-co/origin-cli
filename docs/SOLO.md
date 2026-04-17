@@ -8,12 +8,14 @@ Origin Solo is the free, unrestricted version of Origin for individual developer
 
 - **Unlimited repos** — every repo you work in is auto-registered on first session
 - **Unlimited sessions** — no caps, no throttling
-- **All AI agents** — Claude Code, Cursor, Gemini CLI, Codex, Windsurf, Aider, and more. Auto-created when detected.
+- **All AI agents** — Claude Code, Cursor, Gemini CLI, Codex, Windsurf, Aider, and 7 more. Auto-detected.
 - **Full session replay** — every prompt, every response, every file change
 - **Per-prompt diffs** — see exactly which prompt caused which code changes
+- **Snapshots** — per-prompt checkpoints you can restore or branch from with one click
 - **Token & cost tracking** — know how much each session costs across models
-- **CLI attribution tools** — `origin blame`, `origin stats`, `origin diff`, `origin prompts`
-- **Web dashboard** — visual session browser at getorigin.io
+- **CLI attribution tools** — `origin blame`, `origin diff`, `origin stats`, `origin log`, `origin show <sha>`
+- **Cross-agent handoff** — `origin context` passes state between Claude, Cursor, and any other agent
+- **Web dashboard** — visual session browser at [getorigin.io](https://getorigin.io)
 - **Multi-account** — connect to a team account too, if you belong to one
 
 ---
@@ -50,13 +52,22 @@ Open any AI coding agent and start working. Origin tracks everything automatical
 ```bash
 origin sessions              # list recent sessions
 origin session <id>          # full session with prompts and diffs
+origin log                   # git log with AI session info inline
+origin show <sha>            # full session behind any commit
 origin blame src/index.ts    # line-level AI/human attribution
 origin stats                 # AI vs human breakdown
 origin diff                  # annotated diff
+origin context               # cross-agent handoff + memory
 ```
 
 **Dashboard:**
-Open [getorigin.io/dashboard](https://getorigin.io/dashboard) to browse sessions visually.
+Open [getorigin.io](https://getorigin.io) to browse sessions visually. Key pages:
+
+- **Dashboard** — cost, sessions, AI % this week vs last
+- **Snapshots** — every AI prompt as a checkpoint, with restore + branch + compare
+- **Live Feed** — real-time view of active AI sessions
+- **Repositories** — per-repo AI attribution and commit history
+- **Insights** — deep analytics on models, peak hours, rework hotspots
 
 ---
 

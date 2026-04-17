@@ -25,16 +25,59 @@ Standalone is the default. Run `origin login` to switch to connected mode.
 
 ---
 
+## Command Surface
+
+Origin commands are grouped by purpose. The primary surface below is what `origin --help` shows. Every command name Origin has ever shipped continues to work — older names are kept as hidden aliases of the primary commands forever.
+
+### Primary commands
+
+| Group | Commands |
+|-------|----------|
+| **Setup** | `login`, `init`, `doctor` |
+| **See AI work** | `blame`, `diff`, `stats`, `chat` |
+| **Sessions** | `sessions`, `explain`, `resume`, `share` |
+| **Tracking** | `issue`, `context` |
+| **Time-travel** | `checkpoint` |
+| **Data** | `export`, `search`, `backfill` |
+| **Internal** | `hooks`, `upgrade`, `plugin`, `version` |
+
+### Aliases (hidden from `--help`, fully supported)
+
+| Primary | Alias |
+|---------|-------|
+| `blame` | `ask`, `why`, `prompts` |
+| `stats` | `recap`, `report`, `analyze`, `rework`, `compare` |
+| `sessions` | `session`, `log`, `show`, `session-compare` |
+| `explain` | `review`, `review-pr`, `intent-review` |
+| `context` | `handoff`, `memory` |
+| `issue` | `todo`, `trail` |
+| `checkpoint` | `rewind`, `snapshot` |
+| `init` | `enable`, `disable`, `link`, `attach`, `whoami` |
+| `doctor` | `status`, `verify`, `verify-install`, `clean`, `reset` |
+| `export` / `search` / `backfill` | `repos`, `agents`, `sync`, `policies`, `audit`, `db`, `ignore` |
+| `hooks` | `config`, `proxy`, `ci`, `prompt-status`, `shell-prompt`, `web` |
+
+If your scripts call `origin ask ...` or `origin recap --format json`, they keep working with identical output.
+
+---
+
 ## Supported Agents
 
-| Agent | Slug | Hook Type |
-|-------|------|-----------|
-| Claude Code | `claude-code` | Session hooks (SessionStart, Stop, UserPromptSubmit, SessionEnd, PreToolUse, PostToolUse) |
-| Cursor | `cursor` | Session hooks + Cursor DB |
-| Gemini CLI | `gemini` | Session hooks |
-| Codex CLI | `codex` | Session hooks |
-| Windsurf | `windsurf` | Session hooks |
-| Aider | `aider` | Config hooks (.aider.conf.yml) |
+| Agent | Slug | Detection | Status |
+|-------|------|-----------|--------|
+| Claude Code | `claude-code` | Session hooks | Stable |
+| Cursor | `cursor` | Session hooks + Cursor DB + IDE extension | Stable |
+| Gemini CLI | `gemini` | Session hooks + process detection | Stable |
+| Codex CLI | `codex` | Session hooks + process detection | Stable |
+| Aider | `aider` | Config hooks (`.aider.conf.yml`) | Stable |
+| Windsurf | `windsurf` | Session hooks + process detection | Preview |
+| GitHub Copilot | `copilot` | Process detection + GH CLI extension | Preview |
+| Continue | `continue` | Process detection | Preview |
+| Amp | `amp` | Process detection | Preview |
+| Junie | `junie` | Process detection | Preview |
+| OpenCode | `opencode` | Process detection | Preview |
+| Rovo Dev | `rovo` | Process detection | Preview |
+| Droid | `droid` | Process detection | Preview |
 
 ---
 
@@ -311,6 +354,51 @@ origin rework --days 30 --limit 10
 
 ---
 
+### `origin log`
+
+Git log with Origin session info inline. Like `git log` but each commit also shows which AI agent wrote it, how much it cost, and how many prompts were involved.
+
+```bash
+origin log                     # last 20 commits
+origin log --limit 50
+```
+
+Output:
+
+```
+  599d8fc Fix auth bug       — Claude Code · $0.12 · 3 prompts · Apr 14
+  def5678 Add rate limiting  — Cursor · $0.08 · 1 prompt · Apr 13
+  9ab1234 Update docs        — (no session) · Apr 12
+
+  2/3 commits AI-generated (67%) · $0.20 total cost
+```
+
+| Flag | Description |
+|------|-------------|
+| `-l, --limit <n>` | Max commits to show (default: `20`) |
+| `-a, --all` | Show all branches |
+
+Hidden alias of `origin sessions` in the consolidated surface — still has its own subcommand entry.
+
+---
+
+### `origin show <commit>`
+
+Full session detail for any commit. Takes a commit SHA (short or full) and prints the session that produced it: agent, model, duration, cost, tokens, every prompt in order, every file changed with per-file `+/-` line counts.
+
+```bash
+origin show 599d8fc
+origin show 599d8fc --json
+```
+
+Reads session data from git notes and the `origin-sessions` branch. If the commit has no linked session, prints the commit metadata and a note that it was made outside an AI session.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+---
+
 ### `origin backfill`
 
 Retroactively tag old commits with AI attribution by scanning agent history (`.claude/`, `.cursor/`, `.codex/`), commit message patterns, and code style heuristics.
@@ -549,37 +637,41 @@ origin share abc123 --output session.md
 
 Mid-session shadow snapshots (no commits required). Captures working tree state without affecting git index.
 
-### `origin snapshot`
+### `origin checkpoint`
 
-Save a snapshot of the current working tree state.
-
-```bash
-origin snapshot
-```
-
-### `origin snapshot list`
-
-List all snapshots for the current session.
+Per-prompt checkpoints — auto-saved after every AI turn. These are the snapshots you see on the dashboard at `getorigin.io/snapshots`.
 
 ```bash
-origin snapshot list
+origin checkpoint list              # list all checkpoints for current session
+origin checkpoint save              # manually save a checkpoint now
+origin checkpoint restore <id>      # restore working tree to a checkpoint
+origin checkpoint diff [from] [to]  # diff between two checkpoints
+origin checkpoint clean             # remove all checkpoints
 ```
 
-### `origin snapshot restore <id>`
+Checkpoints capture: prompt text, files changed, diff, AI attribution %, commit SHA, tree SHA. Stored in git so they travel with `git clone`.
 
-Restore working tree to a previously saved snapshot. Automatically saves current state before restoring.
+`origin snapshot` and `origin rewind` are preserved as hidden aliases of `origin checkpoint`.
+
+### `origin snapshot` (alias of `origin checkpoint`)
+
+Still supported for backwards compatibility. Prefer `origin checkpoint` going forward.
 
 ```bash
-origin snapshot restore lxyz123
+origin snapshot                     # save a point-in-time snapshot
+origin snapshot list                # list snapshots for current session
+origin snapshot restore <id>        # restore working tree to a snapshot
+origin snapshot clean               # remove all snapshots
 ```
 
-### `origin snapshot clean`
+### Restore from snapshot via the dashboard
 
-Remove all shadow snapshot branches.
+On the connected platform, every snapshot has a **Restore** and **Branch** button. Clicking either queues a command that the CLI heartbeat picks up within 30s:
 
-```bash
-origin snapshot clean
-```
+- **Restore** — creates a new branch at the snapshot's commit, stashes uncommitted changes, checks out the new branch. Non-destructive.
+- **Branch** — creates a named branch at the snapshot's commit without switching to it. Zero-impact bookmark.
+
+Requirements: the session must be RUNNING (heartbeat alive) and the snapshot must have a commit SHA or tree SHA.
 
 ---
 
@@ -1095,6 +1187,29 @@ eval "$(origin shell-prompt)"
 ```
 
 Add to `~/.zshrc` or `~/.bashrc` to persist. Works with both bash (`PROMPT_COMMAND`) and zsh (`precmd` + `RPROMPT`). Shows session status in the right prompt when Origin is actively tracking.
+
+---
+
+## Cross-Agent Context
+
+### `origin context`
+
+Unifies cross-agent handoff and session memory. When you switch from Claude to Cursor mid-task, `context` lets the new agent pick up where the old one left off.
+
+```bash
+origin context              # show both handoff + memory
+origin context show         # same, explicit
+origin context handoff      # show only cross-agent handoff
+origin context memory       # show only accumulated session summaries
+origin context clear        # clear both
+origin context clear --handoff-only
+origin context clear --memory-only
+```
+
+Under the hood, `context` delegates to the same storage as `origin handoff` and `origin memory` (both hidden aliases).
+
+- **Handoff**: the last session's context blob for the *next* agent. Single, ephemeral, cleared when the next session consumes it.
+- **Memory**: accumulated summaries of recent sessions. Injected into new session system prompts so agents know what was done yesterday. Stored in `refs/notes/origin-memory`.
 
 ---
 

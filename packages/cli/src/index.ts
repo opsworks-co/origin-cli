@@ -53,9 +53,12 @@ import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
 import { reworkCommand } from './commands/rework.js';
 import { reportCommand } from './commands/report.js';
+import { logCommand } from './commands/log.js';
+import { showCommand } from './commands/show.js';
 import { attachCommand } from './commands/attach.js';
 import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
+import { checkpointListCommand, checkpointSaveCommand, checkpointRestoreCommand, checkpointDiffCommand, checkpointCleanCommand } from './commands/checkpoint.js';
 import { promptStatusCommand } from './commands/prompt-status.js';
 import { shellPromptCommand } from './commands/shell-prompt.js';
 import {
@@ -80,6 +83,15 @@ import { installGlobalConsoleSanitizer } from './error-sanitize.js';
 installGlobalConsoleSanitizer();
 
 const program = new Command();
+
+// Mark a command as hidden from --help. The command itself still works when
+// invoked directly — this just keeps the top-level help output focused on
+// the primary surface. Used for legacy aliases that we want to keep working
+// forever but not advertise. Commander uses the internal `_hidden` field.
+function hidden(cmd: Command): Command {
+  (cmd as any)._hidden = true;
+  return cmd;
+}
 
 // `--version` prints the package version. `--version --verbose` (or the
 // dedicated `version` subcommand below) additionally prints the git SHA and
@@ -364,6 +376,17 @@ program.command('recap')
   .option('-d, --days <n>', 'Number of days to include (default: 1 = today only)', '1')
   .action(recapCommand);
 
+program.command('log')
+  .description('Show git log with Origin session info inline (agent, cost, prompts)')
+  .option('-l, --limit <n>', 'Max commits to show', '20')
+  .option('-a, --all', 'Show all branches')
+  .action(logCommand);
+
+program.command('show <commit>')
+  .description('Show the Origin session linked to a commit')
+  .option('--json', 'Output as JSON')
+  .action(showCommand);
+
 program.command('report')
   .description('Generate a markdown sprint report summarizing AI activity')
   .option('-r, --range <range>', 'Date range: 7d, 14d, or 30d', '7d')
@@ -465,6 +488,28 @@ snapshot.command('restore <id>')
 snapshot.command('clean')
   .description('Remove all shadow snapshots')
   .action(snapshotCleanCommand);
+
+// ─── Checkpoints (unified timeline: snapshots + commits) ─────────────────
+
+const checkpoint = program.command('checkpoint').description('Time-travel checkpoints — auto-saved after each AI prompt');
+checkpoint.action(checkpointListCommand);
+checkpoint.command('list')
+  .description('List all checkpoints for current session')
+  .option('-a, --all', 'Show checkpoints from all sessions')
+  .action(checkpointListCommand);
+checkpoint.command('save')
+  .description('Manually save a checkpoint')
+  .option('-m, --message <msg>', 'Checkpoint description')
+  .action(checkpointSaveCommand);
+checkpoint.command('restore <id>')
+  .description('Restore working tree to a checkpoint')
+  .action(checkpointRestoreCommand);
+checkpoint.command('diff [fromId] [toId]')
+  .description('Show diff between checkpoints (or last checkpoint vs current)')
+  .action(checkpointDiffCommand);
+checkpoint.command('clean')
+  .description('Remove all checkpoint branches')
+  .action(checkpointCleanCommand);
 
 program.command('share <sessionId>')
   .description('Create a shareable prompt bundle from a session')
@@ -802,6 +847,82 @@ program.command('user <id>')
       }
     } catch (e: any) { console.error(chalk.red(e.message)); }
   });
+
+// ─── Consolidation: new primary commands ────────────────────────────────
+// `context` unifies cross-agent handoff + session memory. Existing `handoff`
+// and `memory` stay working as hidden aliases below.
+const context = program.command('context')
+  .description('Cross-agent context — handoff + accumulated session memory');
+context.action(async () => {
+  // Default: show both handoff and memory in one view
+  console.log('\x1b[2m→ Handoff:\x1b[0m');
+  await handoffShowCommand();
+  console.log('\n\x1b[2m→ Memory:\x1b[0m');
+  await memoryShowCommand({});
+});
+context.command('show')
+  .description('Show handoff + session memory for this repo')
+  .option('-l, --limit <n>', 'Number of memory sessions to show', '10')
+  .action(async (opts) => {
+    console.log('\x1b[2m→ Handoff:\x1b[0m');
+    await handoffShowCommand();
+    console.log('\n\x1b[2m→ Memory:\x1b[0m');
+    await memoryShowCommand(opts);
+  });
+context.command('handoff')
+  .description('Show only cross-agent handoff context')
+  .action(handoffShowCommand);
+context.command('memory')
+  .description('Show only accumulated session memory')
+  .option('-l, --limit <n>', 'Number of sessions to show', '10')
+  .action(memoryShowCommand);
+context.command('clear')
+  .description('Clear handoff and memory for this repo')
+  .option('--handoff-only', 'Clear only handoff')
+  .option('--memory-only', 'Clear only memory')
+  .action(async (opts: { handoffOnly?: boolean; memoryOnly?: boolean }) => {
+    if (opts.memoryOnly) {
+      await memoryClearCommand();
+    } else if (opts.handoffOnly) {
+      await handoffClearCommand();
+    } else {
+      await handoffClearCommand();
+      await memoryClearCommand();
+    }
+  });
+
+// ─── Consolidation: hide legacy aliases from --help ─────────────────────
+// Every name below still works when invoked directly — this only cleans up
+// `origin --help` output. Keeps backwards compatibility forever.
+const HIDDEN_COMMAND_NAMES = new Set([
+  // Setup aliases (primary: init, doctor)
+  'enable', 'disable', 'link', 'attach', 'whoami', 'status',
+  'prompt-status', 'shell-prompt', 'web',
+  'reset', 'clean', 'verify', 'verify-install',
+  // See-AI-work aliases (primary: blame, stats, chat, diff)
+  'ask', 'why', 'prompts',
+  'recap', 'report', 'analyze', 'rework', 'compare',
+  // Sessions aliases (primary: sessions, explain, resume, share)
+  'session', 'log', 'show', 'session-compare',
+  'review', 'review-pr', 'intent-review',
+  // Tracking aliases (primary: issue, context)
+  'todo', 'trail', 'handoff', 'memory',
+  // Time-travel aliases (primary: checkpoint)
+  'rewind', 'snapshot',
+  // Data aliases (primary: export, search, backfill)
+  'repos', 'agents', 'sync', 'policies', 'audit', 'db', 'ignore',
+  // Internal aliases (primary: hooks, upgrade, plugin)
+  'config', 'proxy', 'ci',
+  // Team/admin commands (not part of solo flow)
+  'repo:add', 'agent:create', 'policy:versions', 'agent:versions',
+  'notifications', 'team', 'user',
+]);
+
+for (const cmd of program.commands) {
+  if (HIDDEN_COMMAND_NAMES.has(cmd.name())) {
+    (cmd as any)._hidden = true;
+  }
+}
 
 // ─── Version Check (post-action) ────────────────────────────────────────
 

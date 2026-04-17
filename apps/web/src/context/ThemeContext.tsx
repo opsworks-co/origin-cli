@@ -15,8 +15,8 @@ const ThemeContext = createContext<ThemeContextValue>({
 function getInitialTheme(): Theme {
   const stored = localStorage.getItem('theme');
   if (stored === 'light' || stored === 'dark') return stored;
-  // Respect system preference on first visit
-  if (window.matchMedia('(prefers-color-scheme: light)').matches) return 'light';
+  // Default to dark for all new visitors — brand consistency.
+  // Users can switch to light from the dashboard toggle if they prefer.
   return 'dark';
 }
 

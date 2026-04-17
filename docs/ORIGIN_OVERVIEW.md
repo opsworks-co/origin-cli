@@ -315,6 +315,22 @@ Admins can restore agents to any previous version.
 - **Model Comparison**: Per-model analytics (cost, tokens, approval rates)
 - **Prompt Analytics**: Searchable prompt log with keyword pattern detection
 - **Activity Heatmaps**: Team activity patterns by day/time
+- **Snapshots**: Per-prompt checkpoints across every session with restore, branch, and compare actions
+- **Live Feed**: Real-time view of active AI sessions
+
+### Snapshots
+
+Every AI prompt creates a snapshot — a point-in-time checkpoint stored in git with the prompt text, files changed, diff, AI attribution %, commit SHA, and tree SHA.
+
+Three actions per snapshot from the dashboard:
+
+| Action | What happens |
+|--------|--------------|
+| **Restore** | Creates a new branch at the snapshot's commit, stashes uncommitted work, checks out the new branch. Non-destructive — original branch preserved. |
+| **Branch** | Creates a named branch at the snapshot's commit without switching. Bookmark for later exploration. |
+| **Compare** | Side-by-side diff of any two snapshots — file-level changes, added lines, removed lines, the original prompts. |
+
+All three commands queue via the session's heartbeat and execute locally via git — the dashboard never touches your working tree directly, the CLI does. Status polling updates the UI within 30 seconds of the CLI picking up the command.
 
 ---
 

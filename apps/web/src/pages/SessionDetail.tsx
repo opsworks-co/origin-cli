@@ -453,45 +453,116 @@ export default function SessionDetail() {
 
   const filesCount = (() => { try { return JSON.parse(session.filesChanged).length; } catch { return 0; } })();
 
-  return (
-    <div className="flex flex-col gap-4 h-full">
-      {/* ── Header row ── */}
-      <div className="flex items-center gap-3 flex-wrap flex-shrink-0">
-        <button
-          onClick={() => navigate('/sessions')}
-          className="text-gray-500 hover:text-gray-300 transition-colors text-sm"
-        >
-          &larr; Sessions
-        </button>
-        <h1 className="text-xl font-bold">{(session.repoNames && session.repoNames.length > 1 ? session.repoNames.join(', ') : session.repoName) ?? 'Session'}</h1>
-        {statusBadge(isDev ? session.status.toLowerCase() : (session.review?.status?.toLowerCase() ?? session.status.toLowerCase()))}
-        <span className="text-xs text-gray-600 font-mono">{session.commitSha?.slice(0, 8)}</span>
-        {session.branch && (
-          <span className="text-xs bg-gray-800 text-gray-300 px-2 py-0.5 rounded-full font-mono inline-flex items-center gap-1">
-            <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
-            {session.branch}
-          </span>
-        )}
+  // Compute AI attribution from prompt changes
+  const aiPct = (() => {
+    if (!session.promptChanges || session.promptChanges.length === 0) return null;
+    let totalLines = 0;
+    let aiLines = 0;
+    for (const pc of session.promptChanges) {
+      const a = (pc as any).linesAdded || 0;
+      const r = (pc as any).linesRemoved || 0;
+      const pct = (pc as any).aiPercentage ?? 100;
+      totalLines += a + r;
+      aiLines += (a + r) * (pct / 100);
+    }
+    return totalLines > 0 ? Math.round((aiLines / totalLines) * 100) : null;
+  })();
 
-        {/* Quick stats */}
-        <div className="ml-auto flex items-center gap-4 text-xs text-gray-500">
-          <span className="flex items-center gap-1">
-            <span className="text-gray-400">{session.agentName ?? 'Agent'}</span>
+  return (
+    <div className="flex flex-col gap-0 h-full">
+      {/* ── Header ── */}
+      <div className="flex-shrink-0 px-6 pt-5 pb-4">
+        {/* Top row: back + title + status */}
+        <div className="flex items-center gap-3 mb-3">
+          <button
+            onClick={() => navigate('/sessions')}
+            className="text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 19l-7-7 7-7" /></svg>
+          </button>
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-lg font-semibold text-gray-100">{(session.repoNames && session.repoNames.length > 1 ? session.repoNames.join(', ') : session.repoName) ?? 'Session'}</h1>
+            {statusBadge(isDev ? session.status.toLowerCase() : (session.review?.status?.toLowerCase() ?? session.status.toLowerCase()))}
+          </div>
+          {session.branch && (
+            <span className="text-[11px] bg-gray-800/80 text-gray-400 px-2.5 py-1 rounded-md font-mono inline-flex items-center gap-1.5 border border-gray-700/50">
+              <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+              {session.branch}
+            </span>
+          )}
+          {session.commitSha && (
+            <code className="text-[10px] text-gray-600 font-mono">{session.commitSha.slice(0, 8)}</code>
+          )}
+        </div>
+
+        {/* Stats row: metric cards */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Agent + Model */}
+          <div className="flex items-center gap-1.5 bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
+            <span className="text-[11px] text-gray-400">{session.agentName ?? 'Agent'}</span>
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">{session.model}</span>
             {session.agentVersion && (
               <span className="text-[10px] text-gray-600">v{session.agentVersion}</span>
             )}
-            <span className="badge-blue text-[10px] py-0">{session.model}</span>
-          </span>
+          </div>
+
           {(session.userName || session.apiKeyName) && (
-            <span>by {session.userName || session.apiKeyName}</span>
+            <div className="flex items-center gap-1.5 bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
+              <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+              <span className="text-[11px] text-gray-300">{session.userName || session.apiKeyName}</span>
+            </div>
           )}
-          <span>{formatDuration(session.durationMs)}</span>
-          <span>{session.tokensUsed.toLocaleString()} tokens</span>
-          <span>{formatCost(session.costUsd)}</span>
-          <span>{session.toolCalls} tools</span>
-          <span>{filesCount} files</span>
-          <span className="text-green-400">+{session.linesAdded}</span>
-          <span className="text-red-400">-{session.linesRemoved}</span>
+
+          {/* Duration */}
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
+            <span className="text-[11px] text-gray-300">{formatDuration(session.durationMs)}</span>
+          </div>
+
+          {/* Cost */}
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
+            <span className="text-[11px] text-gray-300">{formatCost(session.costUsd)}</span>
+          </div>
+
+          {/* Tokens */}
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
+            <span className="text-[11px] text-gray-400">{session.tokensUsed.toLocaleString()}</span>
+            <span className="text-[10px] text-gray-600 ml-1">tokens</span>
+          </div>
+
+          {/* Lines changed */}
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5 flex items-center gap-2">
+            <span className="text-[11px] text-green-400 font-mono">+{session.linesAdded}</span>
+            <span className="text-[11px] text-red-400 font-mono">-{session.linesRemoved}</span>
+          </div>
+
+          {/* Files + tools */}
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5 flex items-center gap-2">
+            <span className="text-[11px] text-gray-400">{filesCount} files</span>
+            <span className="text-gray-700">|</span>
+            <span className="text-[11px] text-gray-400">{session.toolCalls} tools</span>
+          </div>
+
+          {/* AI Attribution */}
+          {aiPct !== null && (
+            <div className={`rounded-lg px-3 py-1.5 flex items-center gap-1.5 border ${
+              aiPct >= 90 ? 'bg-blue-500/10 border-blue-500/25' :
+              aiPct >= 50 ? 'bg-purple-500/10 border-purple-500/25' :
+              'bg-green-500/10 border-green-500/25'
+            }`}>
+              <div className="w-4 h-4 rounded-full border-2 flex items-center justify-center" style={{
+                borderColor: aiPct >= 90 ? 'rgb(96,165,250)' : aiPct >= 50 ? 'rgb(168,85,247)' : 'rgb(74,222,128)',
+                background: `conic-gradient(${aiPct >= 90 ? 'rgb(96,165,250)' : aiPct >= 50 ? 'rgb(168,85,247)' : 'rgb(74,222,128)'} ${aiPct}%, transparent ${aiPct}%)`,
+              }}>
+                <div className="w-2 h-2 rounded-full bg-gray-900" />
+              </div>
+              <span className={`text-[11px] font-medium ${
+                aiPct >= 90 ? 'text-blue-400' : aiPct >= 50 ? 'text-purple-400' : 'text-green-400'
+              }`}>{aiPct}% AI</span>
+            </div>
+          )}
+
+          {/* Spacer + action buttons */}
+          <div className="ml-auto flex items-center gap-1.5 flex-wrap">
 
           {/* Action buttons — pill style */}
           <div className="flex items-center gap-2 ml-2 flex-wrap">
@@ -612,6 +683,7 @@ export default function SessionDetail() {
               {deleting ? 'Deleting...' : 'Delete'}
             </button>
           </div>
+        </div>
         </div>
       </div>
 
@@ -950,85 +1022,105 @@ export default function SessionDetail() {
             );
           })()}
 
-          {/* System prompt hidden — available via API but not shown in UI */}
+          {/* Agent System Prompt & Version */}
+          {(session.agentSystemPrompt || session.agentVersion) && (
+            <div className="card space-y-2 flex-1 min-w-[250px]">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                Agent Context
+                {session.agentVersion && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-700 text-gray-400 font-normal normal-case tracking-normal">
+                    v{session.agentVersion}
+                  </span>
+                )}
+              </h3>
+              {session.agentSystemPrompt && (
+                <details className="group">
+                  <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-300 transition-colors">
+                    System Prompt <span className="text-gray-600">({session.agentSystemPrompt.length} chars)</span>
+                  </summary>
+                  <pre className="mt-2 text-[10px] text-gray-500 bg-gray-900/50 rounded p-2 max-h-48 overflow-auto font-mono whitespace-pre-wrap">
+                    {session.agentSystemPrompt.slice(0, 5000)}
+                    {session.agentSystemPrompt.length > 5000 && '\n... (truncated)'}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )}
+
+          {/* Session Git Info */}
+          {session.sessionDiff && (
+            <div className="card space-y-2 flex-1 min-w-[250px]">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Git State</h3>
+              <div className="text-xs space-y-1">
+                {session.sessionDiff.headBefore && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-500">Before:</span>
+                    <code className="text-gray-400 font-mono text-[10px] bg-gray-800 px-1.5 py-0.5 rounded">{session.sessionDiff.headBefore.slice(0, 12)}</code>
+                  </div>
+                )}
+                {session.sessionDiff.headAfter && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-500">After:</span>
+                    <code className="text-gray-400 font-mono text-[10px] bg-gray-800 px-1.5 py-0.5 rounded">{session.sessionDiff.headAfter.slice(0, 12)}</code>
+                  </div>
+                )}
+                {session.sessionDiff.commitShas && session.sessionDiff.commitShas.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-500">Commits:</span>
+                    <span className="text-gray-400">{session.sessionDiff.commitShas.length}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* ── Main content — full width ── */}
-      <div className="card p-0 overflow-hidden flex-1 min-h-0 flex flex-col">
+      <div className="rounded-xl border border-gray-800/60 bg-gray-900/30 overflow-hidden flex-1 min-h-0 flex flex-col mx-6 mb-4">
         {/* Tab bar */}
-        <div className="px-5 py-2.5 border-b border-gray-800 flex-shrink-0 flex items-center gap-1">
-          <button
-            onClick={() => setActiveTab('session')}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-              activeTab === 'session'
-                ? 'bg-indigo-600/20 text-indigo-400 font-medium'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
-            }`}
-          >
-            Session
-            {(session.promptChanges?.length ?? 0) > 0 && (
-              <span className="ml-1.5 text-xs bg-indigo-600/30 text-indigo-400 px-1.5 py-0.5 rounded-full">
-                {session.promptChanges!.length}
-              </span>
-            )}
-          </button>
-          <button
-            onClick={() => setActiveTab('console')}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-              activeTab === 'console'
-                ? 'bg-emerald-600/20 text-emerald-400 font-medium'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
-            }`}
-          >
-            Console
-          </button>
-          <button
-            onClick={() => setActiveTab('blame')}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-              activeTab === 'blame'
-                ? 'bg-indigo-600/20 text-indigo-400 font-medium'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
-            }`}
-          >
-            AI Blame
-          </button>
-          <button
-            onClick={() => setActiveTab('turns')}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-              activeTab === 'turns'
-                ? 'bg-indigo-600/20 text-indigo-400 font-medium'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
-            }`}
-          >
-            Turns
-          </button>
-          <button
-            onClick={() => setActiveTab('security')}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-              activeTab === 'security'
-                ? 'bg-indigo-600/20 text-indigo-400 font-medium'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
-            }`}
-          >
-            Security
-            {findings.length > 0 && (
-              <span className="ml-1.5 text-xs bg-red-600/30 text-red-400 px-1.5 py-0.5 rounded-full">
-                {findings.length}
-              </span>
-            )}
-          </button>
+        <div className="px-4 pt-1 border-b border-gray-800/60 flex-shrink-0 flex items-center gap-0">
+          {([
+            { key: 'session' as const, label: 'Session', count: session.promptChanges?.length || 0 },
+            { key: 'console' as const, label: 'Console', count: 0 },
+            { key: 'blame' as const, label: 'AI Blame', count: 0 },
+            { key: 'turns' as const, label: 'Checkpoints', count: 0 },
+            { key: 'security' as const, label: 'Security', count: findings.length },
+          ] as const).map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`relative px-4 py-2.5 text-[13px] font-medium transition-colors ${
+                activeTab === tab.key
+                  ? 'text-gray-100'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              {tab.label}
+              {tab.count > 0 && (
+                <span className={`ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full ${
+                  tab.key === 'security'
+                    ? 'bg-red-500/20 text-red-400'
+                    : 'bg-gray-700/80 text-gray-400'
+                }`}>
+                  {tab.count}
+                </span>
+              )}
+              {activeTab === tab.key && (
+                <div className="absolute bottom-0 left-2 right-2 h-[2px] bg-indigo-500 rounded-full" />
+              )}
+            </button>
+          ))}
 
           {/* Ask the Author button */}
           <button
             onClick={() => { setShowAskPanel(!showAskPanel); setAskContext(undefined); }}
-            className={`ml-auto px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 ${
+            className={`ml-auto px-3 py-2 text-[13px] font-medium rounded-lg transition-colors flex items-center gap-1.5 ${
               showAskPanel
-                ? 'bg-purple-600/20 text-purple-400 font-medium'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/50'
+                ? 'bg-purple-500/15 text-purple-400'
+                : 'text-gray-500 hover:text-gray-300'
             }`}
           >
-            <span className="text-xs">&#128172;</span>
             Ask
           </button>
         </div>

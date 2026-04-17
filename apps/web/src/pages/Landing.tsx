@@ -322,6 +322,20 @@ const AGENTS = [
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 export default function Landing() {
+  // Force dark theme on marketing pages regardless of user preference.
+  // Restore previous state when unmounting so dashboard theme toggle still works.
+  useEffect(() => {
+    const root = document.documentElement;
+    const hadDark = root.classList.contains('dark');
+    const prevColorScheme = root.style.colorScheme;
+    root.classList.add('dark');
+    root.style.colorScheme = 'dark';
+    return () => {
+      if (!hadDark) root.classList.remove('dark');
+      root.style.colorScheme = prevColorScheme;
+    };
+  }, []);
+
   return (
     <>
       <Helmet>

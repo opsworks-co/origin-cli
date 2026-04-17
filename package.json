@@ -4,7 +4,13 @@
   "scripts": {
     "dev": "bash dev.sh",
     "stop": "bash stop.sh",
-    "test": "vitest run --workspace vitest.workspace.ts"
+    "test": "vitest run --workspace vitest.workspace.ts",
+    "cli:local": "bash scripts/cli-local.sh",
+    "cli:prod": "bash scripts/cli-prod.sh",
+    "cli:dev": "bash scripts/cli-dev.sh",
+    "db:reset": "bash scripts/db-reset.sh",
+    "deploy:prod": "fly deploy -c fly.toml",
+    "deploy:dev": "fly deploy -c fly.dev.toml"
   },
   "devDependencies": {
     "vitest": "^4.0.18"

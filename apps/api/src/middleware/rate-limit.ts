@@ -46,7 +46,7 @@ export const authLimiter = rateLimit({
 export const sessionLimiter = rateLimit({
   ...baseConfig,
   windowMs: 60 * 1000,      // 1 min
-  max: 120,                 // 120 session ops/min/user (≈2/sec sustained)
+  max: 600,                 // 600 session ops/min/user (≈10/sec sustained)
 });
 
 // ── MCP endpoints ────────────────────────────────────────────────────────

@@ -166,6 +166,12 @@ function mapSession(s: any, pullRequests?: any[]) {
               filesChanged: safeParseArray<string>(pc.filesChanged, `session.${s.id}.promptChanges.filesChanged`),
               diff: pc.diff || '',
               uncommittedDiff: pc.uncommittedDiff || '',
+              linesAdded: pc.linesAdded || 0,
+              linesRemoved: pc.linesRemoved || 0,
+              aiPercentage: pc.aiPercentage ?? 100,
+              checkpointType: pc.checkpointType || null,
+              commitSha: pc.commitSha || null,
+              treeSha: pc.treeSha || null,
               createdAt: pc.createdAt,
             }))
             .filter((pc: any) => {
@@ -263,6 +269,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
           user: true,
           review: { include: { user: true } },
           sessionRepos: { include: { repo: true } },
+          promptChanges: { orderBy: { promptIndex: 'asc' } },
         },
         orderBy: [
           { status: 'desc' },   // RUNNING sorts before COMPLETED alphabetically
@@ -1141,6 +1148,109 @@ router.post('/:id/end', async (req: AuthRequest, res: Response) => {
     res.json({ success: true });
   } catch (err) {
     console.error('End session error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/branch — queue a branch-creation command for the CLI heartbeat to pick up
+router.post('/:id/branch', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const orgId = req.user!.orgId;
+    const { commitSha, branchName, checkout } = req.body;
+
+    if (!commitSha) return res.status(400).json({ error: 'commitSha required' });
+
+    const session = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
+      select: { id: true },
+    });
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const command = JSON.stringify({
+      type: 'branch',
+      commitSha,
+      branchName: branchName || null,
+      checkout: !!checkout,
+      requestedAt: new Date().toISOString(),
+      requestedBy: (req.user as any).email || req.user!.id,
+    });
+
+    await prisma.codingSession.update({
+      where: { id },
+      data: { pendingCommand: command, lastCommandResult: null },
+    });
+
+    res.json({ success: true, message: 'Branch queued. CLI will create it on next heartbeat.' });
+  } catch (err) {
+    console.error('Branch error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /:id/restore — queue a restore command for the CLI heartbeat to pick up
+router.post('/:id/restore', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const orgId = req.user!.orgId;
+    const { treeSha, commitSha, promptIndex } = req.body;
+
+    if (!treeSha && !commitSha) {
+      return res.status(400).json({ error: 'treeSha or commitSha required' });
+    }
+
+    // Verify session belongs to org
+    const session = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
+      select: { id: true, status: true },
+    });
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    // Queue the restore command — CLI heartbeat will pick it up
+    const command = JSON.stringify({
+      type: 'restore',
+      treeSha: treeSha || null,
+      commitSha: commitSha || null,
+      promptIndex: promptIndex ?? null,
+      requestedAt: new Date().toISOString(),
+      requestedBy: (req.user as any).email || req.user!.id,
+    });
+
+    await prisma.codingSession.update({
+      where: { id },
+      data: { pendingCommand: command, lastCommandResult: null },
+    });
+
+    res.json({ success: true, message: 'Restore queued. CLI will pick it up on next heartbeat.' });
+  } catch (err) {
+    console.error('Restore error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:id/restore-status — lightweight status check for pending restore
+router.get('/:id/restore-status', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const orgId = req.user!.orgId;
+
+    const session = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
+      select: { pendingCommand: true, lastCommandResult: true, status: true },
+    });
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    let result: any = null;
+    if (session.lastCommandResult) {
+      try { result = JSON.parse(session.lastCommandResult); } catch { /* ignore */ }
+    }
+
+    res.json({
+      sessionStatus: session.status,
+      pending: !!session.pendingCommand,
+      result,
+    });
+  } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -2204,6 +2314,12 @@ router.post('/merge', async (req: AuthRequest, res: Response) => {
             filesChanged: pc.filesChanged,
             diff: pc.diff,
             uncommittedDiff: pc.uncommittedDiff || '',
+            linesAdded: pc.linesAdded || 0,
+            linesRemoved: pc.linesRemoved || 0,
+            aiPercentage: pc.aiPercentage ?? 100,
+            checkpointType: pc.checkpointType || null,
+            commitSha: pc.commitSha || null,
+            treeSha: pc.treeSha || null,
             createdAt: pc.createdAt,
           },
         });

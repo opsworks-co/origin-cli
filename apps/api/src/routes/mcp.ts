@@ -848,23 +848,64 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
   }
 });
 
+// POST /session/:id/command-result — CLI reports back command execution result
+router.post('/session/:id/command-result', async (req: McpRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const orgId = req.orgId as string;
+    const { type, status, message } = req.body;
+
+    const session = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
+      select: { id: true },
+    });
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const result = JSON.stringify({
+      type: type || 'unknown',
+      status: status || 'unknown',
+      message: (message || '').slice(0, 500),
+      at: new Date().toISOString(),
+    });
+
+    await prisma.codingSession.update({
+      where: { id },
+      data: { lastCommandResult: result },
+    });
+
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'command-result failed' });
+  }
+});
+
 // POST /session/:id/ping — lightweight keepalive heartbeat
 router.post('/session/:id/ping', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const orgId = req.orgId as string;
-    // Scope by org so one tenant's API key can't keepalive-tickle (and
-    // thereby influence IDLE detection on) sessions in another tenant.
     const session = await prisma.codingSession.findFirst({
       where: { id, commit: { repo: { orgId } } },
-      select: { status: true },
+      select: { status: true, pendingCommand: true },
     });
     if (!session) return res.json({ ok: true, status: 'NOT_FOUND' });
 
     if (session.status === 'RUNNING') {
       await prisma.codingSession.update({ where: { id }, data: { updatedAt: new Date() } });
     }
-    res.json({ ok: true, status: session.status });
+
+    // If there's a pending command, include it and clear it (one-shot delivery)
+    let command = null;
+    if (session.pendingCommand) {
+      try {
+        command = JSON.parse(session.pendingCommand);
+        await prisma.codingSession.update({ where: { id }, data: { pendingCommand: null } });
+      } catch { /* malformed JSON, clear it */
+        await prisma.codingSession.update({ where: { id }, data: { pendingCommand: null } });
+      }
+    }
+
+    res.json({ ok: true, status: session.status, command });
   } catch {
     res.status(500).json({ error: 'ping failed' });
   }
@@ -1111,11 +1152,25 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true },
         });
 
+        // Checkpoint metadata fields
+        const pcLinesAdded = Number.isFinite(Number(pc?.linesAdded)) ? Number(pc.linesAdded) : 0;
+        const pcLinesRemoved = Number.isFinite(Number(pc?.linesRemoved)) ? Number(pc.linesRemoved) : 0;
+        const pcAiPercentage = Number.isFinite(Number(pc?.aiPercentage)) ? Number(pc.aiPercentage) : 100;
+        const pcCheckpointType = typeof pc?.checkpointType === 'string' ? pc.checkpointType : null;
+        const pcCommitSha = typeof pc?.commitSha === 'string' ? pc.commitSha : null;
+        const pcTreeSha = typeof pc?.treeSha === 'string' ? pc.treeSha : null;
+
         const updateData = {
           promptText: promptText || existing?.promptText || '',
           filesChanged: (filesChanged && filesChanged !== '[]') ? filesChanged : (existing?.filesChanged || '[]'),
           diff: diff || existing?.diff || '',
           uncommittedDiff: uncommittedDiff || existing?.uncommittedDiff || '',
+          ...(pcLinesAdded > 0 && { linesAdded: pcLinesAdded }),
+          ...(pcLinesRemoved > 0 && { linesRemoved: pcLinesRemoved }),
+          ...(pcAiPercentage !== 100 && { aiPercentage: pcAiPercentage }),
+          ...(pcCheckpointType && { checkpointType: pcCheckpointType }),
+          ...(pcCommitSha && { commitSha: pcCommitSha }),
+          ...(pcTreeSha && { treeSha: pcTreeSha }),
         };
 
         return prisma.promptChange.upsert({
@@ -1576,11 +1631,25 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true },
         });
 
+        // Checkpoint metadata fields
+        const pcLinesAdded = Number.isFinite(Number(pc?.linesAdded)) ? Number(pc.linesAdded) : 0;
+        const pcLinesRemoved = Number.isFinite(Number(pc?.linesRemoved)) ? Number(pc.linesRemoved) : 0;
+        const pcAiPercentage = Number.isFinite(Number(pc?.aiPercentage)) ? Number(pc.aiPercentage) : 100;
+        const pcCheckpointType = typeof pc?.checkpointType === 'string' ? pc.checkpointType : null;
+        const pcCommitSha = typeof pc?.commitSha === 'string' ? pc.commitSha : null;
+        const pcTreeSha = typeof pc?.treeSha === 'string' ? pc.treeSha : null;
+
         const updateData = {
           promptText: promptText || existing?.promptText || '',
           filesChanged: (filesChanged && filesChanged !== '[]') ? filesChanged : (existing?.filesChanged || '[]'),
           diff: diff || existing?.diff || '',
           uncommittedDiff: uncommittedDiff || existing?.uncommittedDiff || '',
+          ...(pcLinesAdded > 0 && { linesAdded: pcLinesAdded }),
+          ...(pcLinesRemoved > 0 && { linesRemoved: pcLinesRemoved }),
+          ...(pcAiPercentage !== 100 && { aiPercentage: pcAiPercentage }),
+          ...(pcCheckpointType && { checkpointType: pcCheckpointType }),
+          ...(pcCommitSha && { commitSha: pcCommitSha }),
+          ...(pcTreeSha && { treeSha: pcTreeSha }),
         };
 
         return prisma.promptChange.upsert({

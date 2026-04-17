@@ -17,6 +17,12 @@ export interface PromptChange {
   filesChanged: string[];
   diff: string;
   uncommittedDiff?: string;
+  linesAdded?: number;
+  linesRemoved?: number;
+  aiPercentage?: number;
+  checkpointType?: string | null;
+  commitSha?: string | null;
+  treeSha?: string | null;
   createdAt?: string;
 }
 
@@ -146,6 +152,30 @@ export function triggerAIReview(id: string) {
 
 export function getSessionDiff(id: string) {
   return request<SessionDiff | { diff: null }>(`/api/sessions/${id}/diff`);
+}
+
+export function restoreSnapshot(sessionId: string, opts: { treeSha?: string | null; commitSha?: string | null; promptIndex?: number }) {
+  return request<{ success: boolean; message: string }>(`/api/sessions/${sessionId}/restore`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  });
+}
+
+export function branchFromSnapshot(sessionId: string, opts: { commitSha: string; branchName?: string; checkout?: boolean }) {
+  return request<{ success: boolean; message: string }>(`/api/sessions/${sessionId}/branch`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  });
+}
+
+export interface RestoreStatus {
+  sessionStatus: string;
+  pending: boolean;
+  result: { type: string; status: string; message: string; at: string } | null;
+}
+
+export function getRestoreStatus(sessionId: string) {
+  return request<RestoreStatus>(`/api/sessions/${sessionId}/restore-status`);
 }
 
 // ── AI blame (line-level attribution) ──────────────────────────────────

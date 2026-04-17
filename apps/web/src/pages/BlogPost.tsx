@@ -8,6 +8,266 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'snapshots-see-what-ai-changed-every-prompt': (
+    <>
+      <p>
+        You ask Claude to &ldquo;add rate limiting.&rdquo; It edits three files. You ask it to &ldquo;also handle the edge case for locked accounts.&rdquo; It touches two more. Then you ask it to &ldquo;write tests for both paths&rdquo; and suddenly your build is broken.
+      </p>
+      <p>
+        Which prompt broke it? You have no idea. The session is one long conversation. The git history shows a single commit at the end. Everything in between &mdash; every intermediate state, every file change per prompt &mdash; is gone.
+      </p>
+      <p>
+        Not anymore. <strong className="text-gray-100">Origin Snapshots capture what changed after every single AI prompt.</strong> Files touched, lines added and removed, the exact diff, AI vs human attribution, commit SHA, and a link back to the session. Every prompt is a checkpoint.
+      </p>
+
+      <h2>What a snapshot looks like</h2>
+      <p>
+        Every time your AI agent responds to a prompt and changes code, Origin records a snapshot. Here&rsquo;s what you see in the dashboard:
+      </p>
+
+      {/* Snapshot list mock */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden shadow-2xl">
+          <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span className="text-xs font-medium text-gray-200">Snapshots</span>
+              <span className="text-[10px] text-gray-600">api-server &middot; main</span>
+            </div>
+            <span className="text-[10px] text-gray-600">3 snapshots &middot; today</span>
+          </div>
+          <div className="divide-y divide-gray-800/60">
+            {[
+              { type: 'auto', typeColor: 'bg-blue-500', prompt: 'add rate limiting to prevent brute force attacks', files: 'src/auth.ts, src/middleware.ts, src/config.ts', added: 42, removed: 8, ai: 94, time: '14 min ago', model: 'claude-sonnet-4' },
+              { type: 'auto', typeColor: 'bg-blue-500', prompt: 'handle the edge case where user account is already locked', files: 'src/auth.ts, src/errors.ts', added: 18, removed: 3, ai: 100, time: '11 min ago', model: 'claude-sonnet-4' },
+              { type: 'auto', typeColor: 'bg-blue-500', prompt: 'write tests for both rate limiting and locked account paths', files: 'tests/auth.test.ts, tests/middleware.test.ts', added: 87, removed: 0, ai: 100, time: '8 min ago', model: 'claude-sonnet-4' },
+            ].map((s, i) => (
+              <div key={i} className="px-4 py-3 hover:bg-gray-900/40 transition-colors">
+                <div className="flex items-start gap-3">
+                  <div className={`w-1.5 h-1.5 rounded-full ${s.typeColor} mt-2 flex-shrink-0`} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-gray-200 mb-1">&ldquo;{s.prompt}&rdquo;</p>
+                    <div className="flex items-center gap-3 flex-wrap text-[10px] text-gray-500">
+                      <span className="text-gray-400">{s.files}</span>
+                      <span className="text-emerald-500">+{s.added}</span>
+                      <span className="text-red-400">-{s.removed}</span>
+                      <span className="text-blue-400">{s.ai}% AI</span>
+                      <span className="font-mono text-gray-600">{s.model}</span>
+                      <span className="ml-auto text-gray-600">{s.time}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <p>
+        Click any snapshot to see the full diff, file-by-file. Click through to the session to see the complete conversation that produced it.
+      </p>
+
+      <h2>The problem snapshots solve</h2>
+      <p>
+        AI coding sessions are long. A single session with Claude or Cursor might involve 10&ndash;20 prompts, touching dozens of files. But git only sees what you commit at the end. The intermediate states are invisible.
+      </p>
+      <p>
+        This creates three problems:
+      </p>
+      <ul>
+        <li><strong className="text-gray-100">You can&rsquo;t bisect within a session.</strong> If the build broke, you have to re-read the entire conversation to find the bad prompt. With snapshots, you see exactly which prompt changed which files.</li>
+        <li><strong className="text-gray-100">Code review is blind.</strong> A PR shows the final diff but not the journey. Snapshots show the reviewer every step the AI took &mdash; what it tried, what it changed, what it reverted.</li>
+        <li><strong className="text-gray-100">Attribution is session-level, not prompt-level.</strong> Without snapshots, you know &ldquo;Claude wrote auth.ts&rdquo; but not which of the 12 prompts did it. Snapshots give you prompt-level attribution.</li>
+      </ul>
+
+      <h2>How it works</h2>
+      <p>
+        Every time an AI agent finishes responding to a prompt, Origin&rsquo;s hooks capture:
+      </p>
+
+      {/* Data captured list */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-gradient-to-b from-gray-950 to-[#0a0b14] p-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            {[
+              { label: 'Prompt text', desc: 'The exact instruction given to the AI', icon: '💬' },
+              { label: 'Files changed', desc: 'Which files were touched by this specific prompt', icon: '📁' },
+              { label: 'Lines added / removed', desc: 'Exact line counts computed from the diff', icon: '📊' },
+              { label: 'AI attribution %', desc: 'What percentage of changed lines are AI-written', icon: '🤖' },
+              { label: 'Checkpoint type', desc: 'auto, manual, session-start, or session-end', icon: '🏷️' },
+              { label: 'Commit SHA', desc: 'If a commit happened, the exact SHA is linked', icon: '🔗' },
+            ].map((item) => (
+              <div key={item.label} className="flex items-start gap-3 p-3 rounded-lg bg-gray-900/40 border border-gray-800/50">
+                <span className="text-base flex-shrink-0">{item.icon}</span>
+                <div>
+                  <div className="text-gray-200 font-medium">{item.label}</div>
+                  <div className="text-gray-500 mt-0.5 text-[11px]">{item.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <p>
+        No extra setup. If you&rsquo;re running Origin, snapshots are already being captured. The data flows through the same hooks that power session tracking.
+      </p>
+
+      <h2>Snapshots in the CLI</h2>
+      <p>
+        Snapshots aren&rsquo;t just a dashboard feature. Two new CLI commands make them useful right in your terminal:
+      </p>
+
+      {/* origin log */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden shadow-2xl">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">Terminal</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin log</div>
+            <div className="h-2" />
+            <div className="text-gray-100">  <span className="text-yellow-400">599d8fc</span> Fix auth bug        <span className="text-gray-600">&mdash;</span> <span className="text-cyan-400">Claude Code</span> <span className="text-gray-600">&middot;</span> <span className="text-emerald-400">$0.12</span> <span className="text-gray-600">&middot;</span> <span className="text-gray-400">3 prompts</span> <span className="text-gray-600">&middot;</span> <span className="text-gray-600">Apr 14</span></div>
+            <div className="text-gray-100">  <span className="text-yellow-400">def5678</span> Add rate limiting   <span className="text-gray-600">&mdash;</span> <span className="text-cyan-400">Cursor</span> <span className="text-gray-600">&middot;</span> <span className="text-emerald-400">$0.08</span> <span className="text-gray-600">&middot;</span> <span className="text-gray-400">1 prompt</span> <span className="text-gray-600">&middot;</span> <span className="text-gray-600">Apr 13</span></div>
+            <div className="text-gray-100">  <span className="text-yellow-400">9ab1234</span> Update docs         <span className="text-gray-600">&mdash;</span> <span className="text-gray-500">(no session)</span> <span className="text-gray-600">&middot;</span> <span className="text-gray-600">Apr 12</span></div>
+            <div className="h-2" />
+            <div className="text-gray-500">  2/3 commits AI-generated (67%) &middot; <span className="text-emerald-400">$0.20</span> total cost</div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <code>origin log</code> is <code>git log</code> but with AI context. Every commit shows which agent wrote it, how much it cost, and how many prompts were involved. The footer gives you the AI ratio and total spend.
+      </p>
+
+      {/* origin show */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-emerald-700/50 bg-gradient-to-b from-emerald-950/30 to-[#0a0b14] overflow-hidden shadow-2xl shadow-emerald-900/10">
+          <div className="px-4 py-2 border-b border-emerald-800/30 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">Terminal</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin show 599d8fc</div>
+            <div className="h-2" />
+            <div className="text-gray-100">  <span className="text-yellow-400">599d8fc</span> Fix auth bug</div>
+            <div className="text-gray-500">  by Alex Kim on 4/14/2026</div>
+            <div className="h-2" />
+            <div className="text-white font-bold">  Session</div>
+            <div className="text-gray-400">  ID:       <span className="text-cyan-400">02c18ce2</span></div>
+            <div className="text-gray-400">  Agent:    <span className="text-cyan-400">Claude Code</span> / <span className="text-gray-500">claude-sonnet-4</span></div>
+            <div className="text-gray-400">  Duration: <span className="text-gray-200">14 min</span></div>
+            <div className="text-gray-400">  Cost:     <span className="text-emerald-400">$0.12</span></div>
+            <div className="text-gray-400">  Prompts:  <span className="text-gray-200">3</span></div>
+            <div className="text-gray-400">  Lines:    <span className="text-emerald-400">+42</span> <span className="text-red-400">-8</span></div>
+            <div className="h-2" />
+            <div className="text-white font-bold">  Prompt Details</div>
+            <div className="text-gray-400">  1. <span className="text-gray-200">&quot;add rate limiting to prevent brute force&quot;</span></div>
+            <div className="text-gray-400">  2. <span className="text-gray-200">&quot;handle locked account edge case&quot;</span></div>
+            <div className="text-gray-400">  3. <span className="text-gray-200">&quot;write tests for both paths&quot;</span></div>
+            <div className="h-2" />
+            <div className="text-white font-bold">  Files</div>
+            <div className="text-gray-400">  &middot; src/auth.ts <span className="text-emerald-400">+28</span> <span className="text-red-400">-6</span></div>
+            <div className="text-gray-400">  &middot; src/middleware.ts <span className="text-emerald-400">+14</span> <span className="text-red-400">-2</span></div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        <code>origin show</code> takes any commit SHA and shows the full session behind it: which agent, what model, how long it took, what it cost, every prompt in order, and every file changed. It&rsquo;s the bridge between <code>git log</code> and the AI session that produced the code.
+      </p>
+
+      <h2>Commit linking</h2>
+      <p>
+        Every commit made during an AI session now gets an automatic trailer:
+      </p>
+
+      {/* Commit message */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden shadow-2xl">
+          <div className="px-4 py-2 border-b border-gray-800">
+            <span className="text-xs text-gray-500 font-mono">git log -1</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-200">Fix rate limiting on login endpoint</div>
+            <div className="h-2" />
+            <div className="text-gray-200">Adds sliding window rate limiter to /auth/login.</div>
+            <div className="text-gray-200">Blocks after 5 failed attempts in 15 minutes.</div>
+            <div className="h-2" />
+            <div className="text-indigo-400">Origin-Session: 02c18ce2a253 | Claude Code | 3 prompts</div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        The trailer is added automatically by Origin&rsquo;s post-commit hook. It shows the session ID, the agent, and the prompt count. Anyone reading the git log can immediately see this was AI-generated and trace it back to the session. No extra commands, no workflow changes.
+      </p>
+
+      <h2>Dashboard: the Snapshots page</h2>
+      <p>
+        The web dashboard at <a href="https://getorigin.io" className="text-emerald-400 hover:text-emerald-300">getorigin.io</a> now has a dedicated Snapshots page. It shows every prompt-level checkpoint across all your sessions:
+      </p>
+      <ul>
+        <li><strong className="text-gray-100">Filter by type</strong> &mdash; see only auto, manual, session-start, or session-end snapshots</li>
+        <li><strong className="text-gray-100">Filter by repo</strong> &mdash; narrow down to a specific project</li>
+        <li><strong className="text-gray-100">Search prompts</strong> &mdash; find the exact prompt that introduced a change</li>
+        <li><strong className="text-gray-100">Click through</strong> &mdash; every snapshot links to the full session detail with diffs</li>
+      </ul>
+      <p>
+        Stats cards at the top give you totals: snapshot count, AI-authored turns, lines added and removed. It&rsquo;s the single view for &ldquo;what did AI do today.&rdquo;
+      </p>
+
+      <h2>What&rsquo;s next: restore from snapshot</h2>
+      <p>
+        Snapshots are read-only today. But the data is there to go further: click a snapshot in the dashboard, hit &ldquo;Restore,&rdquo; and roll your working tree back to that exact point. The CLI picks up the command via heartbeat and runs <code>git read-tree</code> to restore the state. No branch switching, no stashing. One click.
+      </p>
+      <p>
+        We&rsquo;re building this now. If you want early access, grab Origin and start generating snapshots today &mdash; when restore ships, your history will already be there.
+      </p>
+
+      <h2>Try it</h2>
+
+      {/* Install */}
+      <div className="not-prose my-8">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden shadow-2xl">
+          <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
+              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
+            </div>
+            <span className="text-[10px] text-gray-600 ml-2">Terminal</span>
+          </div>
+          <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</div>
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin init</div>
+            <div className="text-emerald-400">  &#10003; Hooks installed. Snapshots are now active.</div>
+            <div className="h-2" />
+            <div className="text-gray-600"># Code with any AI agent. Snapshots happen automatically.</div>
+            <div className="h-2" />
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin log                    <span className="text-gray-700"># see AI sessions in git log</span></div>
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin show abc1234            <span className="text-gray-700"># full session behind any commit</span></div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        Free forever for solo developers. No limits on repos, sessions, or agents.
+      </p>
+      <p>
+        <a href="/register?type=developer" className="text-emerald-400 hover:text-emerald-300 font-medium">Get your free account &rarr;</a>
+      </p>
+    </>
+  ),
   'origin-issue-ai-native-issue-tracker': (
     <>
       <p>
