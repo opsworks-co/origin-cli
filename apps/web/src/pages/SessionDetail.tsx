@@ -15,6 +15,70 @@ function statusBadge(status: string) {
   return <span className={`${getStatusBadgeClass(status)} text-sm`}>{status}</span>;
 }
 
+// ── HeaderCommits ──────────────────────────────────────────────────────────
+// Shows the commits a session produced (from sessionDiff.commitShas, which is
+// the source of truth — `session.commitSha` is HEAD-at-start and misleading).
+// 0 commits → renders nothing.
+// 1 commit  → labeled pill linking to the commit.
+// N commits → "N commits ▾" pill; click toggles an inline list of linked rows.
+function HeaderCommits({ repoId, shas }: { repoId: string | null | undefined; shas: string[] }) {
+  const [open, setOpen] = useState(false);
+  if (!shas || shas.length === 0) return null;
+
+  const pillBase =
+    'text-[11px] bg-gray-800/60 text-gray-400 px-2 py-0.5 rounded-md inline-flex items-center gap-1.5 border border-gray-700/40';
+  const pillInteractive = ' hover:text-gray-200 hover:border-gray-600 transition-colors';
+
+  if (shas.length === 1) {
+    const sha = shas[0];
+    const label = (
+      <>
+        <span className="text-gray-500">Commit:</span>
+        <code className="font-mono">{sha.slice(0, 8)}</code>
+      </>
+    );
+    return repoId ? (
+      <Link to={`/repos/${repoId}/commits/${sha}`} className={pillBase + pillInteractive}>
+        {label}
+      </Link>
+    ) : (
+      <span className={pillBase}>{label}</span>
+    );
+  }
+
+  return (
+    <div className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={pillBase + pillInteractive}
+      >
+        <span className="font-mono">{shas.length}</span>
+        <span>commits</span>
+        <span className="text-gray-500">{open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full mt-1 z-20 min-w-[280px] rounded-md border border-gray-700/60 bg-gray-900 shadow-lg p-1">
+          {shas.map((sha) => {
+            const row = (
+              <div className="px-2 py-1 text-[11px] flex items-center gap-2 hover:bg-gray-800/80 rounded">
+                <code className="font-mono text-gray-300">{sha.slice(0, 8)}</code>
+              </div>
+            );
+            return repoId ? (
+              <Link key={sha} to={`/repos/${repoId}/commits/${sha}`} className="block" onClick={() => setOpen(false)}>
+                {row}
+              </Link>
+            ) : (
+              <div key={sha}>{row}</div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Console View — formatted agent transcript ──────────────────────────────
 
 interface TranscriptTurn { role: string; content: string }
@@ -517,9 +581,7 @@ export default function SessionDetail() {
               {session.branch}
             </span>
           )}
-          {session.commitSha && (
-            <code className="text-[10px] text-gray-600 font-mono">{session.commitSha.slice(0, 8)}</code>
-          )}
+          <HeaderCommits repoId={session.repoId} shas={session.sessionDiff?.commitShas ?? []} />
         </div>
 
         {/* Stats pills row + actions */}
