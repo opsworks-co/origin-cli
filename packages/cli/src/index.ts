@@ -84,15 +84,6 @@ installGlobalConsoleSanitizer();
 
 const program = new Command();
 
-// Mark a command as hidden from --help. The command itself still works when
-// invoked directly — this just keeps the top-level help output focused on
-// the primary surface. Used for legacy aliases that we want to keep working
-// forever but not advertise. Commander uses the internal `_hidden` field.
-function hidden(cmd: Command): Command {
-  (cmd as any)._hidden = true;
-  return cmd;
-}
-
 // `--version` prints the package version. `--version --verbose` (or the
 // dedicated `version` subcommand below) additionally prints the git SHA and
 // build timestamp captured at build time. This is the only reliable way to
@@ -848,9 +839,10 @@ program.command('user <id>')
     } catch (e: any) { console.error(chalk.red(e.message)); }
   });
 
-// ─── Consolidation: new primary commands ────────────────────────────────
-// `context` unifies cross-agent handoff + session memory. Existing `handoff`
-// and `memory` stay working as hidden aliases below.
+// ─── Convenience command: unified context view ─────────────────────────
+// `context` is a convenience aggregator that shows handoff + memory side by
+// side. It does NOT replace `handoff` or `memory` — both remain primary,
+// top-level commands for users who want just one or the other.
 const context = program.command('context')
   .description('Cross-agent context — handoff + accumulated session memory');
 context.action(async () => {
@@ -891,38 +883,94 @@ context.command('clear')
     }
   });
 
-// ─── Consolidation: hide legacy aliases from --help ─────────────────────
-// Every name below still works when invoked directly — this only cleans up
-// `origin --help` output. Keeps backwards compatibility forever.
-const HIDDEN_COMMAND_NAMES = new Set([
-  // Setup aliases (primary: init, doctor)
-  'enable', 'disable', 'link', 'attach', 'whoami', 'status',
-  'prompt-status', 'shell-prompt', 'web',
-  'reset', 'clean', 'verify', 'verify-install',
-  // See-AI-work aliases (primary: blame, stats, chat, diff)
-  'ask', 'why', 'prompts',
-  'recap', 'report', 'analyze', 'rework', 'compare',
-  // Sessions aliases (primary: sessions, explain, resume, share)
-  'session', 'log', 'show', 'session-compare',
-  'review', 'review-pr', 'intent-review',
-  // Tracking aliases (primary: issue, context)
-  'todo', 'trail', 'handoff', 'memory',
-  // Time-travel aliases (primary: checkpoint)
-  'rewind', 'snapshot',
-  // Data aliases (primary: export, search, backfill)
-  'repos', 'agents', 'sync', 'policies', 'audit', 'db', 'ignore',
-  // Internal aliases (primary: hooks, upgrade, plugin)
-  'config', 'proxy', 'ci',
-  // Team/admin commands (not part of solo flow)
-  'repo:add', 'agent:create', 'policy:versions', 'agent:versions',
-  'notifications', 'team', 'user',
-]);
+// ─── Help categorization ────────────────────────────────────────────────
+// Every command does unique work and stays top-level. The long flat list in
+// `--help` is overwhelming, so we group commands by purpose in a custom help
+// section appended below the default command list. Commander still enumerates
+// every command above; this is purely extra guidance.
+//
+// Rule for picking groups: which primary job does a user have when they reach
+// for this command? A command appears in exactly one group.
+const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
+  {
+    label: 'SETUP',
+    commands: ['login', 'init', 'enable', 'disable', 'link', 'attach', 'whoami', 'status'],
+  },
+  {
+    label: 'ATTRIBUTION',
+    commands: ['blame', 'diff', 'stats', 'compare', 'ask', 'why', 'prompts', 'search'],
+  },
+  {
+    label: 'SESSIONS',
+    commands: ['sessions', 'session', 'session-compare', 'log', 'show', 'explain', 'share', 'resume'],
+  },
+  {
+    label: 'REVIEW',
+    commands: ['review', 'review-pr', 'intent-review'],
+  },
+  {
+    label: 'TRACKING',
+    commands: ['issue', 'todo', 'trail', 'handoff', 'memory', 'context'],
+  },
+  {
+    label: 'ANALYTICS',
+    commands: ['recap', 'report', 'analyze', 'rework'],
+  },
+  {
+    label: 'TIME TRAVEL',
+    commands: ['rewind', 'snapshot', 'checkpoint'],
+  },
+  {
+    label: 'CHAT / AI',
+    commands: ['chat'],
+  },
+  {
+    label: 'DATA',
+    commands: ['export', 'backfill', 'db'],
+  },
+  {
+    label: 'GOVERNANCE',
+    commands: ['policies', 'audit', 'ignore'],
+  },
+  {
+    label: 'INTEGRATIONS',
+    commands: ['repos', 'agents', 'sync', 'config', 'proxy', 'ci', 'plugin', 'web'],
+  },
+  {
+    label: 'HEALTH',
+    commands: ['doctor', 'verify', 'verify-install', 'clean', 'reset'],
+  },
+  {
+    label: 'SHELL',
+    commands: ['prompt-status', 'shell-prompt'],
+  },
+  {
+    label: 'META',
+    commands: ['version', 'upgrade', 'hooks'],
+  },
+];
 
-for (const cmd of program.commands) {
-  if (HIDDEN_COMMAND_NAMES.has(cmd.name())) {
-    (cmd as any)._hidden = true;
+program.addHelpText('after', () => {
+  const allRegistered = new Map<string, Command>();
+  for (const cmd of program.commands) {
+    allRegistered.set(cmd.name(), cmd);
   }
-}
+  const lines: string[] = ['', 'Commands by purpose:'];
+  for (const group of COMMAND_GROUPS) {
+    const entries = group.commands
+      .map((name) => allRegistered.get(name))
+      .filter((cmd): cmd is Command => !!cmd)
+      .map((cmd) => {
+        const desc = (cmd.description() || '').split('\n')[0];
+        return `    ${cmd.name().padEnd(18)} ${desc}`;
+      });
+    if (entries.length === 0) continue;
+    lines.push('');
+    lines.push(`  ${group.label}`);
+    lines.push(...entries);
+  }
+  return lines.join('\n');
+});
 
 // ─── Version Check (post-action) ────────────────────────────────────────
 

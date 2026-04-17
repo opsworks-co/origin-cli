@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Session } from '../api';
 import { useAuth } from '../context/AuthContext';
@@ -146,6 +146,7 @@ export default function SessionDetail() {
 
   // Export
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showOverflowMenu, setShowOverflowMenu] = useState(false);
 
   // Replay
   const [replayActive, setReplayActive] = useState(false);
@@ -468,24 +469,50 @@ export default function SessionDetail() {
     return totalLines > 0 ? Math.round((aiLines / totalLines) * 100) : null;
   })();
 
+  const isRunning = session.status === 'RUNNING';
+  // Running sessions: newest turn first (latest activity at top).
+  // Completed: oldest first, reads like a transcript.
+  const turnsDefaultSort: 'asc' | 'desc' = isRunning ? 'desc' : 'asc';
+
+  // Live-ticking duration display for running sessions, static otherwise.
+  const liveDuration = isRunning
+    ? (elapsed >= 3600
+        ? `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m ${elapsed % 60}s`
+        : elapsed >= 60
+          ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+          : `${elapsed}s`)
+    : formatDuration(session.durationMs);
+
   return (
     <div className="flex flex-col gap-0 h-full">
       {/* ── Header ── */}
-      <div className="flex-shrink-0 px-6 pt-5 pb-4">
-        {/* Top row: back + title + status */}
-        <div className="flex items-center gap-3 mb-3">
+      <div className="flex-shrink-0 px-6 pt-4 pb-3">
+        {/* Breadcrumb */}
+        <div className="flex items-center gap-1.5 text-[11px] text-gray-500 mb-2.5">
           <button
             onClick={() => navigate('/sessions')}
-            className="text-gray-500 hover:text-gray-300 transition-colors"
+            className="hover:text-gray-300 transition-colors flex items-center gap-1"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 19l-7-7 7-7" /></svg>
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+            Sessions
           </button>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-lg font-semibold text-gray-100">{(session.repoNames && session.repoNames.length > 1 ? session.repoNames.join(', ') : session.repoName) ?? 'Session'}</h1>
-            {statusBadge(isDev ? session.status.toLowerCase() : (session.review?.status?.toLowerCase() ?? session.status.toLowerCase()))}
-          </div>
+          <span className="text-gray-700">/</span>
+          <Link
+            to={(session.repoId && `/repos/${session.repoId}`) || '/repos'}
+            className="hover:text-gray-300 transition-colors"
+          >
+            {session.repoName ?? 'repo'}
+          </Link>
+          <span className="text-gray-700">/</span>
+          <code className="text-gray-400 font-mono">{session.id.slice(0, 8)}</code>
+        </div>
+
+        {/* Title row: repo, status, branch, commit */}
+        <div className="flex items-center gap-3 mb-3 flex-wrap">
+          <h1 className="text-lg font-semibold text-gray-100">{(session.repoNames && session.repoNames.length > 1 ? session.repoNames.join(', ') : session.repoName) ?? 'Session'}</h1>
+          {statusBadge(isDev ? session.status.toLowerCase() : (session.review?.status?.toLowerCase() ?? session.status.toLowerCase()))}
           {session.branch && (
-            <span className="text-[11px] bg-gray-800/80 text-gray-400 px-2.5 py-1 rounded-md font-mono inline-flex items-center gap-1.5 border border-gray-700/50">
+            <span className="text-[11px] bg-gray-800/60 text-gray-400 px-2 py-0.5 rounded-md font-mono inline-flex items-center gap-1.5 border border-gray-700/40">
               <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
               {session.branch}
             </span>
@@ -495,115 +522,97 @@ export default function SessionDetail() {
           )}
         </div>
 
-        {/* Stats row: metric cards */}
+        {/* Stats pills row + actions */}
         <div className="flex items-center gap-2 flex-wrap">
           {/* Agent + Model */}
-          <div className="flex items-center gap-1.5 bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
-            <span className="text-[11px] text-gray-400">{session.agentName ?? 'Agent'}</span>
+          <div className="flex items-center gap-1.5 bg-gray-800/40 border border-gray-700/40 rounded-lg px-2.5 py-1">
+            <span className="text-[11px] text-gray-300">{session.agentName ?? 'Agent'}</span>
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">{session.model}</span>
-            {session.agentVersion && (
-              <span className="text-[10px] text-gray-600">v{session.agentVersion}</span>
-            )}
           </div>
 
           {(session.userName || session.apiKeyName) && (
-            <div className="flex items-center gap-1.5 bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
+            <div className="flex items-center gap-1.5 bg-gray-800/40 border border-gray-700/40 rounded-lg px-2.5 py-1">
               <svg className="w-3 h-3 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
               <span className="text-[11px] text-gray-300">{session.userName || session.apiKeyName}</span>
             </div>
           )}
 
-          {/* Duration */}
-          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
-            <span className="text-[11px] text-gray-300">{formatDuration(session.durationMs)}</span>
+          {/* Duration — live-ticking when session is RUNNING, with pulsing dot */}
+          <div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 border ${
+            isRunning
+              ? 'bg-purple-500/10 border-purple-500/30'
+              : 'bg-gray-800/40 border-gray-700/40'
+          }`}>
+            {isRunning && (
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500" />
+              </span>
+            )}
+            <span className={`text-[11px] font-mono tabular-nums ${isRunning ? 'text-purple-300' : 'text-gray-300'}`}>
+              {liveDuration}
+            </span>
           </div>
 
           {/* Cost */}
-          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
-            <span className="text-[11px] text-gray-300">{formatCost(session.costUsd)}</span>
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-2.5 py-1">
+            <span className="text-[11px] text-gray-300 tabular-nums">{formatCost(session.costUsd)}</span>
           </div>
 
           {/* Tokens */}
-          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5">
-            <span className="text-[11px] text-gray-400">{session.tokensUsed.toLocaleString()}</span>
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-2.5 py-1">
+            <span className="text-[11px] text-gray-300 tabular-nums">{session.tokensUsed.toLocaleString()}</span>
             <span className="text-[10px] text-gray-600 ml-1">tokens</span>
           </div>
 
-          {/* Lines changed */}
-          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5 flex items-center gap-2">
+          {/* Lines changed — explicitly labeled */}
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-2.5 py-1 flex items-center gap-1.5">
             <span className="text-[11px] text-green-400 font-mono">+{session.linesAdded}</span>
+            <span className="text-gray-700">/</span>
             <span className="text-[11px] text-red-400 font-mono">-{session.linesRemoved}</span>
+            <span className="text-[10px] text-gray-600 ml-0.5">lines</span>
           </div>
 
           {/* Files + tools */}
-          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-3 py-1.5 flex items-center gap-2">
-            <span className="text-[11px] text-gray-400">{filesCount} files</span>
-            <span className="text-gray-700">|</span>
-            <span className="text-[11px] text-gray-400">{session.toolCalls} tools</span>
+          <div className="bg-gray-800/40 border border-gray-700/40 rounded-lg px-2.5 py-1 flex items-center gap-1.5">
+            <span className="text-[11px] text-gray-300 tabular-nums">{filesCount}</span>
+            <span className="text-[10px] text-gray-600">files</span>
+            <span className="text-gray-700">·</span>
+            <span className="text-[11px] text-gray-300 tabular-nums">{session.toolCalls}</span>
+            <span className="text-[10px] text-gray-600">tools</span>
           </div>
 
           {/* AI Attribution */}
           {aiPct !== null && (
-            <div className={`rounded-lg px-3 py-1.5 flex items-center gap-1.5 border ${
+            <div className={`rounded-lg px-2.5 py-1 flex items-center gap-1.5 border ${
               aiPct >= 90 ? 'bg-blue-500/10 border-blue-500/25' :
-              aiPct >= 50 ? 'bg-purple-500/10 border-purple-500/25' :
+              aiPct >= 50 ? 'bg-cyan-500/10 border-cyan-500/25' :
               'bg-green-500/10 border-green-500/25'
             }`}>
-              <div className="w-4 h-4 rounded-full border-2 flex items-center justify-center" style={{
-                borderColor: aiPct >= 90 ? 'rgb(96,165,250)' : aiPct >= 50 ? 'rgb(168,85,247)' : 'rgb(74,222,128)',
-                background: `conic-gradient(${aiPct >= 90 ? 'rgb(96,165,250)' : aiPct >= 50 ? 'rgb(168,85,247)' : 'rgb(74,222,128)'} ${aiPct}%, transparent ${aiPct}%)`,
+              <div className="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center" style={{
+                borderColor: aiPct >= 90 ? 'rgb(96,165,250)' : aiPct >= 50 ? 'rgb(34,211,238)' : 'rgb(74,222,128)',
+                background: `conic-gradient(${aiPct >= 90 ? 'rgb(96,165,250)' : aiPct >= 50 ? 'rgb(34,211,238)' : 'rgb(74,222,128)'} ${aiPct}%, transparent ${aiPct}%)`,
               }}>
-                <div className="w-2 h-2 rounded-full bg-gray-900" />
+                <div className="w-1.5 h-1.5 rounded-full bg-gray-900" />
               </div>
-              <span className={`text-[11px] font-medium ${
-                aiPct >= 90 ? 'text-blue-400' : aiPct >= 50 ? 'text-purple-400' : 'text-green-400'
+              <span className={`text-[11px] font-medium tabular-nums ${
+                aiPct >= 90 ? 'text-blue-400' : aiPct >= 50 ? 'text-cyan-400' : 'text-green-400'
               }`}>{aiPct}% AI</span>
             </div>
           )}
 
-          {/* Spacer + action buttons */}
-          <div className="ml-auto flex items-center gap-1.5 flex-wrap">
-
-          {/* Action buttons — pill style */}
-          <div className="flex items-center gap-2 ml-2 flex-wrap">
-            {/* Replay */}
+          {/* Spacer pushes action buttons to the right */}
+          <div className="ml-auto flex items-center gap-1.5">
+            {/* Replay — neutral now (purple is reserved for running status) */}
             {session.promptChanges && session.promptChanges.length > 0 && (
               <button
                 onClick={() => { setReplayActive(true); setReplayIndex(0); setReplayPlaying(true); }}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-purple-500/15 text-purple-400 border border-purple-500/25 hover:bg-purple-500/25 transition-colors"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-gray-700/50 text-gray-200 border border-gray-600/50 hover:bg-gray-700 transition-colors"
                 title="Replay session step by step"
               >
                 Replay
               </button>
             )}
-
-            {/* Export */}
-            <div className="relative">
-              <button
-                onClick={() => setShowExportMenu(!showExportMenu)}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-gray-700/50 text-gray-300 border border-gray-600/50 hover:bg-gray-700 transition-colors"
-                title="Export session"
-              >
-                Export
-              </button>
-              {showExportMenu && (
-                <div className="absolute right-0 top-full mt-1 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 py-1 min-w-[160px]">
-                  <button
-                    onClick={exportAsMarkdown}
-                    className="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
-                  >
-                    Export as Markdown
-                  </button>
-                  <button
-                    onClick={exportAsGist}
-                    className="w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-800 transition-colors flex items-center gap-1.5"
-                  >
-                    <svg className="w-3.5 h-3.5 text-gray-400" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" /></svg>
-                    Export as Gist
-                  </button>
-                </div>
-              )}
-            </div>
 
             {/* Share */}
             {shareUrl ? (
@@ -627,28 +636,15 @@ export default function SessionDetail() {
               <button
                 onClick={handleShare}
                 disabled={sharing}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-indigo-500/15 text-indigo-400 border border-indigo-500/25 hover:bg-indigo-500/25 transition-colors disabled:opacity-50"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-gray-700/50 text-gray-200 border border-gray-600/50 hover:bg-gray-700 transition-colors disabled:opacity-50"
                 title="Create public share link"
               >
                 {sharing ? 'Sharing...' : 'Share'}
               </button>
             )}
 
-            {/* Details */}
-            <button
-              onClick={() => setShowMeta((prev) => !prev)}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
-                showMeta
-                  ? 'bg-sky-500/15 text-sky-400 border-sky-500/25'
-                  : 'bg-gray-700/50 text-gray-300 border-gray-600/50 hover:bg-gray-700'
-              }`}
-              title="Show details"
-            >
-              Details
-            </button>
-
-            {/* End session */}
-            {session.status === 'RUNNING' && (
+            {/* End session — only when RUNNING */}
+            {isRunning && (
               <button
                 onClick={handleEnd}
                 disabled={ending}
@@ -659,31 +655,60 @@ export default function SessionDetail() {
               </button>
             )}
 
-            {/* Archive / Unarchive */}
-            <button
-              onClick={handleToggleArchive}
-              disabled={archiving}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors disabled:opacity-50 ${
-                session.archived
-                  ? 'bg-amber-500/15 text-amber-400 border-amber-500/25 hover:bg-amber-500/25'
-                  : 'bg-gray-700/50 text-gray-300 border-gray-600/50 hover:bg-gray-700'
-              }`}
-              title={session.archived ? 'Unarchive session' : 'Archive session'}
-            >
-              {archiving ? 'Working...' : session.archived ? 'Unarchive' : 'Archive'}
-            </button>
-
-            {/* Delete */}
-            <button
-              onClick={handleDelete}
-              disabled={deleting}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-              title="Delete session"
-            >
-              {deleting ? 'Deleting...' : 'Delete'}
-            </button>
+            {/* Overflow menu: Export, Details, Archive, Delete */}
+            <div className="relative">
+              <button
+                onClick={() => setShowOverflowMenu(v => !v)}
+                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-gray-300 bg-gray-700/50 border border-gray-600/50 hover:bg-gray-700 transition-colors"
+                title="More actions"
+                aria-label="More actions"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01" /></svg>
+              </button>
+              {showOverflowMenu && (
+                <>
+                  {/* Click-outside catcher */}
+                  <div className="fixed inset-0 z-40" onClick={() => setShowOverflowMenu(false)} />
+                  <div className="absolute right-0 top-full mt-1 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 py-1 min-w-[180px]">
+                    <button
+                      onClick={() => { setShowOverflowMenu(false); exportAsMarkdown(); }}
+                      className="w-full text-left px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
+                    >
+                      Export as Markdown
+                    </button>
+                    <button
+                      onClick={() => { setShowOverflowMenu(false); exportAsGist(); }}
+                      className="w-full text-left px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
+                    >
+                      Export as Gist
+                    </button>
+                    <div className="h-px bg-gray-800 my-1" />
+                    <button
+                      onClick={() => { setShowOverflowMenu(false); setShowMeta(v => !v); }}
+                      className="w-full text-left px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 transition-colors"
+                    >
+                      {showMeta ? 'Hide details' : 'Show details'}
+                    </button>
+                    <button
+                      onClick={() => { setShowOverflowMenu(false); handleToggleArchive(); }}
+                      disabled={archiving}
+                      className="w-full text-left px-3 py-2 text-xs text-gray-300 hover:bg-gray-800 transition-colors disabled:opacity-50"
+                    >
+                      {session.archived ? 'Unarchive' : 'Archive'}
+                    </button>
+                    <div className="h-px bg-gray-800 my-1" />
+                    <button
+                      onClick={() => { setShowOverflowMenu(false); handleDelete(); }}
+                      disabled={deleting}
+                      className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                    >
+                      {deleting ? 'Deleting...' : 'Delete'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
-        </div>
         </div>
       </div>
 
@@ -845,54 +870,7 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* ── Live Session Watch ── */}
-      {session.status === 'RUNNING' && (
-        <div className="card border-purple-500/30 bg-purple-500/5 flex-shrink-0">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <span className="relative flex h-3 w-3">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-purple-500" />
-              </span>
-              <span className="text-sm font-medium text-purple-300">Session Running</span>
-              <span className="text-lg font-mono text-purple-200">
-                {elapsed >= 3600
-                  ? `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m ${elapsed % 60}s`
-                  : elapsed >= 60
-                    ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
-                    : `${elapsed}s`}
-              </span>
-            </div>
-            <div className="flex items-center gap-4 text-xs text-gray-400">
-              {session.toolCalls > 0 && (
-                <span className="flex items-center gap-1">
-                  <span className="text-purple-400 font-medium">{session.toolCalls}</span> tool calls
-                </span>
-              )}
-              {session.tokensUsed > 0 && (
-                <span className="flex items-center gap-1">
-                  <span className="text-purple-400 font-medium">{session.tokensUsed.toLocaleString()}</span> tokens
-                </span>
-              )}
-              {session.costUsd > 0 && (
-                <span className="flex items-center gap-1">
-                  <span className="text-purple-400 font-medium">{formatCost(session.costUsd)}</span>
-                </span>
-              )}
-              {(() => {
-                try {
-                  const files = JSON.parse(session.filesChanged);
-                  return files.length > 0 ? (
-                    <span className="flex items-center gap-1">
-                      <span className="text-purple-400 font-medium">{files.length}</span> files modified
-                    </span>
-                  ) : null;
-                } catch { return null; }
-              })()}
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Live session watch card removed — duration pill above now ticks live with a pulsing dot. */}
 
       {/* ── Collapsible metadata panel ── */}
       {showMeta && (
@@ -1081,10 +1059,10 @@ export default function SessionDetail() {
         {/* Tab bar */}
         <div className="px-4 pt-1 border-b border-gray-800/60 flex-shrink-0 flex items-center gap-0">
           {([
-            { key: 'session' as const, label: 'Session', count: session.promptChanges?.length || 0 },
-            { key: 'console' as const, label: 'Console', count: 0 },
-            { key: 'blame' as const, label: 'AI Blame', count: 0 },
-            { key: 'turns' as const, label: 'Checkpoints', count: 0 },
+            { key: 'session' as const, label: 'Session' },
+            { key: 'console' as const, label: 'Console' },
+            { key: 'blame' as const, label: 'AI Blame' },
+            { key: 'turns' as const, label: 'Checkpoints' },
             { key: 'security' as const, label: 'Security', count: findings.length },
           ] as const).map(tab => (
             <button
@@ -1097,12 +1075,8 @@ export default function SessionDetail() {
               }`}
             >
               {tab.label}
-              {tab.count > 0 && (
-                <span className={`ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full ${
-                  tab.key === 'security'
-                    ? 'bg-red-500/20 text-red-400'
-                    : 'bg-gray-700/80 text-gray-400'
-                }`}>
+              {'count' in tab && tab.count > 0 && (
+                <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400">
                   {tab.count}
                 </span>
               )}
@@ -1112,15 +1086,17 @@ export default function SessionDetail() {
             </button>
           ))}
 
-          {/* Ask the Author button */}
+          {/* Ask — positioned as a distinct action, not a tab. Indigo (reading/query accent). */}
           <button
             onClick={() => { setShowAskPanel(!showAskPanel); setAskContext(undefined); }}
-            className={`ml-auto px-3 py-2 text-[13px] font-medium rounded-lg transition-colors flex items-center gap-1.5 ${
+            className={`ml-auto my-1 px-3 py-1 text-xs font-medium rounded-md border transition-colors flex items-center gap-1.5 ${
               showAskPanel
-                ? 'bg-purple-500/15 text-purple-400'
-                : 'text-gray-500 hover:text-gray-300'
+                ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'
+                : 'text-gray-400 border-gray-700/40 hover:text-indigo-300 hover:border-indigo-500/30 hover:bg-indigo-500/10'
             }`}
+            title="Ask questions about this session"
           >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" /></svg>
             Ask
           </button>
         </div>
@@ -1128,6 +1104,7 @@ export default function SessionDetail() {
           <div className={`flex-1 overflow-y-auto ${showAskPanel ? 'min-w-0' : ''}`}>
           {activeTab === 'session' && (
             <UnifiedSessionView
+              defaultNewestFirst={isRunning}
               transcript={(() => {
                 try {
                   const parsed = JSON.parse(session.transcript);

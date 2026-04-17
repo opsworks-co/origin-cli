@@ -662,3 +662,33 @@ model IssueSession {
   @@unique([issueId, sessionId])
   @@index([sessionId])
 }
+
+// Lead magnet: public repo scans. Anyone can submit a GitHub repo URL and
+// get a heuristic AI-attribution report in exchange for an email address.
+// Token is short, URL-safe, and serves as both the shareable link and the
+// idempotency key for duplicate submissions.
+model AuditLead {
+  id            String   @id @default(uuid())
+  email         String
+  repoUrl       String
+  token         String   @unique
+  // Stored scan result — null while scan is still running
+  commitCount   Int      @default(0)
+  aiCommitCount Int      @default(0)
+  aiPercentage  Float    @default(0)
+  topModel      String?
+  estimatedCost Float    @default(0)
+  totalLines    Int      @default(0)
+  topAuthors    String   @default("[]")  // JSON array of { name, aiCount, humanCount }
+  modelBreakdown String  @default("{}")  // JSON object
+  signalsFound  String   @default("[]")  // JSON array of signal names found (Co-Authored-By, Origin-Session, etc.)
+  status        String   @default("running") // running | complete | failed
+  errorMessage  String?
+  requestIp     String?
+  createdAt     DateTime @default(now())
+  completedAt   DateTime?
+
+  @@index([email])
+  @@index([createdAt])
+  @@index([status])
+}

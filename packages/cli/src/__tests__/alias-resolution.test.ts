@@ -71,24 +71,43 @@ describe('alias resolution', () => {
     expect(text.length, `\`origin ${name} --help\` produced no output`).toBeGreaterThan(0);
   });
 
-  it('top-level --help shows consolidated surface', () => {
+  it('top-level --help lists every command (none are hidden)', () => {
     const output = execFileSync('node', [distPath, '--help'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 8000,
       env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
     }).toString();
 
-    // Primary commands should appear
-    for (const primary of ['blame', 'stats', 'sessions', 'issue', 'context', 'checkpoint']) {
-      expect(output, `\`${primary}\` missing from --help`).toContain(primary);
+    // Every command that does unique work must appear in --help. We previously
+    // hid many of these as "aliases"; that was wrong — they do distinct work
+    // and belong in the primary surface.
+    for (const cmd of [
+      'blame', 'ask', 'why', 'prompts',
+      'stats', 'recap', 'report', 'analyze', 'rework', 'compare',
+      'sessions', 'session', 'log', 'show',
+      'review', 'review-pr', 'intent-review',
+      'handoff', 'memory', 'todo', 'trail', 'issue',
+      'rewind', 'snapshot', 'checkpoint',
+      'enable', 'disable', 'link', 'attach', 'whoami', 'status',
+      'doctor', 'verify', 'verify-install', 'clean', 'reset',
+      'repos', 'agents', 'sync', 'policies', 'audit', 'db', 'ignore',
+      'web', 'config', 'proxy', 'ci', 'prompt-status', 'shell-prompt',
+    ]) {
+      const lineRe = new RegExp(`^\\s+${cmd.replace(/[-]/g, '\\-')}\\b`, 'm');
+      expect(output, `\`${cmd}\` missing from --help primary list`).toMatch(lineRe);
     }
-    // Hidden commands should NOT appear in the primary list
-    // (we check a few representative ones — the test isn't exhaustive, just directional)
-    for (const alias of ['ask', 'why', 'recap', 'report', 'rewind', 'snapshot', 'handoff', 'memory']) {
-      // These should not appear as first-column entries. A loose check: make sure
-      // they're not on a line that starts with spaces + name + spaces + description.
-      const lineRe = new RegExp(`^\\s+${alias}\\s`, 'm');
-      expect(output, `hidden alias \`${alias}\` leaked into --help`).not.toMatch(lineRe);
+  });
+
+  it('help includes categorized groups', () => {
+    const output = execFileSync('node', [distPath, '--help'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 8000,
+      env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
+    }).toString();
+
+    expect(output).toContain('Commands by purpose:');
+    for (const group of ['SETUP', 'ATTRIBUTION', 'SESSIONS', 'TIME TRAVEL', 'HEALTH']) {
+      expect(output, `group header \`${group}\` missing from --help`).toContain(group);
     }
   });
 });

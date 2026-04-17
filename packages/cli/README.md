@@ -13,8 +13,8 @@
 
 <p align="center">
   Track every AI coding session. Line-level AI/human attribution. Full visibility into AI-authored code.<br/>
-  Zero setup — no server, no login, no API keys. All data stored in git.<br/>
-  <strong>50+ commands</strong> · <strong>10+ agents</strong> · <strong>MIT licensed</strong>
+  Works standalone in git with zero setup — or connect to a dashboard for team features.<br/>
+  <strong>50+ commands</strong> · <strong>13 agents</strong> · <strong>MIT licensed</strong>
 </p>
 
 ---
@@ -126,83 +126,128 @@ origin backfill                  # Retroactively tag old commits as AI/human
 
 ## CLI Commands
 
-Origin groups commands by purpose. Every command name that has ever shipped is still supported — older names now resolve as hidden aliases of the primary surface below.
+Every command does distinct work. `origin --help` lists them all alphabetically via Commander, then appends a categorized view below. The groups below match that categorization.
 
 ### Setup
-
 ```
 origin login                    Authenticate with Origin server
 origin init                     Register machine + install hooks
-origin doctor [--fix]           Diagnose, repair, and verify your install
+origin enable [--global]        Install session-tracking hooks
+origin disable [--global]       Remove hooks
+origin link [slug]              Link this repo to an Origin agent
+origin attach [agent]           Attach to a running AI agent session
+origin whoami                   Show current user + org
+origin status                   Show active session, branch, repo info
 ```
 
-### See AI work
-
+### Attribution
 ```
 origin blame <file>             Line-by-line AI/human attribution
-origin diff [range]             Annotated diff with AI attribution
+origin diff [range]             Annotated diff with attribution
 origin stats                    AI vs human stats (--dashboard, --global)
-origin chat                     Chat with Origin about your codebase
+origin compare <a> [b]          Compare attribution between branches
+origin ask <query>              Find which AI session wrote a line or file
+origin why <file[:line]>        Exact prompt that wrote a specific line
+origin prompts <file|session>   Prompts that touched a file or ran in a session
+origin search <query>           Full-text search across prompt history
 ```
 
 ### Sessions
-
 ```
-origin sessions                 List sessions (--all for every repo)
-origin explain [id]             Explain a session with prompts and changes
-origin resume [branch]          Resume a session from a previous branch
-origin share <id>               Share a session (clipboard or --public link)
+origin sessions                 List sessions
+origin session <id>             View one session
+origin session-compare <a> <b>  Compare two sessions side-by-side
+origin log                      Git log with session info inline
+origin show <commit>            Full session behind any commit
+origin explain [id]             Explain a session
+origin share <id>               Share a session (clipboard or public link)
+origin resume [branch]          Resume a session for AI handoff
+```
+
+### Review
+```
+origin review <id>              Approve/reject/flag a session
+origin review-pr <url>          Analyze AI sessions behind a PR
+origin intent-review [branch]   AI intent verification on a branch
 ```
 
 ### Tracking
-
 ```
-origin issue <subcommand>       AI-native issue tracker (create/list/ready/dep)
-origin context <subcommand>     Cross-agent handoff + accumulated session memory
+origin issue <subcommand>       AI-native issue tracker
+origin todo <subcommand>        AI-extracted TODOs across sessions
+origin trail <subcommand>       Branch-centric work tracking
+origin handoff                  Cross-agent context handoff (one-shot)
+origin memory                   Accumulated session memory
+origin context [show|clear]     Convenience view: handoff + memory together
 ```
 
-### Time-travel
-
+### Analytics
 ```
-origin checkpoint               Snapshots, rewind, restore
+origin recap                    End-of-day summary
+origin report                   Sprint report (markdown/json/csv)
+origin analyze                  Prompt pattern analytics
+origin rework                   Detect reworked AI code (hotspots)
+```
+
+### Time travel
+```
+origin rewind                   Rewind to a previous AI checkpoint
+origin snapshot                 Shadow snapshots of working tree
+origin checkpoint               Time-travel checkpoints (auto-saved per prompt)
+```
+
+### Chat / AI
+```
+origin chat                     Interactive AI assistant over your code
 ```
 
 ### Data
-
 ```
-origin export                   Export as CSV / JSON / agent-trace
-origin search <query>           Full-text search across prompts
+origin export                   Export sessions as CSV/JSON/agent-trace
 origin backfill                 Retroactive AI tagging for old commits
+origin db <subcommand>          Local prompt database management
 ```
 
-### Internal
-
+### Governance
 ```
-origin hooks                    Git & agent hook handlers
-origin upgrade                  Upgrade the CLI
-origin plugin                   Manage external agent plugins
-origin version                  Show version + build provenance
+origin policies                 List active policies
+origin audit                    Compliance audit trail
+origin ignore <subcommand>      Manage file ignore patterns
 ```
 
----
+### Integrations
+```
+origin repos                    List tracked repositories
+origin agents                   List detected AI agents
+origin sync                     Sync session data from current repo
+origin config <get|set|list>    Manage CLI configuration
+origin proxy <install|...>      Transparent git proxy for attribution
+origin ci <subcommand>          CI/CD integration
+origin plugin <subcommand>      External agent plugin management
+origin web                      Local web dashboard (no server required)
+```
 
-### Aliases (hidden from `--help`, still supported forever)
+### Health
+```
+origin doctor [--fix]           Diagnose and fix stuck sessions
+origin verify                   Health check dashboard
+origin verify-install           Tamper check of the installed binary
+origin clean [--force]          Remove orphan branches and stale data
+origin reset                    Clear local session state for this repo
+```
 
-| Primary | Hidden aliases |
-|---------|---------------|
-| `blame` | `ask`, `why`, `prompts` |
-| `stats` | `recap`, `report`, `analyze`, `rework`, `compare` |
-| `sessions` | `session`, `log`, `show`, `session-compare` |
-| `explain` | `review`, `review-pr`, `intent-review` |
-| `context` | `handoff`, `memory` |
-| `issue` | `todo`, `trail` |
-| `checkpoint` | `rewind`, `snapshot` |
-| `init` | `enable`, `disable`, `link`, `attach`, `whoami` |
-| `doctor` | `status`, `verify`, `verify-install`, `clean`, `reset` |
-| `export`/`search`/`backfill` | `repos`, `agents`, `sync`, `policies`, `audit`, `db`, `ignore` |
-| `hooks` | `config`, `proxy`, `ci`, `prompt-status`, `shell-prompt`, `web` |
+### Shell integration
+```
+origin prompt-status            Fast PS1 status string (<50ms)
+origin shell-prompt             Shell integration script (eval)
+```
 
-Every alias is a full command — if your scripts call `origin ask ...` or `origin recap --format json`, they keep working with identical output. Run `origin <alias> --help` to see the original flags.
+### Meta
+```
+origin version [--verbose]      Version + build provenance
+origin upgrade                  Upgrade CLI to latest
+origin hooks                    Git/agent hook handlers (internal)
+```
 
 ---
 

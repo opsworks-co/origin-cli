@@ -39,7 +39,7 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 import { authMiddleware } from './middleware/auth.js';
-import { authLimiter, sessionLimiter, mcpLimiter, webhookLimiter, apiLimiter } from './middleware/rate-limit.js';
+import { authLimiter, sessionLimiter, mcpLimiter, webhookLimiter, apiLimiter, publicScanLimiter } from './middleware/rate-limit.js';
 import { startAutoSync } from './services/auto-sync.js';
 import { startScheduler } from './services/scheduler.js';
 import { startWebhookQueue } from './services/webhook-queue.js';
@@ -49,6 +49,7 @@ import sessionRoutes from './routes/sessions.js';
 import agentRoutes from './routes/agents.js';
 import policyRoutes from './routes/policies.js';
 import publicPolicyRoutes from './routes/public-policies.js';
+import publicScanRoutes from './routes/public-scan.js';
 import auditRoutes from './routes/audit.js';
 import statsRoutes from './routes/stats.js';
 import machineRoutes from './routes/machines.js';
@@ -208,6 +209,7 @@ mountRoute('/repos', repoRoutes);
 mountRoute('/sessions', sessionRoutes, [largeBodyParser, sessionLimiter]);
 mountRoute('/agents', agentRoutes);
 mountRoute('/policies/public', publicPolicyRoutes);
+mountRoute('/public-scan', publicScanRoutes, [publicScanLimiter]);
 mountRoute('/policies', policyRoutes);
 mountRoute('/audit', auditRoutes);
 mountRoute('/stats', statsRoutes);

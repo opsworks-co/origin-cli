@@ -5,9 +5,25 @@ import type { SessionDiff, PromptChange } from '../api';
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Adaptive timestamp:
+//   today     → "22:20"
+//   yesterday → "Yesterday 22:20"
+//   older     → "Apr 14 22:20"
 function formatPromptTime(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const sameDay = d.getFullYear() === now.getFullYear() &&
+                  d.getMonth() === now.getMonth() &&
+                  d.getDate() === now.getDate();
+  if (sameDay) return time;
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = d.getFullYear() === yesterday.getFullYear() &&
+                      d.getMonth() === yesterday.getMonth() &&
+                      d.getDate() === yesterday.getDate();
+  if (isYesterday) return `Yesterday ${time}`;
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -689,18 +705,23 @@ interface UnifiedSessionViewProps {
   transcript: Message[];
   promptChanges: PromptChange[];
   sessionDiff?: SessionDiff | null;
+  // Sort default:
+  //   true  (RUNNING sessions) — latest turn at top, feed-like
+  //   false (COMPLETED sessions) — oldest first, reads like a conversation
+  defaultNewestFirst?: boolean;
 }
 
 export default function UnifiedSessionView({
   transcript,
   promptChanges,
   sessionDiff,
+  defaultNewestFirst = true,
 }: UnifiedSessionViewProps) {
   const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
   const [visibleCount, setVisibleCount] = useState(50);
   const [showSessionDiff, setShowSessionDiff] = useState(false);
-  const [newestFirst, setNewestFirst] = useState(true);
+  const [newestFirst, setNewestFirst] = useState(defaultNewestFirst);
   const diffCache = useRef<Map<number, DiffFile[]>>(new Map());
 
   const turns = useMemo(

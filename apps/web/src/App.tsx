@@ -26,6 +26,7 @@ import SharedSession from './pages/SharedSession';
 //    own chunk, which keeps the main bundle small and speeds up first paint
 //    for signed-out and first-visit users. ─────────────────────────────────
 const Docs = lazy(() => import('./pages/Docs'));
+const Scan = lazy(() => import('./pages/Scan'));
 const CLICommands = lazy(() => import('./pages/CLICommands'));
 const Blog = lazy(() => import('./pages/Blog'));
 const BlogPost = lazy(() => import('./pages/BlogPost'));
@@ -132,6 +133,8 @@ export default function App() {
       <Route path="/demo/platform" element={<PublicLayout><DemoPlatform /></PublicLayout>} />
       <Route path="/demo/cli" element={<PublicLayout><DemoCLI /></PublicLayout>} />
       <Route path="/org/:orgSlug/policies" element={<PublicLayout><PublicPolicies /></PublicLayout>} />
+      <Route path="/scan" element={<PublicLayout><Scan /></PublicLayout>} />
+      <Route path="/scan/:token" element={<PublicLayout><Scan /></PublicLayout>} />
       <Route path="/s/:slug" element={<SharedSession />} />
       <Route path="/auth/:provider/callback" element={<OAuthCallback />} />
       <Route path="/login" element={<Login />} />

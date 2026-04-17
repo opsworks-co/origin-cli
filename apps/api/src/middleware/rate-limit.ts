@@ -91,3 +91,15 @@ export const expensiveLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,                  // 10 expensive ops/min/user
 });
+
+// ── Public lead magnet (codebase scan) ───────────────────────────────────
+// No auth, so keyed by IP only. Tight limit to prevent GitHub API quota abuse
+// and lead-list spam. 5 scans/hour/IP = ~120/day per abuser, fine.
+export const publicScanLimiter = rateLimit({
+  standardHeaders: 'draft-7' as const,
+  legacyHeaders: false,
+  handler,
+  keyGenerator: (req) => `ip:${ipKeyGenerator(req.ip || '0.0.0.0')}`,
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+});
