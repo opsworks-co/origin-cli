@@ -7,9 +7,24 @@ import { Archive, ArchiveRestore, GitBranch, GitMerge } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
 import { safeHref } from '../utils/safe-url';
+import { PageHeader, Pill, PulseDot } from '../components/ui';
+import type { PillVariant } from '../components/ui';
+
+// Maps a session/review status string to the Pill variant defined in design-tokens.md.
+// Kept as a simple function so the rest of the file can swap badges for Pills
+// without touching the call sites in the table body.
+function statusToVariant(status: string): PillVariant {
+  const s = status.toLowerCase();
+  if (s === 'running') return 'running';
+  if (s === 'completed' || s === 'approved' || s === 'done') return 'success';
+  if (s === 'flagged' || s === 'warn' || s === 'pending') return 'warning';
+  if (s === 'rejected' || s === 'failed' || s === 'error') return 'error';
+  if (s === 'reviewed' || s === 'info') return 'info';
+  return 'neutral';
+}
 
 function statusBadge(status: string) {
-  return <span className={getStatusBadgeClass(status)}>{status}</span>;
+  return <Pill variant={statusToVariant(status)}>{status}</Pill>;
 }
 
 type SortField = 'model' | 'agent' | 'repo' | 'status' | 'cost' | 'tokens' | 'duration' | 'toolCalls' | 'date' | 'score';
@@ -343,29 +358,29 @@ export default function Sessions() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">Sessions</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            All AI coding sessions across your organization
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {/* Live indicator */}
-          <div className="flex items-center gap-2 text-xs">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                liveConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-600'
-              }`}
-            />
-            <span className={liveConnected ? 'text-green-400' : 'text-gray-500'}>
+      <PageHeader
+        title="Sessions"
+        subtitle={isDev ? 'All AI coding sessions from your machine' : 'All AI coding sessions across your organization'}
+        actions={
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Live indicator — purple = live activity per design tokens */}
+            <Pill
+              variant={liveConnected ? 'running' : 'neutral'}
+              icon={liveConnected ? <PulseDot variant="running" /> : undefined}
+              title={liveConnected ? 'Real-time session events connected' : 'Connecting to real-time session stream'}
+            >
               {liveConnected ? 'Live' : 'Connecting...'}
-            </span>
-            {liveEvents > 0 && (
-              <span className="text-gray-600">({liveEvents} events)</span>
-            )}
+              {liveEvents > 0 && <span className="text-gray-500 ml-1">· {liveEvents}</span>}
+            </Pill>
           </div>
+        }
+      />
+
+      {/* Secondary toolbar — view modes + archive toggle, right-aligned */}
+      <div className="flex items-center justify-end flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          {/* Spacer so the old layout below still works */}
+          <span className="hidden" aria-hidden />
 
           {/* View mode toggle — team only (PR grouping) */}
           {!isDev && (

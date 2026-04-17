@@ -2,8 +2,19 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { PromptEntry, PromptPattern, Repo, Agent } from '../api';
-import { timeAgo, getStatusBadgeClass } from '../utils';
+import { timeAgo } from '../utils';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
+import { PageHeader, Pill, EmptyState } from '../components/ui';
+import type { PillVariant } from '../components/ui';
+
+function reviewStatusToVariant(status: string): PillVariant {
+  const s = status.toLowerCase();
+  if (s === 'approved' || s === 'completed') return 'success';
+  if (s === 'flagged' || s === 'pending') return 'warning';
+  if (s === 'rejected' || s === 'failed' || s === 'error') return 'error';
+  if (s === 'reviewed') return 'info';
+  return 'neutral';
+}
 
 type ViewMode = 'search' | 'patterns';
 
@@ -67,27 +78,26 @@ export default function Prompts() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Prompt Library</h1>
-          <p className="text-sm text-gray-500 mt-1">Search and analyze prompts across your organization</p>
-        </div>
-        <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1">
-          <button
-            onClick={() => setViewMode('search')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${viewMode === 'search' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
-          >
-            Search
-          </button>
-          <button
-            onClick={() => setViewMode('patterns')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${viewMode === 'patterns' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
-          >
-            Patterns
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title="Prompt Library"
+        subtitle="Search and analyze prompts across your organization"
+        actions={
+          <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1">
+            <button
+              onClick={() => setViewMode('search')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${viewMode === 'search' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+            >
+              Search
+            </button>
+            <button
+              onClick={() => setViewMode('patterns')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${viewMode === 'patterns' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+            >
+              Patterns
+            </button>
+          </div>
+        }
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm">
@@ -133,8 +143,10 @@ export default function Prompts() {
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-500" />
             </div>
           ) : prompts.length === 0 ? (
-            <div className="card text-center py-12 text-gray-500">
-              {query ? 'No prompts match your search.' : 'No prompts recorded yet.'}
+            <div className="card p-0">
+              <EmptyState
+                title={query ? 'No prompts match your search' : 'No prompts recorded yet'}
+              />
             </div>
           ) : (
             <>
@@ -152,7 +164,7 @@ export default function Prompts() {
                       </p>
                       <div className="flex items-center gap-2 flex-shrink-0">
                         <span className="badge-blue text-xs">{p.model}</span>
-                        {p.reviewStatus && <span className={getStatusBadgeClass(p.reviewStatus.toLowerCase())}>{p.reviewStatus}</span>}
+                        {p.reviewStatus && <Pill variant={reviewStatusToVariant(p.reviewStatus)}>{p.reviewStatus}</Pill>}
                       </div>
                     </div>
                     <div className="flex items-center gap-4 text-xs text-gray-500">
@@ -184,7 +196,9 @@ export default function Prompts() {
             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-500" />
           </div>
         ) : patterns.length === 0 ? (
-          <div className="card text-center py-12 text-gray-500">No prompt data available for pattern analysis.</div>
+          <div className="card p-0">
+            <EmptyState title="No prompt data available for pattern analysis" />
+          </div>
         ) : (
           <div className="grid lg:grid-cols-2 gap-4">
             {/* Bar Chart */}

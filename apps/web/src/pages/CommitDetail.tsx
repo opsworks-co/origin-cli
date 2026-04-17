@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { CommitDetail } from '../api';
 import { timeAgo } from '../utils';
+import { Breadcrumb, Pill } from '../components/ui';
 
 // ─── Diff line renderer (GitHub-style) ───────────────────────────────
 function DiffLineRow({ line }: { line: string }) {
@@ -141,18 +142,14 @@ export default function CommitDetailPage() {
 
   return (
     <div className="space-y-5">
-      {/* Breadcrumb / header */}
-      <div className="flex items-center gap-2 text-xs text-gray-500">
-        <Link to="/repos" className="hover:text-gray-300 transition-colors">Repos</Link>
-        <span className="text-gray-700">/</span>
-        <Link to={`/repos/${repoId}`} className="hover:text-gray-300 transition-colors">
-          {commit.repo.name}
-        </Link>
-        <span className="text-gray-700">/</span>
-        <Link to={`/repos/${repoId}`} className="hover:text-gray-300 transition-colors">Commits</Link>
-        <span className="text-gray-700">/</span>
-        <code className="text-indigo-400 font-mono">{commit.sha.slice(0, 7)}</code>
-      </div>
+      {/* Breadcrumb */}
+      <Breadcrumb
+        items={[
+          { label: 'Repositories', to: '/repos' },
+          { label: commit.repo.name, to: `/repos/${repoId}` },
+          { label: commit.sha.slice(0, 7) },
+        ]}
+      />
 
       {/* Commit header card */}
       <div className="card">
@@ -173,18 +170,12 @@ export default function CommitDetailPage() {
               )}
               {isAI ? (
                 commit.session ? (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/30">
-                    {commit.session.model}
-                  </span>
+                  <Pill variant="ai">{commit.session.model}</Pill>
                 ) : (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/10 text-purple-400 border border-dashed border-purple-500/40">
-                    {commit.aiToolDetected} <span className="opacity-60">detected</span>
-                  </span>
+                  <Pill variant="running">{commit.aiToolDetected} <span className="opacity-60">detected</span></Pill>
                 )
               ) : (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-gray-800 text-gray-400 border border-gray-700">
-                  Human
-                </span>
+                <Pill variant="neutral">Human</Pill>
               )}
             </div>
             {commit.message.split('\n').slice(1).join('\n').trim() && (

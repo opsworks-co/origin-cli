@@ -3,6 +3,7 @@ import * as api from '../api';
 import type { LeaderboardEntry } from '../api';
 import ActivityHeatmap from '../components/ActivityHeatmap';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { PageHeader, EmptyState } from '../components/ui';
 
 type Period = 'week' | 'month' | 'quarter' | 'all';
 type SortField = 'sessions' | 'lines' | 'cost' | 'quality';
@@ -63,30 +64,32 @@ export default function Leaderboard() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Developer Leaderboard</h1>
-          <p className="text-sm text-gray-500 mt-1">Track AI coding activity and quality across your team</p>
-        </div>
-        <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1">
-          {periods.map((p) => (
-            <button
-              key={p.value}
-              onClick={() => setPeriod(p.value)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                period === p.value ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <PageHeader
+        title="Developer Leaderboard"
+        subtitle="Track AI coding activity and quality across your team"
+        actions={
+          <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1">
+            {periods.map((p) => (
+              <button
+                key={p.value}
+                onClick={() => setPeriod(p.value)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  period === p.value ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        }
+      />
 
       {entries.length === 0 ? (
-        <div className="card text-center py-12 text-gray-500">
-          No activity data for the selected period. Sessions need to be linked to users.
+        <div className="card p-0">
+          <EmptyState
+            title="No activity data"
+            description="No activity data for the selected period. Sessions need to be linked to users."
+          />
         </div>
       ) : (
         <>

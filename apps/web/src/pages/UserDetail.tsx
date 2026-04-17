@@ -3,15 +3,19 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { UserDetail as UserDetailType } from '../api';
 import { timeAgo, getStatusBadgeClass } from '../utils';
+import { PageHeader, Pill } from '../components/ui';
+import type { PillVariant } from '../components/ui';
+
+function roleToVariant(role: string): PillVariant {
+  const r = role.toUpperCase();
+  if (r === 'OWNER') return 'ai';
+  if (r === 'ADMIN') return 'warning';
+  if (r === 'MEMBER') return 'info';
+  return 'neutral';
+}
 
 function roleBadge(role: string) {
-  const map: Record<string, string> = {
-    OWNER: 'badge-purple',
-    ADMIN: 'badge-amber',
-    MEMBER: 'badge-blue',
-    VIEWER: 'badge-gray',
-  };
-  return <span className={map[role] ?? 'badge-gray'}>{role}</span>;
+  return <Pill variant={roleToVariant(role)}>{role}</Pill>;
 }
 
 function statusBadge(status: string) {
@@ -56,27 +60,25 @@ export default function UserDetail() {
 
   return (
     <div className="space-y-6">
-      {/* Back link */}
-      <Link to="/team" className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
-        &larr; Back to Team
-      </Link>
-
       {/* Header */}
-      <div className="card flex items-center gap-4">
-        <div className="w-14 h-14 rounded-full bg-indigo-600/30 flex items-center justify-center text-indigo-400 text-xl font-bold flex-shrink-0">
-          {user.name.charAt(0).toUpperCase()}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold truncate">{user.name}</h1>
-            {roleBadge(user.role)}
+      <PageHeader
+        breadcrumb={[{ label: 'IAM', to: '/iam' }, { label: user.name || user.email }]}
+        title={
+          <div className="flex items-center gap-4">
+            <div className="w-14 h-14 rounded-full bg-indigo-600/30 flex items-center justify-center text-indigo-400 text-xl font-bold flex-shrink-0">
+              {user.name.charAt(0).toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-xl font-semibold text-gray-100 tracking-tight leading-tight truncate">{user.name}</h1>
+              <p className="text-sm text-gray-500">{user.email}</p>
+              <p className="text-xs text-gray-600 mt-0.5">
+                Member since {new Date(user.createdAt).toLocaleDateString()}
+              </p>
+            </div>
           </div>
-          <p className="text-sm text-gray-500">{user.email}</p>
-          <p className="text-xs text-gray-600 mt-0.5">
-            Member since {new Date(user.createdAt).toLocaleDateString()}
-          </p>
-        </div>
-      </div>
+        }
+        meta={roleBadge(user.role)}
+      />
 
       {/* Stats row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

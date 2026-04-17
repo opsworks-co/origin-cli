@@ -7,6 +7,7 @@ import { Package, Plus, RefreshCw, Archive, Trash2, GitFork } from 'lucide-react
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
+import { PageHeader, Pill } from '../components/ui';
 
 /**
  * Derive the effective provider for grouping.
@@ -469,16 +470,11 @@ export default function Repos() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Repositories</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {repos.length} {repos.length === 1 ? 'repo' : 'repos'} &middot; {totalCommits} commits &middot; {totalSessions} sessions
-          </p>
-        </div>
-        {repos.length > 0 && (
-          <div className="flex items-center gap-2">
+      <PageHeader
+        title="Repositories"
+        subtitle={`${repos.length} ${repos.length === 1 ? 'repo' : 'repos'} \u00B7 ${totalCommits} commits \u00B7 ${totalSessions} sessions`}
+        actions={repos.length > 0 ? (
+          <div className="flex items-center gap-2 flex-wrap">
             {hasGitHub && !showImport && (
               <button
                 onClick={() => { handleDiscover(); setShowGitLabImport(false); setShowForm(false); }}
@@ -519,8 +515,8 @@ export default function Repos() {
               {showForm ? 'Close' : '+ Add Repo'}
             </button>
           </div>
-        )}
-      </div>
+        ) : undefined}
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm">{error}</div>
@@ -1008,9 +1004,7 @@ export default function Repos() {
                   )}
                   <span className="font-semibold text-gray-200 text-sm">{group.org}</span>
                   {group.provider === 'local' && (
-                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-medium uppercase tracking-wider">
-                      Local
-                    </span>
+                    <Pill variant="success">Local</Pill>
                   )}
                   <span className="text-xs text-gray-500">
                     {group.repos.length} {group.repos.length === 1 ? 'repo' : 'repos'}

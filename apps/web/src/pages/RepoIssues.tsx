@@ -3,12 +3,14 @@ import { useParams, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Issue, IssueStats } from '../api';
 import { timeAgo } from '../utils';
+import { PageHeader, Pill, EmptyState } from '../components/ui';
+import type { PillVariant } from '../components/ui';
 
-const PRIORITY_LABELS: Record<number, { label: string; color: string }> = {
-  1: { label: 'P1 Critical', color: 'text-red-400 bg-red-500/10 ring-red-500/20' },
-  2: { label: 'P2 High', color: 'text-amber-400 bg-amber-500/10 ring-amber-500/20' },
-  3: { label: 'P3 Medium', color: 'text-blue-400 bg-blue-500/10 ring-blue-500/20' },
-  4: { label: 'P4 Low', color: 'text-gray-400 bg-white/[0.04] ring-white/[0.06]' },
+const PRIORITY_LABELS: Record<number, { label: string; variant: PillVariant }> = {
+  1: { label: 'P1 Critical', variant: 'error' },
+  2: { label: 'P2 High', variant: 'warning' },
+  3: { label: 'P3 Medium', variant: 'info' },
+  4: { label: 'P4 Low', variant: 'neutral' },
 };
 
 const STATUS_CONFIG: Record<string, { icon: string; color: string }> = {
@@ -22,11 +24,7 @@ type StatusFilter = 'open' | 'closed' | 'all';
 
 function PriorityBadge({ priority }: { priority: number }) {
   const cfg = PRIORITY_LABELS[priority] || PRIORITY_LABELS[3];
-  return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold tracking-wide ring-1 ${cfg.color}`}>
-      {cfg.label}
-    </span>
-  );
+  return <Pill variant={cfg.variant}>{cfg.label}</Pill>;
 }
 
 function StatusIcon({ status }: { status: string }) {
@@ -121,25 +119,22 @@ export default function RepoIssues() {
 
   return (
     <div className="animate-fade-in max-w-6xl mx-auto space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
-            <Link to="/repos" className="hover:text-gray-300 transition-colors">Repositories</Link>
-            <span>/</span>
-            <Link to={`/repos/${repoId}`} className="hover:text-gray-300 transition-colors">Repo</Link>
-            <span>/</span>
-            <span className="text-gray-200">Issues</span>
-          </div>
-          <h1 className="text-xl font-bold text-gray-100">Issues</h1>
-        </div>
-        <button
-          onClick={() => setCreating(true)}
-          className="btn-primary text-sm"
-        >
-          + New Issue
-        </button>
-      </div>
+      <PageHeader
+        breadcrumb={[
+          { label: 'Repositories', to: '/repos' },
+          { label: 'Repo', to: `/repos/${repoId}` },
+          { label: 'Issues' },
+        ]}
+        title="Issues"
+        actions={
+          <button
+            onClick={() => setCreating(true)}
+            className="btn-primary text-sm"
+          >
+            + New Issue
+          </button>
+        }
+      />
 
       {/* Stats cards */}
       {stats && (
@@ -248,10 +243,10 @@ export default function RepoIssues() {
 
       {/* Issue list */}
       {filteredIssues.length === 0 ? (
-        <div className="text-center py-12 text-gray-500">
-          <p className="text-lg mb-1">No issues found</p>
-          <p className="text-sm">Create one with the button above or <code className="text-xs bg-gray-800 px-1.5 py-0.5 rounded">origin issue create "title"</code></p>
-        </div>
+        <EmptyState
+          title="No issues found"
+          description={<>Create one with the button above or <code className="text-xs bg-gray-800 px-1.5 py-0.5 rounded">origin issue create "title"</code></>}
+        />
       ) : (
         <div className="space-y-1">
           {filteredIssues.map((issue) => {

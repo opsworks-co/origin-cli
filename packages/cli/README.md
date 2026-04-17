@@ -36,14 +36,14 @@ explicitly push it.
 
 | Pain | What Origin gives you |
 |---|---|
-| 🕵️ **`git blame` is lying to you** — you see the human, not the AI that wrote the line | `origin blame` shows the exact model, agent, session, and prompt behind every single line |
-| 💸 **You have no idea how much AI is costing you** | Per-session token + USD cost, broken down by model, repo, and developer |
-| 🧠 **Prompts disappear the moment you close the terminal** | Every prompt is recorded and searchable — `origin why <file>:<line>` replays the exact conversation that wrote it |
-| 🔁 **Context is lost every time you switch agents** | Cross-agent handoff: Claude can pick up where Cursor left off, automatically |
-| 🔐 **AI agents leak secrets into commits** | Built-in secret scanner blocks commits containing AWS keys, API tokens, JWTs, DB creds, and 40+ other patterns |
-| 🛰️ **Your prompts are being logged by someone else's cloud** | 100% local by default — prompts, responses, and costs live in your own git repo. No accounts, no telemetry, no server required |
-| 🤷 **You don't know which model writes the best code** | `origin stats` compares approval rate, rework rate, avg cost, and avg lines across every model you use |
-| 🧩 **Monorepos and multi-repo workspaces break every tool** | Auto-detects every git repo under your working dir and tracks them all in a single session |
+| 🕵️ **`git blame` is lying to you** — you see the human, not the AI that wrote the line | `origin blame` tags every line with the AI/human authorship + model + session. `origin why <file>:<line>` drills down to the exact prompt behind a line. |
+| 💸 **You have no idea how much AI is costing you** | Per-session token + USD cost. Standalone: breakdown by model and tool. Connected mode adds per-developer and per-repo breakdowns. |
+| 🧠 **Your prompts aren't tied to the code they produced — and aren't searchable across tools** | Every prompt is recorded in git and searchable. `origin why <file>:<line>` replays the exact conversation that wrote a line, across Claude, Cursor, Codex, and 10 more agents. |
+| 🔁 **Context is lost every time you switch agents** | `origin handoff show` passes session state between tools so the next agent picks up where the last one stopped without you re-explaining. |
+| 🔐 **AI agents leak secrets into commits** | Pre-commit secret scanner blocks commits containing 40+ patterns — AWS / GitHub / OpenAI / Anthropic / Stripe / GCP / Azure / Twilio / SendGrid / DigitalOcean / Heroku / Datadog / New Relic / Cloudflare / Discord / Telegram / JWT / DB creds / npm tokens / private keys / generic `*_TOKEN=` `*_SECRET=` `*_KEY=` `*_PASSWORD=` assignments. |
+| 🛰️ **Your prompts are being logged by someone else's cloud** | 100% local by default. No telemetry unless you opt in via `origin config set telemetry true`. Prompts, responses, and costs live in your own git repo. |
+| 🤷 **You don't know which model writes the best code** | `origin stats` compares commits, lines added, acceptance rate, override rate, and cost across every model you use — per-model, not a single global average. |
+| 🧩 **Monorepos and multi-repo workspaces break every tool** | Auto-detects every git repo under your working dir and tracks them all in a single session. |
 
 ### Why it's cool
 

@@ -4,6 +4,26 @@ import * as api from '../api';
 import type { TrailDetail as TrailDetailType, Session } from '../api';
 import { timeAgo, formatCost, getStatusBadgeClass } from '../utils';
 import { safeHref } from '../utils/safe-url';
+import { PageHeader, Pill, ActionButtonGroup } from '../components/ui';
+import type { PillVariant } from '../components/ui';
+
+function statusToVariant(status: string): PillVariant {
+  const s = status.toLowerCase();
+  if (s === 'running' || s === 'active') return 'running';
+  if (s === 'completed' || s === 'approved' || s === 'done' || s === 'success') return 'success';
+  if (s === 'pending' || s === 'warn' || s === 'flagged' || s === 'paused' || s === 'review') return 'warning';
+  if (s === 'rejected' || s === 'failed' || s === 'error') return 'error';
+  if (s === 'reviewed' || s === 'info' || s === 'medium') return 'info';
+  return 'neutral';
+}
+
+function priorityToVariant(priority: string): PillVariant {
+  const p = priority.toLowerCase();
+  if (p === 'critical') return 'error';
+  if (p === 'high') return 'warning';
+  if (p === 'medium') return 'info';
+  return 'neutral';
+}
 
 const STATUS_OPTIONS = ['active', 'review', 'done', 'paused'];
 const PRIORITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
@@ -113,31 +133,38 @@ export default function TrailDetail() {
   const totalCost = trail.sessions.reduce((s, x) => s + x.costUsd, 0);
   const totalLines = trail.sessions.reduce((s, x) => s + x.linesAdded + x.linesRemoved, 0);
 
-  const statusColor: Record<string, string> = { active: 'badge-blue', review: 'badge-amber', done: 'badge-green', paused: 'badge-gray' };
-  const priorityColor: Record<string, string> = { critical: 'badge-red', high: 'badge-amber', medium: 'badge-blue', low: 'badge-gray' };
-
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-start justify-between">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <Link to="/trails" className="text-gray-500 hover:text-gray-300 text-sm">&larr; Trails</Link>
-          </div>
-          <h1 className="text-2xl font-bold">{trail.name}</h1>
-          {trail.description && <p className="text-sm text-gray-500 mt-1">{trail.description}</p>}
-          <div className="flex items-center gap-2 mt-2">
-            <span className={statusColor[trail.status] || 'badge-gray'}>{trail.status}</span>
-            <span className={priorityColor[trail.priority] || 'badge-gray'}>{trail.priority}</span>
-            {trail.branch && <span className="text-xs font-mono bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{trail.branch}</span>}
-            {labels.map((l, i) => <span key={i} className="badge-purple text-xs">{l}</span>)}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setEditing(!editing)} className="btn-secondary text-xs">{editing ? 'Cancel' : 'Edit'}</button>
-          <button onClick={handleDelete} className="btn-secondary text-xs text-red-400 hover:text-red-300">Delete</button>
-        </div>
-      </div>
+      <PageHeader
+        breadcrumb={[{ label: 'Trails', to: '/trails' }, { label: trail.name }]}
+        title={trail.name}
+        subtitle={trail.description || undefined}
+        meta={
+          <>
+            <Pill variant={statusToVariant(trail.status)}>{trail.status}</Pill>
+            <Pill variant={priorityToVariant(trail.priority)}>{trail.priority}</Pill>
+            {trail.branch && (
+              <Pill variant="neutral">
+                <span className="font-mono">{trail.branch}</span>
+              </Pill>
+            )}
+            {labels.map((l, i) => (
+              <Pill key={i} variant="ai">{l}</Pill>
+            ))}
+          </>
+        }
+        actions={
+          <ActionButtonGroup
+            secondary={[
+              { label: editing ? 'Cancel' : 'Edit', onClick: () => setEditing(!editing) },
+            ]}
+            overflow={[
+              { label: 'Delete', onClick: handleDelete, destructive: true },
+            ]}
+          />
+        }
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm">

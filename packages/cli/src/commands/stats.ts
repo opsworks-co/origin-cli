@@ -57,6 +57,37 @@ function displayLocalStats(stats: AttributionStats): void {
         `  ${chalk.cyan(model.padEnd(24))} ${bar} ${chalk.white(String(pct) + '%').padStart(5)}  ${chalk.gray(`${data.commits} commits`)}`,
       );
     }
+
+    // Per-model acceptance + cost (skip if nothing meaningful to show).
+    // We only print this block when at least one model has tracked line-level
+    // acceptance OR a cost from git notes — otherwise the table is all zeros.
+    const hasPerModelAcceptance = Array.from(stats.byModel.values()).some(
+      (v) => v.acceptedLines + v.overriddenLines + v.deletedLines > 0 || v.costUsd > 0,
+    );
+    if (hasPerModelAcceptance) {
+      console.log(chalk.bold('\n  Per-Model Acceptance & Cost\n'));
+      console.log(
+        '  ' + chalk.gray('Model'.padEnd(24)) +
+        chalk.gray('Accept'.padStart(8)) +
+        chalk.gray('Override'.padStart(10)) +
+        chalk.gray('Deleted'.padStart(10)) +
+        chalk.gray('Rate'.padStart(8)) +
+        chalk.gray('Cost'.padStart(10)),
+      );
+      for (const [model, data] of stats.byModel) {
+        const denom = data.acceptedLines + data.overriddenLines;
+        const rate = denom > 0 ? Math.round(data.acceptanceRate * 100) + '%' : '—';
+        const cost = data.costUsd > 0 ? `$${data.costUsd.toFixed(2)}` : '—';
+        console.log(
+          '  ' + chalk.cyan(model.padEnd(24)) +
+          chalk.green(String(data.acceptedLines).padStart(8)) +
+          chalk.yellow(String(data.overriddenLines).padStart(10)) +
+          chalk.red(String(data.deletedLines).padStart(10)) +
+          chalk.white(rate.padStart(8)) +
+          chalk.white(cost.padStart(10)),
+        );
+      }
+    }
   }
 
   // Acceptance metrics

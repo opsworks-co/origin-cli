@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import * as api from '../api';
 import { timeAgo } from '../utils';
+import { PageHeader, Pill, PulseDot } from '../components/ui';
 
 type Tab = 'overview' | 'policies';
 
@@ -166,22 +167,19 @@ export default function MachineDetail() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <Link to="/infrastructure" className="text-sm text-gray-400 hover:text-gray-200 mb-4 inline-block">&larr; Back to Infrastructure</Link>
-
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">{machine.hostname}</h1>
-            <span className={`inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-full ${
-              isOnline ? 'bg-green-500/20 text-green-400' : 'bg-gray-700 text-gray-400'
-            }`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${isOnline ? 'bg-green-500' : 'bg-gray-500'}`} />
-              {isOnline ? 'Online' : 'Offline'}
-            </span>
-          </div>
-          <p className="text-gray-500 text-sm mt-1 font-mono">{machine.machineId}</p>
-        </div>
-      </div>
+      <PageHeader
+        className="mb-6"
+        breadcrumb={[{ label: 'Infrastructure', to: '/infrastructure' }, { label: machine.hostname }]}
+        title={machine.hostname}
+        subtitle={<span className="font-mono">{machine.machineId}</span>}
+        meta={
+          isOnline ? (
+            <Pill variant="running" icon={<PulseDot variant="success" />}>Online</Pill>
+          ) : (
+            <Pill variant="neutral">Offline</Pill>
+          )
+        }
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm mb-4">{error}</div>

@@ -1,53 +1,35 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
-import { Check, X, Loader2, Minus } from 'lucide-react';
+import { Check, X, Loader2, Minus, GitPullRequest } from 'lucide-react';
 import { safeHref } from '../utils/safe-url';
+import { PageHeader, Pill, EmptyState } from '../components/ui';
 
 type PRFilter = 'all' | 'open' | 'passing' | 'failing' | 'pending';
 
 function CheckBadge({ status }: { status: string }) {
   switch (status) {
     case 'success':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-900/30 text-green-400 border border-green-800/50">
-          <Check className="w-3 h-3" />
-          Passed
-        </span>
-      );
+      return <Pill variant="success" icon={<Check className="w-3 h-3" />}>Passed</Pill>;
     case 'failure':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-900/30 text-red-400 border border-red-800/50">
-          <X className="w-3 h-3" />
-          Failed
-        </span>
-      );
+      return <Pill variant="error" icon={<X className="w-3 h-3" />}>Failed</Pill>;
     case 'pending':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-900/30 text-yellow-400 border border-yellow-800/50">
-          <Loader2 className="w-3 h-3 animate-spin" />
-          Pending
-        </span>
-      );
+      return <Pill variant="warning" icon={<Loader2 className="w-3 h-3 animate-spin" />}>Pending</Pill>;
     default:
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400 border border-gray-700">
-          <Minus className="w-3 h-3" />
-        </span>
-      );
+      return <Pill variant="neutral" icon={<Minus className="w-3 h-3" />}>—</Pill>;
   }
 }
 
 function StateBadge({ state }: { state: string }) {
   switch (state) {
     case 'open':
-      return <span className="text-xs text-green-400">Open</span>;
+      return <Pill variant="success" muted size="sm">Open</Pill>;
     case 'merged':
-      return <span className="text-xs text-purple-400">Merged</span>;
+      return <Pill variant="running" muted size="sm">Merged</Pill>;
     case 'closed':
-      return <span className="text-xs text-gray-500">Closed</span>;
+      return <Pill variant="neutral" muted size="sm">Closed</Pill>;
     default:
-      return <span className="text-xs text-gray-500">{state}</span>;
+      return <Pill variant="neutral" muted size="sm">{state}</Pill>;
   }
 }
 
@@ -126,13 +108,10 @@ export default function PullRequests() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-gray-100">Pull Request Checks</h1>
-        <p className="text-sm text-gray-400 mt-1">
-          Origin policy enforcement status for GitHub pull requests
-        </p>
-      </div>
+      <PageHeader
+        title="Pull Request Checks"
+        subtitle="Origin policy enforcement status for GitHub pull requests"
+      />
 
       {/* Filter tabs */}
       <div className="flex gap-1 bg-gray-900 rounded-lg p-1 w-fit">
@@ -154,16 +133,14 @@ export default function PullRequests() {
 
       {/* PR list */}
       {filtered.length === 0 ? (
-        <div className="card text-center py-12">
-          <div className="w-12 h-12 rounded-xl bg-indigo-500/10 flex items-center justify-center mx-auto mb-3">
-            <svg className="w-6 h-6 text-indigo-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /></svg>
-          </div>
-          <h2 className="text-lg font-semibold text-gray-200">No pull requests</h2>
-          <p className="text-sm text-gray-500 mt-1">
-            {prs.length === 0
+        <div className="card p-0">
+          <EmptyState
+            icon={<GitPullRequest className="w-5 h-5" />}
+            title="No pull requests"
+            description={prs.length === 0
               ? 'Pull requests will appear here when GitHub webhooks are configured and PRs are opened.'
               : 'No pull requests match the current filter.'}
-          </p>
+          />
         </div>
       ) : (
         <div className="space-y-2">

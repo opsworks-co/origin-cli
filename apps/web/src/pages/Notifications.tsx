@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
+import { PageHeader, EmptyState } from '../components/ui';
 
 export default function Notifications() {
   const [notifications, setNotifications] = useState<api.Notification[]>([]);
@@ -42,30 +43,32 @@ export default function Notifications() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Notifications</h1>
-        <div className="flex items-center gap-3">
-          <select
-            value={filter}
-            onChange={e => setFilter(e.target.value as 'all' | 'unread')}
-            className="input text-sm"
-          >
-            <option value="all">All</option>
-            <option value="unread">Unread</option>
-          </select>
-          <button onClick={handleMarkAllRead} className="btn-secondary text-sm">
-            Mark all read
-          </button>
-        </div>
-      </div>
+    <div className="max-w-3xl mx-auto space-y-6">
+      <PageHeader
+        title="Notifications"
+        actions={
+          <div className="flex items-center gap-3">
+            <select
+              value={filter}
+              onChange={e => setFilter(e.target.value as 'all' | 'unread')}
+              className="input text-sm"
+            >
+              <option value="all">All</option>
+              <option value="unread">Unread</option>
+            </select>
+            <button onClick={handleMarkAllRead} className="btn-secondary text-sm">
+              Mark all read
+            </button>
+          </div>
+        }
+      />
 
       {loading ? (
         <div className="text-center py-12 text-gray-500">Loading...</div>
       ) : notifications.length === 0 ? (
-        <div className="text-center py-12 text-gray-500">
-          {filter === 'unread' ? 'No unread notifications' : 'No notifications yet'}
-        </div>
+        <EmptyState
+          title={filter === 'unread' ? 'No unread notifications' : 'No notifications yet'}
+        />
       ) : (
         <div className="space-y-2">
           {notifications.map(n => (

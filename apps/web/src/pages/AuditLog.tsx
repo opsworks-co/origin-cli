@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import * as api from '../api';
 import type { AuditEntry } from '../api';
+import { PageHeader, EmptyState } from '../components/ui';
 
 const ACTION_COLORS: Record<string, string> = {
   'session.created': 'text-blue-400',
@@ -77,10 +78,10 @@ export default function AuditLog() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Audit Log</h1>
-        <p className="text-sm text-gray-500 mt-1">Complete record of all actions in your organization</p>
-      </div>
+      <PageHeader
+        title="Audit Log"
+        subtitle="Complete record of all actions in your organization"
+      />
 
       {/* Filter */}
       <div className="flex flex-wrap gap-3 items-center">
@@ -112,7 +113,7 @@ export default function AuditLog() {
             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-500" />
           </div>
         ) : entries.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">No audit entries found</div>
+          <EmptyState title="No audit entries found" />
         ) : (
           <div className="divide-y divide-gray-800/50">
             {entries.map((entry) => (

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import * as api from '../api';
 import VersionHistory from '../components/VersionHistory';
+import { PageHeader, Pill } from '../components/ui';
 
 type Tab = 'rules' | 'agents' | 'versions';
 
@@ -86,33 +87,27 @@ export default function PolicyDetail() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <Link to="/policies" className="text-sm text-gray-400 hover:text-gray-200 mb-4 inline-block">&larr; Back to Policies</Link>
-
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold">{policy.name}</h1>
-          {policy.description && <p className="text-gray-400 mt-1">{policy.description}</p>}
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`text-xs px-2 py-1 rounded-full ${policy.active ? 'bg-green-500/20 text-green-400' : 'bg-gray-700 text-gray-400'}`}>
-            {policy.active ? 'Active' : 'Inactive'}
-          </span>
-          <span className="text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-300">{policy.type}</span>
-        </div>
-      </div>
-
-      {/* Scope badge */}
-      <div className="mb-4">
-        {assignedAgentIds.size === 0 ? (
-          <span className="text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-400">
-            Org-wide — applies to all agents
-          </span>
-        ) : (
-          <span className="text-xs px-2 py-1 rounded-full bg-indigo-500/20 text-indigo-400">
-            Assigned to {assignedAgentIds.size} agent{assignedAgentIds.size !== 1 ? 's' : ''}
-          </span>
-        )}
-      </div>
+      <PageHeader
+        className="mb-6"
+        breadcrumb={[{ label: 'Policies', to: '/policies' }, { label: policy.name }]}
+        title={policy.name}
+        subtitle={policy.description || undefined}
+        meta={
+          <>
+            <Pill variant={policy.active ? 'success' : 'neutral'}>
+              {policy.active ? 'Active' : 'Inactive'}
+            </Pill>
+            <Pill variant="neutral">{policy.type}</Pill>
+            {assignedAgentIds.size === 0 ? (
+              <Pill variant="neutral">Org-wide &mdash; applies to all agents</Pill>
+            ) : (
+              <Pill variant="ai">
+                Assigned to {assignedAgentIds.size} agent{assignedAgentIds.size !== 1 ? 's' : ''}
+              </Pill>
+            )}
+          </>
+        }
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm mb-4">{error}</div>

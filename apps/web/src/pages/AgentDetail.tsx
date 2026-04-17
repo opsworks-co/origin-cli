@@ -2,6 +2,16 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import * as api from '../api';
 import VersionHistory from '../components/VersionHistory';
+import { PageHeader, Pill } from '../components/ui';
+import type { PillVariant } from '../components/ui';
+
+function agentStatusToVariant(status: string): PillVariant {
+  const s = status.toLowerCase();
+  if (s === 'active' || s === 'running') return 'success';
+  if (s === 'disabled' || s === 'error' || s === 'failed') return 'error';
+  if (s === 'paused' || s === 'warn') return 'warning';
+  return 'neutral';
+}
 
 type Tab = 'config' | 'sessions' | 'policies' | 'versions';
 
@@ -253,25 +263,23 @@ export default function AgentDetail() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <Link to="/agents" className="text-sm text-gray-400 hover:text-gray-200 mb-4 inline-block">&larr; Back to Agents</Link>
-
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <PageHeader
+        className="mb-6"
+        breadcrumb={[{ label: 'Agents', to: '/agents' }, { label: agent.name }]}
+        title={
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">{agent.name}</h1>
-            <span className="text-xs font-mono text-gray-500 bg-gray-800 px-2 py-0.5 rounded">v{latestVersion}</span>
+            <h1 className="text-xl font-semibold text-gray-100 tracking-tight leading-tight">{agent.name}</h1>
+            <Pill variant="neutral"><span className="font-mono">v{latestVersion}</span></Pill>
           </div>
-          <p className="text-gray-400 text-sm mt-1">
+        }
+        subtitle={
+          <>
             <span className="font-mono">{agent.slug}</span> &middot; {agent.model}
-          </p>
-          {agent.description && <p className="text-gray-400 mt-2">{agent.description}</p>}
-        </div>
-        <span className={`text-xs px-2 py-1 rounded-full ${
-          agent.status === 'ACTIVE' ? 'bg-green-500/20 text-green-400' : 'bg-gray-700 text-gray-400'
-        }`}>
-          {agent.status}
-        </span>
-      </div>
+            {agent.description && <><br />{agent.description}</>}
+          </>
+        }
+        meta={<Pill variant={agentStatusToVariant(agent.status)}>{agent.status}</Pill>}
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm mb-4">{error}</div>

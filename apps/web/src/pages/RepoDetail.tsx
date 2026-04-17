@@ -6,6 +6,7 @@ import WebhookSettings from '../components/WebhookSettings';
 import ScoreGauge from '../components/ScoreGauge';
 import { timeAgo } from '../utils';
 import { safeHref } from '../utils/safe-url';
+import { PageHeader, Pill, PulseDot, ActionButtonGroup } from '../components/ui';
 
 interface PromptChangeData {
   promptIndex: number;
@@ -750,123 +751,71 @@ export default function RepoDetail() {
 
   const aiPct = health?.aiPercentage ?? (commits.length > 0 ? (aiCount / commits.length) * 100 : 0);
 
+  const overflowItems = [
+    { label: syncing ? 'Syncing…' : 'Resync now', onClick: handleSync, disabled: syncing || rescanning },
+    { label: rescanning ? 'Rescanning…' : 'Rescan AI attribution', onClick: handleRescan, disabled: syncing || rescanning },
+    ...(effProvider === 'github'
+      ? [{ label: importing ? 'Importing…' : 'Import sessions from branch', onClick: handleImportSessions, disabled: syncing || rescanning || importing }]
+      : []),
+  ];
+
   return (
     <div className="space-y-5">
-      {/* Back link */}
-      <div>
-        <button
-          onClick={() => navigate('/repos')}
-          className="text-gray-500 hover:text-gray-300 transition-colors text-xs flex items-center gap-1"
-        >
-          &larr; All repositories
-        </button>
-      </div>
-
-      {/* Hero card — compact single-row header */}
-      <div className="card py-3 px-4">
-        <div className="flex items-center gap-4 flex-wrap">
-          {/* Identity */}
-          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+      <PageHeader
+        breadcrumb={[{ label: 'Repositories', to: '/repos' }, { label: repo.name }]}
+        title={
+          <div className="flex items-center gap-2.5 min-w-0">
             {providerIcon}
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-gray-100 truncate">{repo.name}</h1>
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700 uppercase tracking-wider font-medium">
-                  {effProvider}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 text-[10px] text-gray-600 mt-0.5">
-                <span className="font-mono truncate">{repo.path}</span>
-                <span>·</span>
-                {syncing ? (
-                  <span className="flex items-center gap-1 text-indigo-400">
-                    <div className="animate-spin rounded-full h-2 w-2 border-b border-indigo-400" />
-                    syncing…
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1">
-                    <span className="w-1 h-1 rounded-full bg-emerald-500/80" />
-                    {repo.syncedAt ? timeAgo(repo.syncedAt) : 'never synced'}
-                  </span>
-                )}
-              </div>
-            </div>
+            <h1 className="text-xl font-semibold text-gray-100 tracking-tight leading-tight truncate">{repo.name}</h1>
+            <Pill variant="neutral" size="sm">{effProvider}</Pill>
           </div>
-
-          {/* Inline metrics */}
-          <div className="flex items-center gap-5 text-xs">
-            {health && (
-              <div className="flex items-center gap-1.5">
-                <span className="text-gray-500 uppercase tracking-wider text-[9px]">Health</span>
-                <span className={`text-sm font-bold tabular-nums ${health.healthScore >= 80 ? 'text-emerald-400' : health.healthScore >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
-                  {health.healthScore}
-                </span>
-              </div>
+        }
+        subtitle={
+          <span className="flex items-center gap-2">
+            <span className="font-mono truncate">{repo.path}</span>
+            <span>·</span>
+            {syncing ? (
+              <span className="flex items-center gap-1 text-indigo-400">
+                <div className="animate-spin rounded-full h-2 w-2 border-b border-indigo-400" />
+                syncing…
+              </span>
+            ) : (
+              <span className="flex items-center gap-1">
+                <span className="w-1 h-1 rounded-full bg-emerald-500/80" />
+                {repo.syncedAt ? timeAgo(repo.syncedAt) : 'never synced'}
+              </span>
             )}
-            <div className="flex items-center gap-1.5">
-              <span className="text-gray-500 uppercase tracking-wider text-[9px]">Total</span>
-              <span className="text-sm font-bold text-gray-100 tabular-nums">{commits.length}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-gray-500 uppercase tracking-wider text-[9px]">AI</span>
-              <span className="text-sm font-bold text-indigo-400 tabular-nums">{aiCount}</span>
-              <span className="text-[10px] text-gray-500">({aiPct.toFixed(0)}%)</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-gray-500 uppercase tracking-wider text-[9px]">Human</span>
-              <span className="text-sm font-bold text-gray-200 tabular-nums">{humanCount}</span>
-            </div>
-          </div>
+          </span>
+        }
+        meta={
+          <>
+            {health && (
+              <Pill
+                variant={health.healthScore >= 80 ? 'success' : health.healthScore >= 50 ? 'warning' : 'error'}
+              >
+                Health {health.healthScore}
+              </Pill>
+            )}
+            <Pill variant="neutral">Total {commits.length}</Pill>
+            <Pill variant="ai">AI {aiCount} ({aiPct.toFixed(0)}%)</Pill>
+            <Pill variant="neutral">Human {humanCount}</Pill>
+          </>
+        }
+        actions={
+          <ActionButtonGroup
+            secondary={[
+              { label: 'Issues', onClick: () => navigate(`/repos/${repo.id}/issues`) },
+            ]}
+            overflow={overflowItems}
+          />
+        }
+      />
 
-          {/* Issues link */}
-          <Link
-            to={`/repos/${repo.id}/issues`}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/20 ring-1 ring-indigo-500/20 transition-colors"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
-            Issues
-          </Link>
-
-          {/* Action menu — kebab */}
-          <div className="relative">
-            <details className="group">
-              <summary className="list-none cursor-pointer p-1.5 rounded-md hover:bg-gray-800 text-gray-500 hover:text-gray-300 transition-colors">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v.01M12 12v.01M12 19v.01" />
-                </svg>
-              </summary>
-              <div className="absolute right-0 mt-1 w-52 rounded-lg border border-gray-800 bg-gray-950 shadow-xl z-20 overflow-hidden">
-                <button
-                  onClick={handleSync}
-                  disabled={syncing || rescanning}
-                  className="w-full text-left px-4 py-2.5 text-xs text-gray-300 hover:bg-gray-800/60 disabled:opacity-50"
-                >
-                  Resync now
-                </button>
-                <button
-                  onClick={handleRescan}
-                  disabled={syncing || rescanning}
-                  className="w-full text-left px-4 py-2.5 text-xs text-gray-300 hover:bg-gray-800/60 disabled:opacity-50"
-                >
-                  Rescan AI attribution
-                </button>
-                {effProvider === 'github' && (
-                  <button
-                    onClick={handleImportSessions}
-                    disabled={syncing || rescanning || importing}
-                    className="w-full text-left px-4 py-2.5 text-xs text-gray-300 hover:bg-gray-800/60 disabled:opacity-50"
-                  >
-                    Import sessions from branch
-                  </button>
-                )}
-              </div>
-            </details>
-          </div>
-        </div>
-
-        {/* AI authorship ratio bar — labelled so the meaning is obvious */}
+      {/* AI authorship ratio bar — labelled so the meaning is obvious */}
+      {(commits.length > 0 || syncMsg) && (
+      <div className="card py-3 px-4">
         {commits.length > 0 && (
-          <div className="mt-3 space-y-1.5">
+          <div className="space-y-1.5">
             <div className="flex items-center justify-between text-[10px] text-gray-500">
               <span className="uppercase tracking-wider">AI authorship</span>
               <span className="flex items-center gap-3 text-gray-400">
@@ -892,6 +841,7 @@ export default function RepoDetail() {
           </div>
         )}
       </div>
+      )}
 
       {/* Filters */}
       <div className="flex gap-2 flex-wrap items-center">

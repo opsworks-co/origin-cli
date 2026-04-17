@@ -6,6 +6,7 @@ import { timeAgo } from '../utils';
 import { Bot, Plus, Settings, Trash2, Power } from 'lucide-react';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
+import { PageHeader, Pill, EmptyState } from '../components/ui';
 
 export default function Agents() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -109,22 +110,22 @@ export default function Agents() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Agents</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage your AI coding agents and their configurations</p>
-        </div>
-        <button onClick={() => setShowForm(!showForm)} className={`${showForm ? 'btn-secondary' : 'btn-primary'} text-sm flex items-center gap-2`}>
-          {showForm ? (
-            'Cancel'
-          ) : (
-            <>
-              <Plus className="w-4 h-4" />
-              Add Agent
-            </>
-          )}
-        </button>
-      </div>
+      <PageHeader
+        title="Agents"
+        subtitle="Manage your AI coding agents and their configurations"
+        actions={
+          <button onClick={() => setShowForm(!showForm)} className={`${showForm ? 'btn-secondary' : 'btn-primary'} text-sm flex items-center gap-2`}>
+            {showForm ? (
+              'Cancel'
+            ) : (
+              <>
+                <Plus className="w-4 h-4" />
+                Add Agent
+              </>
+            )}
+          </button>
+        }
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm">
@@ -208,9 +209,12 @@ export default function Agents() {
 
       {/* Agent cards */}
       {agents.length === 0 ? (
-        <div className="card text-center py-12">
-          <p className="text-gray-400 text-lg mb-2">No agents configured yet</p>
-          <p className="text-gray-500 text-sm">Agents represent your AI coding assistants. Add one to start tracking sessions and managing configurations.</p>
+        <div className="card p-0">
+          <EmptyState
+            icon={<Bot className="w-5 h-5" />}
+            title="No agents configured yet"
+            description="Agents represent your AI coding assistants. Add one to start tracking sessions and managing configurations."
+          />
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -235,15 +239,15 @@ export default function Agents() {
                   <button
                     onClick={() => handleToggleStatus(agent)}
                     disabled={toggling[agent.id]}
-                    className={`flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-md transition-all duration-150 ${
-                      isActive
-                        ? 'bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/20 hover:bg-emerald-500/20'
-                        : 'bg-white/[0.04] text-gray-500 ring-1 ring-white/[0.08] hover:bg-white/[0.08]'
-                    }`}
                     title={isActive ? 'Deactivate agent' : 'Activate agent'}
+                    className="transition-all duration-150"
                   >
-                    <Power className="w-3 h-3" />
-                    {toggling[agent.id] ? '...' : isActive ? 'Active' : 'Inactive'}
+                    <Pill
+                      variant={isActive ? 'success' : 'neutral'}
+                      icon={<Power className="w-3 h-3" />}
+                    >
+                      {toggling[agent.id] ? '...' : isActive ? 'Active' : 'Inactive'}
+                    </Pill>
                   </button>
                 </div>
 

@@ -530,6 +530,22 @@ export function preserveAttributionOnMove(
 
 // ─── Aggregate Stats ─────────────────────────────────────────────────────
 
+export interface PerModelStats {
+  commits: number;
+  linesAdded: number;
+  // Cost in USD, summed from git notes. Zero if no notes carry cost data.
+  costUsd: number;
+  // Acceptance metrics for lines originally written by this model.
+  // `acceptedLines` survived in their original AI attribution, `overriddenLines`
+  // were later edited by a human or different model, `deletedLines` were
+  // removed entirely. Rate excludes deletions from the denominator (we can't
+  // tell whether a deletion was rejection or intended cleanup).
+  acceptedLines: number;
+  overriddenLines: number;
+  deletedLines: number;
+  acceptanceRate: number;
+}
+
 export interface AttributionStats {
   totalCommits: number;
   aiCommits: number;
@@ -539,7 +555,7 @@ export interface AttributionStats {
   humanLinesAdded: number;
   mixedLinesAdded: number;
   byTool: Map<string, { commits: number; linesAdded: number }>;
-  byModel: Map<string, { commits: number; linesAdded: number }>;
+  byModel: Map<string, PerModelStats>;
   acceptance: AcceptanceMetrics;
 }
 
@@ -552,9 +568,13 @@ export function computeAttributionStats(
 ): AttributionStats {
   const range = commitRange || 'HEAD~50..HEAD';
   const byTool = new Map<string, { commits: number; linesAdded: number }>();
-  const byModel = new Map<string, { commits: number; linesAdded: number }>();
+  const byModel = new Map<string, PerModelStats>();
   let totalCommits = 0, aiCommits = 0, humanCommits = 0;
   let totalLinesAdded = 0, aiLinesAdded = 0, humanLinesAdded = 0, mixedLinesAdded = 0;
+
+  // Track which AI-written lines belong to which model so we can roll up
+  // per-model acceptance after the per-commit loop. File -> (lineNum -> model).
+  const aiLineOwners = new Map<string, Map<number, string>>();
 
   try {
     // Scope to current branch (HEAD) only
@@ -613,11 +633,46 @@ export function computeAttributionStats(
           toolEntry.linesAdded += commitLines;
           byTool.set(tool, toolEntry);
 
-          // By model
-          const modelEntry = byModel.get(model) || { commits: 0, linesAdded: 0 };
+          // By model — includes per-model acceptance + cost fields
+          const modelEntry = byModel.get(model) || {
+            commits: 0,
+            linesAdded: 0,
+            costUsd: 0,
+            acceptedLines: 0,
+            overriddenLines: 0,
+            deletedLines: 0,
+            acceptanceRate: 1,
+          };
           modelEntry.commits++;
           modelEntry.linesAdded += commitLines;
+          // Pull per-commit cost from the git note if present.
+          const noteCost = typeof note?.costUsd === 'number' ? note.costUsd : 0;
+          modelEntry.costUsd += noteCost;
           byModel.set(model, modelEntry);
+
+          // Record which lines this model wrote so we can compute per-model
+          // acceptance after the loop.
+          try {
+            const diff = execFileSync('git', ['diff-tree', '-p', sha], execOpts(repoPath)).trim();
+            let currentFile = '';
+            let lineNum = 0;
+            for (const diffLine of diff.split('\n')) {
+              const fileMatch = diffLine.match(/^\+\+\+ b\/(.*)/);
+              if (fileMatch) { currentFile = fileMatch[1]; continue; }
+              const hunkMatch = diffLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)/);
+              if (hunkMatch) { lineNum = parseInt(hunkMatch[1], 10); continue; }
+              if (diffLine.startsWith('+') && !diffLine.startsWith('+++')) {
+                if (!aiLineOwners.has(currentFile)) aiLineOwners.set(currentFile, new Map());
+                // A later AI commit by a different model OVERWRITES the owner
+                // for that line number — this matches the "most recent AI
+                // author wins" semantic used elsewhere in the codebase.
+                aiLineOwners.get(currentFile)!.set(lineNum, model);
+                lineNum++;
+              } else if (!diffLine.startsWith('-')) {
+                lineNum++;
+              }
+            }
+          } catch { /* skip line tracking on this commit */ }
         } catch { /* skip */ }
       } else {
         humanCommits++;
@@ -637,6 +692,43 @@ export function computeAttributionStats(
       }
     }
   } catch { /* empty range */ }
+
+  // ── Per-model acceptance rollup ─────────────────────────────────────
+  // For each tracked AI-written line, check whether it's still attributed to
+  // 'ai' in the current file state. If yes → accepted. If it's now 'human' or
+  // 'mixed' → overridden. If the file or line is gone → deleted. Roll the
+  // totals up per model so `byModel[m].acceptanceRate` has a real value.
+  //
+  // `computeFileAttribution` hits git blame per file, so cache per file.
+  const fileAttrCache = new Map<string, ReturnType<typeof computeFileAttribution> | null>();
+  for (const [file, owners] of aiLineOwners) {
+    let fileAttr = fileAttrCache.get(file);
+    if (fileAttr === undefined) {
+      try { fileAttr = computeFileAttribution(repoPath, file); }
+      catch { fileAttr = null; }
+      fileAttrCache.set(file, fileAttr);
+    }
+    for (const [ln, model] of owners) {
+      const entry = byModel.get(model);
+      if (!entry) continue;
+      if (!fileAttr) {
+        entry.deletedLines++;
+        continue;
+      }
+      const lineAttr = fileAttr.lines.find((l) => l.lineNumber === ln);
+      if (!lineAttr) entry.deletedLines++;
+      else if (lineAttr.authorship === 'ai') entry.acceptedLines++;
+      else entry.overriddenLines++;
+    }
+  }
+  // Compute rate per model. Denominator excludes deletions on the same
+  // rationale as the global AcceptanceMetrics: a removed line might be a
+  // rejection OR an intentional cleanup, so we don't penalize either way.
+  for (const [model, entry] of byModel) {
+    const denom = entry.acceptedLines + entry.overriddenLines;
+    entry.acceptanceRate = denom > 0 ? entry.acceptedLines / denom : 1;
+    byModel.set(model, entry);
+  }
 
   return {
     totalCommits,

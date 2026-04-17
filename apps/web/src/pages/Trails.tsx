@@ -3,19 +3,28 @@ import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Trail } from '../api';
 import { timeAgo } from '../utils';
+import { PageHeader, Pill, EmptyState } from '../components/ui';
+import type { PillVariant } from '../components/ui';
 
 const STATUS_OPTIONS = ['active', 'review', 'done', 'paused'];
 const PRIORITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
 
-const statusBadge = (s: string) => {
-  const cls: Record<string, string> = { active: 'badge-blue', review: 'badge-amber', done: 'badge-green', paused: 'badge-gray' };
-  return <span className={cls[s] || 'badge-gray'}>{s}</span>;
+const statusToVariant = (s: string): PillVariant => {
+  if (s === 'active') return 'info';
+  if (s === 'review') return 'warning';
+  if (s === 'done') return 'success';
+  return 'neutral';
 };
 
-const priorityBadge = (p: string) => {
-  const cls: Record<string, string> = { critical: 'badge-red', high: 'badge-amber', medium: 'badge-blue', low: 'badge-gray' };
-  return <span className={cls[p] || 'badge-gray'}>{p}</span>;
+const priorityToVariant = (p: string): PillVariant => {
+  if (p === 'critical') return 'error';
+  if (p === 'high') return 'warning';
+  if (p === 'medium') return 'info';
+  return 'neutral';
 };
+
+const statusBadge = (s: string) => <Pill variant={statusToVariant(s)}>{s}</Pill>;
+const priorityBadge = (p: string) => <Pill variant={priorityToVariant(p)}>{p}</Pill>;
 
 export default function Trails() {
   const navigate = useNavigate();
@@ -76,16 +85,15 @@ export default function Trails() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Feature Trails</h1>
-          <p className="text-sm text-gray-500 mt-1">Track features across sessions, branches, and PRs</p>
-        </div>
-        <button onClick={() => { setShowForm(!showForm); }} className="btn-primary">
-          {showForm ? 'Cancel' : 'Create Trail'}
-        </button>
-      </div>
+      <PageHeader
+        title="Feature Trails"
+        subtitle="Track features across sessions, branches, and PRs"
+        actions={
+          <button onClick={() => { setShowForm(!showForm); }} className="btn-primary">
+            {showForm ? 'Cancel' : 'Create Trail'}
+          </button>
+        }
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm">
@@ -142,8 +150,11 @@ export default function Trails() {
 
       {/* Trail Cards */}
       {trails.length === 0 ? (
-        <div className="card text-center py-12 text-gray-500">
-          No trails yet. Create one to start tracking a feature across sessions.
+        <div className="card p-0">
+          <EmptyState
+            title="No trails yet"
+            description="Create one to start tracking a feature across sessions."
+          />
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -166,7 +177,7 @@ export default function Trails() {
                   {priorityBadge(t.priority)}
                   {t.branch && <span className="text-xs text-gray-500 font-mono bg-gray-800 px-1.5 py-0.5 rounded">{t.branch}</span>}
                   {labels.map((l, i) => (
-                    <span key={i} className="badge-purple text-xs">{l}</span>
+                    <Pill key={i} variant="running">{l}</Pill>
                   ))}
                 </div>
                 <div className="flex items-center justify-between text-xs text-gray-600 pt-2 border-t border-gray-800">
