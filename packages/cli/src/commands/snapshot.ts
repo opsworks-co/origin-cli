@@ -705,26 +705,52 @@ export function condenseAndCleanupSession(
 // ─── Public API ──────────────────────────────────────────────────────────
 
 /**
- * List all snapshots for a session (from shadow branch chain).
+ * List snapshots. If `sessionTag` is given, only returns snapshots for that
+ * tag. Otherwise returns EVERY snapshot across every shadow branch in the
+ * repo — this matches the common user intent of "show me all my snapshots"
+ * regardless of which session they were written under.
  */
 export function listSnapshots(repoPath: string, sessionTag?: string): SnapshotMeta[] {
-  const tag = sessionTag || getSessionTag(repoPath);
-  const branch = shadowBranchForSession(tag);
-  const chainSnapshots = walkSnapshotChain(repoPath, branch);
+  // Session-scoped path (explicit tag)
+  if (sessionTag) {
+    const branch = shadowBranchForSession(sessionTag);
+    const chainSnapshots = walkSnapshotChain(repoPath, branch);
+    if (chainSnapshots.length > 0) return chainSnapshots;
 
-  if (chainSnapshots.length > 0) return chainSnapshots;
-
-  // Fallback: check for legacy per-branch snapshots and all shadow branches
-  const branches = listShadowBranches(repoPath, tag);
-  const legacySnapshots: SnapshotMeta[] = [];
-  for (const b of branches) {
-    // Skip the session-level branch (it has chained commits, already handled)
-    if (b === branch) continue;
-    const meta = parseLegacyShadowMeta(repoPath, b);
-    if (meta) legacySnapshots.push(meta);
+    const branches = listShadowBranches(repoPath, sessionTag);
+    const legacySnapshots: SnapshotMeta[] = [];
+    for (const b of branches) {
+      if (b === branch) continue;
+      const meta = parseLegacyShadowMeta(repoPath, b);
+      if (meta) legacySnapshots.push(meta);
+    }
+    legacySnapshots.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    return legacySnapshots;
   }
-  legacySnapshots.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  return legacySnapshots;
+
+  // No tag → collect every snapshot in the repo, deduped by id.
+  const seen = new Set<string>();
+  const all: SnapshotMeta[] = [];
+  const branches = listShadowBranches(repoPath);
+  for (const b of branches) {
+    // Try chain walk first (new format: one branch per session, N commits)
+    const chain = walkSnapshotChain(repoPath, b);
+    for (const m of chain) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      all.push(m);
+    }
+    // Also try legacy single-commit branch format
+    if (chain.length === 0) {
+      const meta = parseLegacyShadowMeta(repoPath, b);
+      if (meta && !seen.has(meta.id)) {
+        seen.add(meta.id);
+        all.push(meta);
+      }
+    }
+  }
+  all.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return all;
 }
 
 /**
@@ -811,9 +837,10 @@ export async function snapshotSaveCommand(): Promise<void> {
 }
 
 /**
- * origin snapshot list — list all snapshots for current session
+ * origin snapshot list — list every snapshot in the repo.
+ * Use --session <tag> to scope to a single session.
  */
-export async function snapshotListCommand(): Promise<void> {
+export async function snapshotListCommand(opts: { session?: string } = {}): Promise<void> {
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
 
@@ -822,15 +849,15 @@ export async function snapshotListCommand(): Promise<void> {
     process.exit(1);
   }
 
-  const sessionTag = getSessionTag(repoPath);
+  const sessionTag = opts.session;
   const snapshots = listSnapshots(repoPath, sessionTag);
 
   if (snapshots.length === 0) {
-    console.log(chalk.gray('  No snapshots found.'));
+    console.log(chalk.gray(sessionTag ? `  No snapshots for session: ${sessionTag}` : '  No snapshots found in this repo.'));
     return;
   }
 
-  console.log(chalk.bold(`\n  Snapshots for session: ${sessionTag}\n`));
+  console.log(chalk.bold(`\n  ${sessionTag ? `Snapshots for session: ${sessionTag}` : `All snapshots in this repo (${snapshots.length})`}\n`));
 
   for (const meta of snapshots) {
     const age = timeSince(new Date(meta.timestamp));

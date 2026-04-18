@@ -471,7 +471,8 @@ program.command('rewind')
 const snapshot = program.command('snapshot').description('Mid-session shadow snapshots (no commits)');
 snapshot.action(snapshotSaveCommand);
 snapshot.command('list')
-  .description('List all snapshots for current session')
+  .description('List every snapshot in this repo (use --session <tag> to filter)')
+  .option('-s, --session <tag>', 'Only show snapshots for this session tag')
   .action(snapshotListCommand);
 snapshot.command('restore <id>')
   .description('Restore working tree to a snapshot')
