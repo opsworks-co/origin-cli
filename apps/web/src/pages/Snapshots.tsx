@@ -159,6 +159,102 @@ export default function Snapshots() {
 
   const repos = useMemo(() => [...new Set(allSnapshots.map(r => r.repoName))].sort(), [allSnapshots]);
 
+  // ── Session + date grouping ─────────────────────────────────────────────
+  // Group filtered rows by session, then bucket sessions by date. This is
+  // what turns a flat "15 snapshots" firehose into a structured
+  //   Today · 8 snapshots
+  //     Cursor · babak · feature/wave   5 snapshots   7m ago  ›
+  //     claude · babak · main           3 snapshots   2h ago  ›
+  // readout — click a session row to expand the snapshot timeline inline.
+  type SessionGroup = {
+    sessionId: string;
+    repoName: string;
+    branch: string | null;
+    model: string;
+    userName: string | null;
+    rows: SnapshotRow[];
+    latestTime: string;
+    totalAdded: number;
+    totalRemoved: number;
+    totalCost: number;
+  };
+
+  const sessionGroups = useMemo<SessionGroup[]>(() => {
+    const byId = new Map<string, SessionGroup>();
+    for (const row of filtered) {
+      const existing = byId.get(row.sessionId);
+      const pc = row.promptChange;
+      const rowTime = pc.createdAt || row.sessionStartedAt || '';
+      if (!existing) {
+        byId.set(row.sessionId, {
+          sessionId: row.sessionId,
+          repoName: row.repoName,
+          branch: row.branch,
+          model: row.model,
+          userName: row.userName,
+          rows: [row],
+          latestTime: rowTime,
+          totalAdded: pc.linesAdded || 0,
+          totalRemoved: pc.linesRemoved || 0,
+          totalCost: row.costUsd || 0,
+        });
+      } else {
+        existing.rows.push(row);
+        existing.totalAdded += pc.linesAdded || 0;
+        existing.totalRemoved += pc.linesRemoved || 0;
+        if (rowTime && rowTime > existing.latestTime) existing.latestTime = rowTime;
+      }
+    }
+    // Sort rows inside each session chronologically (latest first), then
+    // sessions by latest activity (newest first).
+    const groups = Array.from(byId.values());
+    for (const g of groups) {
+      g.rows.sort((a, b) => {
+        const ta = a.promptChange.createdAt || '';
+        const tb = b.promptChange.createdAt || '';
+        return tb.localeCompare(ta);
+      });
+    }
+    groups.sort((a, b) => b.latestTime.localeCompare(a.latestTime));
+    return groups;
+  }, [filtered]);
+
+  // Date bucketing. Labels match GitHub's PR list vocabulary so returning
+  // users feel at home.
+  const dateGroups = useMemo(() => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const yesterday = today - 24 * 60 * 60 * 1000;
+    const lastWeek = today - 7 * 24 * 60 * 60 * 1000;
+
+    const buckets: Record<string, SessionGroup[]> = {
+      Today: [],
+      Yesterday: [],
+      'Earlier this week': [],
+      Older: [],
+    };
+    for (const g of sessionGroups) {
+      const t = g.latestTime ? new Date(g.latestTime).getTime() : 0;
+      if (t >= today) buckets.Today.push(g);
+      else if (t >= yesterday) buckets.Yesterday.push(g);
+      else if (t >= lastWeek) buckets['Earlier this week'].push(g);
+      else buckets.Older.push(g);
+    }
+    return (Object.entries(buckets) as Array<[string, SessionGroup[]]>).filter(([, arr]) => arr.length > 0);
+  }, [sessionGroups]);
+
+  // Expand state for session cards (independent from the per-snapshot
+  // `expandedId`). We keep a Set so multiple sessions can be open at once.
+  const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(new Set());
+  const toggleSession = useCallback((id: string) => {
+    setExpandedSessionIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
   // Stats
   const totalSnapshots = allSnapshots.length;
   const totalAdded = allSnapshots.reduce((sum, r) => sum + (r.promptChange.linesAdded || 0), 0);
@@ -280,8 +376,77 @@ export default function Snapshots() {
           </p>
         </div>
       ) : (
-        <div className="space-y-1">
-          {filtered.slice(0, 200).map((row, idx) => {
+        <div className="space-y-6">
+          {dateGroups.map(([bucketLabel, sessionsInBucket]) => {
+            const bucketCount = sessionsInBucket.reduce((sum, s) => sum + s.rows.length, 0);
+            return (
+              <section key={bucketLabel}>
+                <h3 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-gray-500 mb-2 flex items-center gap-2">
+                  <span>{bucketLabel}</span>
+                  <span className="text-gray-700">·</span>
+                  <span className="text-gray-600 font-normal normal-case tracking-normal">
+                    {bucketCount} snapshot{bucketCount === 1 ? '' : 's'} across {sessionsInBucket.length} session{sessionsInBucket.length === 1 ? '' : 's'}
+                  </span>
+                </h3>
+                <div className="space-y-1.5">
+                  {sessionsInBucket.map(group => {
+                    const isOpen = expandedSessionIds.has(group.sessionId);
+                    return (
+                      <div
+                        key={group.sessionId}
+                        className={`rounded-lg border transition-colors ${
+                          isOpen
+                            ? 'border-indigo-500/30 bg-indigo-500/[0.03]'
+                            : 'border-gray-800/60 bg-gray-900/20 hover:border-gray-700'
+                        }`}
+                      >
+                        {/* Session summary row — always visible */}
+                        <button
+                          type="button"
+                          onClick={() => toggleSession(group.sessionId)}
+                          className="w-full flex items-center gap-3 px-4 py-2.5 text-left"
+                        >
+                          <svg
+                            className={`w-3.5 h-3.5 text-gray-500 flex-shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`}
+                            fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-500/25">
+                            {group.model.split('/').pop()?.split('-').slice(0, 3).join('-') || group.model}
+                          </span>
+                          <span className="text-sm text-gray-200 font-medium">{group.repoName}</span>
+                          {group.branch && (
+                            <span className="text-[11px] text-gray-500 font-mono truncate">{group.branch}</span>
+                          )}
+                          {group.userName && (
+                            <span className="text-[11px] text-gray-500">· {group.userName}</span>
+                          )}
+                          <div className="ml-auto flex items-center gap-4 text-[11px] tabular-nums">
+                            <span className="text-gray-300 font-medium">
+                              {group.rows.length} <span className="text-gray-500 font-normal">snapshot{group.rows.length === 1 ? '' : 's'}</span>
+                            </span>
+                            {(group.totalAdded > 0 || group.totalRemoved > 0) && (
+                              <span className="font-mono text-gray-500">
+                                <span className="text-emerald-400/90">+{group.totalAdded}</span>
+                                <span className="text-gray-700 mx-0.5">/</span>
+                                <span className="text-red-400/90">-{group.totalRemoved}</span>
+                              </span>
+                            )}
+                            <Link
+                              to={`/sessions/${group.sessionId}`}
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-[10px] text-indigo-400 hover:text-indigo-300 font-medium"
+                            >
+                              open session →
+                            </Link>
+                            <span className="text-gray-600">{relativeTime(group.latestTime)}</span>
+                          </div>
+                        </button>
+                        {/* Expanded: snapshot timeline inside this session */}
+                        {isOpen && (
+                          <div className="border-t border-gray-800/60 px-2 py-1 space-y-0.5">
+                            {group.rows.map((row, idx) => {
             const pc = row.promptChange;
             const cpType = pc.checkpointType || 'auto';
             const style = TYPE_STYLES[cpType] || TYPE_STYLES['auto'];
@@ -615,6 +780,15 @@ export default function Snapshots() {
                   </div>
                 )}
               </div>
+            );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
             );
           })}
           {filtered.length > 200 && (
