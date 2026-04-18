@@ -51,7 +51,7 @@ Origin commands are grouped by purpose. The primary surface below is what `origi
 | `explain` | `review`, `review-pr`, `intent-review` |
 | `context` | `handoff`, `memory` |
 | `issue` | `todo`, `trail` |
-| `snapshot` | `rewind`, `snapshot` |
+| `snapshot` | `rewind` |
 | `init` | `enable`, `disable`, `link`, `attach`, `whoami` |
 | `doctor` | `status`, `verify`, `verify-install`, `clean`, `reset` |
 | `export` / `search` / `backfill` | `repos`, `agents`, `sync`, `policies`, `audit`, `db`, `ignore` |
@@ -650,19 +650,6 @@ origin snapshot clean             # remove all snapshots
 ```
 
 Snapshots capture: prompt text, files changed, diff, AI attribution %, commit SHA, tree SHA. Stored in git so they travel with `git clone`.
-
-`origin snapshot` and `origin rewind` are preserved as hidden aliases of `origin snapshot`.
-
-### `origin snapshot` (alias of `origin snapshot`)
-
-Still supported for backwards compatibility. Prefer `origin snapshot` going forward.
-
-```bash
-origin snapshot                     # save a point-in-time snapshot
-origin snapshot list                # list snapshots for current session
-origin snapshot restore <id>        # restore working tree to a snapshot
-origin snapshot clean               # remove all snapshots
-```
 
 ### Restore from snapshot via the dashboard
 

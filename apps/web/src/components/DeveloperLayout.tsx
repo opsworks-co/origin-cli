@@ -157,8 +157,15 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
           <div className="flex items-center gap-1 mt-1">
             <button
               onClick={() => {
-                try { localStorage.removeItem('origin:tour-dashboard-v1'); } catch {}
-                window.location.href = '/me';
+                // If we're not on the dashboard, the ProductTour component is
+                // unmounted — navigate there first, then dispatch on the next
+                // tick once the component mounts and attaches its listener.
+                const onDashboard = window.location.pathname === '/me';
+                if (!onDashboard) {
+                  window.location.href = '/me?tour=1';
+                  return;
+                }
+                window.dispatchEvent(new CustomEvent('origin:start-tour'));
               }}
               className="flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors"
             >

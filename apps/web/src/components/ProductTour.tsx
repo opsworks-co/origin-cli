@@ -277,6 +277,36 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
     setTransitioning(false);
   }, []);
 
+  // External trigger: sidebar "Tour" button dispatches origin:start-tour so
+  // the tour starts immediately instead of redirecting + showing a second
+  // "Take a tour" button that the user has to click again.
+  useEffect(() => {
+    const handler = () => {
+      try { localStorage.removeItem(storageKey); } catch {}
+      start();
+    };
+    window.addEventListener('origin:start-tour', handler);
+    return () => window.removeEventListener('origin:start-tour', handler);
+  }, [start, storageKey]);
+
+  // Auto-start if the sidebar button navigated here with ?tour=1 (the cross-
+  // page case — ProductTour isn't mounted on /repos so the event dispatch
+  // would have no listener; the URL param survives the navigation).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('tour') === '1') {
+      try { localStorage.removeItem(storageKey); } catch {}
+      start();
+      // Clean up the URL so a refresh doesn't reopen the tour.
+      params.delete('tour');
+      const q = params.toString();
+      window.history.replaceState({}, '', window.location.pathname + (q ? `?${q}` : ''));
+    }
+    // Only run once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const complete = useCallback(() => {
     setActive(false);
     setPos(null);
@@ -355,9 +385,14 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
         if (cancelled) return;
       }
 
-      // 3. Wait for target element to appear (retry up to 2s for lazy-loaded content)
+      // 3. Wait for target element to appear. Some tabs (Timeline/Patterns)
+      //    lazy-mount recharts + heavy charts so 2s was too short — tour got
+      //    stuck around step 5-6 with transitioning=true forever. Bump the
+      //    window to ~6s AND always release the transitioning lock so the
+      //    user at least sees the tooltip in a fallback centered position
+      //    (positionTooltip handles missing targets).
       let retries = 0;
-      while (retries < 10) {
+      while (retries < 30) {
         await wait(200);
         if (cancelled) return;
         const el = document.querySelector(step.target);
@@ -365,6 +400,7 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
         retries++;
       }
 
+      if (cancelled) return;
       setTransitioning(false);
     };
 
@@ -419,20 +455,10 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
 
   const step = steps[currentStep];
 
-  // ── Start button ──────────────────────────────────────────────────────
-  if (!active) {
-    if (isCompleted()) return null;
-    return (
-      <button
-        onClick={start}
-        data-tour="start-tour"
-        className="fixed bottom-6 right-6 z-[9999] flex items-center gap-2 px-4 py-2.5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium shadow-lg shadow-indigo-500/25 transition-all hover:scale-105 animate-bounce-gentle"
-      >
-        <Sparkles className="w-4 h-4" />
-        Take a tour
-      </button>
-    );
-  }
+  // No bottom-right FAB — the tour only starts when the sidebar "Tour"
+  // button dispatches origin:start-tour, so there's never a second button
+  // to click after the user has already asked for the tour.
+  if (!active) return null;
 
   return (
     <>

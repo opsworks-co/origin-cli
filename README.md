@@ -44,6 +44,7 @@ That's it. No server, no login, no API keys. Session metadata lives in `refs/not
 - `origin diff` — annotated diff showing which lines are AI vs human
 - `origin stats` — AI percentage, cost, token usage, per-agent breakdown
 - `origin sessions` — every AI coding session stored in git
+- `origin snapshot` — auto-saved working-tree snapshot after every AI prompt; `origin snapshot restore <id>` time-travels back non-destructively, `origin rewind` opens an interactive browser
 - `origin prompts <file>` — every prompt that touched a file, with diffs
 - `origin chat` — natural-language Q&A over your AI-authored code
 - `origin web` — local browser dashboard, no server needed

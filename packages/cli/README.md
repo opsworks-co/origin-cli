@@ -92,6 +92,8 @@ origin why <file>:<line>         # Which AI prompt wrote a specific line
 origin diff                      # Annotated diff — see AI changes in context
 origin stats                     # AI vs human breakdown for the repo
 origin sessions                  # List all AI coding sessions
+origin snapshot list             # Every auto-saved working-tree snapshot
+origin snapshot restore <id>     # Time-travel back to any prompt's state
 origin prompts <file>            # See which AI prompts touched a file
 origin search "auth bug"         # Find the prompt that introduced code
 origin backfill                  # Retroactively tag old commits as AI/human
@@ -191,10 +193,18 @@ origin rework                   Detect reworked AI code (hotspots)
 
 ### Time travel
 ```
-origin rewind                   Rewind to a previous AI checkpoint
-origin snapshot                 Shadow snapshots of working tree
-origin checkpoint               Time-travel checkpoints (auto-saved per prompt)
+origin snapshot                 Save a point-in-time snapshot of the working tree
+origin snapshot list            List every snapshot for the current session
+origin snapshot restore <id>    Restore the working tree to a snapshot (non-destructive)
+origin snapshot diff [a] [b]    Diff between two snapshots (or last vs current)
+origin snapshot clean           Remove all snapshots for the session
+origin rewind                   Rewind to a previous AI snapshot (interactive)
 ```
+
+Snapshots are auto-saved after every AI prompt — so you can undo a bad
+turn without losing work, branch off a snapshot to try another path, or
+restore the tree to any point in the session. No extra commits, stored
+on orphan branches.
 
 ### Chat / AI
 ```

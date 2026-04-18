@@ -1166,7 +1166,7 @@ export default function SessionDetail() {
           <div className={`flex-1 overflow-y-auto ${showAskPanel ? 'min-w-0' : ''}`}>
           {activeTab === 'session' && (
             <UnifiedSessionView
-              defaultNewestFirst={isRunning}
+              defaultNewestFirst={true}
               transcript={(() => {
                 try {
                   const parsed = JSON.parse(session.transcript);

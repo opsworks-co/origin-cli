@@ -811,32 +811,56 @@ export default function RepoDetail() {
         }
       />
 
-      {/* AI authorship ratio bar — labelled so the meaning is obvious */}
+      {/* AI authorship — big visible split of AI vs human work on this repo */}
       {(commits.length > 0 || syncMsg) && (
-      <div className="card py-3 px-4">
+      <div
+        className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-gradient-to-br from-indigo-500/[0.08] via-gray-900/60 to-violet-500/[0.08] px-5 py-4 shadow-[0_1px_0_rgba(255,255,255,0.03)_inset]"
+      >
+        {/* Subtle radial glow behind the bar */}
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_0%_0%,rgba(99,102,241,0.12),transparent_50%),radial-gradient(circle_at_100%_100%,rgba(168,85,247,0.08),transparent_55%)]" />
         {commits.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-[10px] text-gray-500">
-              <span className="uppercase tracking-wider">AI authorship</span>
-              <span className="flex items-center gap-3 text-gray-400">
-                <span className="flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
-                  AI {aiPct}% <span className="text-gray-600">({aiCount})</span>
+          <div className="relative space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <span className="absolute inset-0 rounded-md bg-indigo-500/30 blur-md" />
+                  <span className="relative flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-indigo-500 to-violet-500 text-white">
+                    <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5"><path d="M13 2L4.5 13h6L11 22l8.5-11h-6L13 2z" fill="currentColor" /></svg>
+                  </span>
+                </div>
+                <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-300">AI authorship</span>
+              </div>
+              <div className="flex items-center gap-4 text-[11px] tabular-nums">
+                <span className="flex items-baseline gap-1.5">
+                  <span className="text-lg font-semibold text-white">{aiPct}%</span>
+                  <span className="text-gray-400">AI</span>
+                  <span className="text-gray-600">({aiCount})</span>
                 </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-gray-500" />
-                  Human {100 - aiPct}% <span className="text-gray-600">({humanCount})</span>
+                <span className="h-3 w-px bg-white/10" />
+                <span className="flex items-baseline gap-1.5">
+                  <span className="text-lg font-semibold text-white">{100 - aiPct}%</span>
+                  <span className="text-gray-400">Human</span>
+                  <span className="text-gray-600">({humanCount})</span>
                 </span>
-              </span>
+              </div>
             </div>
-            <div className="h-1 rounded-full bg-gray-800 overflow-hidden flex">
-              <div className="bg-indigo-500" style={{ width: `${aiPct}%` }} title={`${aiCount} AI commits`} />
-              <div className="bg-gray-500" style={{ width: `${100 - aiPct}%` }} title={`${humanCount} human commits`} />
+            {/* Segmented bar: gradient AI portion + warm amber human portion */}
+            <div className="relative h-2 overflow-hidden rounded-full bg-white/[0.04] ring-1 ring-inset ring-white/[0.03]">
+              <div
+                className="absolute left-0 top-0 h-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 shadow-[0_0_14px_rgba(139,92,246,0.5)]"
+                style={{ width: `${aiPct}%` }}
+                title={`${aiCount} AI commits`}
+              />
+              <div
+                className="absolute top-0 h-full bg-gradient-to-r from-amber-500/60 to-amber-400/40"
+                style={{ left: `${aiPct}%`, width: `${100 - aiPct}%` }}
+                title={`${humanCount} human commits`}
+              />
             </div>
           </div>
         )}
         {syncMsg && (
-          <div className={`mt-1.5 text-[10px] ${syncMsg.startsWith('Sync failed') ? 'text-red-400' : 'text-emerald-400'}`}>
+          <div className={`relative mt-2 text-[10px] ${syncMsg.startsWith('Sync failed') ? 'text-red-400' : 'text-emerald-400'}`}>
             {syncMsg}
           </div>
         )}
