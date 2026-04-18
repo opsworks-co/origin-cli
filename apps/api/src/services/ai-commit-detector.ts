@@ -36,6 +36,8 @@ const AI_SIGNATURES: ToolSignature[] = [
     messagePatterns: [
       /generated\s+with\s+claude\s+code/i,
       /co-authored-by:\s*claude/i,
+      /^made-with:\s*claude/im,
+      /^assistant:\s*claude/im,
     ],
   },
   {
@@ -51,6 +53,8 @@ const AI_SIGNATURES: ToolSignature[] = [
     messagePatterns: [
       /generated\s+by\s+copilot/i,
       /copilot\s+suggestion/i,
+      /^made-with:\s*copilot/im,
+      /^assistant:\s*copilot/im,
     ],
   },
   {
@@ -65,6 +69,8 @@ const AI_SIGNATURES: ToolSignature[] = [
     ],
     messagePatterns: [
       /generated\s+by\s+cursor/i,
+      /^made-with:\s*cursor/im,
+      /^assistant:\s*cursor/im,
     ],
   },
   {
@@ -78,6 +84,7 @@ const AI_SIGNATURES: ToolSignature[] = [
     messagePatterns: [
       /^\[?aider[\]:\s]/i,
       /aider\/\d/i,
+      /^made-with:\s*aider/im,
     ],
   },
   {
@@ -93,6 +100,7 @@ const AI_SIGNATURES: ToolSignature[] = [
     messagePatterns: [
       /generated\s+by\s+gemini/i,
       /generated\s+with\s+gemini/i,
+      /^made-with:\s*gemini/im,
     ],
   },
   {
@@ -109,6 +117,7 @@ const AI_SIGNATURES: ToolSignature[] = [
     messagePatterns: [
       /generated\s+(by|with)\s+codex/i,
       /openai\s+codex/i,
+      /^made-with:\s*codex/im,
     ],
   },
   {
@@ -124,6 +133,7 @@ const AI_SIGNATURES: ToolSignature[] = [
     messagePatterns: [
       /generated\s+by\s+codeium/i,
       /generated\s+by\s+windsurf/i,
+      /^made-with:\s*(codeium|windsurf)/im,
     ],
   },
 ];

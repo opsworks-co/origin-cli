@@ -65,6 +65,9 @@ export default function CommitDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  // When a prompt on the right is clicked, narrow the file tree + middle
+  // panel to files that prompt touched. null = no prompt filter (show all).
+  const [selectedPromptIdx, setSelectedPromptIdx] = useState<number | null>(null);
 
   useEffect(() => {
     if (!repoId || !sha) return;
@@ -81,9 +84,15 @@ export default function CommitDetailPage() {
       .finally(() => setLoading(false));
   }, [repoId, sha]);
 
-  // Build a file tree from flat file list
+  // Build a file tree from flat file list (filtered by selected prompt, if any)
   const fileTree = useMemo(() => {
     if (!commit) return null;
+    const promptPin = selectedPromptIdx !== null
+      ? commit.promptChanges.find((pc) => pc.promptIndex === selectedPromptIdx) || null
+      : null;
+    const source = promptPin
+      ? (commit.files || []).filter((f) => promptPin.filesChanged.includes(f.filename))
+      : commit.files || [];
     type Node = {
       name: string;
       path: string;
@@ -92,7 +101,7 @@ export default function CommitDetailPage() {
       children: Map<string, Node>;
     };
     const root: Node = { name: '', path: '', isFile: false, children: new Map() };
-    for (const f of commit.files || []) {
+    for (const f of source) {
       const parts = f.filename.split('/');
       let cur = root;
       for (let i = 0; i < parts.length; i++) {
@@ -111,7 +120,7 @@ export default function CommitDetailPage() {
       }
     }
     return root;
-  }, [commit]);
+  }, [commit, selectedPromptIdx]);
 
   if (loading) {
     return (
@@ -133,10 +142,17 @@ export default function CommitDetailPage() {
     );
   }
 
-  const selected = commit.files.find((f) => f.filename === selectedFile) || commit.files[0];
+  // If a prompt is pinned, restrict file list to files that prompt touched.
+  const promptFilter = selectedPromptIdx !== null
+    ? commit.promptChanges.find((pc) => pc.promptIndex === selectedPromptIdx) || null
+    : null;
+  const visibleFiles = promptFilter
+    ? commit.files.filter((f) => promptFilter.filesChanged.includes(f.filename))
+    : commit.files;
+  const selected = visibleFiles.find((f) => f.filename === selectedFile) || visibleFiles[0];
   const isAI = !!commit.session || !!commit.aiToolDetected;
   const activePrompts =
-    selected && selected.promptIndexes.length > 0
+    selected && selected.promptIndexes.length > 0 && selectedPromptIdx === null
       ? commit.promptChanges.filter((pc) => selected.promptIndexes.includes(pc.promptIndex))
       : commit.promptChanges;
 
@@ -244,8 +260,12 @@ export default function CommitDetailPage() {
         {/* Left: file tree */}
         <div className="card p-0 overflow-hidden h-fit lg:sticky lg:top-4">
           <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
-            <p className="text-[10px] text-gray-500 uppercase tracking-widest font-medium">Files</p>
-            <span className="text-[10px] text-gray-600">{commit.files.length}</span>
+            <p className="text-[10px] text-gray-500 uppercase tracking-widest font-medium">
+              {selectedPromptIdx !== null ? `Files from prompt #${selectedPromptIdx + 1}` : 'Files'}
+            </p>
+            <span className="text-[10px] text-gray-600">
+              {selectedPromptIdx !== null ? `${visibleFiles.length} / ${commit.files.length}` : commit.files.length}
+            </span>
           </div>
           <div className="max-h-[70vh] overflow-y-auto py-1">
             {fileTree && <TreeNode node={fileTree} depth={0} selected={selectedFile} onSelect={setSelectedFile} />}
@@ -264,6 +284,16 @@ export default function CommitDetailPage() {
                     <span className="text-gray-600"> &larr; {selected.previousFilename}</span>
                   )}
                 </span>
+                {selectedPromptIdx !== null && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPromptIdx(null)}
+                    className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/25 hover:bg-indigo-500/25 transition-colors"
+                    title="Click to clear the prompt filter and see all files"
+                  >
+                    filtered by prompt #{selectedPromptIdx + 1} · clear
+                  </button>
+                )}
                 <span className="text-[10px] text-gray-500 uppercase tracking-wider">{selected.status}</span>
                 <span className="text-xs flex-shrink-0">
                   {selected.additions > 0 && <span className="text-emerald-400">+{selected.additions}</span>}
@@ -298,25 +328,53 @@ export default function CommitDetailPage() {
           </div>
           <div className="max-h-[75vh] overflow-y-auto divide-y divide-gray-800/70">
             {activePrompts.length > 0 ? (
-              activePrompts.map((pc, i) => (
-                <div key={pc.promptIndex} className="px-4 py-3 hover:bg-gray-900/40 transition-colors">
-                  <div className="flex items-start gap-2.5">
-                    <span className="flex-shrink-0 w-5 h-5 rounded-full bg-indigo-600/20 text-indigo-400 flex items-center justify-center text-[10px] font-bold">
-                      {pc.promptIndex + 1}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs text-gray-200 leading-relaxed whitespace-pre-wrap">
-                        {pc.promptText || '(empty prompt)'}
-                      </p>
-                      {pc.filesChanged.length > 0 && (
-                        <p className="text-[10px] text-gray-600 mt-2">
-                          {pc.filesChanged.length} file{pc.filesChanged.length === 1 ? '' : 's'}
+              activePrompts.map((pc) => {
+                const isActive = selectedPromptIdx === pc.promptIndex;
+                return (
+                  <button
+                    key={pc.promptIndex}
+                    type="button"
+                    onClick={() => {
+                      // Toggle: click same prompt again to clear filter.
+                      setSelectedPromptIdx(isActive ? null : pc.promptIndex);
+                      // When pinning a prompt, auto-select its first touched
+                      // file so the middle diff panel immediately shows the
+                      // prompt's changes instead of staying on an unrelated file.
+                      if (!isActive && pc.filesChanged.length > 0) {
+                        setSelectedFile(pc.filesChanged[0]);
+                      }
+                    }}
+                    className={`w-full text-left px-4 py-3 transition-colors block ${
+                      isActive
+                        ? 'bg-indigo-500/10 ring-1 ring-inset ring-indigo-500/30'
+                        : 'hover:bg-gray-900/40'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <span className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                        isActive
+                          ? 'bg-indigo-500 text-white'
+                          : 'bg-indigo-600/20 text-indigo-400'
+                      }`}>
+                        {pc.promptIndex + 1}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-xs leading-relaxed whitespace-pre-wrap ${isActive ? 'text-indigo-100' : 'text-gray-200'}`}>
+                          {pc.promptText || '(empty prompt)'}
                         </p>
-                      )}
+                        <p className="text-[10px] text-gray-600 mt-2 flex items-center gap-2">
+                          {pc.filesChanged.length > 0 && (
+                            <span>{pc.filesChanged.length} file{pc.filesChanged.length === 1 ? '' : 's'}</span>
+                          )}
+                          {isActive && (
+                            <span className="text-indigo-400">· showing this prompt's changes · click to clear</span>
+                          )}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                </div>
-              ))
+                  </button>
+                );
+              })
             ) : commit.session ? (
               <div className="px-4 py-6 text-center">
                 <p className="text-xs text-gray-600">
