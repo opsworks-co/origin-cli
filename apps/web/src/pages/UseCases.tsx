@@ -203,9 +203,10 @@ export default function UseCases() {
             <div className="mt-10 flex flex-wrap justify-center gap-3">
               <span className="text-[10px] uppercase tracking-widest text-gray-600 self-center mr-2">Jump to:</span>
               {[
+                { href: '#snapshots', label: 'Snapshots', color: 'border-violet-500/30 text-violet-400 hover:bg-violet-500/10' },
+                { href: '#blame', label: 'AI Blame', color: 'border-purple-500/30 text-purple-400 hover:bg-purple-500/10' },
+                { href: '#multi-agent', label: 'Multi-Agent', color: 'border-blue-500/30 text-blue-400 hover:bg-blue-500/10' },
                 { href: '#costs', label: 'AI Costs', color: 'border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10' },
-                { href: '#understand', label: 'Code Understanding', color: 'border-purple-500/30 text-purple-400 hover:bg-purple-500/10' },
-                { href: '#history', label: 'Agent History', color: 'border-blue-500/30 text-blue-400 hover:bg-blue-500/10' },
                 { href: '#governance', label: 'Governance', color: 'border-red-500/30 text-red-400 hover:bg-red-500/10' },
                 { href: '#visibility', label: 'Team Visibility', color: 'border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/10' },
                 { href: '#roi', label: 'AI ROI', color: 'border-amber-500/30 text-amber-400 hover:bg-amber-500/10' },
@@ -219,6 +220,65 @@ export default function UseCases() {
           </FadeIn>
         </div>
       </div>
+
+      {/* ─── SOLO: SNAPSHOTS (Undo a Bad AI Turn) ─────────────────────────── */}
+      <Section
+        id="snapshots"
+        badge="For Solo Developers"
+        badgeColor="border-violet-500/30 text-violet-400"
+        title="Undo a Bad AI Turn"
+        subtitle="Every prompt auto-saves a snapshot of your working tree. If the last turn broke something, restore it. If it was good, branch off and keep exploring. No commits polluted — snapshots live on orphan git branches."
+      >
+        <div className="grid md:grid-cols-2 gap-8">
+          <FadeIn>
+            <div className="rounded-xl border border-white/[0.08] bg-gray-900/40 p-6 space-y-4">
+              <h3 className="text-sm font-semibold text-gray-300">Session snapshots — one per prompt</h3>
+              <div className="space-y-2 text-[13px] font-mono">
+                {[
+                  { id: 'a1b2c3d', prompt: 'Add JWT refresh', when: '2m ago', tag: 'current', color: 'text-emerald-400' },
+                  { id: '5f8e9a0', prompt: 'Fix broken token edge case', when: '8m ago', tag: '', color: 'text-gray-400' },
+                  { id: 'd2c4b6a', prompt: 'Refactor auth middleware', when: '14m ago', tag: '', color: 'text-gray-400' },
+                  { id: '7e1f3a2', prompt: 'Add rate limiting', when: '22m ago', tag: 'before break', color: 'text-amber-400' },
+                  { id: '9b4c8d1', prompt: 'Initial /auth endpoint', when: '38m ago', tag: '', color: 'text-gray-400' },
+                ].map(s => (
+                  <div key={s.id} className={`flex items-center justify-between gap-3 px-3 py-2 rounded-md border border-white/[0.04] bg-white/[0.02] ${s.color}`}>
+                    <span className="text-gray-500 text-[11px] tabular-nums">{s.id}</span>
+                    <span className="flex-1 truncate">{s.prompt}</span>
+                    <span className="text-gray-600 text-[11px]">{s.when}</span>
+                    {s.tag && <span className="text-[10px] px-1.5 py-0.5 rounded bg-current/10 border border-current/20">{s.tag}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </FadeIn>
+
+          <FadeIn delay={150}>
+            <div className="space-y-4">
+              <Terminal title="origin snapshot restore 7e1f3a2">
+                <div className="space-y-1 text-gray-300">
+                  <p><span className="text-gray-500">Restoring working tree to snapshot</span> <span className="text-violet-400">7e1f3a2</span></p>
+                  <p className="text-gray-500">  "Add rate limiting"</p>
+                  <p>  <span className="text-emerald-400">✓</span> Stashed uncommitted changes</p>
+                  <p>  <span className="text-emerald-400">✓</span> Restored 3 files</p>
+                  <p>  <span className="text-emerald-400">✓</span> No commits modified</p>
+                  <p className="text-gray-600 mt-2 text-[10px]">Back to stash with <span className="text-indigo-400">git stash pop</span>.</p>
+                </div>
+              </Terminal>
+              <Terminal title="origin rewind --interactive">
+                <div className="space-y-1 text-gray-300">
+                  <p className="text-gray-500">Pick a snapshot to time-travel to:</p>
+                  <p>  <span className="text-violet-400">→</span> 1. a1b2c3d  Add JWT refresh       <span className="text-gray-600">2m</span></p>
+                  <p>    2. 5f8e9a0  Fix broken token...   <span className="text-gray-600">8m</span></p>
+                  <p>    3. d2c4b6a  Refactor auth...      <span className="text-gray-600">14m</span></p>
+                  <p>    4. 7e1f3a2  Add rate limiting     <span className="text-gray-600">22m</span></p>
+                </div>
+              </Terminal>
+            </div>
+          </FadeIn>
+        </div>
+      </Section>
+
+      <div className="max-w-5xl mx-auto px-6"><div className="border-t border-white/[0.04]" /></div>
 
       {/* ─── SOLO: KNOW YOUR AI COSTS ─────────────────────────────────────── */}
       <Section
@@ -270,13 +330,13 @@ export default function UseCases() {
       {/* Divider */}
       <div className="max-w-5xl mx-auto px-6"><div className="border-t border-white/[0.04]" /></div>
 
-      {/* ─── SOLO: UNDERSTAND YOUR CODE ───────────────────────────────────── */}
+      {/* ─── SOLO: AI BLAME ───────────────────────────────────────────────── */}
       <Section
-        id="understand"
+        id="blame"
         badge="For Solo Developers"
         badgeColor="border-purple-500/30 text-purple-400"
-        title="Understand Your Code"
-        subtitle="See which prompt wrote which line, months later. Never lose context on why code was written."
+        title="Blame Every Line"
+        subtitle="Line-level attribution: which AI wrote which line, the prompt that produced it, the model that ran it. `git blame` tells you who committed — `origin blame` tells you who authored."
       >
         <div className="space-y-8">
           <FadeIn>
@@ -334,13 +394,13 @@ export default function UseCases() {
 
       <div className="max-w-5xl mx-auto px-6"><div className="border-t border-white/[0.04]" /></div>
 
-      {/* ─── SOLO: CROSS-AGENT HISTORY ────────────────────────────────────── */}
+      {/* ─── SOLO: MULTI-AGENT ────────────────────────────────────────────── */}
       <Section
-        id="history"
+        id="multi-agent"
         badge="For Solo Developers"
         badgeColor="border-blue-500/30 text-blue-400"
-        title="Cross-Agent History"
-        subtitle="One place for all agent sessions, forever. Switch between Claude, Cursor, Gemini — Origin remembers everything."
+        title="Track Every Agent"
+        subtitle="Claude Code, Cursor, Gemini, Codex, Aider, Windsurf, Copilot — one CLI tracks them all. Switch between agents freely: your history doesn't fragment, and Origin auto-passes context when you hand off."
       >
         <div className="grid md:grid-cols-2 gap-8">
           <FadeIn>

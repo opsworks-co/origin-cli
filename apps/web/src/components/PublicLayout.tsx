@@ -12,16 +12,17 @@ const NAV_LINKS = [
 ];
 
 const USE_CASES_SOLO = [
-  { title: 'Know Your AI Costs', desc: 'Track spend on Claude, Codex, Gemini across all projects', hash: 'costs' },
-  { title: 'Understand Your Code', desc: 'See which prompt wrote which line, months later', hash: 'understand' },
-  { title: 'Cross-Agent History', desc: 'One place for all agent sessions, forever', hash: 'history' },
+  { title: 'Undo a Bad AI Turn', desc: 'Snapshots every prompt. Restore, branch, or rewind without losing work.', hash: 'snapshots' },
+  { title: 'Blame Every Line', desc: "Which agent wrote which line, with the prompt and the model.", hash: 'blame' },
+  { title: 'Track Every Agent', desc: 'Claude, Cursor, Gemini, Codex, Copilot — one CLI, one history.', hash: 'multi-agent' },
+  { title: 'Know Your AI Costs', desc: 'Spend per agent, model, and repo — rolled up across all projects.', hash: 'costs' },
 ];
 
 const USE_CASES_TEAMS = [
-  { title: 'AI Code Governance', desc: 'Policies, cost limits, content filters before merge', hash: 'governance' },
-  { title: 'Team AI Visibility', desc: "See what every developer's agents are doing in real time", hash: 'visibility' },
-  { title: 'Prove AI ROI', desc: 'Show leadership the business case for AI tooling spend', hash: 'roi' },
-  { title: 'Audit Trail', desc: 'Full history of every AI session for compliance', hash: 'audit' },
+  { title: 'AI Code Governance', desc: 'Policies, cost limits, content filters evaluated before merge.', hash: 'governance' },
+  { title: 'Live Session Feed', desc: "See every developer's agents in real time. Stop runaway spend.", hash: 'visibility' },
+  { title: 'Prove AI ROI', desc: 'Show leadership the business case for AI tooling spend with real numbers.', hash: 'roi' },
+  { title: 'Audit Trail', desc: 'SOC 2 / ISO 27001 evidence: every prompt, diff, and model, forever.', hash: 'audit' },
 ];
 
 function UseCasesDropdown({ scrollTop }: { scrollTop: () => void }) {
