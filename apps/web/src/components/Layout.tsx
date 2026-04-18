@@ -5,7 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { request } from '../api';
 import NotificationBell from './NotificationBell';
 import { LogoMark } from './Logo';
-import ChatWidget from './ChatWidget';
+// import ChatWidget from './ChatWidget'; // disabled — see <ChatWidget> block below
 import {
   LayoutDashboard,
   GitFork,
@@ -230,14 +230,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </main>
       </div>
 
-      {/* AI Assistant */}
-      <ChatWidget
-        endpoint="/api/chat/assistant"
-        title="Origin Assistant"
-        placeholder="Ask about your sessions, policies, costs..."
-        requireAuth
-        welcomeMessage="Hi! I'm your Origin AI assistant. I can help with policies, sessions, cost analysis, and more. What would you like to know?"
-      />
+      {/* AI Assistant — disabled for now, re-enable when the feature is ready.
+          To restore: uncomment this <ChatWidget> block and the import above. */}
     </div>
   );
 }

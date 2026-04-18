@@ -335,12 +335,14 @@ export default function CommitDetailPage() {
                     key={pc.promptIndex}
                     type="button"
                     onClick={() => {
-                      // Toggle: click same prompt again to clear filter.
-                      setSelectedPromptIdx(isActive ? null : pc.promptIndex);
-                      // When pinning a prompt, auto-select its first touched
-                      // file so the middle diff panel immediately shows the
-                      // prompt's changes instead of staying on an unrelated file.
-                      if (!isActive && pc.filesChanged.length > 0) {
+                      // Single click = pin this prompt and show its first file
+                      // in the middle diff panel. Always pin (no toggle) — use
+                      // the "clear" badge in the middle header to unpin. The
+                      // toggle behaviour caused a perceived double-click: the
+                      // list re-filtered after the first click, which users
+                      // interpreted as "nothing happened, click again".
+                      setSelectedPromptIdx(pc.promptIndex);
+                      if (pc.filesChanged.length > 0) {
                         setSelectedFile(pc.filesChanged[0]);
                       }
                     }}
@@ -367,7 +369,7 @@ export default function CommitDetailPage() {
                             <span>{pc.filesChanged.length} file{pc.filesChanged.length === 1 ? '' : 's'}</span>
                           )}
                           {isActive && (
-                            <span className="text-indigo-400">· showing this prompt's changes · click to clear</span>
+                            <span className="text-indigo-400">· active · clear via badge in diff header</span>
                           )}
                         </p>
                       </div>

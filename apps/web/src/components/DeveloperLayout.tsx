@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import NotificationBell from './NotificationBell';
-import ChatWidget from './ChatWidget';
+// import ChatWidget from './ChatWidget'; // disabled — see comment below
 import ProductTour, { DASHBOARD_TOUR } from './ProductTour';
 import { LogoMark } from './Logo';
 import {
@@ -237,14 +237,8 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
         </main>
       </div>
 
-      {/* AI Assistant */}
-      <ChatWidget
-        endpoint="/api/chat/assistant"
-        title="Origin Assistant"
-        placeholder="Ask about your sessions, stats, costs..."
-        requireAuth
-        welcomeMessage="Hi! I'm your Origin AI assistant. I can help with your sessions, stats, and more."
-      />
+      {/* AI Assistant — disabled for now, re-enable when the feature is ready.
+          To restore: uncomment the <ChatWidget> block and the import above. */}
 
       {/* Product tour */}
       <ProductTour steps={DASHBOARD_TOUR} tourId="dashboard-v1" />
