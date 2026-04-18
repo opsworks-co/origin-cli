@@ -587,6 +587,12 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; li
       installRewriteHooks(basePath);
       console.log(chalk.green('  ✓ Attribution preservation hooks installed (rebase/amend/cherry-pick)'));
     } catch { /* non-fatal */ }
+    // Auto-fetch attribution notes on clone/pull. Git doesn't fetch
+    // refs/notes/* by default — we add the refspec so `git fetch` pulls
+    // them alongside branches, and do a one-shot fetch now so existing
+    // notes land immediately. Matches the auto-push behaviour in the
+    // pre-push hook (handlePrePush in hooks.ts:4263).
+    configureNotesRefspecAndFetch(basePath);
   }
 
   // If --link provided, validate agent and write .origin.json
@@ -986,4 +992,51 @@ export function installGitPrePushHook(gitRoot: string): void {
   // Make executable
   fs.chmodSync(hookPath, '755');
   console.log(chalk.green('  ✓ Git pre-push hook installed'));
+}
+
+// ─── Auto-fetch attribution refs ─────────────────────────────────────────
+// Git doesn't fetch refs/notes/* on clone or `git fetch`. We add an extra
+// fetchspec to `remote.<name>.fetch` so notes come down alongside branches,
+// then run a one-shot fetch so the user sees existing attribution without
+// waiting for the next manual pull. Safe to call repeatedly — git dedupes
+// fetchspecs by value when you use `config --add` guarded by a pre-check.
+function configureNotesRefspecAndFetch(repoPath: string): void {
+  try {
+    // Pick the first configured remote (usually "origin"). If none, nothing
+    // to do — the repo has no remote to fetch from.
+    const remotesRaw = runDetailed('git', ['remote'], { cwd: repoPath, timeoutMs: 3000 });
+    const remote = (remotesRaw.stdout || '').trim().split('\n')[0].trim();
+    if (!remote) {
+      return;
+    }
+
+    const NOTES_SPEC = `+refs/notes/origin:refs/notes/origin`;
+
+    // Check current fetchspecs for this remote — only add if missing so
+    // re-running `origin enable` doesn't keep appending duplicates.
+    const current = runDetailed(
+      'git',
+      ['config', '--get-all', `remote.${remote}.fetch`],
+      { cwd: repoPath, timeoutMs: 3000 },
+    );
+    const existing = (current.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    if (!existing.includes(NOTES_SPEC)) {
+      runDetailed(
+        'git',
+        ['config', '--add', `remote.${remote}.fetch`, NOTES_SPEC],
+        { cwd: repoPath, timeoutMs: 3000 },
+      );
+      console.log(chalk.green(`  ✓ Configured ${remote} to fetch attribution notes (refs/notes/origin)`));
+    }
+
+    // One-shot fetch so any notes already on the remote land locally now.
+    // `|| true` semantics: we don't care if the remote has no notes ref yet
+    // (common for repos that never pushed them) — the config is what matters.
+    runDetailed('git', ['fetch', remote, 'refs/notes/origin:refs/notes/origin', '--no-tags'], {
+      cwd: repoPath,
+      timeoutMs: 10_000,
+    });
+  } catch {
+    // Non-fatal — user can still push/pull manually with explicit refspecs.
+  }
 }
