@@ -73,6 +73,16 @@ npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ## Quick Start
 
 ```bash
+npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
+origin init                      # one-time: GLOBAL git hooks (every repo)
+origin blame <file>              # any repo, any time
+```
+
+`origin init` sets `git config --global core.hooksPath` → `~/.origin/git-hooks`. Every repo on the machine is tracked automatically. No per-repo setup.
+
+### Detailed
+
+```bash
 origin init                     # Auto-detects agents, installs hooks
 # ... code with any AI agent — Origin tracks automatically
 origin blame src/index.ts       # See who wrote each line

@@ -124,9 +124,10 @@ program.command('login')
   .option('--profile <name>', 'Save as named profile (default: auto-detect "dev" or "team")')
   .action(loginCommand);
 program.command('init')
-  .description('Register this machine as an agent host')
+  .description('Register this machine + install GLOBAL git hooks (tracks all repos)')
   .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
-  .option('--no-hooks', 'Skip automatic global hook installation')
+  .option('--local', 'Install hooks for this repo only (default: global — tracks every repo)')
+  .option('--no-hooks', 'Skip hook installation entirely')
   .action(initCommand);
 program.command('enable')
   .description('Install Origin hooks for session tracking')

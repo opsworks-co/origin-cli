@@ -36,11 +36,13 @@ Origin runs silently alongside any AI coding agent, captures every session (prom
 
 ```bash
 npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
-origin init
-origin blame src/auth.ts
+origin init                      # one-time: installs GLOBAL git hooks
+origin blame src/auth.ts         # any repo, any time
 ```
 
-That's it. No server, no login, no API keys. Session metadata lives in `refs/notes/origin` and the `origin-sessions` branch — both travel with `git clone`.
+**One-time setup.** `origin init` sets `git config --global core.hooksPath` to `~/.origin/git-hooks` — so every repo on the machine (past, present, future) is auto-tracked. No per-repo `origin init` needed. Opt-out per-repo with `origin init --local`.
+
+No server, no login, no API keys required. Session metadata lives in `refs/notes/origin` and the `origin-sessions` branch — both travel with `git clone`.
 
 <sub>Origin isn't on npm's public registry because it's distributed with the platform. `npm i -g <url>` installs the same tarball we use internally. Inspect it first: `curl -sL https://getorigin.io/cli/origin-cli-latest.tgz | tar -tz | head`.</sub>
 

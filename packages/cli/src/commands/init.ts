@@ -6,7 +6,7 @@ import { api } from '../api.js';
 import { enableCommand } from './enable.js';
 import { detectTools } from '../tools-detector.js';
 
-export async function initCommand(opts: { standalone?: boolean; hooks?: boolean } = {}) {
+export async function initCommand(opts: { standalone?: boolean; hooks?: boolean; local?: boolean } = {}) {
   const config = loadConfig();
   let connected = isConnectedMode();
 
@@ -66,11 +66,25 @@ export async function initCommand(opts: { standalone?: boolean; hooks?: boolean 
   saveAgentConfig({ machineId, hostname, detectedTools, orgId: config?.orgId || 'local' });
   console.log(chalk.gray('  Agent config saved to ~/.origin/agent.json'));
 
-  // Auto-install global hooks so all repos are tracked (skip with --no-hooks)
+  // Auto-install hooks. Default = global (every repo tracked automatically
+  // via git core.hooksPath). Opt-out with --no-hooks. Switch to per-repo-only
+  // with --local (must be inside a git repo).
   if (opts.hooks !== false) {
-    console.log(chalk.bold('\n📡 Installing global hooks...\n'));
-    await enableCommand({ global: true });
-    console.log(chalk.green('\n✓ Global hooks installed — Origin is now tracking all AI sessions'));
+    const useGlobal = !opts.local;
+    if (useGlobal) {
+      console.log(chalk.bold('\n📡 Installing GLOBAL git hooks\n'));
+      console.log(chalk.gray('  Sets git config --global core.hooksPath → ~/.origin/git-hooks'));
+      console.log(chalk.gray('  Every repo on this machine — past and future — gets tracked'));
+      console.log(chalk.gray('  automatically. No per-repo `origin init` needed.'));
+      console.log(chalk.gray('  Opt out with: origin init --local (per-repo only)\n'));
+      await enableCommand({ global: true });
+      console.log(chalk.green('\n✓ Global hooks installed — every repo is now tracked'));
+    } else {
+      console.log(chalk.bold('\n📡 Installing LOCAL git hooks for this repo only\n'));
+      await enableCommand({ global: false });
+      console.log(chalk.green('\n✓ Local hooks installed — only this repo is tracked'));
+      console.log(chalk.gray('  Run `origin init` (no --local) to track ALL repos globally.'));
+    }
   }
 
   if (!connected) {
