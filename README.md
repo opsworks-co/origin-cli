@@ -1,6 +1,14 @@
 # Origin
 
-**Know exactly what your AI agents are writing.**
+**The AI-aware layer on top of git.**
+
+Four things no other tool gives you together:
+
+1. **Snapshots** — every AI prompt auto-saves a working-tree snapshot. Undo a bad turn, branch off a good one, time-travel inside a session. Zero commits polluted, stored on orphan branches.
+2. **Blame** — line-level attribution showing which AI wrote which line, with the prompt that produced it and the model that ran it. `git blame` tells you who committed; Origin tells you who *authored*.
+3. **Multi-agent** — one CLI tracks Claude Code, Cursor, Gemini, Codex, Aider, Windsurf, Copilot, Continue, Amp, Junie, OpenCode, Rovo Dev, Droid. Switch agents, track all of them.
+4. **Web platform** — [getorigin.io](https://getorigin.io) for individuals (free) and teams (paid): session replay, live feed, policy enforcement, PR compliance, cost dashboards, SOC 2 audit trails.
+
 
 ```
 $ origin blame src/auth.ts
@@ -20,7 +28,7 @@ $ origin blame src/auth.ts
   Summary: AI: 5 (71%)  Human: 2 (29%)  Mixed: 0 (0%)
 ```
 
-Git blame tells you which human committed code. Origin tells you which AI wrote it, what they were asked to do, and what it cost. It runs silently next to Claude Code, Cursor, Gemini CLI, Codex, Aider, and 8 more agents, captures every session — prompts, responses, tokens, duration, cost — and attaches it to your commits as git notes. Your data stays in your repo.
+Origin runs silently alongside any AI coding agent, captures every session (prompts, responses, tokens, cost, diff), stores it in your own repo as git notes and shadow branches, and gives you snapshots, blame, and a web dashboard on top. Your data stays where your code is.
 
 ---
 
@@ -38,17 +46,48 @@ That's it. No server, no login, no API keys. Session metadata lives in `refs/not
 
 ---
 
-## What you can do
+## The four pillars
 
-- `origin blame <file>` — line-level AI/human attribution with the model that wrote each line
-- `origin diff` — annotated diff showing which lines are AI vs human
-- `origin stats` — AI percentage, cost, token usage, per-agent breakdown
-- `origin sessions` — every AI coding session stored in git
-- `origin snapshot` — auto-saved working-tree snapshot after every AI prompt; `origin snapshot restore <id>` time-travels back non-destructively, `origin rewind` opens an interactive browser
-- `origin prompts <file>` — every prompt that touched a file, with diffs
-- `origin chat` — natural-language Q&A over your AI-authored code
-- `origin web` — local browser dashboard, no server needed
-- Built-in secret scanner blocks commits containing API keys and tokens
+### 1. Snapshots — undo any AI turn
+
+Every AI prompt auto-saves a snapshot of your working tree. If the last turn broke something, restore it. If it was good, branch off and keep exploring.
+
+```bash
+origin snapshot list              # every snapshot in the current session
+origin snapshot restore <id>      # time-travel back (non-destructive)
+origin snapshot diff a1b2 c3d4    # see what changed between two turns
+origin rewind                     # interactive browser
+```
+
+Stored on orphan git branches — no commits polluted, no disk overhead on clone.
+
+### 2. Blame — which AI wrote which line
+
+```bash
+origin blame src/auth.ts          # line-by-line AI/human + model
+origin why src/auth.ts:42         # the exact prompt that produced line 42
+origin diff                       # annotated diff: [AI] vs [HU]
+```
+
+Attribution survives `rebase`, `amend`, `cherry-pick`, and `stash`.
+
+### 3. Multi-agent — one CLI, every agent
+
+Claude Code, Cursor, Gemini CLI, Codex, Aider, Windsurf, GitHub Copilot, Continue, Amp, Junie, OpenCode, Rovo Dev, Droid. Auto-detected by `origin init`. Switch between them — your history doesn't fragment.
+
+### 4. Web platform — solo (free) or team
+
+[getorigin.io](https://getorigin.io) reads the same data the CLI writes:
+
+- **Session replay** — every prompt, diff, tool call, token count
+- **Live feed** — watch active sessions, kill runaway agents
+- **AI blame view** — dashboard version of `origin blame`
+- **Policy enforcement** — block AI from paths, enforce model allowlists, require human review
+- **PR compliance** — GitHub status checks on AI-authored PRs
+- **Cost dashboards** — spend per agent / model / repo / developer
+- **SOC 2 / ISO 27001 audit** — one-click evidence export
+
+Free for solo. Paid for teams.
 
 Full command reference: [`docs/CLI.md`](docs/CLI.md).
 
@@ -76,19 +115,9 @@ Auto-detected by `origin init`. One CLI tracks them all.
 
 ---
 
-## For teams
+## Self-hosting the platform
 
-[getorigin.io](https://getorigin.io) is the hosted platform built on the same CLI. It adds:
-
-- **Session replay** — every prompt and diff of every session, in the browser
-- **Policy enforcement** — block AI from touching payment logic, enforce model allowlists, require human review
-- **PR compliance** — GitHub status checks that verify AI attribution before merge
-- **Cost visibility** — who's spending what, on which model, in which repo
-- **Audit reports** — one-click SOC 2 and ISO 27001 evidence
-
-<!-- TODO: real dashboard screenshot / GIF showing a Session Detail page with prompts + diffs -->
-
-Self-host setup and the full platform architecture live in [`docs/PLATFORM.md`](docs/PLATFORM.md). Hosted is free for solo developers.
+Setup and architecture live in [`docs/PLATFORM.md`](docs/PLATFORM.md). The CLI works standalone without the platform — the web dashboard is optional.
 
 ---
 

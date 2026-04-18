@@ -339,8 +339,8 @@ export default function Landing() {
   return (
     <>
       <Helmet>
-        <title>Origin — AI Code Attribution & Governance</title>
-        <meta name="description" content="Origin tracks every AI coding session, attributes every line, and gives you full visibility into AI-generated code. Free for solo developers." />
+        <title>Origin — Snapshots, blame, and governance for AI code</title>
+        <meta name="description" content="The AI-aware layer on top of git: auto-snapshots for every prompt, line-level AI blame, one CLI for every agent (Claude Code, Cursor, Gemini, Codex, Copilot), and a web platform with session replay, live feed, and policy enforcement. Free for solo developers." />
         <link rel="canonical" href="https://getorigin.io" />
       </Helmet>
 
@@ -429,15 +429,15 @@ export default function Landing() {
 
             <h1 className="text-[clamp(2.8rem,7vw,5rem)] font-bold leading-[1.0] tracking-[-0.04em]">
               <RevealText delay={400}>
-                <span className="text-white">Your AI agents build fast. </span>
-                <span className="text-shimmer">Origin keeps them in check.</span>
+                <span className="text-white">The AI-aware layer </span>
+                <span className="text-shimmer">on top of git.</span>
               </RevealText>
             </h1>
 
             <RevealText delay={1400}>
-              <p className="mt-8 text-lg text-gray-400 max-w-lg leading-relaxed">
-                Track every AI coding session. See which agent wrote what, how much it cost,
-                and what changed.{' '}
+              <p className="mt-8 text-lg text-gray-400 max-w-xl leading-relaxed">
+                Auto-snapshots every AI prompt. Line-level blame across every agent —
+                Claude Code, Cursor, Gemini, Codex, Copilot. One dashboard for all of it.{' '}
                 <span className="text-emerald-400/90">Free for solo developers.</span>
               </p>
             </RevealText>
@@ -558,22 +558,22 @@ export default function Landing() {
           <div className="flex items-end justify-between mb-16">
             <div>
               <p className="text-xs text-gray-600 font-mono mb-2">2.0</p>
-              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Everything recorded.<br />Nothing lost.</h2>
+              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Four things<br />nobody else gives you together.</h2>
             </div>
             <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
-              From line-level attribution to real-time policy enforcement.
+              Snapshots, blame, multi-agent, and a web platform — one install.
             </p>
           </div>
         </FadeIn>
 
         <div className="grid md:grid-cols-2 gap-px bg-white/[0.04] rounded-lg overflow-hidden border border-white/[0.06]">
           {[
-            { title: 'AI Blame', desc: 'See which AI agent wrote each line of code, what prompt generated it, and the full session it came from.', label: '2.1', accent: 'text-indigo-400' },
-            { title: 'Session Replay', desc: 'Every prompt, response, tool call, and file change — recorded with timestamps, token counts, and costs.', label: '2.2', accent: 'text-purple-400' },
-            { title: 'Cost Tracking', desc: 'Track spend per agent, model, repo, and developer. Set budgets. See which models deliver the best ROI.', label: '2.3', accent: 'text-amber-400' },
-            { title: 'Live Dashboard', desc: 'Watch AI sessions in real-time. See active agents, tokens burned, cost per session, and stop runaway agents.', label: '2.4', accent: 'text-emerald-400' },
-            { title: 'Policy Enforcement', desc: 'Block secrets, enforce file restrictions, set cost limits, require human review. Evaluate in real-time.', label: '2.5', accent: 'text-cyan-400' },
-            { title: 'Attribution Context', desc: 'When an agent opens a file, Origin injects line-level authorship — so every AI knows what others changed.', label: '2.6', accent: 'text-rose-400' },
+            { title: 'Snapshots', desc: 'Every AI prompt auto-saves a working-tree snapshot. Undo a bad turn, branch off a good one, time-travel inside a session — all stored on orphan git branches, zero commits polluted.', label: '2.1', accent: 'text-violet-400' },
+            { title: 'AI Blame', desc: 'Line-level attribution: which agent wrote which line, the prompt that produced it, the model that ran it. Survives rebase, amend, cherry-pick, and stash.', label: '2.2', accent: 'text-indigo-400' },
+            { title: 'Multi-agent, one CLI', desc: 'Tracks Claude Code, Cursor, Gemini, Codex, Aider, Windsurf, Copilot, Continue, Amp, Junie, OpenCode, Rovo Dev, Droid. Auto-detected. Your history never fragments when you switch.', label: '2.3', accent: 'text-cyan-400' },
+            { title: 'Web platform — solo & team', desc: 'Session replay, live feed, AI blame view, policy enforcement, PR compliance, cost dashboards, SOC 2 / ISO 27001 audit. Free for individuals, paid for teams.', label: '2.4', accent: 'text-emerald-400' },
+            { title: 'Cost tracking', desc: 'Spend per agent, model, repo, developer. Set budgets. See which models deliver the best ROI.', label: '2.5', accent: 'text-amber-400' },
+            { title: 'Policy enforcement', desc: 'Block AI from paths, enforce model allowlists, set cost limits, require human review, scan for secrets. Evaluated in real time.', label: '2.6', accent: 'text-rose-400' },
           ].map((f, i) => (
             <FadeIn key={f.label} delay={i * 80}>
               <div className="bg-[rgb(8,9,10)] p-8 h-full group hover:bg-white/[0.02] transition-colors duration-200">
