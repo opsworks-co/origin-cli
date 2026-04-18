@@ -435,10 +435,10 @@ export default function Landing() {
             </h1>
 
             <RevealText delay={1400}>
-              <p className="mt-8 text-lg text-gray-400 max-w-lg leading-relaxed">
-                Track every AI coding session. See which agent wrote what, how much it cost,
-                and what changed.{' '}
-                <span className="text-emerald-400/90">Free for solo developers.</span>
+              <p className="mt-8 text-lg text-gray-400 max-w-xl leading-relaxed">
+                Per-prompt snapshots, line-level attribution, and a live dashboard — for
+                every agent you use.{' '}
+                <span className="text-emerald-400/90">Free for solo.</span>
               </p>
             </RevealText>
 
