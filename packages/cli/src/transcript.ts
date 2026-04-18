@@ -340,7 +340,10 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
       }
     }
 
-    result.tokensUsed = result.inputTokens + result.cacheReadTokens + result.outputTokens;
+    // Fresh tokens only. Cache reads are 90% cheaper and volumetrically
+    // huge — rolling them into `tokensUsed` inflated dashboard totals
+    // 10x+ (same bug we fixed for Claude transcripts at line 184).
+    result.tokensUsed = result.inputTokens + result.outputTokens;
     result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
     if (!result.model) result.model = data.model || 'gemini';
 
@@ -800,11 +803,13 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'sonnet': { input: 3, output: 15 },
   'opus': { input: 5, output: 25 },
   'haiku': { input: 1, output: 5 },
-  // Google
+  // Google — pricing per 1M tokens (≤200K context tier where two tiers exist)
   'gemini-2.5-pro': { input: 1.25, output: 10 },
-  'gemini-2.5-flash': { input: 0.15, output: 3.50 },
+  'gemini-2.5-flash': { input: 0.30, output: 2.50 },      // was 0.15/3.50 — wrong
+  'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   'gemini-3-pro': { input: 1.25, output: 10 },
   'gemini-3-flash': { input: 0.15, output: 0.60 },
+  'gemini-2.0-flash': { input: 0.10, output: 0.40 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
   // OpenAI (for Cursor users)
   'gpt-4o': { input: 2.50, output: 10 },
