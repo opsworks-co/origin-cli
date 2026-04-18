@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Apply theme before first paint to avoid FOUC -->
+    <!-- Apply theme before first paint to avoid FOUC. Default dark
+         everywhere — only honor light if the user explicitly picked it.
+         OS-level prefers-color-scheme is intentionally ignored: the
+         marketing pages aren't designed for light mode. -->
     <script>
       (function() {
         var stored = localStorage.getItem('theme');
-        var theme = stored === 'light' ? 'light'
-          : stored === 'dark' ? 'dark'
-          : window.matchMedia('(prefers-color-scheme: light)').matches ? 'light'
-          : 'dark';
+        var theme = stored === 'light' ? 'light' : 'dark';
         if (theme === 'dark') document.documentElement.classList.add('dark');
         document.documentElement.style.colorScheme = theme;
       })();
@@ -42,7 +42,7 @@
       gtag('js', new Date());
       gtag('config', 'G-1GRK1KDD9P');
     </script>
-    <script type="module" crossorigin src="/assets/index-CpSuDtwu.js"></script>
+    <script type="module" crossorigin src="/assets/index-say1taYI.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/react-vendor-CC7Ml7aG.js">
     <link rel="modulepreload" crossorigin href="/assets/chart-vendor-CEHXd1TQ.js">
     <link rel="stylesheet" crossorigin href="/assets/index-PcQM4xXA.css">

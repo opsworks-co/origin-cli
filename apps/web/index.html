@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Apply theme before first paint to avoid FOUC -->
+    <!-- Apply theme before first paint to avoid FOUC. Default dark
+         everywhere — only honor light if the user explicitly picked it.
+         OS-level prefers-color-scheme is intentionally ignored: the
+         marketing pages aren't designed for light mode. -->
     <script>
       (function() {
         var stored = localStorage.getItem('theme');
-        var theme = stored === 'light' ? 'light'
-          : stored === 'dark' ? 'dark'
-          : window.matchMedia('(prefers-color-scheme: light)').matches ? 'light'
-          : 'dark';
+        var theme = stored === 'light' ? 'light' : 'dark';
         if (theme === 'dark') document.documentElement.classList.add('dark');
         document.documentElement.style.colorScheme = theme;
       })();

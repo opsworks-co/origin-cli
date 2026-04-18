@@ -429,15 +429,15 @@ export default function Landing() {
 
             <h1 className="text-[clamp(2.8rem,7vw,5rem)] font-bold leading-[1.0] tracking-[-0.04em]">
               <RevealText delay={400}>
-                <span className="text-white">The AI-aware layer </span>
-                <span className="text-shimmer">on top of git.</span>
+                <span className="text-white">Your AI agents build fast. </span>
+                <span className="text-shimmer">Origin keeps them in check.</span>
               </RevealText>
             </h1>
 
             <RevealText delay={1400}>
-              <p className="mt-8 text-lg text-gray-400 max-w-xl leading-relaxed">
-                Auto-snapshots every AI prompt. Line-level blame across every agent —
-                Claude Code, Cursor, Gemini, Codex, Copilot. One dashboard for all of it.{' '}
+              <p className="mt-8 text-lg text-gray-400 max-w-lg leading-relaxed">
+                Track every AI coding session. See which agent wrote what, how much it cost,
+                and what changed.{' '}
                 <span className="text-emerald-400/90">Free for solo developers.</span>
               </p>
             </RevealText>
