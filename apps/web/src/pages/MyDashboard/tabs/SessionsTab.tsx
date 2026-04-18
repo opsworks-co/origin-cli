@@ -1,7 +1,50 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Search, Bookmark, Star, BarChart3, GitMerge } from 'lucide-react';
 import { Session, agentColor, fmt, fmtCost, fmtDuration, timeAgo } from '../utils';
 import { TagEditor } from '../TagEditor';
+
+// ── Chain grouping ─────────────────────────────────────────────────────────
+// Re-orders sessions so that descendants appear directly under their root
+// (if the root is on the current page) and annotates each with `chainDepth`
+// for visual indentation. Keeps non-chained sessions in their original order
+// relative to each other.
+function groupChains(sessions: Session[]): Array<Session & { chainDepth: number; isChainRoot: boolean }> {
+  if (sessions.length === 0) return [];
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  // Build parent→children adjacency restricted to sessions currently on screen.
+  const children = new Map<string, Session[]>();
+  const isChild = new Set<string>();
+  for (const s of sessions) {
+    if (s.parentSessionId && byId.has(s.parentSessionId)) {
+      const arr = children.get(s.parentSessionId) || [];
+      arr.push(s);
+      children.set(s.parentSessionId, arr);
+      isChild.add(s.id);
+    }
+  }
+  // Sort children by startedAt ascending so they read chronologically after the root.
+  for (const arr of children.values()) {
+    arr.sort((a, b) => {
+      const ta = a.startedAt ? new Date(a.startedAt).getTime() : 0;
+      const tb = b.startedAt ? new Date(b.startedAt).getTime() : 0;
+      return ta - tb;
+    });
+  }
+  const out: Array<Session & { chainDepth: number; isChainRoot: boolean }> = [];
+  const seen = new Set<string>();
+  const walk = (s: Session, depth: number, root: boolean) => {
+    if (seen.has(s.id)) return;
+    seen.add(s.id);
+    out.push(Object.assign({}, s, { chainDepth: depth, isChainRoot: root && (children.get(s.id)?.length ?? 0) > 0 }));
+    const kids = children.get(s.id);
+    if (kids) for (const k of kids) walk(k, depth + 1, false);
+  };
+  for (const s of sessions) {
+    if (isChild.has(s.id)) continue; // children are emitted by walk()
+    walk(s, 0, true);
+  }
+  return out;
+}
 
 type SortField = 'agent' | 'repo' | 'duration' | 'cost' | 'tokens' | 'status' | 'date';
 
@@ -60,6 +103,11 @@ export function SessionsTab(props: SessionsTabProps) {
     sessionsLoading, filteredSessions, SortHeader,
     sessionsOffset, sessionsTotal, totalPages, currentPage, LIMIT,
   } = props;
+
+  // Group chained sessions: children appear directly under their root with
+  // an indent + tree-connector glyph. If the root isn't on this page, the
+  // child still gets an indent so the "Chain" badge has visual context.
+  const orderedSessions = useMemo(() => groupChains(filteredSessions), [filteredSessions]);
 
   return (
         <div className="space-y-4">
@@ -185,10 +233,12 @@ export function SessionsTab(props: SessionsTabProps) {
                       </td>
                     </tr>
                   ) : (
-                    filteredSessions.map((s) => (
+                    orderedSessions.map((s) => (
                       <tr
                         key={s.id}
-                        className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors cursor-pointer"
+                        className={`border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors cursor-pointer ${
+                          s.chainDepth > 0 ? 'bg-sky-950/10' : ''
+                        }`}
                         onClick={() => navigate(`/sessions/${s.id}`)}
                       >
                         <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
@@ -220,15 +270,20 @@ export function SessionsTab(props: SessionsTabProps) {
                           </button>
                         </td>
                         <td className="px-4 py-3">
-                          <span
-                            className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded"
-                            style={{
-                              backgroundColor: `${agentColor(s.agentName)}15`,
-                              color: agentColor(s.agentName),
-                            }}
-                          >
-                            {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
-                          </span>
+                          <div className="flex items-center gap-1.5" style={{ paddingLeft: s.chainDepth > 0 ? `${Math.min(s.chainDepth, 3) * 14}px` : 0 }}>
+                            {s.chainDepth > 0 && (
+                              <span className="text-sky-500/60 font-mono text-xs leading-none select-none" aria-hidden>└─</span>
+                            )}
+                            <span
+                              className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded"
+                              style={{
+                                backgroundColor: `${agentColor(s.agentName)}15`,
+                                color: agentColor(s.agentName),
+                              }}
+                            >
+                              {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
+                            </span>
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-gray-400">{s.repoName || '—'}</td>
                         <td className="px-4 py-3 text-gray-500 hidden md:table-cell font-mono text-xs">
@@ -246,10 +301,15 @@ export function SessionsTab(props: SessionsTabProps) {
                               </span>
                             )}
                             {s.parentSessionId && (
-                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-900/30 text-sky-400">
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); navigate(`/sessions/${s.parentSessionId}`); }}
+                                title={`Chained to session ${s.parentSessionId.slice(0, 8)} — same agent, same branch, ended within 10 minutes before this one started. Click to open the parent.`}
+                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-sky-900/30 text-sky-400 hover:bg-sky-800/50 hover:text-sky-300 transition-colors cursor-pointer"
+                              >
                                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
                                 Chain
-                              </span>
+                              </button>
                             )}
                             {s.status === 'RUNNING' ? (
                               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">

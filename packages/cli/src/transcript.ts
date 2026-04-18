@@ -440,7 +440,16 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
       // If no prompt text (tool_result entry), continue accumulating files in current turn
     }
 
-    if (type === 'assistant' && currentPromptIndex >= 0) {
+    if (type === 'assistant') {
+      // If assistant work appears before we've seen any user prompt (e.g.
+      // transcript starts mid-session with a tool_result), synthesise
+      // prompt-index 0 so file edits don't get discarded under a phantom
+      // -1 bucket. The session/start prompt list still drives the UI
+      // turn labels; this just makes sure files attach SOMEWHERE.
+      if (currentPromptIndex < 0) {
+        currentPromptIndex = 0;
+        currentPromptText = currentPromptText || '';
+      }
       const content = entry.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
@@ -466,8 +475,11 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
     });
   }
 
-  // Filter out prompts with no file changes (unless it's the only prompt)
-  return mappings.filter((m) => m.filesChanged.length > 0);
+  // Don't filter out prompts with zero files — conversational turns are
+  // valid data; the UI can show "No files modified" rather than hiding
+  // the turn entirely. Previously filtering made the UI look empty for
+  // tiny sessions where Claude replied without editing files.
+  return mappings;
 }
 
 /**
