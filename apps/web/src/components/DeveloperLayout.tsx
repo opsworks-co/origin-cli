@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -52,6 +52,22 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // One-time tour nudge: Register pages set `origin:tour-highlight = '1'`
+  // so new accounts see a pulsing Tour button on their very first session.
+  // Cleared on click or after the user has been on a page for 60s without
+  // clicking — so it never lingers forever.
+  const [tourHighlight, setTourHighlight] = useState(() => {
+    try { return localStorage.getItem('origin:tour-highlight') === '1'; } catch { return false; }
+  });
+
+  useEffect(() => {
+    if (!tourHighlight) return;
+    const t = setTimeout(() => {
+      try { localStorage.removeItem('origin:tour-highlight'); } catch { /* private mode */ }
+      setTourHighlight(false);
+    }, 60_000);
+    return () => clearTimeout(t);
+  }, [tourHighlight]);
 
   const handleLogout = () => {
     logout();
@@ -157,6 +173,10 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
           <div className="flex items-center gap-1 mt-1">
             <button
               onClick={() => {
+                // Clear the one-time highlight flag — even if they click
+                // from a different page, they've acknowledged the tour.
+                try { localStorage.removeItem('origin:tour-highlight'); } catch { /* private mode */ }
+                setTourHighlight(false);
                 // If we're not on the dashboard, the ProductTour component is
                 // unmounted — navigate there first, then dispatch on the next
                 // tick once the component mounts and attaches its listener.
@@ -167,10 +187,20 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
                 }
                 window.dispatchEvent(new CustomEvent('origin:start-tour'));
               }}
-              className="flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors"
+              className={
+                tourHighlight
+                  ? 'relative flex-1 flex items-center justify-center gap-1.5 text-[11px] font-semibold text-white px-2 py-1.5 rounded-md bg-gradient-to-r from-indigo-600 to-violet-600 shadow-[0_0_0_1px_rgba(139,92,246,0.5),0_0_18px_rgba(139,92,246,0.45)] hover:shadow-[0_0_0_1px_rgba(139,92,246,0.7),0_0_24px_rgba(139,92,246,0.6)] transition-all'
+                  : 'flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors'
+              }
             >
-              <Sparkles className="w-3.5 h-3.5" />
+              <Sparkles className={`w-3.5 h-3.5 ${tourHighlight ? 'animate-pulse' : ''}`} />
               Tour
+              {tourHighlight && (
+                <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-fuchsia-400 opacity-75 animate-ping" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-fuchsia-500" />
+                </span>
+              )}
             </button>
             <button
               onClick={handleLogout}

@@ -37,6 +37,10 @@ export default function Register() {
     setError('');
     setLoading(true);
     try {
+      // Mark the sidebar "Tour" button for a one-time highlight on the
+      // new user's first post-registration session. DeveloperLayout reads
+      // and clears this flag; subsequent logins stay un-highlighted.
+      try { localStorage.setItem('origin:tour-highlight', '1'); } catch { /* private mode */ }
       if (accountType === 'developer') {
         await registerDeveloper(email, password, name);
         navigate('/onboarding');

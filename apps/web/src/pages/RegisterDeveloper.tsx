@@ -18,6 +18,9 @@ export default function RegisterDeveloper() {
     setError('');
     setLoading(true);
     try {
+      // One-time Tour button highlight for new users. DeveloperLayout
+      // reads this flag and clears it on first click or first view.
+      try { localStorage.setItem('origin:tour-highlight', '1'); } catch { /* private mode */ }
       await registerDeveloper(email, password, name);
       navigate('/onboarding');
     } catch (err: any) {
