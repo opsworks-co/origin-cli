@@ -442,11 +442,11 @@ export default function Landing() {
           <div className="scan-line absolute left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-indigo-500/30 to-transparent" />
         </div>
 
-        <div className="relative w-full max-w-5xl mx-auto px-6 py-20">
+        <div className="relative w-full max-w-5xl mx-auto px-6 py-10 lg:py-12">
           <div className="max-w-3xl">
             {/* Badge */}
             <RevealText delay={200}>
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/[0.08] bg-white/[0.03] mb-8 backdrop-blur-sm">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/[0.08] bg-white/[0.03] mb-5 backdrop-blur-sm">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 <span className="text-xs text-gray-400">AI Code Attribution & Governance</span>
               </div>
@@ -460,7 +460,7 @@ export default function Landing() {
             </h1>
 
             <RevealText delay={1400}>
-              <p className="mt-8 text-lg text-gray-400 max-w-2xl leading-relaxed">
+              <p className="mt-6 text-lg text-gray-400 max-w-2xl leading-relaxed">
                 Per-prompt snapshots, line-level attribution, and a live dashboard for{' '}
                 <span className="text-emerald-400/90">solo devs</span>. Policy enforcement,
                 PR compliance, and audit trails for{' '}
@@ -469,7 +469,7 @@ export default function Landing() {
             </RevealText>
 
             <RevealText delay={1700}>
-              <div className="mt-10 flex items-center gap-4">
+              <div className="mt-7 flex items-center gap-4">
                 <Link
                   to="/register?type=developer"
                   className="group relative px-7 py-3 text-sm font-medium rounded-lg bg-indigo-600 text-white overflow-hidden transition-all hover:shadow-lg hover:shadow-indigo-500/25"
@@ -495,14 +495,14 @@ export default function Landing() {
               </div>
 
               {/* Install one-liner */}
-              <div className="mt-6 max-w-xl">
+              <div className="mt-5 max-w-xl">
                 <InstallCommand />
               </div>
             </RevealText>
 
             {/* Agent pills */}
             <RevealText delay={2000}>
-              <div className="mt-14 flex items-center gap-3 flex-wrap">
+              <div className="mt-8 flex items-center gap-3 flex-wrap">
                 <span className="text-[11px] text-gray-600 uppercase tracking-wider mr-1">Works with</span>
                 {AGENTS.map((a) => (
                   <span
