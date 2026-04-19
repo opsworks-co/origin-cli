@@ -460,10 +460,11 @@ export default function Landing() {
             </h1>
 
             <RevealText delay={1400}>
-              <p className="mt-8 text-lg text-gray-400 max-w-xl leading-relaxed">
-                Per-prompt snapshots, line-level attribution, and a live dashboard — for
-                every agent you use.{' '}
-                <span className="text-emerald-400/90">Free for solo.</span>
+              <p className="mt-8 text-lg text-gray-400 max-w-2xl leading-relaxed">
+                Per-prompt snapshots, line-level attribution, and a live dashboard for{' '}
+                <span className="text-emerald-400/90">solo devs</span>. Policy enforcement,
+                PR compliance, and audit trails for{' '}
+                <span className="text-indigo-400/90">teams</span>.
               </p>
             </RevealText>
 
