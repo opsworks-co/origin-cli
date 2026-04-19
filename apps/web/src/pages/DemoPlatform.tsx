@@ -355,6 +355,74 @@ function Step6Content() {
   );
 }
 
+function StepBlameContent() {
+  const lines = [
+    { n: 12, code: "import { z } from 'zod';", author: 'human', by: 'alice', age: '3d ago' },
+    { n: 13, code: '', author: null },
+    { n: 14, code: 'const registerSchema = z.object({', author: 'ai', model: 'claude-opus-4-7', by: 'bob', age: '2m ago' },
+    { n: 15, code: '  email: z.string().email(),', author: 'ai', model: 'claude-opus-4-7', by: 'bob', age: '2m ago' },
+    { n: 16, code: '  passcode: z.string().min(8),', author: 'ai', model: 'claude-opus-4-7', by: 'bob', age: '2m ago' },
+    { n: 17, code: '  name: z.string().min(1),', author: 'ai', model: 'claude-opus-4-7', by: 'bob', age: '2m ago' },
+    { n: 18, code: '});', author: 'ai', model: 'claude-opus-4-7', by: 'bob', age: '2m ago' },
+    { n: 19, code: '', author: null },
+    { n: 20, code: "router.post('/register', async (req) => {", author: 'human', by: 'alice', age: '3d ago' },
+  ];
+  return (
+    <div className="flex gap-4">
+      <div className="w-48 bg-gray-900 rounded p-3 space-y-1 flex-shrink-0">
+        <SidebarItem icon="📊" label="Dashboard" />
+        <SidebarItem icon="📦" label="Repos" active />
+        <SidebarItem icon="🔴" label="Live Sessions" />
+        <SidebarItem icon="🛡️" label="Policies" />
+        <SidebarItem icon="🔑" label="API Keys" />
+        <SidebarItem icon="📝" label="Audit Log" />
+      </div>
+      <div className="flex-1 space-y-4 min-w-0">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-200">AI Blame for code review</h3>
+          <p className="text-[10px] text-gray-500 mt-0.5">See exactly which lines came from which AI, which developer, and which prompt — before you approve a PR.</p>
+        </div>
+        <div className="flex items-center gap-2 px-3 py-2 bg-gray-800/60 rounded-t-lg border-b border-gray-700 text-[11px]">
+          <span className="text-gray-300 font-mono">acme/backend · src/routes/auth.ts</span>
+          <span className="ml-auto text-gray-500">AI 56% · Human 44% · 2 contributors</span>
+        </div>
+        <div className="bg-gray-900/50 rounded-b-lg overflow-hidden -mt-4">
+          <div className="font-mono text-[10px]">
+            {lines.map((l) => (
+              <div
+                key={l.n}
+                className={`flex items-center gap-2 px-2 py-0.5 ${
+                  l.author === 'ai' ? 'bg-indigo-500/10 border-l-2 border-indigo-500/60' :
+                  l.author === 'human' ? 'bg-transparent border-l-2 border-gray-700' :
+                  'bg-transparent border-l-2 border-transparent'
+                }`}
+              >
+                <span className="text-gray-600 w-6 text-right">{l.n}</span>
+                <span className={`flex-1 truncate ${l.author === 'ai' ? 'text-indigo-200' : 'text-gray-300'}`}>{l.code || ' '}</span>
+                {l.author === 'ai' && (
+                  <>
+                    <span className="text-[9px] px-1 py-0 rounded bg-indigo-500/25 text-indigo-300">AI</span>
+                    <span className="text-gray-500 w-24 truncate">{l.model}</span>
+                    <span className="text-gray-600 w-10">{l.by}</span>
+                  </>
+                )}
+                {l.author === 'human' && (
+                  <>
+                    <span className="text-[9px] px-1 py-0 rounded bg-gray-700/60 text-gray-400">HU</span>
+                    <span className="text-gray-500 w-24" />
+                    <span className="text-gray-600 w-10">{l.by}</span>
+                  </>
+                )}
+                {l.age && <span className="text-gray-600 w-14 text-right">{l.age}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Step7Content() {
   return (
     <div className="space-y-4">
@@ -464,6 +532,12 @@ const STEPS: Step[] = [
     caption: 'Watch AI coding sessions in real-time. See every prompt, every file changed, every token spent.',
     browserTitle: 'getorigin.io/sessions',
     content: <Step6Content />,
+  },
+  {
+    title: 'AI Blame for code review',
+    caption: 'Line-by-line AI attribution across every file. Before approving a PR, see which AI wrote which line, and which developer ran it.',
+    browserTitle: 'getorigin.io/repos/acme-backend/blame/src/routes/auth.ts',
+    content: <StepBlameContent />,
   },
   {
     title: 'Review PR checks',

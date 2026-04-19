@@ -254,31 +254,45 @@ function StepInsights() {
   );
 }
 
-function StepApiKeys() {
+function StepSnapshots() {
+  const snaps = [
+    { id: 'a1b2c3d', prompt: 'Add JWT refresh endpoint', files: 1, when: '2m ago', tag: 'current', active: true },
+    { id: '5f8e9a0', prompt: 'Fix broken token edge case', files: 1, when: '8m ago' },
+    { id: 'd2c4b6a', prompt: 'Refactor auth middleware', files: 3, when: '14m ago' },
+    { id: '7e1f3a2', prompt: 'Add rate limiting', files: 2, when: '22m ago', tag: 'before break' },
+    { id: '9b4c8d1', prompt: 'Initial /auth endpoint', files: 1, when: '38m ago' },
+  ];
   return (
     <div className="flex gap-4">
-      <SoloSidebar active="keys" />
+      <SoloSidebar active="sessions" />
       <div className="flex-1 space-y-4 min-w-0">
         <div>
-          <h3 className="text-sm font-semibold text-gray-200">API Keys</h3>
-          <p className="text-[10px] text-gray-500 mt-0.5">Connect the Origin CLI to your account</p>
+          <h3 className="text-sm font-semibold text-gray-200">Undo a bad AI turn</h3>
+          <p className="text-[10px] text-gray-500 mt-0.5">Every prompt auto-saves a snapshot. Restore, branch, or rewind without losing work.</p>
         </div>
-        {/* Existing key */}
-        <div className="bg-gray-800/30 rounded-lg px-4 py-3 flex items-center justify-between">
-          <div>
-            <span className="text-xs text-gray-200">laptop</span>
-            <code className="block text-[10px] text-emerald-400 mt-0.5">org_sk_7f2a...</code>
-            <span className="text-[9px] text-gray-600">Created Apr 5, 2026</span>
-          </div>
-          <span className="text-[10px] text-red-400">Revoke</span>
-        </div>
-        {/* Quick setup */}
+        {/* Snapshot list */}
         <div className="bg-gray-800/50 rounded-lg p-3 space-y-1.5">
-          <p className="text-[10px] text-gray-400 font-medium">Quick Setup</p>
+          <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Session · 5 snapshots</p>
+          <div className="space-y-1 font-mono text-[10px]">
+            {snaps.map((s) => (
+              <div key={s.id} className={`flex items-center gap-2 px-2 py-1.5 rounded ${s.active ? 'bg-emerald-500/10 border border-emerald-500/30' : s.tag === 'before break' ? 'bg-amber-500/10 border border-amber-500/30' : 'bg-gray-800/60 border border-transparent'}`}>
+                <span className={s.active ? 'text-emerald-300' : s.tag === 'before break' ? 'text-amber-300' : 'text-gray-500'}>{s.id}</span>
+                <span className={`flex-1 truncate ${s.active ? 'text-emerald-100' : 'text-gray-300'}`}>{s.prompt}</span>
+                <span className="text-gray-600">{s.files} file{s.files === 1 ? '' : 's'}</span>
+                <span className="text-gray-600">{s.when}</span>
+                {s.tag && (
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded ${s.active ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'}`}>{s.tag}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+        {/* Actions */}
+        <div className="bg-gray-800/30 rounded-lg p-3 space-y-1.5">
+          <p className="text-[10px] text-gray-400 font-medium">From the CLI</p>
           <div className="font-mono text-[10px] text-emerald-400 space-y-0.5">
-            <p>$ npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</p>
-            <p>$ origin login --key YOUR_KEY</p>
-            <p>$ origin init</p>
+            <p>$ origin snapshot restore 7e1f3a2</p>
+            <p className="text-gray-500">  Stashed uncommitted · Restored 2 files · No commits modified</p>
           </div>
         </div>
       </div>
@@ -286,42 +300,55 @@ function StepApiKeys() {
   );
 }
 
-function StepChain() {
+function StepBlame() {
+  const lines = [
+    { n: 12, code: "import { z } from 'zod';", author: 'human', age: '3d ago' },
+    { n: 13, code: '', author: null },
+    { n: 14, code: 'const registerSchema = z.object({', author: 'ai', model: 'claude-opus-4-7', age: '2m ago' },
+    { n: 15, code: '  email: z.string().email(),', author: 'ai', model: 'claude-opus-4-7', age: '2m ago' },
+    { n: 16, code: '  passcode: z.string().min(8),', author: 'ai', model: 'claude-opus-4-7', age: '2m ago' },
+    { n: 17, code: '  name: z.string().min(1),', author: 'ai', model: 'claude-opus-4-7', age: '2m ago' },
+    { n: 18, code: '});', author: 'ai', model: 'claude-opus-4-7', age: '2m ago' },
+    { n: 19, code: '', author: null },
+    { n: 20, code: "router.post('/register', async (req) => {", author: 'human', age: '3d ago' },
+  ];
   return (
     <div className="flex gap-4">
-      <SoloSidebar active="sessions" />
+      <SoloSidebar active="repos" />
       <div className="flex-1 space-y-4 min-w-0">
-        <h3 className="text-sm font-semibold text-gray-200">Session Chain</h3>
-        <p className="text-[10px] text-gray-500">Sessions from the same Claude Code session are linked automatically</p>
-        {/* Chain panel */}
-        <div className="bg-gray-800/50 rounded-lg p-3 space-y-2">
-          <div className="flex items-center gap-2">
-            <svg className="w-3.5 h-3.5 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
-            <span className="text-xs font-medium text-gray-300">Session Chain (3 sessions)</span>
-          </div>
-          <div className="space-y-1">
-            {[
-              { n: 1, date: 'Apr 5, 10:30 AM', cost: '$4.40', status: 'Done' },
-              { n: 2, date: 'Apr 5, 2:15 PM', cost: '$2.10', status: 'Done' },
-              { n: 3, date: 'Apr 6, 9:00 AM', cost: '$1.80', status: 'Running', current: true },
-            ].map((s) => (
-              <div key={s.n} className={`flex items-center justify-between px-2 py-1.5 rounded text-xs ${s.current ? 'bg-indigo-500/10 border border-indigo-500/30' : 'bg-gray-800/50'}`}>
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-500 font-mono">#{s.n}</span>
-                  <span className={s.current ? 'text-indigo-400 font-medium' : 'text-gray-300'}>{s.date}</span>
-                  {s.status === 'Running' ? (
-                    <span className="flex items-center gap-1 text-[10px] text-green-400"><span className="w-1 h-1 rounded-full bg-green-400 animate-pulse" />Running</span>
-                  ) : (
-                    <Badge color="gray">{s.status}</Badge>
-                  )}
-                </div>
-                <span className="text-gray-500">{s.cost}</span>
+        <div>
+          <h3 className="text-sm font-semibold text-gray-200">AI blame — see which AI wrote which line</h3>
+          <p className="text-[10px] text-gray-500 mt-0.5">Line-by-line attribution with the prompt + model that produced it. Survives rebase, amend, cherry-pick.</p>
+        </div>
+        {/* File header */}
+        <div className="flex items-center gap-2 px-3 py-2 bg-gray-800/60 rounded-t-lg border-b border-gray-700 text-[11px]">
+          <span className="text-gray-300 font-mono">src/routes/auth.ts</span>
+          <span className="ml-auto text-gray-500">AI 56% · Human 44%</span>
+        </div>
+        {/* Blame rows */}
+        <div className="bg-gray-900/50 rounded-b-lg overflow-hidden -mt-4">
+          <div className="font-mono text-[10px]">
+            {lines.map((l) => (
+              <div
+                key={l.n}
+                className={`flex items-center gap-2 px-2 py-0.5 ${
+                  l.author === 'ai' ? 'bg-indigo-500/10 border-l-2 border-indigo-500/60' :
+                  l.author === 'human' ? 'bg-transparent border-l-2 border-gray-700' :
+                  'bg-transparent border-l-2 border-transparent'
+                }`}
+              >
+                <span className="text-gray-600 w-6 text-right">{l.n}</span>
+                <span className={`flex-1 truncate ${l.author === 'ai' ? 'text-indigo-200' : 'text-gray-300'}`}>{l.code || ' '}</span>
+                {l.author === 'ai' && (
+                  <>
+                    <span className="text-[9px] px-1 py-0 rounded bg-indigo-500/25 text-indigo-300">AI</span>
+                    <span className="text-gray-500 w-28 truncate">{l.model}</span>
+                  </>
+                )}
+                {l.author === 'human' && <span className="text-[9px] px-1 py-0 rounded bg-gray-700/60 text-gray-400">HU</span>}
+                {l.age && <span className="text-gray-600 w-16 text-right">{l.age}</span>}
               </div>
             ))}
-          </div>
-          <div className="flex justify-between pt-1 border-t border-gray-700 text-[10px] text-gray-500">
-            <span>Total</span>
-            <span className="text-gray-300 font-medium">$8.30 &middot; 1d 22h</span>
           </div>
         </div>
       </div>
@@ -359,16 +386,16 @@ const STEPS: Step[] = [
     content: <StepInsights />,
   },
   {
-    title: 'Connect with an API key',
-    caption: 'Create a key, run three commands, and you\'re tracking. Works with Claude Code, Cursor, Gemini, Codex, and more.',
-    browserTitle: 'getorigin.io/api-keys',
-    content: <StepApiKeys />,
+    title: 'Undo any AI turn with snapshots',
+    caption: 'Every prompt auto-saves a working-tree snapshot. Restore, branch off, or rewind — no commits polluted, stored on orphan git branches.',
+    browserTitle: 'getorigin.io/snapshots',
+    content: <StepSnapshots />,
   },
   {
-    title: 'Session chaining across restarts',
-    caption: 'When you resume a Claude Code session the next day, Origin links the sessions automatically so you see the full picture.',
-    browserTitle: 'getorigin.io/sessions/a3f1e2',
-    content: <StepChain />,
+    title: 'See which AI wrote each line',
+    caption: 'Line-by-line AI attribution with the prompt and model that produced it. `origin blame auth.ts` — like git blame, but for AI.',
+    browserTitle: 'getorigin.io/repos/acme-backend/blame/src/routes/auth.ts',
+    content: <StepBlame />,
   },
 ];
 
