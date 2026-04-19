@@ -32,32 +32,10 @@ const STEPS: Step[] = [
     ],
   },
   {
-    title: 'Login to your Origin account',
-    command: '$ origin login',
+    title: 'Initialize Origin (one command, every repo)',
+    command: '$ origin init',
     caption:
-      'Authenticate with your API key from the Origin dashboard. Your credentials are stored locally.',
-    output: [
-      { text: '' },
-      {
-        text: '\u{1F510} Enter your Origin API key: ****************************',
-        color: 'text-gray-300',
-      },
-      { text: '' },
-      {
-        text: '\u2713 Authenticated as Artem Dolobanko (OpsWorks Co.)',
-        color: 'text-green-400',
-      },
-      {
-        text: '\u2713 Config saved to ~/.origin/config.json',
-        color: 'text-green-400',
-      },
-    ],
-  },
-  {
-    title: 'Initialize Origin in your repo',
-    command: '$ cd ~/projects/acme-backend && origin init',
-    caption:
-      'Origin auto-detects your AI tools and installs lightweight git hooks. Zero config needed.',
+      'Sets git config --global core.hooksPath so every repo on your machine is tracked automatically. No per-repo setup. Auto-detects Claude Code, Cursor, Codex, Gemini — and 9 more agents.',
     output: [
       { text: '' },
       {
@@ -69,16 +47,14 @@ const STEPS: Step[] = [
         color: 'text-green-400',
       },
       { text: '  \u2713 Cursor detected', color: 'text-green-400' },
+      { text: '  \u2713 Codex CLI detected', color: 'text-green-400' },
       { text: '' },
-      { text: '\u{1F4E6} Repository: acme/backend', color: 'text-cyan-400' },
       {
-        text: '\u{1F916} Agent: claude-code (matched)',
+        text: '\u{1F4E1} Installing GLOBAL git hooks',
         color: 'text-cyan-400',
       },
-      { text: '' },
-      { text: '\u2713 Git hooks installed', color: 'text-green-400' },
       {
-        text: '\u2713 Origin is now tracking AI sessions in this repo',
+        text: '  \u2713 Every repo on this machine \u2014 past and future \u2014 is now tracked',
         color: 'text-green-400',
       },
       { text: '' },
@@ -171,6 +147,48 @@ const STEPS: Step[] = [
       {
         text: "  20 \u2502 router.post('/register', async (req)\u2502 human    \u2502 3 days ago",
         color: 'blame-human',
+      },
+    ],
+  },
+  {
+    title: 'Undo a bad AI turn with snapshots',
+    command: '$ origin snapshot list',
+    caption:
+      'Every AI prompt auto-saves a working-tree snapshot. Time-travel back to any prompt without losing work \u2014 stored on orphan git branches, no commits polluted.',
+    output: [
+      { text: '' },
+      {
+        text: '  a1b2c3d  2m ago   1 file   [auto]   add JWT refresh',
+        color: 'text-gray-300',
+      },
+      {
+        text: '  5f8e9a0  8m ago   1 file   [auto]   fix broken token edge case',
+        color: 'text-gray-300',
+      },
+      {
+        text: '  d2c4b6a  14m ago  3 files  [auto]   refactor auth middleware',
+        color: 'text-gray-300',
+      },
+      {
+        text: '  7e1f3a2  22m ago  2 files  [auto]   add rate limiting',
+        color: 'text-amber-400',
+      },
+      { text: '' },
+      {
+        text: '$ origin snapshot restore 7e1f3a2',
+        color: 'text-green-400',
+      },
+      { text: '' },
+      {
+        text: '\u2713 Stashed uncommitted changes',
+        color: 'text-green-400',
+      },
+      { text: '\u2713 Restored 2 files', color: 'text-green-400' },
+      { text: '\u2713 No commits modified', color: 'text-green-400' },
+      { text: '' },
+      {
+        text: 'Back to stash with `git stash pop`.',
+        color: 'text-gray-500',
       },
     ],
   },

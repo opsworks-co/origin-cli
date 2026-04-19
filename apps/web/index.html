@@ -1,18 +1,23 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark" style="color-scheme: dark; background: #0a0b14;">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Apply theme before first paint to avoid FOUC. Default dark
-         everywhere — only honor light if the user explicitly picked it.
-         OS-level prefers-color-scheme is intentionally ignored: the
-         marketing pages aren't designed for light mode. -->
+    <!-- Dark is BAKED INTO THE HTML above, not applied via script, so stale
+         cached JS bundles can't leave the page in a light-flash state even
+         if they don't know about the new theme logic. The script below
+         only REMOVES the dark class if the user has explicitly chosen
+         light in their dashboard. Result: marketing pages are always dark
+         on first paint, regardless of cache or cold-load. -->
     <script>
       (function() {
-        var stored = localStorage.getItem('theme');
-        var theme = stored === 'light' ? 'light' : 'dark';
-        if (theme === 'dark') document.documentElement.classList.add('dark');
-        document.documentElement.style.colorScheme = theme;
+        try {
+          if (localStorage.getItem('theme') === 'light') {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.style.colorScheme = 'light';
+            document.documentElement.style.background = '';
+          }
+        } catch { /* private mode */ }
       })();
     </script>
     <title>Origin — Snapshots, blame, and governance for AI code</title>
