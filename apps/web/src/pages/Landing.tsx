@@ -321,7 +321,32 @@ const AGENTS = [
 ];
 
 // ── Main ─────────────────────────────────────────────────────────────────────
+// ── Solo / Team feature sets ───────────────────────────────────────────────
+// Rendered inside a segmented toggle above the Features grid so visitors
+// self-identify and see the benefits of the plan they actually care about.
+
+type FeatureItem = { title: string; desc: string; label: string; accent: string };
+
+const SOLO_FEATURES: FeatureItem[] = [
+  { title: 'Snapshots', desc: 'Every AI prompt auto-saves a working-tree snapshot. Undo a bad turn, branch off a good one, time-travel inside a session — all stored on orphan git branches, zero commits polluted.', label: '2.1', accent: 'text-violet-400' },
+  { title: 'AI Blame', desc: 'Line-level attribution: which agent wrote which line, the prompt that produced it, the model that ran it. Survives rebase, amend, cherry-pick, and stash.', label: '2.2', accent: 'text-indigo-400' },
+  { title: 'Multi-agent, one CLI', desc: 'Tracks Claude Code, Cursor, Gemini, Codex, Aider, Windsurf, Copilot, Continue, Amp, Junie, OpenCode, Rovo Dev, Droid. Auto-detected. Your history never fragments when you switch.', label: '2.3', accent: 'text-cyan-400' },
+  { title: 'Personal dashboard', desc: 'Your coding activity at getorigin.io/me. Session replay, cost per model, tokens, streaks, and a searchable prompt history. Free forever.', label: '2.4', accent: 'text-emerald-400' },
+  { title: 'Cost tracking', desc: 'Spend per agent, model, repo. See which models deliver the best ROI before the Anthropic bill arrives.', label: '2.5', accent: 'text-amber-400' },
+  { title: 'Zero-config capture', desc: 'One `origin init` wires global git hooks — every repo, every AI session, auto-tracked. No per-project setup.', label: '2.6', accent: 'text-rose-400' },
+];
+
+const TEAM_FEATURES: FeatureItem[] = [
+  { title: 'Everything in Solo', desc: 'Snapshots, blame, multi-agent tracking, the personal dashboard — every Solo feature is included for every seat on the team plan.', label: '2.1', accent: 'text-emerald-400' },
+  { title: 'Policy enforcement', desc: 'Block AI from `payments/**`, enforce model allowlists (`no-opus-on-prod`), set cost caps, require human review. Rules evaluated pre-commit — not after.', label: '2.2', accent: 'text-rose-400' },
+  { title: 'Live session feed', desc: 'Watch every developer\'s AI in real time. Tokens ticker, cost counter, active files. Spot a runaway agent and kill it before it burns the budget.', label: '2.3', accent: 'text-cyan-400' },
+  { title: 'PR compliance checks', desc: 'GitHub status checks on every PR. Block merges that lack AI attribution, violate policies, or exceed cost thresholds. One-click override with audit log.', label: '2.4', accent: 'text-indigo-400' },
+  { title: 'Team cost dashboards', desc: 'Spend rolled up per developer, per repo, per model, per agent. Budgets with alerts. Prove AI ROI with real numbers instead of vibes.', label: '2.5', accent: 'text-amber-400' },
+  { title: 'SOC 2 / ISO 27001 audit', desc: 'One-click evidence export: every prompt, diff, model, and reviewer, for every AI-authored line. Scoped API keys, IAM, full audit log.', label: '2.6', accent: 'text-violet-400' },
+];
+
 export default function Landing() {
+  const [plan, setPlan] = useState<'solo' | 'team'>('solo');
   // Force dark theme on marketing pages regardless of user preference.
   // Restore previous state when unmounting so dashboard theme toggle still works.
   useEffect(() => {
@@ -555,27 +580,57 @@ export default function Landing() {
       {/* ─── FEATURES ─────────────────────────────────────────────────────── */}
       <section className="max-w-5xl mx-auto px-6 py-24">
         <FadeIn>
-          <div className="flex items-end justify-between mb-16">
+          <div className="flex items-end justify-between mb-10">
             <div>
               <p className="text-xs text-gray-600 font-mono mb-2">2.0</p>
-              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Four things<br />nobody else gives you together.</h2>
+              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">
+                {plan === 'solo'
+                  ? <>Built for individuals<br />who code with AI.</>
+                  : <>Built for teams<br />shipping with AI at scale.</>}
+              </h2>
             </div>
             <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
-              Snapshots, blame, multi-agent, and a web platform — one install.
+              {plan === 'solo'
+                ? 'Free forever. Snapshots, blame, cost tracking, every agent.'
+                : '$29/user/month. Governance, live feed, PR checks, audit.'}
             </p>
           </div>
         </FadeIn>
 
+        {/* Solo / Team segmented toggle */}
+        <FadeIn>
+          <div className="flex justify-center mb-10">
+            <div className="inline-flex items-center gap-1 p-1 rounded-full border border-white/[0.08] bg-white/[0.02] backdrop-blur-sm">
+              {[
+                { key: 'solo' as const, label: 'Solo', sub: 'Free' },
+                { key: 'team' as const, label: 'Team', sub: '$29/user' },
+              ].map((opt) => {
+                const active = plan === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    onClick={() => setPlan(opt.key)}
+                    className={`relative flex items-center gap-2 px-5 py-2 rounded-full text-sm font-medium transition-all ${
+                      active
+                        ? 'bg-white text-gray-900 shadow-lg shadow-white/10'
+                        : 'text-gray-400 hover:text-gray-200'
+                    }`}
+                    aria-pressed={active}
+                  >
+                    <span>{opt.label}</span>
+                    <span className={`text-[10px] font-normal ${active ? 'text-gray-500' : 'text-gray-600'}`}>
+                      {opt.sub}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </FadeIn>
+
         <div className="grid md:grid-cols-2 gap-px bg-white/[0.04] rounded-lg overflow-hidden border border-white/[0.06]">
-          {[
-            { title: 'Snapshots', desc: 'Every AI prompt auto-saves a working-tree snapshot. Undo a bad turn, branch off a good one, time-travel inside a session — all stored on orphan git branches, zero commits polluted.', label: '2.1', accent: 'text-violet-400' },
-            { title: 'AI Blame', desc: 'Line-level attribution: which agent wrote which line, the prompt that produced it, the model that ran it. Survives rebase, amend, cherry-pick, and stash.', label: '2.2', accent: 'text-indigo-400' },
-            { title: 'Multi-agent, one CLI', desc: 'Tracks Claude Code, Cursor, Gemini, Codex, Aider, Windsurf, Copilot, Continue, Amp, Junie, OpenCode, Rovo Dev, Droid. Auto-detected. Your history never fragments when you switch.', label: '2.3', accent: 'text-cyan-400' },
-            { title: 'Web platform — solo & team', desc: 'Session replay, live feed, AI blame view, policy enforcement, PR compliance, cost dashboards, SOC 2 / ISO 27001 audit. Free for individuals, paid for teams.', label: '2.4', accent: 'text-emerald-400' },
-            { title: 'Cost tracking', desc: 'Spend per agent, model, repo, developer. Set budgets. See which models deliver the best ROI.', label: '2.5', accent: 'text-amber-400' },
-            { title: 'Policy enforcement', desc: 'Block AI from paths, enforce model allowlists, set cost limits, require human review, scan for secrets. Evaluated in real time.', label: '2.6', accent: 'text-rose-400' },
-          ].map((f, i) => (
-            <FadeIn key={f.label} delay={i * 80}>
+          {(plan === 'solo' ? SOLO_FEATURES : TEAM_FEATURES).map((f, i) => (
+            <FadeIn key={`${plan}-${f.label}`} delay={i * 50}>
               <div className="bg-[rgb(8,9,10)] p-8 h-full group hover:bg-white/[0.02] transition-colors duration-200">
                 <div className="flex items-center gap-3 mb-4">
                   <span className="text-xs text-gray-700 font-mono">{f.label}</span>
@@ -586,6 +641,49 @@ export default function Landing() {
             </FadeIn>
           ))}
         </div>
+
+        {/* Plan-specific CTA under the grid */}
+        <FadeIn>
+          <div className="mt-10 flex items-center justify-center gap-3">
+            {plan === 'solo' ? (
+              <>
+                <Link
+                  to="/register?type=developer"
+                  className="px-6 py-2.5 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                >
+                  Get started free &rarr;
+                </Link>
+                <Link
+                  to="/demo"
+                  className="px-6 py-2.5 text-sm font-medium rounded-lg text-gray-300 border border-white/[0.1] hover:bg-white/[0.05] transition-all"
+                >
+                  See the solo demo
+                </Link>
+              </>
+            ) : (
+              <>
+                <Link
+                  to="/register"
+                  className="px-6 py-2.5 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                >
+                  Start free trial &rarr;
+                </Link>
+                <Link
+                  to="/demo"
+                  className="px-6 py-2.5 text-sm font-medium rounded-lg text-gray-300 border border-white/[0.1] hover:bg-white/[0.05] transition-all"
+                >
+                  See the team demo
+                </Link>
+                <Link
+                  to="/pricing"
+                  className="px-6 py-2.5 text-sm font-medium rounded-lg text-gray-300 hover:text-white transition-colors"
+                >
+                  View pricing &rarr;
+                </Link>
+              </>
+            )}
+          </div>
+        </FadeIn>
       </section>
 
       <div className="border-t border-white/[0.06]" />
