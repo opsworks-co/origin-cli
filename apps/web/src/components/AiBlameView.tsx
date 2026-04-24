@@ -63,7 +63,10 @@ const BUILD_ARTIFACT_PATTERNS: RegExp[] = [
   /(^|\/)drizzle\/meta\//,
 ];
 
-function isBuildArtifact(file: string): boolean {
+// Exported for direct unit testing — the regex array is the entire surface
+// that decides whether a file disappears from AI Blame, so it must be tested
+// in isolation. See src/components/__tests__/AiBlameView.test.ts.
+export function isBuildArtifact(file: string): boolean {
   return BUILD_ARTIFACT_PATTERNS.some((re) => re.test(file));
 }
 
@@ -355,10 +358,26 @@ function ByPromptView({
     );
   }
 
+  // Disclose the artifact-filter effect so a user who hasn't noticed the
+  // toggle isn't left wondering why N prompts vanished from a session that
+  // they remember having more.
+  const hiddenByArtifactFilter = prompts.length - visiblePrompts.length;
+
   return (
     <div className="flex-1 overflow-auto">
       <div className="px-4 py-3 text-[11px] text-gray-500 border-b border-gray-800/50">
-        {visiblePrompts.length} prompt{visiblePrompts.length !== 1 ? 's' : ''} produced source code.
+        {hiddenByArtifactFilter > 0 ? (
+          <>
+            {visiblePrompts.length} of {prompts.length} prompt{prompts.length !== 1 ? 's' : ''} produced source code
+            <span className="text-gray-600">
+              {' '}— {hiddenByArtifactFilter} only modified build artifacts (hidden).
+            </span>
+          </>
+        ) : (
+          <>
+            {visiblePrompts.length} prompt{visiblePrompts.length !== 1 ? 's' : ''} produced source code.
+          </>
+        )}{' '}
         Click a file to see line-level attribution.
       </div>
 
