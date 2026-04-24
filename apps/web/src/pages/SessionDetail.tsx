@@ -16,35 +16,64 @@ function statusBadge(status: string) {
 }
 
 // ── HeaderCommits ──────────────────────────────────────────────────────────
-// Shows the commits a session produced (from sessionDiff.commitShas, which is
-// the source of truth — `session.commitSha` is HEAD-at-start and misleading).
+// Shows the commits a session produced. Prefers the rich `commits` list
+// (API's sessionCommits union) which carries branch + message; falls back to
+// the SHA-only `sessionDiff.commitShas` for older API responses.
 // 0 commits → renders nothing.
-// 1 commit  → labeled pill linking to the commit.
-// N commits → "N commits ▾" pill; click toggles an inline list of linked rows.
-function HeaderCommits({ repoId, shas }: { repoId: string | null | undefined; shas: string[] }) {
+// 1 commit  → labeled pill linking to the commit (shows branch when non-default).
+// N commits → "N commits ▾" pill; click toggles an inline list grouped by branch.
+type HeaderCommitEntry = { sha: string; branch?: string | null; message?: string | null };
+function HeaderCommits({
+  repoId,
+  commits,
+  shas,
+}: {
+  repoId: string | null | undefined;
+  commits?: Array<{ sha: string; branch: string | null; message: string }> | null;
+  shas?: string[];
+}) {
   const [open, setOpen] = useState(false);
-  if (!shas || shas.length === 0) return null;
+
+  // Normalize: prefer rich commits, else synthesize from SHA list.
+  const entries: HeaderCommitEntry[] =
+    commits && commits.length > 0
+      ? commits.map((c) => ({ sha: c.sha, branch: c.branch, message: c.message }))
+      : (shas || []).map((sha) => ({ sha }));
+
+  if (entries.length === 0) return null;
 
   const pillBase =
     'text-[11px] bg-gray-800/60 text-gray-400 px-2 py-0.5 rounded-md inline-flex items-center gap-1.5 border border-gray-700/40';
   const pillInteractive = ' hover:text-gray-200 hover:border-gray-600 transition-colors';
 
-  if (shas.length === 1) {
-    const sha = shas[0];
+  if (entries.length === 1) {
+    const e = entries[0];
     const label = (
       <>
         <span className="text-gray-500">Commit:</span>
-        <code className="font-mono">{sha.slice(0, 8)}</code>
+        <code className="font-mono">{e.sha.slice(0, 8)}</code>
+        {e.branch && (
+          <span className="text-gray-500 font-mono">· {e.branch}</span>
+        )}
       </>
     );
     return repoId ? (
-      <Link to={`/repos/${repoId}/commits/${sha}`} className={pillBase + pillInteractive}>
+      <Link to={`/repos/${repoId}/commits/${e.sha}`} className={pillBase + pillInteractive}>
         {label}
       </Link>
     ) : (
       <span className={pillBase}>{label}</span>
     );
   }
+
+  // Group by branch so multi-branch sessions are legible at a glance.
+  const byBranch = new Map<string, HeaderCommitEntry[]>();
+  for (const e of entries) {
+    const key = e.branch || 'unknown';
+    if (!byBranch.has(key)) byBranch.set(key, []);
+    byBranch.get(key)!.push(e);
+  }
+  const multiBranch = byBranch.size > 1;
 
   return (
     <div className="relative inline-block">
@@ -53,26 +82,41 @@ function HeaderCommits({ repoId, shas }: { repoId: string | null | undefined; sh
         onClick={() => setOpen((v) => !v)}
         className={pillBase + pillInteractive}
       >
-        <span className="font-mono">{shas.length}</span>
+        <span className="font-mono">{entries.length}</span>
         <span>commits</span>
+        {multiBranch && <span className="text-gray-500">· {byBranch.size} branches</span>}
         <span className="text-gray-500">{open ? '▴' : '▾'}</span>
       </button>
       {open && (
-        <div className="absolute left-0 top-full mt-1 z-20 min-w-[280px] rounded-md border border-gray-700/60 bg-gray-900 shadow-lg p-1">
-          {shas.map((sha) => {
-            const row = (
-              <div className="px-2 py-1 text-[11px] flex items-center gap-2 hover:bg-gray-800/80 rounded">
-                <code className="font-mono text-gray-300">{sha.slice(0, 8)}</code>
-              </div>
-            );
-            return repoId ? (
-              <Link key={sha} to={`/repos/${repoId}/commits/${sha}`} className="block" onClick={() => setOpen(false)}>
-                {row}
-              </Link>
-            ) : (
-              <div key={sha}>{row}</div>
-            );
-          })}
+        <div className="absolute left-0 top-full mt-1 z-20 min-w-[320px] rounded-md border border-gray-700/60 bg-gray-900 shadow-lg p-1">
+          {[...byBranch.entries()].map(([branch, bEntries]) => (
+            <div key={branch}>
+              {multiBranch && (
+                <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-mono">
+                  {branch}
+                </div>
+              )}
+              {bEntries.map((e) => {
+                const row = (
+                  <div className="px-2 py-1 text-[11px] flex items-center gap-2 hover:bg-gray-800/80 rounded">
+                    <code className="font-mono text-gray-300">{e.sha.slice(0, 8)}</code>
+                    {e.message && (
+                      <span className="text-gray-500 truncate max-w-[220px]">
+                        {e.message.split('\n')[0]}
+                      </span>
+                    )}
+                  </div>
+                );
+                return repoId ? (
+                  <Link key={e.sha} to={`/repos/${repoId}/commits/${e.sha}`} className="block" onClick={() => setOpen(false)}>
+                    {row}
+                  </Link>
+                ) : (
+                  <div key={e.sha}>{row}</div>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -172,7 +216,7 @@ export default function SessionDetail() {
   const [error, setError] = useState('');
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'session' | 'console' | 'security' | 'blame' | 'turns'>('session');
+  const [activeTab, setActiveTab] = useState<'session' | 'security' | 'blame' | 'turns'>('session');
 
   // Review state
   const [reviewNote, setReviewNote] = useState('');
@@ -252,12 +296,18 @@ export default function SessionDetail() {
     return () => clearInterval(interval);
   }, [session?.status, session?.startedAt]);
 
-  // Deep-link tab from URL params
+  // Deep-link tab + prompt focus from URL params. The commit-detail page
+  // passes `?tab=snapshots&prompt=N` / `?tab=blame&prompt=N` to land users on
+  // the exact snapshot or blame slice that matches the prompt they clicked.
+  const [focusPromptIndex, setFocusPromptIndex] = useState<number | null>(null);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const tab = params.get('tab');
     if (tab === 'blame') setActiveTab('blame');
-    else if (tab === 'turns') setActiveTab('turns');
+    else if (tab === 'turns' || tab === 'snapshots') setActiveTab('turns');
+    const promptParam = params.get('prompt');
+    const parsed = promptParam != null ? Number(promptParam) : NaN;
+    if (Number.isFinite(parsed)) setFocusPromptIndex(parsed);
   }, []);
 
   // Poll for updates when session is running
@@ -581,7 +631,11 @@ export default function SessionDetail() {
               {session.branch}
             </span>
           )}
-          <HeaderCommits repoId={session.repoId} shas={session.sessionDiff?.commitShas ?? []} />
+          <HeaderCommits
+            repoId={session.repoId}
+            commits={session.commits}
+            shas={session.sessionDiff?.commitShas ?? []}
+          />
         </div>
 
         {/* Stats pills row + actions */}
@@ -1122,7 +1176,6 @@ export default function SessionDetail() {
         <div className="px-4 pt-1 border-b border-gray-800/60 flex-shrink-0 flex items-center gap-0">
           {([
             { key: 'session' as const, label: 'Session' },
-            { key: 'console' as const, label: 'Console' },
             { key: 'blame' as const, label: 'AI Blame' },
             { key: 'turns' as const, label: 'Snapshots' },
             { key: 'security' as const, label: 'Security', count: findings.length },
@@ -1184,15 +1237,30 @@ export default function SessionDetail() {
               })()}
               promptChanges={session.promptChanges || []}
               sessionDiff={session.sessionDiff}
+              commits={session.commits}
+              repoId={session.repoId}
+              snapshots={session.snapshots}
             />
-          )}
-          {activeTab === 'console' && (
-            <ConsoleView transcript={session.transcript} />
           )}
           {activeTab === 'blame' && (
             <AiBlameView
               sessionId={session.id}
-              filesChanged={(() => { try { return JSON.parse(session.filesChanged); } catch { return []; } })()}
+              // Fall back to the union of prompt filesChanged when the
+              // session row itself has an empty filesChanged — legacy rows
+              // and webhook-synced commits often skipped that field, which
+              // would otherwise show "No files changed in this session."
+              filesChanged={(() => {
+                try {
+                  const top = JSON.parse(session.filesChanged || '[]');
+                  if (Array.isArray(top) && top.length > 0) return top as string[];
+                } catch { /* fall through */ }
+                const union = new Set<string>();
+                for (const pc of session.promptChanges || []) {
+                  for (const f of (pc.filesChanged || [])) union.add(f);
+                }
+                return [...union];
+              })()}
+              focusPromptIndex={focusPromptIndex}
               onAskAboutLine={(file, lineNumber, content) => {
                 setAskContext({ file, lineNumber, lineContent: content });
                 setShowAskPanel(true);
@@ -1206,6 +1274,7 @@ export default function SessionDetail() {
               annotations={annotations}
               canAnnotate={!!(session.userId === user?.id || ['ADMIN', 'OWNER'].includes((user?.role || '').toUpperCase()))}
               currentUserId={user?.id}
+              focusPromptIndex={focusPromptIndex}
               onAddAnnotation={async (turnIndex, text) => {
                 const created = await api.createAnnotation(id!, { turnIndex, text });
                 setAnnotations((prev) => [...prev, created]);

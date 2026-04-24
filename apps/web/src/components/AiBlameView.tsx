@@ -60,9 +60,17 @@ interface AiBlameViewProps {
   sessionId: string;
   filesChanged: string[];
   onAskAboutLine?: (file: string, lineNumber: number, content: string) => void;
+  /**
+   * When set, the view auto-selects a file that this prompt touched (if blame
+   * data already provides a file list for it) and scrolls + expands the
+   * matching prompt card on the right sidebar. Used by the commit-detail
+   * "Open AI blame →" deep-link so users land on the exact prompt they
+   * clicked, not the first one.
+   */
+  focusPromptIndex?: number | null;
 }
 
-export default function AiBlameView({ sessionId, filesChanged, onAskAboutLine }: AiBlameViewProps) {
+export default function AiBlameView({ sessionId, filesChanged, onAskAboutLine, focusPromptIndex = null }: AiBlameViewProps) {
   const [selectedFile, setSelectedFile] = useState<string>(filesChanged[0] || '');
   const [blameData, setBlameData] = useState<BlameResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -95,6 +103,33 @@ export default function AiBlameView({ sessionId, filesChanged, onAskAboutLine }:
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [sessionId, selectedFile]);
+
+  // Deep-link: when ?prompt=N is set in the URL, pre-select a file that prompt
+  // touched, expand the prompt's sidebar card, and scroll it into view. Fires
+  // once per focusPromptIndex change — users can still navigate freely after.
+  useEffect(() => {
+    if (focusPromptIndex == null) return;
+    setExpandedPrompt(focusPromptIndex);
+  }, [focusPromptIndex]);
+
+  useEffect(() => {
+    if (focusPromptIndex == null || !blameData) return;
+    // Switch to a file this prompt actually touched so the highlighted lines
+    // are visible instead of the default "first in list".
+    const target = blameData.prompts.find((p) => p.promptIndex === focusPromptIndex);
+    if (target && target.filesChanged.length > 0) {
+      const first = target.filesChanged[0];
+      if (filesChanged.includes(first) && first !== selectedFile) {
+        setSelectedFile(first);
+        return; // let the effect re-run after blame reloads for the new file
+      }
+    }
+    // Scroll the sidebar card into view once the DOM has the refs.
+    const el = promptRefs.current.get(focusPromptIndex);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // We intentionally depend on blameData so this re-runs after each file load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusPromptIndex, blameData]);
 
   // Compute which prompts actually contributed to this file
   const activePrompts = useMemo(() => {

@@ -3,66 +3,24 @@
 </p>
 
 <h1 align="center">Origin CLI</h1>
-<p align="center"><strong>Know exactly what your AI agents are writing.</strong></p>
+
+<p align="center">
+  <strong>Every agent. Every prompt. Every line. In your git repo.</strong><br/>
+  <em>The AI coding history layer for developers and teams.</em>
+</p>
 
 <p align="center">
   <a href="https://github.com/dolobanko/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
-  <a href="https://github.com/dolobanko/origin-cli/stargazers"><img src="https://img.shields.io/github/stars/dolobanko/origin-cli?style=social" alt="GitHub stars"></a>
   <a href="https://getorigin.io"><img src="https://img.shields.io/badge/web-getorigin.io-6366f1" alt="Website"></a>
 </p>
 
-<p align="center">
-  Track every AI coding session. Line-level AI/human attribution. Full visibility into AI-authored code.<br/>
-  Works standalone in git with zero setup — or connect to a dashboard for team features.<br/>
-  <strong>50+ commands</strong> · <strong>13 agents</strong> · <strong>MIT licensed</strong>
-</p>
-
 ---
 
-## Why Origin?
-
-AI now writes **30–70% of the code** that ships to production. But `git blame` still
-points at the human who pressed **Commit** — not the model, not the prompt, not the
-session. Once a line lands in `main`, the "why" is gone forever.
-
-Origin fixes that. It runs silently next to any AI coding agent (Claude Code, Cursor,
-Codex, Gemini, Aider, Windsurf, Continue, Copilot CLI, and more), captures the full
-session context — prompts, responses, tool calls, token counts, cost, duration —
-and attaches it to your commits as git notes. Everything stays in **your git repo**.
-No server. No login. No API keys. No data ever leaves your machine unless you
-explicitly push it.
-
-### The problems Origin solves
-
-| Pain | What Origin gives you |
-|---|---|
-| 🕵️ **`git blame` is lying to you** — you see the human, not the AI that wrote the line | `origin blame` tags every line with the AI/human authorship + model + session. `origin why <file>:<line>` drills down to the exact prompt behind a line. |
-| 💸 **You have no idea how much AI is costing you** | Per-session token + USD cost. Standalone: breakdown by model and tool. Connected mode adds per-developer and per-repo breakdowns. |
-| 🧠 **Your prompts aren't tied to the code they produced — and aren't searchable across tools** | Every prompt is recorded in git and searchable. `origin why <file>:<line>` replays the exact conversation that wrote a line, across Claude, Cursor, Codex, and 10 more agents. |
-| 🔁 **Context is lost every time you switch agents** | `origin handoff show` passes session state between tools so the next agent picks up where the last one stopped without you re-explaining. |
-| 🔐 **AI agents leak secrets into commits** | Pre-commit secret scanner blocks commits containing 40+ patterns — AWS / GitHub / OpenAI / Anthropic / Stripe / GCP / Azure / Twilio / SendGrid / DigitalOcean / Heroku / Datadog / New Relic / Cloudflare / Discord / Telegram / JWT / DB creds / npm tokens / private keys / generic `*_TOKEN=` `*_SECRET=` `*_KEY=` `*_PASSWORD=` assignments. |
-| 🛰️ **Your prompts are being logged by someone else's cloud** | 100% local by default. No telemetry unless you opt in via `origin config set telemetry true`. Prompts, responses, and costs live in your own git repo. |
-| 🤷 **You don't know which model writes the best code** | `origin stats` compares commits, lines added, acceptance rate, override rate, and cost across every model you use — per-model, not a single global average. |
-| 🧩 **Monorepos and multi-repo workspaces break every tool** | Auto-detects every git repo under your working dir and tracks them all in a single session. |
-
-### Why it's cool
-
-- **Zero config.** `origin init` auto-detects whichever AI agent you use and installs
-  the right hook. No YAML, no dashboards to set up, no accounts to create.
-- **100% local by default.** All data lives in git notes + the `origin-sessions`
-  branch. You own it. `git clone` your repo and everything comes with it.
-- **It works with every agent** — Claude Code, Cursor, Codex, Gemini CLI, Aider,
-  Windsurf, Continue, Copilot CLI, Roo, Cline, Kilo, and more. Same commands, same
-  output, no matter what you use.
-- **Fast.** Written in TypeScript, compiled to a single binary, runs in milliseconds.
-  Hooks add <50ms to your commits.
-- **Policy-aware.** Define rules in `.origin/policies.yml` (secret scanning, file
-  allowlists, model allowlists, cost limits) and Origin enforces them at commit
-  time — before bad code ever reaches `main`.
-- **Free forever for solo developers.** Open source, MIT licensed. Teams get an
-  optional hosted dashboard at [getorigin.io](https://getorigin.io).
-
----
+Origin runs silently next to any AI coding agent — Claude Code, Cursor, Codex,
+Gemini CLI, Aider, Windsurf, Copilot, and more — and captures every session:
+prompts, files touched, tokens, cost, diffs. All of it lives in your git repo as
+notes and refs. `git clone` brings the history with the code. No server, no
+login, no API keys required.
 
 ## Install
 
@@ -70,367 +28,113 @@ explicitly push it.
 npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ```
 
-## Quick Start
+## Quick start
 
 ```bash
-npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
-origin init                      # one-time: GLOBAL git hooks (every repo)
-origin blame <file>              # any repo, any time
+origin init                     # auto-detect agents, install git hooks
+# ...code with any AI agent — Origin tracks automatically
+origin blame src/index.ts       # see which AI wrote each line
 ```
 
-`origin init` sets `git config --global core.hooksPath` → `~/.origin/git-hooks`. Every repo on the machine is tracked automatically. No per-repo setup.
-
-### Detailed
-
-```bash
-origin init                     # Auto-detects agents, installs hooks
-# ... code with any AI agent — Origin tracks automatically
-origin blame src/index.ts       # See who wrote each line
-```
-
-That's it. Everything stored locally in git notes and the `origin-sessions` branch.
+That's it. Nothing to configure.
 
 ---
 
-## Top Commands
+## The four beats
 
-These are the commands you'll use every day:
+Origin maps to one idea per verb. Everything else is detail.
+
+### 01 — Every agent.
+
+Auto-detected. Claude Code, Cursor, Codex, Gemini CLI, Aider, Windsurf, Copilot,
+Continue, Cody, Cline, Codeium, Roo, Kilo. One command picks up whichever tool
+you use.
 
 ```bash
-origin blame <file>              # Line-by-line AI/human attribution
-origin why <file>:<line>         # Which AI prompt wrote a specific line
-origin diff                      # Annotated diff — see AI changes in context
-origin stats                     # AI vs human breakdown for the repo
-origin sessions                  # List all AI coding sessions
-origin snapshot list             # Every auto-saved working-tree snapshot
-origin snapshot restore <id>     # Time-travel back to any prompt's state
-origin prompts <file>            # See which AI prompts touched a file
-origin search "auth bug"         # Find the prompt that introduced code
-origin backfill                  # Retroactively tag old commits as AI/human
+origin init           # detect agents + install hooks
+origin agents         # list detected agents
+origin status         # show the active session
 ```
+
+### 02 — Every prompt.
+
+Each turn is captured as a snapshot: prompt text, model, files touched, diff,
+tokens, cost, duration.
+
+```bash
+origin snapshot       # list per-prompt snapshots in the current session
+origin sessions       # list all sessions
+origin session <id>   # replay a single session
+origin rewind --to <sha>   # restore working tree to any snapshot
+```
+
+### 03 — Every line.
+
+Line-level attribution across agents and sessions. Point at any line, get the
+exact prompt that wrote it.
+
+```bash
+origin blame <file>          # per-line AI/human + model per line
+origin why <file>:<line>     # the exact prompt behind one line
+origin diff                  # annotated diff, AI vs human
+origin search "auth bug"     # full-text search across prompts
+```
+
+### 04 — In your git repo.
+
+Nothing leaves your machine. Sessions live in `refs/notes/origin` and the
+`origin-sessions` branch. Clone the repo, clone the history.
+
+```
+refs/notes/origin          per-commit model / session / cost / tokens
+origin-sessions            transcripts, prompts, file changes
+~/.origin/config.json      CLI config (machine-local)
+```
+
+No telemetry by default. Opt in with `origin config set telemetry true`.
 
 ---
 
-## Supported Agents
+## Supported agents
 
-| Agent | Detection | Status |
-|-------|-----------|--------|
-| <img src="https://cdn.simpleicons.org/anthropic/D97757" width="14"> **Claude Code** | Session hooks + process detection | ✅ Supported |
-| <img src="https://cdn.simpleicons.org/cursor/00A4EF" width="14"> **Cursor** | Session hooks + Cursor DB + IDE extension | ✅ Supported |
-| <img src="https://cdn.simpleicons.org/openai/412991" width="14"> **Codex CLI** | Session hooks + process detection + npx cache | ✅ Supported |
-| <img src="https://cdn.simpleicons.org/google/4285F4" width="14"> **Gemini CLI** | Session hooks + process detection | ✅ Supported |
-| 🌊 **Windsurf** | Session hooks + CLI detection | ✅ Supported |
-| 🤖 **Aider** | Session hooks + CLI detection | 🚧 In Development |
-| <img src="https://cdn.simpleicons.org/github/ffffff" width="14"> **GitHub Copilot** | IDE extension + GH CLI extension + process detection | 🚧 In Development |
-| 🧠 **Cody** | IDE extension + CLI detection | 🚧 In Development |
-| ▶️ **Continue** | IDE extension detection | 🚧 In Development |
-| 💎 **Codeium** | IDE extension detection | 🚧 In Development |
-| 🔧 **Cline** | IDE extension detection (Claude Dev) | 🚧 In Development |
+**Shipping:** Claude Code · Cursor · Codex CLI · Gemini CLI · Windsurf
+**In development:** Aider · GitHub Copilot · Cody · Continue · Codeium · Cline
 
-**Detection methods:**
-- CLI availability (`which <tool>`)
-- IDE extension scanning (VS Code, VSCodium)
-- Extension directory inspection
-- MCP config inspection
-- Process detection during commits
+Detection runs on CLI availability, IDE extension inspection, MCP config, and
+process detection at commit time.
 
 ---
 
-## CLI Commands
+## More commands
 
-Every command does distinct work. `origin --help` lists them all alphabetically via Commander, then appends a categorized view below. The groups below match that categorization.
+The CLI has 50+ commands covering review, governance, handoff, memory, TODOs,
+time travel, reports, audit, and CI integration. See [`DOCS.md`](./DOCS.md) or
+run `origin --help`.
 
-### Setup
-```
-origin login                    Authenticate with Origin server
-origin init                     Register machine + install hooks
-origin enable [--global]        Install session-tracking hooks
-origin disable [--global]       Remove hooks
-origin link [slug]              Link this repo to an Origin agent
-origin attach [agent]           Attach to a running AI agent session
-origin whoami                   Show current user + org
-origin status                   Show active session, branch, repo info
-```
+Commonly used beyond the four beats:
 
-### Attribution
-```
-origin blame <file>             Line-by-line AI/human attribution
-origin diff [range]             Annotated diff with attribution
-origin stats                    AI vs human stats (--dashboard, --global)
-origin compare <a> [b]          Compare attribution between branches
-origin ask <query>              Find which AI session wrote a line or file
-origin why <file[:line]>        Exact prompt that wrote a specific line
-origin prompts <file|session>   Prompts that touched a file or ran in a session
-origin search <query>           Full-text search across prompt history
-```
-
-### Sessions
-```
-origin sessions                 List sessions
-origin session <id>             View one session
-origin session-compare <a> <b>  Compare two sessions side-by-side
-origin log                      Git log with session info inline
-origin show <commit>            Full session behind any commit
-origin explain [id]             Explain a session
-origin share <id>               Share a session (clipboard or public link)
-origin resume [branch]          Resume a session for AI handoff
-```
-
-### Review
-```
-origin review <id>              Approve/reject/flag a session
-origin review-pr <url>          Analyze AI sessions behind a PR
-origin intent-review [branch]   AI intent verification on a branch
-```
-
-### Tracking
-```
-origin issue <subcommand>       AI-native issue tracker
-origin todo <subcommand>        AI-extracted TODOs across sessions
-origin trail <subcommand>       Branch-centric work tracking
-origin handoff                  Cross-agent context handoff (one-shot)
-origin memory                   Accumulated session memory
-origin context [show|clear]     Convenience view: handoff + memory together
-```
-
-### Analytics
-```
-origin recap                    End-of-day summary
-origin report                   Sprint report (markdown/json/csv)
-origin analyze                  Prompt pattern analytics
-origin rework                   Detect reworked AI code (hotspots)
-```
-
-### Time travel
-```
-origin snapshot                 Save a point-in-time snapshot of the working tree
-origin snapshot list            List every snapshot for the current session
-origin snapshot restore <id>    Restore the working tree to a snapshot (non-destructive)
-origin snapshot diff [a] [b]    Diff between two snapshots (or last vs current)
-origin snapshot clean           Remove all snapshots for the session
-origin rewind                   Rewind to a previous AI snapshot (interactive)
-```
-
-Snapshots are auto-saved after every AI prompt — so you can undo a bad
-turn without losing work, branch off a snapshot to try another path, or
-restore the tree to any point in the session. No extra commits, stored
-on orphan branches.
-
-### Chat / AI
-```
-origin chat                     Interactive AI assistant over your code
-```
-
-### Data
-```
-origin export                   Export sessions as CSV/JSON/agent-trace
-origin backfill                 Retroactive AI tagging for old commits
-origin db <subcommand>          Local prompt database management
-```
-
-### Governance
-```
-origin policies                 List active policies
-origin audit                    Compliance audit trail
-origin ignore <subcommand>      Manage file ignore patterns
-```
-
-### Integrations
-```
-origin repos                    List tracked repositories
-origin agents                   List detected AI agents
-origin sync                     Sync session data from current repo
-origin config <get|set|list>    Manage CLI configuration
-origin proxy <install|...>      Transparent git proxy for attribution
-origin ci <subcommand>          CI/CD integration
-origin plugin <subcommand>      External agent plugin management
-origin web                      Local web dashboard (no server required)
-```
-
-### Health
-```
-origin doctor [--fix]           Diagnose and fix stuck sessions
-origin verify                   Health check dashboard
-origin verify-install           Tamper check of the installed binary
-origin clean [--force]          Remove orphan branches and stale data
-origin reset                    Clear local session state for this repo
-```
-
-### Shell integration
-```
-origin prompt-status            Fast PS1 status string (<50ms)
-origin shell-prompt             Shell integration script (eval)
-```
-
-### Meta
-```
-origin version [--verbose]      Version + build provenance
-origin upgrade                  Upgrade CLI to latest
-origin hooks                    Git/agent hook handlers (internal)
+```bash
+origin stats                 # AI vs human stats for the repo
+origin handoff show          # pass context to the next agent
+origin recap                 # end-of-day summary
+origin backfill --apply      # retroactively tag old commits
+origin policies              # list active governance policies
+origin doctor                # diagnose stuck sessions
+origin upgrade               # update to latest
 ```
 
 ---
 
-## Usage Examples
+## For teams
 
-### Who wrote this code?
-
-```bash
-origin blame src/api.ts
-```
-```
-  1 | Claude   | 3h ago  | import express from 'express';
-  2 | Claude   | 3h ago  | import { prisma } from './db';
-  3 | Human    | 2d ago  |
-  4 | Gemini   | 1h ago  | export async function getUsers() {
-  5 | Gemini   | 1h ago  |   const users = await prisma.user.findMany();
-  6 | Cursor   | 30m ago |   return users.filter(u => u.active);
-
-10 lines  Claude: 40%  Gemini: 30%  Cursor: 10%  Human: 20%
-```
-
-### Retroactive attribution (for repos that existed before Origin)
+[getorigin.io](https://getorigin.io) adds the team layer on top of the CLI:
+live dashboard, per-user cost attribution, model and budget policies, PR
+compliance checks, audit trails, and GitHub App / Slack integrations. Free for
+solo developers, $29/user/month for teams.
 
 ```bash
-origin backfill                      # Dry-run — shows what it would tag
-origin backfill --apply              # Actually write the tags
-origin backfill --days 180           # Go back 6 months
-origin backfill --min-confidence high # Only tag high-confidence matches
-```
-
-Scans `.claude/`, `.cursor/`, `.codex/` session history, commit message patterns, and code style heuristics to retroactively identify AI-generated commits.
-
-### Find the prompt behind any code
-
-```bash
-origin search "authentication"
-origin search "refactor" --agent cursor --from 2026-03-01
-```
-
-### Sprint report
-
-```bash
-origin report --range 14d --format json --output sprint.json
-```
-
-### Compliance audit
-
-```bash
-origin audit --from 2026-01-01 --to 2026-03-31 --format json
-```
-
----
-
-## Features
-
-### AI Attribution Context
-
-Origin automatically injects context into AI agent system prompts so agents know what other agents have already done.
-
-**Repo-level** (session start):
-```
-Repository AI context: 90% of recent commits (27/30) are AI-generated.
-  - claude-code wrote src/api.ts, src/hooks.ts on 2026-03-22
-  - gemini-cli wrote src/utils.ts on 2026-03-21
-```
-
-**Per-file** (when an agent reads/edits a file):
-```
-File attribution for src/hooks.ts: 95% AI-generated (2258/2388 lines).
-  Lines 1-28: claude-code (claude-opus-4-6)
-  Lines 217-240: human (KIRAN)
-```
-
-### Secret Scanner
-
-Pre-commit hook blocks commits containing hardcoded secrets:
-
-```
-  AWS Access Key     config.env:3   AKIA****MPLE
-  GitHub Token       src/api.ts:12  ghp_****ab12
-  2 secrets found. Commit blocked.
-```
-
-Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, JWTs, database connection strings, private keys, and `*_TOKEN=`/`*_SECRET=`/`*_KEY=` patterns.
-
-### Cross-Agent Context Handoff
-
-Switch from Claude to Cursor (or any agent) without losing context. When a session ends, Origin saves what you were working on. The next session — even with a different agent — picks up where you left off.
-
-```bash
-origin handoff show              # Preview what will be passed to next agent
-origin handoff clear             # Reset handoff context
-```
-
-### Session Memory
-
-Origin remembers what happened in previous sessions. New sessions get the last 3 summaries injected, so the agent knows what was done yesterday, which files were touched, and what's still open.
-
-```bash
-origin memory show              # See accumulated session history
-origin memory clear             # Reset memory for this repo
-```
-
-### AI TODO Tracker
-
-TODOs mentioned in AI sessions are automatically extracted and tracked:
-
-```bash
-origin todo list                # Show all open TODOs across repos
-origin todo done <id>           # Mark as complete
-origin todo show <id>           # Show originating session context
-origin todo add "fix auth flow" # Manually add a TODO
-```
-
----
-
-## How It Works
-
-```
-AI Agent commits code → Post-commit hook fires → Origin detects AI process
-→ Writes git note (model, session, cost) → Writes session to origin-sessions branch
-→ origin blame / stats / diff read notes for attribution
-```
-
-### Data Storage
-
-| Location | Purpose |
-|----------|---------|
-| `refs/notes/origin` | Per-commit AI metadata (model, session, cost, tokens) |
-| `refs/notes/origin-memory` | Session memory — accumulated summaries across sessions |
-| `origin-sessions` branch | Session transcripts, prompts, file changes |
-| `.git/origin-handoff.json` | Cross-agent handoff context (latest session) |
-| `~/.origin/config.json` | CLI config |
-| `~/.origin/git-hooks/` | Global hook scripts |
-
----
-
-## Origin vs Alternatives
-
-| Feature | Origin | git-ai | Entire.io |
-|---------|--------|--------|-----------|
-| Line-level attribution | **Yes** — per-line AI/human tags | Commit-level only | No |
-| Retroactive tagging | **Yes** — `origin backfill` | No | No |
-| Local-first / no server | **Yes** — git notes, zero setup | Yes | No — SaaS only |
-| Multi-agent support | **5 agents** (6 more in dev) | Claude only | GitHub Copilot only |
-| Session transcripts | **Full prompts + responses** | No | No |
-| Per-file context injection | **Yes** — agents see authorship | No | No |
-| Secret scanning | **Built-in** pre-commit hook | No | No |
-| Cross-agent handoff | **Yes** — context carries over | No | No |
-| Total commands | **50+** | ~5 | N/A |
-| Open source | **MIT** | MIT | Closed |
-
----
-
-## For Teams
-
-**[getorigin.io](https://getorigin.io)** — centralized dashboard, policy enforcement, PR compliance. Free trial.
-
-Connected mode adds: real-time dashboard, budget controls with ROI calculator, weekly digest emails, model/cost policies, PR blocking, compliance reports, IAM with per-user API keys, team leaderboards, Slack notifications, and GitHub App integration.
-
-```bash
-origin login    # Authenticate with your Origin instance
-origin init     # Register machine + install hooks
+origin login      # authenticate with your Origin instance
+origin init       # register the machine + install hooks
 ```
 
 ---

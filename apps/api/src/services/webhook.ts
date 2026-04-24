@@ -84,6 +84,16 @@ export async function processGitHubPush(repoId: string, payload: GitHubPushPaylo
     // concurrent push, the second delivery will take the update branch and
     // only fill in `branch` if it was empty.
     const detection = detectAITool(commit.message, commit.author.name);
+    // GitHub's push payload ships the changed-file lists per commit. Capture
+    // them so the commit-detail page can show the file list even when the
+    // commit never got a matching Origin session — without this the page
+    // renders "No files in this commit" despite the repo knowing exactly
+    // which files changed.
+    const changedFiles = [
+      ...(commit.added || []),
+      ...(commit.modified || []),
+      ...(commit.removed || []),
+    ];
     const result = await prisma.commit.upsert({
       where: { repoId_sha: { repoId, sha: commit.id } },
       create: {
@@ -95,9 +105,19 @@ export async function processGitHubPush(repoId: string, payload: GitHubPushPaylo
         aiDetectionMethod: detection.aiDetectionMethod,
         branch,
         committedAt: new Date(commit.timestamp),
+        filesChanged: JSON.stringify(changedFiles),
+        fileCount: changedFiles.length || null,
       },
       update: {}, // on collision keep existing row; branch backfill below
     });
+    // Backfill filesChanged on existing rows that were created before this
+    // capture existed (or by a code path that left it empty).
+    if (changedFiles.length > 0 && (result.filesChanged === '[]' || !result.filesChanged)) {
+      await prisma.commit.updateMany({
+        where: { id: result.id, OR: [{ filesChanged: '[]' }, { filesChanged: '' }] },
+        data: { filesChanged: JSON.stringify(changedFiles), fileCount: changedFiles.length },
+      });
+    }
     if (branch && !result.branch) {
       // Backfill branch only when it was previously unknown. updateMany with
       // a `branch: null` guard makes this safe under concurrency.
@@ -311,6 +331,11 @@ export async function processGitLabPush(repoId: string, payload: GitLabPushPaylo
 
     // Atomic upsert — see GitHub path above for rationale.
     const detection = detectAITool(commit.message, commit.author.name);
+    const changedFiles = [
+      ...(commit.added || []),
+      ...(commit.modified || []),
+      ...(commit.removed || []),
+    ];
     const result = await prisma.commit.upsert({
       where: { repoId_sha: { repoId, sha: commit.id } },
       create: {
@@ -322,9 +347,17 @@ export async function processGitLabPush(repoId: string, payload: GitLabPushPaylo
         aiDetectionMethod: detection.aiDetectionMethod,
         branch,
         committedAt: new Date(commit.timestamp),
+        filesChanged: JSON.stringify(changedFiles),
+        fileCount: changedFiles.length || null,
       },
       update: {}, // on collision keep existing row; branch backfill below
     });
+    if (changedFiles.length > 0 && (result.filesChanged === '[]' || !result.filesChanged)) {
+      await prisma.commit.updateMany({
+        where: { id: result.id, OR: [{ filesChanged: '[]' }, { filesChanged: '' }] },
+        data: { filesChanged: JSON.stringify(changedFiles), fileCount: changedFiles.length },
+      });
+    }
     if (branch && !result.branch) {
       // Backfill branch only when it was previously unknown. updateMany with
       // a `branch: null` guard makes this safe under concurrency.

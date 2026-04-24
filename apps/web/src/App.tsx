@@ -362,13 +362,7 @@ export default function App() {
       />
       <Route
         path="/integrations"
-        element={
-          <ProtectedRoute>
-            <AppLayout>
-              <Integrations />
-            </AppLayout>
-          </ProtectedRoute>
-        }
+        element={<Navigate to="/settings?tab=integrations" replace />}
       />
       <Route
         path="/settings"
@@ -386,7 +380,7 @@ export default function App() {
       />
       <Route
         path="/api-keys"
-        element={<ProtectedRoute><AppLayout><ApiKeys /></AppLayout></ProtectedRoute>}
+        element={<Navigate to="/settings?tab=keys" replace />}
       />
       <Route
         path="/snapshots"

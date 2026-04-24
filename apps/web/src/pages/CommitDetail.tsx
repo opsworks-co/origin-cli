@@ -38,6 +38,34 @@ function DiffLineRow({ line }: { line: string }) {
   );
 }
 
+// Parse a unified diff (from a single prompt) and return the patch hunks for
+// one file. Uses suffix-match so absolute-path entries match relative commit paths.
+function extractFilePatch(rawDiff: string, filename: string): string {
+  if (!rawDiff || !filename) return '';
+  const sections = rawDiff.split(/^diff --git /m).filter(Boolean);
+  for (const section of sections) {
+    const header = section.split('\n', 1)[0] || '';
+    const m = header.match(/a\/(.+?)\s+b\/(.+)/);
+    if (!m) continue;
+    const bPath = m[2];
+    const matches = bPath === filename || bPath.endsWith(filename) || filename.endsWith(bPath);
+    if (!matches) continue;
+    const at = section.indexOf('@@');
+    return at >= 0 ? section.slice(at) : '';
+  }
+  return '';
+}
+
+function countAddDel(patch: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const ln of patch.split('\n')) {
+    if (ln.startsWith('+') && !ln.startsWith('+++')) additions++;
+    else if (ln.startsWith('-') && !ln.startsWith('---')) deletions++;
+  }
+  return { additions, deletions };
+}
+
 function FileStatusDot({ status }: { status: string }) {
   const map: Record<string, string> = {
     added: 'bg-emerald-500',
@@ -84,14 +112,18 @@ export default function CommitDetailPage() {
       .finally(() => setLoading(false));
   }, [repoId, sha]);
 
-  // Build a file tree from flat file list (filtered by selected prompt, if any)
+  // Match a commit-file path against a prompt's recorded filesChanged using
+  // the same fuzzy suffix-match the API uses (apps/api/src/routes/repos.ts:~1513).
+  // Strict includes() misses absolute paths and prefix mismatches.
+  const fileMatchesPrompt = (filename: string, promptFiles: string[]) =>
+    promptFiles.some((pf) => pf === filename || pf.endsWith(filename) || filename.endsWith(pf));
   const fileTree = useMemo(() => {
     if (!commit) return null;
     const promptPin = selectedPromptIdx !== null
       ? commit.promptChanges.find((pc) => pc.promptIndex === selectedPromptIdx) || null
       : null;
     const source = promptPin
-      ? (commit.files || []).filter((f) => promptPin.filesChanged.includes(f.filename))
+      ? (commit.files || []).filter((f) => fileMatchesPrompt(f.filename, promptPin.filesChanged))
       : commit.files || [];
     type Node = {
       name: string;
@@ -147,9 +179,17 @@ export default function CommitDetailPage() {
     ? commit.promptChanges.find((pc) => pc.promptIndex === selectedPromptIdx) || null
     : null;
   const visibleFiles = promptFilter
-    ? commit.files.filter((f) => promptFilter.filesChanged.includes(f.filename))
+    ? commit.files.filter((f) => fileMatchesPrompt(f.filename, promptFilter.filesChanged))
     : commit.files;
   const selected = visibleFiles.find((f) => f.filename === selectedFile) || visibleFiles[0];
+  // When a prompt is pinned, render that prompt's diff slice for the selected
+  // file (not the file's union-of-all-prompts patch). Falls back to the full
+  // patch if the prompt's diff doesn't include this file.
+  const promptPatch = selected && promptFilter
+    ? extractFilePatch(promptFilter.diff, selected.filename)
+    : '';
+  const currentPatch = promptPatch || selected?.patch || '';
+  const promptStats = promptPatch ? countAddDel(promptPatch) : null;
   const isAI = !!commit.session || !!commit.aiToolDetected;
   const activePrompts =
     selected && selected.promptIndexes.length > 0 && selectedPromptIdx === null
@@ -296,14 +336,22 @@ export default function CommitDetailPage() {
                 )}
                 <span className="text-[10px] text-gray-500 uppercase tracking-wider">{selected.status}</span>
                 <span className="text-xs flex-shrink-0">
-                  {selected.additions > 0 && <span className="text-emerald-400">+{selected.additions}</span>}
-                  {selected.additions > 0 && selected.deletions > 0 && ' '}
-                  {selected.deletions > 0 && <span className="text-red-400">−{selected.deletions}</span>}
+                  {(() => {
+                    const adds = promptStats ? promptStats.additions : selected.additions;
+                    const dels = promptStats ? promptStats.deletions : selected.deletions;
+                    return (
+                      <>
+                        {adds > 0 && <span className="text-emerald-400">+{adds}</span>}
+                        {adds > 0 && dels > 0 && ' '}
+                        {dels > 0 && <span className="text-red-400">−{dels}</span>}
+                      </>
+                    );
+                  })()}
                 </span>
               </div>
               <div className="bg-[#0a0b14] overflow-x-auto max-h-[75vh] overflow-y-auto">
-                {selected.patch ? (
-                  selected.patch.split('\n').map((line, i) => <DiffLineRow key={i} line={line} />)
+                {currentPatch ? (
+                  currentPatch.split('\n').map((line, i) => <DiffLineRow key={i} line={line} />)
                 ) : (
                   <div className="px-6 py-12 text-center text-sm text-gray-600">
                     No patch content available for this file.
@@ -312,7 +360,24 @@ export default function CommitDetailPage() {
               </div>
             </>
           ) : (
-            <div className="px-6 py-24 text-center text-sm text-gray-600">No files in this commit.</div>
+            <div className="px-6 py-24 text-center text-sm text-gray-600">
+              {selectedPromptIdx !== null && (commit.files?.length || 0) > 0 ? (
+                <>
+                  <p>No files in this commit match prompt #{selectedPromptIdx + 1}.</p>
+                  <p className="mt-2 text-xs text-gray-500">
+                    The prompt may have edited files that were later reverted, or paths recorded as absolute.
+                  </p>
+                  <button
+                    onClick={() => setSelectedPromptIdx(null)}
+                    className="mt-4 text-xs text-indigo-400 hover:text-indigo-300"
+                  >
+                    Show all {commit.files?.length || 0} file{(commit.files?.length || 0) === 1 ? '' : 's'} &rarr;
+                  </button>
+                </>
+              ) : (
+                'No files in this commit.'
+              )}
+            </div>
           )}
         </div>
 
@@ -330,51 +395,65 @@ export default function CommitDetailPage() {
             {activePrompts.length > 0 ? (
               activePrompts.map((pc) => {
                 const isActive = selectedPromptIdx === pc.promptIndex;
+                const sessionId = commit.session?.id;
                 return (
-                  <button
+                  <div
                     key={pc.promptIndex}
-                    type="button"
-                    onClick={() => {
-                      // Single click = pin this prompt and show its first file
-                      // in the middle diff panel. Always pin (no toggle) — use
-                      // the "clear" badge in the middle header to unpin. The
-                      // toggle behaviour caused a perceived double-click: the
-                      // list re-filtered after the first click, which users
-                      // interpreted as "nothing happened, click again".
-                      setSelectedPromptIdx(pc.promptIndex);
-                      if (pc.filesChanged.length > 0) {
-                        setSelectedFile(pc.filesChanged[0]);
-                      }
-                    }}
-                    className={`w-full text-left px-4 py-3 transition-colors block ${
-                      isActive
-                        ? 'bg-indigo-500/10 ring-1 ring-inset ring-indigo-500/30'
-                        : 'hover:bg-gray-900/40'
+                    className={`transition-colors ${
+                      isActive ? 'bg-indigo-500/10 ring-1 ring-inset ring-indigo-500/30' : 'hover:bg-gray-900/40'
                     }`}
                   >
-                    <div className="flex items-start gap-2.5">
-                      <span className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                        isActive
-                          ? 'bg-indigo-500 text-white'
-                          : 'bg-indigo-600/20 text-indigo-400'
-                      }`}>
-                        {pc.promptIndex + 1}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <p className={`text-xs leading-relaxed whitespace-pre-wrap ${isActive ? 'text-indigo-100' : 'text-gray-200'}`}>
-                          {pc.promptText || '(empty prompt)'}
-                        </p>
-                        <p className="text-[10px] text-gray-600 mt-2 flex items-center gap-2">
-                          {pc.filesChanged.length > 0 && (
-                            <span>{pc.filesChanged.length} file{pc.filesChanged.length === 1 ? '' : 's'}</span>
-                          )}
-                          {isActive && (
-                            <span className="text-indigo-400">· active · clear via badge in diff header</span>
-                          )}
-                        </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedPromptIdx(pc.promptIndex);
+                        const firstMatch = (commit.files || []).find((f) =>
+                          fileMatchesPrompt(f.filename, pc.filesChanged)
+                        );
+                        if (firstMatch) setSelectedFile(firstMatch.filename);
+                      }}
+                      className="w-full text-left px-4 pt-3 pb-2 block"
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <span className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                          isActive ? 'bg-indigo-500 text-white' : 'bg-indigo-600/20 text-indigo-400'
+                        }`}>
+                          {pc.promptIndex + 1}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-xs leading-relaxed whitespace-pre-wrap ${isActive ? 'text-indigo-100' : 'text-gray-200'}`}>
+                            {pc.promptText || '(empty prompt)'}
+                          </p>
+                          <p className="text-[10px] text-gray-600 mt-2 flex items-center gap-2">
+                            {pc.filesChanged.length > 0 && (
+                              <span>{pc.filesChanged.length} file{pc.filesChanged.length === 1 ? '' : 's'}</span>
+                            )}
+                            {isActive && (
+                              <span className="text-indigo-400">· active · clear via badge in diff header</span>
+                            )}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                  </button>
+                    </button>
+                    {sessionId && (
+                      <div className="px-4 pb-3 pl-[38px] flex gap-3 text-[10px]">
+                        <Link
+                          to={`/sessions/${sessionId}?tab=snapshots&prompt=${pc.promptIndex}`}
+                          className="text-emerald-400/80 hover:text-emerald-300 transition-colors"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          View snapshot →
+                        </Link>
+                        <Link
+                          to={`/sessions/${sessionId}?tab=blame&prompt=${pc.promptIndex}`}
+                          className="text-purple-400/80 hover:text-purple-300 transition-colors"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          Open AI blame →
+                        </Link>
+                      </div>
+                    )}
+                  </div>
                 );
               })
             ) : commit.session ? (

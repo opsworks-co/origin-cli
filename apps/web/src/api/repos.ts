@@ -16,6 +16,7 @@ export interface Repo {
   /** Original provider column (for "reconnect to restore" hints) */
   declaredProvider?: string;
   archived: boolean;
+  verboseCapture?: boolean;
   syncedAt: string | null;
   createdAt: string;
   _count?: { commits: number; sessions?: number };
@@ -44,6 +45,13 @@ export function createRepo(data: { name: string; path: string; provider?: string
 
 export function syncRepo(id: string) {
   return request<{ synced: number; total: number }>(`/api/repos/${id}/sync`, { method: 'POST' });
+}
+
+export function backfillRepoFiles(id: string) {
+  return request<{ scanned: number; updated: number; failed: number; truncated: boolean }>(
+    `/api/repos/${id}/backfill-files`,
+    { method: 'POST' },
+  );
 }
 
 export function rescanRepoCommits(id: string) {

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { SessionAnnotation } from '../api';
 
 const PROMPT_COLORS = [
@@ -44,6 +44,11 @@ interface TurnTimelineProps {
   onAddAnnotation?: (turnIndex: number, text: string) => Promise<void>;
   onDeleteAnnotation?: (annotationId: string) => Promise<void>;
   currentUserId?: string;
+  /**
+   * When set, the timeline auto-expands the matching turn and scrolls it into
+   * view. Used for the commit-detail "View snapshot →" deep-link.
+   */
+  focusPromptIndex?: number | null;
 }
 
 export default function TurnTimeline({
@@ -54,11 +59,26 @@ export default function TurnTimeline({
   onAddAnnotation,
   onDeleteAnnotation,
   currentUserId,
+  focusPromptIndex = null,
 }: TurnTimelineProps) {
   const [expandedTurn, setExpandedTurn] = useState<number | null>(null);
+  const turnRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  useEffect(() => {
+    if (focusPromptIndex == null) return;
+    setExpandedTurn(focusPromptIndex);
+    // Give the expand render a tick, then scroll to the card.
+    const t = setTimeout(() => {
+      const el = turnRefs.current.get(focusPromptIndex);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 50);
+    return () => clearTimeout(t);
+  }, [focusPromptIndex]);
   const [addingToTurn, setAddingToTurn] = useState<number | null>(null);
   const [draftText, setDraftText] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<{ sha: string; turn: number } | null>(null);
+  const [restoreCopied, setRestoreCopied] = useState(false);
 
   const handleSubmitAnnotation = async (turnIndex: number) => {
     if (!draftText.trim() || !onAddAnnotation) return;
@@ -139,7 +159,14 @@ export default function TurnTimeline({
           const turnAnnotations = annotations.filter(a => a.turnIndex === pc.promptIndex);
 
           return (
-            <div key={pc.promptIndex} className="relative pl-8 pb-4 last:pb-0">
+            <div
+              key={pc.promptIndex}
+              ref={(el) => {
+                if (el) turnRefs.current.set(pc.promptIndex, el);
+                else turnRefs.current.delete(pc.promptIndex);
+              }}
+              className="relative pl-8 pb-4 last:pb-0"
+            >
               {/* Dot — colored by snapshot type */}
               <div className={`absolute left-1.5 top-1.5 w-[14px] h-[14px] rounded-full ${
                 cpType === 'session-start' ? 'bg-green-400' :
@@ -230,6 +257,18 @@ export default function TurnTimeline({
                           <span className="text-[10px] text-gray-500">
                             {new Date(pc.createdAt).toLocaleString()}
                           </span>
+                        )}
+                        {pc.commitSha && (
+                          <button
+                            onClick={() => {
+                              setRestoreTarget({ sha: pc.commitSha as string, turn: pc.promptIndex + 1 });
+                              setRestoreCopied(false);
+                            }}
+                            className="ml-auto text-[10px] px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/25 hover:bg-indigo-500/25 transition-colors"
+                            title="Restore working tree to this snapshot (runs locally)"
+                          >
+                            Restore
+                          </button>
                         )}
                       </div>
                     )}
@@ -344,6 +383,60 @@ export default function TurnTimeline({
           );
         })}
       </div>
+
+      {restoreTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setRestoreTarget(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-xl border border-gray-800 bg-gray-950 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-gray-800">
+              <h3 className="text-sm font-semibold text-gray-100">
+                Restore to Turn {restoreTarget.turn}
+              </h3>
+              <p className="mt-1 text-xs text-gray-500">
+                Rewinds your working tree to the snapshot captured after this prompt. Run on the
+                machine that holds the repo — Origin won't touch your files from the cloud.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-gray-600 mb-1">Run locally</p>
+                <div className="flex items-stretch gap-2">
+                  <code className="flex-1 px-3 py-2 rounded-lg bg-gray-900 border border-gray-800 text-xs font-mono text-gray-200 break-all">
+                    origin rewind --to {restoreTarget.sha}
+                  </code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(`origin rewind --to ${restoreTarget.sha}`);
+                      setRestoreCopied(true);
+                      setTimeout(() => setRestoreCopied(false), 1500);
+                    }}
+                    className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
+                  >
+                    {restoreCopied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+              <div className="text-[11px] text-amber-400/80 bg-amber-500/5 border border-amber-500/20 rounded-lg px-3 py-2">
+                Uncommitted changes will be stashed before rewinding. Use{' '}
+                <code className="font-mono text-amber-300">git stash pop</code> to recover them.
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-800 flex justify-end">
+              <button
+                onClick={() => setRestoreTarget(null)}
+                className="text-xs px-3 py-1.5 rounded-lg text-gray-400 hover:text-gray-200 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

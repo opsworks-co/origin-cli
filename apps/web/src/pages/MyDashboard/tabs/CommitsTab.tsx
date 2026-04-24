@@ -54,11 +54,21 @@ export function CommitsTab({
   commitsOffset: number;
   navigate: (path: string) => void;
 }) {
+  // Hide commits with no actual file changes — empty/trivial commits add
+  // noise and don't tell the user anything about AI code authorship.
+  const visibleCommits = commitEntries.filter((c) => c.filesChanged.length > 0);
+  const hiddenCount = commitEntries.length - visibleCommits.length;
+
   return (
         <div className="space-y-4" data-tour="tab-content-commits">
           {/* Sort controls */}
           <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-500">{commitsTotal} commit{commitsTotal !== 1 ? 's' : ''}</span>
+            <span className="text-xs text-gray-500">
+              {visibleCommits.length} commit{visibleCommits.length !== 1 ? 's' : ''}
+              {hiddenCount > 0 && (
+                <span className="text-gray-600"> · {hiddenCount} empty hidden</span>
+              )}
+            </span>
             <select
               value={commitSort}
               onChange={(e) => { setCommitSort(e.target.value as CommitSort); setCommitsOffset(0); }}

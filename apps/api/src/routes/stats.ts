@@ -1167,13 +1167,16 @@ router.get('/me/commits', async (req: AuthRequest, res: Response) => {
       await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
     ).map((r) => r.id);
 
-    // Find commits linked to this user's sessions
+    // Find commits linked to this user's sessions.
+    // Exclude placeholder rows that the MCP session-start flow creates
+    // (random SHA + empty message) — they aren't real commits yet.
     const baseWhere: any = {
       repoId: { in: repoIds },
       OR: [
         { codingSession: { userId } },
         { session: { userId } },
       ],
+      message: { not: '' },
     };
 
     // Sort options

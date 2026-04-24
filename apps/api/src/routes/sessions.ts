@@ -85,6 +85,8 @@ function mapSession(s: any, pullRequests?: any[]) {
     tokensUsed: s.tokensUsed,
     inputTokens: s.inputTokens,
     outputTokens: s.outputTokens,
+    cacheReadTokens: (s as any).cacheReadTokens ?? 0,
+    cacheCreationTokens: (s as any).cacheCreationTokens ?? 0,
     toolCalls: s.toolCalls,
     durationMs: (() => {
       const status = computeStatus(s);
@@ -181,6 +183,46 @@ function mapSession(s: any, pullRequests?: any[]) {
             });
         })()
       : [],
+    // Snapshots taken during this session, exposed for the timeline rail.
+    snapshots: Array.isArray(s.snapshots)
+      ? s.snapshots.map((sn: any) => ({
+          id: sn.id,
+          snapshotId: sn.snapshotId,
+          type: sn.type,
+          takenAt: sn.takenAt,
+          promptIndex: sn.promptIndex,
+          commitSha: sn.commitSha,
+        }))
+      : [],
+    // All commits attributed to this session (primary + sessionCommits union),
+    // deduplicated by SHA and sorted by time. Surfaces commits made on
+    // feature branches during the session — the primary commit field only
+    // ever points at one of them.
+    commits: (() => {
+      const all: any[] = [];
+      if (s.commit) all.push(s.commit);
+      if (Array.isArray(s.commits)) {
+        for (const c of s.commits) all.push(c);
+      }
+      const seen = new Set<string>();
+      return all
+        .filter((c) => {
+          if (!c?.sha || seen.has(c.sha)) return false;
+          seen.add(c.sha);
+          return true;
+        })
+        .sort((a, b) => new Date(a.committedAt).getTime() - new Date(b.committedAt).getTime())
+        .map((c) => ({
+          id: c.id,
+          sha: c.sha,
+          message: c.message,
+          author: c.author,
+          branch: c.branch || null,
+          committedAt: c.committedAt,
+          filesChanged: safeParseArray<string>(c.filesChanged, `session.${s.id}.commits.${c.sha}.filesChanged`),
+          repoName: c.repo?.name || null,
+        }));
+    })(),
   };
 }
 
@@ -706,12 +748,22 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       where: detailWhere,
       include: {
         commit: { include: { repo: true } },
+        // Additional commits attributed to this session (sessionCommits relation).
+        // A session can span multiple commits — especially across branches when
+        // a prompt runs `git checkout -b …`. `commit` above is the primary;
+        // `commits` is every commit the post-commit hook attributed to us.
+        commits: {
+          include: { repo: { select: { name: true } } },
+          orderBy: { committedAt: 'asc' },
+          take: 500,
+        },
         agent: true,
         user: true,
         review: { include: { user: true } },
         sessionDiff: true,
         promptChanges: { orderBy: { promptIndex: 'asc' } },
         sessionRepos: { include: { repo: true } },
+        snapshots: { orderBy: { takenAt: 'asc' }, take: 500 },
       },
     });
 

@@ -144,6 +144,18 @@ const shortModel = (m: string) =>
     .replace('-20251001', '')
     .replace('gpt-', 'gpt-');
 
+// Trim trailing days where every numeric field is zero — the API zero-fills
+// the range up to `to`, which often includes a partial/empty "today" that
+// makes charts show a misleading cliff down to 0.
+function trimTrailingZeros<T extends Record<string, any>>(series: T[] | undefined): T[] {
+  if (!series || series.length === 0) return series || [];
+  const isZero = (row: T) =>
+    Object.entries(row).every(([k, v]) => k === 'date' || k === 'week' || k === 'hour' || k === 'bucket' || !v);
+  let end = series.length;
+  while (end > 1 && isZero(series[end - 1])) end--;
+  return series.slice(0, end);
+}
+
 // ── Main component ──────────────────────────────────────────────────────────
 
 export default function Insights() {
@@ -213,6 +225,15 @@ export default function Insights() {
     }));
   }, [trend, models]);
 
+  // Pre-trim all daily series so charts don't cliff down to zero on a partial
+  // trailing day (API zero-fills the range through `to`).
+  const aiAuthorshipOverTime = useMemo(
+    () => trimTrailingZeros(stats?.aiAuthorshipOverTime),
+    [stats?.aiAuthorshipOverTime]
+  );
+  const linesByDay = useMemo(() => trimTrailingZeros(stats?.linesByDay), [stats?.linesByDay]);
+  const costByDay = useMemo(() => trimTrailingZeros(stats?.costByDay), [stats?.costByDay]);
+
   const modelNames = useMemo(() => models.map((m) => m.model), [models]);
 
   if (loading && !stats) {
@@ -249,10 +270,10 @@ export default function Insights() {
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex gap-1 p-1 rounded-lg bg-gray-900/60 border border-gray-800">
             {[
+              { label: '1d', days: 1 },
               { label: '7d', days: 7 },
               { label: '30d', days: 30 },
               { label: '90d', days: 90 },
-              { label: 'Year', days: 365 },
             ].map(({ label, days }) => (
               <button
                 key={label}
@@ -328,9 +349,9 @@ export default function Insights() {
         <SectionHeader title="Activity & authorship" subtitle="How AI usage changes over time" />
         <div className="grid lg:grid-cols-2 gap-5">
           <ChartCard title="AI Authorship %" hint="% of lines AI-authored">
-            {stats.aiAuthorshipOverTime && stats.aiAuthorshipOverTime.length > 0 ? (
+            {aiAuthorshipOverTime.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={stats.aiAuthorshipOverTime}>
+                <AreaChart data={aiAuthorshipOverTime}>
                   <defs>
                     <linearGradient id="gradAi" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor={CHART_THEME.indigo} stopOpacity={0.4} />
@@ -350,9 +371,9 @@ export default function Insights() {
           </ChartCard>
 
           <ChartCard title="Lines changed" hint="Added vs removed">
-            {stats.linesByDay && stats.linesByDay.length > 0 ? (
+            {linesByDay.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={stats.linesByDay}>
+                <AreaChart data={linesByDay}>
                   <defs>
                     <linearGradient id="gradAdded" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor={CHART_THEME.green} stopOpacity={0.4} />
@@ -376,37 +397,6 @@ export default function Insights() {
             )}
           </ChartCard>
 
-          <ChartCard title="Activity by hour" hint="Sessions by hour of day">
-            {stats.sessionsByHour && stats.sessionsByHour.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={stats.sessionsByHour}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />
-                  <XAxis dataKey="hour" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(h) => `${h}:00`} />
-                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [v, 'Sessions']} labelFormatter={(h) => `${h}:00 - ${h}:59`} />
-                  <Bar dataKey="count" fill={CHART_THEME.purple} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <EmptyState message="No data yet" />
-            )}
-          </ChartCard>
-
-          <ChartCard title="Session duration" hint="Distribution">
-            {stats.durationBuckets && stats.durationBuckets.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={stats.durationBuckets}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />
-                  <XAxis dataKey="bucket" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <Tooltip contentStyle={TT_STYLE} />
-                  <Bar dataKey="count" fill={CHART_THEME.amber} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <EmptyState message="No data yet" />
-            )}
-          </ChartCard>
         </div>
       </section>
 
@@ -415,9 +405,9 @@ export default function Insights() {
         <SectionHeader title="Cost & tokens" subtitle="Where your AI budget is going" />
         <div className="grid lg:grid-cols-2 gap-5">
           <ChartCard title="Cost over time">
-            {stats.costByDay && stats.costByDay.length > 0 ? (
+            {costByDay.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={stats.costByDay}>
+                <AreaChart data={costByDay}>
                   <defs>
                     <linearGradient id="gradCost" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor={CHART_THEME.cyan} stopOpacity={0.4} />
@@ -446,28 +436,6 @@ export default function Insights() {
                   <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']} />
                   <Bar dataKey="cost" fill={CHART_THEME.purple} radius={[0, 4, 4, 0]} />
                 </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <EmptyState message="No data yet" />
-            )}
-          </ChartCard>
-
-          <ChartCard title="Tokens over time">
-            {stats.tokensByDay && stats.tokensByDay.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={stats.tokensByDay}>
-                  <defs>
-                    <linearGradient id="gradTokens" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={CHART_THEME.purple} stopOpacity={0.4} />
-                      <stop offset="95%" stopColor={CHART_THEME.purple} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />
-                  <XAxis dataKey="date" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v)} />
-                  <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [v.toLocaleString(), 'Tokens']} />
-                  <Area type="monotone" dataKey="tokens" stroke={CHART_THEME.purple} strokeWidth={2.5} fill="url(#gradTokens)" />
-                </AreaChart>
               </ResponsiveContainer>
             ) : (
               <EmptyState message="No data yet" />
@@ -572,7 +540,7 @@ export default function Insights() {
 
             {/* Adoption trend */}
             {trendData.length > 0 && (
-              <ChartCard title="Adoption trend" hint="Last 12 weeks" tall>
+              <ChartCard title="Adoption trend" hint="Weekly share by model" tall>
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={trendData}>
                     <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />

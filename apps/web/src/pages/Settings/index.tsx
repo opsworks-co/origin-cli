@@ -7,10 +7,11 @@ import Trails from '../Trails';
 import Compliance from '../Compliance';
 import GeneralTab from './GeneralTab';
 import IntegrationsTab from './IntegrationsTab';
+import ApiKeys from '../ApiKeys';
 
 type SettingsTab = 'general' | 'keys' | 'integrations' | 'audit' | 'reports' | 'trails' | 'compliance';
-const ORG_TABS: SettingsTab[] = ['general', 'integrations', 'audit', 'reports', 'trails', 'compliance'];
-const DEV_TABS: SettingsTab[] = ['general'];
+const ORG_TABS: SettingsTab[] = ['general', 'keys', 'integrations', 'audit', 'reports', 'trails', 'compliance'];
+const DEV_TABS: SettingsTab[] = ['general', 'keys', 'integrations'];
 
 
 export default function Settings() {
@@ -66,13 +67,22 @@ export default function Settings() {
         >
           General
         </button>
-        {/* API Keys moved to standalone /api-keys page */}
-        {!isDev && (user?.role === 'ADMIN' || user?.role === 'OWNER') && (
+        <button
+          onClick={() => setActiveTab('keys')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'keys'
+              ? (isDev ? 'border-emerald-500 text-emerald-400' : 'border-indigo-500 text-indigo-400')
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          API Keys
+        </button>
+        {(isDev || (user?.role === 'ADMIN' || user?.role === 'OWNER')) && (
         <button
           onClick={() => setActiveTab('integrations')}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'integrations'
-              ? 'border-indigo-500 text-indigo-400'
+              ? (isDev ? 'border-emerald-500 text-emerald-400' : 'border-indigo-500 text-indigo-400')
               : 'border-transparent text-gray-500 hover:text-gray-300'
           }`}
         >
@@ -128,6 +138,8 @@ export default function Settings() {
       </div>
 
       {activeTab === 'general' && <GeneralTab />}
+
+      {activeTab === 'keys' && <ApiKeys />}
 
       {activeTab === 'integrations' && <IntegrationsTab />}
 

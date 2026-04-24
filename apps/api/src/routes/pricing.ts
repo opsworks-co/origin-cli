@@ -10,16 +10,20 @@ interface AuthRequest extends Request {
 
 type ModelPricing = Record<string, { input: number; output: number }>;
 
-// Default pricing (per 1M tokens) — used as fallback and for seeding
+// Default pricing (per 1M tokens) — used as fallback and for seeding.
+// Anthropic cache: read = 0.1 × input, create = 1.25 × input (handled by caller).
 const DEFAULT_MODEL_PRICING: ModelPricing = {
+  // Anthropic — real public rates
   'sonnet': { input: 3, output: 15 },
-  'opus': { input: 5, output: 25 },
-  'haiku': { input: 1, output: 5 },
+  'opus': { input: 15, output: 75 },
+  'haiku': { input: 0.80, output: 4 },
+  // Google
   'gemini-2.5-pro': { input: 1.25, output: 10 },
   'gemini-2.5-flash': { input: 0.30, output: 2.50 },
   'gemini-3-pro': { input: 1.25, output: 10 },
   'gemini-3-flash': { input: 0.15, output: 0.60 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
+  // OpenAI
   'gpt-4o': { input: 2.50, output: 10 },
   'gpt-4o-mini': { input: 0.15, output: 0.60 },
   'o1': { input: 15, output: 60 },

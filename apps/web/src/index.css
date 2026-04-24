@@ -16,14 +16,14 @@
 }
 
 .dark {
-  --bg-primary: #030712;    /* gray-950 */
-  --bg-card:    #111827;    /* gray-900 */
-  --bg-sidebar: rgba(17,24,39,0.8);
+  --bg-primary: #0A0B1E;    /* deep indigo */
+  --bg-card:    #13152B;    /* indigo card */
+  --bg-sidebar: rgba(19,21,43,0.8);
   --bg-hover:   rgba(255,255,255,0.04);
   --text-primary:   #f3f4f6; /* gray-100 */
   --text-secondary: #9ca3af; /* gray-400 */
   --text-muted:     #6b7280; /* gray-500 */
-  --border:     #374151;     /* gray-700 */
+  --border:     #252849;     /* indigo border */
   --ring-muted: rgba(255,255,255,0.06);
 }
 

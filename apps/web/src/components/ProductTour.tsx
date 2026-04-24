@@ -26,171 +26,102 @@ export interface TourStep {
 // ── Tour definitions ────────────────────────────────────────────────────────
 
 export const DASHBOARD_TOUR: TourStep[] = [
-  // ── Overview ──────────────────────────────────────────────────────────
+  // ── 1. Landing on the new Repositories-first sidebar ─────────────────
   {
     target: '[data-tour="sidebar-nav"]',
     title: 'Welcome to Origin',
-    content: 'This is your command center. Let\'s walk through everything — starting with the dashboard, then each section of the platform.',
+    content: 'Your AI coding record. Three stops in the sidebar: Repositories, Sessions, Insights. We\'ll hit each one — takes about a minute.',
+    placement: 'right',
+    route: '/repos',
+    delay: 200,
+  },
+
+  // ── 2. Repositories: starting point, groups, collapse, backfill ──────
+  {
+    target: '[data-tour="nav-repos"]',
+    title: '1. Repositories',
+    content: 'The default landing page. Import from GitHub or GitLab, or point at a local checkout — every commit that lands here gets an AI attribution and a pointer to the session that produced it.',
+    placement: 'right',
+  },
+  {
+    target: 'main',
+    title: 'Groups collapse',
+    content: 'Click any group header (Local, your GitHub org…) to hide its repos. The state sticks across reloads so a noisy "Local" group stays tucked away.',
+    placement: 'bottom',
+    delay: 200,
+  },
+  {
+    target: 'main',
+    title: 'Backfill historical files',
+    content: 'On a GitHub/GitLab group, "Backfill files" pulls the changed-file list for any commit that was ingested before Origin captured it. Click once and the commit-detail pages light up.',
+    placement: 'bottom',
+    action: 'Hover the group header to see it',
+  },
+
+  // ── 3. Sessions: list + pretty tool call rendering ───────────────────
+  {
+    target: '[data-tour="nav-sessions"]',
+    title: '2. Sessions',
+    content: 'Every AI coding run shows up here — agent, model, cost, duration, tokens. Open any row for the full transcript, with tool calls rendered as color-coded terminal rows (read / write / exec / MCP).',
+    placement: 'right',
+    route: '/sessions',
+  },
+
+  // ── 4. Insights (was Dashboard) — the rest of the steps live at /me ──
+  {
+    target: '[data-tour="nav-insights"]',
+    title: '3. Insights',
+    content: 'Your personal dashboard — the old Dashboard and Insights pages live here now. Stat cards, a coding timeline, an activity heatmap, per-agent breakdown, and full prompt search.',
     placement: 'right',
     route: '/me',
   },
   {
     target: '[data-tour="stat-cards"]',
-    title: 'Stats Overview',
-    content: 'Your key metrics at a glance — total sessions, tokens consumed, accumulated cost, and lines of code written. Click any card to expand an agent-by-agent breakdown.',
+    title: 'Today at a glance',
+    content: 'Sessions, tokens, spend, lines written. Click any card to expand into the agent-by-agent split.',
     placement: 'bottom',
-    action: 'Click a card to expand it',
-  },
-  {
-    target: '[data-tour="activity-heatmap"]',
-    title: 'Activity Heatmap',
-    content: 'Your coding activity over the past year. Darker cells = more AI sessions that day. Hover any cell to see the exact count. Build a streak!',
-    placement: 'bottom',
-    clickBefore: '[data-tour="tab-stats"]',
-    delay: 500,
-  },
-
-  // ── Sessions tab ──────────────────────────────────────────────────────
-  {
-    target: '[data-tour="tab-sessions"]',
-    title: 'Sessions Tab',
-    content: 'This is your default view — a complete list of every AI coding session. Let\'s look at what\'s inside.',
-    placement: 'bottom',
-    clickBefore: '[data-tour="tab-sessions"]',
-  },
-  {
-    target: '[data-tour="session-table"]',
-    title: 'Session History',
-    content: 'Each row is one AI session — which agent, which repo, branch, duration, cost, and tokens. Click a row to see the full detail: every prompt, tool call, and file change.',
-    placement: 'top',
-    action: 'Click any session for details',
-    delay: 500,
-  },
-
-  // ── Timeline tab ──────────────────────────────────────────────────────
-  {
-    target: '[data-tour="tab-timeline"]',
-    title: 'Timeline View',
-    content: 'A chronological view of your sessions. See when you switched between agents, how long each session lasted, and spot patterns in your workflow.',
-    placement: 'bottom',
-    clickBefore: '[data-tour="tab-timeline"]',
+    action: 'Cards expand on click',
   },
   {
     target: '[data-tour="tab-content-timeline"]',
-    title: 'Your Coding Timeline',
-    content: 'Each dot is a session, colored by agent. The vertical timeline shows your day-by-day activity. Look for patterns — when do you code most? Which agents do you reach for?',
+    title: 'Coding timeline',
+    content: 'Every session plotted on a single row of time, colored by agent. Fastest way to spot when and where the AI actually worked.',
     placement: 'top',
     delay: 300,
   },
-
-  // ── Agents tab ────────────────────────────────────────────────────────
-  {
-    target: '[data-tour="tab-agents"]',
-    title: 'Agents Breakdown',
-    content: 'See all the AI agents you\'ve used — Claude Code, Cursor, Gemini, Copilot, and more. Each gets its own card with detailed stats.',
-    placement: 'bottom',
-    clickBefore: '[data-tour="tab-agents"]',
-  },
-  {
-    target: '[data-tour="tab-content-agents"]',
-    title: 'Agent Cards',
-    content: 'Each card shows an agent\'s total sessions, cost, tokens, lines written, and last active time. Compare agents side by side to see which ones you use most and which are most efficient.',
-    placement: 'top',
-    delay: 300,
-  },
-
-  // ── Stats tab ─────────────────────────────────────────────────────────
   {
     target: '[data-tour="tab-stats"]',
-    title: 'Detailed Stats',
-    content: 'The full stats view with your activity heatmap, agent usage pie chart, top files, and repo breakdown — all in one place.',
+    title: 'Stats & heatmap',
+    content: 'Year-long activity heatmap plus top files, top repos, and agent usage. Darker cells = more AI work that day — streaks tick up here.',
     placement: 'bottom',
     clickBefore: '[data-tour="tab-stats"]',
-  },
-
-  // ── Patterns tab ──────────────────────────────────────────────────────
-  {
-    target: '[data-tour="tab-patterns"]',
-    title: 'Coding Patterns',
-    content: 'Discover when you\'re most productive. Hourly and daily breakdowns reveal your peak coding hours, average session length, and monthly trends.',
-    placement: 'bottom',
-    clickBefore: '[data-tour="tab-patterns"]',
-  },
-  {
-    target: '[data-tour="tab-content-patterns"]',
-    title: 'Your Peak Hours',
-    content: 'The hour-by-hour chart shows when you start AI sessions most. The daily chart shows which days of the week you code. Use this to optimize your schedule around your most productive windows.',
-    placement: 'top',
     delay: 400,
   },
-
-  // ── Efficiency tab ────────────────────────────────────────────────────
-  {
-    target: '[data-tour="tab-efficiency"]',
-    title: 'Efficiency Metrics',
-    content: 'How efficient is your AI coding? This tab tracks tokens per line of code, cost per commit, cache usage, and which tools your agents call most.',
-    placement: 'bottom',
-    clickBefore: '[data-tour="tab-efficiency"]',
-  },
-  {
-    target: '[data-tour="tab-content-efficiency"]',
-    title: 'Cost & Output Ratios',
-    content: 'Key ratios: tokens per line written, cost per commit, average lines per session. Lower tokens-per-line = more efficient prompting. High cache hit rates = better context reuse.',
-    placement: 'top',
-    delay: 400,
-  },
-
-  // ── Prompts tab ───────────────────────────────────────────────────────
   {
     target: '[data-tour="tab-prompts"]',
-    title: 'Prompt Search',
-    content: 'Search across all your prompts. Find that one prompt that produced great results and reuse it. Every prompt is indexed with the files it changed.',
+    title: 'Prompt search',
+    content: 'Every prompt you\'ve ever sent, searchable — indexed with the files each one changed. Find the prompt that produced great results and reuse it verbatim.',
     placement: 'bottom',
     clickBefore: '[data-tour="tab-prompts"]',
+    delay: 300,
   },
 
-  // ── Commits tab ───────────────────────────────────────────────────────
-  {
-    target: '[data-tour="tab-commits"]',
-    title: 'Commit History',
-    content: 'Every commit linked to AI sessions. See which commits were AI-assisted, the detection method, and click to view the full diff.',
-    placement: 'bottom',
-    clickBefore: '[data-tour="tab-commits"]',
-  },
-
-  // ── Other pages ───────────────────────────────────────────────────────
+  // ── 5. Commit drill-down: the new prompt → snapshot / blame links ─────
   {
     target: '[data-tour="nav-repos"]',
-    title: 'Repositories',
-    content: 'Import repos from GitHub/GitLab or track local ones. When you start an AI session in a tracked repo, it auto-links — so you can see all sessions per project.',
+    title: 'One more thing — commit drill-down',
+    content: 'Open a commit from Repositories → Repo → Commit. Each prompt card has "View snapshot →" and "Open AI blame →" — those now land on the exact prompt, not the whole session.',
     placement: 'right',
     route: '/repos',
   },
+
+  // ── 6. Settings (tucked under Account) ────────────────────────────────
   {
-    target: '[data-tour="nav-live"]',
-    title: 'Live Feed',
-    content: 'Watch your AI sessions in real time. See active sessions with live token counters, cost tickers, and an event log of everything happening across your projects.',
+    target: '[data-tour="nav-settings"]',
+    title: 'Settings',
+    content: 'API keys for the CLI, GitHub / GitLab integrations, general preferences. First time here? Start by creating an API key, then run `origin login --key …` locally.',
     placement: 'right',
-    route: '/live',
-  },
-  {
-    target: '[data-tour="nav-insights"]',
-    title: 'Insights',
-    content: 'Deep analytics and trends — cost over time, productivity scores, agent comparisons, and team benchmarks. The bigger picture of your AI coding.',
-    placement: 'right',
-  },
-  {
-    target: '[data-tour="nav-api-keys"]',
-    title: 'API Keys',
-    content: 'Create and manage API keys for CLI authentication. Each key connects an Origin CLI installation to your account. You need at least one to start tracking.',
-    placement: 'right',
-    route: '/api-keys',
-  },
-  {
-    target: '[data-tour="nav-integrations"]',
-    title: 'Integrations',
-    content: 'Connect GitHub and GitLab for automatic repo syncing, commit imports, and PR-level session linking. This is where you manage all your provider connections.',
-    placement: 'right',
+    route: '/settings',
   },
 ];
 

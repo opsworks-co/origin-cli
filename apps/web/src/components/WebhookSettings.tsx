@@ -1,12 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import * as api from '../api';
 
-export default function WebhookSettings({ repoId }: { repoId: string }) {
+export default function WebhookSettings({
+  repoId,
+  defaultExpanded = false,
+}: { repoId: string; defaultExpanded?: boolean }) {
   const [webhooks, setWebhooks] = useState<api.Webhook[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [newSecret, setNewSecret] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
 
   const load = async () => {
     try {

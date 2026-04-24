@@ -91,6 +91,32 @@ export const api = {
   },
   pingSession: (id: string) =>
     request(`/api/mcp/session/${id}/ping`, { method: 'POST' }),
+  attachRepo: async (id: string, repoPath: string) => {
+    const res = await request(`/api/mcp/session/${id}/attach-repo`, {
+      method: 'POST',
+      body: JSON.stringify({ repoPath }),
+    });
+    assertObj(res, 'attachRepo');
+    return res;
+  },
+  uploadSnapshot: async (id: string, snapshot: {
+    snapshotId: string;
+    type: string;
+    takenAt: string;
+    promptIndex?: number | null;
+    commitSha?: string | null;
+    treeSha?: string | null;
+    filesChanged?: string[];
+    linesAdded?: number;
+    linesRemoved?: number;
+  }) => {
+    const res = await request(`/api/mcp/session/${id}/snapshot`, {
+      method: 'POST',
+      body: JSON.stringify(snapshot),
+    });
+    assertObj(res, 'uploadSnapshot');
+    return res;
+  },
 
   // Sessions (web API)
   getSessions: (params?: Record<string, string>) => {

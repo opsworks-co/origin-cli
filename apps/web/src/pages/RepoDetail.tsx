@@ -496,6 +496,8 @@ function statusBadge(status: string | null | undefined) {
   return <span className={map[status] ?? 'badge-gray'}>{status.toLowerCase()}</span>;
 }
 
+type RepoTab = 'overview' | 'commits' | 'sessions';
+
 export default function RepoDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -505,6 +507,21 @@ export default function RepoDetail() {
   const [error, setError] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [commitSearch, setCommitSearch] = useState('');
+  // Repo-level sub-tab. Persists across reloads via localStorage so refreshing
+  // on the Sessions view doesn't bounce the user back to Commits.
+  const [repoTab, setRepoTab] = useState<RepoTab>(() => {
+    try {
+      const saved = localStorage.getItem('origin:repo-tab') as RepoTab | null;
+      if (saved === 'overview' || saved === 'commits' || saved === 'sessions') return saved;
+    } catch { /* ignore */ }
+    return 'commits';
+  });
+  useEffect(() => {
+    try { localStorage.setItem('origin:repo-tab', repoTab); } catch { /* ignore */ }
+  }, [repoTab]);
+  // Sessions tab data — fetched lazily when user opens it.
+  const [repoSessions, setRepoSessions] = useState<import('../api').Session[]>([]);
+  const [repoSessionsLoading, setRepoSessionsLoading] = useState(false);
 
   // Branch filter
   const [branches, setBranches] = useState<string[]>([]);
@@ -515,6 +532,7 @@ export default function RepoDetail() {
   const [syncMsg, setSyncMsg] = useState('');
   const [rescanning, setRescanning] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [webhookOpen, setWebhookOpen] = useState(false);
 
   // Health
   const [health, setHealth] = useState<RepoHealth | null>(null);
@@ -647,6 +665,17 @@ export default function RepoDetail() {
     return () => window.removeEventListener('keydown', handleKey);
   }, [selectedCommit]);
 
+  // Lazy-load sessions for this repo when the user opens the Sessions tab.
+  // Re-fetches if they switch away and back, since session activity is live.
+  useEffect(() => {
+    if (repoTab !== 'sessions' || !id) return;
+    setRepoSessionsLoading(true);
+    api.getSessions({ repoId: id, limit: '100' } as any)
+      .then((data) => setRepoSessions(data?.sessions || []))
+      .catch(() => setRepoSessions([]))
+      .finally(() => setRepoSessionsLoading(false));
+  }, [repoTab, id]);
+
   const isAI = (c: any) => c.session !== null || c.aiToolDetected !== null;
 
   const filteredCommits = commits.filter((c) => {
@@ -751,16 +780,60 @@ export default function RepoDetail() {
 
   const aiPct = health?.aiPercentage ?? (commits.length > 0 ? (aiCount / commits.length) * 100 : 0);
 
+  const handleToggleVerbose = async () => {
+    if (!repo) return;
+    const next = !repo.verboseCapture;
+    try {
+      const updated = await api.updateRepo(repo.id, { verboseCapture: next });
+      setRepo((r) => (r ? { ...r, verboseCapture: updated.verboseCapture } : r));
+      setSyncMsg(next ? 'Verbose capture enabled' : 'Verbose capture disabled');
+      setTimeout(() => setSyncMsg(''), 3000);
+    } catch {
+      setSyncMsg('Failed to update verbose capture');
+    }
+  };
+
   const overflowItems = [
-    { label: syncing ? 'Syncing…' : 'Resync now', onClick: handleSync, disabled: syncing || rescanning },
-    { label: rescanning ? 'Rescanning…' : 'Rescan AI attribution', onClick: handleRescan, disabled: syncing || rescanning },
+    {
+      label: syncing ? 'Syncing…' : 'Resync now',
+      description: 'Pull the latest commits and branch list from the provider.',
+      onClick: handleSync,
+      disabled: syncing || rescanning,
+    },
+    {
+      label: rescanning ? 'Rescanning…' : 'Rescan AI attribution',
+      description: 'Re-run the AI-vs-human classifier over this repo\u2019s commit history.',
+      onClick: handleRescan,
+      disabled: syncing || rescanning,
+    },
     ...(effProvider === 'github'
-      ? [{ label: importing ? 'Importing…' : 'Import sessions from branch', onClick: handleImportSessions, disabled: syncing || rescanning || importing }]
+      ? [
+          {
+            label: importing ? 'Importing…' : 'Import sessions from branch',
+            description: 'Pull AI sessions recorded on a specific branch into this repo.',
+            onClick: handleImportSessions,
+            disabled: syncing || rescanning || importing,
+          },
+          { divider: true },
+          {
+            label: 'GitHub webhook…',
+            description: 'Optional: real-time push updates instead of polling.',
+            onClick: () => setWebhookOpen(true),
+          },
+        ]
       : []),
+    { divider: true },
+    {
+      label: `Verbose capture: ${repo.verboseCapture ? 'on' : 'off'}`,
+      description: repo.verboseCapture
+        ? 'Click to disable. Full tool inputs + outputs are being stored.'
+        : 'Click to enable. Captures full tool inputs and result bodies in session transcripts.',
+      onClick: handleToggleVerbose,
+    },
   ];
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <PageHeader
         breadcrumb={[{ label: 'Repositories', to: '/repos' }, { label: repo.name }]}
         title={
@@ -811,121 +884,173 @@ export default function RepoDetail() {
         }
       />
 
-      {/* AI authorship — big visible split of AI vs human work on this repo */}
-      {(commits.length > 0 || syncMsg) && (
-      <div
-        className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-gradient-to-br from-indigo-500/[0.08] via-gray-900/60 to-violet-500/[0.08] px-5 py-4 shadow-[0_1px_0_rgba(255,255,255,0.03)_inset]"
-      >
-        {/* Subtle radial glow behind the bar */}
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_0%_0%,rgba(99,102,241,0.12),transparent_50%),radial-gradient(circle_at_100%_100%,rgba(168,85,247,0.08),transparent_55%)]" />
-        {commits.length > 0 && (
-          <div className="relative space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="relative">
-                  <span className="absolute inset-0 rounded-md bg-indigo-500/30 blur-md" />
-                  <span className="relative flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-indigo-500 to-violet-500 text-white">
-                    <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5"><path d="M13 2L4.5 13h6L11 22l8.5-11h-6L13 2z" fill="currentColor" /></svg>
-                  </span>
-                </div>
-                <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-300">AI authorship</span>
-              </div>
-              <div className="flex items-center gap-4 text-[11px] tabular-nums">
-                <span className="flex items-baseline gap-1.5">
-                  <span className="text-lg font-semibold text-white">{aiPct}%</span>
-                  <span className="text-gray-400">AI</span>
-                  <span className="text-gray-600">({aiCount})</span>
-                </span>
-                <span className="h-3 w-px bg-white/10" />
-                <span className="flex items-baseline gap-1.5">
-                  <span className="text-lg font-semibold text-white">{100 - aiPct}%</span>
-                  <span className="text-gray-400">Human</span>
-                  <span className="text-gray-600">({humanCount})</span>
-                </span>
-              </div>
-            </div>
-            {/* Segmented bar: gradient AI portion + warm amber human portion */}
-            <div className="relative h-2 overflow-hidden rounded-full bg-white/[0.04] ring-1 ring-inset ring-white/[0.03]">
-              <div
-                className="absolute left-0 top-0 h-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 shadow-[0_0_14px_rgba(139,92,246,0.5)]"
-                style={{ width: `${aiPct}%` }}
-                title={`${aiCount} AI commits`}
-              />
-              <div
-                className="absolute top-0 h-full bg-gradient-to-r from-amber-500/60 to-amber-400/40"
-                style={{ left: `${aiPct}%`, width: `${100 - aiPct}%` }}
-                title={`${humanCount} human commits`}
-              />
-            </div>
-          </div>
-        )}
-        {syncMsg && (
-          <div className={`relative mt-2 text-[10px] ${syncMsg.startsWith('Sync failed') ? 'text-red-400' : 'text-emerald-400'}`}>
-            {syncMsg}
-          </div>
-        )}
-      </div>
+      {/* Authorship is in the header pills; only keep transient sync feedback here. */}
+      {syncMsg && (
+        <div className={`text-[11px] ${syncMsg.startsWith('Sync failed') ? 'text-red-400' : 'text-emerald-400'}`}>
+          {syncMsg}
+        </div>
       )}
 
-      {/* Filters */}
-      <div className="flex gap-2 flex-wrap items-center">
-        {(
-          [
-            { key: 'all', label: 'All', count: commits.length },
-            { key: 'ai', label: 'AI Authored', count: aiCount },
-            { key: 'human', label: 'Human', count: humanCount },
-          ] as { key: Filter; label: string; count: number }[]
-        ).map(({ key, label, count }) => (
+      {/* Repo-level tabs — Entire-style. Overview / Commits / Sessions. */}
+      <div className="flex items-center gap-0 border-b border-gray-800/60">
+        {([
+          { key: 'overview' as const, label: 'Overview' },
+          { key: 'commits' as const, label: 'Commits', count: commits.length },
+          { key: 'sessions' as const, label: 'Sessions' },
+        ] as Array<{ key: RepoTab; label: string; count?: number }>).map((t) => (
           <button
-            key={key}
-            onClick={() => setFilter(key)}
-            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-              filter === key
-                ? 'bg-indigo-600/20 text-indigo-400 border border-indigo-500/30'
-                : 'bg-gray-800 text-gray-400 border border-gray-700 hover:text-gray-200'
+            key={t.key}
+            onClick={() => setRepoTab(t.key)}
+            className={`relative px-4 py-2 text-[13px] font-medium transition-colors ${
+              repoTab === t.key
+                ? 'text-gray-100'
+                : 'text-gray-500 hover:text-gray-300'
             }`}
           >
-            {label}{' '}
-            <span className="text-xs opacity-60">({count})</span>
+            {t.label}
+            {typeof t.count === 'number' && (
+              <span className={`ml-1.5 text-[10px] font-mono ${repoTab === t.key ? 'text-indigo-400' : 'text-gray-600'}`}>
+                {t.count}
+              </span>
+            )}
+            {repoTab === t.key && (
+              <div className="absolute bottom-[-1px] left-2 right-2 h-[2px] bg-indigo-500 rounded-full" />
+            )}
           </button>
         ))}
+      </div>
+
+      {/* Overview tab */}
+      {repoTab === 'overview' && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="card py-3">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Total commits</div>
+              <div className="text-lg font-semibold text-gray-100">{commits.length}</div>
+            </div>
+            <div className="card py-3">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">AI-authored</div>
+              <div className="text-lg font-semibold text-indigo-300">{aiCount} <span className="text-[11px] text-gray-500 font-normal">({aiPct.toFixed(0)}%)</span></div>
+            </div>
+            <div className="card py-3">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Branches</div>
+              <div className="text-lg font-semibold text-gray-100">{branches.length}</div>
+            </div>
+            {health && (
+              <div className="card py-3">
+                <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Health</div>
+                <div className="text-lg font-semibold text-gray-100">{health.healthScore}</div>
+              </div>
+            )}
+          </div>
+          <div className="card p-4 text-[12px] text-gray-500">
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-2">Most recent commits</div>
+            {commits.slice(0, 5).map((c) => (
+              <div key={c.id} className="flex items-center gap-2 py-1.5 border-b border-gray-800/40 last:border-0">
+                <code className="font-mono text-[11px] text-gray-400">{c.sha.slice(0, 8)}</code>
+                <span className="text-gray-300 truncate flex-1">{c.message.split('\n')[0]}</span>
+                <span className="text-[10px] text-gray-600">{timeAgo(c.committedAt)}</span>
+              </div>
+            ))}
+            {commits.length === 0 && <div className="py-2 text-gray-600">No commits yet.</div>}
+          </div>
+        </div>
+      )}
+
+      {/* Sessions tab — sessions filtered to this repo */}
+      {repoTab === 'sessions' && (
+        <div className="card p-0 overflow-hidden">
+          {repoSessionsLoading ? (
+            <div className="p-6 text-center text-gray-500 text-sm">Loading sessions…</div>
+          ) : repoSessions.length === 0 ? (
+            <div className="p-6 text-center text-gray-500 text-sm">No sessions for this repo yet.</div>
+          ) : (
+            <div className="divide-y divide-gray-800/40">
+              {repoSessions.map((s) => (
+                <Link
+                  key={s.id}
+                  to={`/sessions/${s.id}`}
+                  className="flex items-center gap-3 px-4 py-2.5 hover:bg-gray-800/30 transition-colors"
+                >
+                  <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-mono ${
+                    s.status === 'RUNNING' ? 'bg-emerald-500/15 text-emerald-300' :
+                    s.status === 'IDLE' ? 'bg-amber-500/15 text-amber-300' :
+                    'bg-gray-700/40 text-gray-400'
+                  }`}>
+                    {s.status?.toLowerCase()}
+                  </span>
+                  <span className="text-[12px] text-gray-300 truncate flex-1">
+                    {s.agentName || s.model}
+                  </span>
+                  {s.branch && (
+                    <span className="text-[10px] font-mono text-gray-500 hidden sm:inline">{s.branch}</span>
+                  )}
+                  <span className="text-[11px] text-gray-500 font-mono whitespace-nowrap">
+                    ${s.costUsd.toFixed(2)}
+                  </span>
+                  <span className="text-[11px] text-gray-600 whitespace-nowrap">
+                    {timeAgo(s.startedAt || s.createdAt)}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Commits tab — original filter + commit list */}
+      {repoTab === 'commits' && (
+      <>
+
+      {/* Filters — segmented control + branch selector */}
+      <div className="flex gap-2 flex-wrap items-center">
+        <div className="inline-flex items-center rounded-lg border border-gray-800 bg-gray-900/50 p-0.5">
+          {(
+            [
+              { key: 'all', label: 'All', count: commits.length },
+              { key: 'ai', label: 'AI Authored', count: aiCount },
+              { key: 'human', label: 'Human', count: humanCount },
+            ] as { key: Filter; label: string; count: number }[]
+          ).map(({ key, label, count }) => (
+            <button
+              key={key}
+              onClick={() => setFilter(key)}
+              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                filter === key
+                  ? 'bg-indigo-500/15 text-indigo-300 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-200'
+              }`}
+            >
+              {label}
+              <span className={`ml-1.5 ${filter === key ? 'text-indigo-400/70' : 'text-gray-600'}`}>{count}</span>
+            </button>
+          ))}
+        </div>
 
         {/* Branch filter dropdown */}
         {branches.length > 0 && (
-          <>
-            <div className="w-px h-6 bg-gray-700 mx-1" />
-            <select
-              value={branchFilter}
-              onChange={(e) => setBranchFilter(e.target.value)}
-              className="px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-800 text-gray-300 border border-gray-700 hover:text-gray-200 transition-colors appearance-none cursor-pointer pr-8"
-              style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
-            >
-              <option value="">All branches</option>
-              {branches.map((b) => (
-                <option key={b} value={b}>{b}</option>
-              ))}
-            </select>
-          </>
+          <select
+            value={branchFilter}
+            onChange={(e) => setBranchFilter(e.target.value)}
+            className="px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-900/50 text-gray-300 border border-gray-800 hover:text-gray-200 transition-colors appearance-none cursor-pointer pr-7"
+            style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
+          >
+            <option value="">All branches</option>
+            {branches.map((b) => (
+              <option key={b} value={b}>{b}</option>
+            ))}
+          </select>
         )}
       </div>
 
-      {/* Webhooks Section — only for repos we can actually talk to GitHub
-          for. Hidden on local repos (no integration, no GitHub remote to
-          point a webhook at) so it doesn't eat half the screen with a
-          setup guide the user can't act on. */}
-      {effProvider === 'github' && (
-        <div className="card">
-          <WebhookSettings repoId={id!} />
-        </div>
-      )}
 
       {/* Commits — Snapshots-style date-grouped list */}
       <div className="card p-0 overflow-hidden">
         {/* Search header */}
-        <div className="px-5 py-3 border-b border-gray-800 flex items-center gap-3">
+        <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
           <div className="relative flex-1 max-w-xl">
             <svg
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600"
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-600"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -937,10 +1062,10 @@ export default function RepoDetail() {
               value={commitSearch}
               onChange={(e) => setCommitSearch(e.target.value)}
               placeholder="Search commits, SHA, or author…"
-              className="w-full bg-gray-900/60 border border-gray-800 rounded-lg pl-9 pr-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-indigo-600/60 transition-colors"
+              className="w-full bg-transparent border-0 pl-7 pr-2 py-1 text-sm text-gray-200 placeholder-gray-600 focus:outline-none"
             />
           </div>
-          <div className="text-xs text-gray-600 whitespace-nowrap ml-auto">
+          <div className="text-[11px] text-gray-600 whitespace-nowrap ml-auto">
             {searchedCommits.length} commit{searchedCommits.length === 1 ? '' : 's'}
           </div>
         </div>
@@ -955,9 +1080,9 @@ export default function RepoDetail() {
             {commitsByDate.map((group) => (
               <div key={group.key}>
                 {/* Date header */}
-                <div className="px-5 py-2.5 border-b border-gray-800 bg-gray-900/30 flex items-center justify-between sticky top-0 z-10 backdrop-blur">
-                  <p className="text-xs text-gray-400 font-semibold">{group.label}</p>
-                  <p className="text-[10px] text-gray-600 uppercase tracking-wider">
+                <div className="px-4 py-1.5 border-y border-gray-800/80 bg-gray-900/60 flex items-center justify-between sticky top-0 z-10 backdrop-blur">
+                  <p className="text-[11px] text-gray-400 font-medium">{group.label}</p>
+                  <p className="text-[10px] text-gray-600 tabular-nums">
                     {group.items.length} commit{group.items.length === 1 ? '' : 's'}
                   </p>
                 </div>
@@ -983,10 +1108,10 @@ export default function RepoDetail() {
                       <div
                         key={commit.id}
                         onClick={() => navigate(`/repos/${id}/commits/${commit.sha}`)}
-                        className="group flex items-center gap-4 px-5 py-3 hover:bg-gray-800/30 transition-colors cursor-pointer"
+                        className="group flex items-center gap-3 px-4 py-1.5 hover:bg-gray-800/30 transition-colors cursor-pointer"
                       >
                         {/* SHA */}
-                        <code className="text-[11px] text-gray-500 font-mono w-16 flex-shrink-0">
+                        <code className="text-[11px] text-gray-500 font-mono w-14 flex-shrink-0 tabular-nums">
                           {commit.sha.slice(0, 7)}
                         </code>
 
@@ -1059,6 +1184,8 @@ export default function RepoDetail() {
           </div>
         )}
       </div>
+      </>
+      )}
 
       {/* Diff Modal */}
       {selectedCommit && (
@@ -1069,6 +1196,34 @@ export default function RepoDetail() {
           onClose={closeDiff}
           commit={selectedCommit}
         />
+      )}
+
+      {/* Webhook setup modal — lives in the "⋯" menu so it doesn't eat
+          page space when the user isn't configuring it. */}
+      {webhookOpen && effProvider === 'github' && id && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setWebhookOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-xl border border-gray-800 bg-gray-950 shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-800">
+              <h3 className="text-sm font-semibold text-gray-100">GitHub webhook</h3>
+              <button
+                onClick={() => setWebhookOpen(false)}
+                className="text-gray-500 hover:text-gray-200 text-xs"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-4">
+              <WebhookSettings repoId={id} defaultExpanded />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

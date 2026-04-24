@@ -99,6 +99,41 @@ function RevealText({ children, delay = 0, className = '' }: { children: React.R
   );
 }
 
+// ── Rotating hero word ──────────────────────────────────────────────────────
+function RotatingWord({
+  words,
+  interval = 2200,
+}: {
+  words: { text: string; className: string }[];
+  interval?: number;
+}) {
+  const [index, setIndex] = useState(0);
+  const [visible, setVisible] = useState(true);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setVisible(false);
+      setTimeout(() => {
+        setIndex((i) => (i + 1) % words.length);
+        setVisible(true);
+      }, 280);
+    }, interval);
+    return () => clearInterval(id);
+  }, [words.length, interval]);
+
+  const current = words[index];
+
+  return (
+    <span
+      className={`inline-block whitespace-nowrap transition-all duration-300 ease-out ${current.className} ${
+        visible ? 'opacity-100 translate-y-0 blur-0' : 'opacity-0 -translate-y-2 blur-sm'
+      }`}
+    >
+      {current.text}
+    </span>
+  );
+}
+
 // ── Fade-in on scroll ────────────────────────────────────────────────────────
 function useFadeIn() {
   const ref = useRef<HTMLDivElement>(null);
@@ -167,6 +202,18 @@ const CLI_DEMOS: { cmd: string; desc: string; lines: { text: string; color?: str
       { text: '  Installing git hooks...', color: 'text-gray-500', delay: 1100 },
       { text: '  \u2713 post-commit hook installed', color: 'text-emerald-400', delay: 1400 },
       { text: '  \u2713 Origin initialized in 2.1s', color: 'text-indigo-400', delay: 1800 },
+    ],
+  },
+  {
+    cmd: 'snapshot',
+    desc: 'Per-prompt captures',
+    lines: [
+      { text: '$ origin snapshot', color: 'text-gray-200' },
+      { text: '  Session a3f2.. | claude-4 | 3 turns', color: 'text-gray-600', delay: 300 },
+      { text: '  #1 "add rate limiting"        +42 / -8   94% AI', color: 'text-emerald-400', delay: 600 },
+      { text: '  #2 "handle locked accounts"   +18 / -3   100% AI', color: 'text-emerald-400', delay: 900 },
+      { text: '  #3 "write tests for paths"    +87 / -0   100% AI', color: 'text-emerald-400', delay: 1200 },
+      { text: '  Stored in git refs. Travels with clone.', color: 'text-indigo-400', delay: 1500 },
     ],
   },
   {
@@ -418,8 +465,13 @@ export default function Landing() {
           background: linear-gradient(90deg, #6366f1 0%, #a855f7 25%, #38bdf8 50%, #a855f7 75%, #6366f1 100%);
           background-size: 200% auto;
           -webkit-background-clip: text;
+          background-clip: text;
           -webkit-text-fill-color: transparent;
           animation: shimmer 6s linear infinite;
+          /* Descenders (g, p, y) get clipped with tight line-height + bg-clip:text.
+             Extra padding-bottom + line-height gives them room. */
+          padding-bottom: 0.12em;
+          line-height: 1.1;
         }
         @keyframes scan {
           0% { transform: translateY(-100%); opacity: 0; }
@@ -442,7 +494,7 @@ export default function Landing() {
           <div className="scan-line absolute left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-indigo-500/30 to-transparent" />
         </div>
 
-        <div className="relative w-full max-w-5xl mx-auto px-6 py-10 lg:py-12">
+        <div className="relative w-full max-w-5xl mx-auto px-6 py-12 lg:py-16">
           <div className="max-w-3xl">
             {/* Badge */}
             <RevealText delay={200}>
@@ -454,8 +506,17 @@ export default function Landing() {
 
             <h1 className="text-[clamp(2.8rem,7vw,5rem)] font-bold leading-[1.0] tracking-[-0.04em]">
               <RevealText delay={400}>
-                <span className="text-white">Your AI agents build fast. </span>
-                <span className="text-shimmer">Origin keeps them in check.</span>
+                <span className="block">
+                  <span className="text-white">Every AI </span>
+                  <RotatingWord
+                    words={[
+                      { text: 'agent.', className: 'text-emerald-400' },
+                      { text: 'prompt.', className: 'text-indigo-400' },
+                      { text: 'line.', className: 'text-purple-400' },
+                    ]}
+                  />
+                </span>
+                <span className="block text-shimmer mt-4">In your git repo.</span>
               </RevealText>
             </h1>
 
@@ -465,6 +526,12 @@ export default function Landing() {
                 <span className="text-emerald-400/90">solo devs</span>. Policy enforcement,
                 PR compliance, and audit trails for{' '}
                 <span className="text-indigo-400/90">teams</span>.
+              </p>
+            </RevealText>
+
+            <RevealText delay={1600}>
+              <p className="mt-3 text-sm text-gray-500 max-w-2xl leading-relaxed">
+                The AI coding history layer for developers and teams.
               </p>
             </RevealText>
 
@@ -542,12 +609,83 @@ export default function Landing() {
 
       <div className="border-t border-white/[0.06]" />
 
+      {/* ─── HOW IT WORKS ─────────────────────────────────────────────────── */}
+      <section className="max-w-5xl mx-auto px-6 py-24">
+        <FadeIn>
+          <div className="flex items-end justify-between mb-10">
+            <div>
+              <p className="text-xs text-gray-600 font-mono mb-2">1.0</p>
+              <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">How it works</h2>
+            </div>
+            <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
+              Four layers. Install once, everything downstream just works.
+            </p>
+          </div>
+        </FadeIn>
+
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-px bg-white/[0.04] rounded-lg overflow-hidden border border-white/[0.06]">
+          {[
+            {
+              step: '01',
+              title: 'Every agent.',
+              accent: 'text-emerald-400',
+              desc: 'Origin auto-detects Claude Code, Cursor, Gemini CLI, Codex, Copilot, Windsurf, Aider — no config, no per-tool setup.',
+              code: 'origin init',
+              codeNote: 'one command, every agent',
+            },
+            {
+              step: '02',
+              title: 'Every prompt.',
+              accent: 'text-indigo-400',
+              desc: 'Each turn is captured: prompt text, model, files touched, diff, tokens, cost, duration. A snapshot per prompt.',
+              code: 'origin sessions',
+              codeNote: 'replay any conversation',
+            },
+            {
+              step: '03',
+              title: 'Every line.',
+              accent: 'text-purple-400',
+              desc: 'Line-level attribution across agents and sessions. Point at any line and get the exact prompt that wrote it.',
+              code: 'origin why src/auth.ts:42',
+              codeNote: 'prompt-level git blame',
+            },
+            {
+              step: '04',
+              title: 'In your git repo.',
+              accent: 'text-amber-400',
+              desc: 'Sessions live in git refs and git notes. git clone brings everything. No lock-in. Your data travels with your code.',
+              code: 'git push --all',
+              codeNote: 'history ships with the repo',
+            },
+          ].map((it, i) => (
+            <FadeIn key={it.step} delay={i * 80}>
+              <div className="bg-[rgb(8,9,10)] p-7 h-full group hover:bg-white/[0.02] transition-colors duration-200 flex flex-col">
+                <div className="flex items-baseline gap-3 mb-4">
+                  <span className="text-xs text-gray-700 font-mono">{it.step}</span>
+                  <h3 className={`text-base font-semibold ${it.accent}`}>{it.title}</h3>
+                </div>
+                <p className="text-sm text-gray-500 leading-relaxed flex-1">{it.desc}</p>
+                <div className="mt-5 pt-4 border-t border-white/[0.05]">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-indigo-400 font-mono text-[11px]">$</span>
+                    <code className="text-[11px] text-gray-300 font-mono">{it.code}</code>
+                  </div>
+                  <p className="text-[10px] text-gray-600">{it.codeNote}</p>
+                </div>
+              </div>
+            </FadeIn>
+          ))}
+        </div>
+      </section>
+
+      <div className="border-t border-white/[0.06]" />
+
       {/* ─── CLI DEMO ─────────────────────────────────────────────────────── */}
       <section className="max-w-4xl mx-auto px-6 py-24">
         <FadeIn>
           <div className="flex items-end justify-between mb-8">
             <div>
-              <p className="text-xs text-gray-600 font-mono mb-2">1.0</p>
+              <p className="text-xs text-gray-600 font-mono mb-2">2.0</p>
               <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Five commands,<br />full visibility</h2>
             </div>
             <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
@@ -583,7 +721,7 @@ export default function Landing() {
         <FadeIn>
           <div className="flex items-end justify-between mb-10">
             <div>
-              <p className="text-xs text-gray-600 font-mono mb-2">2.0</p>
+              <p className="text-xs text-gray-600 font-mono mb-2">3.0</p>
               <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">
                 {plan === 'solo'
                   ? <>Built for individuals<br />who code with AI.</>
@@ -694,7 +832,7 @@ export default function Landing() {
         <FadeIn>
           <div className="flex items-end justify-between mb-16">
             <div>
-              <p className="text-xs text-gray-600 font-mono mb-2">3.0</p>
+              <p className="text-xs text-gray-600 font-mono mb-2">4.0</p>
               <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">From code to merge,<br />fully tracked</h2>
             </div>
             <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
@@ -731,7 +869,7 @@ export default function Landing() {
         <FadeIn>
           <div className="flex items-end justify-between mb-16">
             <div>
-              <p className="text-xs text-gray-600 font-mono mb-2">4.0</p>
+              <p className="text-xs text-gray-600 font-mono mb-2">5.0</p>
               <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Two modes,<br />one platform</h2>
             </div>
             <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
@@ -787,7 +925,7 @@ export default function Landing() {
       <section className="max-w-5xl mx-auto px-6 py-24">
         <FadeIn>
           <div className="text-center mb-14">
-            <p className="text-xs text-gray-600 font-mono mb-2">5.0</p>
+            <p className="text-xs text-gray-600 font-mono mb-2">6.0</p>
             <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">How Origin compares</h2>
             <p className="text-gray-500 mt-3 text-sm">The only platform that covers attribution, governance, and developer experience.</p>
           </div>

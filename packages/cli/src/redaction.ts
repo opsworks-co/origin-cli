@@ -67,13 +67,16 @@ function shannonEntropy(s: string): number {
 
 /**
  * Check if a token looks like a high-entropy secret.
+ * Intentionally conservative: the old thresholds nuked whole transcripts
+ * by flagging file paths, commit SHAs, base64-ish tool output, etc.
  */
 function isHighEntropySecret(token: string): boolean {
-  if (token.length < 15 || token.length > 90) return false;
+  if (token.length < 25 || token.length > 90) return false;
   // Skip common non-secrets
   if (/^[a-z]+$/i.test(token)) return false;  // all letters
   if (/^[0-9]+$/.test(token)) return false;     // all numbers
-  if (/^[a-f0-9]+$/i.test(token) && token.length <= 40) return false; // hex up to 40 chars (git SHA, short hashes)
+  if (/^[a-f0-9]+$/i.test(token) && token.length <= 64) return false; // hex up to sha-256 length
+  if (/\//.test(token)) return false;           // filesystem-y paths
   // Must have mixed character classes
   const hasUpper = /[A-Z]/.test(token);
   const hasLower = /[a-z]/.test(token);
@@ -81,8 +84,11 @@ function isHighEntropySecret(token: string): boolean {
   const hasSpecial = /[^A-Za-z0-9]/.test(token);
   const classCount = [hasUpper, hasLower, hasDigit, hasSpecial].filter(Boolean).length;
   if (classCount < 3) return false;
-  return shannonEntropy(token) > 4.5;
+  return shannonEntropy(token) > 5.0;
 }
+
+// Words near a candidate that make it plausibly a secret in context.
+const SECRET_CONTEXT = /\b(key|token|secret|password|passwd|pass|auth|credential|bearer|api.?key|api.?secret|client.?secret)\b/i;
 
 // ─── Public API ───────────────────────────────────────────────────────────
 
@@ -123,10 +129,15 @@ export function redactSecrets(text: string): RedactionResult {
   while ((tokenMatch = tokenRegex.exec(result)) !== null) {
     const token = tokenMatch[1];
     if (token.includes(REDACTED)) continue; // Already redacted
-    if (isHighEntropySecret(token)) {
-      entropyRedactions.push([tokenMatch.index, tokenMatch[0].length, token]);
-      findings.push({ type: 'High-entropy secret', position: tokenMatch.index });
-    }
+    if (!isHighEntropySecret(token)) continue;
+    // Only redact if there's a secret-ish context word within 80 chars of
+    // the match. Prevents false positives on tool output, hashes, paths.
+    const ctxStart = Math.max(0, tokenMatch.index - 80);
+    const ctxEnd = Math.min(result.length, tokenMatch.index + tokenMatch[0].length + 80);
+    const ctx = result.slice(ctxStart, ctxEnd);
+    if (!SECRET_CONTEXT.test(ctx)) continue;
+    entropyRedactions.push([tokenMatch.index, tokenMatch[0].length, token]);
+    findings.push({ type: 'High-entropy secret', position: tokenMatch.index });
   }
 
   // Apply entropy redactions in reverse order to preserve positions

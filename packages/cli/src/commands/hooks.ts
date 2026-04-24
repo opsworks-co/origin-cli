@@ -37,6 +37,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import * as fzstd from 'fzstd';
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
 
@@ -674,6 +675,7 @@ interface CodexSessionData {
   tokensUsed: number;
   inputTokens: number;
   outputTokens: number;
+  toolCalls: number;
   prompt: string;
   transcript?: string;  // full JSONL conversation for display
 }
@@ -744,6 +746,7 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
         tokensUsed: rolloutResult.tokensUsed,
         inputTokens: rolloutResult.inputTokens,
         outputTokens: rolloutResult.outputTokens,
+        toolCalls: rolloutResult.toolCalls,
         prompt,
         transcript: rolloutResult.transcript,
       };
@@ -756,6 +759,7 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
       tokensUsed: sqliteTokens,
       inputTokens: Math.round(sqliteTokens * 0.7),
       outputTokens: Math.round(sqliteTokens * 0.3),
+      toolCalls: 0,
       prompt,
     };
   } catch (err) {
@@ -778,7 +782,7 @@ function parseCodexRollout(
   codexDir: string,
   rolloutPath: string,
   threadId: string,
-): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; transcript?: string } | null {
+): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; toolCalls: number; transcript?: string } | null {
   try {
     // Try to resolve the rollout file
     let rolloutFile = '';
@@ -802,29 +806,19 @@ function parseCodexRollout(
 
     if (!rolloutFile) return null;
 
-    // Read and decompress
+    // Read + decompress. Previously relied on `zstd` CLI or `python3+zstandard`
+    // which many users don't have installed — token capture silently degraded
+    // to character-based estimation. fzstd is a pure-JS decoder (~20KB) so this
+    // path now works on any machine with just Node.
     let content: string;
     if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
-      // Use zstd CLI to decompress — avoid adding a native dep
       try {
-        content = execFileSync('zstd', ['-d', '-c', rolloutFile], {
-          encoding: 'utf-8' as const,
-          timeout: 10000,
-          stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-          maxBuffer: 50 * 1024 * 1024,
-        });
-      } catch {
-        // zstd might not be installed — try python3 as fallback
-        try {
-          content = execFileSync(
-            'python3',
-            ['-c', "import sys,zstandard as z;sys.stdout.buffer.write(z.ZstdDecompressor().decompress(open(sys.argv[1],'rb').read()))", rolloutFile],
-            { encoding: 'utf-8' as const, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], maxBuffer: 50 * 1024 * 1024 },
-          );
-        } catch {
-          debugLog('codex', 'cannot decompress .zst — neither zstd nor python3+zstandard available');
-          return null;
-        }
+        const compressed = fs.readFileSync(rolloutFile);
+        const decompressed = fzstd.decompress(new Uint8Array(compressed));
+        content = Buffer.from(decompressed).toString('utf-8');
+      } catch (err) {
+        debugLog('codex', 'fzstd decompress failed', { error: String(err) });
+        return null;
       }
     } else {
       content = fs.readFileSync(rolloutFile, 'utf-8');
@@ -837,6 +831,7 @@ function parseCodexRollout(
     let maxTotalTokens = 0;
     let model: string | undefined;
     let turnCount = 0;
+    let toolCalls = 0;
 
     // Build transcript from conversation events
     const turns: Array<{ role: string; content: string }> = [];
@@ -892,6 +887,7 @@ function parseCodexRollout(
         // Tool calls — record as assistant actions
         if (eventType === 'tool_call' || eventType === 'function_call' ||
             (event?.data?.type === 'function_call') || (event?.data?.type === 'shell')) {
+          toolCalls++;
           const tool = event?.data?.name || event?.data?.command || event?.name || 'tool';
           const args = event?.data?.arguments || event?.data?.args || '';
           const argStr = typeof args === 'string' ? args : JSON.stringify(args);
@@ -911,6 +907,7 @@ function parseCodexRollout(
       outputTokens: maxOutputTokens,
       model,
       turnCount,
+      toolCalls,
       transcript: turns.length > 0 ? JSON.stringify(turns) : undefined,
     };
   } catch (err) {
@@ -1462,6 +1459,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     let agentSystemPrompt: string | undefined;
     let activePolicies: string[] | undefined;
     let enforcementRules: any[] | undefined;
+    let verboseCapture = false;
     let apiStartedAt: string | undefined;
 
     if (connected) {
@@ -1484,11 +1482,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
         activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
         enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+        verboseCapture = result.verboseCapture === true;
         // Use server startedAt if returned (deduped sessions preserve original start time)
         if (result.startedAt) {
           apiStartedAt = result.startedAt as string;
         }
-        debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt });
+        debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt, verboseCapture });
       } catch (apiErr: any) {
         // API failed — fall back to local session instead of aborting entirely
         debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
@@ -1519,6 +1518,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       agentSystemPrompt,
       activePolicies,
       enforcementRules,
+      verboseCapture,
     };
 
     // Multi-repo: store all repo paths and per-repo git state
@@ -1954,6 +1954,25 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       state.transcriptPath = input.transcript_path;
     }
 
+    // ── Mid-session branch tracking ─────────────────────────────────────
+    // Agents that don't fire PostToolUse (Codex) otherwise never get a
+    // branch refresh until session-end, so sessions look stuck on the
+    // branch they started on even after the agent `git checkout`s a new one.
+    // getBranch() just reads .git/HEAD so it's cheap to do on every prompt.
+    try {
+      const repoPath = state.repoPath || hookCwd;
+      const currentBranch = getBranch(repoPath);
+      if (currentBranch && currentBranch !== state.branch) {
+        debugLog('user-prompt-submit', 'branch changed', { from: state.branch, to: currentBranch });
+        state.branch = currentBranch;
+        if (isConnectedMode() && state.sessionId && !state.sessionId.startsWith('local-')) {
+          api.updateSession(state.sessionId, { branch: currentBranch }).catch(() => {});
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+
     // Ensure session stays RUNNING (may have been auto-expired by listAllActiveSessions)
     state.status = 'RUNNING';
     saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
@@ -1971,7 +1990,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         try {
           if (state.transcriptPath) {
             parsed = parseTranscript(state.transcriptPath);
-            displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
+            displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
           }
         } catch {
           // Transcript may not be readable mid-session for all agents
@@ -2191,7 +2210,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     const parsed = parseTranscript(state.transcriptPath);
 
     // Format transcript for dashboard display (converts JSONL → [{role, content}] JSON)
-    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
+    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
     debugLog('stop', 'formatted transcript', { displayLength: displayTranscript.length });
 
     // For Cursor: discover agent transcript JSONL for real conversation data + better token estimates
@@ -2231,20 +2250,28 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       }
     }
 
-    // For Codex: supplement with data from its SQLite database when transcript is missing
-    const codexData = (!state.transcriptPath && parsed.tokensUsed === 0)
+    // For Codex: supplement with data from its SQLite database / rollout JSONL.
+    // Gate on agentSlug so we don't accidentally pull Codex data into a
+    // different agent's session. Run whenever we don't yet have real tokens —
+    // don't also require empty transcriptPath, since Codex occasionally
+    // populates it and we still want the rollout's richer numbers.
+    const codexData = (agentSlug === 'codex' && parsed.tokensUsed === 0)
       ? discoverCodexSessionData(state.repoPath)
       : null;
     if (codexData) {
       debugLog('stop', 'supplementing with Codex data', {
         model: codexData.model,
         tokens: codexData.tokensUsed,
+        toolCalls: codexData.toolCalls,
         hasTranscript: !!codexData.transcript,
       });
       if (!parsed.model) parsed.model = codexData.model;
       parsed.tokensUsed = codexData.tokensUsed;
       parsed.inputTokens = codexData.inputTokens;
       parsed.outputTokens = codexData.outputTokens;
+      if (codexData.toolCalls > 0 && parsed.toolCalls === 0) {
+        parsed.toolCalls = codexData.toolCalls;
+      }
       if (codexData.prompt && state.prompts.length === 0) {
         state.prompts.push(codexData.prompt);
       }
@@ -2688,7 +2715,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     const parsed = parseTranscript(state.transcriptPath);
 
     // Format transcript for dashboard display (converts JSONL → [{role, content}] JSON)
-    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
+    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
     debugLog('session-end', 'formatted transcript', { displayLength: displayTranscript.length });
 
     const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
@@ -3302,12 +3329,35 @@ export async function handlePostCommit(): Promise<void> {
 
     if (connected) {
       for (const s of activeSessions) {
+        // Attribute this commit to the session's current (latest) prompt so
+        // the commit-detail page can filter "prompts in this commit" by SHA
+        // instead of the noisier file-overlap heuristic. Schema stores one
+        // commitSha per (sessionId, promptIndex) — if a prompt produces
+        // multiple commits in sequence, last-write wins; earlier commits on
+        // that prompt still surface through the file-overlap fallback.
+        const latestPromptIdx = Math.max(0, (s.prompts?.length || 1) - 1);
+        const latestPromptText = s.prompts?.[latestPromptIdx] || '';
+        const perPromptUpdate = {
+          promptIndex: latestPromptIdx,
+          promptText: latestPromptText.slice(0, 1000),
+          filesChanged,
+          diff: diff.length > 100_000 ? diff.slice(0, 100_000) : diff,
+          linesAdded,
+          linesRemoved,
+          commitSha,
+        };
         try {
-          debugLog('post-commit', 'sending incremental update', { sessionId: s.sessionId, filesChanged: filesChanged.length });
+          debugLog('post-commit', 'sending incremental update', {
+            sessionId: s.sessionId,
+            filesChanged: filesChanged.length,
+            attributedPromptIdx: latestPromptIdx,
+            commitSha,
+          });
           await api.updateSession(s.sessionId, {
             filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
             branch: currentBranch || undefined,
             gitCapture,
+            promptChanges: latestPromptText ? [perPromptUpdate] : undefined,
           });
           debugLog('post-commit', 'API update complete', { sessionId: s.sessionId });
         } catch (err: any) {
@@ -3436,6 +3486,68 @@ function enforceFileRestrictions(
   return null;
 }
 
+/**
+ * Lazy multi-repo attribution.
+ *
+ * Resolves each file path to its containing git repo. If any path lives in
+ * a repo that isn't yet attached to this session, notifies the API to attach
+ * it and tracks per-repo git state locally. This is how we pick up sibling
+ * repos the agent actually touches — without blindly attaching every repo
+ * under the cwd at session-start.
+ */
+async function attachReposForFiles(
+  state: SessionState,
+  filePaths: string[],
+  saveCwd: string,
+): Promise<void> {
+  if (!filePaths.length) return;
+  if (!state.sessionId || state.sessionId.startsWith('local-')) return;
+  if (!isConnectedMode()) return;
+
+  const attached = new Set<string>();
+  if (state.repoPath) attached.add(state.repoPath);
+  for (const rp of state.repoPaths || []) attached.add(rp);
+
+  const newRoots = new Set<string>();
+  for (const fp of filePaths) {
+    if (!fp) continue;
+    const abs = path.isAbsolute(fp) ? fp : path.resolve(state.repoPath || saveCwd, fp);
+    let dir: string;
+    try {
+      dir = fs.statSync(abs).isDirectory() ? abs : path.dirname(abs);
+    } catch {
+      dir = path.dirname(abs);
+    }
+    const root = getGitRoot(dir);
+    if (!root || attached.has(root) || newRoots.has(root)) continue;
+    newRoots.add(root);
+  }
+  if (newRoots.size === 0) return;
+
+  let mutated = false;
+  for (const root of newRoots) {
+    try {
+      await api.attachRepo(state.sessionId, root);
+    } catch (err: any) {
+      debugLog('attach-repo', 'failed (non-fatal)', { root, error: err?.message });
+      continue;
+    }
+    if (!state.repoPaths) state.repoPaths = state.repoPath ? [state.repoPath] : [];
+    state.repoPaths.push(root);
+    if (!state.perRepoState) state.perRepoState = {};
+    state.perRepoState[root] = {
+      headShaAtStart: getHeadSha(root),
+      headShaAtLastStop: null,
+      prePromptSha: getHeadSha(root),
+      prePromptDirtyFiles: getDirtyFiles(root),
+      branch: getBranch(root),
+    };
+    mutated = true;
+    debugLog('attach-repo', 'attached', { root, sessionId: state.sessionId });
+  }
+  if (mutated) saveSessionState(state, saveCwd, state.sessionTag);
+}
+
 async function handlePreToolUse(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('pre-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
@@ -3447,20 +3559,33 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
   }
   const { state, saveCwd } = found;
 
-  // ── Policy Enforcement: FILE_RESTRICTION ──────────────────────────────
-  if (state.enforcementRules && state.enforcementRules.length > 0) {
-    const toolInput = input.tool_input || {};
-    const filePaths = extractFilePaths(input.tool_name || '', toolInput);
+  // Extract file paths once — used for both lazy repo attach and policy enforcement.
+  const toolInput = input.tool_input || {};
+  const filePaths = extractFilePaths(input.tool_name || '', toolInput);
+  if (filePaths.length > 0) {
     debugLog('pre-tool-use', 'extracted paths', { filePaths, toolName: input.tool_name });
+  }
 
-    if (filePaths.length > 0) {
-      const result = enforceFileRestrictions(state.enforcementRules, filePaths, state.repoPath);
-      if (result?.blocked) {
-        debugLog('pre-tool-use', 'BLOCKED by policy', { reason: result.reason });
-        // Exit code 2 + stderr blocks the tool for both Claude Code and Gemini CLI
-        process.stderr.write(result.reason + '\n');
-        process.exit(2);
-      }
+  // ── Lazy multi-repo attach ──────────────────────────────────────────────
+  // If the agent touches a file in a sibling repo, attach it now instead of
+  // attaching every repo under cwd upfront (the old behavior bundled unrelated
+  // projects into a single session).
+  if (filePaths.length > 0) {
+    try {
+      await attachReposForFiles(state, filePaths, saveCwd);
+    } catch {
+      // non-fatal — attribution is best-effort
+    }
+  }
+
+  // ── Policy Enforcement: FILE_RESTRICTION ──────────────────────────────
+  if (state.enforcementRules && state.enforcementRules.length > 0 && filePaths.length > 0) {
+    const result = enforceFileRestrictions(state.enforcementRules, filePaths, state.repoPath);
+    if (result?.blocked) {
+      debugLog('pre-tool-use', 'BLOCKED by policy', { reason: result.reason });
+      // Exit code 2 + stderr blocks the tool for both Claude Code and Gemini CLI
+      process.stderr.write(result.reason + '\n');
+      process.exit(2);
     }
   }
 
@@ -3474,6 +3599,17 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
         const snapId = createAutoSnapshot(state.repoPath, state.sessionTag);
         if (snapId) {
           debugLog('pre-tool-use', 'auto-snapshot created', { snapId, toolName: input.tool_name });
+          // Fire-and-forget upload so the dashboard timeline can mark a dot.
+          // Non-fatal — snapshots stay locally even if upload fails.
+          if (isConnectedMode() && state.sessionId && !state.sessionId.startsWith('local-')) {
+            api.uploadSnapshot(state.sessionId, {
+              snapshotId: snapId,
+              type: 'auto',
+              takenAt: new Date().toISOString(),
+              promptIndex: Math.max(0, (state.prompts?.length || 1) - 1),
+              commitSha: getHeadSha(state.repoPath) || undefined,
+            }).catch(() => { /* non-fatal */ });
+          }
         }
       }
     } catch {

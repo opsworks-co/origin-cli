@@ -518,6 +518,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         agentSystemPrompt: dedupPrompt || undefined,
         activePolicies: [],
         startedAt: existingSession.startedAt?.toISOString(),
+        verboseCapture: !!repo.verboseCapture,
       });
     }
 
@@ -631,15 +632,31 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         sessionId: reuseSession.id,
         systemPrompt: agent?.systemPrompt || null,
         resumed: true,
+        verboseCapture: !!repo.verboseCapture,
       });
     }
 
     // Generate a placeholder SHA (random 40-char hex)
     const placeholderSha = crypto.randomBytes(20).toString('hex');
 
-    // Create a commit with placeholder SHA (mark as session-detected AI)
-    // Use API key name for standalone tokens so sessions show the token name
-    const commitAuthor = req.mcpUserId ? 'mcp-agent' : (req.apiKeyName || 'mcp-agent');
+    // Create a commit with placeholder SHA (mark as session-detected AI).
+    // Prefer the real user's name/email over the hardcoded "mcp-agent"
+    // string — showing "mcp-agent" in every row of the commit list is
+    // useless to the user and hides who actually ran the session.
+    let commitAuthor = 'mcp-agent';
+    if (req.mcpUserId) {
+      try {
+        const authorUser = await prisma.user.findUnique({
+          where: { id: req.mcpUserId },
+          select: { name: true, email: true },
+        });
+        commitAuthor = authorUser?.name || authorUser?.email || req.apiKeyName || 'mcp-agent';
+      } catch {
+        commitAuthor = req.apiKeyName || 'mcp-agent';
+      }
+    } else if (req.apiKeyName) {
+      commitAuthor = req.apiKeyName;
+    }
     const commit = await prisma.commit.create({
       data: {
         repoId: repo.id,
@@ -694,27 +711,14 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         isPrimary: true,
       },
     });
-    // Create records for additional repos (if any)
+    // Create records for additional repos (if any).
+    // Uses EXACT path match only — the old `endsWith('/dirname')` fallback
+    // would collide repos like `/a/origin` with `/b/origin` and bundle
+    // unrelated projects into the same session.
     if (additionalRepoPaths && Array.isArray(additionalRepoPaths)) {
       for (const extraPath of additionalRepoPaths) {
         try {
-          // Resolve each additional repo path using the same fuzzy matching.
-          //
-          // Race note: two concurrent session/start calls with the same
-          // additionalRepoPaths were previously able to both fall through
-          // the findFirst branch, then both hit create, producing duplicate
-          // rows. There's no @@unique([orgId, path]) on Repo because some
-          // orgs already have duplicate rows from the pre-race era, so we
-          // can't use upsert. Instead, re-check inside an interactive
-          // transaction so the find/create is serialized per (orgId, path).
           let extraRepo = await prisma.repo.findFirst({ where: { orgId, path: extraPath } });
-          if (!extraRepo) {
-            const dirName = extraPath.split('/').filter(Boolean).pop()?.toLowerCase();
-            if (dirName) {
-              const orgRepos = await prisma.repo.findMany({ where: { orgId }, take: 5000 });
-              extraRepo = orgRepos.find((r) => r.path.toLowerCase().endsWith(`/${dirName}`)) || null;
-            }
-          }
           // Auto-register for solo devs — do it inside a tx so a concurrent
           // request can't create the same row between our check and write.
           if (!extraRepo && isSoloKey) {
@@ -784,7 +788,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     } catch { /* non-critical */ }
 
-    res.json({ sessionId: codingSession.id, parentSessionId, activePolicies, enforcementRules, agentSystemPrompt: fullSystemPrompt });
+    res.json({ sessionId: codingSession.id, parentSessionId, activePolicies, enforcementRules, agentSystemPrompt: fullSystemPrompt, verboseCapture: !!repo.verboseCapture });
 
     }); // end withSessionLock
   } catch (err) {
@@ -804,7 +808,7 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
     // Join through commit.repo.orgId so we can use a single query.
     const session = await prisma.codingSession.findFirst({
       where: { id, commit: { repo: { orgId } } },
-      include: { agent: true },
+      include: { agent: true, commit: { select: { repo: { select: { verboseCapture: true } } } } },
     });
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
@@ -841,7 +845,13 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
         .map((p: any) => `[${p.type}] ${p.name}: ${p.description || ''}`.trim());
     } catch { /* non-critical */ }
 
-    res.json({ sessionId: id, status: session.status, activePolicies, agentSystemPrompt });
+    res.json({
+      sessionId: id,
+      status: session.status,
+      activePolicies,
+      agentSystemPrompt,
+      verboseCapture: !!session.commit?.repo?.verboseCapture,
+    });
   } catch (err) {
     console.error('Resume session error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -876,6 +886,117 @@ router.post('/session/:id/command-result', async (req: McpRequest, res: Response
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: 'command-result failed' });
+  }
+});
+
+// POST /session/:id/attach-repo — lazily attach a repo to a running session.
+// Called by the CLI when a tool touches a file in a git repo that wasn't
+// known at session-start (e.g. agent reads a file in a sibling directory).
+router.post('/session/:id/attach-repo', async (req: McpRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const orgId = req.orgId as string;
+    const { repoPath } = req.body;
+
+    if (typeof repoPath !== 'string' || !repoPath || repoPath.length > 1000) {
+      return res.status(400).json({ error: 'invalid repoPath' });
+    }
+
+    const scopeCheck = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
+      select: { id: true },
+    });
+    if (!scopeCheck) return res.status(404).json({ error: 'Session not found' });
+
+    const isSoloKey = req.keyType === 'solo' || req.accountType === 'developer';
+
+    let repo = await prisma.repo.findFirst({ where: { orgId, path: repoPath } });
+    if (!repo && isSoloKey) {
+      const dirName = repoPath.split('/').filter(Boolean).pop() || repoPath;
+      repo = await prisma.$transaction(async (tx) => {
+        const existing = await tx.repo.findFirst({ where: { orgId, path: repoPath } });
+        if (existing) return existing;
+        return tx.repo.create({
+          data: { orgId, name: dirName, path: repoPath, provider: 'local' },
+        });
+      });
+    }
+    if (!repo) return res.json({ ok: true, attached: false, reason: 'repo not registered' });
+
+    // @@unique([sessionId, repoId]) makes this idempotent.
+    try {
+      await prisma.sessionRepo.create({
+        data: { sessionId: id, repoId: repo.id, isPrimary: false },
+      });
+    } catch {
+      // duplicate — already attached, treat as success
+    }
+    res.json({ ok: true, attached: true, repoId: repo.id });
+  } catch (err: any) {
+    console.log('[session/attach-repo] failed', err?.message);
+    res.status(500).json({ error: 'attach-repo failed' });
+  }
+});
+
+// POST /session/:id/snapshot — record an auto/manual snapshot the CLI just
+// created. Stored centrally so the dashboard timeline can mark dots for each
+// snapshot taken during a session. Idempotent on (sessionId, snapshotId).
+router.post('/session/:id/snapshot', async (req: McpRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const orgId = req.orgId as string;
+    const {
+      snapshotId,
+      type,
+      takenAt,
+      promptIndex,
+      commitSha,
+      treeSha,
+      filesChanged,
+      linesAdded,
+      linesRemoved,
+    } = req.body;
+
+    if (typeof snapshotId !== 'string' || !snapshotId || snapshotId.length > 200) {
+      return res.status(400).json({ error: 'invalid snapshotId' });
+    }
+    if (typeof type !== 'string' || !type || type.length > 40) {
+      return res.status(400).json({ error: 'invalid type' });
+    }
+
+    const scopeCheck = await prisma.codingSession.findFirst({
+      where: { id, commit: { repo: { orgId } } },
+      select: { id: true },
+    });
+    if (!scopeCheck) return res.status(404).json({ error: 'Session not found' });
+
+    const filesArr = Array.isArray(filesChanged) ? filesChanged.slice(0, 200).filter((f) => typeof f === 'string') : [];
+
+    await prisma.snapshot.upsert({
+      where: { sessionId_snapshotId: { sessionId: id, snapshotId } },
+      create: {
+        sessionId: id,
+        snapshotId,
+        type,
+        takenAt: takenAt ? new Date(takenAt) : new Date(),
+        promptIndex: typeof promptIndex === 'number' ? promptIndex : null,
+        commitSha: typeof commitSha === 'string' ? commitSha : null,
+        treeSha: typeof treeSha === 'string' ? treeSha : null,
+        filesChanged: JSON.stringify(filesArr),
+        linesAdded: Number.isFinite(Number(linesAdded)) ? Number(linesAdded) : 0,
+        linesRemoved: Number.isFinite(Number(linesRemoved)) ? Number(linesRemoved) : 0,
+      },
+      update: {
+        type,
+        promptIndex: typeof promptIndex === 'number' ? promptIndex : undefined,
+        commitSha: typeof commitSha === 'string' ? commitSha : undefined,
+        treeSha: typeof treeSha === 'string' ? treeSha : undefined,
+      },
+    });
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.log('[session/snapshot] failed', err?.message);
+    res.status(500).json({ error: 'snapshot upload failed' });
   }
 });
 
@@ -1184,6 +1305,25 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           create: { sessionId: id, promptIndex, ...updateData },
         });
       }));
+
+      // Roll the per-prompt line counts up to the session row so the header
+      // aggregate stays in sync. Without this the session shows +0/−0 while
+      // individual turns clearly show changes — misleading the user.
+      // Only re-aggregate when the client didn't send an explicit session-level
+      // value in this PATCH (explicit wins, sum is fallback).
+      if (cleanLinesAdded === undefined || cleanLinesRemoved === undefined) {
+        const agg = await prisma.promptChange.aggregate({
+          where: { sessionId: id },
+          _sum: { linesAdded: true, linesRemoved: true },
+        });
+        await prisma.codingSession.update({
+          where: { id },
+          data: {
+            ...(cleanLinesAdded === undefined && { linesAdded: agg._sum.linesAdded ?? 0 }),
+            ...(cleanLinesRemoved === undefined && { linesRemoved: agg._sum.linesRemoved ?? 0 }),
+          },
+        });
+      }
     }
 
     // Emit rich real-time events for Live Feed
@@ -1414,15 +1554,44 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       include: { commit: { select: { repoId: true } } },
     });
 
-    // Update the commit message — use summary or first 200 chars of prompt
-    const commitMessage = summary || (prompt ? prompt.slice(0, 200) : '');
-    if (commitMessage) {
+    // Update the commit message — use summary, fall back to the payload
+    // prompt, then to whatever prompt was already stored on the session at
+    // session/start. Without this last fallback, sessions that don't resend
+    // the prompt on session/end leave the placeholder commit with an empty
+    // `message` and the commits list shows blank rows.
+    const messageSource = summary
+      || (prompt ? prompt.slice(0, 200) : '')
+      || (existingSession.prompt ? existingSession.prompt.slice(0, 200) : '');
+    // Same treatment for the author — if the placeholder was stamped with
+    // "mcp-agent" at session/start (no user context yet) and we now have
+    // the session's user or apiKeyName, upgrade the author string.
+    let updatedAuthor: string | null = null;
+    try {
+      const placeholderCommit = await prisma.commit.findUnique({
+        where: { id: codingSession.commitId },
+        select: { author: true },
+      });
+      if (placeholderCommit?.author === 'mcp-agent') {
+        if (existingSession.userId) {
+          const u = await prisma.user.findUnique({
+            where: { id: existingSession.userId },
+            select: { name: true, email: true },
+          });
+          updatedAuthor = u?.name || u?.email || existingSession.apiKeyName || null;
+        } else if (existingSession.apiKeyName) {
+          updatedAuthor = existingSession.apiKeyName;
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    if (messageSource || updatedAuthor) {
       // Re-run AI detection on the real commit message (may have Co-Authored-By trailers)
-      const detection = detectAITool(commitMessage, '');
+      const detection = messageSource ? detectAITool(messageSource, '') : { aiToolDetected: null, aiDetectionMethod: null };
       await prisma.commit.update({
         where: { id: codingSession.commitId },
         data: {
-          message: commitMessage,
+          ...(messageSource && { message: messageSource }),
+          ...(updatedAuthor && { author: updatedAuthor }),
           ...(detection.aiToolDetected ? {
             aiToolDetected: detection.aiToolDetected,
             aiDetectionMethod: detection.aiDetectionMethod,
@@ -1480,8 +1649,8 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
             where: { id: codingSession.commitId },
             data: {
               sha: realSha,
-              message: firstDetail?.message || commitMessage || '',
-              author: firstDetail?.author || 'ai-agent',
+              message: firstDetail?.message || messageSource || '',
+              author: firstDetail?.author || updatedAuthor || 'ai-agent',
               filesChanged: firstDetail ? JSON.stringify(firstDetail.filesChanged) : '[]',
             },
           });

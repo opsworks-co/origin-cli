@@ -61,6 +61,8 @@ export interface Session {
   tokensUsed: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
   toolCalls: number;
   durationMs: number;
   linesAdded: number;
@@ -82,6 +84,11 @@ export interface Session {
   pullRequests?: SessionPullRequestInfo[];
   sessionDiff?: SessionDiff | null;
   promptChanges?: PromptChange[];
+  // Every commit attributed to this session, primary + sessionCommits.
+  // Lets the UI surface branch/SHA for commits the session made off main.
+  commits?: SessionCommit[];
+  // Auto-snapshots taken during the session — drives timeline rail dots.
+  snapshots?: SessionSnapshot[];
   chainSessions?: Array<{
     id: string;
     startedAt: string | null;
@@ -92,6 +99,26 @@ export interface Session {
     status: string;
     model: string;
   }>;
+}
+
+export interface SessionCommit {
+  id: string;
+  sha: string;
+  message: string;
+  author: string;
+  branch: string | null;
+  committedAt: string;
+  filesChanged: string[];
+  repoName: string | null;
+}
+
+export interface SessionSnapshot {
+  id: string;
+  snapshotId: string;
+  type: string;
+  takenAt: string;
+  promptIndex: number | null;
+  commitSha: string | null;
 }
 
 export interface SessionReview {

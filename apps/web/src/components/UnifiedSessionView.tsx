@@ -1,5 +1,7 @@
 import { useState, useMemo, useRef, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import type { SessionDiff, PromptChange } from '../api';
+import type { SessionCommit, SessionSnapshot } from '../api/sessions';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,6 +35,18 @@ function formatPromptTime(iso: string): string {
 interface Message {
   role: string;
   content: string;
+  toolCalls?: ToolCallEntry[];
+}
+
+// Structured tool-call data preserved by the CLI's transcript formatter.
+// `input` carries the full Bash command / Edit hunk / etc.; `result` the
+// (capped) output. Indexed by id so summary lines can match them.
+interface ToolCallEntry {
+  id?: string;
+  name: string;
+  input: Record<string, any>;
+  result?: string;
+  resultTruncated?: boolean;
 }
 
 interface DiffFile {
@@ -149,8 +163,128 @@ function buildUnifiedTurns(
 // Formatted assistant message renderer
 // ---------------------------------------------------------------------------
 
-function FormattedMessage({ text }: { text: string }) {
+type ToolCategory = 'read' | 'write' | 'exec' | 'search' | 'web' | 'agent' | 'mcp' | 'meta';
+
+const TOOL_CATEGORY_STYLE: Record<ToolCategory, { border: string; label: string }> = {
+  // border uses raw color so tailwind's JIT can't prune it; label is a utility class.
+  read:   { border: 'rgb(56 189 248 / 0.55)',  label: 'text-sky-300' },    // Read / Glob / Grep
+  write:  { border: 'rgb(251 191 36 / 0.55)',  label: 'text-amber-300' }, // Edit / Write
+  exec:   { border: 'rgb(52 211 153 / 0.55)',  label: 'text-emerald-300' }, // Bash
+  search: { border: 'rgb(167 139 250 / 0.55)', label: 'text-violet-300' }, // WebSearch
+  web:    { border: 'rgb(244 114 182 / 0.55)', label: 'text-pink-300' },   // WebFetch
+  agent:  { border: 'rgb(129 140 248 / 0.55)', label: 'text-indigo-300' }, // Task
+  mcp:    { border: 'rgb(45 212 191 / 0.55)',  label: 'text-teal-300' },   // mcp__*
+  meta:   { border: 'rgb(148 163 184 / 0.45)', label: 'text-slate-400' },  // TodoWrite etc.
+};
+
+function toolCategory(name: string): ToolCategory {
+  if (name.startsWith('mcp__')) return 'mcp';
+  switch (name) {
+    case 'Read': case 'Glob': case 'Grep': case 'NotebookRead': return 'read';
+    case 'Edit': case 'Write': case 'NotebookEdit':             return 'write';
+    case 'Bash':                                                 return 'exec';
+    case 'WebSearch':                                            return 'search';
+    case 'WebFetch':                                             return 'web';
+    case 'Task':                                                 return 'agent';
+    default:                                                     return 'meta';
+  }
+}
+
+// ── Tool call row — collapsed by default, click to reveal full input + result.
+// Only structured tool calls (CLI ≥ this build) are expandable; older
+// transcripts render a static one-liner.
+function ToolCallRow({
+  name,
+  arg,
+  swatch,
+  structured,
+}: {
+  name: string;
+  arg: string;
+  swatch: { border: string; label: string };
+  structured?: ToolCallEntry;
+}) {
+  const [open, setOpen] = useState(false);
+  const hasDetail = !!structured && (Object.keys(structured.input || {}).length > 0 || !!structured.result);
+  // Pick the most readable input field for display — prefer commands/files
+  // over arbitrary fields like description.
+  const fullInputDisplay = (() => {
+    if (!structured) return '';
+    const inp = structured.input || {};
+    if (typeof inp.command === 'string') return inp.command;
+    if (typeof inp.file_path === 'string') return inp.file_path;
+    if (typeof inp.path === 'string') return inp.path;
+    if (typeof inp.pattern === 'string') return inp.pattern;
+    if (typeof inp.url === 'string') return inp.url;
+    if (typeof inp.query === 'string') return inp.query;
+    // Fall back to JSON dump for less common shapes (Edit, Task, etc.)
+    try { return JSON.stringify(inp, null, 2); } catch { return ''; }
+  })();
+
+  return (
+    <div className="my-1">
+      <div
+        className={`group flex items-baseline gap-2 pl-3 border-l-2 text-[12px] leading-[1.65] font-mono ${
+          hasDetail ? 'cursor-pointer hover:bg-gray-800/40 rounded-r' : ''
+        }`}
+        style={{ borderColor: swatch.border }}
+        onClick={() => hasDetail && setOpen((v) => !v)}
+      >
+        <span className={`text-[10px] uppercase tracking-wider font-semibold ${swatch.label}`}>
+          {name}
+        </span>
+        {arg && (
+          <span className="text-gray-400 truncate" title={arg}>
+            {arg}
+          </span>
+        )}
+        {hasDetail && (
+          <span className="ml-auto text-[10px] text-gray-600 group-hover:text-gray-400">
+            {open ? '▾' : '▸'}
+          </span>
+        )}
+      </div>
+      {open && structured && (
+        <div className="ml-3 mt-1 mb-2 pl-3 border-l-2 border-gray-800/60 space-y-2">
+          {fullInputDisplay && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Input</div>
+              <pre className="text-[11px] leading-[1.5] font-mono text-gray-300 bg-gray-900/60 rounded-md px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all">
+                {fullInputDisplay}
+              </pre>
+            </div>
+          )}
+          {structured.result && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">
+                Result {structured.resultTruncated && <span className="normal-case text-gray-600">(truncated)</span>}
+              </div>
+              <pre className="text-[11px] leading-[1.5] font-mono text-gray-400 bg-gray-900/40 rounded-md px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all max-h-72 overflow-y-auto">
+                {structured.result}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FormattedMessage({
+  text,
+  hideToolCalls,
+  toolCalls,
+}: {
+  text: string;
+  hideToolCalls?: boolean;
+  toolCalls?: ToolCallEntry[];
+}) {
   const elements: React.ReactNode[] = [];
+
+  // Track which structured tool call we're currently consuming. Tool-call
+  // markers appear in `text` in the same order they do in `toolCalls`, so a
+  // running counter is enough to pair them.
+  let toolIdx = 0;
 
   // Split into blocks: code blocks, tool calls, and regular text
   const lines = text.split('\n');
@@ -188,6 +322,13 @@ function FormattedMessage({ text }: { text: string }) {
     // Tool call patterns: [Tool: ToolName], [Tool: ToolName → arg], [Tool: ToolName: arg]
     const toolMatch = line.match(/^\[Tool:\s*([^\]→:]+?)(?:\s*[→:]\s*(.+?))?\]$/);
     if (toolMatch) {
+      if (hideToolCalls) {
+        // Filter says hide tool calls — skip the line entirely.
+        // Still bump toolIdx so subsequent rows pair with the right entry.
+        toolIdx++;
+        i++;
+        continue;
+      }
       const rawName = toolMatch[1].trim();
       const toolArg = toolMatch[2]?.trim() || '';
 
@@ -200,17 +341,23 @@ function FormattedMessage({ text }: { text: string }) {
         displayName = `${server}: ${tool}`;
       }
 
-      // Plain-text rendering — the colored/emoji badges felt too fancy.
-      // Keep tool calls as a single mono line that reads like terminal output.
+      const category = toolCategory(rawName);
+      const swatch = TOOL_CATEGORY_STYLE[category];
+
+      // Pair with structured data when available — emits an expandable row
+      // that shows full input + result on click. Falls back to the legacy
+      // one-liner when no structured data exists (older transcripts).
+      const structured = toolCalls?.[toolIdx];
+      toolIdx++;
+
       elements.push(
-        <div
+        <ToolCallRow
           key={key++}
-          className="my-0.5 font-mono text-[12px] text-gray-400 leading-[1.6]"
-        >
-          <span className="text-gray-500">›</span>{' '}
-          <span className="text-gray-300">{displayName}</span>
-          {toolArg && <span className="text-gray-500"> {toolArg}</span>}
-        </div>,
+          name={displayName}
+          arg={toolArg}
+          swatch={swatch}
+          structured={structured}
+        />,
       );
       i++;
       continue;
@@ -254,7 +401,10 @@ function FormattedMessage({ text }: { text: string }) {
   const flushToolBatch = () => {
     if (toolBatch.length > 0) {
       grouped.push(
-        <div key={`batch-${grouped.length}`} className="my-2 flex flex-wrap gap-1 items-center">
+        <div
+          key={`batch-${grouped.length}`}
+          className="my-2 rounded-md border border-gray-800/70 bg-gray-900/40 py-1.5"
+        >
           {toolBatch}
         </div>,
       );
@@ -369,6 +519,8 @@ function TurnCard({
   expandedFiles,
   onToggleFile,
   diffCache,
+  hideToolCalls,
+  snapshots,
 }: {
   turn: TranscriptTurn;
   isExpanded: boolean;
@@ -376,6 +528,8 @@ function TurnCard({
   expandedFiles: Record<string, boolean>;
   onToggleFile: (key: string) => void;
   diffCache: React.MutableRefObject<Map<number, DiffFile[]>>;
+  hideToolCalls?: boolean;
+  snapshots?: SessionSnapshot[];
 }) {
   const pc = turn.promptChange;
   const hasChanges = pc && pc.filesChanged.length > 0;
@@ -410,6 +564,8 @@ function TurnCard({
 
   // Assistant response
   const assistantText = turn.assistantMessages.map((m) => m.content).join('\n\n');
+  // Concatenated structured tool calls in the same order as the merged text.
+  const assistantToolCalls = turn.assistantMessages.flatMap((m) => m.toolCalls || []);
   const [showFullResponse, setShowFullResponse] = useState(false);
   const TRUNCATE_LEN = 800;
   const truncatedResponse =
@@ -431,14 +587,35 @@ function TurnCard({
         className="w-full text-left px-5 py-3 transition-colors group"
       >
         <div className="flex items-start gap-3">
-          {/* Turn number */}
-          <span className={`flex-shrink-0 text-xs font-mono w-7 h-7 rounded-full flex items-center justify-center mt-0.5 ${
-            hasChanges
-              ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30'
-              : 'bg-gray-800 text-gray-500 border border-gray-700'
-          }`}>
-            {turn.turnIndex + 1}
-          </span>
+          {/* Turn number + snapshot rail dots — one dot per snapshot taken
+              during this prompt, capped to 5 with a "+N" overflow indicator. */}
+          <div className="flex-shrink-0 flex flex-col items-center gap-1 mt-0.5">
+            <span className={`text-xs font-mono w-7 h-7 rounded-full flex items-center justify-center ${
+              hasChanges
+                ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30'
+                : 'bg-gray-800 text-gray-500 border border-gray-700'
+            }`}>
+              {turn.turnIndex + 1}
+            </span>
+            {snapshots && snapshots.length > 0 && (
+              <div
+                className="flex flex-col items-center gap-0.5"
+                title={`${snapshots.length} snapshot${snapshots.length === 1 ? '' : 's'} taken during this prompt`}
+              >
+                {snapshots.slice(0, 5).map((sn) => (
+                  <span
+                    key={sn.id}
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      sn.type === 'manual' ? 'bg-amber-400/80' : 'bg-emerald-400/60'
+                    }`}
+                  />
+                ))}
+                {snapshots.length > 5 && (
+                  <span className="text-[8px] font-mono text-gray-500">+{snapshots.length - 5}</span>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Prompt text */}
           <div className="flex-1 min-w-0">
@@ -489,7 +666,11 @@ function TurnCard({
                 <span className="text-[11px] font-medium text-gray-500">Assistant</span>
               </div>
               <div className="ml-7">
-                <FormattedMessage text={truncatedResponse} />
+                <FormattedMessage
+                  text={truncatedResponse}
+                  hideToolCalls={hideToolCalls}
+                  toolCalls={assistantToolCalls}
+                />
                 {assistantText.length > TRUNCATE_LEN && !showFullResponse && (
                   <span className="text-gray-600">...</span>
                 )}
@@ -705,16 +886,33 @@ interface UnifiedSessionViewProps {
   transcript: Message[];
   promptChanges: PromptChange[];
   sessionDiff?: SessionDiff | null;
+  // Optional repo id + commit list to render commits inline in the timeline.
+  // When provided, each commit slots beneath the prompt that produced it
+  // (matched via PromptChange.commitSha) and links to its detail page.
+  commits?: SessionCommit[];
+  repoId?: string | null;
+  // Auto-snapshots for the rail. Each one attributed to a prompt turn renders
+  // a small dot; counts pile up next to the turn number.
+  snapshots?: SessionSnapshot[];
   // Sort default:
   //   true  (RUNNING sessions) — latest turn at top, feed-like
   //   false (COMPLETED sessions) — oldest first, reads like a conversation
   defaultNewestFirst?: boolean;
 }
 
+// Categories for the left-rail filter. Counts are computed from transcript
+// markers like `[Tool: Bash → ...]`, prompt count, response count, and the
+// commits[] prop. Hiding a category narrows what each TurnCard shows; toggling
+// "commits" hides the inline commit rows.
+type FilterKey = 'prompts' | 'responses' | 'tools' | 'commits';
+
 export default function UnifiedSessionView({
   transcript,
   promptChanges,
   sessionDiff,
+  commits,
+  repoId,
+  snapshots,
   defaultNewestFirst = true,
 }: UnifiedSessionViewProps) {
   const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
@@ -722,12 +920,98 @@ export default function UnifiedSessionView({
   const [visibleCount, setVisibleCount] = useState(50);
   const [showSessionDiff, setShowSessionDiff] = useState(false);
   const [newestFirst, setNewestFirst] = useState(defaultNewestFirst);
+  const [hidden, setHidden] = useState<Set<FilterKey>>(new Set());
   const diffCache = useRef<Map<number, DiffFile[]>>(new Map());
 
   const turns = useMemo(
     () => buildUnifiedTurns(transcript, promptChanges),
     [transcript, promptChanges],
   );
+
+  // Per-tool-category counts from transcript markers — same regex the
+  // FormattedMessage renderer uses, kept in sync.
+  const counts = useMemo(() => {
+    let promptsN = 0;
+    let responsesN = 0;
+    const toolsByCategory: Record<ToolCategory, number> = {
+      read: 0, write: 0, exec: 0, search: 0, web: 0, agent: 0, mcp: 0, meta: 0,
+    };
+    let toolsTotal = 0;
+    for (const t of turns) {
+      if (t.humanMessage || t.promptChange?.promptText) promptsN++;
+      const allText = t.assistantMessages.map((m) => m.content).join('\n');
+      // Strip tool-call lines to figure out if there's any actual response text.
+      const nonToolText = allText
+        .split('\n')
+        .filter((ln) => !/^\[Tool:\s*[^\]]+\]$/.test(ln))
+        .join('\n')
+        .trim();
+      if (nonToolText.length > 0) responsesN++;
+      const matches = allText.match(/^\[Tool:\s*([^\]→:]+?)(?:\s*[→:].*)?\]$/gm) || [];
+      for (const m of matches) {
+        const nameMatch = m.match(/^\[Tool:\s*([^\]→:]+?)(?:\s*[→:]|])/);
+        const name = nameMatch ? nameMatch[1].trim() : '';
+        if (!name) continue;
+        toolsByCategory[toolCategory(name)]++;
+        toolsTotal++;
+      }
+    }
+    return {
+      prompts: promptsN,
+      responses: responsesN,
+      tools: toolsTotal,
+      toolsByCategory,
+      commits: commits?.length || 0,
+    };
+  }, [turns, commits]);
+
+  // Group commits by the prompt that produced them so we can render an inline
+  // commit row beneath each turn card.
+  const commitsByPromptIndex = useMemo(() => {
+    const map = new Map<number, SessionCommit[]>();
+    if (!commits || commits.length === 0) return map;
+    // Match each commit to the PromptChange that recorded its SHA.
+    for (const c of commits) {
+      const pc = promptChanges.find((p) => p.commitSha === c.sha);
+      const idx = pc?.promptIndex ?? -1;
+      const arr = map.get(idx) || [];
+      arr.push(c);
+      map.set(idx, arr);
+    }
+    return map;
+  }, [commits, promptChanges]);
+
+  // Group snapshots by promptIndex. The CLI tags each upload with the active
+  // prompt — so we can decorate that turn's rail without correlating timestamps.
+  const snapshotsByPromptIndex = useMemo(() => {
+    const map = new Map<number, SessionSnapshot[]>();
+    if (!snapshots || snapshots.length === 0) return map;
+    for (const sn of snapshots) {
+      const idx = sn.promptIndex ?? -1;
+      const arr = map.get(idx) || [];
+      arr.push(sn);
+      map.set(idx, arr);
+    }
+    return map;
+  }, [snapshots]);
+
+  // Commits that didn't match any prompt (legacy rows pre commitSha capture).
+  // Surface them at the end so they aren't lost.
+  const orphanedCommits = useMemo(() => commitsByPromptIndex.get(-1) || [], [commitsByPromptIndex]);
+
+  const toggleFilter = useCallback((key: FilterKey) => {
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const showCommits = !hidden.has('commits');
+  const showTools = !hidden.has('tools');
+  const showPrompts = !hidden.has('prompts');
+  const showResponses = !hidden.has('responses');
 
   const orderedTurns = useMemo(
     () => (newestFirst ? [...turns].reverse() : turns),
@@ -816,20 +1100,108 @@ export default function UnifiedSessionView({
         </div>
       </div>
 
-      {/* Timeline */}
-      <div className="flex-1 overflow-y-auto px-5 py-4">
-        <div className="space-y-2 max-w-5xl mx-auto">
-          {visibleTurns.map((turn) => (
-            <TurnCard
-              key={turn.turnIndex}
-              turn={turn}
-              isExpanded={expandedTurns.has(turn.turnIndex)}
-              onToggle={() => toggleTurn(turn.turnIndex)}
-              expandedFiles={expandedFiles}
-              onToggleFile={toggleFile}
-              diffCache={diffCache}
+      {/* Body: filter rail + timeline */}
+      <div className="flex-1 overflow-hidden flex">
+        {/* Filter rail */}
+        <aside className="hidden lg:block w-48 flex-shrink-0 border-r border-gray-800/60 px-3 py-4 overflow-y-auto">
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-2 px-1">Filters</div>
+          <FilterRow
+            label="Prompts"
+            count={counts.prompts}
+            checked={showPrompts}
+            onToggle={() => toggleFilter('prompts')}
+            iconColor="text-indigo-400"
+          />
+          <FilterRow
+            label="Responses"
+            count={counts.responses}
+            checked={showResponses}
+            onToggle={() => toggleFilter('responses')}
+            iconColor="text-gray-400"
+          />
+          <FilterRow
+            label="Tool calls"
+            count={counts.tools}
+            checked={showTools}
+            onToggle={() => toggleFilter('tools')}
+            iconColor="text-emerald-400"
+          />
+          {/* Tool sub-counts — read-only breakdown so users can see what's
+              happening even when they don't toggle them individually. */}
+          {counts.tools > 0 && showTools && (
+            <div className="mt-1 ml-3 mb-2 space-y-0.5">
+              {(['exec', 'read', 'write', 'search', 'web', 'agent', 'mcp', 'meta'] as ToolCategory[])
+                .filter((cat) => counts.toolsByCategory[cat] > 0)
+                .map((cat) => (
+                  <div key={cat} className="flex items-center justify-between text-[10px] text-gray-500 px-1">
+                    <span className={TOOL_CATEGORY_STYLE[cat].label}>
+                      {cat === 'exec' ? 'Bash' : cat === 'read' ? 'Read' : cat === 'write' ? 'Edit' : cat[0].toUpperCase() + cat.slice(1)}
+                    </span>
+                    <span className="font-mono">{counts.toolsByCategory[cat]}</span>
+                  </div>
+                ))}
+            </div>
+          )}
+          {counts.commits > 0 && (
+            <FilterRow
+              label="Commits"
+              count={counts.commits}
+              checked={showCommits}
+              onToggle={() => toggleFilter('commits')}
+              iconColor="text-amber-400"
             />
-          ))}
+          )}
+        </aside>
+
+        {/* Timeline */}
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+        <div className="space-y-2 max-w-5xl mx-auto">
+          {visibleTurns.map((turn) => {
+            const turnCommits = showCommits ? (commitsByPromptIndex.get(turn.turnIndex) || []) : [];
+            // Hide turn entirely when both prompts and responses are filtered out
+            // and there's nothing else (no tool calls visible, no commits).
+            const turnHasResponse = turn.assistantMessages.some((m) =>
+              m.content.split('\n').some((ln) => !/^\[Tool:\s*[^\]]+\]$/.test(ln) && ln.trim()),
+            );
+            const turnHasPrompt = !!(turn.humanMessage || turn.promptChange?.promptText);
+            const visibleByPrompt = showPrompts ? turnHasPrompt : false;
+            const visibleByResponse = showResponses ? turnHasResponse : false;
+            const visibleByTools = showTools && turn.assistantMessages.some((m) => /\[Tool:/.test(m.content));
+            const visibleByCommit = turnCommits.length > 0;
+            if (!visibleByPrompt && !visibleByResponse && !visibleByTools && !visibleByCommit) return null;
+
+            return (
+              <div key={turn.turnIndex}>
+                <TurnCard
+                  turn={turn}
+                  isExpanded={expandedTurns.has(turn.turnIndex)}
+                  onToggle={() => toggleTurn(turn.turnIndex)}
+                  expandedFiles={expandedFiles}
+                  onToggleFile={toggleFile}
+                  diffCache={diffCache}
+                  hideToolCalls={!showTools}
+                  snapshots={snapshotsByPromptIndex.get(turn.turnIndex) || []}
+                />
+                {turnCommits.map((c) => (
+                  <CommitRow key={c.sha} commit={c} repoId={repoId} />
+                ))}
+              </div>
+            );
+          })}
+
+          {/* Orphaned commits — couldn't be matched to a prompt via commitSha
+              (legacy data, or commit made outside any tracked prompt window).
+              Show at the end of the timeline so they're still visible. */}
+          {showCommits && orphanedCommits.length > 0 && (
+            <div className="pt-2 mt-2 border-t border-gray-800/40">
+              <div className="text-[10px] uppercase tracking-wider text-gray-600 mb-1.5 px-1">
+                Other commits in this session
+              </div>
+              {orphanedCommits.map((c) => (
+                <CommitRow key={c.sha} commit={c} repoId={repoId} />
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Load more */}
@@ -854,7 +1226,79 @@ export default function UnifiedSessionView({
             />
           </div>
         )}
+        </div>
       </div>
     </div>
+  );
+}
+
+// ── Filter rail row ─────────────────────────────────────────────────────────
+function FilterRow({
+  label,
+  count,
+  checked,
+  onToggle,
+  iconColor,
+}: {
+  label: string;
+  count: number;
+  checked: boolean;
+  onToggle: () => void;
+  iconColor: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={`w-full flex items-center justify-between text-[12px] py-1.5 px-1 rounded hover:bg-gray-800/50 transition-colors ${
+        checked ? 'text-gray-200' : 'text-gray-600'
+      }`}
+    >
+      <span className="flex items-center gap-2">
+        <span
+          className={`w-3 h-3 rounded-sm border flex items-center justify-center ${
+            checked ? `border-current ${iconColor}` : 'border-gray-700'
+          }`}
+        >
+          {checked && (
+            <svg className="w-2 h-2" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2 6l3 3 5-6" />
+            </svg>
+          )}
+        </span>
+        <span>{label}</span>
+      </span>
+      <span className="font-mono text-[11px] text-gray-500">{count}</span>
+    </button>
+  );
+}
+
+// ── Commit row (inline in timeline) ────────────────────────────────────────
+// Mirrors Entire's compact commit pill: SHA, subject, branch, +/- counts.
+function CommitRow({ commit, repoId }: { commit: SessionCommit; repoId?: string | null }) {
+  const subject = (commit.message || '').split('\n')[0] || '(no message)';
+  const inner = (
+    <div className="flex items-center gap-3 py-1.5 px-3 my-1 rounded border border-amber-500/15 bg-amber-500/5 hover:bg-amber-500/10 transition-colors">
+      <svg className="w-3.5 h-3.5 text-amber-400/80 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 7h14M5 12h14M5 17h14" /></svg>
+      <code className="text-[11px] font-mono text-amber-300/90">{commit.sha.slice(0, 8)}</code>
+      <span className="text-[12px] text-gray-300 truncate flex-1" title={commit.message}>
+        {subject}
+      </span>
+      {commit.branch && (
+        <span className="text-[10px] font-mono text-gray-500 hidden sm:inline">
+          {commit.branch}
+        </span>
+      )}
+      <span className="text-[10px] text-gray-500 font-mono whitespace-nowrap">
+        {commit.filesChanged.length} file{commit.filesChanged.length !== 1 ? 's' : ''}
+      </span>
+    </div>
+  );
+  return repoId ? (
+    <Link to={`/repos/${repoId}/commits/${commit.sha}`} className="block">
+      {inner}
+    </Link>
+  ) : (
+    inner
   );
 }

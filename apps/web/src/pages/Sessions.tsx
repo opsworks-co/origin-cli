@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import * as api from '../api';
 import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent, TeamMember } from '../api';
 import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../utils';
-import { Archive, ArchiveRestore, GitBranch, GitMerge } from 'lucide-react';
+import { Archive, ArchiveRestore, GitBranch, GitMerge, Search, Bookmark, Star } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
 import { safeHref } from '../utils/safe-url';
@@ -26,6 +26,7 @@ function statusToVariant(status: string): PillVariant {
 function statusBadge(status: string) {
   return <Pill variant={statusToVariant(status)}>{status}</Pill>;
 }
+
 
 type SortField = 'model' | 'agent' | 'repo' | 'status' | 'cost' | 'tokens' | 'duration' | 'toolCalls' | 'date' | 'score';
 type SortDir = 'asc' | 'desc';
@@ -67,6 +68,7 @@ export default function Sessions() {
   const [users, setUsers] = useState<TeamMember[]>([]);
 
   // Filters
+  const [search, setSearch] = useState('');
   const [model, setModel] = useState('');
   const [status, setStatus] = useState('');
   const [repoId, setRepoId] = useState('');
@@ -74,6 +76,43 @@ export default function Sessions() {
   const [userId, setUserId] = useState('');
   const [branch, setBranch] = useState('');
   const [offset, setOffset] = useState(0);
+  // Saved/bookmarked-only toggle — client-side for now, matches the look of
+  // the Insights page's SessionsTab filter.
+  const [showSaved, setShowSaved] = useState(false);
+  const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const req = (api as any).request;
+    if (typeof req !== 'function') return;
+    req('/api/sessions/bookmarked')
+      .then((data: any) => {
+        if (Array.isArray(data)) {
+          setSavedIds(new Set(data.map((s: { id: string }) => s.id)));
+        }
+      })
+      .catch(() => {});
+  }, []);
+  const toggleSaved = async (id: string) => {
+    const isBookmarked = savedIds.has(id);
+    setSavedIds((prev) => {
+      const next = new Set(prev);
+      if (isBookmarked) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    try {
+      await (api as any).request(`/api/sessions/${id}/bookmark`, {
+        method: isBookmarked ? 'DELETE' : 'POST',
+      });
+    } catch {
+      // Revert on error
+      setSavedIds((prev) => {
+        const next = new Set(prev);
+        if (isBookmarked) next.add(id);
+        else next.delete(id);
+        return next;
+      });
+    }
+  };
 
   // Sorting
   const [sortBy, setSortBy] = useState<SortField>('date');
@@ -275,7 +314,21 @@ export default function Sessions() {
   };
 
   const sortedSessions = useMemo(() => {
-    const list = [...sessions];
+    let list = [...sessions];
+    // Client-side text search across common fields + saved-only toggle.
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter((s) =>
+        (s.model || '').toLowerCase().includes(q) ||
+        (s.agentName || '').toLowerCase().includes(q) ||
+        (s.repoName || '').toLowerCase().includes(q) ||
+        (s.branch || '').toLowerCase().includes(q) ||
+        (s.userName || '').toLowerCase().includes(q)
+      );
+    }
+    if (showSaved) {
+      list = list.filter((s) => savedIds.has(s.id));
+    }
     list.sort((a, b) => {
       // RUNNING sessions always float to the top
       const aRunning = a.status === 'RUNNING' ? 1 : 0;
@@ -319,7 +372,7 @@ export default function Sessions() {
       return sortDir === 'asc' ? cmp : -cmp;
     });
     return list;
-  }, [sessions, sortBy, sortDir]);
+  }, [sessions, sortBy, sortDir, search, showSaved, savedIds]);
 
   const SortHeader = ({
     field,
@@ -331,7 +384,7 @@ export default function Sessions() {
     align?: 'right';
   }) => (
     <th
-      className={`px-6 py-3 font-medium cursor-pointer hover:text-gray-300 select-none ${
+      className={`px-3 py-2 font-medium cursor-pointer hover:text-gray-300 select-none ${
         align === 'right' ? 'text-right' : ''
       }`}
       onClick={() => toggleSort(field)}
@@ -356,231 +409,107 @@ export default function Sessions() {
     return <span className={info.cls}>{info.label}</span>;
   };
 
+  // Extracted so the viewMode toggle lives OUTSIDE the "list view only"
+  // conditional — otherwise TS narrows viewMode to 'list' and the toggle
+  // becomes a dead button.
+  const viewModeToggle = !isDev ? (
+    <div className="flex rounded-md border border-gray-800 overflow-hidden">
+      <button
+        onClick={() => setViewMode('list')}
+        className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+          viewMode === 'list' ? 'bg-indigo-500/15 text-indigo-300' : 'text-gray-500 hover:text-gray-300'
+        }`}
+      >List</button>
+      <button
+        onClick={() => setViewMode('by-pr')}
+        className={`px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+          (viewMode as ViewMode) === 'by-pr' ? 'bg-indigo-500/15 text-indigo-300' : 'text-gray-500 hover:text-gray-300'
+        }`}
+      >By PR</button>
+    </div>
+  ) : null;
+
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Sessions"
-        subtitle={isDev ? 'All AI coding sessions from your machine' : 'All AI coding sessions across your organization'}
-        actions={
-          <div className="flex items-center gap-3 flex-wrap">
-            {/* Live indicator — purple = live activity per design tokens */}
-            <Pill
-              variant={liveConnected ? 'running' : 'neutral'}
-              icon={liveConnected ? <PulseDot variant="running" /> : undefined}
-              title={liveConnected ? 'Real-time session events connected' : 'Connecting to real-time session stream'}
-            >
-              {liveConnected ? 'Live' : 'Connecting...'}
-              {liveEvents > 0 && <span className="text-gray-500 ml-1">· {liveEvents}</span>}
-            </Pill>
+    <div className="space-y-3">
+      {/* SessionsTab-style filter row — clean, flat, no page header band.
+          Search input takes remaining space; small right-side pills carry
+          the live/archive/view-mode chrome that used to eat a whole row. */}
+      {viewMode === 'list' ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+            <input
+              type="text"
+              placeholder="Search sessions..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="input w-full pl-9 text-sm"
+            />
           </div>
-        }
-      />
-
-      {/* Secondary toolbar — view modes + archive toggle, right-aligned */}
-      <div className="flex items-center justify-end flex-wrap gap-3">
-        <div className="flex items-center gap-3">
-          {/* Spacer so the old layout below still works */}
-          <span className="hidden" aria-hidden />
-
-          {/* View mode toggle — team only (PR grouping) */}
-          {!isDev && (
-          <div className="flex rounded-lg border border-gray-700 overflow-hidden">
-            <button
-              onClick={() => setViewMode('list')}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                viewMode === 'list'
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-gray-800 text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              List
-            </button>
-            <button
-              onClick={() => setViewMode('by-pr')}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                viewMode === 'by-pr'
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-gray-800 text-gray-400 hover:text-gray-200'
-              }`}
-            >
-              By PR
-            </button>
-          </div>
-          )}
-
-          {/* Archive toggle */}
-          <button
-            onClick={() => setShowArchived(!showArchived)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              showArchived
-                ? 'bg-amber-600/20 text-amber-400 border border-amber-700/50'
-                : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700'
-            }`}
-          >
-            {showArchived ? <ArchiveRestore className="w-3.5 h-3.5" /> : <Archive className="w-3.5 h-3.5" />}
-            {showArchived ? 'Archived' : 'Archive'}
-          </button>
-        </div>
-      </div>
-
-      {/* Analytics Summary Bar — gradient stat cards, matches Insights/MyDashboard */}
-      {viewMode === 'list' && analytics && (() => {
-        const gradients: Record<string, string> = {
-          indigo: 'from-indigo-500/20 to-indigo-500/0',
-          purple: 'from-purple-500/20 to-purple-500/0',
-          cyan: 'from-cyan-500/20 to-cyan-500/0',
-          amber: 'from-amber-500/20 to-amber-500/0',
-          green: 'from-emerald-500/20 to-emerald-500/0',
-          red: 'from-red-500/20 to-red-500/0',
-        };
-        const StatTile = ({
-          label,
-          value,
-          accent,
-          valueClassName,
-        }: {
-          label: string;
-          value: React.ReactNode;
-          accent: keyof typeof gradients;
-          valueClassName?: string;
-        }) => (
-          <div className="relative rounded-xl border border-gray-800/80 bg-gray-900/40 p-4 overflow-hidden hover:border-gray-700 transition-colors">
-            <div className={`absolute inset-0 bg-gradient-to-br ${gradients[accent]} opacity-60 pointer-events-none`} />
-            <div className="relative">
-              <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wider">{label}</p>
-              <p className={`text-xl font-semibold tabular-nums mt-1.5 ${valueClassName ?? 'text-gray-50'}`}>
-                {value}
-              </p>
-            </div>
-          </div>
-        );
-        return (
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-            <StatTile label="Total Cost" value={`$${analytics.totalCost.toFixed(2)}`} accent="cyan" />
-            <StatTile label="Avg Cost" value={`$${analytics.avgCost.toFixed(2)}`} accent="cyan" />
-            <StatTile label="Tokens" value={`${(analytics.totalTokens / 1000).toFixed(1)}k`} accent="purple" />
-            <StatTile label="Avg Duration" value={formatDuration(analytics.avgDuration)} accent="indigo" />
-            <StatTile label="Tool Calls" value={analytics.totalTools} accent="amber" />
-            {!isDev && (
-              <StatTile
-                label="Avg Score"
-                value={analytics.avgScore ?? '—'}
-                accent="green"
-                valueClassName={
-                  analytics.avgScore == null
-                    ? 'text-gray-500'
-                    : analytics.avgScore >= 80
-                      ? 'text-emerald-400'
-                      : analytics.avgScore >= 50
-                        ? 'text-amber-400'
-                        : 'text-red-400'
-                }
-              />
-            )}
-            {!isDev && (
-              <StatTile
-                label="Flagged"
-                value={analytics.flaggedCount}
-                accent={analytics.flaggedCount > 0 ? 'red' : 'green'}
-                valueClassName={analytics.flaggedCount > 0 ? 'text-red-400' : 'text-emerald-400'}
-              />
-            )}
-          </div>
-        );
-      })()}
-
-      {/* Filter Bar - only in list view */}
-      {viewMode === 'list' && (
-        <div className="flex flex-wrap gap-3">
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="select text-sm"
-          >
-            <option value="">All models</option>
-            {models.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-            <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514</option>
-            <option value="gpt-4o">gpt-4o</option>
-            <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
-          </select>
-
-          {!isDev && (
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            className="select text-sm"
-          >
-            <option value="">All statuses</option>
-            <option value="unreviewed">Unreviewed</option>
-            <option value="reviewed">Reviewed</option>
-            <option value="approved">Approved</option>
-            <option value="rejected">Rejected</option>
-            <option value="flagged">Flagged</option>
-          </select>
-          )}
-
-          <select
-            value={repoId}
-            onChange={(e) => setRepoId(e.target.value)}
-            className="select text-sm"
-          >
-            <option value="">All repos</option>
-            {repos.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.name}
-              </option>
-            ))}
-          </select>
-
           <select
             value={agentId}
-            onChange={(e) => setAgentId(e.target.value)}
+            onChange={(e) => { setAgentId(e.target.value); setOffset(0); }}
             className="select text-sm"
           >
             <option value="">All agents</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
+            {agents.map((a) => (<option key={a.id} value={a.id}>{a.name}</option>))}
           </select>
-
+          <select
+            value={repoId}
+            onChange={(e) => { setRepoId(e.target.value); setOffset(0); }}
+            className="select text-sm"
+          >
+            <option value="">All repos</option>
+            {repos.map((r) => (<option key={r.id} value={r.id}>{r.name}</option>))}
+          </select>
           {!isDev && (
-          <select
-            value={userId}
-            onChange={(e) => setUserId(e.target.value)}
-            className="select text-sm"
-          >
-            <option value="">All users</option>
-            {users.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name}
-              </option>
-            ))}
-          </select>
+            <select
+              value={status}
+              onChange={(e) => { setStatus(e.target.value); setOffset(0); }}
+              className="select text-sm"
+            >
+              <option value="">All statuses</option>
+              <option value="unreviewed">Unreviewed</option>
+              <option value="reviewed">Reviewed</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+              <option value="flagged">Flagged</option>
+            </select>
           )}
-
-          <select
-            value={branch}
-            onChange={(e) => setBranch(e.target.value)}
-            className="select text-sm"
+          <button
+            onClick={() => setShowSaved(!showSaved)}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              showSaved
+                ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700'
+            }`}
           >
-            <option value="">All branches</option>
-            {branches.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-
-          <div className="ml-auto text-sm text-gray-500 self-center">
-            {total} session{total !== 1 ? 's' : ''}
-          </div>
+            <Bookmark className="w-3.5 h-3.5" />
+            Saved
+          </button>
+          <Pill
+            variant={liveConnected ? 'running' : 'neutral'}
+            size="sm"
+            icon={liveConnected ? <PulseDot variant="running" /> : undefined}
+            title={liveConnected ? 'Real-time session events connected' : 'Connecting to real-time session stream'}
+          >
+            {liveConnected ? 'Live' : 'Connecting…'}
+          </Pill>
+          {viewModeToggle}
+          <button
+            onClick={() => setShowArchived(!showArchived)}
+            className={`flex items-center gap-1.5 px-2.5 py-2 rounded-md text-[12px] font-medium border transition-colors ${
+              showArchived
+                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                : 'bg-transparent text-gray-400 border-gray-800 hover:text-gray-200 hover:border-gray-700'
+            }`}
+          >
+            {showArchived ? <ArchiveRestore className="w-3 h-3" /> : <Archive className="w-3 h-3" />}
+            {showArchived ? 'Archived' : 'Archive'}
+          </button>
         </div>
+      ) : (
+        <div className="flex items-center justify-end">{viewModeToggle}</div>
       )}
 
       {/* Error */}
@@ -769,7 +698,7 @@ export default function Sessions() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-[11px] text-gray-500 uppercase tracking-wider border-b border-white/[0.06]">
-                  <th className="px-3 py-3 w-10">
+                  <th className="px-3 py-2 w-8">
                     <input
                       type="checkbox"
                       checked={allSelected}
@@ -778,25 +707,18 @@ export default function Sessions() {
                       title="Select all pending sessions"
                     />
                   </th>
-                  <SortHeader field="model">Model</SortHeader>
-                  <SortHeader field="status">Status</SortHeader>
+                  <th className="px-2 py-2 w-8"></th>
                   <SortHeader field="agent">Agent</SortHeader>
-                  {!isDev && <th className="px-6 py-3 font-medium">User</th>}
+                  <SortHeader field="model">Model</SortHeader>
                   <SortHeader field="repo">Repo</SortHeader>
-                  <th className="px-6 py-3 font-medium">Branch</th>
-                  <SortHeader field="duration" align="right">
-                    Duration
-                  </SortHeader>
-                  <SortHeader field="tokens" align="right">
-                    Tokens
-                  </SortHeader>
-                  <SortHeader field="cost" align="right">
-                    Cost
-                  </SortHeader>
-                  {!isDev && <SortHeader field="score">Score</SortHeader>}
-                  <SortHeader field="date" align="right">
-                    Age
-                  </SortHeader>
+                  <th className="px-3 py-2 font-medium hidden md:table-cell">Branch</th>
+                  <SortHeader field="duration" align="right">Duration</SortHeader>
+                  <SortHeader field="cost" align="right">Cost</SortHeader>
+                  <SortHeader field="tokens" align="right">Tokens</SortHeader>
+                  <SortHeader field="status">Status</SortHeader>
+                  {!isDev && <th className="px-3 py-2 font-medium">User</th>}
+                  <th className="px-3 py-2 font-medium hidden xl:table-cell">Tags</th>
+                  <SortHeader field="date" align="right">When</SortHeader>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
@@ -827,82 +749,102 @@ export default function Sessions() {
                           className="rounded border-gray-600 text-indigo-500 focus:ring-indigo-500 cursor-pointer"
                         />
                       </td>
-                      <td className="px-6 py-3">
-                        <span className="badge-blue">{s.model}</span>
+                      {/* Bookmark star */}
+                      <td className="px-2 py-2" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => toggleSaved(s.id)}
+                          className="p-0.5 rounded hover:bg-gray-700 transition-colors"
+                          title={savedIds.has(s.id) ? 'Remove bookmark' : 'Bookmark session'}
+                        >
+                          <Star
+                            className={`w-4 h-4 ${
+                              savedIds.has(s.id) ? 'text-amber-400 fill-amber-400' : 'text-gray-600'
+                            }`}
+                          />
+                        </button>
                       </td>
-                      <td className="px-6 py-3">
-                        {s.status === 'RUNNING' ? (
-                          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-400">
-                            <span className="relative flex h-1.5 w-1.5">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-green-400" />
-                            </span>
-                            running
-                          </span>
-                        ) : s.status === 'IDLE' ? (
-                          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-400">
-                            <span className="relative flex h-1.5 w-1.5">
-                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-400" />
-                            </span>
-                            idle
-                          </span>
-                        ) : s.status === 'ERROR' ? (
-                          <span className="text-xs font-medium text-red-400">error</span>
-                        ) : (
-                          <span className="text-xs text-gray-500">ended</span>
-                        )}
+                      {/* Agent */}
+                      <td className="px-3 py-2">
+                        <span className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300">
+                          {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
+                        </span>
                       </td>
-                      <td className="px-6 py-3 text-gray-400 text-xs">
-                        {s.agentName ?? <span className="text-gray-600">—</span>}
-                        {s.agentVersion && <span className="text-gray-600 ml-1">v{s.agentVersion}</span>}
+                      {/* Model */}
+                      <td className="px-3 py-2 text-gray-400 text-xs font-mono truncate max-w-[160px]" title={s.model}>
+                        {s.model || '—'}
                       </td>
-                      {!isDev && (
-                      <td className="px-6 py-3 text-gray-400 text-xs">
-                        {s.userName || s.commitAuthor ||
-                          <span className="text-gray-600">—</span>}
+                      {/* Repo */}
+                      <td className="px-3 py-2 text-gray-400 text-sm">
+                        {(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}
                       </td>
-                      )}
-                      <td className="px-6 py-3 text-gray-400">{(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}</td>
-                      <td className="px-6 py-3 text-gray-400 text-xs max-w-[140px] truncate">
+                      {/* Branch */}
+                      <td className="px-3 py-2 text-gray-500 hidden md:table-cell font-mono text-xs max-w-[140px] truncate">
                         {s.branch ? (
                           <span className="inline-flex items-center gap-1">
                             <GitBranch className="w-3 h-3 text-gray-500" />
                             {s.branch}
                           </span>
-                        ) : (
-                          <span className="text-gray-600">—</span>
-                        )}
+                        ) : '—'}
                       </td>
-                      <td className="px-6 py-3 text-right text-gray-400 tabular-nums">
+                      {/* Duration */}
+                      <td className="px-3 py-2 text-right text-gray-300 tabular-nums">
                         {formatDuration(s.durationMs)}
                       </td>
-                      <td className="px-6 py-3 text-right text-gray-400 tabular-nums">
-                        {(s.tokensUsed / 1000).toFixed(1)}k
-                      </td>
-                      <td className="px-6 py-3 text-right text-gray-300 tabular-nums">
+                      {/* Cost */}
+                      <td className="px-3 py-2 text-right text-gray-300 tabular-nums">
                         {formatCost(s.costUsd)}
                       </td>
-                      {!isDev && (
-                      <td className="px-6 py-3">
-                        {s.review?.score != null ? (
-                          <span className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-0.5 rounded-full ${
-                            s.review.score >= 80 ? 'bg-green-500/20 text-green-400' :
-                            s.review.score >= 50 ? 'bg-amber-500/20 text-amber-400' :
-                            'bg-red-500/20 text-red-400'
-                          }`}>
-                            {s.review.score}
-                            {s.review.isAutoReview && (
-                              <span className="text-[9px] opacity-60">AI</span>
-                            )}
+                      {/* Tokens */}
+                      <td className="px-3 py-2 text-right text-gray-400 tabular-nums">
+                        {(() => {
+                          const total = (s.tokensUsed || 0) + ((s as any).cacheReadTokens || 0) + ((s as any).cacheCreationTokens || 0);
+                          const cacheShare = total - (s.tokensUsed || 0);
+                          const formatted = total >= 1_000_000 ? `${(total / 1_000_000).toFixed(1)}M` : `${(total / 1000).toFixed(1)}k`;
+                          const title = cacheShare > 0
+                            ? `${s.inputTokens?.toLocaleString() || 0} in + ${s.outputTokens?.toLocaleString() || 0} out + ${cacheShare.toLocaleString()} cache`
+                            : `${s.tokensUsed?.toLocaleString() || 0} tokens`;
+                          return <span title={title}>{formatted}</span>;
+                        })()}
+                      </td>
+                      {/* Status */}
+                      <td className="px-3 py-2">
+                        {s.status === 'RUNNING' ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                            Running
+                          </span>
+                        ) : s.status === 'IDLE' ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-900/30 text-amber-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                            Idle
                           </span>
                         ) : s.review?.status ? (
-                          statusBadge(s.review.status.toLowerCase())
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              s.review.status === 'APPROVED' ? 'bg-green-900/30 text-green-400' :
+                              s.review.status === 'FLAGGED' ? 'bg-amber-900/30 text-amber-400' :
+                              s.review.status === 'REJECTED' ? 'bg-red-900/30 text-red-400' :
+                              'bg-gray-800 text-gray-400'
+                            }`}
+                          >
+                            {s.review.status.charAt(0) + s.review.status.slice(1).toLowerCase()}
+                          </span>
                         ) : (
-                          <span className="text-xs text-gray-600">—</span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-800 text-gray-500">
+                            Done
+                          </span>
                         )}
                       </td>
+                      {/* User — team only */}
+                      {!isDev && (
+                        <td className="px-3 py-2 text-gray-400 text-xs">
+                          {s.userName || s.commitAuthor || <span className="text-gray-600">—</span>}
+                        </td>
                       )}
-                      <td className="px-6 py-3 text-right text-gray-500">
+                      {/* Tags — xl only to keep table dense */}
+                      <td className="px-3 py-2 hidden xl:table-cell text-gray-600 text-xs">+</td>
+                      {/* When */}
+                      <td className="px-3 py-2 text-right text-gray-500 text-xs whitespace-nowrap">
                         {timeAgo(s.createdAt)}
                       </td>
                     </tr>
@@ -914,7 +856,7 @@ export default function Sessions() {
 
           {/* Pagination */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between px-6 py-3 border-t border-gray-800">
+            <div className="flex items-center justify-between px-3 py-2 border-t border-gray-800">
               <button
                 onClick={() => setOffset(Math.max(0, offset - LIMIT))}
                 disabled={offset === 0}

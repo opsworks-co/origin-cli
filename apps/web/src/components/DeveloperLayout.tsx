@@ -7,14 +7,10 @@ import NotificationBell from './NotificationBell';
 import ProductTour, { DASHBOARD_TOUR } from './ProductTour';
 import { LogoMark } from './Logo';
 import {
-  LayoutDashboard,
-  Radio,
   FolderGit2,
   Settings,
   Lightbulb,
-  Plug,
-  KeyRound,
-  Camera,
+  Play,
   LogOut,
   Menu,
   X,
@@ -30,18 +26,15 @@ const NAV_GROUPS = [
   {
     label: 'Workspace',
     items: [
-      { to: '/me',         label: 'Dashboard',    icon: LayoutDashboard },
-      { to: '/repos',      label: 'Repositories', icon: FolderGit2 },
-      { to: '/snapshots',  label: 'Snapshots',    icon: Camera },
-      { to: '/live',       label: 'Live Feed',    icon: Radio },
-      { to: '/insights',   label: 'Insights',     icon: Lightbulb },
+      { to: '/repos',    label: 'Repositories', icon: FolderGit2 },
+      { to: '/sessions', label: 'Sessions',     icon: Play },
+      // Insights now absorbs the old solo Dashboard content — one landing page.
+      { to: '/me',       label: 'Insights',     icon: Lightbulb },
     ],
   },
   {
     label: 'Account',
     items: [
-      { to: '/integrations', label: 'Integrations', icon: Plug },
-      { to: '/api-keys',     label: 'API Keys',     icon: KeyRound },
       { to: '/settings',     label: 'Settings',     icon: Settings },
     ],
   },

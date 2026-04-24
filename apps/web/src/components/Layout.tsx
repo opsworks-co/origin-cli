@@ -19,7 +19,6 @@ import {
   DollarSign,
   Settings,
   Lightbulb,
-  Camera,
   LogOut,
   Menu,
   X,
@@ -36,9 +35,8 @@ const NAV_GROUPS = [
     label: 'Workspace',
     items: [
       { to: '/dashboard',  label: 'Dashboard',    icon: LayoutDashboard },
-      { to: '/repos',      label: 'Repositories', icon: GitFork },
       { to: '/sessions',   label: 'Sessions',     icon: Play },
-      { to: '/snapshots',  label: 'Snapshots',    icon: Camera },
+      { to: '/repos',      label: 'Repositories', icon: GitFork },
       { to: '/insights',   label: 'Insights',     icon: Lightbulb },
     ],
   },

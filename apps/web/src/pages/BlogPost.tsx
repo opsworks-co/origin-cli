@@ -8,6 +8,247 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'nobody-in-the-chain-wrote-this-code': (
+    <>
+      <p>
+        Most engineering managers I know haven&rsquo;t written production code in years.
+      </p>
+      <p>
+        That used to be fine. They managed engineers who coded. Now those engineers manage AI agents that code.
+      </p>
+      <p>
+        So you have a manager who can&rsquo;t code, overseeing a dev who doesn&rsquo;t really code anymore, shipping code written by a model nobody fully understands.
+      </p>
+      <p>
+        And somehow we expect code reviews to catch problems in that chain.
+      </p>
+      <p className="text-gray-100 font-medium">
+        The gap between what&rsquo;s happening in the codebase and what leadership thinks is happening has never been wider.
+      </p>
+
+      <h2>The three-layer gap</h2>
+
+      {/* Chain-of-trust diagram */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-6 shadow-2xl">
+          <div className="flex flex-col md:flex-row items-stretch gap-3">
+            {[
+              {
+                label: 'Manager',
+                role: 'Approves the roadmap',
+                detail: 'Last shipped prod code: 4+ years ago',
+                color: 'border-amber-500/40 bg-amber-500/5',
+                accent: 'text-amber-400',
+              },
+              {
+                label: 'Engineer',
+                role: 'Writes the prompts',
+                detail: 'Types ~20% of the lines · reviews the rest',
+                color: 'border-indigo-500/40 bg-indigo-500/5',
+                accent: 'text-indigo-400',
+              },
+              {
+                label: 'Model',
+                role: 'Writes the code',
+                detail: 'claude-opus / gpt-5 / cursor-agent · 60–90% of diff',
+                color: 'border-purple-500/40 bg-purple-500/5',
+                accent: 'text-purple-400',
+              },
+            ].map((node, i) => (
+              <React.Fragment key={node.label}>
+                <div className={`flex-1 rounded-lg border ${node.color} px-4 py-3`}>
+                  <div className={`text-[10px] uppercase tracking-wider ${node.accent} font-semibold`}>
+                    Layer {i + 1}
+                  </div>
+                  <div className="text-sm font-semibold text-gray-100 mt-1">{node.label}</div>
+                  <div className="text-xs text-gray-400 mt-0.5">{node.role}</div>
+                  <div className="text-[11px] text-gray-600 mt-2">{node.detail}</div>
+                </div>
+                {i < 2 && (
+                  <div className="hidden md:flex items-center justify-center px-1 text-gray-700">
+                    &rarr;
+                  </div>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+          <div className="mt-4 pt-4 border-t border-gray-800 text-[11px] text-gray-500">
+            The person who approves the work can&rsquo;t read the diff.
+            The person who &ldquo;wrote&rdquo; it didn&rsquo;t type most of it.
+            The thing that did type it has no memory of why.
+          </div>
+        </div>
+      </div>
+
+      <p>
+        Each layer used to have a reason to exist. Managers set direction. Engineers translated direction into code. Reviewers caught what the engineer missed. The chain worked because everyone in it could, in a pinch, do the job of the person next to them.
+      </p>
+      <p>
+        That&rsquo;s gone now. The manager couldn&rsquo;t pass a tech screen at their own company. The engineer drives an autocomplete loop that produces 80% of the diff. The reviewer approves a PR written by a model they&rsquo;ve never used, in a style they didn&rsquo;t choose, doing things they didn&rsquo;t explicitly ask for.
+      </p>
+
+      <h2>Code review was the last line of defense. It&rsquo;s not holding.</h2>
+
+      <p>
+        Code review was designed for a world where a human spent four hours writing a thing and another human spent twenty minutes reading it. The reviewer&rsquo;s edge was patience &mdash; they had more of it than the author on the specific file in front of them.
+      </p>
+
+      <p>
+        AI flipped that. Now the author spent four minutes generating the thing and the reviewer spends twenty minutes reading it. The author has no particular insight into why the code is the way it is &mdash; they didn&rsquo;t make the choices that produced it. Ask them why a function is recursive instead of iterative and the honest answer is &ldquo;that&rsquo;s what the model gave me and it worked.&rdquo;
+      </p>
+
+      <p>
+        Reviewers can still catch obvious bugs. They can&rsquo;t catch:
+      </p>
+      <ul>
+        <li><strong className="text-gray-100">Subtle API misuse the model hallucinated from a different library.</strong> Looks plausible. Compiles. Doesn&rsquo;t do what the signature suggests.</li>
+        <li><strong className="text-gray-100">Regressions the model silently introduced while fixing something else.</strong> The diff shows the intended change; the unrelated change three files over goes unread.</li>
+        <li><strong className="text-gray-100">Architecture drift.</strong> Every prompt picks the locally-best option. A hundred locally-best options produce a codebase nobody designed.</li>
+        <li><strong className="text-gray-100">Silent cost blowouts.</strong> The PR looks small. The session behind it burned $120 in tokens and took 47 tool calls. That doesn&rsquo;t show in the diff.</li>
+      </ul>
+
+      <h2>What leadership thinks is happening vs. what&rsquo;s actually happening</h2>
+
+      {/* Dashboard contrast mock */}
+      <div className="not-prose my-10 grid md:grid-cols-2 gap-4">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between">
+            <span className="text-xs font-medium text-gray-300">What the exec dashboard shows</span>
+            <span className="text-[10px] text-emerald-400">on track</span>
+          </div>
+          <div className="p-4 space-y-3">
+            <div className="flex items-baseline justify-between">
+              <span className="text-[11px] text-gray-500 uppercase tracking-wider">Velocity</span>
+              <span className="text-lg font-semibold text-gray-100 tabular-nums">+34%</span>
+            </div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-[11px] text-gray-500 uppercase tracking-wider">PRs merged</span>
+              <span className="text-lg font-semibold text-gray-100 tabular-nums">127</span>
+            </div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-[11px] text-gray-500 uppercase tracking-wider">Incidents</span>
+              <span className="text-lg font-semibold text-gray-100 tabular-nums">0</span>
+            </div>
+            <div className="text-[11px] text-gray-600 pt-2 border-t border-gray-800">
+              &ldquo;The team is shipping faster than ever.&rdquo;
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-amber-500/30 bg-[#0a0b14] overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-amber-500/30 flex items-center justify-between">
+            <span className="text-xs font-medium text-amber-300">What the codebase actually shows</span>
+            <span className="text-[10px] text-amber-400">blind spots</span>
+          </div>
+          <div className="p-4 space-y-2 text-[11px] text-gray-400">
+            <div className="flex items-start gap-2">
+              <span className="text-amber-400 font-mono">·</span>
+              <span>78% of lines in the last 30 days written by AI. No human typed them.</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-amber-400 font-mono">·</span>
+              <span>4 different models in rotation. No one chose which writes which service.</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-amber-400 font-mono">·</span>
+              <span>$18k/mo in inference, spread across 23 personal API keys.</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-amber-400 font-mono">·</span>
+              <span>Average PR reviewer reads 14% of lines &mdash; the rest is &ldquo;LGTM, trust the tests.&rdquo;</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-amber-400 font-mono">·</span>
+              <span>No one can answer &ldquo;why is this here&rdquo; for 60%+ of the codebase.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p>
+        Both dashboards are telling the truth. They&rsquo;re just telling it about different things. The exec dashboard measures throughput. The codebase measures reality. In a world where a dev and an AI can ship a feature in an afternoon, throughput is easy. Reality is what bites you six months later when nobody remembers which prompt introduced the race condition.
+      </p>
+
+      <h2>What to do Monday morning</h2>
+
+      <p>
+        Don&rsquo;t ban AI coding. That ship sailed &mdash; your best engineers would quit, and your worst engineers would use it anyway. The question isn&rsquo;t whether AI writes your code. It&rsquo;s whether anyone can still answer basic questions about the code after it&rsquo;s written.
+      </p>
+
+      <p>
+        Three things close the gap:
+      </p>
+
+      <ul>
+        <li>
+          <strong className="text-gray-100">Per-line attribution that survives the commit.</strong> Not &ldquo;Sarah committed this&rdquo; &mdash; <em>which prompt, which model, which session</em> produced this line. Without this, every review is guessing.
+        </li>
+        <li>
+          <strong className="text-gray-100">Session replay on the PR.</strong> Reviewers shouldn&rsquo;t see just the final diff. They should see the prompt chain that produced it &mdash; what was asked, what the model tried, what got reverted. The journey is often more revealing than the destination.
+        </li>
+        <li>
+          <strong className="text-gray-100">Governance that runs before the PR opens.</strong> Model allowlists, cost caps, forbidden paths, required reviews for AI-heavy changes. Enforced at commit time, not discovered in post-mortem.
+        </li>
+      </ul>
+
+      {/* What Origin shows mock */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] overflow-hidden shadow-2xl">
+          <div className="px-4 py-2.5 border-b border-gray-800 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-indigo-500" />
+              <span className="text-xs font-medium text-gray-200">auth-service &middot; PR #1247</span>
+            </div>
+            <span className="text-[10px] text-indigo-400">96% AI &middot; claude-opus-4-7</span>
+          </div>
+          <div className="px-4 py-3 border-b border-gray-800/60">
+            <p className="text-xs text-gray-300 mb-1">add rate limiting to auth endpoints</p>
+            <div className="flex items-center gap-3 text-[10px] text-gray-500 font-mono">
+              <span>12 prompts</span>
+              <span>47 tool calls</span>
+              <span>$4.82</span>
+              <span>18m 22s</span>
+              <span className="ml-auto text-gray-400">reviewer: @sarah</span>
+            </div>
+          </div>
+          <div className="divide-y divide-gray-800/60 text-[11px]">
+            {[
+              { line: 'src/middleware/ratelimit.ts:42', prompt: 'use redis for distributed counters', note: 'author couldn\'t answer why redis vs memory' },
+              { line: 'src/middleware/ratelimit.ts:87', prompt: 'handle the locked-account edge case', note: 'added a branch that swallows errors silently' },
+              { line: 'src/middleware/ratelimit.ts:114', prompt: 'write tests for both paths', note: 'tests mock the thing they\'re meant to verify' },
+            ].map((row, i) => (
+              <div key={i} className="px-4 py-2.5 hover:bg-gray-900/40 transition-colors">
+                <div className="flex items-start gap-3">
+                  <span className="text-gray-600 font-mono text-[10px] flex-shrink-0 pt-0.5">{row.line}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-gray-300">&ldquo;{row.prompt}&rdquo;</p>
+                    <p className="text-amber-400/80 mt-0.5">⚠ {row.note}</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <p>
+        That&rsquo;s what Origin shows on every PR. Not &ldquo;AI wrote this&rdquo; &mdash; everyone knows that. Which <em>prompt</em> wrote which <em>line</em>, what the model tried before landing there, and what the reviewer should actually pay attention to. Per-line attribution. Session replay on PR. Policies enforced before commit.
+      </p>
+
+      <p>
+        We built it because we ran the chain ourselves and saw it break. The best engineers we know still ship great code with AI &mdash; but they can tell you exactly why every file looks the way it does. The teams that can&rsquo;t answer that question are accruing debt they won&rsquo;t see until it&rsquo;s already shipped.
+      </p>
+
+      <p>
+        Code review isn&rsquo;t the last line of defense anymore. Visibility is.
+      </p>
+
+      <p className="text-gray-500 text-sm mt-8">
+        Origin is git blame for AI. <Link to="/" className="text-indigo-400 hover:text-indigo-300">See it on your repo</Link> &mdash; free for solo developers, works with Claude Code, Cursor, Codex, Gemini, and Aider.
+      </p>
+    </>
+  ),
+
   'snapshots-see-what-ai-changed-every-prompt': (
     <>
       <p>

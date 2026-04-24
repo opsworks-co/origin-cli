@@ -114,6 +114,24 @@ export default function Repos() {
   const [showArchived, setShowArchived] = useState(false);
   const [archivedRepos, setArchivedRepos] = useState<Repo[]>([]);
 
+  // Collapsed org groups — persists across reloads so hiding a noisy group sticks.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('origin:repos:collapsed');
+      if (raw) return new Set(JSON.parse(raw));
+    } catch { /* ignore */ }
+    return new Set();
+  });
+  const toggleGroupCollapsed = (orgKey: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(orgKey)) next.delete(orgKey);
+      else next.add(orgKey);
+      try { localStorage.setItem('origin:repos:collapsed', JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  };
+
   // GitHub import state
   const [hasGitHub, setHasGitHub] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -615,33 +633,50 @@ export default function Repos() {
               <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-500">Webhooks created automatically</p>
                 <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowImport(false);
-                      setSelectedRepos(new Set());
-                      setImportResults([]);
-                      setSearchFilter('');
-                    }}
-                    disabled={importing}
-                    className="btn-secondary text-sm"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleImport}
-                    disabled={selectedRepos.size === 0 || importing}
-                    className="btn-primary text-sm"
-                  >
-                    {importing ? (
-                      <span className="flex items-center gap-2">
-                        <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
-                        Importing...
-                      </span>
-                    ) : (
-                      `Import ${selectedRepos.size} Selected`
-                    )}
-                  </button>
+                  {importResults.length > 0 && selectedRepos.size === 0 && !importing ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowImport(false);
+                        setSelectedRepos(new Set());
+                        setImportResults([]);
+                        setSearchFilter('');
+                      }}
+                      className="btn-primary text-sm"
+                    >
+                      OK
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowImport(false);
+                          setSelectedRepos(new Set());
+                          setImportResults([]);
+                          setSearchFilter('');
+                        }}
+                        disabled={importing}
+                        className="btn-secondary text-sm"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleImport}
+                        disabled={selectedRepos.size === 0 || importing}
+                        className="btn-primary text-sm"
+                      >
+                        {importing ? (
+                          <span className="flex items-center gap-2">
+                            <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
+                            Importing...
+                          </span>
+                        ) : (
+                          `Import ${selectedRepos.size} Selected`
+                        )}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </>
@@ -748,34 +783,52 @@ export default function Repos() {
               <div className="flex items-center justify-between">
                 <p className="text-xs text-gray-500">Webhooks created automatically</p>
                 <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowGitLabImport(false);
-                      setSelectedGitLabRepos(new Set());
-                      setGitlabImportResults([]);
-                      setGitlabSearchFilter('');
-                    }}
-                    disabled={importingGitLab}
-                    className="btn-secondary text-sm"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleGitLabImport}
-                    disabled={selectedGitLabRepos.size === 0 || importingGitLab}
-                    className="btn-primary text-sm"
-                    style={{ background: '#FC6D26' }}
-                  >
-                    {importingGitLab ? (
-                      <span className="flex items-center gap-2">
-                        <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
-                        Importing...
-                      </span>
-                    ) : (
-                      `Import ${selectedGitLabRepos.size} Selected`
-                    )}
-                  </button>
+                  {gitlabImportResults.length > 0 && selectedGitLabRepos.size === 0 && !importingGitLab ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowGitLabImport(false);
+                        setSelectedGitLabRepos(new Set());
+                        setGitlabImportResults([]);
+                        setGitlabSearchFilter('');
+                      }}
+                      className="btn-primary text-sm"
+                      style={{ background: '#FC6D26' }}
+                    >
+                      OK
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowGitLabImport(false);
+                          setSelectedGitLabRepos(new Set());
+                          setGitlabImportResults([]);
+                          setGitlabSearchFilter('');
+                        }}
+                        disabled={importingGitLab}
+                        className="btn-secondary text-sm"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleGitLabImport}
+                        disabled={selectedGitLabRepos.size === 0 || importingGitLab}
+                        className="btn-primary text-sm"
+                        style={{ background: '#FC6D26' }}
+                      >
+                        {importingGitLab ? (
+                          <span className="flex items-center gap-2">
+                            <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
+                            Importing...
+                          </span>
+                        ) : (
+                          `Import ${selectedGitLabRepos.size} Selected`
+                        )}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </>
@@ -980,11 +1033,26 @@ export default function Repos() {
         </div>
       ) : (
         <div className="space-y-4">
-          {orgGroups.map((group) => (
+          {orgGroups.map((group) => {
+            const collapsed = collapsedGroups.has(group.org);
+            return (
             <div key={group.org} className="card p-0 overflow-hidden">
-              {/* Org Header */}
-              <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between bg-gray-900/80">
+              {/* Org Header — clicking anywhere outside the action buttons
+                  toggles the group collapsed. Hover reveals the chevron. */}
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => toggleGroupCollapsed(group.org)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroupCollapsed(group.org); } }}
+                className={`px-5 py-3 flex items-center justify-between bg-gray-900/80 cursor-pointer transition-colors hover:bg-gray-900 ${collapsed ? '' : 'border-b border-gray-800'}`}
+              >
                 <div className="flex items-center gap-3">
+                  <svg
+                    className={`w-3.5 h-3.5 text-gray-500 transition-transform ${collapsed ? '' : 'rotate-90'}`}
+                    fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                  </svg>
                   {group.provider === 'github' ? (
                     <svg className="w-4 h-4 text-gray-400" viewBox="0 0 16 16" fill="currentColor">
                       <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
@@ -1014,7 +1082,7 @@ export default function Repos() {
                   <span>{group.totalCommits} commits</span>
                   <span>{group.totalSessions} sessions</span>
                   <button
-                    onClick={() => handleSyncAll(group)}
+                    onClick={(e) => { e.stopPropagation(); handleSyncAll(group); }}
                     className="text-indigo-400 hover:text-indigo-300 transition-colors"
                   >
                     Sync all
@@ -1022,7 +1090,8 @@ export default function Repos() {
                 </div>
               </div>
 
-              {/* Repo Rows */}
+              {/* Repo Rows — hidden when the group is collapsed */}
+              {!collapsed && (
               <div className="divide-y divide-gray-800/50">
                 {group.repos.map((repo) => (
                   <div
@@ -1099,8 +1168,10 @@ export default function Repos() {
                   </div>
                 ))}
               </div>
+              )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

@@ -126,15 +126,16 @@ model ApiKeyAgentScope {
 // ── Repos & Sessions ────────────────────────────────────────────
 
 model Repo {
-  id        String    @id @default(uuid())
-  orgId     String
-  org       Org       @relation(fields: [orgId], references: [id])
-  name      String
-  path      String
-  provider  String    @default("local")
-  archived  Boolean   @default(false)
-  syncedAt  DateTime?
-  createdAt DateTime  @default(now())
+  id             String    @id @default(uuid())
+  orgId          String
+  org            Org       @relation(fields: [orgId], references: [id])
+  name           String
+  path           String
+  provider       String    @default("local")
+  archived       Boolean   @default(false)
+  verboseCapture Boolean   @default(false)
+  syncedAt       DateTime?
+  createdAt      DateTime  @default(now())
   commits      Commit[]
   webhooks     Webhook[]
   pullRequests PullRequest[]
@@ -217,6 +218,7 @@ model CodingSession {
   review       SessionReview?
   sessionDiff    SessionDiff?
   promptChanges  PromptChange[]
+  snapshots      Snapshot[]
   secretFindings SecretFinding[]
   trailSessions  TrailSession[]
   sharedSessions SharedSession[]
@@ -267,6 +269,29 @@ model PromptChange {
 
   @@unique([sessionId, promptIndex])
   @@index([sessionId])
+}
+
+// Auto-snapshots taken by the CLI throughout a session (via shadow git
+// branches). Stored centrally so the dashboard can render dots on the
+// session timeline rail. The snapshot's actual tree contents stay in the
+// user's local repo — this table holds metadata only.
+model Snapshot {
+  id            String        @id @default(uuid())
+  sessionId     String
+  session       CodingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  snapshotId    String        // CLI-generated id, unique within a session
+  type          String        // auto | manual | pre-prompt | session-start | session-end
+  treeSha       String?
+  commitSha     String?       // HEAD at snapshot time
+  promptIndex   Int?          // Which prompt this snapshot belongs to (if any)
+  filesChanged  String        @default("[]") // JSON array of file paths
+  linesAdded    Int           @default(0)
+  linesRemoved  Int           @default(0)
+  takenAt       DateTime      // CLI-side timestamp
+  createdAt     DateTime      @default(now())
+
+  @@unique([sessionId, snapshotId])
+  @@index([sessionId, takenAt])
 }
 
 model SessionRepo {

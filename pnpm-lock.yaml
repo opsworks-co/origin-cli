@@ -151,6 +151,9 @@ importers:
       commander:
         specifier: ^12.1.0
         version: 12.1.0
+      fzstd:
+        specifier: ^0.1.1
+        version: 0.1.1
     devDependencies:
       '@types/node':
         specifier: ^22.14.1
@@ -1484,6 +1487,9 @@ packages:
 
   function-bind@1.1.2:
     resolution: {integrity: sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==}
+
+  fzstd@0.1.1:
+    resolution: {integrity: sha512-dkuVSOKKwh3eas5VkJy1AW1vFpet8TA/fGmVA5krThl8YcOVE/8ZIoEA1+U1vEn5ckxxhLirSdY837azmbaNHA==}
 
   gensync@1.0.0-beta.2:
     resolution: {integrity: sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg==}
@@ -3563,6 +3569,8 @@ snapshots:
     optional: true
 
   function-bind@1.1.2: {}
+
+  fzstd@0.1.1: {}
 
   gensync@1.0.0-beta.2: {}
 

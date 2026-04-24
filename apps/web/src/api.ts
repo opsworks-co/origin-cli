@@ -402,7 +402,10 @@ export function deleteRepo(id: string) {
   return request<void>(`/api/repos/${id}`, { method: 'DELETE' });
 }
 
-export function updateRepo(id: string, data: Partial<{ name: string; path: string; provider: string }>) {
+export function updateRepo(
+  id: string,
+  data: Partial<{ name: string; path: string; provider: string; verboseCapture: boolean }>,
+) {
   return request<Repo>(`/api/repos/${id}`, {
     method: 'PUT',
     body: JSON.stringify(data),

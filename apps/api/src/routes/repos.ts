@@ -509,6 +509,141 @@ router.post('/:id/sync', expensiveLimiter, async (req: AuthRequest, res: Respons
   }
 });
 
+// POST /:id/backfill-files — fill in commit.filesChanged / additions /
+// deletions from the GitHub or GitLab API for rows that were ingested before
+// the webhook captured them (or via a code path that left them blank).
+// This unsticks the commit-detail page for legacy commits without requiring
+// a fresh push.
+router.post('/:id/backfill-files', requireRole('ADMIN'), expensiveLimiter, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+    if (repo.provider !== 'github' && repo.provider !== 'gitlab') {
+      return res.status(400).json({ error: 'Backfill requires a GitHub or GitLab-backed repo' });
+    }
+
+    // Grab missing-file commits. Capped at 500 per call so a monorepo with
+    // thousands of rows doesn't DoS the provider API; re-run to chip away.
+    const MAX_PER_CALL = 500;
+    const commits = await prisma.commit.findMany({
+      where: {
+        repoId: id,
+        OR: [{ filesChanged: '[]' }, { filesChanged: '' }, { filesChanged: { equals: null as any } }],
+      },
+      orderBy: { committedAt: 'desc' },
+      take: MAX_PER_CALL,
+    });
+
+    if (commits.length === 0) {
+      return res.json({ scanned: 0, updated: 0, failed: 0, truncated: false });
+    }
+
+    let token: string | undefined;
+    let apiBase = '';
+    let projectOrOwnerRepo: { owner: string; repo: string } | string | null = null;
+    const headers: Record<string, string> = { 'User-Agent': 'Origin-App' };
+
+    if (repo.provider === 'github') {
+      const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+      if (integration?.token) token = integration.token;
+      else if (process.env.GITHUB_TOKEN) token = process.env.GITHUB_TOKEN;
+      const parsed = parseRepoFullName(repo.path);
+      if (!parsed) return res.status(400).json({ error: 'Unable to parse GitHub repo path' });
+      projectOrOwnerRepo = parsed;
+      apiBase = integration?.apiBaseUrl || 'https://api.github.com';
+      headers.Accept = 'application/vnd.github.v3+json';
+      if (token) headers.Authorization = `Bearer ${token}`;
+    } else {
+      const integration = await getGitLabIntegrationConfig(req.user!.orgId);
+      if (!integration) return res.status(400).json({ error: 'GitLab integration not configured' });
+      const { token: glToken } = await getValidGitLabToken(integration);
+      if (!glToken) return res.status(400).json({ error: 'GitLab token unavailable' });
+      token = glToken;
+      const projectPath = parseGitLabProjectPath(repo.path);
+      if (!projectPath) return res.status(400).json({ error: 'Unable to parse GitLab project path' });
+      projectOrOwnerRepo = projectPath;
+      apiBase = (integration as any).apiBaseUrl || 'https://gitlab.com/api/v4';
+      headers['PRIVATE-TOKEN'] = token;
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    // Serial, not parallel — the provider rate-limits per-token and a 500-way
+    // fan-out burns the budget fast. Small delay between calls keeps us well
+    // under GitHub's 5k/h authenticated ceiling for typical repo sizes.
+    let updated = 0;
+    let failed = 0;
+    for (const c of commits) {
+      try {
+        let files: string[] = [];
+        let additions = 0;
+        let deletions = 0;
+        if (repo.provider === 'github') {
+          const { owner, repo: name } = projectOrOwnerRepo as { owner: string; repo: string };
+          const r = await fetch(`${apiBase}/repos/${owner}/${name}/commits/${c.sha}`, { headers });
+          if (!r.ok) { failed++; continue; }
+          const data = await r.json() as any;
+          for (const f of (data.files || [])) {
+            files.push(f.filename);
+            additions += f.additions || 0;
+            deletions += f.deletions || 0;
+          }
+        } else {
+          const encoded = encodeURIComponent(projectOrOwnerRepo as string);
+          const r = await fetch(`${apiBase}/projects/${encoded}/repository/commits/${c.sha}/diff?per_page=100`, { headers });
+          if (!r.ok) { failed++; continue; }
+          const diffs = await r.json() as any[];
+          for (const d of (diffs || [])) {
+            files.push(d.new_path || d.old_path);
+            const patch = d.diff || '';
+            for (const line of patch.split('\n')) {
+              if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+              else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+            }
+          }
+        }
+
+        if (files.length > 0) {
+          await prisma.commit.update({
+            where: { id: c.id },
+            data: {
+              filesChanged: JSON.stringify(files),
+              fileCount: files.length,
+              // Only fill these if they were unset — preserve any values that
+              // were stamped by a session-level capture.
+              ...(c.additions == null && { additions }),
+              ...(c.deletions == null && { deletions }),
+            },
+          });
+          updated++;
+        }
+      } catch {
+        failed++;
+      }
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'REPO_FILES_BACKFILLED',
+        resource: repo.id,
+        metadata: JSON.stringify({ scanned: commits.length, updated, failed }),
+      },
+    });
+
+    res.json({
+      scanned: commits.length,
+      updated,
+      failed,
+      truncated: commits.length === MAX_PER_CALL,
+    });
+  } catch (err) {
+    console.error('Backfill files error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /:id/import-sessions — import sessions from the origin-sessions git branch
 router.post('/:id/import-sessions', expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
@@ -894,7 +1029,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { name, path, provider } = req.body;
+    const { name, path, provider, verboseCapture } = req.body;
 
     const existing = await prisma.repo.findFirst({
       where: { id, orgId: req.user!.orgId },
@@ -907,6 +1042,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
         ...(name !== undefined && { name }),
         ...(path !== undefined && { path }),
         ...(provider !== undefined && { provider }),
+        ...(typeof verboseCapture === 'boolean' && { verboseCapture }),
       },
     });
 
@@ -1284,6 +1420,10 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
             // slug (e.g. "claude-code", "cursor") instead of the raw
             // provider model name ("gemini-3-flash-preview").
             agent: { select: { id: true, slug: true, name: true } },
+            // Include the user so the list can show the human name instead
+            // of the "mcp-agent" placeholder that session/start stamped on
+            // the commit before the author was known.
+            user: { select: { id: true, name: true, email: true } },
           },
         },
         codingSession: {
@@ -1291,6 +1431,7 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
             promptChanges: { orderBy: { promptIndex: 'asc' } },
             review: true,
             agent: { select: { id: true, slug: true, name: true } },
+            user: { select: { id: true, name: true, email: true } },
           },
         },
       },
@@ -1298,12 +1439,31 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
       take: 1000,
     });
 
-    // Filter out git-notes metadata commits and dedupe by SHA.
-    // See utils/commit-filter.ts for full rationale.
+    // Filter out git-notes metadata commits, session-only placeholders,
+    // and dedupe by SHA.
+    //
+    // Session placeholders: session/start stamps a Commit row with a random
+    // SHA so the CodingSession has a FK target. If the session never
+    // produces a real git commit (read-only / planning runs, or a session
+    // that crashed before git-capture), that placeholder row stays in the
+    // Commit table forever with no filesChanged / additions / deletions.
+    // Those aren't commits the user ever made — they shouldn't appear in
+    // the commits list. Keep them out via a strict "no real change data"
+    // test so we don't accidentally hide real commits the webhook hasn't
+    // fully hydrated yet (those have a non-random author and/or a real
+    // message and/or a committedAt from the source).
+    const isSessionPlaceholder = (c: any): boolean => {
+      if (c.aiDetectionMethod !== 'session') return false;
+      const filesChangedEmpty = !c.filesChanged || c.filesChanged === '[]';
+      const noStats = c.additions == null && c.deletions == null && c.fileCount == null;
+      const noMessage = !c.message || c.message.trim() === '';
+      return filesChangedEmpty && noStats && noMessage;
+    };
     const seen = new Set<string>();
     const commits: typeof rawCommits = [];
     for (const c of rawCommits) {
       if (isGitNotesMetadataCommit(c.message)) continue;
+      if (isSessionPlaceholder(c)) continue;
       if (seen.has(c.sha)) continue;
       seen.add(c.sha);
       commits.push(c);
@@ -1316,6 +1476,23 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
       // Remove codingSession from output to keep API shape consistent
       const { codingSession: _cs, ...commitWithout } = c;
 
+      // Retroactive fallbacks for placeholder commits that were stamped
+      // with author="mcp-agent" and message="" before session/end had the
+      // data to fill them in. Keeps legacy rows readable without requiring
+      // a DB migration.
+      if (sess) {
+        if (!commitWithout.message || commitWithout.message.trim() === '') {
+          const fallbackMessage = sess.prompt
+            ? sess.prompt.slice(0, 200)
+            : (sess.promptChanges?.[0]?.promptText || '').slice(0, 200);
+          if (fallbackMessage) commitWithout.message = fallbackMessage;
+        }
+        if (commitWithout.author === 'mcp-agent' || !commitWithout.author) {
+          const fallbackAuthor = sess.user?.name || sess.user?.email || sess.apiKeyName;
+          if (fallbackAuthor) commitWithout.author = fallbackAuthor;
+        }
+      }
+
       if (!sess) return { ...commitWithout, session: null };
 
       const dbPrompts = (sess.promptChanges || []).map((pc: any) => ({
@@ -1324,6 +1501,7 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
         filesChanged: safeParseArray<string>(pc.filesChanged, `repos.list prompt ${pc.promptIndex}`),
         diff: pc.diff || '',
         uncommittedDiff: pc.uncommittedDiff || '',
+        commitSha: pc.commitSha || null,
       }));
 
       // If no PromptChange records exist, extract prompts from transcript
@@ -1340,6 +1518,7 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
                 promptText: (typeof m.content === 'string' ? m.content : '').slice(0, 1000),
                 filesChanged: [],
                 diff: '',
+                commitSha: null,
               }));
           }
         } catch {
@@ -1347,19 +1526,23 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
         }
       }
 
-      // Filter promptChanges by file overlap with this commit's files
-      const commitFiles = safeParseArray<string>(c.filesChanged, `repos.list commit ${c.sha}`);
-
-      if (commitFiles.length > 0 && promptChanges.length > 0) {
-        const relevant = promptChanges.filter((pc: any) => {
-          const pcFiles: string[] = pc.filesChanged || [];
-          return pcFiles.some((f: string) => commitFiles.some((cf: string) =>
-            f === cf || f.endsWith(cf) || cf.endsWith(f)
-          ));
-        });
-        // Use filtered prompts if any match; otherwise keep all (fallback)
-        if (relevant.length > 0) {
-          promptChanges = relevant;
+      // Prefer exact commitSha attribution; fall back to file overlap.
+      const byCommitSha = promptChanges.filter((pc: any) => pc.commitSha === c.sha);
+      if (byCommitSha.length > 0) {
+        promptChanges = byCommitSha;
+      } else {
+        const commitFiles = safeParseArray<string>(c.filesChanged, `repos.list commit ${c.sha}`);
+        if (commitFiles.length > 0 && promptChanges.length > 0) {
+          const relevant = promptChanges.filter((pc: any) => {
+            const pcFiles: string[] = pc.filesChanged || [];
+            return pcFiles.some((f: string) => commitFiles.some((cf: string) =>
+              f === cf || f.endsWith(cf) || cf.endsWith(f)
+            ));
+          });
+          // Use filtered prompts if any match; otherwise keep all (fallback)
+          if (relevant.length > 0) {
+            promptChanges = relevant;
+          }
         }
       }
 
@@ -1401,6 +1584,7 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
             promptChanges: { orderBy: { promptIndex: 'asc' } },
             review: true,
             sessionDiff: true,
+            user: { select: { id: true, name: true, email: true } },
           },
         },
         codingSession: {
@@ -1408,6 +1592,7 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
             promptChanges: { orderBy: { promptIndex: 'asc' } },
             review: true,
             sessionDiff: true,
+            user: { select: { id: true, name: true, email: true } },
           },
         },
       },
@@ -1416,6 +1601,22 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
     if (!commit) return res.status(404).json({ error: 'Commit not found' });
 
     let sess: any = (commit as any).session || (commit as any).codingSession;
+
+    // Retroactive fallbacks — if the placeholder row was created before the
+    // session had a user/prompt, fall back to those here so legacy commits
+    // render a real name and message on the detail page too.
+    if (sess) {
+      if (!commit.message || commit.message.trim() === '') {
+        const fallbackMessage = sess.prompt
+          ? sess.prompt.slice(0, 200)
+          : (sess.promptChanges?.[0]?.promptText || '').slice(0, 200);
+        if (fallbackMessage) (commit as any).message = fallbackMessage;
+      }
+      if (commit.author === 'mcp-agent' || !commit.author) {
+        const fallbackAuthor = sess.user?.name || sess.user?.email || sess.apiKeyName;
+        if (fallbackAuthor) (commit as any).author = fallbackAuthor;
+      }
+    }
 
     // Fallback: if no direct FK link (e.g. commit synced from GitHub/GitLab
     // without an Origin hook), look up a session whose SessionDiff.commitShas
@@ -1484,6 +1685,7 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
         promptText: pc.promptText,
         filesChanged: (() => { try { return JSON.parse(pc.filesChanged || '[]'); } catch { return []; } })(),
         diff: pc.diff || '',
+        commitSha: pc.commitSha || null,
       }));
 
       // Fallback: extract from transcript if no promptChanges
@@ -1499,21 +1701,31 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
                 promptText: (typeof m.content === 'string' ? m.content : '').slice(0, 1000),
                 filesChanged: [],
                 diff: '',
+                commitSha: null,
               }));
           }
         } catch {/* ignore */}
       }
 
-      // Narrow to prompts that touched this commit's files
-      const commitFiles = safeParseArray<string>(commit.filesChanged, `repos.detail narrow ${commit.sha}`);
-      if (commitFiles.length > 0 && promptChanges.length > 0) {
-        const relevant = promptChanges.filter((pc: any) => {
-          const pcFiles: string[] = pc.filesChanged || [];
-          return pcFiles.some((f: string) =>
-            commitFiles.some((cf: string) => f === cf || f.endsWith(cf) || cf.endsWith(f))
-          );
-        });
-        if (relevant.length > 0) promptChanges = relevant;
+      // Narrow to prompts that actually produced this commit. Prefer authoritative
+      // commitSha attribution (set by the post-commit hook); fall back to
+      // file-overlap for legacy rows that predate SHA capture. Without this,
+      // a session that made commits on both main and a feature branch shows
+      // every prompt under every commit.
+      const byCommitSha = promptChanges.filter((pc: any) => pc.commitSha === sha);
+      if (byCommitSha.length > 0) {
+        promptChanges = byCommitSha;
+      } else {
+        const commitFiles = safeParseArray<string>(commit.filesChanged, `repos.detail narrow ${commit.sha}`);
+        if (commitFiles.length > 0 && promptChanges.length > 0) {
+          const relevant = promptChanges.filter((pc: any) => {
+            const pcFiles: string[] = pc.filesChanged || [];
+            return pcFiles.some((f: string) =>
+              commitFiles.some((cf: string) => f === cf || f.endsWith(cf) || cf.endsWith(f))
+            );
+          });
+          if (relevant.length > 0) promptChanges = relevant;
+        }
       }
     }
 
@@ -1663,6 +1875,42 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
       } catch {/* ignore */}
     }
 
+    // Last-resort fallback: commits from purely local repos (no GitHub/GitLab
+    // remote and no captured full session diff) may still have a file list
+    // stamped on the CodingSession or Commit rows. Surface that so the UI can
+    // at least show file names and totals instead of a blank "No files in
+    // this commit." panel.
+    if (files.length === 0) {
+      // Prefer the session's filesChanged when available — it reflects what
+      // the hook actually observed for this run. Fall back to the commit row.
+      let storedFiles = sess
+        ? safeParseArray<string>(sess.filesChanged, `repos.detail sess ${sess.id}`)
+        : [];
+      if (storedFiles.length === 0) {
+        storedFiles = safeParseArray<string>(commit.filesChanged, `repos.detail stored ${commit.sha}`);
+      }
+      if (storedFiles.length > 0) {
+        const totalAdd = sess?.linesAdded ?? commit.additions ?? 0;
+        const totalDel = sess?.linesRemoved ?? commit.deletions ?? 0;
+        // Distribute totals uniformly across files — real per-file splits
+        // aren't recoverable without a diff, and the commit-level totals are
+        // surfaced separately in the header.
+        const perFileAdd = Math.floor(totalAdd / storedFiles.length);
+        const perFileDel = Math.floor(totalDel / storedFiles.length);
+        for (const filename of storedFiles) {
+          files.push({
+            filename,
+            status: 'modified',
+            additions: perFileAdd,
+            deletions: perFileDel,
+            changes: perFileAdd + perFileDel,
+            patch: '',
+            previousFilename: null,
+          });
+        }
+      }
+    }
+
     // Map each file to the prompt(s) that touched it
     const filesWithPromptIdx = files.map((f) => {
       const matchingPromptIndexes: number[] = [];
@@ -1676,8 +1924,13 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
       return { ...f, promptIndexes: matchingPromptIndexes };
     });
 
-    const totalAdditions = filesWithPromptIdx.reduce((s, f) => s + f.additions, 0);
-    const totalDeletions = filesWithPromptIdx.reduce((s, f) => s + f.deletions, 0);
+    // Prefer summed file-level counts, but fall back to the commit-level
+    // stats if file rows have 0/0 (e.g. the local-only stored-files fallback
+    // above was used without additions/deletions on the commit row).
+    const fileAdditions = filesWithPromptIdx.reduce((s, f) => s + f.additions, 0);
+    const fileDeletions = filesWithPromptIdx.reduce((s, f) => s + f.deletions, 0);
+    const totalAdditions = fileAdditions > 0 ? fileAdditions : (sess?.linesAdded ?? commit.additions ?? 0);
+    const totalDeletions = fileDeletions > 0 ? fileDeletions : (sess?.linesRemoved ?? commit.deletions ?? 0);
 
     // Build minimal session payload (no transcript)
     const sessionPayload = sess ? (() => {

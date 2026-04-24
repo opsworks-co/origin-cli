@@ -31,7 +31,6 @@ import {
 } from './utils';
 import { StatCardsRow } from './StatCardsRow';
 import { TodayActivityFeed } from './TodayActivityFeed';
-import { SessionsTab } from './tabs/SessionsTab';
 import { TimelineTab } from './tabs/TimelineTab';
 import { AgentsTab } from './tabs/AgentsTab';
 import { StatsTab } from './tabs/StatsTab';
@@ -42,7 +41,18 @@ import { CommitsTab, CommitEntry, CommitSort } from './tabs/CommitsTab';
 
 // ── Main component ──────────────────────────────────────────────────────────
 
-type Tab = 'sessions' | 'timeline' | 'agents' | 'stats' | 'patterns' | 'efficiency' | 'prompts' | 'commits';
+// Sessions lives on /sessions (left-nav) — don't duplicate it here.
+type Tab = 'timeline' | 'commits' | 'prompts' | 'agents' | 'stats' | 'patterns' | 'efficiency';
+
+const TABS: { key: Tab; label: string; icon: React.ElementType }[] = [
+  { key: 'timeline', label: 'Timeline', icon: Activity },
+  { key: 'commits', label: 'Commits', icon: GitCommit },
+  { key: 'prompts', label: 'Prompt Search', icon: Search },
+  { key: 'agents', label: 'Agents', icon: Bot },
+  { key: 'stats', label: 'Stats', icon: BarChart3 },
+  { key: 'patterns', label: 'Patterns', icon: Timer },
+  { key: 'efficiency', label: 'Efficiency', icon: Gauge },
+];
 
 export default function MyDashboard() {
   const { user } = useAuth();
@@ -163,9 +173,6 @@ export default function MyDashboard() {
   // Merge
   const [merging, setMerging] = useState(false);
 
-  // Tab
-  const [tab, setTab] = useState<Tab>('sessions');
-
   // ── Fetch stats ─────────────────────────────────────────────────────
   useEffect(() => {
     setStatsLoading(true);
@@ -229,69 +236,8 @@ export default function MyDashboard() {
       .finally(() => setTodayLoading(false));
   }, []);
 
-  // ── Fetch timeline sessions (last 100, no offset) ─────────────────
+  // ── Fetch commits ───────────────────────────────────────────────────
   useEffect(() => {
-    if (tab !== 'timeline') return;
-    setTimelineLoading(true);
-    const params = new URLSearchParams();
-    params.set('mine', 'true');
-    params.set('limit', '100');
-    params.set('offset', '0');
-    request<{ sessions: Session[]; total: number }>(`/api/sessions?${params.toString()}`)
-      .then((data) => setTimelineSessions(data.sessions))
-      .catch(() => {})
-      .finally(() => setTimelineLoading(false));
-  }, [tab]);
-
-  // ── Fetch patterns (lazy) ─────────────────────────────────────────────
-  useEffect(() => {
-    if (tab !== 'patterns' || patterns) return;
-    setPatternsLoading(true);
-    request<CodingPatterns>('/api/stats/me/patterns')
-      .then(setPatterns)
-      .catch(() => {})
-      .finally(() => setPatternsLoading(false));
-  }, [tab, patterns]);
-
-  // ── Fetch efficiency (lazy) ────────────────────────────────────────
-  useEffect(() => {
-    if (tab !== 'efficiency' || efficiency) return;
-    setEfficiencyLoading(true);
-    request<Efficiency>('/api/stats/me/efficiency')
-      .then(setEfficiency)
-      .catch(() => {})
-      .finally(() => setEfficiencyLoading(false));
-  }, [tab, efficiency]);
-
-  // ── Debounce prompt search ──────────────────────────────────────────
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setPromptSearchDebounced(promptSearch);
-      setPromptsOffset(0);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [promptSearch]);
-
-  // ── Fetch prompts (lazy) ───────────────────────────────────────────
-  useEffect(() => {
-    if (tab !== 'prompts') return;
-    setPromptsLoading(true);
-    const params = new URLSearchParams();
-    params.set('limit', '30');
-    params.set('offset', String(promptsOffset));
-    if (promptSearchDebounced) params.set('q', promptSearchDebounced);
-    request<{ prompts: PromptEntry[]; total: number }>(`/api/stats/me/prompts?${params.toString()}`)
-      .then((data) => {
-        setPromptEntries(data.prompts);
-        setPromptsTotal(data.total);
-      })
-      .catch(() => {})
-      .finally(() => setPromptsLoading(false));
-  }, [tab, promptsOffset, promptSearchDebounced]);
-
-  // ── Fetch commits (lazy) ──────────────────────────────────────────
-  useEffect(() => {
-    if (tab !== 'commits') return;
     setCommitsLoading(true);
     const params = new URLSearchParams();
     params.set('limit', '50');
@@ -304,7 +250,7 @@ export default function MyDashboard() {
       })
       .catch(() => {})
       .finally(() => setCommitsLoading(false));
-  }, [tab, commitsOffset, commitSort]);
+  }, [commitsOffset, commitSort]);
 
   // ── Fetch bookmarked IDs ────────────────────────────────────────────
   useEffect(() => {
@@ -424,23 +370,83 @@ export default function MyDashboard() {
   const totalPages = Math.ceil((showBookmarked ? bookmarkedSessions.length : sessionsTotal) / LIMIT);
   const currentPage = Math.floor(sessionsOffset / LIMIT) + 1;
 
-  const TABS: { key: Tab; label: string; icon: React.ElementType }[] = [
-    { key: 'sessions', label: 'Sessions', icon: Play },
-    { key: 'timeline', label: 'Timeline', icon: Activity },
-    { key: 'agents', label: 'Agents', icon: Bot },
-    { key: 'stats', label: 'Stats', icon: BarChart3 },
-    { key: 'patterns', label: 'Patterns', icon: Timer },
-    { key: 'efficiency', label: 'Efficiency', icon: Gauge },
-    { key: 'prompts', label: 'Prompt Search', icon: Search },
-    { key: 'commits', label: 'Commits', icon: GitCommit },
-  ];
+  // Tabs — preserve the selection across reloads so users don't get dumped
+  // back on "sessions" after refreshing on a commits-tab bug report etc.
+  const [tab, setTab] = useState<Tab>(() => {
+    try {
+      const saved = localStorage.getItem('origin:dashboard-tab') as Tab | null;
+      if (saved && TABS.some((t) => t.key === saved)) return saved;
+    } catch { /* ignore */ }
+    return 'timeline';
+  });
+  useEffect(() => {
+    try { localStorage.setItem('origin:dashboard-tab', tab); } catch { /* ignore */ }
+  }, [tab]);
+
+  // Lazy fetch per-tab data so we don't hammer the API for tabs the user
+  // never opens. Same gating pattern the original dashboard used before
+  // the split accidentally dropped these effects.
+  useEffect(() => {
+    if (tab !== 'timeline') return;
+    setTimelineLoading(true);
+    const params = new URLSearchParams();
+    params.set('mine', 'true');
+    params.set('limit', '100');
+    params.set('offset', '0');
+    request<{ sessions: Session[]; total: number }>(`/api/sessions?${params.toString()}`)
+      .then((data) => setTimelineSessions(data.sessions))
+      .catch(() => {})
+      .finally(() => setTimelineLoading(false));
+  }, [tab]);
+
+  useEffect(() => {
+    if (tab !== 'patterns' || patterns) return;
+    setPatternsLoading(true);
+    request<CodingPatterns>('/api/stats/me/patterns')
+      .then(setPatterns)
+      .catch(() => {})
+      .finally(() => setPatternsLoading(false));
+  }, [tab, patterns]);
+
+  useEffect(() => {
+    if (tab !== 'efficiency' || efficiency) return;
+    setEfficiencyLoading(true);
+    request<Efficiency>('/api/stats/me/efficiency')
+      .then(setEfficiency)
+      .catch(() => {})
+      .finally(() => setEfficiencyLoading(false));
+  }, [tab, efficiency]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setPromptSearchDebounced(promptSearch);
+      setPromptsOffset(0);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [promptSearch]);
+
+  useEffect(() => {
+    if (tab !== 'prompts') return;
+    setPromptsLoading(true);
+    const params = new URLSearchParams();
+    params.set('limit', '30');
+    params.set('offset', String(promptsOffset));
+    if (promptSearchDebounced) params.set('q', promptSearchDebounced);
+    request<{ prompts: PromptEntry[]; total: number }>(`/api/stats/me/prompts?${params.toString()}`)
+      .then((data) => {
+        setPromptEntries(data.prompts);
+        setPromptsTotal(data.total);
+      })
+      .catch(() => {})
+      .finally(() => setPromptsLoading(false));
+  }, [tab, promptsOffset, promptSearchDebounced]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-gray-100">My Dashboard</h1>
+          <h1 className="text-xl font-bold text-gray-100">Insights</h1>
           <p className="text-sm text-gray-500 mt-0.5">
             {user?.name || user?.email} &middot; Personal coding activity
           </p>
@@ -626,43 +632,6 @@ export default function MyDashboard() {
         ))}
       </div>
 
-      {/* ═══════════════════ SESSIONS TAB ═══════════════════ */}
-      {tab === 'sessions' && (
-        <SessionsTab
-          search={search}
-          setSearch={setSearch}
-          agentFilter={agentFilter}
-          setAgentFilter={setAgentFilter}
-          repoFilter={repoFilter}
-          setRepoFilter={setRepoFilter}
-          statusFilter={statusFilter}
-          setStatusFilter={setStatusFilter}
-          setSessionsOffset={setSessionsOffset}
-          uniqueAgents={uniqueAgents}
-          uniqueRepos={uniqueRepos}
-          showBookmarked={showBookmarked}
-          setShowBookmarked={setShowBookmarked}
-          bookmarkedIds={bookmarkedIds}
-          bookmarkTags={bookmarkTags}
-          toggleBookmark={toggleBookmark}
-          updateBookmarkTags={updateBookmarkTags}
-          compareIds={compareIds}
-          setCompareIds={setCompareIds}
-          merging={merging}
-          handleMerge={handleMerge}
-          navigate={navigate}
-          sessionsLoading={sessionsLoading}
-          filteredSessions={filteredSessions}
-          SortHeader={SortHeader}
-          sessionsOffset={sessionsOffset}
-          sessionsTotal={sessionsTotal}
-          totalPages={totalPages}
-          currentPage={currentPage}
-          LIMIT={LIMIT}
-        />
-      )}
-
-      {/* ═══════════════════ TIMELINE TAB ═══════════════════ */}
       {tab === 'timeline' && (
         <TimelineTab
           timelineLoading={timelineLoading}
@@ -671,27 +640,34 @@ export default function MyDashboard() {
         />
       )}
 
-      {/* ═══════════════════ AGENTS TAB ═══════════════════ */}
       {tab === 'agents' && (
-        <AgentsTab agentsLoading={agentsLoading} agentCards={agentCards} />
+        <AgentsTab
+          agentsLoading={agentsLoading}
+          agentCards={agentCards}
+        />
       )}
 
-      {/* ═══════════════════ STATS TAB ═══════════════════ */}
       {tab === 'stats' && (
-        <StatsTab statsLoading={statsLoading} stats={stats} />
+        <StatsTab
+          statsLoading={statsLoading}
+          stats={stats}
+        />
       )}
 
-      {/* ═══════════════════ PATTERNS TAB ═══════════════════ */}
       {tab === 'patterns' && (
-        <PatternsTab patternsLoading={patternsLoading} patterns={patterns} />
+        <PatternsTab
+          patternsLoading={patternsLoading}
+          patterns={patterns}
+        />
       )}
 
-      {/* ═══════════════════ EFFICIENCY TAB ═══════════════════ */}
       {tab === 'efficiency' && (
-        <EfficiencyTab efficiencyLoading={efficiencyLoading} efficiency={efficiency} />
+        <EfficiencyTab
+          efficiencyLoading={efficiencyLoading}
+          efficiency={efficiency}
+        />
       )}
 
-      {/* ═══════════════════ PROMPTS TAB ═══════════════════ */}
       {tab === 'prompts' && (
         <PromptsTab
           promptSearch={promptSearch}
@@ -708,7 +684,6 @@ export default function MyDashboard() {
         />
       )}
 
-      {/* ═══════════════════ COMMITS TAB ═══════════════════ */}
       {tab === 'commits' && (
         <CommitsTab
           commitsTotal={commitsTotal}

@@ -3,10 +3,77 @@ import * as api from '../api';
 import type { LeaderboardEntry } from '../api';
 import ActivityHeatmap from '../components/ActivityHeatmap';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { PageHeader, EmptyState } from '../components/ui';
+import { PageHeader, EmptyState, DataTable } from '../components/ui';
+import type { DataTableColumn } from '../components/ui';
 
 type Period = 'week' | 'month' | 'quarter' | 'all';
 type SortField = 'sessions' | 'lines' | 'cost' | 'quality';
+
+type LeaderboardRow = LeaderboardEntry & { _rank: number };
+
+const leaderboardColumns: DataTableColumn<LeaderboardRow>[] = [
+  {
+    key: 'rank',
+    label: '#',
+    width: '40px',
+    className: 'font-mono',
+    render: (e) => <span className="text-gray-600 font-mono">{e._rank}</span>,
+  },
+  {
+    key: 'developer',
+    label: 'Developer',
+    render: (e) => (
+      <>
+        <p className="text-gray-200 font-medium">{e.name}</p>
+        <p className="text-xs text-gray-600">{e.email}</p>
+      </>
+    ),
+  },
+  {
+    key: 'sessions',
+    label: 'Sessions',
+    align: 'right',
+    render: (e) => e.sessions,
+  },
+  {
+    key: 'lines',
+    label: 'Lines',
+    align: 'right',
+    render: (e) => e.lines.toLocaleString(),
+  },
+  {
+    key: 'cost',
+    label: 'Cost',
+    align: 'right',
+    render: (e) => `$${e.cost.toFixed(2)}`,
+  },
+  {
+    key: 'approval',
+    label: 'Approval',
+    align: 'right',
+    render: (e) => e.approvalRate > 0 ? (
+      <span className={e.approvalRate >= 80 ? 'text-green-400' : e.approvalRate >= 50 ? 'text-amber-400' : 'text-red-400'}>
+        {e.approvalRate.toFixed(0)}%
+      </span>
+    ) : (
+      <span className="text-gray-600">—</span>
+    ),
+  },
+  {
+    key: 'quality',
+    label: 'Quality',
+    align: 'right',
+    render: (e) => (
+      <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-xs font-bold ${
+        e.qualityScore >= 80 ? 'bg-green-500/20 text-green-400'
+        : e.qualityScore >= 50 ? 'bg-amber-500/20 text-amber-400'
+        : 'bg-red-500/20 text-red-400'
+      }`}>
+        {Math.round(e.qualityScore)}
+      </span>
+    ),
+  },
+];
 
 export default function Leaderboard() {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
@@ -130,57 +197,14 @@ export default function Leaderboard() {
                   <option value="quality">By Quality Score</option>
                 </select>
               </div>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800">
-                    <th className="px-6 py-3 font-medium w-10">#</th>
-                    <th className="px-3 py-3 font-medium">Developer</th>
-                    <th className="px-3 py-3 font-medium text-right">Sessions</th>
-                    <th className="px-3 py-3 font-medium text-right">Lines</th>
-                    <th className="px-3 py-3 font-medium text-right">Cost</th>
-                    <th className="px-3 py-3 font-medium text-right">Approval</th>
-                    <th className="px-3 py-3 font-medium text-right">Quality</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-800/50">
-                  {entries.map((e, i) => (
-                    <tr
-                      key={e.userId}
-                      onClick={() => setSelectedUser(e.userId)}
-                      className={`cursor-pointer transition-colors ${
-                        selectedUser === e.userId ? 'bg-indigo-600/10' : 'hover:bg-gray-800/30'
-                      }`}
-                    >
-                      <td className="px-6 py-3 text-gray-600 font-mono">{i + 1}</td>
-                      <td className="px-3 py-3">
-                        <p className="text-gray-200 font-medium">{e.name}</p>
-                        <p className="text-xs text-gray-600">{e.email}</p>
-                      </td>
-                      <td className="px-3 py-3 text-right text-gray-300">{e.sessions}</td>
-                      <td className="px-3 py-3 text-right text-gray-300">{e.lines.toLocaleString()}</td>
-                      <td className="px-3 py-3 text-right text-gray-300">${e.cost.toFixed(2)}</td>
-                      <td className="px-3 py-3 text-right">
-                        {e.approvalRate > 0 ? (
-                          <span className={e.approvalRate >= 80 ? 'text-green-400' : e.approvalRate >= 50 ? 'text-amber-400' : 'text-red-400'}>
-                            {e.approvalRate.toFixed(0)}%
-                          </span>
-                        ) : (
-                          <span className="text-gray-600">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-3 text-right">
-                        <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-xs font-bold ${
-                          e.qualityScore >= 80 ? 'bg-green-500/20 text-green-400'
-                          : e.qualityScore >= 50 ? 'bg-amber-500/20 text-amber-400'
-                          : 'bg-red-500/20 text-red-400'
-                        }`}>
-                          {Math.round(e.qualityScore)}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <DataTable<LeaderboardRow>
+                data={entries.map((e, i) => ({ ...e, _rank: i + 1 }))}
+                columns={leaderboardColumns}
+                rowKey={(e) => e.userId}
+                onRowClick={(e) => setSelectedUser(e.userId)}
+                rowClassName={(e) => selectedUser === e.userId ? 'bg-indigo-600/10' : ''}
+                className="rounded-none border-0 bg-transparent"
+              />
             </div>
 
             {/* Bar Chart */}

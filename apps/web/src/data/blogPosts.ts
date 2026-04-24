@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Nobody in the chain actually wrote this code',
+    slug: 'nobody-in-the-chain-wrote-this-code',
+    date: '2026-04-20',
+    author: 'Artem Dolobanko',
+    tags: ['engineering-leadership', 'ai-governance', 'code-review', 'developer-tools'],
+    excerpt:
+      'Most engineering managers haven\'t written production code in years. The engineers they manage don\'t really write code anymore either — they manage AI agents that do. So a manager who can\'t code oversees a dev who doesn\'t code, shipping code from a model nobody fully understands. Code review was the last line of defense. It\'s not holding.',
+  },
+  {
     title: 'Snapshots: See What Your AI Changed After Every Prompt',
     slug: 'snapshots-see-what-ai-changed-every-prompt',
     date: '2026-04-16',
