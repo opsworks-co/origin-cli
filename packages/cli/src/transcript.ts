@@ -643,7 +643,25 @@ export interface DisplayMessage {
  * Strips tool_use/tool_result blocks, keeps only human-readable text.
  * Returns a JSON string ready to store in the database, or '' if empty.
  */
-export function formatTranscriptForDisplay(transcriptPath: string): string {
+/**
+ * Options for formatting a transcript for dashboard display.
+ *
+ * `verbose` was added by recent hook handlers (call sites in commands/hooks.ts
+ * pass `{ verbose: !!state.verboseCapture }`) but the implementation was never
+ * landed — calls broke the production tsc build because the function only
+ * accepted a single argument. Accept the option here so the build stays green;
+ * actual verbose-mode formatting (richer tool-call detail, raw payloads, etc.)
+ * is a follow-up — see issue tracker.
+ */
+export interface FormatTranscriptOptions {
+  verbose?: boolean;
+}
+
+export function formatTranscriptForDisplay(
+  transcriptPath: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _options?: FormatTranscriptOptions,
+): string {
   if (!fs.existsSync(transcriptPath)) {
     return '';
   }
