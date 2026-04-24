@@ -634,39 +634,6 @@ function extractGeminiPromptMappings(raw: string): PromptFileMapping[] {
 export interface DisplayMessage {
   role: 'user' | 'assistant';
   content: string;
-  // Structured tool-call data preserved alongside the text content so the
-  // dashboard can render expandable rows with the full Bash command, Edit
-  // input, etc. The summary `[Tool: Name → arg]` line still appears in
-  // `content` to keep older transcript renderers working unchanged.
-  toolCalls?: DisplayToolCall[];
-}
-
-export interface DisplayToolCall {
-  id?: string;
-  name: string;
-  input: Record<string, any>;
-  result?: string;        // populated in verbose mode (paired by tool_use_id)
-  resultTruncated?: boolean;
-}
-
-// Per-tool input cap: enough to fit a real Bash command or Edit hunk without
-// blowing the 10MB transcript ceiling when sessions have hundreds of calls.
-const MAX_INPUT_CHARS = 4000;
-const MAX_RESULT_CHARS_NORMAL = 600;
-const MAX_RESULT_CHARS_VERBOSE = 4000;
-
-function clampInput(input: Record<string, any>): Record<string, any> {
-  const out: Record<string, any> = {};
-  for (const [k, v] of Object.entries(input || {})) {
-    if (typeof v === 'string') {
-      out[k] = v.length > MAX_INPUT_CHARS ? v.slice(0, MAX_INPUT_CHARS) + '…' : v;
-    } else {
-      // Non-string values (arrays, objects) — keep as-is, JSON.stringify will
-      // truncate naturally when the whole transcript hits its cap.
-      out[k] = v;
-    }
-  }
-  return out;
 }
 
 /**
@@ -676,7 +643,7 @@ function clampInput(input: Record<string, any>): Record<string, any> {
  * Strips tool_use/tool_result blocks, keeps only human-readable text.
  * Returns a JSON string ready to store in the database, or '' if empty.
  */
-export function formatTranscriptForDisplay(transcriptPath: string, opts: { verbose?: boolean } = {}): string {
+export function formatTranscriptForDisplay(transcriptPath: string): string {
   if (!fs.existsSync(transcriptPath)) {
     return '';
   }
@@ -696,13 +663,13 @@ export function formatTranscriptForDisplay(transcriptPath: string, opts: { verbo
       if (singleObj.messages || singleObj.history) {
         messages = formatGeminiMessages(raw);
       } else {
-        messages = formatJSONLMessages(raw, opts);
+        messages = formatJSONLMessages(raw);
       }
     } catch {
-      messages = formatJSONLMessages(raw, opts);
+      messages = formatJSONLMessages(raw);
     }
   } else {
-    messages = formatJSONLMessages(raw, opts);
+    messages = formatJSONLMessages(raw);
   }
 
   if (messages.length === 0) return '';
@@ -710,85 +677,7 @@ export function formatTranscriptForDisplay(transcriptPath: string, opts: { verbo
   return JSON.stringify(messages);
 }
 
-/**
- * Summarise a tool_use block into a single `[Tool: Name → arg]` line that the
- * web renderer knows how to parse. The arg is chosen per tool so the rendered
- * row is actually informative — previously Grep/Glob/TodoWrite/WebFetch all
- * showed up as bare `[Tool: Name]` rows.
- */
-function summariseToolUse(name: string, input: Record<string, any>, verbose = false): string {
-  // Verbose mode: dramatically higher cap so full commands / grep patterns /
-  // bash invocations are captured for audit. Normal mode stays at 80 chars.
-  const CAP = verbose ? 4000 : 80;
-  const trunc = (s: string, n = CAP) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
-  const basename = (p: string) => (p.includes('/') ? p.split('/').pop() || p : p);
-
-  let arg = '';
-  switch (name) {
-    case 'Read':
-    case 'Write':
-    case 'Edit':
-    case 'NotebookEdit':
-      if (typeof input.file_path === 'string') arg = basename(input.file_path);
-      else if (typeof input.notebook_path === 'string') arg = basename(input.notebook_path);
-      break;
-    case 'Bash':
-      if (typeof input.command === 'string') arg = trunc(input.command.replace(/\s+/g, ' ').trim());
-      break;
-    case 'Grep':
-    case 'Glob':
-      if (typeof input.pattern === 'string') arg = trunc(input.pattern, Math.min(CAP, verbose ? 4000 : 60));
-      if (typeof input.path === 'string' && input.path) arg += ` in ${basename(input.path)}`;
-      break;
-    case 'WebFetch':
-    case 'WebSearch':
-      arg = trunc(input.url || input.query || '', CAP);
-      break;
-    case 'Task':
-      arg = trunc(input.description || input.subagent_type || '', Math.min(CAP, verbose ? 4000 : 60));
-      break;
-    case 'TodoWrite':
-      if (Array.isArray(input.todos)) arg = `${input.todos.length} item${input.todos.length === 1 ? '' : 's'}`;
-      break;
-    default:
-      // Best-effort fallback for MCP / custom tools.
-      arg = trunc(
-        input.file_path || input.path || input.command || input.query || input.url || input.pattern || '',
-        CAP,
-      );
-  }
-
-  return arg ? `[Tool: ${name} → ${arg}]` : `[Tool: ${name}]`;
-}
-
-// Per-tool output caps in verbose mode. File reads get the most; everything
-// else stays tight so a single noisy tool can't blow the 10MB transcript cap.
-function summariseToolResult(content: any, toolName?: string): string {
-  const text = (() => {
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-      return content
-        .map((c: any) => (typeof c === 'string' ? c : c?.text || ''))
-        .filter(Boolean)
-        .join('\n');
-    }
-    if (content && typeof content === 'object') return content.text || '';
-    return '';
-  })();
-  if (!text.trim()) return '';
-  const CAPS: Record<string, number> = { Read: 16000, Bash: 8000, WebFetch: 8000, WebSearch: 4000 };
-  const cap = CAPS[toolName || ''] ?? 4000;
-  const out = text.length > cap ? text.slice(0, cap - 1) + '…' : text;
-  return `[Tool result${toolName ? ` ← ${toolName}` : ''}]\n${out}`;
-}
-
-function formatJSONLMessages(raw: string, opts: { verbose?: boolean } = {}): DisplayMessage[] {
-  const verbose = opts.verbose === true;
-  // Map tool_use id → { toolName, toolCallRef } so tool_result blocks can be
-  // both labeled (for the existing summary text) AND attached to the structured
-  // toolCalls entry (for expandable rendering on the web).
-  const toolNameById = new Map<string, string>();
-  const toolCallById = new Map<string, DisplayToolCall>();
+function formatJSONLMessages(raw: string): DisplayMessage[] {
   const lines = raw.split('\n').filter((line) => line.trim());
   const messages: DisplayMessage[] = [];
 
@@ -803,73 +692,6 @@ function formatJSONLMessages(raw: string, opts: { verbose?: boolean } = {}): Dis
     const type = entry.type || entry.message?.role;
 
     if (type === 'user') {
-      // In verbose mode, user messages can carry tool_result blocks. Surface
-      // them as synthetic assistant entries so the UI can render the output
-      // back-to-back with the tool call that produced it.
-      if (verbose && Array.isArray(entry.message?.content)) {
-        const resultParts: string[] = [];
-        for (const block of entry.message!.content as any[]) {
-          if (block?.type === 'tool_result') {
-            const toolName = block.tool_use_id ? toolNameById.get(block.tool_use_id) : undefined;
-            const rendered = summariseToolResult(block.content, toolName);
-            if (rendered) resultParts.push(rendered);
-            // Also stash the result on the structured tool call entry so the
-            // web UI can render an expand-to-output panel.
-            if (block.tool_use_id) {
-              const tc = toolCallById.get(block.tool_use_id);
-              if (tc) {
-                const cap = MAX_RESULT_CHARS_VERBOSE;
-                const text = (() => {
-                  if (typeof block.content === 'string') return block.content;
-                  if (Array.isArray(block.content)) {
-                    return block.content
-                      .map((c: any) => (typeof c === 'string' ? c : c?.text || ''))
-                      .filter(Boolean)
-                      .join('\n');
-                  }
-                  return '';
-                })();
-                if (text) {
-                  tc.result = text.length > cap ? text.slice(0, cap) : text;
-                  tc.resultTruncated = text.length > cap;
-                }
-              }
-            }
-          }
-        }
-        if (resultParts.length > 0) {
-          const joined = resultParts.join('\n\n');
-          const last = messages[messages.length - 1];
-          if (last && last.role === 'assistant') last.content += '\n\n' + joined;
-          else messages.push({ role: 'assistant', content: joined });
-        }
-      }
-      // Even in non-verbose mode, capture short tool_result snippets onto the
-      // structured tool call so the dashboard can show *something* when a
-      // user expands a tool row.
-      if (!verbose && Array.isArray(entry.message?.content)) {
-        for (const block of entry.message!.content as any[]) {
-          if (block?.type !== 'tool_result' || !block.tool_use_id) continue;
-          const tc = toolCallById.get(block.tool_use_id);
-          if (!tc) continue;
-          const text = (() => {
-            if (typeof block.content === 'string') return block.content;
-            if (Array.isArray(block.content)) {
-              return block.content
-                .map((c: any) => (typeof c === 'string' ? c : c?.text || ''))
-                .filter(Boolean)
-                .join('\n');
-            }
-            return '';
-          })();
-          if (text) {
-            const cap = MAX_RESULT_CHARS_NORMAL;
-            tc.result = text.length > cap ? text.slice(0, cap) : text;
-            tc.resultTruncated = text.length > cap;
-          }
-        }
-      }
-
       const prompt = extractUserPrompt(entry);
       if (prompt) {
         messages.push({ role: 'user', content: prompt });
@@ -879,7 +701,6 @@ function formatJSONLMessages(raw: string, opts: { verbose?: boolean } = {}): Dis
     if (type === 'assistant') {
       const content = entry.message?.content;
       let text = '';
-      const messageToolCalls: DisplayToolCall[] = [];
 
       if (typeof content === 'string' && content) {
         text = content;
@@ -890,20 +711,14 @@ function formatJSONLMessages(raw: string, opts: { verbose?: boolean } = {}): Dis
           if (block.type === 'text' && block.text) {
             parts.push(block.text);
           } else if (block.type === 'tool_use' && block.name) {
-            // Show tool usage as a compact note. Keep one line per call; the
-            // web UI renders these as a stylised terminal row (see
-            // UnifiedSessionView.FormattedMessage).
-            parts.push(summariseToolUse(block.name, block.input || {}, verbose));
-            // Capture the structured form for expandable rendering. Always
-            // record the tool name for result-pairing, even in non-verbose mode.
-            if (block.id) toolNameById.set(block.id, block.name);
-            const tc: DisplayToolCall = {
-              id: block.id,
-              name: block.name,
-              input: clampInput(block.input || {}),
-            };
-            messageToolCalls.push(tc);
-            if (block.id) toolCallById.set(block.id, tc);
+            // Show tool usage as a compact note
+            const input = block.input || {};
+            const filePath = input.file_path || input.notebook_path || input.command || '';
+            if (filePath) {
+              parts.push(`[Tool: ${block.name} → ${typeof filePath === 'string' ? filePath.split('/').pop() : ''}]`);
+            } else {
+              parts.push(`[Tool: ${block.name}]`);
+            }
           }
         }
         text = parts.join('\n');
@@ -914,15 +729,8 @@ function formatJSONLMessages(raw: string, opts: { verbose?: boolean } = {}): Dis
         const last = messages[messages.length - 1];
         if (last && last.role === 'assistant') {
           last.content += '\n\n' + text;
-          if (messageToolCalls.length > 0) {
-            last.toolCalls = (last.toolCalls || []).concat(messageToolCalls);
-          }
         } else {
-          messages.push({
-            role: 'assistant',
-            content: text,
-            ...(messageToolCalls.length > 0 && { toolCalls: messageToolCalls }),
-          });
+          messages.push({ role: 'assistant', content: text });
         }
       }
     }
@@ -991,11 +799,14 @@ function formatGeminiMessages(raw: string): DisplayMessage[] {
 export type ModelPricing = Record<string, { input: number; output: number }>;
 
 const DEFAULT_MODEL_PRICING: ModelPricing = {
-  // Anthropic — real public rates (per 1M tokens).
-  // Cache read = 0.1 × input, cache create = 1.25 × input (applied by estimateCost).
-  'sonnet': { input: 3, output: 15 },
-  'opus': { input: 15, output: 75 },
-  'haiku': { input: 0.80, output: 4 },
+  // Anthropic — verified against https://www.anthropic.com/pricing on 2026-04-24.
+  // Cache reads are billed at 10% of input; cache writes at 125% (handled in
+  // estimateCost below). Per-1M-token rates in USD.
+  // NOTE: keep this table in sync with packages/cli/src/commands/prompt-status.ts
+  // until both are consolidated into a single pricing module.
+  'sonnet': { input: 3,    output: 15 },
+  'opus':   { input: 15,   output: 75 },  // was 5/25 — undercounted Opus cost by 3×
+  'haiku':  { input: 0.80, output: 4  },  // matches Haiku 3.5 / 4 public rates
   // Google — pricing per 1M tokens (≤200K context tier where two tiers exist)
   'gemini-2.5-pro': { input: 1.25, output: 10 },
   'gemini-2.5-flash': { input: 0.30, output: 2.50 },      // was 0.15/3.50 — wrong
