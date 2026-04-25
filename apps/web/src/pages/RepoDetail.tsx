@@ -46,8 +46,6 @@ interface Commit {
   } | null;
 }
 
-type Filter = 'all' | 'ai' | 'human';
-
 // ─── Diff helpers ──────────────────────────────────────────────
 
 function DiffLine({ line }: { line: string }) {
@@ -496,7 +494,7 @@ function statusBadge(status: string | null | undefined) {
   return <span className={map[status] ?? 'badge-gray'}>{status.toLowerCase()}</span>;
 }
 
-type RepoTab = 'overview' | 'commits' | 'sessions';
+type RepoTab = 'commits' | 'sessions';
 
 export default function RepoDetail() {
   const { id } = useParams<{ id: string }>();
@@ -505,14 +503,13 @@ export default function RepoDetail() {
   const [commits, setCommits] = useState<Commit[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [filter, setFilter] = useState<Filter>('all');
   const [commitSearch, setCommitSearch] = useState('');
   // Repo-level sub-tab. Persists across reloads via localStorage so refreshing
   // on the Sessions view doesn't bounce the user back to Commits.
   const [repoTab, setRepoTab] = useState<RepoTab>(() => {
     try {
       const saved = localStorage.getItem('origin:repo-tab') as RepoTab | null;
-      if (saved === 'overview' || saved === 'commits' || saved === 'sessions') return saved;
+      if (saved === 'commits' || saved === 'sessions') return saved;
     } catch { /* ignore */ }
     return 'commits';
   });
@@ -678,27 +675,16 @@ export default function RepoDetail() {
 
   const isAI = (c: any) => c.session !== null || c.aiToolDetected !== null;
 
-  const filteredCommits = commits.filter((c) => {
-    switch (filter) {
-      case 'ai':
-        return isAI(c);
-      case 'human':
-        return !isAI(c);
-      default:
-        return true;
-    }
-  });
-
   // Apply free-text search across commit message, sha, and author
   const searchedCommits = useMemo(() => {
     const q = commitSearch.trim().toLowerCase();
-    if (!q) return filteredCommits;
-    return filteredCommits.filter((c) =>
+    if (!q) return commits;
+    return commits.filter((c) =>
       c.message.toLowerCase().includes(q) ||
       c.sha.toLowerCase().includes(q) ||
       c.author.toLowerCase().includes(q)
     );
-  }, [filteredCommits, commitSearch]);
+  }, [commits, commitSearch]);
 
   // Group commits by local calendar date (today, yesterday, full date)
   const commitsByDate = useMemo(() => {
@@ -891,10 +877,9 @@ export default function RepoDetail() {
         </div>
       )}
 
-      {/* Repo-level tabs — Entire-style. Overview / Commits / Sessions. */}
+      {/* Repo-level tabs — Commits / Sessions. */}
       <div className="flex items-center gap-0 border-b border-gray-800/60">
         {([
-          { key: 'overview' as const, label: 'Overview' },
           { key: 'commits' as const, label: 'Commits', count: commits.length },
           { key: 'sessions' as const, label: 'Sessions' },
         ] as Array<{ key: RepoTab; label: string; count?: number }>).map((t) => (
@@ -919,43 +904,6 @@ export default function RepoDetail() {
           </button>
         ))}
       </div>
-
-      {/* Overview tab */}
-      {repoTab === 'overview' && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="card py-3">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Total commits</div>
-              <div className="text-lg font-semibold text-gray-100">{commits.length}</div>
-            </div>
-            <div className="card py-3">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">AI-authored</div>
-              <div className="text-lg font-semibold text-indigo-300">{aiCount} <span className="text-[11px] text-gray-500 font-normal">({aiPct.toFixed(0)}%)</span></div>
-            </div>
-            <div className="card py-3">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Branches</div>
-              <div className="text-lg font-semibold text-gray-100">{branches.length}</div>
-            </div>
-            {health && (
-              <div className="card py-3">
-                <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Health</div>
-                <div className="text-lg font-semibold text-gray-100">{health.healthScore}</div>
-              </div>
-            )}
-          </div>
-          <div className="card p-4 text-[12px] text-gray-500">
-            <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-2">Most recent commits</div>
-            {commits.slice(0, 5).map((c) => (
-              <div key={c.id} className="flex items-center gap-2 py-1.5 border-b border-gray-800/40 last:border-0">
-                <code className="font-mono text-[11px] text-gray-400">{c.sha.slice(0, 8)}</code>
-                <span className="text-gray-300 truncate flex-1">{c.message.split('\n')[0]}</span>
-                <span className="text-[10px] text-gray-600">{timeAgo(c.committedAt)}</span>
-              </div>
-            ))}
-            {commits.length === 0 && <div className="py-2 text-gray-600">No commits yet.</div>}
-          </div>
-        </div>
-      )}
 
       {/* Sessions tab — sessions filtered to this repo */}
       {repoTab === 'sessions' && (
@@ -998,35 +946,12 @@ export default function RepoDetail() {
         </div>
       )}
 
-      {/* Commits tab — original filter + commit list */}
+      {/* Commits tab — single list, AI/Human shown inline as tags */}
       {repoTab === 'commits' && (
       <>
 
-      {/* Filters — segmented control + branch selector */}
+      {/* Branch selector */}
       <div className="flex gap-2 flex-wrap items-center">
-        <div className="inline-flex items-center rounded-lg border border-gray-800 bg-gray-900/50 p-0.5">
-          {(
-            [
-              { key: 'all', label: 'All', count: commits.length },
-              { key: 'ai', label: 'AI Authored', count: aiCount },
-              { key: 'human', label: 'Human', count: humanCount },
-            ] as { key: Filter; label: string; count: number }[]
-          ).map(({ key, label, count }) => (
-            <button
-              key={key}
-              onClick={() => setFilter(key)}
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                filter === key
-                  ? 'bg-indigo-500/15 text-indigo-300 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-200'
-              }`}
-            >
-              {label}
-              <span className={`ml-1.5 ${filter === key ? 'text-indigo-400/70' : 'text-gray-600'}`}>{count}</span>
-            </button>
-          ))}
-        </div>
-
         {/* Branch filter dropdown */}
         {branches.length > 0 && (
           <select

@@ -1,6 +1,70 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ArrowRight, ChevronDown, ChevronUp } from 'lucide-react';
 import { Session, agentColor, buildSessionSummary, fmtCost, timeAgo } from './utils';
+
+// Build a 2-3 sentence narrative summary of today's activity. No LLM call —
+// just a deterministic roll-up of the session data we already have.
+function buildTodaySummary(sessions: Session[]): { headline: string; details: string } | null {
+  if (sessions.length === 0) return null;
+
+  const totalCost = sessions.reduce((s, x) => s + (x.costUsd || 0), 0);
+  const totalTokens = sessions.reduce((s, x) => s + (x.tokensUsed || 0), 0);
+  const totalAdded = sessions.reduce((s, x) => s + (x.linesAdded || 0), 0);
+  const totalRemoved = sessions.reduce((s, x) => s + (x.linesRemoved || 0), 0);
+
+  // Agent share
+  const byAgent = new Map<string, number>();
+  for (const s of sessions) {
+    const k = s.agentName || s.model || 'AI';
+    byAgent.set(k, (byAgent.get(k) || 0) + 1);
+  }
+  const topAgents = Array.from(byAgent.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([k]) => k);
+
+  // Repos touched
+  const repos = new Set<string>();
+  for (const s of sessions) if (s.repoName) repos.add(s.repoName);
+
+  // Most-edited files
+  const fileCount = new Map<string, number>();
+  for (const s of sessions) {
+    let files: string[] = [];
+    try { files = JSON.parse(s.filesChanged) || []; } catch { /* ignore */ }
+    for (const f of files) fileCount.set(f, (fileCount.get(f) || 0) + 1);
+  }
+  const topFiles = Array.from(fileCount.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([f]) => f.split('/').pop() || f);
+
+  const sessionsWord = sessions.length === 1 ? 'session' : 'sessions';
+  const repoWord = repos.size === 1 ? 'repo' : 'repos';
+  const agentList = topAgents.join(' and ');
+  const headline = `${sessions.length} AI ${sessionsWord} today${
+    agentList ? ` via ${agentList}` : ''
+  }${repos.size > 0 ? ` across ${repos.size} ${repoWord}` : ''}.`;
+
+  const detailParts: string[] = [];
+  if (totalAdded > 0 || totalRemoved > 0) {
+    detailParts.push(
+      `+${totalAdded.toLocaleString()} / −${totalRemoved.toLocaleString()} lines`
+    );
+  }
+  if (totalTokens > 0) {
+    detailParts.push(`${(totalTokens / 1000).toFixed(0)}K tokens`);
+  }
+  if (totalCost > 0) {
+    detailParts.push(fmtCost(totalCost));
+  }
+  if (topFiles.length > 0) {
+    detailParts.push(`mostly ${topFiles.join(', ')}`);
+  }
+  const details = detailParts.join(' · ');
+
+  return { headline, details };
+}
 
 // ── Today's Activity Feed ───────────────────────────────────────────────────
 
@@ -33,6 +97,8 @@ export function TodayActivityFeed({
       new Date(a.startedAt || a.createdAt).getTime()
   );
 
+  const summary = useMemo(() => buildTodaySummary(sessions), [sessions]);
+
   function buildLabel(s: Session): string {
     const agent = s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || 'AI';
     let files: string[] = [];
@@ -55,7 +121,18 @@ export function TodayActivityFeed({
   });
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-3">
+      {/* Generated summary — narrative roll-up of today's activity. */}
+      {summary && (
+        <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/5 px-3 py-2.5">
+          <p className="text-xs text-gray-200 leading-relaxed">{summary.headline}</p>
+          {summary.details && (
+            <p className="text-[11px] text-gray-500 mt-1 font-mono">{summary.details}</p>
+          )}
+        </div>
+      )}
+
+      <div className="space-y-1">
       {sorted.map((s) => {
         const color = agentColor(s.agentName);
         const label = buildLabel(s);
@@ -109,6 +186,7 @@ export function TodayActivityFeed({
           </div>
         );
       })}
+      </div>
     </div>
   );
 }

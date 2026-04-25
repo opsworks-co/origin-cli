@@ -414,7 +414,11 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
     tags: [...debugSessions1, ...debugSessions2].map(s => s.sessionTag),
   });
 
-  // 1. If we have a claude session ID, try exact match
+  // 1. If we have a claude session ID, try exact match.
+  // The caller only passes claudeSessionId for agents with STABLE per-conversation
+  // ids (Claude Code, Windsurf). If exact match fails for a stable agent, the
+  // conversation is genuinely new — DO NOT fall through to "most recent active",
+  // which silently merges unrelated Claude Code windows into one platform session.
   if (claudeSessionId) {
     const found = findSessionByClaudeId(claudeSessionId, hookCwd)
       || (repoPath !== hookCwd ? findSessionByClaudeId(claudeSessionId, repoPath) : null);
@@ -422,6 +426,8 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
       debugLog('findStateForHook', 'exact match', { claudeSessionId, sessionId: found.sessionId, tag: found.sessionTag });
       return { state: found, saveCwd: found.repoPath || repoPath };
     }
+    debugLog('findStateForHook', 'no exact match for stable claudeSessionId — new session needed', { claudeSessionId, agentSlug });
+    return null;
   }
 
   // 2. Fall back to active sessions for this repo

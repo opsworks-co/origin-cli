@@ -1707,26 +1707,12 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
         } catch {/* ignore */}
       }
 
-      // Narrow to prompts that actually produced this commit. Prefer authoritative
-      // commitSha attribution (set by the post-commit hook); fall back to
-      // file-overlap for legacy rows that predate SHA capture. Without this,
-      // a session that made commits on both main and a feature branch shows
-      // every prompt under every commit.
-      const byCommitSha = promptChanges.filter((pc: any) => pc.commitSha === sha);
-      if (byCommitSha.length > 0) {
-        promptChanges = byCommitSha;
-      } else {
-        const commitFiles = safeParseArray<string>(commit.filesChanged, `repos.detail narrow ${commit.sha}`);
-        if (commitFiles.length > 0 && promptChanges.length > 0) {
-          const relevant = promptChanges.filter((pc: any) => {
-            const pcFiles: string[] = pc.filesChanged || [];
-            return pcFiles.some((f: string) =>
-              commitFiles.some((cf: string) => f === cf || f.endsWith(cf) || cf.endsWith(f))
-            );
-          });
-          if (relevant.length > 0) promptChanges = relevant;
-        }
-      }
+      // Show ONLY prompts whose commitSha matches this commit. Anything else
+      // is a guess — the previous file-overlap fallback bundled every prompt
+      // that touched any of the commit's files, which usually meant every
+      // session prompt got listed. Empty is better than wrong; legacy commits
+      // (pre commitSha-attribution) show no prompts here.
+      promptChanges = promptChanges.filter((pc: any) => pc.commitSha === sha);
     }
 
     // Build per-file diff (reuse sessionDiff / prompt diff parsing)

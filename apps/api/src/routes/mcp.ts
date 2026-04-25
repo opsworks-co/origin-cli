@@ -472,6 +472,11 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     // as IDLE via lastActivityAt, and only reap after the genuine 2h abandon.
     const ZOMBIE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
     const zombieCutoff = new Date(Date.now() - ZOMBIE_THRESHOLD_MS);
+    // When the client supplies its native session id (Claude Code's
+    // claudeSessionId, Cursor's conversation_id, etc.), scope dedup to that
+    // value so two unrelated conversations on the same machine/repo/agent
+    // don't collapse into one session row. Without this, every new Claude
+    // Code window appended its prompts to the still-RUNNING prior session.
     const existingSession = await prisma.codingSession.findFirst({
       where: {
         agentId: agent?.id || null,
@@ -482,6 +487,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         commit: { repoId: repo.id, repo: { orgId } },
         status: 'RUNNING',
         updatedAt: { gte: heartbeatCutoff }, // heartbeat must be alive
+        ...(agentSessionId ? { agentSessionId } : {}),
       },
       include: { commit: { select: { repoId: true } } },
       orderBy: { startedAt: 'desc' },
@@ -1007,12 +1013,30 @@ router.post('/session/:id/ping', async (req: McpRequest, res: Response) => {
     const orgId = req.orgId as string;
     const session = await prisma.codingSession.findFirst({
       where: { id, commit: { repo: { orgId } } },
-      select: { status: true, pendingCommand: true },
+      select: { status: true, pendingCommand: true, branch: true },
     });
     if (!session) return res.json({ ok: true, status: 'NOT_FOUND' });
 
+    // The heartbeat reports the agent's current git branch every 30s, so the
+    // dashboard reflects mid-session checkouts (e.g. agent runs `git checkout
+    // -b feature/x`) instead of staying stuck on the branch the session
+    // started on.
+    const reportedBranch = typeof req.body?.branch === 'string' ? req.body.branch.slice(0, 500) : null;
+    const branchChanged = reportedBranch && reportedBranch !== session.branch;
+
     if (session.status === 'RUNNING') {
-      await prisma.codingSession.update({ where: { id }, data: { updatedAt: new Date() } });
+      await prisma.codingSession.update({
+        where: { id },
+        data: {
+          updatedAt: new Date(),
+          ...(branchChanged && { branch: reportedBranch }),
+        },
+      });
+    } else if (branchChanged) {
+      await prisma.codingSession.update({
+        where: { id },
+        data: { branch: reportedBranch },
+      });
     }
 
     // If there's a pending command, include it and clear it (one-shot delivery)

@@ -900,12 +900,6 @@ interface UnifiedSessionViewProps {
   defaultNewestFirst?: boolean;
 }
 
-// Categories for the left-rail filter. Counts are computed from transcript
-// markers like `[Tool: Bash → ...]`, prompt count, response count, and the
-// commits[] prop. Hiding a category narrows what each TurnCard shows; toggling
-// "commits" hides the inline commit rows.
-type FilterKey = 'prompts' | 'responses' | 'tools' | 'commits';
-
 export default function UnifiedSessionView({
   transcript,
   promptChanges,
@@ -920,50 +914,12 @@ export default function UnifiedSessionView({
   const [visibleCount, setVisibleCount] = useState(50);
   const [showSessionDiff, setShowSessionDiff] = useState(false);
   const [newestFirst, setNewestFirst] = useState(defaultNewestFirst);
-  const [hidden, setHidden] = useState<Set<FilterKey>>(new Set());
   const diffCache = useRef<Map<number, DiffFile[]>>(new Map());
 
   const turns = useMemo(
     () => buildUnifiedTurns(transcript, promptChanges),
     [transcript, promptChanges],
   );
-
-  // Per-tool-category counts from transcript markers — same regex the
-  // FormattedMessage renderer uses, kept in sync.
-  const counts = useMemo(() => {
-    let promptsN = 0;
-    let responsesN = 0;
-    const toolsByCategory: Record<ToolCategory, number> = {
-      read: 0, write: 0, exec: 0, search: 0, web: 0, agent: 0, mcp: 0, meta: 0,
-    };
-    let toolsTotal = 0;
-    for (const t of turns) {
-      if (t.humanMessage || t.promptChange?.promptText) promptsN++;
-      const allText = t.assistantMessages.map((m) => m.content).join('\n');
-      // Strip tool-call lines to figure out if there's any actual response text.
-      const nonToolText = allText
-        .split('\n')
-        .filter((ln) => !/^\[Tool:\s*[^\]]+\]$/.test(ln))
-        .join('\n')
-        .trim();
-      if (nonToolText.length > 0) responsesN++;
-      const matches = allText.match(/^\[Tool:\s*([^\]→:]+?)(?:\s*[→:].*)?\]$/gm) || [];
-      for (const m of matches) {
-        const nameMatch = m.match(/^\[Tool:\s*([^\]→:]+?)(?:\s*[→:]|])/);
-        const name = nameMatch ? nameMatch[1].trim() : '';
-        if (!name) continue;
-        toolsByCategory[toolCategory(name)]++;
-        toolsTotal++;
-      }
-    }
-    return {
-      prompts: promptsN,
-      responses: responsesN,
-      tools: toolsTotal,
-      toolsByCategory,
-      commits: commits?.length || 0,
-    };
-  }, [turns, commits]);
 
   // Group commits by the prompt that produced them so we can render an inline
   // commit row beneath each turn card.
@@ -994,24 +950,6 @@ export default function UnifiedSessionView({
     }
     return map;
   }, [snapshots]);
-
-  // Commits that didn't match any prompt (legacy rows pre commitSha capture).
-  // Surface them at the end so they aren't lost.
-  const orphanedCommits = useMemo(() => commitsByPromptIndex.get(-1) || [], [commitsByPromptIndex]);
-
-  const toggleFilter = useCallback((key: FilterKey) => {
-    setHidden((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }, []);
-
-  const showCommits = !hidden.has('commits');
-  const showTools = !hidden.has('tools');
-  const showPrompts = !hidden.has('prompts');
-  const showResponses = !hidden.has('responses');
 
   const orderedTurns = useMemo(
     () => (newestFirst ? [...turns].reverse() : turns),
@@ -1100,76 +1038,13 @@ export default function UnifiedSessionView({
         </div>
       </div>
 
-      {/* Body: filter rail + timeline */}
+      {/* Body: timeline */}
       <div className="flex-1 overflow-hidden flex">
-        {/* Filter rail */}
-        <aside className="hidden lg:block w-48 flex-shrink-0 border-r border-gray-800/60 px-3 py-4 overflow-y-auto">
-          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-2 px-1">Filters</div>
-          <FilterRow
-            label="Prompts"
-            count={counts.prompts}
-            checked={showPrompts}
-            onToggle={() => toggleFilter('prompts')}
-            iconColor="text-indigo-400"
-          />
-          <FilterRow
-            label="Responses"
-            count={counts.responses}
-            checked={showResponses}
-            onToggle={() => toggleFilter('responses')}
-            iconColor="text-gray-400"
-          />
-          <FilterRow
-            label="Tool calls"
-            count={counts.tools}
-            checked={showTools}
-            onToggle={() => toggleFilter('tools')}
-            iconColor="text-emerald-400"
-          />
-          {/* Tool sub-counts — read-only breakdown so users can see what's
-              happening even when they don't toggle them individually. */}
-          {counts.tools > 0 && showTools && (
-            <div className="mt-1 ml-3 mb-2 space-y-0.5">
-              {(['exec', 'read', 'write', 'search', 'web', 'agent', 'mcp', 'meta'] as ToolCategory[])
-                .filter((cat) => counts.toolsByCategory[cat] > 0)
-                .map((cat) => (
-                  <div key={cat} className="flex items-center justify-between text-[10px] text-gray-500 px-1">
-                    <span className={TOOL_CATEGORY_STYLE[cat].label}>
-                      {cat === 'exec' ? 'Bash' : cat === 'read' ? 'Read' : cat === 'write' ? 'Edit' : cat[0].toUpperCase() + cat.slice(1)}
-                    </span>
-                    <span className="font-mono">{counts.toolsByCategory[cat]}</span>
-                  </div>
-                ))}
-            </div>
-          )}
-          {counts.commits > 0 && (
-            <FilterRow
-              label="Commits"
-              count={counts.commits}
-              checked={showCommits}
-              onToggle={() => toggleFilter('commits')}
-              iconColor="text-amber-400"
-            />
-          )}
-        </aside>
-
         {/* Timeline */}
         <div className="flex-1 overflow-y-auto px-5 py-4">
         <div className="space-y-2 max-w-5xl mx-auto">
           {visibleTurns.map((turn) => {
-            const turnCommits = showCommits ? (commitsByPromptIndex.get(turn.turnIndex) || []) : [];
-            // Hide turn entirely when both prompts and responses are filtered out
-            // and there's nothing else (no tool calls visible, no commits).
-            const turnHasResponse = turn.assistantMessages.some((m) =>
-              m.content.split('\n').some((ln) => !/^\[Tool:\s*[^\]]+\]$/.test(ln) && ln.trim()),
-            );
-            const turnHasPrompt = !!(turn.humanMessage || turn.promptChange?.promptText);
-            const visibleByPrompt = showPrompts ? turnHasPrompt : false;
-            const visibleByResponse = showResponses ? turnHasResponse : false;
-            const visibleByTools = showTools && turn.assistantMessages.some((m) => /\[Tool:/.test(m.content));
-            const visibleByCommit = turnCommits.length > 0;
-            if (!visibleByPrompt && !visibleByResponse && !visibleByTools && !visibleByCommit) return null;
-
+            const turnCommits = commitsByPromptIndex.get(turn.turnIndex) || [];
             return (
               <div key={turn.turnIndex}>
                 <TurnCard
@@ -1179,7 +1054,6 @@ export default function UnifiedSessionView({
                   expandedFiles={expandedFiles}
                   onToggleFile={toggleFile}
                   diffCache={diffCache}
-                  hideToolCalls={!showTools}
                   snapshots={snapshotsByPromptIndex.get(turn.turnIndex) || []}
                 />
                 {turnCommits.map((c) => (
@@ -1188,20 +1062,6 @@ export default function UnifiedSessionView({
               </div>
             );
           })}
-
-          {/* Orphaned commits — couldn't be matched to a prompt via commitSha
-              (legacy data, or commit made outside any tracked prompt window).
-              Show at the end of the timeline so they're still visible. */}
-          {showCommits && orphanedCommits.length > 0 && (
-            <div className="pt-2 mt-2 border-t border-gray-800/40">
-              <div className="text-[10px] uppercase tracking-wider text-gray-600 mb-1.5 px-1">
-                Other commits in this session
-              </div>
-              {orphanedCommits.map((c) => (
-                <CommitRow key={c.sha} commit={c} repoId={repoId} />
-              ))}
-            </div>
-          )}
         </div>
 
         {/* Load more */}
@@ -1229,47 +1089,6 @@ export default function UnifiedSessionView({
         </div>
       </div>
     </div>
-  );
-}
-
-// ── Filter rail row ─────────────────────────────────────────────────────────
-function FilterRow({
-  label,
-  count,
-  checked,
-  onToggle,
-  iconColor,
-}: {
-  label: string;
-  count: number;
-  checked: boolean;
-  onToggle: () => void;
-  iconColor: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className={`w-full flex items-center justify-between text-[12px] py-1.5 px-1 rounded hover:bg-gray-800/50 transition-colors ${
-        checked ? 'text-gray-200' : 'text-gray-600'
-      }`}
-    >
-      <span className="flex items-center gap-2">
-        <span
-          className={`w-3 h-3 rounded-sm border flex items-center justify-center ${
-            checked ? `border-current ${iconColor}` : 'border-gray-700'
-          }`}
-        >
-          {checked && (
-            <svg className="w-2 h-2" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M2 6l3 3 5-6" />
-            </svg>
-          )}
-        </span>
-        <span>{label}</span>
-      </span>
-      <span className="font-mono text-[11px] text-gray-500">{count}</span>
-    </button>
   );
 }
 

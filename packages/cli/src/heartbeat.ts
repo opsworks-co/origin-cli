@@ -69,6 +69,29 @@ function isStateFileStale(): boolean {
 }
 
 /**
+ * Read the agent's current git branch from the session's repo path.
+ * Hooks fire on prompt-submit which Gemini/Codex/etc don't always trigger,
+ * so the heartbeat reports branch every 30s as a backstop — keeps the
+ * dashboard in sync after a mid-session `git checkout`.
+ */
+function getCurrentBranch(): string | null {
+  if (!stateFile) return null;
+  try {
+    const raw = fs.readFileSync(stateFile, 'utf-8');
+    const state = JSON.parse(raw) as { repoPath?: string };
+    const repoPath = state.repoPath;
+    if (!repoPath) return null;
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      encoding: 'utf-8',
+      cwd: repoPath,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Report command execution result back to the dashboard.
  */
 async function reportResult(type: string, status: 'success' | 'failed', message: string) {
@@ -391,6 +414,7 @@ async function ping() {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
         },
+        body: JSON.stringify({ branch: getCurrentBranch() }),
       });
       const data = await resp.json() as { ok: boolean; status?: string; command?: any };
 

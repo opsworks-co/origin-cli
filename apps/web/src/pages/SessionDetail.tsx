@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Session } from '../api';
@@ -217,6 +217,23 @@ export default function SessionDetail() {
 
   // Tab state
   const [activeTab, setActiveTab] = useState<'session' | 'security' | 'blame' | 'turns'>('session');
+
+  // Stable filesChanged for AiBlameView. Recomputing this inline as `(() => …)()`
+  // produced a new array reference on every render, which busted the useMemo
+  // and useEffect deps inside AiBlameView and caused an infinite re-fetch loop
+  // (the spinner never resolved).
+  const blameFilesChanged = useMemo<string[]>(() => {
+    if (!session) return [];
+    try {
+      const top = JSON.parse(session.filesChanged || '[]');
+      if (Array.isArray(top) && top.length > 0) return top as string[];
+    } catch { /* fall through */ }
+    const union = new Set<string>();
+    for (const pc of session.promptChanges || []) {
+      for (const f of (pc.filesChanged || [])) union.add(f);
+    }
+    return [...union];
+  }, [session?.filesChanged, session?.promptChanges]);
 
   // Review state
   const [reviewNote, setReviewNote] = useState('');
@@ -1215,8 +1232,8 @@ export default function SessionDetail() {
             Ask
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto flex">
-          <div className={`flex-1 overflow-y-auto ${showAskPanel ? 'min-w-0' : ''}`}>
+        <div className="flex-1 min-h-0 flex">
+          <div className={`flex-1 overflow-y-auto min-h-0 ${showAskPanel ? 'min-w-0' : ''}`}>
           {activeTab === 'session' && (
             <UnifiedSessionView
               defaultNewestFirst={true}
@@ -1245,21 +1262,7 @@ export default function SessionDetail() {
           {activeTab === 'blame' && (
             <AiBlameView
               sessionId={session.id}
-              // Fall back to the union of prompt filesChanged when the
-              // session row itself has an empty filesChanged — legacy rows
-              // and webhook-synced commits often skipped that field, which
-              // would otherwise show "No files changed in this session."
-              filesChanged={(() => {
-                try {
-                  const top = JSON.parse(session.filesChanged || '[]');
-                  if (Array.isArray(top) && top.length > 0) return top as string[];
-                } catch { /* fall through */ }
-                const union = new Set<string>();
-                for (const pc of session.promptChanges || []) {
-                  for (const f of (pc.filesChanged || [])) union.add(f);
-                }
-                return [...union];
-              })()}
+              filesChanged={blameFilesChanged}
               focusPromptIndex={focusPromptIndex}
               onAskAboutLine={(file, lineNumber, content) => {
                 setAskContext({ file, lineNumber, lineContent: content });
@@ -1354,7 +1357,7 @@ export default function SessionDetail() {
 
           {/* Ask the Author side panel */}
           {showAskPanel && (
-            <div className="w-96 border-l border-gray-800 flex-shrink-0">
+            <div className="w-96 border-l border-gray-800 flex-shrink-0 min-h-0 overflow-hidden">
               <AskAuthorPanel
                 sessionId={session.id}
                 onClose={() => setShowAskPanel(false)}

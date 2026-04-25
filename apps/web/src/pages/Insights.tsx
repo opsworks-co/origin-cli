@@ -227,12 +227,35 @@ export default function Insights() {
 
   // Pre-trim all daily series so charts don't cliff down to zero on a partial
   // trailing day (API zero-fills the range through `to`).
-  const aiAuthorshipOverTime = useMemo(
-    () => trimTrailingZeros(stats?.aiAuthorshipOverTime),
-    [stats?.aiAuthorshipOverTime]
-  );
-  const linesByDay = useMemo(() => trimTrailingZeros(stats?.linesByDay), [stats?.linesByDay]);
-  const costByDay = useMemo(() => trimTrailingZeros(stats?.costByDay), [stats?.costByDay]);
+  // Then accumulate to running totals — these charts read as "where are we
+  // in the period overall" rather than "what happened on day X", which is
+  // why dips in the middle of a window felt wrong.
+  const aiAuthorshipOverTime = useMemo(() => {
+    const trimmed = trimTrailingZeros(stats?.aiAuthorshipOverTime) as Array<{ date: string; percent: number }>;
+    let sum = 0;
+    return trimmed.map((d, i) => {
+      sum += d.percent;
+      return { date: d.date, percent: Math.round(sum / (i + 1)) };
+    });
+  }, [stats?.aiAuthorshipOverTime]);
+  const linesByDay = useMemo(() => {
+    const trimmed = trimTrailingZeros(stats?.linesByDay) as Array<{ date: string; added: number; removed: number }>;
+    let added = 0;
+    let removed = 0;
+    return trimmed.map((d) => {
+      added += d.added || 0;
+      removed += d.removed || 0;
+      return { date: d.date, added, removed };
+    });
+  }, [stats?.linesByDay]);
+  const costByDay = useMemo(() => {
+    const trimmed = trimTrailingZeros(stats?.costByDay) as Array<{ date: string; cost: number }>;
+    let cost = 0;
+    return trimmed.map((d) => {
+      cost += d.cost || 0;
+      return { date: d.date, cost: parseFloat(cost.toFixed(2)) };
+    });
+  }, [stats?.costByDay]);
 
   const modelNames = useMemo(() => models.map((m) => m.model), [models]);
 
@@ -348,7 +371,7 @@ export default function Insights() {
       <section>
         <SectionHeader title="Activity & authorship" subtitle="How AI usage changes over time" />
         <div className="grid lg:grid-cols-2 gap-5">
-          <ChartCard title="AI Authorship %" hint="% of lines AI-authored">
+          <ChartCard title="AI Authorship %" hint="Running average % AI-authored">
             {aiAuthorshipOverTime.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={aiAuthorshipOverTime}>
@@ -370,7 +393,7 @@ export default function Insights() {
             )}
           </ChartCard>
 
-          <ChartCard title="Lines changed" hint="Added vs removed">
+          <ChartCard title="Lines changed" hint="Cumulative added vs removed">
             {linesByDay.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={linesByDay}>
@@ -404,7 +427,7 @@ export default function Insights() {
       <section>
         <SectionHeader title="Cost & tokens" subtitle="Where your AI budget is going" />
         <div className="grid lg:grid-cols-2 gap-5">
-          <ChartCard title="Cost over time">
+          <ChartCard title="Cost over time" hint="Cumulative spend">
             {costByDay.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={costByDay}>

@@ -45,11 +45,11 @@ import { CommitsTab, CommitEntry, CommitSort } from './tabs/CommitsTab';
 type Tab = 'timeline' | 'commits' | 'prompts' | 'agents' | 'stats' | 'patterns' | 'efficiency';
 
 const TABS: { key: Tab; label: string; icon: React.ElementType }[] = [
+  { key: 'stats', label: 'Stats', icon: BarChart3 },
   { key: 'timeline', label: 'Timeline', icon: Activity },
   { key: 'commits', label: 'Commits', icon: GitCommit },
   { key: 'prompts', label: 'Prompt Search', icon: Search },
   { key: 'agents', label: 'Agents', icon: Bot },
-  { key: 'stats', label: 'Stats', icon: BarChart3 },
   { key: 'patterns', label: 'Patterns', icon: Timer },
   { key: 'efficiency', label: 'Efficiency', icon: Gauge },
 ];
@@ -377,7 +377,7 @@ export default function MyDashboard() {
       const saved = localStorage.getItem('origin:dashboard-tab') as Tab | null;
       if (saved && TABS.some((t) => t.key === saved)) return saved;
     } catch { /* ignore */ }
-    return 'timeline';
+    return 'stats';
   });
   useEffect(() => {
     try { localStorage.setItem('origin:dashboard-tab', tab); } catch { /* ignore */ }
@@ -577,7 +577,7 @@ export default function MyDashboard() {
         <StatCardsRow stats={stats} fmt={fmt} fmtCost={fmtCost} />
       ) : null}
 
-      {/* Today's Activity feed — collapsible */}
+      {/* Today's Activity feed — collapsible, with generated summary on top */}
       {(todayLoading || todaySessions.length > 0) && (
         <div className="rounded-xl border border-gray-800/80 bg-gray-900/30 overflow-hidden">
           <button

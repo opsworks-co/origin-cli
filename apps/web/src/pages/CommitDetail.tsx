@@ -5,34 +5,81 @@ import type { CommitDetail } from '../api';
 import { timeAgo } from '../utils';
 import { Breadcrumb, Pill } from '../components/ui';
 
-// ─── Diff line renderer (GitHub-style) ───────────────────────────────
-function DiffLineRow({ line }: { line: string }) {
-  let bg = '';
-  let text = 'text-gray-400';
-  let prefix = ' ';
-  if (line.startsWith('@@')) {
+// ─── Diff renderer with old + new line numbers ───────────────────────
+// Walks a unified patch, tracks the current old/new line counters from
+// each `@@ -a,b +c,d @@` hunk header, and renders rows with two narrow
+// line-number gutters so the user sees both sides of the change.
+type DiffRow =
+  | { kind: 'hunk'; text: string }
+  | { kind: 'context'; oldNum: number; newNum: number; content: string }
+  | { kind: 'add'; newNum: number; content: string }
+  | { kind: 'del'; oldNum: number; content: string };
+
+function buildDiffRows(patch: string): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('@@')) {
+      const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) {
+        oldLine = parseInt(m[1], 10);
+        newLine = parseInt(m[2], 10);
+      }
+      rows.push({ kind: 'hunk', text: line });
+      continue;
+    }
+    if (line.startsWith('+')) {
+      rows.push({ kind: 'add', newNum: newLine, content: line.slice(1) });
+      newLine++;
+    } else if (line.startsWith('-')) {
+      rows.push({ kind: 'del', oldNum: oldLine, content: line.slice(1) });
+      oldLine++;
+    } else {
+      // Context line (starts with a space, or empty)
+      rows.push({ kind: 'context', oldNum: oldLine, newNum: newLine, content: line.startsWith(' ') ? line.slice(1) : line });
+      oldLine++;
+      newLine++;
+    }
+  }
+  return rows;
+}
+
+function DiffRowView({ row }: { row: DiffRow }) {
+  if (row.kind === 'hunk') {
     return (
       <div className="bg-indigo-950/40 text-indigo-300 px-4 py-0.5 font-mono text-[11px] border-y border-indigo-900/40 whitespace-pre">
-        {line}
+        {row.text}
       </div>
     );
   }
-  if (line.startsWith('+') && !line.startsWith('+++')) {
+  let bg = '';
+  let text = 'text-gray-400';
+  let prefix = ' ';
+  let oldCol: string = '';
+  let newCol: string = '';
+  if (row.kind === 'add') {
     bg = 'bg-emerald-950/40 border-l-2 border-emerald-700/60';
     text = 'text-emerald-200';
     prefix = '+';
-  } else if (line.startsWith('-') && !line.startsWith('---')) {
+    newCol = String(row.newNum);
+  } else if (row.kind === 'del') {
     bg = 'bg-red-950/40 border-l-2 border-red-800/60';
     text = 'text-red-200';
     prefix = '-';
-  } else if (line.startsWith('+++') || line.startsWith('---')) {
-    return null;
+    oldCol = String(row.oldNum);
+  } else {
+    oldCol = String(row.oldNum);
+    newCol = String(row.newNum);
   }
   return (
-    <div className={`${bg} flex items-start px-0 font-mono text-[11px] leading-[1.55] whitespace-pre`}>
-      <span className="inline-block w-6 text-center text-gray-600 select-none flex-shrink-0">{prefix}</span>
+    <div className={`${bg} flex items-start font-mono text-[11px] leading-[1.55] whitespace-pre`}>
+      <span className="inline-block w-10 text-right pr-2 text-gray-600 select-none flex-shrink-0 tabular-nums">{oldCol}</span>
+      <span className="inline-block w-10 text-right pr-2 text-gray-600 select-none flex-shrink-0 tabular-nums border-l border-gray-800/60">{newCol}</span>
+      <span className="inline-block w-5 text-center text-gray-600 select-none flex-shrink-0 border-l border-gray-800/60">{prefix}</span>
       <span className={`flex-1 ${text} pr-4`}>
-        {line.slice(1) || ' '}
+        {row.content || ' '}
       </span>
     </div>
   );
@@ -234,11 +281,11 @@ export default function CommitDetailPage() {
                 <Pill variant="neutral">Human</Pill>
               )}
             </div>
-            {commit.message.split('\n').slice(1).join('\n').trim() && (
-              <pre className="mt-3 text-xs text-gray-400 font-mono whitespace-pre-wrap leading-relaxed max-w-3xl">
-                {commit.message.split('\n').slice(1).join('\n').trim()}
-              </pre>
-            )}
+            {/* Commit message body intentionally hidden here. When agents
+                (Codex/etc.) reuse the user's prompt as the subject they often
+                also dump every session prompt into the body — which renders
+                as a noisy wall of unrelated prompts on this page. The full
+                message is still available on git itself and via the API. */}
           </div>
 
           {/* Stats */}
@@ -351,7 +398,7 @@ export default function CommitDetailPage() {
               </div>
               <div className="bg-[#0a0b14] overflow-x-auto max-h-[75vh] overflow-y-auto">
                 {currentPatch ? (
-                  currentPatch.split('\n').map((line, i) => <DiffLineRow key={i} line={line} />)
+                  buildDiffRows(currentPatch).map((row, i) => <DiffRowView key={i} row={row} />)
                 ) : (
                   <div className="px-6 py-12 text-center text-sm text-gray-600">
                     No patch content available for this file.

@@ -10,6 +10,7 @@ import {
   FolderGit2,
   Settings,
   Lightbulb,
+  LayoutDashboard,
   Play,
   LogOut,
   Menu,
@@ -26,10 +27,10 @@ const NAV_GROUPS = [
   {
     label: 'Workspace',
     items: [
+      { to: '/me',       label: 'Dashboard',    icon: LayoutDashboard },
       { to: '/repos',    label: 'Repositories', icon: FolderGit2 },
       { to: '/sessions', label: 'Sessions',     icon: Play },
-      // Insights now absorbs the old solo Dashboard content — one landing page.
-      { to: '/me',       label: 'Insights',     icon: Lightbulb },
+      { to: '/insights', label: 'Insights',     icon: Lightbulb },
     ],
   },
   {

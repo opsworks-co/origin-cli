@@ -2,6 +2,49 @@ import { MyStats, fmt, fmtCost } from '../utils';
 import { ActivityHeatmap } from '../ActivityHeatmap';
 import { AgentPie } from '../AgentPie';
 
+// `topFiles[].file` sometimes arrives as a JSON-stringified array (e.g. when
+// a session's `filesChanged` column was aggregated upstream without being
+// flattened). Render each underlying path as its own row instead of dumping
+// the raw JSON string in the UI.
+function expandFileEntries(entries: { file: string; count: number }[]): { file: string; count: number }[] {
+  const out: { file: string; count: number }[] = [];
+  for (const e of entries) {
+    const raw = (e.file || '').trim();
+    let parsed: string[] | null = null;
+    if (raw.startsWith('[')) {
+      try {
+        const v = JSON.parse(raw);
+        if (Array.isArray(v)) parsed = v.filter((x) => typeof x === 'string');
+      } catch { /* fall through */ }
+    }
+    if (parsed && parsed.length > 0) {
+      for (const p of parsed) out.push({ file: p, count: e.count });
+    } else if (parsed && parsed.length === 0) {
+      // Empty array — skip ("[]" is noise).
+      continue;
+    } else {
+      out.push({ file: raw, count: e.count });
+    }
+  }
+  // Re-aggregate by path so duplicates from multiple buckets sum.
+  const agg = new Map<string, number>();
+  for (const e of out) {
+    if (!e.file) continue;
+    agg.set(e.file, (agg.get(e.file) || 0) + e.count);
+  }
+  return Array.from(agg.entries())
+    .map(([file, count]) => ({ file, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+// Strip the user's homedir prefix so paths read as repo-relative.
+function shortenFilePath(p: string): string {
+  if (!p) return p;
+  const m = p.match(/^["']?\/Users\/[^/]+\/(.+?)["']?$/);
+  if (m) return m[1];
+  return p.replace(/^["']|["']$/g, '');
+}
+
 export function StatsTab({
   statsLoading,
   stats,
@@ -49,31 +92,36 @@ export function StatsTab({
                 {/* Top files */}
                 <div className="card">
                   <h3 className="text-sm font-semibold text-gray-300 mb-3">Most Modified Files</h3>
-                  {stats.topFiles.length === 0 ? (
-                    <p className="text-xs text-gray-600">No file data yet</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {stats.topFiles.slice(0, 10).map((f, i) => {
-                        const maxCount = stats.topFiles[0]?.count || 1;
-                        return (
-                          <div key={i}>
-                            <div className="flex items-center justify-between text-xs mb-0.5">
-                              <span className="text-gray-400 font-mono truncate max-w-[250px]" title={f.file}>
-                                {f.file}
-                              </span>
-                              <span className="text-gray-500 ml-2 flex-shrink-0">{f.count}x</span>
+                  {(() => {
+                    const expanded = expandFileEntries(stats.topFiles).slice(0, 10);
+                    if (expanded.length === 0) {
+                      return <p className="text-xs text-gray-600">No file data yet</p>;
+                    }
+                    const maxCount = expanded[0]?.count || 1;
+                    return (
+                      <div className="space-y-2">
+                        {expanded.map((f, i) => {
+                          const display = shortenFilePath(f.file);
+                          return (
+                            <div key={i}>
+                              <div className="flex items-center justify-between text-xs mb-0.5 gap-2">
+                                <span className="text-gray-400 font-mono truncate" title={f.file}>
+                                  {display}
+                                </span>
+                                <span className="text-gray-500 flex-shrink-0">{f.count}x</span>
+                              </div>
+                              <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-indigo-500/60 rounded-full"
+                                  style={{ width: `${(f.count / maxCount) * 100}%` }}
+                                />
+                              </div>
                             </div>
-                            <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
-                              <div
-                                className="h-full bg-indigo-500/60 rounded-full"
-                                style={{ width: `${(f.count / maxCount) * 100}%` }}
-                              />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Sessions by repo */}
