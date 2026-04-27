@@ -3135,6 +3135,45 @@ export async function handlePostCommit(): Promise<void> {
   // Add Origin-Session trailer to commit message (like Entire's Entire-Snapshot trailer)
   const apiUrl = config?.apiUrl || 'https://getorigin.io';
 
+  // ── Shadow-sync: post commit metadata to API regardless of session state ──
+  // The session-aware path below only fires when an Origin session was active
+  // for this commit. That misses: (a) commits made by AI without Origin
+  // running, (b) plain human commits, (c) commits done while the heartbeat
+  // process had died. Without shadow-sync the dashboard's repo view stays
+  // empty until `git push` triggers the GitHub/GitLab webhook. Fire-and-
+  // forget so a slow API call doesn't hold up the user's commit.
+  if (connected) {
+    try {
+      let repoUrl: string | undefined;
+      try {
+        repoUrl = execFileSync('git', ['config', '--get', 'remote.origin.url'], execOpts).trim() || undefined;
+      } catch { /* no remote, fine */ }
+      const committedAtIso = (() => {
+        try {
+          return execFileSync('git', ['log', '-1', '--format=%cI'], execOpts).trim() || undefined;
+        } catch { return undefined; }
+      })();
+      api.ingestCommits({
+        repoPath,
+        repoUrl,
+        commits: [{
+          sha: commitSha,
+          message: commitMessage,
+          author: commitAuthor,
+          branch: currentBranch || null,
+          filesChanged,
+          additions: linesAdded,
+          deletions: linesRemoved,
+          committedAt: committedAtIso,
+        }],
+      })
+        .then((r) => debugLog('post-commit', 'shadow ingest ok', { ingested: r?.ingested, repoId: r?.repoId }))
+        .catch((err: any) => debugLog('post-commit', 'shadow ingest failed (non-fatal)', { message: err?.message }));
+    } catch (err: any) {
+      debugLog('post-commit', 'shadow ingest setup failed', { message: err?.message });
+    }
+  }
+
   // Get ALL active sessions for this repo (concurrent session support)
   const activeSessions = listActiveSessions(hookCwd);
   activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());

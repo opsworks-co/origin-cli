@@ -91,6 +91,24 @@ export const api = {
   },
   pingSession: (id: string) =>
     request(`/api/mcp/session/${id}/ping`, { method: 'POST' }),
+  ingestCommits: async (data: {
+    repoPath: string;
+    repoUrl?: string;
+    commits: Array<{
+      sha: string;
+      message?: string;
+      author?: string;
+      branch?: string | null;
+      filesChanged?: string[];
+      additions?: number;
+      deletions?: number;
+      committedAt?: string;
+    }>;
+  }) => {
+    const res = await request('/api/mcp/commits/ingest', { method: 'POST', body: JSON.stringify(data) });
+    assertObj(res, 'ingestCommits');
+    return res;
+  },
   attachRepo: async (id: string, repoPath: string) => {
     const res = await request(`/api/mcp/session/${id}/attach-repo`, {
       method: 'POST',

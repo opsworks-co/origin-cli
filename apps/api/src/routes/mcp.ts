@@ -2029,6 +2029,138 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
   }
 });
 
+// POST /commits/ingest — shadow-sync of local commits (no push required)
+//
+// CLI's post-commit hook fires this so commits land on the dashboard the
+// moment they're created locally. Without this, commits only appear after a
+// push triggers the GitHub/GitLab webhook, which means new prompt→commit
+// links don't show until the user pushes. Independent of session state —
+// works whether or not Origin tracked the work that produced the commit.
+router.post('/commits/ingest', async (req: McpRequest, res: Response) => {
+  try {
+    const orgId = req.orgId as string;
+    const { repoPath, repoUrl, commits } = req.body as {
+      repoPath?: string;
+      repoUrl?: string;
+      commits?: Array<{
+        sha: string;
+        message?: string;
+        author?: string;
+        branch?: string | null;
+        filesChanged?: string[];
+        additions?: number;
+        deletions?: number;
+        committedAt?: string;
+      }>;
+    };
+
+    if (!repoPath || !Array.isArray(commits) || commits.length === 0) {
+      return res.status(400).json({ error: 'repoPath and non-empty commits[] are required' });
+    }
+    // Cap fan-out — prevents a misbehaving client from inserting thousands
+    // of rows in a single request.
+    const MAX_COMMITS = 200;
+    const capped = commits.slice(0, MAX_COMMITS);
+
+    // Resolve the repo using the same matching logic as session/start so a
+    // local checkout's path resolves to the same row a webhook would target.
+    let repo = await prisma.repo.findFirst({ where: { orgId, path: repoPath } });
+
+    if (!repo && repoUrl) {
+      let slug: string | null = null;
+      const httpsMatch = repoUrl.match(/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/);
+      if (httpsMatch) slug = httpsMatch[1].toLowerCase();
+      if (!slug) {
+        const sshMatch = repoUrl.match(/github\.com:([^/]+\/[^/]+?)(?:\.git)?$/);
+        if (sshMatch) slug = sshMatch[1].toLowerCase();
+      }
+      if (slug) {
+        const orgRepos = await prisma.repo.findMany({ where: { orgId } });
+        repo = orgRepos.find((r) => {
+          const rLower = r.path.toLowerCase();
+          return rLower === slug
+            || rLower === `https://github.com/${slug}`
+            || rLower === `https://github.com/${slug}.git`
+            || rLower.endsWith(`/${slug}`)
+            || rLower.endsWith(`/${slug}.git`);
+        }) || null;
+      }
+    }
+    if (!repo) {
+      const dirName = repoPath.split('/').filter(Boolean).pop()?.toLowerCase();
+      if (dirName) {
+        const orgRepos = await prisma.repo.findMany({ where: { orgId } });
+        repo = orgRepos.find((r) => r.path.split('/').pop()?.toLowerCase() === dirName) || null;
+      }
+    }
+
+    const isSoloKey = req.keyType === 'solo' || req.accountType === 'developer';
+    if (!repo) {
+      if (!isSoloKey) {
+        return res.status(403).json({ error: 'Repository not registered' });
+      }
+      const repoName = repoPath.split('/').filter(Boolean).pop() || repoPath;
+      try {
+        repo = await prisma.repo.create({
+          data: { orgId, name: repoName, path: repoPath, provider: repoUrl ? 'github' : 'local' },
+        });
+      } catch {
+        repo = await prisma.repo.findFirst({ where: { orgId, path: repoPath } });
+      }
+      if (!repo) return res.status(500).json({ error: 'Failed to auto-register repo' });
+    }
+
+    if (!isSoloKey && (!req.repoScopes || !req.repoScopes.includes(repo.id))) {
+      return res.status(403).json({ error: 'API key not scoped to this repo' });
+    }
+
+    let ingested = 0;
+    for (const c of capped) {
+      if (!c?.sha || typeof c.sha !== 'string' || !/^[0-9a-f]{7,40}$/i.test(c.sha)) continue;
+
+      const detection = detectAITool(c.message || '', c.author || '');
+      const filesArr = Array.isArray(c.filesChanged) ? c.filesChanged.filter((f) => typeof f === 'string').slice(0, 1000) : [];
+      const committedAt = c.committedAt ? new Date(c.committedAt) : new Date();
+
+      try {
+        await prisma.commit.upsert({
+          where: { repoId_sha: { repoId: repo.id, sha: c.sha } },
+          create: {
+            repoId: repo.id,
+            sha: c.sha,
+            message: (c.message || '').slice(0, 5000),
+            author: (c.author || 'unknown').slice(0, 200),
+            aiToolDetected: detection.aiToolDetected,
+            aiDetectionMethod: detection.aiDetectionMethod,
+            branch: c.branch || null,
+            committedAt: Number.isFinite(committedAt.getTime()) ? committedAt : new Date(),
+            filesChanged: JSON.stringify(filesArr),
+            fileCount: filesArr.length || null,
+            additions: typeof c.additions === 'number' ? c.additions : null,
+            deletions: typeof c.deletions === 'number' ? c.deletions : null,
+          },
+          update: {
+            // Backfill fields that were unknown at first-ingest. Don't
+            // overwrite values populated by a later session-update path.
+            ...(c.branch && { branch: c.branch }),
+            ...(filesArr.length > 0 && { filesChanged: JSON.stringify(filesArr), fileCount: filesArr.length }),
+          },
+        });
+        ingested++;
+      } catch (err: any) {
+        console.error('[commits/ingest] upsert failed', { sha: c.sha, err: err?.message });
+      }
+    }
+
+    await prisma.repo.update({ where: { id: repo.id }, data: { syncedAt: new Date() } }).catch(() => {});
+
+    res.json({ ingested, repoId: repo.id, truncated: commits.length > MAX_COMMITS });
+  } catch (err: any) {
+    console.error('Commits ingest error:', err?.message || err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /violations — report a policy violation
 router.post('/violations', async (req: McpRequest, res: Response) => {
   try {
