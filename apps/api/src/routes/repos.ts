@@ -1707,12 +1707,24 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
         } catch {/* ignore */}
       }
 
-      // Show ONLY prompts whose commitSha matches this commit. Anything else
-      // is a guess — the previous file-overlap fallback bundled every prompt
-      // that touched any of the commit's files, which usually meant every
-      // session prompt got listed. Empty is better than wrong; legacy commits
-      // (pre commitSha-attribution) show no prompts here.
-      promptChanges = promptChanges.filter((pc: any) => pc.commitSha === sha);
+      // Show prompts whose commitSha matches this commit. If no prompts have
+      // been attributed to a SHA yet (Codex/Gemini sessions populate prompts
+      // at session-end, not on per-prompt-submit) AND this commit is the
+      // session's primary commit, show all prompts — better than the empty
+      // "no per-prompt diffs captured yet" placeholder for sessions where
+      // per-prompt attribution is structurally unavailable.
+      const exactMatch = promptChanges.filter((pc: any) => pc.commitSha === sha);
+      const anyAttributed = promptChanges.some((pc: any) => pc.commitSha);
+      if (exactMatch.length > 0) {
+        promptChanges = exactMatch;
+      } else if (!anyAttributed && sess.commitId === commit.id) {
+        // No per-prompt attribution exists for this session — surface all
+        // session prompts under this commit. promptText comes from the
+        // transcript fallback above so users see what was asked.
+        // Leave promptChanges as-is.
+      } else {
+        promptChanges = exactMatch; // empty
+      }
     }
 
     // Build per-file diff (reuse sessionDiff / prompt diff parsing)
