@@ -275,9 +275,10 @@ export function SessionsTab(props: SessionsTabProps) {
                               <span className="text-sky-500/60 font-mono text-xs leading-none select-none" aria-hidden>└─</span>
                             )}
                             <span
-                              className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded"
+                              className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded border"
                               style={{
-                                backgroundColor: `${agentColor(s.agentName)}15`,
+                                backgroundColor: `${agentColor(s.agentName)}28`,
+                                borderColor: `${agentColor(s.agentName)}55`,
                                 color: agentColor(s.agentName),
                               }}
                             >

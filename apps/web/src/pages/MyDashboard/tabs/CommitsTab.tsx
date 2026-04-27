@@ -141,8 +141,12 @@ export function CommitsTab({
                             <td className="px-4 py-3">
                               {c.sessionAgent ? (
                                 <span
-                                  className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded"
-                                  style={{ backgroundColor: `${agentColor(c.sessionAgent)}15`, color: agentColor(c.sessionAgent) }}
+                                  className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded border"
+                                  style={{
+                                    backgroundColor: `${agentColor(c.sessionAgent)}28`,
+                                    borderColor: `${agentColor(c.sessionAgent)}55`,
+                                    color: agentColor(c.sessionAgent),
+                                  }}
                                 >
                                   {c.sessionAgent}
                                 </span>

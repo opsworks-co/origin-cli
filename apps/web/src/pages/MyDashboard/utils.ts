@@ -135,19 +135,24 @@ export function dayLabel(date: string) {
   return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
 }
 
-// Agent color map — consistent colors per agent name
-const AGENT_COLORS: Record<string, string> = {
-  'Claude Code': '#a78bfa',
-  Claude: '#a78bfa',
-  Cursor: '#60a5fa',
-  Gemini: '#fbbf24',
-  Codex: '#34d399',
-  Copilot: '#818cf8',
-};
+// Agent color map — consistent colors per agent name. Match against the
+// lowercased name — order matters: longer keys first (e.g. "claude code"
+// before "claude") so the right entry wins.
+const AGENT_COLORS: Array<[string, string]> = [
+  ['claude code', '#a78bfa'], // lavender/purple
+  ['claude', '#a78bfa'],
+  ['cursor', '#38bdf8'],      // sky blue
+  ['gemini', '#fbbf24'],      // amber
+  ['codex', '#34d399'],       // emerald
+  ['copilot', '#f472b6'],     // pink
+  ['gpt', '#34d399'],         // OpenAI fallback → emerald (same as Codex)
+  ['aider', '#fb7185'],       // rose
+];
 export function agentColor(name: string | null) {
   if (!name) return '#6b7280';
-  for (const [key, color] of Object.entries(AGENT_COLORS)) {
-    if (name.toLowerCase().includes(key.toLowerCase())) return color;
+  const lower = name.toLowerCase();
+  for (const [key, color] of AGENT_COLORS) {
+    if (lower.includes(key)) return color;
   }
   return '#8b5cf6';
 }
