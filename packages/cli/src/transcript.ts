@@ -21,6 +21,7 @@ interface MessageUsage {
 interface TranscriptLine {
   type: 'user' | 'assistant';
   uuid?: string;
+  timestamp?: string;
   message: {
     id?: string;
     role?: string;
@@ -67,7 +68,16 @@ const FILE_MODIFICATION_TOOLS = new Set([
 
 // ─── Parser ────────────────────────────────────────────────────────────────
 
-export function parseTranscript(transcriptPath: string): ParsedTranscript {
+export function parseTranscript(transcriptPath: string, opts: { since?: Date | string | null } = {}): ParsedTranscript {
+  // Resumed Claude Code sessions write the full conversation history into the
+  // new transcript file, so summing every line double-counts the parent
+  // session's tokens (we saw cache reads ~200M show up identically on a
+  // chained child, inflating cost by ~2×). When `since` is provided, drop
+  // entries whose `timestamp` predates it so each session reports only the
+  // tokens it actually produced.
+  const sinceMs = opts.since
+    ? (typeof opts.since === 'string' ? new Date(opts.since) : opts.since).getTime()
+    : 0;
   const result: ParsedTranscript = {
     prompts: [],
     filesChanged: [],
@@ -119,6 +129,11 @@ export function parseTranscript(transcriptPath: string): ParsedTranscript {
       entry = JSON.parse(line);
     } catch {
       continue; // skip malformed lines
+    }
+
+    if (sinceMs > 0 && entry.timestamp) {
+      const t = Date.parse(entry.timestamp);
+      if (Number.isFinite(t) && t < sinceMs) continue;
     }
 
     const type = entry.type || entry.message?.role;

@@ -1995,7 +1995,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         let displayTranscript = '';
         try {
           if (state.transcriptPath) {
-            parsed = parseTranscript(state.transcriptPath);
+            parsed = parseTranscript(state.transcriptPath, { since: state.startedAt });
             displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
           }
         } catch {
@@ -2213,7 +2213,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
   try {
     debugLog('stop', 'parsing transcript', { transcriptPath: state.transcriptPath });
-    const parsed = parseTranscript(state.transcriptPath);
+    const parsed = parseTranscript(state.transcriptPath, { since: state.startedAt });
 
     // Format transcript for dashboard display (converts JSONL → [{role, content}] JSON)
     let displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
@@ -2718,7 +2718,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
   }
 
   try {
-    const parsed = parseTranscript(state.transcriptPath);
+    const parsed = parseTranscript(state.transcriptPath, { since: state.startedAt });
 
     // Format transcript for dashboard display (converts JSONL → [{role, content}] JSON)
     let displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
@@ -3383,7 +3383,7 @@ export async function handlePostCommit(): Promise<void> {
 
     // Parse transcript for full metrics (or use empty defaults for agents without transcripts)
     const parsed = state.transcriptPath
-      ? parseTranscript(state.transcriptPath)
+      ? parseTranscript(state.transcriptPath, { since: state.startedAt })
       : { prompts: [], filesChanged: [], tokensUsed: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0, summary: '', model: '', transcript: '' };
     const promptMappings = state.transcriptPath
       ? extractPromptFileMappings(state.transcriptPath)
