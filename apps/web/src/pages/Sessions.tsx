@@ -320,14 +320,22 @@ export default function Sessions() {
     // Client-side text search across common fields + saved-only toggle.
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter((s) =>
-        (s.model || '').toLowerCase().includes(q) ||
-        (s.agentName || '').toLowerCase().includes(q) ||
-        (s.repoName || '').toLowerCase().includes(q) ||
-        (s.branch || '').toLowerCase().includes(q) ||
-        (s.userName || '').toLowerCase().includes(q) ||
-        (Array.isArray((s as any).filesChanged) && (s as any).filesChanged.some((f: string) => (f || '').toLowerCase().includes(q)))
-      );
+      list = list.filter((s) => {
+        // filesChanged comes back from the API as a JSON-stringified array
+        // ("[\"foo.ts\",\"bar.ts\"]"), not a parsed array. Match against the
+        // raw string — substring match still finds basename hits and avoids
+        // a JSON.parse per row on every keystroke.
+        const fc = (s as any).filesChanged;
+        const filesText = typeof fc === 'string' ? fc.toLowerCase() : Array.isArray(fc) ? fc.join('|').toLowerCase() : '';
+        return (
+          (s.model || '').toLowerCase().includes(q) ||
+          (s.agentName || '').toLowerCase().includes(q) ||
+          (s.repoName || '').toLowerCase().includes(q) ||
+          (s.branch || '').toLowerCase().includes(q) ||
+          (s.userName || '').toLowerCase().includes(q) ||
+          filesText.includes(q)
+        );
+      });
     }
     if (showSaved) {
       list = list.filter((s) => savedIds.has(s.id));

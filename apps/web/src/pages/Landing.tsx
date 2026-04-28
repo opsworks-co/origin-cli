@@ -496,14 +496,6 @@ export default function Landing() {
 
         <div className="relative w-full max-w-5xl mx-auto px-6 py-12 lg:py-16">
           <div className="max-w-3xl">
-            {/* Badge */}
-            <RevealText delay={200}>
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/[0.08] bg-white/[0.03] mb-5 backdrop-blur-sm">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="text-xs text-gray-400">AI Code Attribution & Governance</span>
-              </div>
-            </RevealText>
-
             <h1 className="text-[clamp(2.8rem,7vw,5rem)] font-bold leading-[1.0] tracking-[-0.04em]">
               <RevealText delay={400}>
                 <span className="block">

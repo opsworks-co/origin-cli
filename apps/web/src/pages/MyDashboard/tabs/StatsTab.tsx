@@ -106,7 +106,12 @@ export function StatsTab({
                           // Link to Sessions filtered to this file. We pass the
                           // basename — the Sessions search filter matches it
                           // against the per-session filesChanged list.
-                          const basename = (f.file.split('/').pop() || f.file).trim();
+                          // Strip stray quotes/brackets from JSON-stringified
+                          // entries so the URL prefill is just `mcp.ts` not
+                          // `mcp.ts"`.
+                          const basename = (f.file.split('/').pop() || f.file)
+                            .replace(/^["[\]]+|["[\]]+$/g, '')
+                            .trim();
                           return (
                             <Link
                               key={i}
