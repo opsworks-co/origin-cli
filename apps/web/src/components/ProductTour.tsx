@@ -243,6 +243,22 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
       const q = params.toString();
       window.history.replaceState({}, '', window.location.pathname + (q ? `?${q}` : ''));
     }
+    // First-login auto-start. Register pages set
+    // \`origin:auto-start-tour = '1'\` after a successful signup; the tour
+    // fires once and the flag is cleared. Distinct from
+    // \`origin:tour-highlight\` which only pulses the sidebar button —
+    // that nudge stays for users who close the auto-tour and want a
+    // visible reminder.
+    try {
+      if (localStorage.getItem('origin:auto-start-tour') === '1') {
+        localStorage.removeItem('origin:auto-start-tour');
+        localStorage.removeItem(storageKey);
+        // Small delay so the layout has time to mount + render anchors
+        // (sidebar nav items the tour highlights). 600ms matches the
+        // Register → /me redirect cadence.
+        setTimeout(() => start(), 600);
+      }
+    } catch { /* private mode */ }
     // Only run once on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

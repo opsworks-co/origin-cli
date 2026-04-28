@@ -18,8 +18,9 @@ export default function RegisterDeveloper() {
     setError('');
     setLoading(true);
     try {
-      // One-time Tour button highlight for new users. DeveloperLayout
-      // reads this flag and clears it on first click or first view.
+      // Auto-fire the product tour on the first dashboard load after
+      // signup, plus a sidebar nudge in case the user closes it early.
+      try { localStorage.setItem('origin:auto-start-tour', '1'); } catch { /* private mode */ }
       try { localStorage.setItem('origin:tour-highlight', '1'); } catch { /* private mode */ }
       await registerDeveloper(email, password, name);
       navigate('/onboarding');

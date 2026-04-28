@@ -707,6 +707,73 @@ router.get('/digest-preview', requireRole('ADMIN'), async (req: AuthRequest, res
   }
 });
 
+// ── Org-level LLM API key (for AI session titles + future summaries) ────
+//
+// We don't return the key itself, only whether one is configured + which
+// provider. Setting requires ADMIN; clearing too. Stored in plaintext on
+// the Org row — same trust boundary as the org's stored GitHub token.
+
+// GET /api/settings/llm — describe whether an LLM key is configured
+router.get('/llm', async (req: AuthRequest, res: Response) => {
+  try {
+    const org = await prisma.org.findUnique({
+      where: { id: req.user!.orgId },
+      select: { llmProvider: true, llmApiKey: true },
+    });
+    res.json({
+      provider: org?.llmProvider || null,
+      configured: !!(org?.llmApiKey && org.llmProvider),
+    });
+  } catch (err) {
+    console.error('Get LLM config error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/settings/llm — set provider + key (ADMIN+)
+router.put('/llm', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { provider, apiKey } = req.body as { provider?: string; apiKey?: string };
+    if (provider !== 'anthropic' && provider !== 'openai') {
+      return res.status(400).json({ error: 'provider must be "anthropic" or "openai"' });
+    }
+    if (typeof apiKey !== 'string' || apiKey.trim().length < 10) {
+      return res.status(400).json({ error: 'apiKey is required (min length 10)' });
+    }
+    await prisma.org.update({
+      where: { id: req.user!.orgId },
+      data: { llmProvider: provider, llmApiKey: apiKey.trim() },
+    });
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user!.orgId,
+        userId: req.user!.id,
+        action: 'LLM_KEY_SET',
+        resource: req.user!.orgId,
+        metadata: JSON.stringify({ provider }),
+      },
+    });
+    res.json({ ok: true, provider });
+  } catch (err) {
+    console.error('Set LLM key error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/settings/llm — clear configured key (ADMIN+)
+router.delete('/llm', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    await prisma.org.update({
+      where: { id: req.user!.orgId },
+      data: { llmProvider: null, llmApiKey: null },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Clear LLM key error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/settings/fix-orphaned-keys — assign unlinked keys to current user
 router.post('/fix-orphaned-keys', async (req: AuthRequest, res: Response) => {
   try {

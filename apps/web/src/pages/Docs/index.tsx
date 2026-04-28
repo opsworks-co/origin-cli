@@ -46,7 +46,10 @@ import ApiSection from './sections/api';
 
 export default function Docs() {
   const { section: urlSection } = useParams<{ section?: string }>();
-  const [activeTab, setActiveTab] = useState<DocTab>('cli');
+  // Default to "Team" — most users land on /docs to set up their org, not
+  // to read CLI reference. The hero card on Overview points straight at the
+  // team quick-start walkthrough.
+  const [activeTab, setActiveTab] = useState<DocTab>('team');
   const [active, setActive] = useState<Section>('overview');
 
   useEffect(() => {

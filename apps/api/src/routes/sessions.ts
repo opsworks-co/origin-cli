@@ -5,6 +5,7 @@ import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
 import { expensiveLimiter } from '../middleware/rate-limit.js';
 import { notifyOrgAdmins, notifyOrgMembers } from '../services/notifications.js';
 import { safeParseArray, safeParseObject } from '../utils/safe-json.js';
+import { generateSessionTitle } from '../services/ai-summarize.js';
 
 /** Check if user has admin/owner role */
 function isAdminUser(req: AuthRequest): boolean {
@@ -419,6 +420,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       _avg: { score: true },
       _count: true,
     }).catch(() => ({ _avg: { score: null }, _count: 0 }));
+
+    // Fire-and-forget: upgrade heuristic titles to LLM-generated ones for
+    // sessions in this page that don't have an aiTitle yet. Capped to 5
+    // per request so a fresh dashboard view doesn't fan out into dozens
+    // of provider calls. Caller's response uses whatever's already on
+    // the row; the next page load picks up the upgraded titles.
+    try {
+      const needsTitle = sessions.filter((s: any) => !s.aiTitle).slice(0, 5);
+      for (const s of needsTitle) {
+        generateSessionTitle(s.id).catch(() => { /* silent — heuristic stays */ });
+      }
+    } catch { /* ignore */ }
 
     res.json({
       sessions: sessions.map((s) => mapSession(s)),

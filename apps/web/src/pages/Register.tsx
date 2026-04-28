@@ -37,9 +37,12 @@ export default function Register() {
     setError('');
     setLoading(true);
     try {
-      // Mark the sidebar "Tour" button for a one-time highlight on the
-      // new user's first post-registration session. DeveloperLayout reads
-      // and clears this flag; subsequent logins stay un-highlighted.
+      // First-login UX: auto-fire the product tour as soon as the new
+      // user lands on the dashboard. \`auto-start-tour\` is a one-shot
+      // flag ProductTour reads + clears on mount.
+      // \`tour-highlight\` is the longer-lived sidebar pulse so users
+      // who close the auto-tour can still find the way back to it.
+      try { localStorage.setItem('origin:auto-start-tour', '1'); } catch { /* private mode */ }
       try { localStorage.setItem('origin:tour-highlight', '1'); } catch { /* private mode */ }
       if (accountType === 'developer') {
         await registerDeveloper(email, password, name);

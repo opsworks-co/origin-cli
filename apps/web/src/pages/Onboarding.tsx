@@ -22,7 +22,7 @@ const TOTAL_STEPS = 5;
 
 // ── Step indicator ──────────────────────────────────────────────────────────
 function Steps({ current }: { current: number }) {
-  const steps = ['AI Tools', 'Connect', 'Import Repos', 'Install CLI', 'First Session'];
+  const steps = ['AI Tools', 'Connect', 'Import Repos', 'AI Summaries', 'Install CLI', 'First Session'];
   return (
     <div className="flex items-center justify-center gap-1.5 mb-8">
       {steps.map((label, i) => (
@@ -154,7 +154,7 @@ export default function Onboarding() {
 
   // Poll for first session in step 3
   useEffect(() => {
-    if (step !== 4 || !polling) return;
+    if (step !== 5 || !polling) return;
     const check = async () => {
       try {
         const stats = await request<{ totalSessions: number }>('/api/stats/me');
@@ -594,8 +594,13 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* ─── STEP 4: Install & Connect ──────────────────────────────────── */}
+        {/* ─── STEP 4: AI Summaries — optional org-level LLM key ─────────── */}
         {step === 3 && (
+          <AiSummariesStep onContinue={() => setStep(4)} onBack={() => setStep(2)} />
+        )}
+
+        {/* ─── STEP 5: Install & Connect ──────────────────────────────────── */}
+        {step === 4 && (
           <div className="animate-fade-in space-y-6">
             <div className="text-center">
               <h1 className="text-2xl font-bold text-white">Install &amp; Connect the CLI</h1>
@@ -658,11 +663,11 @@ export default function Onboarding() {
             </div>
 
             <div className="flex items-center justify-between pt-2">
-              <button onClick={() => setStep(githubConnected || gitlabConnected ? 2 : 1)} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+              <button onClick={() => setStep(3)} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
                 &larr; Back
               </button>
               <button
-                onClick={() => { setStep(4); setPolling(true); }}
+                onClick={() => { setStep(5); setPolling(true); }}
                 className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
               >
                 I've run the commands &rarr;
@@ -671,8 +676,8 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* ─── STEP 5: Waiting for first session ──────────────────────────── */}
-        {step === 4 && (
+        {/* ─── STEP 6: Waiting for first session ──────────────────────────── */}
+        {step === 5 && (
           <div className="animate-fade-in space-y-6">
             <div className="text-center">
               {sessionFound ? (
@@ -721,7 +726,7 @@ export default function Onboarding() {
 
             <div className="flex items-center justify-between pt-2">
               <button
-                onClick={() => { setPolling(false); setStep(3); }}
+                onClick={() => { setPolling(false); setStep(4); }}
                 className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
               >
                 &larr; Back
@@ -739,6 +744,118 @@ export default function Onboarding() {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── AI Summaries onboarding step ──────────────────────────────────────────
+//
+// Optional. The org admin can paste an Anthropic / OpenAI API key here and
+// every session in the dashboard gets a real AI-generated label
+// ("Refactored auth middleware") instead of the heuristic first-line
+// fallback. Skipping is fine — the heuristic still works.
+function AiSummariesStep({ onContinue, onBack }: { onContinue: () => void; onBack: () => void }) {
+  const [provider, setProvider] = React.useState<'anthropic' | 'openai'>('anthropic');
+  const [apiKey, setApiKey] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+  const [saved, setSaved] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  const save = async () => {
+    setError('');
+    setSaving(true);
+    try {
+      const res = await fetch('/api/settings/llm', {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, apiKey }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      setSaved(true);
+      // Brief confirmation, then continue.
+      setTimeout(onContinue, 600);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="animate-fade-in space-y-6">
+      <div className="text-center">
+        <h1 className="text-2xl font-bold text-white">AI Summaries (optional)</h1>
+        <p className="text-sm text-gray-400 mt-2">
+          Drop in an Anthropic or OpenAI key and every session gets a real one-line
+          label like "Refactored auth middleware" instead of the first prompt's first line.
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-white/[0.08] bg-gray-900/40 p-5 space-y-4">
+        {/* Provider toggle */}
+        <div className="flex gap-2">
+          {(['anthropic', 'openai'] as const).map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setProvider(p)}
+              className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors border ${
+                provider === p
+                  ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/40'
+                  : 'bg-gray-900/40 text-gray-400 border-white/[0.06] hover:text-gray-200'
+              }`}
+            >
+              {p === 'anthropic' ? 'Anthropic (Claude Haiku)' : 'OpenAI (gpt-4o-mini)'}
+            </button>
+          ))}
+        </div>
+
+        {/* Key input */}
+        <div>
+          <label className="text-xs text-gray-400 mb-1.5 block">
+            {provider === 'anthropic' ? 'Anthropic API key' : 'OpenAI API key'}
+          </label>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={provider === 'anthropic' ? 'sk-ant-…' : 'sk-…'}
+            className="w-full px-3 py-2 rounded-lg bg-gray-900 border border-white/[0.08] text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500/50 font-mono"
+            autoComplete="off"
+          />
+          <p className="text-[11px] text-gray-600 mt-1.5">
+            Stored on your org. Used only to generate session titles. You can change or remove it later in Settings → AI.
+          </p>
+        </div>
+
+        {error && <div className="text-xs text-red-400">{error}</div>}
+        {saved && <div className="text-xs text-emerald-400">Saved — generating titles for past sessions in the background.</div>}
+      </div>
+
+      <div className="flex items-center justify-between pt-2">
+        <button onClick={onBack} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+          &larr; Back
+        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onContinue}
+            className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            Skip for now
+          </button>
+          <button
+            onClick={save}
+            disabled={saving || apiKey.trim().length < 10}
+            className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {saving ? 'Saving…' : 'Save & continue'}
+          </button>
+        </div>
       </div>
     </div>
   );
