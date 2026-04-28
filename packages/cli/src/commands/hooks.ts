@@ -784,6 +784,174 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
  * Token events have a `total_token_usage` field with cumulative counts.
  * We take the max seen values as the final totals.
  */
+/**
+ * Extract user prompts with timestamps from the agent's session log so the
+ * post-commit hook can attribute each commit to the prompt that produced
+ * it. Codex/Gemini don't fire user-prompt-submit hooks, so without this
+ * every commit ends up stamped with promptIndex 0 (the rest being filled
+ * in only at session end).
+ *
+ * Returns prompts in chronological order with millisecond timestamps; the
+ * index in the array IS the promptIndex used for downstream UI.
+ */
+interface PromptTimelineEntry {
+  text: string;
+  timestamp: number;
+}
+
+function readCodexRolloutFile(repoPath: string): string | null {
+  try {
+    const codexDir = path.join(os.homedir(), '.codex');
+    if (!fs.existsSync(codexDir)) return null;
+    const stateFiles = fs.readdirSync(codexDir)
+      .filter(f => f.startsWith('state_') && f.endsWith('.sqlite'))
+      .map(f => ({ path: path.join(codexDir, f), mtime: fs.statSync(path.join(codexDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (stateFiles.length === 0) return null;
+
+    const repoBasename = path.basename(repoPath);
+    if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
+    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const threadQuery = `SELECT id, rollout_path FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
+    const raw = execFileSync('sqlite3', [stateFiles[0].path, threadQuery], {
+      encoding: 'utf-8' as const,
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (!raw) return null;
+    const parts = raw.split('|');
+    const threadId = parts[0];
+    const rolloutPath = parts[1] || '';
+
+    let rolloutFile = '';
+    if (rolloutPath && fs.existsSync(rolloutPath)) rolloutFile = rolloutPath;
+    else if (rolloutPath) {
+      const abs = path.join(codexDir, rolloutPath);
+      if (fs.existsSync(abs)) rolloutFile = abs;
+    }
+    if (!rolloutFile) {
+      const sessionsDir = path.join(codexDir, 'sessions');
+      if (fs.existsSync(sessionsDir)) rolloutFile = findLatestRollout(sessionsDir, threadId);
+    }
+    if (!rolloutFile) return null;
+
+    if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
+      const compressed = fs.readFileSync(rolloutFile);
+      const decompressed = fzstd.decompress(new Uint8Array(compressed));
+      return Buffer.from(decompressed).toString('utf-8');
+    }
+    return fs.readFileSync(rolloutFile, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function getCodexPromptsTimeline(repoPath: string): PromptTimelineEntry[] {
+  const content = readCodexRolloutFile(repoPath);
+  if (!content) return [];
+  const out: PromptTimelineEntry[] = [];
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      const eventType = event?.type || event?.event || '';
+      if (eventType !== 'item.created' && eventType !== 'message') continue;
+      const item = event?.data || event?.item || event;
+      const role = item?.role || item?.type;
+      if (role !== 'user' && role !== 'human') continue;
+      const content_ = item?.content || item?.text || item?.message;
+      const text = typeof content_ === 'string'
+        ? content_
+        : Array.isArray(content_)
+          ? content_.map((c: any) => c?.text || c?.content || '').join('')
+          : '';
+      if (!text || !text.trim()) continue;
+      // Codex events carry an ISO-ish timestamp on most variants.
+      const tsRaw = event?.timestamp || event?.ts || event?.time || event?.created_at || item?.timestamp;
+      const ts = tsRaw ? new Date(tsRaw).getTime() : NaN;
+      out.push({ text, timestamp: Number.isFinite(ts) ? ts : 0 });
+    } catch { /* skip */ }
+  }
+  // If timestamps are missing, preserve insertion order (the JSONL itself is
+  // chronological).
+  return out;
+}
+
+function getGeminiPromptsTimeline(transcriptPath: string): PromptTimelineEntry[] {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return [];
+  try {
+    const raw = fs.readFileSync(transcriptPath, 'utf-8');
+    // Gemini transcripts are JSON arrays of {role, parts:[{text}], timestamp}
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: PromptTimelineEntry[] = [];
+    for (const m of parsed) {
+      const role = m?.role;
+      if (role !== 'user' && role !== 'human') continue;
+      const text = typeof m.content === 'string'
+        ? m.content
+        : Array.isArray(m?.parts)
+          ? m.parts.map((p: any) => p?.text || '').join('')
+          : '';
+      if (!text || !text.trim()) continue;
+      const tsRaw = m?.timestamp || m?.ts || m?.created_at;
+      const ts = tsRaw ? new Date(tsRaw).getTime() : 0;
+      out.push({ text, timestamp: Number.isFinite(ts) ? ts : 0 });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pick the prompt that most likely produced this commit.
+ *
+ * 1. If we have explicit prompts in state (Claude path), use the latest one.
+ * 2. Else discover the agent's prompts from its transcript (Codex/Gemini)
+ *    and find the latest prompt whose timestamp ≤ the commit's timestamp.
+ *    Falls back to the last prompt if no usable timestamps are present.
+ */
+function resolvePromptForCommit(
+  state: SessionState | null,
+  repoPath: string,
+  commitTimestampMs: number,
+): { promptIndex: number; promptText: string; total: number } {
+  const fromState = state?.prompts || [];
+  if (fromState.length > 0) {
+    const idx = fromState.length - 1;
+    return { promptIndex: idx, promptText: fromState[idx], total: fromState.length };
+  }
+
+  // Codex
+  const isCodex = !!state?.model && /gpt|codex|o1-|o3-|o4-/i.test(state.model);
+  let timeline: PromptTimelineEntry[] = isCodex ? getCodexPromptsTimeline(repoPath) : [];
+
+  // Gemini fallback
+  if (timeline.length === 0 && state?.transcriptPath && fs.existsSync(state.transcriptPath)) {
+    timeline = getGeminiPromptsTimeline(state.transcriptPath);
+  }
+
+  if (timeline.length === 0) {
+    return { promptIndex: 0, promptText: '', total: 0 };
+  }
+
+  // Match commit to the latest prompt at-or-before commitTimestamp.
+  let pickIdx = -1;
+  for (let i = 0; i < timeline.length; i++) {
+    const ts = timeline[i].timestamp;
+    if (ts > 0 && ts <= commitTimestampMs) pickIdx = i;
+    else if (ts === 0) pickIdx = i; // unknown timestamp — fall through
+  }
+  if (pickIdx < 0) pickIdx = timeline.length - 1;
+
+  return {
+    promptIndex: pickIdx,
+    promptText: timeline[pickIdx].text,
+    total: timeline.length,
+  };
+}
+
 function parseCodexRollout(
   codexDir: string,
   rolloutPath: string,
@@ -1319,15 +1487,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       // Touch the state file to keep it fresh
       saveSessionState(existing, repoPath, existing.sessionTag);
 
-      // Auto-snapshot: capture pre-prompt state for rewind capability
-      try {
-        createSnapshot(repoPath, {
-          sessionTag: existing.sessionTag,
-          type: 'pre-prompt',
-          model: existing.model,
-          promptIndex: existing.prompts.length,
-        });
-      } catch { /* non-fatal */ }
+      // Pre-prompt snapshots removed on purpose. The user-facing rule is
+      // "snapshots only for prompts that change code AND get committed",
+      // so capturing the pre-prompt working tree (no changes possible yet)
+      // produced empty rows the user couldn't act on. The post-commit hook
+      // condenses the latest stop-snapshot for each commit, which is the
+      // right anchor for "what did this prompt change?"
 
       // Restart heartbeat to keep session alive between prompts
       const stateFileReuse = getStatePath(repoPath, existing.sessionTag);
@@ -2604,26 +2769,37 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         uncommittedDiff: pm.uncommittedDiff,
       }));
     }
-    // Auto-snapshot: save working tree state after each AI turn
-    // Includes attribution data (lines added/removed by AI)
-    try {
-      const cpId = createSnapshot(state.repoPath, {
-        sessionTag: state.sessionTag,
-        prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
-        model: model || state.model,
-        tokensUsed: parsed.tokensUsed || 0,
-        costUsd: costUsd || 0,
-        promptIndex: prompts.length,
-        type: 'auto',
-        linesAdded: gitCapture.linesAdded || 0,
-        linesRemoved: gitCapture.linesRemoved || 0,
-        transcriptPath: state.transcriptPath,
-      });
-      if (cpId) {
-        debugLog('stop', 'auto-snapshot created', { snapshotId: cpId, promptIndex: prompts.length });
+    // Auto-snapshot: save working tree state after each AI turn — but only
+    // when the turn actually produced code changes. Empty turns (the user
+    // asked a question, the agent answered with no edits) used to leave a
+    // "Snapshot" entry with "No diff captured for this snapshot", which
+    // bloated the snapshots list with un-restorable rows. The post-commit
+    // hook later promotes the latest auto-snapshot for each commit, so
+    // anything that doesn't get committed will fall off when the shadow
+    // branch is cleaned at session-end.
+    const turnLines = (gitCapture.linesAdded || 0) + (gitCapture.linesRemoved || 0);
+    if (turnLines > 0) {
+      try {
+        const cpId = createSnapshot(state.repoPath, {
+          sessionTag: state.sessionTag,
+          prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
+          model: model || state.model,
+          tokensUsed: parsed.tokensUsed || 0,
+          costUsd: costUsd || 0,
+          promptIndex: prompts.length,
+          type: 'auto',
+          linesAdded: gitCapture.linesAdded || 0,
+          linesRemoved: gitCapture.linesRemoved || 0,
+          transcriptPath: state.transcriptPath,
+        });
+        if (cpId) {
+          debugLog('stop', 'auto-snapshot created', { snapshotId: cpId, promptIndex: prompts.length, lines: turnLines });
+        }
+      } catch (cpErr: any) {
+        debugLog('stop', 'auto-snapshot failed (non-fatal)', { message: cpErr.message });
       }
-    } catch (cpErr: any) {
-      debugLog('stop', 'auto-snapshot failed (non-fatal)', { message: cpErr.message });
+    } else {
+      debugLog('stop', 'auto-snapshot skipped (no code changes this turn)', { promptIndex: prompts.length });
     }
 
     // Re-save state with RUNNING status FIRST so it survives any errors below
@@ -3022,20 +3198,13 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
     }
   } finally {
-    // Create final session-end snapshot with transcript
-    try {
-      const finalCpId = createSnapshot(state.repoPath, {
-        sessionTag: state.sessionTag,
-        type: 'session-end',
-        model: state.model,
-        prompt: state.prompts.length > 0 ? state.prompts[state.prompts.length - 1] : undefined,
-        promptIndex: state.prompts.length,
-        transcriptPath: state.transcriptPath,
-      });
-      if (finalCpId) {
-        debugLog('session-end', 'final snapshot created', { snapshotId: finalCpId });
-      }
-    } catch { /* non-fatal */ }
+    // Final session-end snapshot removed. By the time we reach here the
+    // post-commit hook has already condensed the per-commit snapshots; an
+    // additional "session-end" row at this point captures whatever happens
+    // to be in the working tree — which for sessions that ended without a
+    // final commit is just unstaged scratch. Keeping it created the empty
+    // rows the user reported in the snapshots list. The condensation /
+    // shadow-cleanup below still runs.
 
     // Condense all session snapshots to permanent branch + clean up shadow branch
     try {
@@ -3372,16 +3541,27 @@ export async function handlePostCommit(): Promise<void> {
       linesRemoved,
     };
 
+    // Resolve the commit's timestamp once, outside the per-session loop.
+    // resolvePromptForCommit() uses it to match the commit to the prompt
+    // that most likely produced it (Codex/Gemini path).
+    let commitTimestampMs = Date.now();
+    try {
+      const iso = execFileSync('git', ['log', '-1', '--format=%cI', commitSha], execOpts).trim();
+      const parsed = iso ? new Date(iso).getTime() : NaN;
+      if (Number.isFinite(parsed)) commitTimestampMs = parsed;
+    } catch { /* fall back to wallclock */ }
+
     if (connected) {
       for (const s of activeSessions) {
-        // Attribute this commit to the session's current (latest) prompt so
-        // the commit-detail page can filter "prompts in this commit" by SHA
-        // instead of the noisier file-overlap heuristic. Schema stores one
-        // commitSha per (sessionId, promptIndex) — if a prompt produces
-        // multiple commits in sequence, last-write wins; earlier commits on
-        // that prompt still surface through the file-overlap fallback.
-        const latestPromptIdx = Math.max(0, (s.prompts?.length || 1) - 1);
-        const latestPromptText = s.prompts?.[latestPromptIdx] || '';
+        // Pick the prompt this commit belongs to. Claude path uses
+        // s.prompts (populated on user-prompt-submit). Codex/Gemini have
+        // no submit hook — resolvePromptForCommit walks their transcript
+        // and picks the latest prompt timestamped at-or-before this
+        // commit. Fixes "all commits attributed to prompt #1" for
+        // Codex sessions with multiple prompts.
+        const resolved = resolvePromptForCommit(s, repoPath, commitTimestampMs);
+        const latestPromptIdx = resolved.promptIndex;
+        const latestPromptText = resolved.promptText;
         const perPromptUpdate = {
           promptIndex: latestPromptIdx,
           promptText: latestPromptText.slice(0, 1000),

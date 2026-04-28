@@ -541,9 +541,9 @@ export default function RepoDetail() {
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState('');
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (silent = false) => {
     if (!id) return;
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const [repos, commitData, branchData] = await Promise.all([
         api.getRepos(),
@@ -554,10 +554,18 @@ export default function RepoDetail() {
       setRepo(found);
       setCommits(commitData as Commit[]);
       setBranches(branchData.branches.filter(Boolean));
+      // Clear any prior error once a fetch succeeds — without this, a
+      // transient error during the 20s background poll would stick on
+      // screen even after the next tick fixed it.
+      setError('');
     } catch (err: any) {
-      setError(err.message);
+      // Suppress errors on background ticks. The page would briefly flash
+      // a "Failed to load …" banner whenever the network blipped during
+      // the 20s sync poll, then "fix itself" 20s later — exactly the
+      // user-reported "random error that disappears".
+      if (!silent) setError(err.message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
     // Fetch health score and access control separately (non-blocking)
     api.getRepoHealth(id).then(setHealth).catch(() => {});
@@ -591,7 +599,9 @@ export default function RepoDetail() {
         if (isProviderBacked) {
           await api.syncRepo(id).catch(() => {});
         }
-        if (!cancelled) await fetchData();
+        // silent=true so the loading spinner doesn't flash and a
+        // transient error doesn't surface during a 20s background tick.
+        if (!cancelled) await fetchData(true);
       } finally {
         if (!cancelled) timer = setTimeout(tick, 20_000);
       }
