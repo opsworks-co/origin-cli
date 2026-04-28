@@ -56,6 +56,8 @@ export interface Session {
   committedAt: string | null;
   model: string;
   prompt: string;
+  /** Short human-readable summary derived from the session's first prompt. Null until generated. */
+  aiTitle: string | null;
   transcript: string;
   filesChanged: string;
   tokensUsed: number;

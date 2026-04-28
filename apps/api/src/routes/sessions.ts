@@ -58,6 +58,47 @@ function computeStatus(s: any): string {
   return s.status || 'COMPLETED';
 }
 
+/**
+ * Derive a short human-readable title for a session from the data we have.
+ *
+ * Strategy (cheap, no LLM): first non-empty line of the first prompt, then
+ * the first commit message, then the model. Capped to ~70 chars so the
+ * snapshot list and sessions list stay tidy. The DB column \`aiTitle\` lets
+ * a future enrichment pass overwrite this with an LLM-generated summary
+ * without changing the read path.
+ */
+function deriveSessionTitle(s: any): string | null {
+  const clean = (raw: string | null | undefined): string | null => {
+    if (!raw) return null;
+    // Drop common boilerplate prefixes / role markers.
+    let t = String(raw).trim();
+    if (!t) return null;
+    // First non-empty line
+    t = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || '';
+    if (!t) return null;
+    // Strip leading punctuation/markdown
+    t = t.replace(/^[#>\-*\s]+/, '').trim();
+    if (t.length > 70) t = t.slice(0, 67).trimEnd() + '…';
+    // Title-case the first letter so it reads as a session label.
+    if (t.length > 0) t = t[0].toUpperCase() + t.slice(1);
+    return t || null;
+  };
+
+  // Prefer the first prompt — it's almost always the most descriptive.
+  // promptChanges (when included by the query) preserve order; fall back
+  // to s.prompt which is the joined prompt text.
+  const firstPrompt = Array.isArray(s.promptChanges) && s.promptChanges.length > 0
+    ? s.promptChanges[0]?.promptText
+    : null;
+  const fromPrompt = clean(firstPrompt) || clean(s.prompt);
+  if (fromPrompt) return fromPrompt;
+
+  const fromCommit = clean(s.commit?.message);
+  if (fromCommit) return fromCommit;
+
+  return null;
+}
+
 function mapSession(s: any, pullRequests?: any[]) {
   return {
     id: s.id,
@@ -80,6 +121,7 @@ function mapSession(s: any, pullRequests?: any[]) {
     committedAt: s.commit?.committedAt || null,
     model: s.model,
     prompt: s.prompt,
+    aiTitle: (s as any).aiTitle || deriveSessionTitle(s),
     transcript: s.transcript,
     filesChanged: s.filesChanged,
     tokensUsed: s.tokensUsed,

@@ -211,6 +211,7 @@ model CodingSession {
   machineId       String?                      // Machine that created this session (for dedup without audit log race)
   pendingCommand  String?                      // JSON command for CLI to pick up via heartbeat (e.g. restore)
   lastCommandResult String?                    // JSON result of last command executed by CLI
+  aiTitle      String?                          // Short human-readable summary of the session ("Refactored auth middleware"). Derived from first prompt; nullable until generated.
   startedAt    DateTime?                       // When session actually started (from session/start)
   endedAt      DateTime?                       // When session ended (from session/end)
   createdAt    DateTime       @default(now())

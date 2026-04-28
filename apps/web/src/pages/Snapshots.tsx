@@ -17,6 +17,10 @@ interface SnapshotRow {
   sessionStartedAt: string | null;
   costUsd: number;
   sessionCommitSha: string | null;
+  // Short human-readable session summary (server derives from first
+  // prompt). Lets the snapshot list say "Refactored auth middleware"
+  // instead of just "claude · main · Adolf Cool".
+  sessionTitle: string | null;
   promptChange: PromptChange;
 }
 
@@ -130,6 +134,7 @@ export default function Snapshots() {
           sessionStartedAt: s.startedAt || s.createdAt,
           costUsd: s.costUsd || 0,
           sessionCommitSha: s.commitSha || null,
+          sessionTitle: (s as any).aiTitle || null,
           promptChange: pc,
         });
       }
@@ -172,6 +177,7 @@ export default function Snapshots() {
     branch: string | null;
     model: string;
     userName: string | null;
+    title: string | null;
     rows: SnapshotRow[];
     latestTime: string;
     totalAdded: number;
@@ -192,6 +198,7 @@ export default function Snapshots() {
           branch: row.branch,
           model: row.model,
           userName: row.userName,
+          title: row.sessionTitle,
           rows: [row],
           latestTime: rowTime,
           totalAdded: pc.linesAdded || 0,
@@ -412,15 +419,33 @@ export default function Snapshots() {
                           >
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                           </svg>
-                          <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-500/25">
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 ring-1 ring-indigo-500/25 flex-shrink-0">
                             {group.model.split('/').pop()?.split('-').slice(0, 3).join('-') || group.model}
                           </span>
-                          <span className="text-sm text-gray-200 font-medium">{group.repoName}</span>
-                          {group.branch && (
-                            <span className="text-[11px] text-gray-500 font-mono truncate">{group.branch}</span>
-                          )}
-                          {group.userName && (
-                            <span className="text-[11px] text-gray-500">· {group.userName}</span>
+                          {/* Title-first layout: a derived session summary
+                              (from the first prompt) is far more useful than
+                              "claude · main · Adolf Cool" repeated 50 times. */}
+                          {group.title ? (
+                            <div className="flex-1 min-w-0 flex items-center gap-2">
+                              <span className="text-sm text-gray-100 font-medium truncate" title={group.title}>
+                                {group.title}
+                              </span>
+                              <span className="text-[11px] text-gray-500 truncate flex-shrink-0">
+                                {group.repoName}
+                                {group.branch && <> · <span className="font-mono">{group.branch}</span></>}
+                                {group.userName && <> · {group.userName}</>}
+                              </span>
+                            </div>
+                          ) : (
+                            <>
+                              <span className="text-sm text-gray-200 font-medium">{group.repoName}</span>
+                              {group.branch && (
+                                <span className="text-[11px] text-gray-500 font-mono truncate">{group.branch}</span>
+                              )}
+                              {group.userName && (
+                                <span className="text-[11px] text-gray-500">· {group.userName}</span>
+                              )}
+                            </>
                           )}
                           <div className="ml-auto flex items-center gap-4 text-[11px] tabular-nums">
                             <span className="text-gray-300 font-medium">
