@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '../api';
 import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent, TeamMember } from '../api';
 import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../utils';
@@ -67,8 +67,10 @@ export default function Sessions() {
   // Users
   const [users, setUsers] = useState<TeamMember[]>([]);
 
-  // Filters
-  const [search, setSearch] = useState('');
+  // Filters. Seed `search` from the `?q=` URL param so deep-links from
+  // dashboard tiles (e.g. "files most modified") prefill the search box.
+  const [searchParams] = useSearchParams();
+  const [search, setSearch] = useState(searchParams.get('q') || '');
   const [model, setModel] = useState('');
   const [status, setStatus] = useState('');
   const [repoId, setRepoId] = useState('');
@@ -323,7 +325,8 @@ export default function Sessions() {
         (s.agentName || '').toLowerCase().includes(q) ||
         (s.repoName || '').toLowerCase().includes(q) ||
         (s.branch || '').toLowerCase().includes(q) ||
-        (s.userName || '').toLowerCase().includes(q)
+        (s.userName || '').toLowerCase().includes(q) ||
+        (Array.isArray((s as any).filesChanged) && (s as any).filesChanged.some((f: string) => (f || '').toLowerCase().includes(q)))
       );
     }
     if (showSaved) {

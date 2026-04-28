@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { MyStats, fmt, fmtCost } from '../utils';
 import { ActivityHeatmap } from '../ActivityHeatmap';
 import { AgentPie } from '../AgentPie';
@@ -102,21 +103,30 @@ export function StatsTab({
                       <div className="space-y-2">
                         {expanded.map((f, i) => {
                           const display = shortenFilePath(f.file);
+                          // Link to Sessions filtered to this file. We pass the
+                          // basename — the Sessions search filter matches it
+                          // against the per-session filesChanged list.
+                          const basename = (f.file.split('/').pop() || f.file).trim();
                           return (
-                            <div key={i}>
+                            <Link
+                              key={i}
+                              to={`/sessions?q=${encodeURIComponent(basename)}`}
+                              className="block group"
+                              title={`See sessions touching ${f.file}`}
+                            >
                               <div className="flex items-center justify-between text-xs mb-0.5 gap-2">
-                                <span className="text-gray-400 font-mono truncate" title={f.file}>
+                                <span className="text-gray-400 group-hover:text-gray-200 font-mono truncate transition-colors" title={f.file}>
                                   {display}
                                 </span>
                                 <span className="text-gray-500 flex-shrink-0">{f.count}x</span>
                               </div>
                               <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
                                 <div
-                                  className="h-full bg-indigo-500/60 rounded-full"
+                                  className="h-full bg-indigo-500/60 group-hover:bg-indigo-400 rounded-full transition-colors"
                                   style={{ width: `${(f.count / maxCount) * 100}%` }}
                                 />
                               </div>
-                            </div>
+                            </Link>
                           );
                         })}
                       </div>
@@ -134,18 +144,23 @@ export function StatsTab({
                       {stats.sessionsByRepo.slice(0, 8).map((r, i) => {
                         const maxSessions = stats.sessionsByRepo[0]?.sessions || 1;
                         return (
-                          <div key={i}>
+                          <Link
+                            key={i}
+                            to={r.repoId ? `/repos/${r.repoId}` : '#'}
+                            className="block group"
+                            title={`Open ${r.repoName}`}
+                          >
                             <div className="flex items-center justify-between text-xs mb-0.5">
-                              <span className="text-gray-400">{r.repoName}</span>
+                              <span className="text-gray-400 group-hover:text-gray-200 transition-colors">{r.repoName}</span>
                               <span className="text-gray-500">{r.sessions} sessions</span>
                             </div>
                             <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
                               <div
-                                className="h-full bg-cyan-500/60 rounded-full"
+                                className="h-full bg-cyan-500/60 group-hover:bg-cyan-400 rounded-full transition-colors"
                                 style={{ width: `${(r.sessions / maxSessions) * 100}%` }}
                               />
                             </div>
-                          </div>
+                          </Link>
                         );
                       })}
                     </div>
