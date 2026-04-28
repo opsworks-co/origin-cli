@@ -218,14 +218,34 @@ export default function Repos() {
     }
   };
 
-  const fetchRepos = useCallback(() => {
-    setLoading(true);
+  const fetchRepos = useCallback((silent = false) => {
+    if (!silent) setLoading(true);
     api
       .getRepos()
       .then(setRepos)
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
+      .catch((err) => { if (!silent) setError(err.message); })
+      .finally(() => { if (!silent) setLoading(false); });
   }, []);
+
+  // Auto-refresh repo list every 20s so commit/session counts stay live as
+  // the CLI shadow-syncs new commits and the background sync pulls from
+  // GitHub/GitLab. Pause while the tab is hidden.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = () => {
+      if (cancelled) return;
+      if (typeof document !== 'undefined' && !document.hidden) {
+        fetchRepos(true);
+      }
+      timer = setTimeout(tick, 20_000);
+    };
+    timer = setTimeout(tick, 20_000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [fetchRepos]);
 
   useEffect(() => {
     fetchRepos();

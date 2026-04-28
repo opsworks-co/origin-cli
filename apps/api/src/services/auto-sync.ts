@@ -1,11 +1,18 @@
 import { prisma } from '../db.js';
 import { syncSnapshots } from './snapshot.js';
 
-// Auto-sync interval: 15 minutes
-const SYNC_INTERVAL_MS = 15 * 60 * 1000;
+// Auto-sync interval: 2 minutes. The frontend (Repos list + RepoDetail)
+// polls every 20s and triggers /sync for the actively viewed repo, so this
+// loop is the catch-all for repos nobody is watching. Tighter than the
+// previous 15 min so a freshly-pushed commit shows up within ~2 min even
+// without a webhook. GitHub/GitLab rate-limit guard is the per-repo gap
+// below.
+const SYNC_INTERVAL_MS = 2 * 60 * 1000;
 
-// Minimum time between syncs for the same repo (avoid hammering GitHub API)
-const MIN_SYNC_GAP_MS = 10 * 60 * 1000;
+// Minimum time between syncs for the same repo (avoid hammering GitHub API).
+// 1 min is well under GitHub's 5000/hr authenticated ceiling even for orgs
+// with hundreds of repos.
+const MIN_SYNC_GAP_MS = 60 * 1000;
 
 let running = false;
 

@@ -393,8 +393,12 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
 
   return (
     <>
-      {/* Overlay with cutout */}
-      <div className="fixed inset-0 z-[9998]" onClick={complete}>
+      {/* Overlay with cutout. No click-to-dismiss — during the up-to-6s
+          window where the next step's target is loading, the tooltip is
+          briefly hidden, and an impatient click anywhere on the dim layer
+          used to silently complete the tour. The X / "Skip tour" buttons
+          inside the tooltip card are the only ways out now. */}
+      <div className="fixed inset-0 z-[9998]">
         <svg className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none' }}>
           <defs>
             <mask id="tour-mask">

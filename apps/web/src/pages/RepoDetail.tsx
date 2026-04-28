@@ -567,22 +567,49 @@ export default function RepoDetail() {
     fetchData();
   }, [fetchData]);
 
-  // Auto-sync on mount if the repo hasn't been synced recently.
-  // Provider-backed repos (github/gitlab) re-pull silently in the background.
+  // Auto-sync loop. Provider-backed repos (github/gitlab) re-pull from the
+  // remote every 20s. Local repos can't fetch from a remote, but the page's
+  // fetchData() still picks up commits the CLI shadow-syncs in the
+  // background, so we keep them on the same loop with a no-op syncRepo call
+  // skipped — fetchData alone refreshes the list. Pause when the tab is
+  // hidden so a backgrounded dashboard doesn't hammer the API.
   useEffect(() => {
     if (!id || !repo) return;
-    // Only auto-pull for repos whose integration is actually connected.
     const eff = repo.effectiveProvider ?? repo.provider;
-    if (eff !== 'github' && eff !== 'gitlab') return;
-    const STALE_MS = 5 * 60 * 1000; // 5 min
+    const isProviderBacked = eff === 'github' || eff === 'gitlab';
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (typeof document !== 'undefined' && document.hidden) {
+        timer = setTimeout(tick, 20_000);
+        return;
+      }
+      try {
+        if (isProviderBacked) {
+          await api.syncRepo(id).catch(() => {});
+        }
+        if (!cancelled) await fetchData();
+      } finally {
+        if (!cancelled) timer = setTimeout(tick, 20_000);
+      }
+    };
+
+    // First tick honours staleness — don't hammer the provider on mount if
+    // we just synced via /sync earlier.
+    const STALE_MS = 60 * 1000; // 1 min
     const lastSync = repo.syncedAt ? new Date(repo.syncedAt).getTime() : 0;
-    if (Date.now() - lastSync < STALE_MS) return;
-    setSyncing(true);
-    api
-      .syncRepo(id)
-      .then(() => fetchData())
-      .catch(() => {})
-      .finally(() => setSyncing(false));
+    const initialDelay = isProviderBacked && Date.now() - lastSync < STALE_MS
+      ? 20_000
+      : 0;
+    timer = setTimeout(tick, initialDelay);
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, repo?.id]);
 
