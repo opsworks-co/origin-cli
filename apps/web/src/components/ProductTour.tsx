@@ -67,10 +67,19 @@ export const DASHBOARD_TOUR: TourStep[] = [
     route: '/sessions',
   },
 
+  // ── 3. Snapshots: the feature most users don't know exists ──────────
+  {
+    target: '[data-tour="nav-snapshots"]',
+    title: '3. Snapshots',
+    content: 'Origin captures a snapshot of your working tree at every prompt — silently. Run `origin snapshot list` to see them, `origin snapshot restore <id>` to roll back to any past state. The Snapshots page indexes them across every session.',
+    placement: 'right',
+    route: '/snapshots',
+  },
+
   // ── 4. Insights (was Dashboard) — the rest of the steps live at /me ──
   {
     target: '[data-tour="nav-insights"]',
-    title: '3. Insights',
+    title: '4. Insights',
     content: 'Your personal dashboard — the old Dashboard and Insights pages live here now. Stat cards, a coding timeline, an activity heatmap, per-agent breakdown, and full prompt search.',
     placement: 'right',
     route: '/me',

@@ -1194,8 +1194,12 @@ export default function SessionDetail() {
           {([
             { key: 'session' as const, label: 'Session' },
             { key: 'blame' as const, label: 'AI Blame' },
-            { key: 'turns' as const, label: 'Snapshots' },
-            { key: 'security' as const, label: 'Security', count: findings.length },
+            // Snapshots: surface the count so users discover the tab exists.
+            // Per-prompt snapshots are auto-captured but the feature is
+            // invisible until users notice them — the count on the tab is
+            // the cheapest discoverability nudge.
+            { key: 'turns' as const, label: 'Snapshots', count: session.snapshots?.length || 0, accent: 'amber' as const },
+            { key: 'security' as const, label: 'Security', count: findings.length, accent: 'red' as const },
           ] as const).map(tab => (
             <button
               key={tab.key}
@@ -1205,10 +1209,15 @@ export default function SessionDetail() {
                   ? 'text-gray-100'
                   : 'text-gray-500 hover:text-gray-300'
               }`}
+              title={tab.key === 'turns' ? 'Per-prompt snapshots — restore any past state with `origin snapshot restore`' : undefined}
             >
               {tab.label}
               {'count' in tab && tab.count > 0 && (
-                <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400">
+                <span className={`ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full ${
+                  ('accent' in tab && tab.accent === 'amber')
+                    ? 'bg-amber-500/15 text-amber-400'
+                    : 'bg-red-500/20 text-red-400'
+                }`}>
                   {tab.count}
                 </span>
               )}

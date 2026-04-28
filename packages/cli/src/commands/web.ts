@@ -1,4 +1,7 @@
 import http from 'http';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { execSync } from 'child_process';
 import chalk from 'chalk';
 import { getGitRoot, getBranch } from '../session-state.js';
@@ -145,6 +148,127 @@ function gatherData(repoRoot: string) {
   };
 }
 
+/**
+ * Discover every git repo Origin has tracked on this machine by walking
+ * ~/.origin/sessions/. Each session-state file records the repoPath that
+ * produced it; collapsing them gives the full multi-repo footprint.
+ */
+function discoverTrackedRepos(): string[] {
+  const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+  if (!fs.existsSync(sessionsDir)) return [];
+  const seen = new Set<string>();
+  try {
+    for (const entry of fs.readdirSync(sessionsDir)) {
+      if (!entry.endsWith('.json')) continue;
+      try {
+        const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
+        if (state?.repoPath && typeof state.repoPath === 'string') {
+          // Only count repos that still exist on disk and are still git
+          // checkouts. Otherwise the dashboard would surface deleted /
+          // moved repos that gatherData() would just no-op on.
+          if (fs.existsSync(path.join(state.repoPath, '.git'))) {
+            seen.add(state.repoPath);
+          }
+        }
+      } catch { /* skip malformed */ }
+    }
+  } catch { /* ignore */ }
+  return Array.from(seen).sort();
+}
+
+interface AllReposData {
+  repos: Array<{
+    path: string;
+    name: string;
+    aiCommits: number;
+    humanCommits: number;
+    aiLines: number;
+    humanLines: number;
+    sessions: number;
+    lastCommitDate: string | null;
+  }>;
+  totals: {
+    repoCount: number;
+    totalCommits: number;
+    aiCommits: number;
+    humanCommits: number;
+    aiLines: number;
+    humanLines: number;
+    sessions: number;
+    toolCounts: Record<string, number>;
+    modelCounts: Record<string, number>;
+  };
+  recentCommits: Array<{
+    sha: string;
+    date: string;
+    message: string;
+    author: string;
+    isAi: boolean;
+    model?: string;
+    repoName: string;
+  }>;
+}
+
+/**
+ * Run gatherData() across every tracked repo and roll the per-repo numbers
+ * into a single overview. The recentCommits feed is the union of each
+ * repo's last 100 commits, sorted globally by date.
+ */
+function gatherAllReposData(repoPaths: string[]): AllReposData {
+  const repos: AllReposData['repos'] = [];
+  const totals = {
+    repoCount: 0, totalCommits: 0, aiCommits: 0, humanCommits: 0,
+    aiLines: 0, humanLines: 0, sessions: 0,
+    toolCounts: {} as Record<string, number>,
+    modelCounts: {} as Record<string, number>,
+  };
+  const recentCommits: AllReposData['recentCommits'] = [];
+
+  for (const p of repoPaths) {
+    let data: ReturnType<typeof gatherData>;
+    try {
+      data = gatherData(p);
+    } catch {
+      continue;
+    }
+    const name = p.split('/').pop() || p;
+
+    repos.push({
+      path: p,
+      name,
+      aiCommits: data.stats.aiCommits,
+      humanCommits: data.stats.humanCommits,
+      aiLines: data.stats.aiLines,
+      humanLines: data.stats.humanLines,
+      sessions: data.sessions.length,
+      lastCommitDate: data.commits[0]?.date || null,
+    });
+
+    totals.repoCount++;
+    totals.totalCommits += data.stats.totalCommits;
+    totals.aiCommits += data.stats.aiCommits;
+    totals.humanCommits += data.stats.humanCommits;
+    totals.aiLines += data.stats.aiLines;
+    totals.humanLines += data.stats.humanLines;
+    totals.sessions += data.sessions.length;
+    for (const [k, v] of Object.entries(data.stats.toolCounts)) {
+      totals.toolCounts[k] = (totals.toolCounts[k] || 0) + v;
+    }
+    for (const [k, v] of Object.entries(data.stats.modelCounts)) {
+      totals.modelCounts[k] = (totals.modelCounts[k] || 0) + v;
+    }
+    for (const c of data.commits.slice(0, 100)) {
+      recentCommits.push({ ...c, repoName: name });
+    }
+  }
+
+  // Most-active repos first; fall back to alphabetical for ties
+  repos.sort((a, b) => (b.aiCommits + b.humanCommits) - (a.aiCommits + a.humanCommits) || a.name.localeCompare(b.name));
+  recentCommits.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+  return { repos, totals, recentCommits: recentCommits.slice(0, 50) };
+}
+
 function detectTool(model: string): string {
   const m = (model || '').toLowerCase();
   if (m.includes('claude') || m.includes('sonnet') || m.includes('opus') || m.includes('haiku')) return 'claude-code';
@@ -155,9 +279,10 @@ function detectTool(model: string): string {
   return model || 'unknown';
 }
 
-function buildHTML(data: ReturnType<typeof gatherData>): string {
+function buildHTML(data: ReturnType<typeof gatherData>, allRepos: AllReposData | null): string {
   const { commits, sessions, stats, branch, repoRoot, prompts } = data;
   const repoName = repoRoot.split('/').pop() || 'repo';
+  const showAllRepos = !!(allRepos && allRepos.totals.repoCount > 1);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -176,6 +301,7 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
   .nav button { background: none; border: none; color: #8b949e; padding: 12px 16px; cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; transition: all 0.2s; }
   .nav button:hover { color: #c9d1d9; }
   .nav button.active { color: #f0f6fc; border-bottom-color: #f78166; }
+  .nav-badge { display: inline-block; background: #f7816633; color: #f78166; padding: 1px 7px; border-radius: 10px; font-size: 11px; margin-left: 6px; font-weight: 600; }
   .content { max-width: 1200px; margin: 0 auto; padding: 24px; }
   .tab { display: none; }
   .tab.active { display: block; }
@@ -243,15 +369,85 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
 </div>
 
 <div class="nav">
-  <button class="active" onclick="showTab('overview')">Overview</button>
-  <button onclick="showTab('commits')">Commits</button>
-  <button onclick="showTab('sessions')">Sessions</button>
-  <button onclick="showTab('prompts')">Prompts</button>
+  ${showAllRepos ? `<button class="active" onclick="showTab('all-repos', this)">All repos <span class="nav-badge">${allRepos!.totals.repoCount}</span></button>` : ''}
+  <button class="${showAllRepos ? '' : 'active'}" onclick="showTab('overview', this)">${showAllRepos ? 'This repo' : 'Overview'}</button>
+  <button onclick="showTab('commits', this)">Commits</button>
+  <button onclick="showTab('sessions', this)">Sessions</button>
+  <button onclick="showTab('prompts', this)">Prompts</button>
 </div>
 
 <div class="content">
-  <!-- Overview -->
-  <div id="tab-overview" class="tab active">
+  <!-- All repos (default tab when more than one tracked repo exists) -->
+  ${showAllRepos ? `
+  <div id="tab-all-repos" class="tab active">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="label">Repositories</div>
+        <div class="value">${allRepos!.totals.repoCount}</div>
+        <div class="sub">tracked on this machine</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Total Commits</div>
+        <div class="value">${allRepos!.totals.totalCommits.toLocaleString()}</div>
+        <div class="sub">${allRepos!.totals.aiCommits} AI · ${allRepos!.totals.humanCommits} Human</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">AI Ratio</div>
+        <div class="value">${allRepos!.totals.totalCommits ? Math.round((allRepos!.totals.aiCommits / allRepos!.totals.totalCommits) * 100) : 0}%</div>
+        <div class="sub">across all repos</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Sessions</div>
+        <div class="value">${allRepos!.totals.sessions.toLocaleString()}</div>
+        <div class="sub">total tracked AI runs</div>
+      </div>
+    </div>
+
+    <div class="bar-chart">
+      <h3>Top repos by activity</h3>
+      ${allRepos!.repos.slice(0, 12).map((r) => {
+        const total = r.aiCommits + r.humanCommits;
+        const aiPct = total ? Math.round((r.aiCommits / total) * 100) : 0;
+        const maxTotal = allRepos!.repos[0] ? (allRepos!.repos[0].aiCommits + allRepos!.repos[0].humanCommits) : 1;
+        const widthPct = maxTotal ? Math.max(Math.round((total / maxTotal) * 100), 4) : 4;
+        return `<div class="bar-row">
+          <span class="bar-label" title="${escapeHtml(r.path)}">${escapeHtml(r.name)}</span>
+          <div class="bar-track"><div class="bar-fill ai" style="width: ${widthPct}%">${total} commits · ${aiPct}% AI · ${r.sessions} sessions</div></div>
+        </div>`;
+      }).join('\n')}
+    </div>
+
+    <div class="bar-chart">
+      <h3>By Tool (across all repos)</h3>
+      ${Object.entries(allRepos!.totals.toolCounts).sort((a, b) => b[1] - a[1]).map(([tool, count]) => {
+        const pct = allRepos!.totals.aiCommits ? Math.round((count / allRepos!.totals.aiCommits) * 100) : 0;
+        return `<div class="bar-row">
+          <span class="bar-label">${escapeHtml(tool)}</span>
+          <div class="bar-track"><div class="bar-fill ai" style="width: ${Math.max(pct, 5)}%">${count} commits (${pct}%)</div></div>
+        </div>`;
+      }).join('\n') || '<div class="empty">No AI commits detected yet</div>'}
+    </div>
+
+    <div class="bar-chart">
+      <h3>Recent activity (across all repos)</h3>
+      <div class="commit-list" style="border:none">
+      ${allRepos!.recentCommits.slice(0, 25).map((c) => `
+        <div class="commit-item">
+          <span class="badge ${c.isAi ? 'ai' : 'human'}">${c.isAi ? 'AI' : 'HU'}</span>
+          <span class="commit-msg">${escapeHtml(c.message)}</span>
+          <span class="commit-author" title="${escapeHtml(c.repoName)}">${escapeHtml(c.repoName)}</span>
+          <span class="commit-model">${c.isAi ? escapeHtml(c.model || '') : ''}</span>
+          <span class="commit-sha">${c.sha.slice(0, 7)}</span>
+          <span class="commit-date">${new Date(c.date).toLocaleDateString()}</span>
+        </div>
+      `).join('') || '<div class="empty">No commits found</div>'}
+      </div>
+    </div>
+  </div>
+  ` : ''}
+
+  <!-- Overview (per-current-repo) -->
+  <div id="tab-overview" class="tab ${showAllRepos ? '' : 'active'}">
     <div class="stats-grid">
       <div class="stat-card">
         <div class="label">Total Commits</div>
@@ -364,11 +560,11 @@ function buildHTML(data: ReturnType<typeof gatherData>): string {
 <div class="footer">Origin CLI — local AI code attribution dashboard</div>
 
 <script>
-function showTab(name) {
+function showTab(name, btn) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
-  event.target.classList.add('active');
+  (btn || event.target).classList.add('active');
 }
 </script>
 </body>
@@ -393,7 +589,17 @@ export async function webCommand(opts: { port?: string }) {
   console.log(chalk.gray('  Gathering data from git notes, sessions, and local DB...'));
 
   const data = gatherData(repoRoot);
-  const html = buildHTML(data);
+  // Aggregate stats across every repo Origin has seen on this machine.
+  // The list excludes the current repo from the "other repos" path-walk
+  // result by construction — the current repo's data is rebuilt fresh
+  // by gatherAllReposData() so the totals row stays consistent with
+  // what the per-repo Overview tab shows.
+  const trackedPaths = discoverTrackedRepos();
+  // Always include the current repo even if no session has fired in it
+  // yet (first run from inside this checkout).
+  if (!trackedPaths.includes(repoRoot)) trackedPaths.push(repoRoot);
+  const allRepos = trackedPaths.length > 1 ? gatherAllReposData(trackedPaths) : null;
+  const html = buildHTML(data, allRepos);
 
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

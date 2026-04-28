@@ -342,26 +342,26 @@ function ByPromptView({
     );
   }
 
-  // Filter prompts that only touched build artifacts (since those are hidden)
-  const visiblePrompts = prompts.filter((p) =>
-    p.filesChanged.some((f) => trackableSet.has(f)),
-  );
+  // Always show every prompt. Previously prompts whose filesChanged were
+  // ALL build artifacts got filtered out, which silently hid Codex prompts
+  // when the per-prompt attribution was incomplete (Codex doesn't fire
+  // user-prompt-submit hooks, so post-commit guesses files and can stamp
+  // a prompt with only an artifact like package-lock.json). Mark those
+  // prompts visually but keep them in the list so the user can verify.
+  const visiblePrompts = prompts;
+  const artifactOnlyCount = prompts.filter(
+    (p) => p.filesChanged.length > 0 && !p.filesChanged.some((f) => trackableSet.has(f)),
+  ).length;
 
   if (visiblePrompts.length === 0) {
     return (
       <div className="p-5 text-center py-12">
-        <p className="text-gray-500 text-sm">No prompts produced source code in this session.</p>
-        <p className="text-gray-600 text-xs mt-1">
-          (Prompts that only modified build artifacts are hidden by default.)
-        </p>
+        <p className="text-gray-500 text-sm">No prompts found in this session.</p>
       </div>
     );
   }
 
-  // Disclose the artifact-filter effect so a user who hasn't noticed the
-  // toggle isn't left wondering why N prompts vanished from a session that
-  // they remember having more.
-  const hiddenByArtifactFilter = prompts.length - visiblePrompts.length;
+  const hiddenByArtifactFilter = artifactOnlyCount;
 
   return (
     <div className="flex-1 overflow-auto">
@@ -385,11 +385,13 @@ function ByPromptView({
         const color = getPromptColor(prompt.promptIndex);
         const isExpanded = expandedPrompts.has(prompt.promptIndex);
         const visibleFiles = prompt.filesChanged.filter((f) => trackableSet.has(f));
+        const artifactFiles = prompt.filesChanged.filter((f) => !trackableSet.has(f));
+        const isArtifactOnly = visibleFiles.length === 0 && artifactFiles.length > 0;
 
         return (
           <div
             key={prompt.promptIndex}
-            className={`border-b border-gray-800/40 ${isExpanded ? `${color.bg}` : ''}`}
+            className={`border-b border-gray-800/40 ${isExpanded ? `${color.bg}` : ''} ${isArtifactOnly ? 'opacity-60' : ''}`}
           >
             {/* Prompt header — clickable to expand */}
             <button
@@ -404,7 +406,15 @@ function ByPromptView({
                   </span>
                   <span className="text-[10px] text-gray-500">
                     {visibleFiles.length} file{visibleFiles.length !== 1 ? 's' : ''}
+                    {artifactFiles.length > 0 && (
+                      <> · <span className="text-amber-500/70">{artifactFiles.length} artifact{artifactFiles.length !== 1 ? 's' : ''}</span></>
+                    )}
                   </span>
+                  {isArtifactOnly && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                      build artifacts only
+                    </span>
+                  )}
                 </div>
                 <p
                   className={`text-[12px] text-gray-300 mt-1 leading-relaxed ${
@@ -422,28 +432,41 @@ function ByPromptView({
             {/* Files — visible when expanded */}
             {isExpanded && (
               <div className="pb-3 px-4 ml-5 border-l border-gray-800/50">
-                {visibleFiles.length === 0 ? (
+                {visibleFiles.map((file) => (
+                  <button
+                    key={file}
+                    onClick={() => onJumpToFile(file)}
+                    className="w-full text-left flex items-center gap-2 py-1.5 px-3 rounded hover:bg-gray-800/50 transition-colors group"
+                  >
+                    <span className="text-[12px] text-gray-300 group-hover:text-indigo-400 font-mono">
+                      {getFileName(file)}
+                    </span>
+                    <span className="text-[10px] text-gray-600 truncate">
+                      {shortenPath(file)}
+                    </span>
+                    <span className="ml-auto text-[10px] text-gray-700 group-hover:text-gray-500">
+                      view blame →
+                    </span>
+                  </button>
+                ))}
+                {/* Artifact files: show greyed out so the user can see what
+                    the prompt actually touched. Click is a no-op since
+                    the line-level blame view doesn't render artifacts. */}
+                {artifactFiles.map((file) => (
+                  <div
+                    key={file}
+                    className="w-full text-left flex items-center gap-2 py-1.5 px-3 rounded text-gray-500 italic"
+                    title="Build artifact — not line-blame-able"
+                  >
+                    <span className="text-[12px] font-mono">{getFileName(file)}</span>
+                    <span className="text-[10px] text-gray-700 truncate">{shortenPath(file)}</span>
+                    <span className="ml-auto text-[10px] text-amber-500/60">artifact</span>
+                  </div>
+                ))}
+                {visibleFiles.length === 0 && artifactFiles.length === 0 && (
                   <p className="text-[11px] text-gray-600 italic py-2 pl-3">
-                    Only build artifacts (hidden).
+                    No files attributed to this prompt.
                   </p>
-                ) : (
-                  visibleFiles.map((file) => (
-                    <button
-                      key={file}
-                      onClick={() => onJumpToFile(file)}
-                      className="w-full text-left flex items-center gap-2 py-1.5 px-3 rounded hover:bg-gray-800/50 transition-colors group"
-                    >
-                      <span className="text-[12px] text-gray-300 group-hover:text-indigo-400 font-mono">
-                        {getFileName(file)}
-                      </span>
-                      <span className="text-[10px] text-gray-600 truncate">
-                        {shortenPath(file)}
-                      </span>
-                      <span className="ml-auto text-[10px] text-gray-700 group-hover:text-gray-500">
-                        view blame →
-                      </span>
-                    </button>
-                  ))
                 )}
               </div>
             )}

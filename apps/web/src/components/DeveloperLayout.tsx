@@ -18,6 +18,7 @@ import {
   Sun,
   Moon,
   Sparkles,
+  Camera,
 } from 'lucide-react';
 
 // Navigation is grouped by frequency of use.
@@ -27,10 +28,11 @@ const NAV_GROUPS = [
   {
     label: 'Workspace',
     items: [
-      { to: '/me',       label: 'Dashboard',    icon: LayoutDashboard },
-      { to: '/repos',    label: 'Repositories', icon: FolderGit2 },
-      { to: '/sessions', label: 'Sessions',     icon: Play },
-      { to: '/insights', label: 'Insights',     icon: Lightbulb },
+      { to: '/me',        label: 'Dashboard',    icon: LayoutDashboard },
+      { to: '/repos',     label: 'Repositories', icon: FolderGit2 },
+      { to: '/sessions',  label: 'Sessions',     icon: Play },
+      { to: '/snapshots', label: 'Snapshots',    icon: Camera },
+      { to: '/insights',  label: 'Insights',     icon: Lightbulb },
     ],
   },
   {
