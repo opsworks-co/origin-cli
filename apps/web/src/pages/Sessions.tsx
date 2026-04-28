@@ -9,6 +9,7 @@ import { useAuth } from '../context/AuthContext';
 import { safeHref } from '../utils/safe-url';
 import { PageHeader, Pill, PulseDot } from '../components/ui';
 import type { PillVariant } from '../components/ui';
+import { agentColor } from './MyDashboard/utils';
 
 // Maps a session/review status string to the Pill variant defined in design-tokens.md.
 // Kept as a simple function so the rest of the file can swap badges for Pills
@@ -776,7 +777,13 @@ export default function Sessions() {
                       </td>
                       {/* Agent */}
                       <td className="px-3 py-2">
-                        <span className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300">
+                        <span
+                          className="inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded"
+                          style={{
+                            backgroundColor: `${agentColor(s.agentName)}22`,
+                            color: agentColor(s.agentName),
+                          }}
+                        >
                           {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
                         </span>
                       </td>
