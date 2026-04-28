@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { updatePRGitHubStatus, listPRCommits, getIntegrationConfig, parseRepoFullName } from './github-integration.js';
+import { postPRAuthorshipCheck } from './pr-authorship.js';
 import { updateMRGitLabStatus, listMRCommits, getGitLabIntegrationConfig, parseGitLabProjectPath } from './gitlab-integration.js';
 import { detectAITool } from './ai-commit-detector.js';
 import { isGitNotesMetadataCommit } from '../utils/commit-filter.js';
@@ -257,6 +258,15 @@ export async function processGitHubPR(repoId: string, payload: GitHubPRPayload) 
     } catch (err) {
       console.error('Failed to update GitHub PR status:', err);
     }
+
+    // AI authorship check — informational status posted on every PR
+    // showing the AI %, top agents, prompt count, and total cost. Visible
+    // to every reviewer, even ones who haven't installed Origin. Toggled
+    // by IntegrationConfig.settings.prCheckEnabled (default on).
+    // Fire-and-forget — never blocks the webhook response.
+    postPRAuthorshipCheck(prRecord.id).catch((err) => {
+      console.error('PR authorship check failed:', err);
+    });
   }
 
   return {

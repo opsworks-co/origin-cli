@@ -523,6 +523,10 @@ model PullRequest {
   commitShas  String   @default("[]")
   checkStatus String?
   commentId   String?
+  // GitHub Check Run ID for the AI-authorship status check we post on
+  // every PR. Stored so subsequent webhooks (synchronize, reopen) PATCH
+  // the same check_run instead of creating duplicates.
+  authorshipCheckRunId Int?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

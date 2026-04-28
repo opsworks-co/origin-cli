@@ -13,6 +13,7 @@ export default function Integrations() {
   const [ghPostChecks, setGhPostChecks] = useState(true);
   const [ghPostComments, setGhPostComments] = useState(true);
   const [ghCheckOnReview, setGhCheckOnReview] = useState(true);
+  const [ghPrAuthorshipCheck, setGhPrAuthorshipCheck] = useState(true);
   const [savingIntegration, setSavingIntegration] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; login?: string; error?: string } | null>(null);
@@ -158,6 +159,7 @@ export default function Integrations() {
         setGhPostChecks(gh.settings?.postChecks ?? true);
         setGhPostComments(gh.settings?.postComments ?? true);
         setGhCheckOnReview(gh.settings?.checkOnReview ?? true);
+        setGhPrAuthorshipCheck(gh.settings?.prCheckEnabled ?? true);
       }
       // Populate GitLab integration state
       const gl = data.find((i) => i.provider === 'gitlab');
@@ -270,7 +272,7 @@ export default function Integrations() {
     setIntegrationSuccess(null);
 
     const existing = integrations.find((i) => i.provider === 'github');
-    const settings = { postChecks: ghPostChecks, postComments: ghPostComments, checkOnReview: ghCheckOnReview };
+    const settings = { postChecks: ghPostChecks, postComments: ghPostComments, checkOnReview: ghCheckOnReview, prCheckEnabled: ghPrAuthorshipCheck };
 
     try {
       if (existing) {
@@ -897,7 +899,7 @@ export default function Integrations() {
                       const gh = integrations.find((i) => i.provider === 'github');
                       if (gh) {
                         api.updateIntegration(gh.id, {
-                          settings: { postChecks: e.target.checked, postComments: ghPostComments, checkOnReview: ghCheckOnReview },
+                          settings: { postChecks: e.target.checked, postComments: ghPostComments, checkOnReview: ghCheckOnReview, prCheckEnabled: ghPrAuthorshipCheck },
                         });
                       }
                     }}
@@ -917,7 +919,7 @@ export default function Integrations() {
                       const gh = integrations.find((i) => i.provider === 'github');
                       if (gh) {
                         api.updateIntegration(gh.id, {
-                          settings: { postChecks: ghPostChecks, postComments: e.target.checked, checkOnReview: ghCheckOnReview },
+                          settings: { postChecks: ghPostChecks, postComments: e.target.checked, checkOnReview: ghCheckOnReview, prCheckEnabled: ghPrAuthorshipCheck },
                         });
                       }
                     }}
@@ -937,7 +939,7 @@ export default function Integrations() {
                       const gh = integrations.find((i) => i.provider === 'github');
                       if (gh) {
                         api.updateIntegration(gh.id, {
-                          settings: { postChecks: ghPostChecks, postComments: ghPostComments, checkOnReview: e.target.checked },
+                          settings: { postChecks: ghPostChecks, postComments: ghPostComments, checkOnReview: e.target.checked, prCheckEnabled: ghPrAuthorshipCheck },
                         });
                       }
                     }}
@@ -946,6 +948,26 @@ export default function Integrations() {
                   <div>
                     <span className="text-sm text-gray-200">Update checks on review</span>
                     <p className="text-xs text-gray-500">Refreshes PR status when sessions are approved/rejected in Origin</p>
+                  </div>
+                </label>
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={ghPrAuthorshipCheck}
+                    onChange={(e) => {
+                      setGhPrAuthorshipCheck(e.target.checked);
+                      const gh = integrations.find((i) => i.provider === 'github');
+                      if (gh) {
+                        api.updateIntegration(gh.id, {
+                          settings: { postChecks: ghPostChecks, postComments: ghPostComments, checkOnReview: ghCheckOnReview, prCheckEnabled: e.target.checked },
+                        });
+                      }
+                    }}
+                    className="w-4 h-4 rounded border-gray-600 bg-gray-800 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <div>
+                    <span className="text-sm text-gray-200">Post AI authorship check on PRs</span>
+                    <p className="text-xs text-gray-500">Adds an informational <code className="text-[10px] px-1 py-0.5 bg-gray-800 rounded">Origin / AI authorship</code> check showing AI %, top agents, prompt count, and cost. Visible to every reviewer.</p>
                   </div>
                 </label>
               </div>
