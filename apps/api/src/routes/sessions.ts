@@ -107,7 +107,10 @@ function mapSession(s: any, pullRequests?: any[]) {
     agentId: s.agentId,
     agentName: s.agent?.name || null,
     userId: s.userId || null,
-    userName: s.user?.name || null,
+    // Prefer real user → email → API key name. Never expose the
+    // "mcp-agent" placeholder string that the commit-author column
+    // sometimes carries when no user is linked.
+    userName: s.user?.name || s.user?.email || s.apiKeyName || null,
     userEmail: s.user?.email || null,
     apiKeyId: s.apiKeyId || null,
     apiKeyName: s.apiKeyName || null,

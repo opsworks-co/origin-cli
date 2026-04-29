@@ -791,26 +791,12 @@ export default function Sessions() {
                       <td className="px-3 py-2 text-gray-400 text-xs font-mono truncate max-w-[160px]" title={s.model}>
                         {s.model || '—'}
                       </td>
-                      {/* Repo + AI session title (when generated). The
-                          title surfaces what a session was actually about
-                          ("Refactored auth middleware") so the list
-                          becomes scannable instead of a wall of identical
-                          repo · main rows. */}
-                      <td className="px-3 py-2 text-sm max-w-[280px]">
-                        <div className="truncate">
-                          {(s as any).aiTitle ? (
-                            <>
-                              <span className="text-gray-100" title={(s as any).aiTitle}>{(s as any).aiTitle}</span>
-                              <span className="text-gray-600 text-xs ml-2">
-                                {(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}
-                              </span>
-                            </>
-                          ) : (
-                            <span className="text-gray-400">
-                              {(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}
-                            </span>
-                          )}
-                        </div>
+                      {/* Repo — match solo dashboard: just the repo name.
+                          The session's AI title belongs in its own column
+                          or the row's primary text, not displacing this
+                          one. */}
+                      <td className="px-3 py-2 text-gray-400 text-sm">
+                        {(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}
                       </td>
                       {/* Branch */}
                       <td className="px-3 py-2 text-gray-500 hidden md:table-cell font-mono text-xs max-w-[140px] truncate">
@@ -870,10 +856,21 @@ export default function Sessions() {
                           </span>
                         )}
                       </td>
-                      {/* User — team only */}
+                      {/* User — team only.
+                          Skip the "mcp-agent" placeholder commit-author
+                          string. That label leaks in when a session was
+                          created via an API key with no linked user;
+                          showing it as the User makes the column useless.
+                          Prefer real user → API key name → em-dash. */}
                       {!isDev && (
                         <td className="px-3 py-2 text-gray-400 text-xs">
-                          {s.userName || s.commitAuthor || <span className="text-gray-600">—</span>}
+                          {(() => {
+                            if (s.userName) return s.userName;
+                            const author = (s.commitAuthor || '').trim();
+                            if (author && author !== 'mcp-agent' && author !== 'ai-agent') return author;
+                            if (s.apiKeyName) return s.apiKeyName;
+                            return <span className="text-gray-600">—</span>;
+                          })()}
                         </td>
                       )}
                       {/* Tags — xl only to keep table dense */}
