@@ -1,16 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
 
-// Settings → AI tab: manage the org-level LLM API key (used for AI-generated
-// session titles + future LLM-backed features) and provide a "recompute
-// costs" diagnostic for sessions whose stored cost looks wrong vs. their
-// stored token counts.
-
-type Provider = 'anthropic' | 'openai';
-
-interface LlmConfig {
-  provider: Provider | null;
-  configured: boolean;
-}
+// Settings → AI tab
+//
+// Single-purpose now: cost-recompute diagnostic. The LLM API key lives
+// in Integrations (one key powers Chat, AI session titles, and any
+// future LLM features) — no duplicate input here.
 
 interface RecomputeResult {
   scanned: number;
@@ -29,80 +24,9 @@ interface RecomputeResult {
 }
 
 export default function AiTab() {
-  const [cfg, setCfg] = useState<LlmConfig | null>(null);
-  const [provider, setProvider] = useState<Provider>('anthropic');
-  const [apiKey, setApiKey] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-  const [removing, setRemoving] = useState(false);
-
-  // Recompute panel
   const [recomputeRunning, setRecomputeRunning] = useState(false);
   const [recomputeResult, setRecomputeResult] = useState<RecomputeResult | null>(null);
   const [recomputeError, setRecomputeError] = useState('');
-
-  useEffect(() => {
-    loadConfig();
-  }, []);
-
-  const loadConfig = async () => {
-    try {
-      const res = await fetch('/api/settings/llm', { credentials: 'include' });
-      if (res.ok) {
-        const data = await res.json();
-        setCfg(data);
-        if (data.provider) setProvider(data.provider);
-      }
-    } catch { /* ignore */ }
-  };
-
-  const save = async () => {
-    setError('');
-    setSuccess('');
-    setSaving(true);
-    try {
-      const res = await fetch('/api/settings/llm', {
-        method: 'PUT',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, apiKey }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || `HTTP ${res.status}`);
-      }
-      setSuccess('Saved. AI summaries enabled.');
-      setApiKey('');
-      await loadConfig();
-    } catch (err: any) {
-      setError(err?.message || 'Failed to save');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const remove = async () => {
-    setError('');
-    setSuccess('');
-    setRemoving(true);
-    try {
-      const res = await fetch('/api/settings/llm', {
-        method: 'DELETE',
-        credentials: 'include',
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || `HTTP ${res.status}`);
-      }
-      setSuccess('Removed. Falling back to heuristic titles.');
-      await loadConfig();
-    } catch (err: any) {
-      setError(err?.message || 'Failed to remove');
-    } finally {
-      setRemoving(false);
-    }
-  };
 
   const runRecompute = async (dryRun: boolean) => {
     setRecomputeError('');
@@ -130,89 +54,25 @@ export default function AiTab() {
 
   return (
     <div className="space-y-8">
-      {/* ── LLM API Key ───────────────────────────────────────── */}
-      <section className="card space-y-5">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-100">LLM API Key</h2>
-          <p className="text-sm text-gray-500 mt-1">
-            Used to generate AI session titles ("Refactored auth middleware") and other
-            LLM-backed features. Without a key, Origin falls back to a deterministic
-            heuristic (first prompt's first line).
-          </p>
-        </div>
-
-        {cfg?.configured && (
-          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/[0.05] px-4 py-3 flex items-center justify-between">
-            <div>
-              <div className="text-sm text-emerald-300">
-                Configured · {cfg.provider === 'anthropic' ? 'Anthropic (Claude Haiku)' : 'OpenAI (gpt-4o-mini)'}
-              </div>
-              <div className="text-xs text-gray-500 mt-0.5">Key is encrypted on the server. Never returned in API responses.</div>
-            </div>
-            <button
-              onClick={remove}
-              disabled={removing}
-              className="px-3 py-1.5 text-xs rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-            >
-              {removing ? 'Removing…' : 'Remove'}
-            </button>
+      {/* Pointer to canonical LLM key */}
+      <section className="card">
+        <div className="flex items-start gap-3">
+          <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-indigo-500/15 flex items-center justify-center">
+            <svg className="w-4 h-4 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
           </div>
-        )}
-
-        <div className="space-y-3">
-          <div>
-            <label className="text-xs text-gray-400 mb-2 block">Provider</label>
-            <div className="flex gap-2">
-              {(['anthropic', 'openai'] as const).map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => setProvider(p)}
-                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors border ${
-                    provider === p
-                      ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/40'
-                      : 'bg-gray-900/40 text-gray-400 border-white/[0.06] hover:text-gray-200'
-                  }`}
-                >
-                  {p === 'anthropic' ? 'Anthropic (Claude Haiku)' : 'OpenAI (gpt-4o-mini)'}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <label className="text-xs text-gray-400 mb-1.5 block">
-              {cfg?.configured ? 'Replace API key' : 'API key'}
-            </label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder={provider === 'anthropic' ? 'sk-ant-…' : 'sk-…'}
-              className="w-full px-3 py-2 rounded-lg bg-gray-900 border border-white/[0.08] text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500/50 font-mono"
-              autoComplete="off"
-            />
-            <p className="text-[11px] text-gray-600 mt-1.5">
-              Cheap models — one ~30-token call per session = fractions of a cent.
+          <div className="flex-1">
+            <h2 className="text-base font-semibold text-gray-100">LLM API key</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              One key powers Chat, AI-generated session titles, and any other LLM features.
+              Configure it once in <Link to="/settings?tab=integrations" className="text-indigo-400 hover:underline">Settings → Integrations → AI Provider</Link>.
             </p>
-          </div>
-
-          {error && <div className="text-sm text-red-400">{error}</div>}
-          {success && <div className="text-sm text-emerald-400">{success}</div>}
-
-          <div className="flex justify-end">
-            <button
-              onClick={save}
-              disabled={saving || apiKey.trim().length < 10}
-              className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {saving ? 'Saving…' : cfg?.configured ? 'Replace key' : 'Save'}
-            </button>
           </div>
         </div>
       </section>
 
-      {/* ── Cost recompute ────────────────────────────────────── */}
+      {/* Cost recompute */}
       <section className="card space-y-5">
         <div>
           <h2 className="text-lg font-semibold text-gray-100">Recompute session costs</h2>

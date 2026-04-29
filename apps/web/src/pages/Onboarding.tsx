@@ -766,18 +766,19 @@ function AiSummariesStep({ onContinue, onBack }: { onContinue: () => void; onBac
     setError('');
     setSaving(true);
     try {
-      const res = await fetch('/api/settings/llm', {
+      // /api/settings/chat is the canonical LLM-key endpoint — same row
+      // backs Chat, AI session titles, and any future LLM features.
+      const res = await fetch('/api/settings/chat', {
         method: 'PUT',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, apiKey }),
+        body: JSON.stringify({ apiKey, llmProvider: provider }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
       setSaved(true);
-      // Brief confirmation, then continue.
       setTimeout(onContinue, 600);
     } catch (err: any) {
       setError(err?.message || 'Failed to save');

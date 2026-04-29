@@ -83,8 +83,8 @@ export default function AIChatIntegration() {
             </svg>
           </div>
           <div>
-            <h2 className="text-lg font-semibold">AI Chat</h2>
-            <p className="text-sm text-gray-500">Configure the AI assistant for your organization</p>
+            <h2 className="text-lg font-semibold">AI Provider</h2>
+            <p className="text-sm text-gray-500">One LLM key powers Chat, AI session titles, and any other LLM-backed feature in Origin.</p>
           </div>
         </div>
         {chatLoading ? (

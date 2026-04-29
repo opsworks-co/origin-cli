@@ -663,14 +663,14 @@ export default function Integrations() {
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-200">AI Chat</h3>
+                <h3 className="text-sm font-semibold text-gray-200">AI Provider</h3>
                 {chatConfigured ? (
                   <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-green-900/30 text-green-400">Configured</span>
                 ) : (
                   <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-800 text-gray-500">Not configured</span>
                 )}
               </div>
-              <p className="text-xs text-gray-500 mt-0.5">AI assistant for your org</p>
+              <p className="text-xs text-gray-500 mt-0.5">Powers Chat + session titles</p>
             </div>
           </div>
         </div>
@@ -1562,8 +1562,8 @@ export default function Integrations() {
               <svg className="w-5 h-5 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
             </div>
             <div>
-              <h2 className="text-lg font-semibold">AI Chat</h2>
-              <p className="text-xs text-gray-500">Configure the AI assistant for your organization</p>
+              <h2 className="text-lg font-semibold">AI Provider</h2>
+              <p className="text-xs text-gray-500">One LLM key powers Chat, AI session titles, and any other LLM-backed feature.</p>
             </div>
           </div>
           {chatLoading ? (

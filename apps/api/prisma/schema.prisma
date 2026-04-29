@@ -12,12 +12,6 @@ model Org {
   name          String
   slug          String         @unique
   createdAt     DateTime       @default(now())
-  // Optional LLM key the org provides for higher-quality features that
-  // benefit from a real model: AI-generated session titles, future
-  // summaries, etc. NULL means fall back to the deterministic heuristic.
-  // Provider is one of "anthropic" | "openai".
-  llmProvider   String?
-  llmApiKey     String?        // encrypted at rest; do NOT log
   users         User[]
   repos         Repo[]
   agents        Agent[]

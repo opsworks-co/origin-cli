@@ -1,7 +1,8 @@
-// AI-generated session titles. Org admins set llmProvider + llmApiKey via
-// the onboarding step (or Settings → AI). When unset, callers fall back to
-// the deterministic heuristic in routes/sessions.ts. Designed to be
-// fire-and-forget: a failure here never blocks the read path.
+// AI-generated session titles. Reads the org's single LLM key — the same
+// row backing the in-app Chat feature (IntegrationConfig with
+// provider='llm'). One key, every LLM feature. When unset, callers fall
+// back to the deterministic heuristic in routes/sessions.ts.
+// Fire-and-forget: a failure here never blocks the read path.
 
 import { prisma } from '../db.js';
 
@@ -139,11 +140,29 @@ export async function generateSessionTitle(sessionId: string): Promise<string | 
   const orgId = session.commit?.repo?.orgId;
   if (!orgId) return null;
 
-  const org = await prisma.org.findUnique({
-    where: { id: orgId },
-    select: { llmProvider: true, llmApiKey: true },
+  // Read the org's canonical LLM key (the one configured for the Chat
+  // feature in Settings → Integrations). Falls back to the env-var
+  // ANTHROPIC_API_KEY when the org hasn't configured one — matches the
+  // behaviour of /api/settings/chat/config.
+  const config = await prisma.integrationConfig.findFirst({
+    where: { orgId, provider: 'llm' },
   });
-  if (!org?.llmApiKey || !org?.llmProvider) return null;
+  let provider: string | null = null;
+  let apiKey: string | null = null;
+  if (config?.token) {
+    apiKey = config.token;
+    try {
+      const settings = JSON.parse(config.settings || '{}');
+      provider = settings.llmProvider || 'anthropic';
+    } catch { provider = 'anthropic'; }
+  } else if (process.env.ANTHROPIC_API_KEY) {
+    provider = 'anthropic';
+    apiKey = process.env.ANTHROPIC_API_KEY;
+  }
+  if (!provider || !apiKey) return null;
+  // The chat config supports 'google' too but we don't yet — fall back to
+  // null so the heuristic is used. Wire when we add Gemini support here.
+  if (provider !== 'anthropic' && provider !== 'openai') return null;
 
   const prompts: PromptForSummary[] = session.promptChanges?.length
     ? session.promptChanges.map((pc) => ({
@@ -163,10 +182,10 @@ export async function generateSessionTitle(sessionId: string): Promise<string | 
   });
 
   let title: string | null = null;
-  if (org.llmProvider === 'anthropic') {
-    title = await callAnthropic(org.llmApiKey, userPrompt);
-  } else if (org.llmProvider === 'openai') {
-    title = await callOpenAI(org.llmApiKey, userPrompt);
+  if (provider === 'anthropic') {
+    title = await callAnthropic(apiKey, userPrompt);
+  } else if (provider === 'openai') {
+    title = await callOpenAI(apiKey, userPrompt);
   } else {
     return null;
   }
