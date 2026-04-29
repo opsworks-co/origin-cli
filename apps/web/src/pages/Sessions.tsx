@@ -675,8 +675,8 @@ export default function Sessions() {
                       className="flex items-center gap-4 px-5 py-3 hover:bg-gray-800/30 transition-colors cursor-pointer"
                     >
                       <span className="badge-blue text-xs">{s.model}</span>
-                      <span className="text-gray-300 text-sm truncate flex-1 max-w-[250px]">
-                        {s.commitMessage || s.prompt?.slice(0, 80) || '—'}
+                      <span className="text-gray-300 text-sm truncate flex-1 max-w-[280px]" title={(s as any).aiTitle || s.commitMessage || s.prompt}>
+                        {(s as any).aiTitle || s.commitMessage || s.prompt?.slice(0, 80) || '—'}
                       </span>
                       <span className="text-gray-500 text-xs tabular-nums">
                         {formatDuration(s.durationMs)}
@@ -791,9 +791,26 @@ export default function Sessions() {
                       <td className="px-3 py-2 text-gray-400 text-xs font-mono truncate max-w-[160px]" title={s.model}>
                         {s.model || '—'}
                       </td>
-                      {/* Repo */}
-                      <td className="px-3 py-2 text-gray-400 text-sm">
-                        {(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}
+                      {/* Repo + AI session title (when generated). The
+                          title surfaces what a session was actually about
+                          ("Refactored auth middleware") so the list
+                          becomes scannable instead of a wall of identical
+                          repo · main rows. */}
+                      <td className="px-3 py-2 text-sm max-w-[280px]">
+                        <div className="truncate">
+                          {(s as any).aiTitle ? (
+                            <>
+                              <span className="text-gray-100" title={(s as any).aiTitle}>{(s as any).aiTitle}</span>
+                              <span className="text-gray-600 text-xs ml-2">
+                                {(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-gray-400">
+                              {(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       {/* Branch */}
                       <td className="px-3 py-2 text-gray-500 hidden md:table-cell font-mono text-xs max-w-[140px] truncate">

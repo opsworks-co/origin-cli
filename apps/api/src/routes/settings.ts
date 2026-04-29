@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { getBudgetConfig, saveBudgetConfig, getMonthlySpend, getDailySpend, getSpendByModel, getSpendByUser } from '../services/budget.js';
 import { sendTestEmail, sendWeeklyDigest, generateWeeklyDigestData } from '../services/email.js';
 import { buildWeeklyDigestHTML } from '../services/email-templates.js';
+import { recomputeOrgSessionCosts } from '../services/cost-recompute.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -770,6 +771,36 @@ router.delete('/llm', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     res.json({ ok: true });
   } catch (err) {
     console.error('Clear LLM key error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/settings/recompute-costs — re-derive every session's costUsd
+// from the stored token counts using the current pricing table. ADMIN only.
+// Pass { dryRun: true } to preview without persisting.
+router.post('/recompute-costs', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const dryRun = req.body?.dryRun === true;
+    const result = await recomputeOrgSessionCosts(req.user!.orgId, { dryRun });
+    if (!dryRun && result.updated > 0) {
+      await prisma.auditLog.create({
+        data: {
+          orgId: req.user!.orgId,
+          userId: req.user!.id,
+          action: 'COSTS_RECOMPUTED',
+          resource: req.user!.orgId,
+          metadata: JSON.stringify({
+            scanned: result.scanned,
+            updated: result.updated,
+            totalBefore: result.totalCostBefore,
+            totalAfter: result.totalCostAfter,
+          }),
+        },
+      });
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('Recompute costs error:', err?.message || err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

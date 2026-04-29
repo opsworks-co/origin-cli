@@ -7,11 +7,12 @@ import Trails from '../Trails';
 import Compliance from '../Compliance';
 import GeneralTab from './GeneralTab';
 import IntegrationsTab from './IntegrationsTab';
+import AiTab from './AiTab';
 import ApiKeys from '../ApiKeys';
 
-type SettingsTab = 'general' | 'keys' | 'integrations' | 'audit' | 'reports' | 'trails' | 'compliance';
-const ORG_TABS: SettingsTab[] = ['general', 'keys', 'integrations', 'audit', 'reports', 'trails', 'compliance'];
-const DEV_TABS: SettingsTab[] = ['general', 'keys', 'integrations'];
+type SettingsTab = 'general' | 'keys' | 'integrations' | 'ai' | 'audit' | 'reports' | 'trails' | 'compliance';
+const ORG_TABS: SettingsTab[] = ['general', 'keys', 'integrations', 'ai', 'audit', 'reports', 'trails', 'compliance'];
+const DEV_TABS: SettingsTab[] = ['general', 'keys', 'integrations', 'ai'];
 
 
 export default function Settings() {
@@ -89,6 +90,18 @@ export default function Settings() {
           Integrations
         </button>
         )}
+        {(isDev || (user?.role === 'ADMIN' || user?.role === 'OWNER')) && (
+        <button
+          onClick={() => setActiveTab('ai')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            activeTab === 'ai'
+              ? (isDev ? 'border-emerald-500 text-emerald-400' : 'border-indigo-500 text-indigo-400')
+              : 'border-transparent text-gray-500 hover:text-gray-300'
+          }`}
+        >
+          AI
+        </button>
+        )}
         {!isDev && (
         <>
         <div className="w-px h-5 bg-gray-800 self-center mx-1" />
@@ -142,6 +155,8 @@ export default function Settings() {
       {activeTab === 'keys' && <ApiKeys />}
 
       {activeTab === 'integrations' && <IntegrationsTab />}
+
+      {activeTab === 'ai' && <AiTab />}
 
       {/* Agent Setup tab removed — content moved to Docs */}
 
