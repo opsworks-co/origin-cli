@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { Settings as SettingsIcon, Key, Plug, ScrollText, FileText, Footprints, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import AuditLog from '../AuditLog';
 import Reports from '../Reports';
@@ -13,9 +14,19 @@ type SettingsTab = 'general' | 'keys' | 'integrations' | 'audit' | 'reports' | '
 const ORG_TABS: SettingsTab[] = ['general', 'keys', 'integrations', 'audit', 'reports', 'trails', 'compliance'];
 const DEV_TABS: SettingsTab[] = ['general', 'keys', 'integrations'];
 
+const TAB_META: Record<SettingsTab, { label: string; Icon: React.ComponentType<{ className?: string }> }> = {
+  general:      { label: 'General',      Icon: SettingsIcon },
+  keys:         { label: 'API Keys',     Icon: Key },
+  integrations: { label: 'Integrations', Icon: Plug },
+  audit:        { label: 'Audit Log',    Icon: ScrollText },
+  reports:      { label: 'Reports',      Icon: FileText },
+  trails:       { label: 'Trails',       Icon: Footprints },
+  compliance:   { label: 'Compliance',   Icon: ShieldCheck },
+};
+
 
 export default function Settings() {
-  const { user } = useAuth();
+  const { user, activeOrg } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Active tab — read from URL ?tab= param, default to 'general'
@@ -56,86 +67,54 @@ export default function Settings() {
       </div>
 
       {/* Tab Navigation */}
-      <div className="flex gap-1 border-b border-gray-800">
-        <button
-          onClick={() => setActiveTab('general')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'general'
-              ? (isDev ? 'border-emerald-500 text-emerald-400' : 'border-indigo-500 text-indigo-400')
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          General
-        </button>
-        <button
-          onClick={() => setActiveTab('keys')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'keys'
-              ? (isDev ? 'border-emerald-500 text-emerald-400' : 'border-indigo-500 text-indigo-400')
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          API Keys
-        </button>
-        {(isDev || (user?.role === 'ADMIN' || user?.role === 'OWNER')) && (
-        <button
-          onClick={() => setActiveTab('integrations')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'integrations'
-              ? (isDev ? 'border-emerald-500 text-emerald-400' : 'border-indigo-500 text-indigo-400')
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Integrations
-        </button>
-        )}
-        {!isDev && (
-        <>
-        <div className="w-px h-5 bg-gray-800 self-center mx-1" />
-        <button
-          onClick={() => setActiveTab('audit')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'audit'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Audit Log
-        </button>
-        <button
-          onClick={() => setActiveTab('reports')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'reports'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Reports
-        </button>
-        <div className="w-px h-5 bg-gray-800 self-center mx-1" />
-        <button
-          onClick={() => setActiveTab('trails')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'trails'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Trails
-        </button>
-        <button
-          onClick={() => setActiveTab('compliance')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            activeTab === 'compliance'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-gray-500 hover:text-gray-300'
-          }`}
-        >
-          Compliance
-        </button>
-        </>
-        )}
-      </div>
+      {(() => {
+        const accent = isDev ? 'emerald' : 'indigo';
+        const TabBtn = ({ tab }: { tab: SettingsTab }) => {
+          const meta = TAB_META[tab];
+          const active = activeTab === tab;
+          return (
+            <button
+              onClick={() => setActiveTab(tab)}
+              className={`group relative inline-flex items-center gap-2 px-3.5 py-2.5 text-sm font-medium transition-all ${
+                active
+                  ? (accent === 'emerald' ? 'text-emerald-400' : 'text-indigo-400')
+                  : 'text-gray-500 hover:text-gray-200'
+              }`}
+            >
+              <meta.Icon className={`w-3.5 h-3.5 transition-transform ${active ? '' : 'group-hover:scale-110 opacity-70 group-hover:opacity-100'}`} />
+              <span>{meta.label}</span>
+              {active && (
+                <span
+                  className={`absolute left-2 right-2 -bottom-px h-0.5 rounded-full ${
+                    accent === 'emerald'
+                      ? 'bg-gradient-to-r from-emerald-500/0 via-emerald-500 to-emerald-500/0'
+                      : 'bg-gradient-to-r from-indigo-500/0 via-indigo-500 to-indigo-500/0'
+                  }`}
+                />
+              )}
+            </button>
+          );
+        };
+        return (
+          <div className="relative">
+            <div className="flex items-center gap-0.5 border-b border-white/[0.06] flex-wrap">
+              <TabBtn tab="general" />
+              <TabBtn tab="keys" />
+              {(isDev || activeOrg?.role === 'ADMIN' || activeOrg?.role === 'OWNER') && <TabBtn tab="integrations" />}
+              {!isDev && (
+                <>
+                  <span className="mx-1.5 h-4 w-px bg-white/[0.08]" />
+                  <TabBtn tab="audit" />
+                  <TabBtn tab="reports" />
+                  <span className="mx-1.5 h-4 w-px bg-white/[0.08]" />
+                  <TabBtn tab="trails" />
+                  <TabBtn tab="compliance" />
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {activeTab === 'general' && <GeneralTab />}
 

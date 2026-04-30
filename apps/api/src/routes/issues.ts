@@ -1,9 +1,10 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 
 const router = Router({ mergeParams: true });
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // Helper: serialize Issue for API response
 function mapIssue(issue: any) {

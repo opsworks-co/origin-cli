@@ -7,7 +7,7 @@ export default function OAuthCallback() {
   const { provider } = useParams<{ provider: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { setSession } = useAuth();
+  const { applyAuthResponse } = useAuth();
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -26,7 +26,7 @@ export default function OAuthCallback() {
 
     api.oauthCallback(provider, code, state, accountType)
       .then((res) => {
-        setSession(res.token, res.user);
+        applyAuthResponse(res);
         // New developer accounts go to onboarding wizard
         if (res.apiKey && res.user.accountType === 'developer') {
           try { sessionStorage.setItem('origin:onboarding-key', res.apiKey); } catch { /* ignore */ }
@@ -38,7 +38,7 @@ export default function OAuthCallback() {
       .catch((err) => {
         setError(err.message || 'OAuth authentication failed');
       });
-  }, [provider, searchParams, setSession, navigate]);
+  }, [provider, searchParams, applyAuthResponse, navigate]);
 
   if (error) {
     return (

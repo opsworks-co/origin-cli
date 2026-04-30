@@ -3,7 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
 
 export default function ProfileEditor() {
-  const { user, updateUser } = useAuth();
+  const { user, activeOrg, applyAuthResponse } = useAuth();
   const [name, setName] = useState(user?.name || '');
   const [email, setEmail] = useState(user?.email || '');
   const [avatarUrl, setAvatarUrl] = useState(user?.avatarUrl || '');
@@ -21,7 +21,7 @@ export default function ProfileEditor() {
         ...(email !== user?.email ? { email } : {}),
         ...(avatarUrl !== (user?.avatarUrl || '') ? { avatarUrl } : {}),
       });
-      updateUser(updated);
+      applyAuthResponse(updated);
       setFeedback({ type: 'success', msg: 'Profile updated' });
       setTimeout(() => setFeedback(null), 3000);
     } catch (err: any) {
@@ -108,7 +108,7 @@ export default function ProfileEditor() {
             }}
           />
           <span className="inline-block text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-800 text-gray-400 border border-gray-700">
-            {user?.accountType === 'developer' ? 'Solo' : user?.role}
+            {user?.accountType === 'developer' ? 'Solo' : activeOrg?.role}
           </span>
         </div>
 

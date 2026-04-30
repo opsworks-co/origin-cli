@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import {
   getSessionsForPR,
   computeCheckStatus,
@@ -11,11 +11,12 @@ import { safeParseArray } from '../utils/safe-json.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — list all PRs for the org
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { repoId, status, state } = req.query;
 
     // First find all repo IDs belonging to this org (cap for DoS
@@ -125,7 +126,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     const pr = await prisma.pullRequest.findFirst({
       where: {
         id: req.params.id as string,
-        repo: { orgId: req.user!.orgId },
+        repo: { orgId: req.activeOrgId! },
       },
     });
 
@@ -188,7 +189,7 @@ router.get('/review', async (req: AuthRequest, res: Response) => {
     const [, owner, repoName, numberStr] = match;
     const prNumber = parseInt(numberStr, 10);
 
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     // Find repo by name within this org
     const repo = await prisma.repo.findFirst({
@@ -293,7 +294,7 @@ router.post('/:id/recheck', requireRole('ADMIN'), async (req: AuthRequest, res: 
     const pr = await prisma.pullRequest.findFirst({
       where: {
         id: req.params.id as string,
-        repo: { orgId: req.user!.orgId },
+        repo: { orgId: req.activeOrgId! },
       },
     });
 
@@ -322,7 +323,7 @@ router.post('/:id/recheck', requireRole('ADMIN'), async (req: AuthRequest, res: 
     // Update status on the correct provider
     if (repo.provider === 'gitlab') {
       await updateMRGitLabStatus(
-        req.user!.orgId,
+        req.activeOrgId!,
         pr.repoId,
         pr.number,
         headSha,
@@ -330,7 +331,7 @@ router.post('/:id/recheck', requireRole('ADMIN'), async (req: AuthRequest, res: 
       );
     } else {
       await updatePRGitHubStatus(
-        req.user!.orgId,
+        req.activeOrgId!,
         pr.repoId,
         pr.number,
         headSha,
@@ -344,7 +345,7 @@ router.post('/:id/recheck', requireRole('ADMIN'), async (req: AuthRequest, res: 
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'PR_RECHECK',
         resource: pr.id,

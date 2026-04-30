@@ -200,7 +200,7 @@ export default function GitLabIntegration() {
                   onClick={async () => {
                     setConnectingGitlabOAuth(true);
                     try {
-                      const { authorizeUrl } = await api.getGitLabOAuthInstallUrl();
+                      const { authorizeUrl } = await api.getGitLabOAuthInstallUrl({ from: 'settings' });
                       window.location.href = authorizeUrl;
                     } catch (err: any) {
                       setIntegrationError(err.message);

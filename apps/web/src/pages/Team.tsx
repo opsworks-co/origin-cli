@@ -17,8 +17,8 @@ function roleBadge(role: string) {
 }
 
 export default function Team() {
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'ADMIN' || user?.role === 'OWNER';
+  const { user, activeOrg } = useAuth();
+  const isAdmin = activeOrg?.role === 'ADMIN' || activeOrg?.role === 'OWNER';
 
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loading, setLoading] = useState(true);

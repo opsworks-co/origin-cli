@@ -80,6 +80,14 @@ export interface Agent {
   description: string | null;
   model: string;
   status: string;
+  // Catalog model: catalog rows are seeded for every org and only get
+  // toggled on/off; custom rows are user-created and deletable. The list
+  // endpoint also surfaces month-to-date session count + spend so the
+  // Agents page can render activity inline without per-card fetches.
+  isEnabled: boolean;
+  isCustom: boolean;
+  sessionsThisMonth?: number;
+  costThisMonth?: number;
   systemPrompt: string | null;
   securityRulesEnabled: boolean;
   securityRules: string | null;
@@ -93,8 +101,29 @@ export interface Agent {
   sessions?: any[];
 }
 
+export interface CatalogEntry {
+  slug: string;
+  name: string;
+  description: string;
+  defaultModel: string;
+  allowedModels: string[];
+  iconKey: 'claude-code' | 'cursor' | 'gemini' | 'codex';
+  docsUrl: string;
+}
+
 export function getAgents() {
   return request<Agent[]>('/api/agents');
+}
+
+export function getAgentCatalog() {
+  return request<CatalogEntry[]>('/api/agents/catalog');
+}
+
+export function toggleAgent(id: string, enabled: boolean) {
+  return request<{ id: string; isEnabled: boolean }>(`/api/agents/${id}/toggle`, {
+    method: 'PATCH',
+    body: JSON.stringify({ enabled }),
+  });
 }
 
 export interface AgentCreateData {
@@ -149,6 +178,148 @@ export function deleteAgent(id: string) {
 
 export function restoreAgentVersion(agentId: string, versionId: string) {
   return request<Agent>(`/api/agents/${agentId}/restore/${versionId}`, { method: 'POST' });
+}
+
+// ---- Agent per-model budget overrides -----------------------------------
+
+export interface AgentModel {
+  id: string;
+  agentId: string;
+  model: string;
+  monthlyLimit: number | null;
+  tokenLimit: number | null;
+  maxCostPerSession: number | null;
+  maxTokensPerSession: number | null;
+  autoDetected: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserModelLimit {
+  id: string;
+  userId: string;
+  model: string;
+  monthlyLimit: number | null;
+  tokenLimit: number | null;
+  maxCostPerSession: number | null;
+  maxTokensPerSession: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepoModelLimit {
+  id: string;
+  repoId: string;
+  model: string;
+  monthlyLimit: number | null;
+  tokenLimit: number | null;
+  maxCostPerSession: number | null;
+  maxTokensPerSession: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function getAgentModels(agentId: string) {
+  return request<AgentModel[]>(`/api/agents/${agentId}/models`);
+}
+
+export function createAgentModel(agentId: string, data: {
+  model: string;
+  monthlyLimit?: number | null;
+  tokenLimit?: number | null;
+  maxCostPerSession?: number | null;
+  maxTokensPerSession?: number | null;
+}) {
+  return request<AgentModel>(`/api/agents/${agentId}/models`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateAgentModel(agentId: string, model: string, data: Partial<{
+  monthlyLimit: number | null;
+  tokenLimit: number | null;
+  maxCostPerSession: number | null;
+  maxTokensPerSession: number | null;
+}>) {
+  return request<AgentModel>(`/api/agents/${agentId}/models/${encodeURIComponent(model)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteAgentModel(agentId: string, model: string) {
+  return request<{ ok: boolean }>(`/api/agents/${agentId}/models/${encodeURIComponent(model)}`, {
+    method: 'DELETE',
+  });
+}
+
+// ---- Per-(user, model) budget overrides ---------------------------------
+
+export function getUserModels(userId: string) {
+  return request<UserModelLimit[]>(`/api/users/${userId}/models`);
+}
+export function createUserModel(userId: string, data: {
+  model: string;
+  monthlyLimit?: number | null;
+  tokenLimit?: number | null;
+  maxCostPerSession?: number | null;
+  maxTokensPerSession?: number | null;
+}) {
+  return request<UserModelLimit>(`/api/users/${userId}/models`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+export function updateUserModel(userId: string, model: string, data: Partial<{
+  monthlyLimit: number | null;
+  tokenLimit: number | null;
+  maxCostPerSession: number | null;
+  maxTokensPerSession: number | null;
+}>) {
+  return request<UserModelLimit>(`/api/users/${userId}/models/${encodeURIComponent(model)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+export function deleteUserModel(userId: string, model: string) {
+  return request<{ ok: boolean }>(`/api/users/${userId}/models/${encodeURIComponent(model)}`, {
+    method: 'DELETE',
+  });
+}
+
+// ---- Per-(repo, model) budget overrides ---------------------------------
+
+export function getRepoModels(repoId: string) {
+  return request<RepoModelLimit[]>(`/api/repos/${repoId}/models`);
+}
+export function createRepoModel(repoId: string, data: {
+  model: string;
+  monthlyLimit?: number | null;
+  tokenLimit?: number | null;
+  maxCostPerSession?: number | null;
+  maxTokensPerSession?: number | null;
+}) {
+  return request<RepoModelLimit>(`/api/repos/${repoId}/models`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+export function updateRepoModel(repoId: string, model: string, data: Partial<{
+  monthlyLimit: number | null;
+  tokenLimit: number | null;
+  maxCostPerSession: number | null;
+  maxTokensPerSession: number | null;
+}>) {
+  return request<RepoModelLimit>(`/api/repos/${repoId}/models/${encodeURIComponent(model)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+export function deleteRepoModel(repoId: string, model: string) {
+  return request<{ ok: boolean }>(`/api/repos/${repoId}/models/${encodeURIComponent(model)}`, {
+    method: 'DELETE',
+  });
 }
 
 // ---- Policies ------------------------------------------------------------
@@ -271,7 +442,8 @@ export interface Stats {
   linesWrittenThisMonth: number;
   unreviewed: number;
   modelBreakdown: Record<string, number>;
-  costByModel: { model: string; cost: number; count: number }[];
+  costByModel: { model: string; cost: number; count: number; tokens?: number }[];
+  tokensByAgent?: { agentId: string; name: string; model: string; tokens: number; cost: number; count: number }[];
   sessionsByDay: { date: string; count: number }[];
   sessionsByRepo: { repo: string; count: number }[];
   aiAuthorshipOverTime: { date: string; percent: number }[];
@@ -313,6 +485,70 @@ export function getStats(from?: string, to?: string) {
   if (to) params.set('to', to);
   const qs = params.toString();
   return request<Stats>(`/api/stats${qs ? `?${qs}` : ''}`);
+}
+
+// ── Team-scoped views (org-wide) ──────────────────────────────────────────
+
+export interface TeamPromptEntry {
+  sessionId: string;
+  agentName: string;
+  userId: string | null;
+  userName: string;
+  repoId: string | null;
+  repoName: string | null;
+  promptIndex: number;
+  promptText: string;
+  filesChanged: string[];
+  createdAt: string;
+}
+
+export function getTeamPrompts(opts: { q?: string; userId?: string; agentId?: string; repoId?: string; model?: string; limit?: number; offset?: number } = {}) {
+  const p = new URLSearchParams();
+  if (opts.q) p.set('q', opts.q);
+  if (opts.userId) p.set('userId', opts.userId);
+  if (opts.agentId) p.set('agentId', opts.agentId);
+  if (opts.repoId) p.set('repoId', opts.repoId);
+  if (opts.model) p.set('model', opts.model);
+  if (opts.limit !== undefined) p.set('limit', String(opts.limit));
+  if (opts.offset !== undefined) p.set('offset', String(opts.offset));
+  const qs = p.toString();
+  return request<{ prompts: TeamPromptEntry[]; total: number }>(`/api/stats/team/prompts${qs ? `?${qs}` : ''}`);
+}
+
+export interface TeamEfficiency {
+  tokensPerLine: number;
+  costPerSession: number;
+  costPerCommit: number;
+  avgLinesPerSession: number;
+  avgFilesPerCommit: number;
+  commitsPerSession: number;
+  totalSessions: number;
+  totalCommits: number;
+  totalCost: number;
+  byEngineer: Array<{
+    userId: string;
+    name: string;
+    sessions: number;
+    cost: number;
+    tokensPerLine: number;
+    costPerSession: number;
+  }>;
+}
+
+export function getTeamEfficiency() {
+  return request<TeamEfficiency>('/api/stats/team/efficiency');
+}
+
+export interface TeamAdoption {
+  totalEngineers: number;
+  activeThisWeek: number;
+  activeLastWeek: number;
+  newAdopters: number;
+  adoptionPct: number;
+}
+
+export function getTeamAdoption() {
+  return request<TeamAdoption>('/api/stats/team/adoption');
 }
 
 // ---- Machines ---------------------------------------------------------------

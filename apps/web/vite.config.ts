@@ -1,8 +1,36 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import fs from 'node:fs'
+import path from 'node:path'
+
+// Single source of truth for "what build is this." Used both to bake a
+// constant into the JS bundle (BUILD_ID) and to write a build-info.json next
+// to the dist root that the server serves. The client polls the JSON at
+// runtime and compares it to the baked-in constant — when they diverge a
+// new deploy has happened and the user's tab is on the old bundle.
+const BUILD_ID = String(Date.now())
+
+// Vite plugin: emit /build-info.json to dist after build. Tiny inline plugin
+// instead of pulling in a copy plugin dep.
+function emitBuildInfo() {
+  return {
+    name: 'origin-emit-build-info',
+    apply: 'build' as const,
+    closeBundle() {
+      const out = path.resolve(__dirname, 'dist', 'build-info.json')
+      fs.writeFileSync(out, JSON.stringify({ buildId: BUILD_ID }))
+    },
+  }
+}
 
 export default defineConfig({
-  plugins: [react()],
+  define: {
+    // Baked-in identifier of the bundle the user is currently running.
+    // Re-baked on every build, so two different deploys produce two
+    // different constants.
+    __BUILD_ID__: JSON.stringify(BUILD_ID),
+  },
+  plugins: [react(), emitBuildInfo()],
   server: {
     host: true,
     port: 5176,

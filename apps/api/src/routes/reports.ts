@@ -1,14 +1,15 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET /compliance — generate compliance report for a date range
 router.get('/compliance', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     // Parse dates with NaN guards — `new Date("not-a-date")` returns
     // Invalid Date whose .getTime() is NaN, which silently corrupts Prisma
     // range filters. Fall back to sensible defaults on parse failure.
@@ -246,7 +247,7 @@ router.get('/compliance', async (req: AuthRequest, res: Response) => {
 // GET /compliance/summary — quick compliance score
 router.get('/compliance/summary', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
     const repos = await prisma.repo.findMany({

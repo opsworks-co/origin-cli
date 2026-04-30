@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import { expensiveLimiter } from '../middleware/rate-limit.js';
 import { syncSnapshots } from '../services/snapshot.js';
 import { generateWebhookSecret } from '../services/webhook.js';
@@ -24,16 +24,28 @@ import { safeParseArray } from '../utils/safe-json.js';
 import { validateFieldLengths, COMMON_LIMITS } from '../utils/validate.js';
 import { isGitNotesMetadataCommit } from '../utils/commit-filter.js';
 import { parseGitHubUrl } from '../services/github.js';
+import { importOriginSessionsFromGit } from '../services/origin-sessions-import.js';
+import { readableRepoIds, type RepoLevel } from '../services/access.js';
+import { requireRepoAccess } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
-// GET / — list repos for org
+// GET / — list repos for org. For non-privileged users (MEMBER/VIEWER),
+// the list is filtered to repos they have an explicit RepoMember row for.
+// OWNER/ADMIN get the full list (readableRepoIds returns null).
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const showArchived = req.query.archived === 'true';
+    const accessible = await readableRepoIds(req.user!.id, req.activeOrgId!, req.activeRole);
+    const accessFilter = accessible === null ? {} : { id: { in: accessible } };
     const repos = await prisma.repo.findMany({
-      where: { orgId: req.user!.orgId, ...(!showArchived && { archived: false }) },
+      where: {
+        orgId: req.activeOrgId!,
+        ...(!showArchived && { archived: false }),
+        ...accessFilter,
+      },
       include: {
         _count: { select: { commits: true } },
       },
@@ -75,10 +87,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let hasGitHub = false;
     let hasGitLab = false;
     try {
-      hasGitHub = !!(await getIntegrationConfig(req.user!.orgId, 'github'));
+      hasGitHub = !!(await getIntegrationConfig(req.activeOrgId!, 'github'));
     } catch { /* treat as disconnected */ }
     try {
-      hasGitLab = !!(await getGitLabIntegrationConfig(req.user!.orgId));
+      hasGitLab = !!(await getGitLabIntegrationConfig(req.activeOrgId!));
     } catch { /* treat as disconnected */ }
 
     const result = repos.map((r) => {
@@ -123,7 +135,7 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
 
     const repo = await prisma.repo.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         name,
         path,
         provider: provider || 'local',
@@ -132,7 +144,7 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'REPO_CREATED',
         resource: repo.id,
@@ -150,7 +162,7 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
 // GET /github/discover — list GitHub repos available to org's token
 router.get('/github/discover', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
-    const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+    const integration = await getIntegrationConfig(req.activeOrgId!, 'github');
     if (!integration) {
       return res.status(400).json({ error: 'GitHub not connected. Add a GitHub token in Settings → Integrations.' });
     }
@@ -162,7 +174,7 @@ router.get('/github/discover', requireRole('MEMBER'), async (req: AuthRequest, r
 
     // Load existing Origin repos to mark which are already imported
     const existingRepos = await prisma.repo.findMany({
-      where: { orgId: req.user!.orgId, provider: 'github' },
+      where: { orgId: req.activeOrgId!, provider: 'github' },
       select: { id: true, path: true },
     });
 
@@ -201,14 +213,14 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
       return res.status(400).json({ error: 'Missing originBaseUrl' });
     }
 
-    const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+    const integration = await getIntegrationConfig(req.activeOrgId!, 'github');
     if (!integration) {
       return res.status(400).json({ error: 'GitHub not connected' });
     }
 
     // Load existing repos to skip duplicates
     const existingRepos = await prisma.repo.findMany({
-      where: { orgId: req.user!.orgId, provider: 'github' },
+      where: { orgId: req.activeOrgId!, provider: 'github' },
       select: { id: true, path: true },
     });
 
@@ -238,7 +250,7 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
         const repoName = item.name || parsed.repo;
         const repo = await prisma.repo.create({
           data: {
-            orgId: req.user!.orgId,
+            orgId: req.activeOrgId!,
             name: repoName,
             path: `github.com/${parsed.owner}/${parsed.repo}`,
             provider: 'github',
@@ -282,7 +294,7 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
         // 3. Audit log
         await prisma.auditLog.create({
           data: {
-            orgId: req.user!.orgId,
+            orgId: req.activeOrgId!,
             userId: req.user!.id,
             action: 'REPO_IMPORTED',
             resource: repo.id,
@@ -302,6 +314,13 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
           repoId: repo.id,
           error: webhookCreated ? undefined : 'Repo created but webhook failed',
         });
+
+        // Fire-and-forget: pull any prompts/snapshots that already exist
+        // on the origin-sessions branch + git notes. Newly imported repos
+        // get instant context for past sessions captured on other machines.
+        importOriginSessionsFromGit(repo.id, req.activeOrgId!).catch((e) => {
+          console.error('[github-import] auto import-sessions failed:', e);
+        });
       } catch (importErr: any) {
         console.error(`Failed to import ${item.fullName}:`, importErr.message);
         results.push({ fullName: item.fullName, success: false, error: importErr.message });
@@ -320,7 +339,7 @@ router.post('/github/import', requireRole('ADMIN'), async (req: AuthRequest, res
 // GET /gitlab/discover — list GitLab projects available to org's token
 router.get('/gitlab/discover', requireRole('MEMBER'), async (req: AuthRequest, res: Response) => {
   try {
-    const integration = await getGitLabIntegrationConfig(req.user!.orgId);
+    const integration = await getGitLabIntegrationConfig(req.activeOrgId!);
     if (!integration) {
       return res.status(400).json({ error: 'GitLab not connected. Add a GitLab token in Settings → Integrations.' });
     }
@@ -332,7 +351,7 @@ router.get('/gitlab/discover', requireRole('MEMBER'), async (req: AuthRequest, r
     }
 
     const existingRepos = await prisma.repo.findMany({
-      where: { orgId: req.user!.orgId, provider: 'gitlab' },
+      where: { orgId: req.activeOrgId!, provider: 'gitlab' },
       select: { id: true, path: true },
     });
 
@@ -370,7 +389,7 @@ router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res
       return res.status(400).json({ error: 'Missing originBaseUrl' });
     }
 
-    const integration = await getGitLabIntegrationConfig(req.user!.orgId);
+    const integration = await getGitLabIntegrationConfig(req.activeOrgId!);
     if (!integration) {
       return res.status(400).json({ error: 'GitLab not connected' });
     }
@@ -378,7 +397,7 @@ router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res
     const { token: glToken, authType: glAuthType } = await getValidGitLabToken(integration);
 
     const existingRepos = await prisma.repo.findMany({
-      where: { orgId: req.user!.orgId, provider: 'gitlab' },
+      where: { orgId: req.activeOrgId!, provider: 'gitlab' },
       select: { id: true, path: true },
     });
 
@@ -405,7 +424,7 @@ router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res
         const repoName = item.name || projectPath.split('/').pop() || projectPath;
         const repo = await prisma.repo.create({
           data: {
-            orgId: req.user!.orgId,
+            orgId: req.activeOrgId!,
             name: repoName,
             path: `gitlab.com/${projectPath}`,
             provider: 'gitlab',
@@ -440,7 +459,7 @@ router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res
 
         await prisma.auditLog.create({
           data: {
-            orgId: req.user!.orgId,
+            orgId: req.activeOrgId!,
             userId: req.user!.id,
             action: 'REPO_IMPORTED',
             resource: repo.id,
@@ -458,6 +477,13 @@ router.post('/gitlab/import', requireRole('ADMIN'), async (req: AuthRequest, res
           success: true,
           repoId: repo.id,
           error: webhookCreated ? undefined : 'Repo created but webhook failed',
+        });
+
+        // Fire-and-forget: pull any session data already on the
+        // origin-sessions branch (e.g. pushed from a developer's machine
+        // before this admin connected GitLab to Origin).
+        importOriginSessionsFromGit(repo.id, req.activeOrgId!).catch((e) => {
+          console.error('[gitlab-import] auto import-sessions failed:', e);
         });
       } catch (importErr: any) {
         console.error(`Failed to import ${item.fullPath}:`, importErr.message);
@@ -478,14 +504,20 @@ router.post('/:id/sync', expensiveLimiter, async (req: AuthRequest, res: Respons
     const id = req.params.id as string;
 
     const repo = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
 
     if (!repo) {
       return res.status(404).json({ error: 'Repo not found' });
     }
 
-    const result = await syncSnapshots({ ...repo, orgId: req.user!.orgId });
+    const result = await syncSnapshots({ ...repo, orgId: req.activeOrgId! });
+
+    // Pick up any new sessions/notes pushed since the last sync. Fire and
+    // forget so /sync stays fast for the UI.
+    importOriginSessionsFromGit(id, req.activeOrgId!).catch((e) => {
+      console.error('[repo-sync] auto import-sessions failed:', e);
+    });
 
     await prisma.repo.update({
       where: { id },
@@ -494,7 +526,7 @@ router.post('/:id/sync', expensiveLimiter, async (req: AuthRequest, res: Respons
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'REPO_SYNCED',
         resource: repo.id,
@@ -517,7 +549,7 @@ router.post('/:id/sync', expensiveLimiter, async (req: AuthRequest, res: Respons
 router.post('/:id/backfill-files', requireRole('ADMIN'), expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
     if (repo.provider !== 'github' && repo.provider !== 'gitlab') {
       return res.status(400).json({ error: 'Backfill requires a GitHub or GitLab-backed repo' });
@@ -545,7 +577,7 @@ router.post('/:id/backfill-files', requireRole('ADMIN'), expensiveLimiter, async
     const headers: Record<string, string> = { 'User-Agent': 'Origin-App' };
 
     if (repo.provider === 'github') {
-      const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+      const integration = await getIntegrationConfig(req.activeOrgId!, 'github');
       if (integration?.token) token = integration.token;
       else if (process.env.GITHUB_TOKEN) token = process.env.GITHUB_TOKEN;
       const parsed = parseRepoFullName(repo.path);
@@ -555,7 +587,7 @@ router.post('/:id/backfill-files', requireRole('ADMIN'), expensiveLimiter, async
       headers.Accept = 'application/vnd.github.v3+json';
       if (token) headers.Authorization = `Bearer ${token}`;
     } else {
-      const integration = await getGitLabIntegrationConfig(req.user!.orgId);
+      const integration = await getGitLabIntegrationConfig(req.activeOrgId!);
       if (!integration) return res.status(400).json({ error: 'GitLab integration not configured' });
       const { token: glToken } = await getValidGitLabToken(integration);
       if (!glToken) return res.status(400).json({ error: 'GitLab token unavailable' });
@@ -624,7 +656,7 @@ router.post('/:id/backfill-files', requireRole('ADMIN'), expensiveLimiter, async
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'REPO_FILES_BACKFILLED',
         resource: repo.id,
@@ -644,280 +676,36 @@ router.post('/:id/backfill-files', requireRole('ADMIN'), expensiveLimiter, async
   }
 });
 
-// POST /:id/import-sessions — import sessions from the origin-sessions git branch
+// POST /:id/import-sessions — import sessions from the origin-sessions git
+// branch + git notes. Works for both GitHub and GitLab, public or private
+// (uses the org's integration token if configured, falls back to the public
+// API for public repos).
 router.post('/:id/import-sessions', expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const repo = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
-    // Get GitHub token
-    let token: string | undefined;
-    const integration = await getIntegrationConfig(req.user!.orgId, 'github');
-    if (integration?.token) token = integration.token;
-    else if (process.env.GITHUB_TOKEN) token = process.env.GITHUB_TOKEN;
-
-    const headers: Record<string, string> = {
-      Accept: 'application/vnd.github.v3+json',
-      'User-Agent': 'Origin-App',
-    };
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    // Determine owner/repo for GitHub API
-    let owner: string;
-    let repoName: string;
-    if (repo.provider === 'github') {
-      const parsed = parseRepoFullName(repo.path);
-      if (!parsed) return res.status(400).json({ error: 'Invalid GitHub repo path' });
-      owner = parsed.owner;
-      repoName = parsed.repo;
-    } else {
-      // For local repos, try to get the GitHub remote
-      return res.status(400).json({
-        error: 'Import from branch only works for GitHub repos. Push the origin-sessions branch to GitHub first: git push origin origin-sessions',
-      });
+    const result = await importOriginSessionsFromGit(id, req.activeOrgId!);
+    if (result.imported === 0 && result.total === 0 && result.message) {
+      return res.json(result);
     }
-
-    const apiBase = integration?.apiBaseUrl || 'https://api.github.com';
-
-    // 1. List files in the origin-sessions branch
-    let treeData: any;
-    try {
-      const treeRes = await fetch(
-        `${apiBase}/repos/${owner}/${repoName}/git/trees/origin-sessions?recursive=1`,
-        { headers },
-      );
-      if (!treeRes.ok) {
-        if (treeRes.status === 404) {
-          return res.status(404).json({
-            error: 'No origin-sessions branch found. Make sure the CLI has written session data and the branch is pushed to GitHub.',
-          });
-        }
-        return res.status(treeRes.status).json({ error: `GitHub API error: ${treeRes.status}` });
-      }
-      treeData = await treeRes.json();
-    } catch (err: any) {
-      // Don't echo err.message back — it can contain request URLs,
-      // internal hostnames, or stack traces from node-fetch. Log
-      // server-side, return a generic failure to the caller.
-      console.error('[repos] failed to read origin-sessions branch:', err);
-      return res.status(500).json({ error: 'Failed to read origin-sessions branch' });
-    }
-
-    // 2. Filter for session JSON files
-    const sessionFiles = (treeData.tree || []).filter(
-      (f: any) => f.path?.startsWith('sessions/') && f.path?.endsWith('.json') && f.type === 'blob',
-    );
-
-    if (sessionFiles.length === 0) {
-      return res.json({ imported: 0, skipped: 0, message: 'No session files found in origin-sessions branch' });
-    }
-
-    // 3. Get existing session IDs to skip duplicates. Cap at 500k — the
-    // import path only dedupes against recently-seen ids, and pulling
-    // every session across the org would OOM the process on large
-    // tenants.
-    const existingSessions = await prisma.codingSession.findMany({
-      where: {
-        commit: { repo: { orgId: req.user!.orgId } },
-      },
-      select: { id: true },
-      take: 500_000,
-      orderBy: { createdAt: 'desc' },
-    });
-    const existingIds = new Set(existingSessions.map((s) => s.id));
-
-    let imported = 0;
-    let skipped = 0;
-
-    // 4. Fetch and import each session file
-    for (const file of sessionFiles) {
-      try {
-        const blobRes = await fetch(
-          `${apiBase}/repos/${owner}/${repoName}/git/blobs/${file.sha}`,
-          { headers },
-        );
-        if (!blobRes.ok) { skipped++; continue; }
-
-        const blobData = await blobRes.json() as any;
-        const content = Buffer.from(blobData.content, 'base64').toString('utf-8');
-        const session = JSON.parse(content) as {
-          sessionId: string;
-          model: string;
-          startedAt: string;
-          endedAt: string;
-          durationMs: number;
-          costUsd: number;
-          tokensUsed: number;
-          inputTokens: number;
-          outputTokens: number;
-          toolCalls: number;
-          linesAdded: number;
-          linesRemoved: number;
-          prompts: string[];
-          filesChanged: string[];
-          promptChanges: Array<{ prompt: string; files: string[] }>;
-          git: { headBefore: string; headAfter: string; commitShas: string[] };
-          summary: string;
-        };
-
-        // Skip if already imported
-        if (existingIds.has(session.sessionId)) { skipped++; continue; }
-
-        // Find or create the commit for this session
-        const commitSha = session.git.commitShas?.[0] || session.git.headAfter || '';
-        if (!commitSha) { skipped++; continue; }
-
-        let commit = await prisma.commit.findFirst({
-          where: { repoId: id, sha: commitSha },
-        });
-
-        if (!commit) {
-          // Create the commit record
-          commit = await prisma.commit.create({
-            data: {
-              repoId: id,
-              sha: commitSha,
-              message: session.summary || session.prompts[0]?.slice(0, 200) || '',
-              author: 'ai-agent',
-              aiToolDetected: session.model || 'claude-code',
-              aiDetectionMethod: 'session',
-              committedAt: new Date(session.endedAt || session.startedAt),
-            },
-          });
-        }
-
-        // Check if commit already has a session
-        const existingSession = await prisma.codingSession.findUnique({
-          where: { commitId: commit.id },
-        });
-        if (existingSession) { skipped++; continue; }
-
-        // Build transcript from prompts
-        const transcript = session.prompts.map((p, i) => ([
-          { role: 'user' as const, content: p },
-          { role: 'assistant' as const, content: `Completed task ${i + 1}.` },
-        ])).flat();
-
-        // Create the coding session
-        const codingSession = await prisma.codingSession.create({
-          data: {
-            id: session.sessionId,
-            commitId: commit.id,
-            model: session.model || 'unknown',
-            prompt: session.prompts[0] || '',
-            transcript: JSON.stringify(transcript),
-            filesChanged: JSON.stringify(session.filesChanged || []),
-            tokensUsed: session.tokensUsed || 0,
-            inputTokens: session.inputTokens || 0,
-            outputTokens: session.outputTokens || 0,
-            toolCalls: session.toolCalls || 0,
-            durationMs: session.durationMs || 0,
-            linesAdded: session.linesAdded || 0,
-            linesRemoved: session.linesRemoved || 0,
-            costUsd: session.costUsd || 0,
-          },
-        });
-
-        // Create promptChange records
-        for (let i = 0; i < (session.promptChanges || []).length; i++) {
-          const pc = session.promptChanges[i];
-          await prisma.promptChange.create({
-            data: {
-              sessionId: codingSession.id,
-              promptIndex: i,
-              promptText: (pc.prompt || '').slice(0, 1000),
-              filesChanged: JSON.stringify(pc.files || []),
-              diff: '',
-            },
-          });
-        }
-
-        // If no promptChanges, create from prompts array
-        if (!session.promptChanges?.length && session.prompts?.length) {
-          for (let i = 0; i < session.prompts.length; i++) {
-            await prisma.promptChange.create({
-              data: {
-                sessionId: codingSession.id,
-                promptIndex: i,
-                promptText: session.prompts[i].slice(0, 1000),
-                filesChanged: JSON.stringify([]),
-                diff: '',
-              },
-            });
-          }
-        }
-
-        // Create sessionDiff if git data available
-        if (session.git.headBefore && session.git.headAfter) {
-          await prisma.sessionDiff.create({
-            data: {
-              sessionId: codingSession.id,
-              headBefore: session.git.headBefore,
-              headAfter: session.git.headAfter,
-              commitShas: JSON.stringify(session.git.commitShas || []),
-              diff: '',
-              linesAdded: session.linesAdded || 0,
-              linesRemoved: session.linesRemoved || 0,
-            },
-          });
-        }
-
-        // Create individual Commit records for additional SHAs in this session
-        if (session.git.commitShas && session.git.commitShas.length > 1) {
-          for (const sha of session.git.commitShas.slice(1)) {
-            const exists = await prisma.commit.findFirst({ where: { repoId: id, sha } });
-            if (!exists) {
-              await prisma.commit.create({
-                data: {
-                  repoId: id,
-                  sha,
-                  message: '',
-                  author: 'ai-agent',
-                  aiToolDetected: session.model || 'claude-code',
-                  aiDetectionMethod: 'session',
-                  committedAt: new Date(session.endedAt || session.startedAt),
-                  sessionId: codingSession.id,
-                },
-              });
-            }
-          }
-        }
-
-        // Update commit AI detection
-        if (!commit.aiToolDetected) {
-          await prisma.commit.update({
-            where: { id: commit.id },
-            data: {
-              aiToolDetected: session.model || 'claude-code',
-              aiDetectionMethod: 'session',
-            },
-          });
-        }
-
-        existingIds.add(session.sessionId);
-        imported++;
-      } catch (err: any) {
-        console.error(`Failed to import session file ${file.path}:`, err.message);
-        skipped++;
-      }
-    }
-
-    res.json({ imported, skipped, total: sessionFiles.length });
+    return res.json(result);
   } catch (err) {
     console.error('Import sessions error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 
 // POST /:id/rescan — re-fetch full commit messages from GitHub and run AI detection
 router.post('/:id/rescan', requireRole('ADMIN'), expensiveLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const repo = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
@@ -927,7 +715,7 @@ router.post('/:id/rescan', requireRole('ADMIN'), expensiveLimiter, async (req: A
 
     if (parsed) {
       try {
-        const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+        const integration = await getIntegrationConfig(req.activeOrgId!, 'github');
         const token = integration?.token || process.env.GITHUB_TOKEN;
         const apiBase = integration?.apiBaseUrl || 'https://api.github.com';
 
@@ -1014,7 +802,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const repo = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
       include: { _count: { select: { commits: true } } },
     });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
@@ -1032,7 +820,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     const { name, path, provider, verboseCapture } = req.body;
 
     const existing = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!existing) return res.status(404).json({ error: 'Repo not found' });
 
@@ -1048,7 +836,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'REPO_UPDATED',
         resource: id,
@@ -1070,7 +858,7 @@ router.patch('/:id/archive', requireRole('ADMIN'), async (req: AuthRequest, res:
     const { archived } = req.body;
 
     const existing = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!existing) return res.status(404).json({ error: 'Repo not found' });
 
@@ -1081,7 +869,7 @@ router.patch('/:id/archive', requireRole('ADMIN'), async (req: AuthRequest, res:
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: archived ? 'REPO_ARCHIVED' : 'REPO_UNARCHIVED',
         resource: id,
@@ -1102,7 +890,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     const id = req.params.id as string;
 
     const existing = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!existing) return res.status(404).json({ error: 'Repo not found' });
 
@@ -1111,7 +899,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     for (const wh of webhooks) {
       if (wh.githubWebhookId) {
         if (existing.provider === 'gitlab') {
-          const glIntegration = await getGitLabIntegrationConfig(req.user!.orgId);
+          const glIntegration = await getGitLabIntegrationConfig(req.activeOrgId!);
           const projectPath = parseGitLabProjectPath(existing.path);
           if (glIntegration && projectPath) {
             const { token: glTok, authType: glAt } = await getValidGitLabToken(glIntegration);
@@ -1124,7 +912,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
             );
           }
         } else {
-          const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+          const integration = await getIntegrationConfig(req.activeOrgId!, 'github');
           const parsed = parseRepoFullName(existing.path);
           if (integration && parsed) {
             await deleteGitHubWebhook(
@@ -1178,7 +966,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'REPO_DELETED',
         resource: id,
@@ -1200,7 +988,7 @@ router.get('/:id/commits/:sha/diff', async (req: AuthRequest, res: Response) => 
     const sha = (req.params as any).sha as string;
 
     const repo = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
@@ -1211,7 +999,7 @@ router.get('/:id/commits/:sha/diff', async (req: AuthRequest, res: Response) => 
 
       // Try org integration token first, then fall back to env var
       let token: string | undefined;
-      const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+      const integration = await getIntegrationConfig(req.activeOrgId!, 'github');
       if (integration?.token) {
         token = integration.token;
       } else if (process.env.GITHUB_TOKEN) {
@@ -1363,7 +1151,7 @@ router.get('/:id/branches', async (req: AuthRequest, res: Response) => {
     const id = req.params.id as string;
 
     const repo = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
 
     if (!repo) {
@@ -1394,7 +1182,7 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
     const id = req.params.id as string;
 
     const repo = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
 
     if (!repo) {
@@ -1572,7 +1360,7 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
     const sha = (req.params as any).sha as string;
 
     const repo = await prisma.repo.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
@@ -1779,7 +1567,7 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
     if (files.length === 0 && repo.provider === 'gitlab') {
       try {
         const projectPath = parseGitLabProjectPath(repo.path);
-        const integration = await getGitLabIntegrationConfig(req.user!.orgId);
+        const integration = await getGitLabIntegrationConfig(req.activeOrgId!);
         if (projectPath && integration) {
           const { token } = await getValidGitLabToken(integration);
           if (token) {
@@ -1840,7 +1628,7 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
         const parsed = parseRepoFullName(repo.path);
         if (parsed) {
           let token: string | undefined;
-          const integration = await getIntegrationConfig(req.user!.orgId, 'github');
+          const integration = await getIntegrationConfig(req.activeOrgId!, 'github');
           if (integration?.token) token = integration.token;
           else if (process.env.GITHUB_TOKEN) token = process.env.GITHUB_TOKEN;
 
@@ -1970,7 +1758,7 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
 router.delete('/:id/backfilled-sessions', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
     // Find sessions with 0 tokens (placeholder backfills). Cap at 100k
@@ -2012,7 +1800,7 @@ router.delete('/:id/backfilled-sessions', requireRole('ADMIN'), async (req: Auth
 router.post('/:id/webhooks', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
     // Check if webhook already exists
@@ -2028,7 +1816,7 @@ router.post('/:id/webhooks', requireRole('ADMIN'), async (req: AuthRequest, res:
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'WEBHOOK_CREATED',
         resource: id,
@@ -2055,7 +1843,7 @@ router.post('/:id/webhooks', requireRole('ADMIN'), async (req: AuthRequest, res:
 router.get('/:id/webhooks', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
     const webhooks = await prisma.webhook.findMany({
@@ -2079,7 +1867,7 @@ router.delete('/:id/webhooks/:webhookId', requireRole('ADMIN'), async (req: Auth
     const id = req.params.id as string;
     const webhookId = (req.params as any).webhookId as string;
 
-    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.user!.orgId } });
+    const repo = await prisma.repo.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!repo) return res.status(404).json({ error: 'Repo not found' });
 
     const webhook = await prisma.webhook.findFirst({ where: { id: webhookId, repoId: id } });
@@ -2097,7 +1885,7 @@ router.delete('/:id/webhooks/:webhookId', requireRole('ADMIN'), async (req: Auth
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'WEBHOOK_DELETED',
         resource: id,
@@ -2115,7 +1903,7 @@ router.delete('/:id/webhooks/:webhookId', requireRole('ADMIN'), async (req: Auth
 router.get('/:id/health', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const repo = await prisma.repo.findFirst({
       where: { id, orgId },
@@ -2220,6 +2008,266 @@ router.get('/:id/health', async (req: AuthRequest, res: Response) => {
     });
   } catch (err) {
     console.error('Repo health error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Per-(repo, model) budget overrides ─────────────────────────────────────
+// IDOR-safe: every read/write scopes the target repo to the calling user's
+// org first. `:modelKey` is URL-encoded model string ((repoId, model) is the
+// natural unique key).
+
+router.get('/:id/models', async (req: AuthRequest, res: Response) => {
+  try {
+    const owned = await prisma.repo.findFirst({
+      where: { id: req.params.id as string, orgId: req.activeOrgId! },
+      select: { id: true },
+    });
+    if (!owned) return res.status(404).json({ error: 'Repository not found in your organization' });
+
+    const models = await prisma.repoModelLimit.findMany({
+      where: { repoId: owned.id },
+      orderBy: { model: 'asc' },
+    });
+    res.json(models);
+  } catch (err) {
+    console.error('List repo models error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/:id/models', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const owned = await prisma.repo.findFirst({
+      where: { id: req.params.id as string, orgId: req.activeOrgId! },
+      select: { id: true },
+    });
+    if (!owned) return res.status(404).json({ error: 'Repository not found in your organization' });
+
+    const { model, monthlyLimit, tokenLimit, maxCostPerSession, maxTokensPerSession } = req.body || {};
+    if (typeof model !== 'string' || !model.trim()) {
+      return res.status(400).json({ error: 'model is required' });
+    }
+    if (model.length > 200) {
+      return res.status(413).json({ error: 'model exceeds max length of 200' });
+    }
+    try {
+      const created = await prisma.repoModelLimit.create({
+        data: {
+          repoId: owned.id,
+          model: model.trim(),
+          monthlyLimit: typeof monthlyLimit === 'number' && monthlyLimit > 0 ? monthlyLimit : null,
+          tokenLimit: typeof tokenLimit === 'number' && tokenLimit > 0 ? tokenLimit : null,
+          maxCostPerSession: typeof maxCostPerSession === 'number' && maxCostPerSession > 0 ? maxCostPerSession : null,
+          maxTokensPerSession: typeof maxTokensPerSession === 'number' && maxTokensPerSession > 0 ? maxTokensPerSession : null,
+        },
+      });
+      res.json(created);
+    } catch (e: any) {
+      if (e?.code === 'P2002') {
+        return res.status(409).json({ error: 'Model already configured for this repo. PUT to update.' });
+      }
+      throw e;
+    }
+  } catch (err) {
+    console.error('Create repo model error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/:id/models/:modelKey', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const owned = await prisma.repo.findFirst({
+      where: { id: req.params.id as string, orgId: req.activeOrgId! },
+      select: { id: true },
+    });
+    if (!owned) return res.status(404).json({ error: 'Repository not found in your organization' });
+
+    const model = decodeURIComponent(req.params.modelKey as string);
+    const data: Record<string, unknown> = {};
+    const body = req.body || {};
+    for (const key of ['monthlyLimit', 'tokenLimit', 'maxCostPerSession', 'maxTokensPerSession'] as const) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) {
+        const v = body[key];
+        data[key] = typeof v === 'number' && v > 0 ? v : null;
+      }
+    }
+    try {
+      const updated = await prisma.repoModelLimit.update({
+        where: { repoId_model: { repoId: owned.id, model } },
+        data,
+      });
+      res.json(updated);
+    } catch (e: any) {
+      if (e?.code === 'P2025') return res.status(404).json({ error: 'Model not configured for this repo' });
+      throw e;
+    }
+  } catch (err) {
+    console.error('Update repo model error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/:id/models/:modelKey', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const owned = await prisma.repo.findFirst({
+      where: { id: req.params.id as string, orgId: req.activeOrgId! },
+      select: { id: true },
+    });
+    if (!owned) return res.status(404).json({ error: 'Repository not found in your organization' });
+
+    const model = decodeURIComponent(req.params.modelKey as string);
+    try {
+      await prisma.repoModelLimit.delete({
+        where: { repoId_model: { repoId: owned.id, model } },
+      });
+      res.json({ ok: true });
+    } catch (e: any) {
+      if (e?.code === 'P2025') return res.status(404).json({ error: 'Model not configured for this repo' });
+      throw e;
+    }
+  } catch (err) {
+    console.error('Delete repo model error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Repo Member Management ──────────────────────────────────────────────
+//
+// Per-user access grants on a single repo. Org OWNER/ADMIN have implicit
+// admin on every repo and don't need rows here; they appear in the list
+// with `inherited: true` so the UI can show them as locked-in.
+
+const VALID_REPO_LEVELS = ['read', 'write', 'admin'] as const;
+
+router.get('/:id/members', requireRepoAccess('read'), async (req: AuthRequest, res: Response) => {
+  try {
+    const repoId = req.params.id as string;
+
+    // Explicit grants in the RepoMember table.
+    const direct = await prisma.repoMember.findMany({
+      where: { repoId },
+      select: {
+        level: true,
+        createdAt: true,
+        user: { select: { id: true, name: true, email: true, avatarUrl: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    // Inherited from org role: every OWNER / ADMIN of the active org
+    // gets implicit admin. Surface them in the list so the UI can show
+    // who has access without requiring a separate fetch.
+    const privileged = await prisma.membership.findMany({
+      where: { orgId: req.activeOrgId!, role: { in: ['OWNER', 'ADMIN'] } },
+      select: {
+        role: true,
+        user: { select: { id: true, name: true, email: true, avatarUrl: true } },
+      },
+    });
+
+    const directIds = new Set(direct.map((d) => d.user.id));
+    const inherited = privileged
+      .filter((p) => !directIds.has(p.user.id))
+      .map((p) => ({
+        ...p.user,
+        level: 'admin' as RepoLevel,
+        inherited: true,
+        orgRole: p.role,
+      }));
+
+    res.json({
+      members: [
+        ...direct.map((d) => ({ ...d.user, level: d.level, inherited: false, grantedAt: d.createdAt })),
+        ...inherited,
+      ],
+    });
+  } catch (err) {
+    console.error('List repo members error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /:id/members/:userId — set/upgrade/downgrade a user's access level.
+// Idempotent: re-running with the same level is a no-op. Caller must have
+// repo admin (which org OWNER/ADMIN inherit automatically).
+router.put('/:id/members/:userId', requireRepoAccess('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const repoId = req.params.id as string;
+    const targetUserId = req.params.userId as string;
+    const { level } = req.body as { level?: string };
+
+    if (!level || !VALID_REPO_LEVELS.includes(level as RepoLevel)) {
+      return res.status(400).json({ error: 'level must be read | write | admin' });
+    }
+
+    // Target must be a member of the active org. Otherwise we'd be
+    // granting access to a user outside the org boundary, which breaks
+    // org-level isolation.
+    const targetMembership = await prisma.membership.findUnique({
+      where: { userId_orgId: { userId: targetUserId, orgId: req.activeOrgId! } },
+      select: { role: true },
+    });
+    if (!targetMembership) {
+      return res.status(400).json({ error: 'User is not a member of this org' });
+    }
+
+    // Inherited OWNER/ADMIN don't need explicit RepoMember rows; saving
+    // one would just be noise. Reject with a clarifying message.
+    if (targetMembership.role === 'OWNER' || targetMembership.role === 'ADMIN') {
+      return res.status(400).json({
+        error: `${targetMembership.role}s have implicit admin on every repo. Change their org role instead.`,
+      });
+    }
+
+    const row = await prisma.repoMember.upsert({
+      where: { userId_repoId: { userId: targetUserId, repoId } },
+      update: { level, grantedBy: req.user!.id },
+      create: { userId: targetUserId, repoId, level, grantedBy: req.user!.id },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.activeOrgId!,
+        userId: req.user!.id,
+        action: 'REPO_ACCESS_GRANTED',
+        resource: repoId,
+        metadata: JSON.stringify({ targetUserId, level }),
+      },
+    });
+
+    res.json({ userId: row.userId, repoId: row.repoId, level: row.level });
+  } catch (err) {
+    console.error('Update repo member error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/:id/members/:userId', requireRepoAccess('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const repoId = req.params.id as string;
+    const targetUserId = req.params.userId as string;
+
+    const { count } = await prisma.repoMember.deleteMany({
+      where: { userId: targetUserId, repoId },
+    });
+    if (count === 0) {
+      return res.status(404).json({ error: 'No explicit access on this repo (org admins inherit access)' });
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.activeOrgId!,
+        userId: req.user!.id,
+        action: 'REPO_ACCESS_REVOKED',
+        resource: repoId,
+        metadata: JSON.stringify({ targetUserId }),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete repo member error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

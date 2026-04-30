@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import { expensiveLimiter } from '../middleware/rate-limit.js';
 import { createPolicyVersion } from '../services/versioning.js';
 import { getOrgLLMKey, getOrgLLMModel, getOrgLLMProvider } from './settings.js';
@@ -21,12 +21,13 @@ const POLICY_RULE_LIMITS = {
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — list policies for org (includes agent assignments)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const policies = await prisma.policy.findMany({
-      where: { orgId: req.user!.orgId },
+      where: { orgId: req.activeOrgId! },
       include: {
         rules: {
           include: {
@@ -66,7 +67,7 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
 
     const policy = await prisma.policy.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         name,
         description: description || null,
         type,
@@ -77,7 +78,7 @@ router.post('/', requireRole('MEMBER'), async (req: AuthRequest, res: Response) 
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'POLICY_CREATED',
         resource: policy.id,
@@ -104,7 +105,7 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
     }
 
     const existing = await prisma.policy.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
 
     if (!existing) {
@@ -116,7 +117,7 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
     // precheck above. Prevents a future refactor from silently turning
     // this into a cross-org IDOR if the precheck is dropped or reordered.
     const updated = await prisma.policy.updateMany({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
       data: {
         ...(name !== undefined && { name }),
         ...(description !== undefined && { description }),
@@ -128,14 +129,14 @@ router.put('/:id', requireRole('MEMBER'), async (req: AuthRequest, res: Response
       return res.status(404).json({ error: 'Policy not found' });
     }
     const policy = await prisma.policy.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
 
     await createPolicyVersion(id, req.user!.id, 'UPDATED');
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'POLICY_UPDATED',
         resource: id,
@@ -156,7 +157,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     const id = req.params.id as string;
 
     const existing = await prisma.policy.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
 
     if (!existing) {
@@ -170,7 +171,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     await prisma.policyRule.deleteMany({ where: { policyId: id } });
     await prisma.policyAssignment.deleteMany({ where: { policyId: id } });
     const deletedPolicy = await prisma.policy.deleteMany({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (deletedPolicy.count === 0) {
       return res.status(404).json({ error: 'Policy not found' });
@@ -178,7 +179,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'POLICY_DELETED',
         resource: id,
@@ -208,7 +209,7 @@ router.post('/:id/rules', requireRole('MEMBER'), async (req: AuthRequest, res: R
     }
 
     const policy = await prisma.policy.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
 
     if (!policy) {
@@ -220,15 +221,15 @@ router.post('/:id/rules', requireRole('MEMBER'), async (req: AuthRequest, res: R
     // agent from another org, which would then fire on that foreign
     // agent's sessions via the policy engine join path.
     if (agentId) {
-      const agent = await prisma.agent.findFirst({ where: { id: agentId, orgId: req.user!.orgId } });
+      const agent = await prisma.agent.findFirst({ where: { id: agentId, orgId: req.activeOrgId! } });
       if (!agent) return res.status(400).json({ error: 'Agent not found in your organization' });
     }
     if (machineId) {
-      const machine = await prisma.machine.findFirst({ where: { id: machineId, orgId: req.user!.orgId } });
+      const machine = await prisma.machine.findFirst({ where: { id: machineId, orgId: req.activeOrgId! } });
       if (!machine) return res.status(400).json({ error: 'Machine not found in your organization' });
     }
     if (repoId) {
-      const repo = await prisma.repo.findFirst({ where: { id: repoId, orgId: req.user!.orgId } });
+      const repo = await prisma.repo.findFirst({ where: { id: repoId, orgId: req.activeOrgId! } });
       if (!repo) return res.status(400).json({ error: 'Repo not found in your organization' });
     }
 
@@ -265,7 +266,7 @@ router.delete('/:id/rules/:ruleId', requireRole('ADMIN'), async (req: AuthReques
     const ruleId = (req.params as any).ruleId as string;
 
     const policy = await prisma.policy.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
 
     if (!policy) {
@@ -304,7 +305,7 @@ router.delete('/:id/rules/:ruleId', requireRole('ADMIN'), async (req: AuthReques
 router.get('/:id/versions', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const policy = await prisma.policy.findFirst({ where: { id, orgId: req.user!.orgId } });
+    const policy = await prisma.policy.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!policy) return res.status(404).json({ error: 'Policy not found' });
 
     const versions = await prisma.policyVersion.findMany({
@@ -344,14 +345,14 @@ router.put('/:id/assignments', requireRole('MEMBER'), async (req: AuthRequest, r
     }
 
     const policy = await prisma.policy.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!policy) return res.status(404).json({ error: 'Policy not found' });
 
     // Validate all agent IDs belong to the same org
     if (agentIds.length > 0) {
       const agents = await prisma.agent.findMany({
-        where: { id: { in: agentIds }, orgId: req.user!.orgId },
+        where: { id: { in: agentIds }, orgId: req.activeOrgId! },
         select: { id: true },
       });
       const validIds = new Set(agents.map(a => a.id));
@@ -377,7 +378,7 @@ router.put('/:id/assignments', requireRole('MEMBER'), async (req: AuthRequest, r
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'POLICY_ASSIGNMENTS_UPDATED',
         resource: id,
@@ -396,7 +397,7 @@ router.put('/:id/assignments', requireRole('MEMBER'), async (req: AuthRequest, r
 router.get('/:id/assignments', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const policy = await prisma.policy.findFirst({ where: { id, orgId: req.user!.orgId } });
+    const policy = await prisma.policy.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!policy) return res.status(404).json({ error: 'Policy not found' });
 
     const assignments = await prisma.policyAssignment.findMany({
@@ -477,7 +478,7 @@ router.post('/from-natural-language', expensiveLimiter, requireRole('MEMBER'), a
       return res.status(413).json({ error: 'prompt exceeds maximum length' });
     }
 
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     // Fetch context: existing agents, repos for name resolution. Cap
     // both — the LLM context is the limiter here, not the DB, and

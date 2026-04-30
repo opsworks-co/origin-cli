@@ -1,6 +1,6 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260428.0124",
+  "version": "0.20260430.1015",
   "type": "module",
   "bin": {
     "origin": "./dist/index.js"

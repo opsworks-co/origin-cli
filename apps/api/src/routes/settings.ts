@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import { getBudgetConfig, saveBudgetConfig, getMonthlySpend, getDailySpend, getSpendByModel, getSpendByUser } from '../services/budget.js';
 import { sendTestEmail, sendWeeklyDigest, generateWeeklyDigestData } from '../services/email.js';
 import { buildWeeklyDigestHTML } from '../services/email-templates.js';
@@ -9,16 +9,15 @@ import { recomputeOrgSessionCosts } from '../services/cost-recompute.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
-interface AuthRequest extends Request {
-  user?: { id: string; orgId: string; role: string };
-}
+
 
 // GET /api/settings/api-keys (ADMIN+ only)
 router.get('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const keys = await prisma.apiKey.findMany({
-      where: { orgId: req.user!.orgId },
+      where: { orgId: req.activeOrgId! },
       select: {
         id: true, name: true, keyPrefix: true, createdAt: true,
         userId: true, role: true,
@@ -64,7 +63,7 @@ router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Res
     // Validate repoIds belong to this org
     if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
       const validRepos = await prisma.repo.findMany({
-        where: { orgId: req.user!.orgId, id: { in: repoIds } },
+        where: { orgId: req.activeOrgId!, id: { in: repoIds } },
         select: { id: true },
       });
       if (validRepos.length !== repoIds.length) {
@@ -75,7 +74,7 @@ router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Res
     // Validate agentIds belong to this org
     if (agentIds && Array.isArray(agentIds) && agentIds.length > 0) {
       const validAgents = await prisma.agent.findMany({
-        where: { orgId: req.user!.orgId, id: { in: agentIds } },
+        where: { orgId: req.activeOrgId!, id: { in: agentIds } },
         select: { id: true },
       });
       if (validAgents.length !== agentIds.length) {
@@ -90,7 +89,7 @@ router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Res
     // Always link key to the current user
     const key = await prisma.apiKey.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         name: name || 'API Key',
         keyHash,
@@ -135,14 +134,14 @@ router.put('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: 
       return res.status(400).json({ error: `agentIds cannot exceed ${MAX_SCOPE_ITEMS} items` });
     }
 
-    const key = await prisma.apiKey.findFirst({ where: { id, orgId: req.user!.orgId } });
+    const key = await prisma.apiKey.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!key) return res.status(404).json({ error: 'API key not found' });
 
     // Update agent scopes if provided
     if (agentIds !== undefined && Array.isArray(agentIds)) {
       if (agentIds.length > 0) {
         const validAgents = await prisma.agent.findMany({
-          where: { orgId: req.user!.orgId, id: { in: agentIds } },
+          where: { orgId: req.activeOrgId!, id: { in: agentIds } },
           select: { id: true },
         });
         if (validAgents.length !== agentIds.length) {
@@ -161,7 +160,7 @@ router.put('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: 
     if (repoIds !== undefined && Array.isArray(repoIds)) {
       if (repoIds.length > 0) {
         const validRepos = await prisma.repo.findMany({
-          where: { orgId: req.user!.orgId, id: { in: repoIds } },
+          where: { orgId: req.activeOrgId!, id: { in: repoIds } },
           select: { id: true },
         });
         if (validRepos.length !== repoIds.length) {
@@ -201,7 +200,7 @@ router.delete('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, re
   try {
     const id = req.params.id as string;
     await prisma.apiKey.deleteMany({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     res.json({ ok: true });
   } catch (err) {
@@ -215,7 +214,7 @@ router.delete('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, re
 // GET /api/settings/budget — get budget config + current spend
 router.get('/budget', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const [config, spent, dailySpend, spendByModel, spendByUser] = await Promise.all([
       getBudgetConfig(orgId),
       getMonthlySpend(orgId),
@@ -245,12 +244,12 @@ router.get('/budget', async (req: AuthRequest, res: Response) => {
 // PUT /api/settings/budget — update budget config
 router.put('/budget', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    if (req.user!.role !== 'ADMIN') {
+    if (req.activeRole! !== 'ADMIN') {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
     const { monthlyLimit, alertThresholds, blockOnExceed } = req.body;
-    const config = await saveBudgetConfig(req.user!.orgId, {
+    const config = await saveBudgetConfig(req.activeOrgId!, {
       ...(monthlyLimit !== undefined && { monthlyLimit }),
       ...(alertThresholds !== undefined && { alertThresholds }),
       ...(blockOnExceed !== undefined && { blockOnExceed }),
@@ -259,7 +258,7 @@ router.put('/budget', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'BUDGET_UPDATED',
         resource: 'budget',
@@ -280,13 +279,13 @@ router.put('/budget', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 router.get('/org', async (req: AuthRequest, res: Response) => {
   try {
     const org = await prisma.org.findUnique({
-      where: { id: req.user!.orgId },
+      where: { id: req.activeOrgId! },
       select: {
         id: true,
         name: true,
         slug: true,
         createdAt: true,
-        _count: { select: { users: true, repos: true, agents: true, policies: true } },
+        _count: { select: { memberships: true, repos: true, agents: true, policies: true } },
       },
     });
 
@@ -304,7 +303,7 @@ router.get('/org', async (req: AuthRequest, res: Response) => {
 // PUT /api/settings/org — update org settings (admin/owner only)
 router.put('/org', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { name, slug } = req.body;
 
     if (!name && !slug) {
@@ -365,7 +364,7 @@ router.put('/org', requireRole('ADMIN'), async (req: AuthRequest, res: Response)
 // GET /api/settings/chat — get chat config
 router.get('/chat', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const config = await prisma.integrationConfig.findFirst({
       where: { orgId, provider: 'llm' },
     });
@@ -433,7 +432,7 @@ const VALID_PROVIDERS = ['anthropic', 'openai', 'google'];
 // PUT /api/settings/chat — save chat config
 router.put('/chat', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { apiKey, model, llmProvider } = req.body;
 
     if (!apiKey) {
@@ -481,7 +480,7 @@ router.put('/chat', requireRole('ADMIN'), async (req: AuthRequest, res: Response
 // POST /api/settings/chat/test — test chat config
 router.post('/chat/test', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { apiKey, llmProvider } = req.body;
 
     const keyToTest = apiKey || (await getOrgLLMKey(orgId)) || process.env.ANTHROPIC_API_KEY;
@@ -597,7 +596,7 @@ export async function getOrgLLMProvider(orgId: string): Promise<'anthropic' | 'o
 router.get('/email', async (req: AuthRequest, res: Response) => {
   try {
     const config = await prisma.integrationConfig.findFirst({
-      where: { orgId: req.user!.orgId, provider: 'email' },
+      where: { orgId: req.activeOrgId!, provider: 'email' },
     });
 
     const defaults = { enabled: false, recipients: [] as string[], sendDay: 'monday' };
@@ -619,7 +618,7 @@ router.get('/email', async (req: AuthRequest, res: Response) => {
 router.put('/email', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const { enabled, recipients, sendDay } = req.body;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const settings = {
       enabled: enabled ?? false,
@@ -653,7 +652,7 @@ router.put('/email', requireRole('ADMIN'), async (req: AuthRequest, res: Respons
 router.post('/email/test', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const { to } = req.body;
-    const recipient = to || req.user!.orgId; // Will be resolved to user email
+    const recipient = to || req.activeOrgId!; // Will be resolved to user email
 
     // Get user email if no explicit recipient
     let email = to;
@@ -679,7 +678,7 @@ router.post('/email/test', requireRole('ADMIN'), async (req: AuthRequest, res: R
 // POST /api/settings/send-digest — manually trigger the weekly digest (for testing)
 router.post('/send-digest', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const result = await sendWeeklyDigest(req.user!.orgId);
+    const result = await sendWeeklyDigest(req.activeOrgId!);
     res.json(result);
   } catch (err) {
     console.error('Send digest error:', err);
@@ -690,7 +689,7 @@ router.post('/send-digest', requireRole('ADMIN'), async (req: AuthRequest, res: 
 // GET /api/settings/digest-preview — returns the HTML preview without sending
 router.get('/digest-preview', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const data = await generateWeeklyDigestData(req.user!.orgId);
+    const data = await generateWeeklyDigestData(req.activeOrgId!);
     if (!data) {
       return res.status(404).json({ error: 'Org not found' });
     }
@@ -714,14 +713,14 @@ router.get('/digest-preview', requireRole('ADMIN'), async (req: AuthRequest, res
 router.post('/recompute-costs', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const dryRun = req.body?.dryRun === true;
-    const result = await recomputeOrgSessionCosts(req.user!.orgId, { dryRun });
+    const result = await recomputeOrgSessionCosts(req.activeOrgId!, { dryRun });
     if (!dryRun && result.updated > 0) {
       await prisma.auditLog.create({
         data: {
-          orgId: req.user!.orgId,
+          orgId: req.activeOrgId!,
           userId: req.user!.id,
           action: 'COSTS_RECOMPUTED',
-          resource: req.user!.orgId,
+          resource: req.activeOrgId!,
           metadata: JSON.stringify({
             scanned: result.scanned,
             updated: result.updated,
@@ -742,7 +741,7 @@ router.post('/recompute-costs', requireRole('ADMIN'), async (req: AuthRequest, r
 router.post('/fix-orphaned-keys', async (req: AuthRequest, res: Response) => {
   try {
     const result = await prisma.apiKey.updateMany({
-      where: { orgId: req.user!.orgId, userId: null },
+      where: { orgId: req.activeOrgId!, userId: null },
       data: { userId: req.user!.id },
     });
     res.json({ updated: result.count });

@@ -11,8 +11,11 @@ model Org {
   id            String         @id @default(uuid())
   name          String
   slug          String         @unique
+  // "personal" = a single-user org auto-created on developer signup; drives
+  // DeveloperLayout when active. "team" = a normal multi-user org.
+  type          String         @default("team")
   createdAt     DateTime       @default(now())
-  users         User[]
+  memberships   Membership[]
   repos         Repo[]
   agents        Agent[]
   integrations  IntegrationConfig[]
@@ -27,19 +30,25 @@ model Org {
 
 model User {
   id            String         @id @default(uuid())
-  orgId         String
-  org           Org            @relation(fields: [orgId], references: [id])
   email         String         @unique
   name          String
   passwordHash  String
-  role          String         @default("MEMBER")
-  accountType   String         @default("org")    // "org" or "developer"
+  // Hint of how this user signed up — "org" (created/joined a team) or
+  // "developer" (got a personal org). Doesn't gate authorization. The active
+  // org's `type` is what drives layout and feature scope.
+  accountType   String         @default("org")
+  // Pure UX hint for which org to default to on next login. Never trusted
+  // for authz — every request validates membership independently.
+  lastOrgId     String?
   avatarUrl     String?
   provider      String?        // "github", "gitlab", "google", or null for email/password
   providerUserId String?
   emailVerified Boolean        @default(false)
   lastLoginAt   DateTime?
   createdAt     DateTime       @default(now())
+  memberships   Membership[]
+  repoMemberships  RepoMember[]
+  agentMemberships AgentMember[]
   auditLogs     AuditLog[]
   reviews       SessionReview[]
   notifications Notification[]
@@ -48,7 +57,23 @@ model User {
   bookmarks     SessionBookmark[]
   authTokens    AuthToken[]
   annotations   SessionAnnotation[]
+  modelLimits   UserModelLimit[]
+}
 
+// Multi-org membership join table. A user belongs to one or more orgs and
+// has a per-org role. Authorization on every org-scoped request goes
+// through this table — `User` no longer carries `orgId`/`role`.
+model Membership {
+  id        String   @id @default(uuid())
+  userId    String
+  orgId     String
+  role      String   // OWNER | ADMIN | MEMBER | REVIEWER
+  joinedAt  DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org       Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([userId])
   @@index([orgId])
 }
 
@@ -143,8 +168,30 @@ model Repo {
   apiKeyScopes ApiKeyRepoScope[]
   sessionRepos SessionRepo[]
   issues       Issue[]
+  modelLimits  RepoModelLimit[]
+  members      RepoMember[]
 
   @@index([orgId, archived])
+}
+
+// Direct per-user grant of access to a single repo. Org OWNER and ADMIN
+// roles always have implicit Admin on every repo and don't need a row
+// here; explicit RepoMember rows control access for org MEMBER and
+// VIEWER users. Levels are ordered: read < write < admin.
+model RepoMember {
+  id        String   @id @default(uuid())
+  userId    String
+  repoId    String
+  level     String   // "read" | "write" | "admin"
+  grantedBy String?  // userId of admin who granted this access (audit trail)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repo      Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, repoId])
+  @@index([userId])
+  @@index([repoId])
 }
 
 model Commit {
@@ -266,6 +313,20 @@ model PromptChange {
   checkpointType  String?       // auto, manual, pre-prompt, session-start, session-end
   commitSha       String?       // HEAD commit SHA at this checkpoint
   treeSha         String?       // Git tree SHA at this checkpoint
+  // Captures mid-session model switches. CLI sends the model that was active
+  // for *this* prompt; null means "use session.model" (older clients, or
+  // prompts that landed before the field existed).
+  model           String?
+  // Per-prompt token usage and cost. Each prompt is priced at its own
+  // `model`'s rates (computed on the CLI via estimateCost) so a session that
+  // mixes Opus + Sonnet has accurate costs even though session.costUsd is a
+  // single field. Null/zero on older clients — analytics still fall back to
+  // the session-level total in that case.
+  inputTokens         Int   @default(0)
+  outputTokens        Int   @default(0)
+  cacheReadTokens     Int   @default(0)
+  cacheCreationTokens Int   @default(0)
+  costUsd             Float @default(0)
   createdAt       DateTime      @default(now())
 
   @@unique([sessionId, promptIndex])
@@ -335,6 +396,13 @@ model Agent {
   description       String?
   model             String
   status            String          @default("ACTIVE")
+  // Catalog vs custom: catalog agents are pre-seeded on org creation
+  // (Claude Code, Cursor, Gemini CLI, Codex CLI). They start disabled
+  // and admins flip `isEnabled` to start collecting data. Custom agents
+  // (`isCustom=true`) are created via the "Add custom agent" form for
+  // in-house tooling and are deletable; catalog rows are not.
+  isEnabled         Boolean         @default(false)
+  isCustom          Boolean         @default(false)
   systemPrompt      String?         // Custom system instructions for this agent
   securityRulesEnabled Boolean      @default(false) // Inject security rules into system prompt
   securityRules     String?         // Custom security rules (default rules used if empty)
@@ -349,8 +417,91 @@ model Agent {
   versions          AgentVersion[]
   policyAssignments PolicyAssignment[]
   apiKeyScopes      ApiKeyAgentScope[]
+  models            AgentModel[]
+  members           AgentMember[]
 
   @@unique([orgId, slug])
+}
+
+// Direct per-user grant of access to a single agent. Org OWNER/ADMIN roles
+// always have implicit Admin on every agent. Levels for agents are simpler
+// than repos: "use" lets a user run sessions with the agent; "admin" lets
+// them edit config and manage access.
+model AgentMember {
+  id        String   @id @default(uuid())
+  userId    String
+  agentId   String
+  level     String   // "use" | "admin"
+  grantedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, agentId])
+  @@index([userId])
+  @@index([agentId])
+}
+
+// Per-model budget overrides for an Agent. A row exists for each model the
+// agent runs that needs custom budget config; absent rows fall back to the
+// Agent's own fields (then to org-level limits). The migration backfills one
+// row per existing Agent so single-model behaviour is preserved.
+model AgentModel {
+  id                  String   @id @default(uuid())
+  agentId             String
+  agent               Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  model               String   // e.g. "claude-opus-4-7"
+  monthlyLimit        Float?   // USD; null = inherit Agent default → org default
+  tokenLimit          Int?     // monthly tokens; null = inherit
+  maxCostPerSession   Float?   // null = inherit Agent.maxCostPerSession
+  maxTokensPerSession Int?     // null = inherit Agent.maxTokensPerSession
+  // Set true when the row is created by auto-detection (server saw a model
+  // that wasn't yet registered for this agent). Lets the UI surface "new
+  // models seen" to admins without manual paperwork.
+  autoDetected        Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([agentId, model])
+  @@index([agentId])
+}
+
+// Per-(user, model) budget overrides. Same shape as AgentModel but scoped to
+// a developer instead of an agent. Used when leadership wants to cap a
+// specific dev's spend on a specific (expensive) model.
+model UserModelLimit {
+  id                  String   @id @default(uuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model               String
+  monthlyLimit        Float?
+  tokenLimit          Int?
+  maxCostPerSession   Float?
+  maxTokensPerSession Int?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([userId, model])
+  @@index([userId])
+}
+
+// Per-(repo, model) budget overrides. Block runaway sessions inside a single
+// project before they impact the whole org cap.
+model RepoModelLimit {
+  id                  String   @id @default(uuid())
+  repoId              String
+  repo                Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  model               String
+  monthlyLimit        Float?
+  tokenLimit          Int?
+  maxCostPerSession   Float?
+  maxTokensPerSession Int?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([repoId, model])
+  @@index([repoId])
 }
 
 // ── Policies ────────────────────────────────────────────────────

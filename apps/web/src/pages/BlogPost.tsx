@@ -8,6 +8,324 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'per-model-budget-caps-team': (
+    <>
+      <p>
+        Last Friday, a head of engineering at a 30-person startup pinged me a screenshot of their Anthropic invoice. <span className="text-gray-300">$8,400 for the month.</span> They had budgeted $2,000.
+      </p>
+      <p>
+        I asked the questions you have to ask:
+      </p>
+      <ul>
+        <li>Which model drove that?</li>
+        <li>Which repo?</li>
+        <li>Which engineer?</li>
+        <li>What got shipped for $8,400?</li>
+      </ul>
+      <p>
+        He couldn&rsquo;t answer any of them. Nobody on his team could. They had a single Anthropic API key, they used it across Claude Code, Cursor, internal scripts, and Slack bots, and the bill arrived once a month with one number on it.
+      </p>
+      <p className="text-gray-100 font-medium">
+        That conversation, give or take, has happened on every customer call we&rsquo;ve had this quarter. So this week we shipped per-model budget caps for teams &mdash; the feature that lets you say &ldquo;Opus $300 per developer per month, Sonnet $100, Haiku unlimited&rdquo; and have it actually <em>enforced</em>, not just reported on.
+      </p>
+
+      <h2>Most teams have four models, not one</h2>
+
+      <p>
+        Talk to any engineering team that&rsquo;s been using AI for more than three months and you find the same pattern:
+      </p>
+
+      {/* Four-model spec card */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-6 shadow-2xl">
+          <p className="text-[10px] uppercase tracking-[0.12em] text-gray-500 font-semibold mb-4">
+            Models in active use, by job
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {[
+              { name: 'Opus / GPT-5', job: 'Hard architecture work', share: 90, color: '#a78bfa' },
+              { name: 'Sonnet / GPT-4o', job: 'Tests + refactors', share: 60, color: '#a78bfa' },
+              { name: 'Codex / Cursor', job: 'Boilerplate + scaffolding', share: 75, color: '#34d399' },
+              { name: 'Gemini / Haiku', job: 'That one weird case', share: 35, color: '#fbbf24' },
+            ].map((m) => (
+              <div key={m.name} className="rounded-lg border border-gray-800 bg-gray-900/40 p-4">
+                <p className="text-sm font-mono text-gray-100 mb-1">{m.name}</p>
+                <p className="text-[11px] text-gray-500 mb-3">{m.job}</p>
+                <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full" style={{ width: `${m.share}%`, background: m.color }} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="mt-4 text-[11px] text-gray-500 text-center">
+            Same engineer, four bills. None of them attributable.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        And every model has a ten-fold cost spread between the high end and the low end. Opus runs at <code>$15/M input tokens, $75/M output tokens.</code> Haiku is <code>$0.80 in / $4 out</code> &mdash; literally 1/19th the per-token cost.
+      </p>
+      <p>
+        Which means a developer who reaches for Opus when Haiku would&rsquo;ve done the job is silently burning your budget at 19&times; the rate they need to. And there&rsquo;s no signal coming back to tell them that.
+      </p>
+
+      <h2>The visibility gap is structural</h2>
+
+      <p>
+        Here&rsquo;s why nobody&rsquo;s solved this with a spreadsheet: the unit of cost (a token) and the unit of work (a session that produced a PR) live in completely different systems.
+      </p>
+
+      {/* Cost-attribution chain diagram */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-6 shadow-2xl">
+          <div className="flex flex-col md:flex-row items-stretch gap-3">
+            {[
+              { label: 'Provider invoice', detail: 'Anthropic / OpenAI / Google bills you a single number', color: 'border-red-500/40 bg-red-500/5', accent: 'text-red-400' },
+              { label: 'API key', detail: 'Maybe one per service. Maybe one per developer if you\'re organised.', color: 'border-amber-500/40 bg-amber-500/5', accent: 'text-amber-400' },
+              { label: 'The actual work', detail: 'Engineer · repo · model · prompt · session · PR', color: 'border-emerald-500/40 bg-emerald-500/5', accent: 'text-emerald-400' },
+            ].map((node, i) => (
+              <React.Fragment key={node.label}>
+                <div className={`flex-1 rounded-lg border ${node.color} px-4 py-3`}>
+                  <div className={`text-[10px] uppercase tracking-wider ${node.accent} font-semibold mb-1`}>{node.label}</div>
+                  <p className="text-xs text-gray-400 leading-snug">{node.detail}</p>
+                </div>
+                {i < 2 && (
+                  <div className="self-center text-gray-700 px-1 hidden md:block">→</div>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+          <p className="mt-4 text-[11px] text-gray-500 text-center">
+            The provider gives you the top of this chain. The bottom is where the budget actually goes.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        FinOps tools handle invoice rollup. Provider dashboards show usage. Neither knows that <span className="text-gray-300">prompt #4 in session 9c2a1f, run by Sarah at 14:32 on Tuesday in the <code>billing</code> repo, used Opus to add 14 lines that became PR #2103.</span> Origin does &mdash; that&rsquo;s the unit we capture &mdash; but until this week it didn&rsquo;t enforce on it.
+      </p>
+
+      <h2>What we shipped</h2>
+
+      <p>
+        Four levels of budget cap, each with monthly USD and monthly token limits, plus per-session caps:
+      </p>
+
+      {/* Budget hierarchy diagram */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-6 shadow-2xl">
+          <div className="space-y-2">
+            {[
+              { tier: '1', label: 'Org', detail: 'Monthly cap across the whole company', limit: '$10,000' },
+              { tier: '2', label: 'Agent', detail: 'Claude Code · Cursor · Codex · Gemini', limit: '$3,000 / agent' },
+              { tier: '3', label: 'Agent × Model', detail: 'Opus · Sonnet · Haiku, separately', limit: '$300 / model', highlight: true },
+              { tier: '4', label: 'Engineer × Model', detail: 'A specific dev\'s Opus budget', limit: '$50 / dev' },
+              { tier: '4', label: 'Repo × Model', detail: 'How much any model can spend in a repo', limit: '$200 / repo' },
+            ].map((row, i) => (
+              <div
+                key={i}
+                className={`flex items-center gap-3 rounded-lg border px-4 py-3 ${
+                  row.highlight
+                    ? 'border-indigo-500/50 bg-indigo-500/[0.06]'
+                    : 'border-gray-800 bg-gray-900/40'
+                }`}
+                style={{ marginLeft: `${(Number(row.tier) - 1) * 24}px` }}
+              >
+                <span className={`text-[10px] uppercase tracking-wider font-semibold w-16 ${row.highlight ? 'text-indigo-300' : 'text-gray-500'}`}>
+                  Tier {row.tier}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm font-medium ${row.highlight ? 'text-gray-50' : 'text-gray-200'}`}>{row.label}</p>
+                  <p className="text-[11px] text-gray-500">{row.detail}</p>
+                </div>
+                <code className={`text-xs font-mono ${row.highlight ? 'text-indigo-300' : 'text-gray-400'}`}>
+                  {row.limit}
+                </code>
+              </div>
+            ))}
+          </div>
+          <p className="mt-4 text-[11px] text-gray-500">
+            The narrowest matching cap fires first. A too-loose tier above can&rsquo;t accidentally bypass a tighter one below.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        Tier 3 &mdash; <strong>per agent &times; model</strong> &mdash; is the one we built this release around. It&rsquo;s the one customers asked for by name. Tiers 1 and 2 already existed; tiers 4 are nice-to-have. Tier 3 is what flips &ldquo;we have an AI cost problem&rdquo; into &ldquo;we have an AI cost lever.&rdquo;
+      </p>
+
+      <h2>What it looks like in the dashboard</h2>
+
+      <p>
+        Open any agent &rarr; the new <strong>Models</strong> section shows every model that agent has run, with four editable cells per row:
+      </p>
+
+      {/* Per-model row mockup */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm font-semibold text-gray-100">Models</p>
+              <p className="text-[11px] text-gray-500">Per-model budget overrides. Leave blank to inherit the agent default.</p>
+            </div>
+            <span className="text-xs text-indigo-400">+ Add model</span>
+          </div>
+          <div className="divide-y divide-gray-800">
+            {[
+              { model: 'claude-opus-4-7',    monthly: '300',   tokens: '50,000,000', perSess: '5.00', perSessTok: '200000',  spent: 182, limit: 300, tier: 'amber' },
+              { model: 'claude-sonnet-4-6',  monthly: '100',   tokens: '',           perSess: '',     perSessTok: '',        spent: 24,  limit: 100, tier: 'green' },
+              { model: 'claude-haiku-4-5',   monthly: '',      tokens: '',           perSess: '',     perSessTok: '',        spent: 4.30, limit: 0,  tier: 'none' },
+            ].map((row) => (
+              <div key={row.model} className="py-3">
+                <div className="flex items-center justify-between mb-2">
+                  <code className="text-sm text-gray-100 font-mono">{row.model}</code>
+                  <span className="text-[11px] text-gray-500">Remove</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+                  {[
+                    { label: 'Monthly $', value: row.monthly },
+                    { label: 'Monthly tokens', value: row.tokens },
+                    { label: 'Max $/sess', value: row.perSess },
+                    { label: 'Max tok/sess', value: row.perSessTok },
+                  ].map((c, i) => (
+                    <div key={i} className="rounded border border-gray-800 bg-gray-950 px-2.5 py-1.5">
+                      <p className="text-[9px] uppercase tracking-wider text-gray-600">{c.label}</p>
+                      <p className={`text-xs font-mono ${c.value ? 'text-gray-200' : 'text-gray-700 italic'}`}>
+                        {c.value || 'inherit'}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                {row.limit > 0 ? (
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full"
+                        style={{
+                          width: `${Math.min((row.spent / row.limit) * 100, 100)}%`,
+                          background: row.tier === 'amber' ? '#f59e0b' : row.tier === 'green' ? '#10b981' : '#6b7280',
+                        }}
+                      />
+                    </div>
+                    <span className="text-[11px] text-gray-500 tabular-nums w-32 text-right">
+                      ${row.spent.toFixed(2)} / ${row.limit} this month
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-gray-600">No limit · ${typeof row.spent === 'number' ? row.spent.toFixed(2) : row.spent} spent this month</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <p>
+        Three rows, three different policies. Opus is on a tight leash. Sonnet has a comfortable budget. Haiku is unlimited &mdash; the message to the team is &ldquo;reach for this one freely.&rdquo; The progress bars and the tier-colored gradients aren&rsquo;t decoration; they&rsquo;re a glance-test for &ldquo;is anyone close to a cap?&rdquo;
+      </p>
+
+      <h2>Hard stop, not a monthly surprise</h2>
+
+      <p>
+        The point isn&rsquo;t a chart at the end of the month. The point is to stop the session <em>before</em> it runs.
+      </p>
+      <p>
+        When an engineer fires up Claude Code on Opus and the cap has been hit, Origin checks at session-start, in milliseconds, before the model is even invoked. The CLI returns:
+      </p>
+      <pre className="not-prose">
+        <code className="block rounded-lg bg-gray-950 border border-gray-800 px-4 py-3 text-sm text-gray-300 font-mono whitespace-pre-wrap">
+{`$ origin run --model claude-opus-4-7
+[origin] Session blocked — agent model budget limit reached.
+Claude Code · claude-opus-4-7 monthly model limit
+exceeded ($302.10 / $300.00).
+
+Try:
+  origin run --model claude-sonnet-4-6   # $76 of $100 used this month
+  origin run --model claude-haiku-4-5    # unlimited`}
+        </code>
+      </pre>
+      <p>
+        No mid-session billing surprise. No conversation that starts with &ldquo;your AI bill is up $4,000 this month.&rdquo; The engineer either picks a smaller model, asks for a higher cap, or pings the architect. All of those are productive conversations to have <em>before</em> the spend, not after.
+      </p>
+
+      <h2>The Opus burner problem, and how tier 4 handles it</h2>
+
+      <p>
+        Every team has one. The engineer running 4&times; the team&rsquo;s average AI spend, almost entirely on the most expensive model, often for tasks the cheaper models would&rsquo;ve handled at a third of the cost. They&rsquo;re not malicious &mdash; they just got into a habit of using the smartest model and the cost signal never reached them.
+      </p>
+      <p>
+        Per-engineer model caps target that directly. Set Opus at $50/dev/mo across the team, with a one-off override for the principal architect. Everyone gets the same ceiling on the expensive stuff. The behaviour change happens within a week &mdash; engineers start feeling out where Sonnet works.
+      </p>
+
+      <h2>Behavioural shift: the cheap models become first-choice</h2>
+
+      <p>
+        Most teams have settled into &ldquo;use the smartest model.&rdquo; That&rsquo;s a defensible default when the cost signal is invisible. It becomes a bad default the moment the cost is on the same screen as the work.
+      </p>
+      <p>
+        With per-model caps in place, three things shift in the team&rsquo;s daily conversation:
+      </p>
+      <ol>
+        <li><strong>Reaching for Opus becomes deliberate.</strong> &ldquo;Why are you using Opus for boilerplate?&rdquo; goes from a sigh in standup to a hard stop at session-start.</li>
+        <li><strong>Mid-tier models earn their seat.</strong> Sonnet for tests and refactors stops being the consolation prize and starts being the default.</li>
+        <li><strong>Cheap models stop being &ldquo;backup&rdquo; and start being primary.</strong> Haiku for scaffolding, log parsing, doc generation &mdash; work that absolutely doesn&rsquo;t need flagship reasoning &mdash; gets routed to the model whose pricing matches.</li>
+      </ol>
+
+      <h2>What you actually see, day-to-day</h2>
+
+      <p>
+        The dashboard hero panel shows month-to-date spend with a gradient progress bar (green &rarr; amber &rarr; red), a faint &ldquo;projected&rdquo; ghost overlaid showing where the spend will land if the trend holds, and milestone markers at 50/80/100%. Click the Tokens KPI card to drill in by agent &mdash; cursor 21M tokens, claude-opus-4-6 19M, codex 5M. Same drill-down for cost.
+      </p>
+      <p>
+        On the Insights page, <strong>Cost by model</strong> renders each bar in the model&rsquo;s brand color &mdash; Claude in lavender, Cursor in sky, Codex in emerald, Gemini in amber &mdash; so a fleet of models is scannable at a glance. The Efficiency tab flags any engineer running 2&times; over the team&rsquo;s tokens-per-line average. The Anomalies tab catches sessions that spent 10&times; more than the median.
+      </p>
+      <p>
+        And every block, every alert, every CLI message tells you <em>which level fired</em>: <code>org</code>, <code>agent</code>, <code>model</code>, <code>user-model</code>, or <code>repo-model</code>. No guessing.
+      </p>
+
+      <h2>The conversation that just got possible</h2>
+
+      <p>
+        For 18 months, the standard answer to &ldquo;how much are we spending on AI?&rdquo; has been &ldquo;a lot, and we don&rsquo;t exactly know on what.&rdquo;
+      </p>
+      <p>
+        That&rsquo;s ending. Not because someone shipped a heroic FinOps tool, but because the AI coding session finally has a place to live as a unit of work, with all its attribution attached. With per-model caps, the question gets concrete:
+      </p>
+      <div className="not-prose my-8 rounded-xl border border-gray-800 bg-[#0a0b14] p-6 shadow-2xl space-y-3">
+        {[
+          'We spent $4,200 on Opus, $1,100 on Sonnet, $90 on Haiku.',
+          'Opus produced 41 PRs; 8 of them flagged for review.',
+          'Three engineers account for 60% of the Opus spend.',
+          'We capped Opus at $300/dev, kept Sonnet open at $100, told the team Haiku for boilerplate.',
+          'Spend was down 38% the next month. Throughput was flat.',
+        ].map((line, i) => (
+          <div key={i} className="flex items-start gap-3">
+            <span className="text-[10px] text-indigo-400 font-mono mt-0.5">{String(i + 1).padStart(2, '0')}</span>
+            <p className="text-sm text-gray-200">{line}</p>
+          </div>
+        ))}
+      </div>
+      <p>
+        That&rsquo;s a finance conversation an engineering manager can actually have. With numbers. With a knob.
+      </p>
+
+      <h2>How to turn it on</h2>
+
+      <p>
+        Open any agent in your team org. Scroll to <strong>Models</strong>. The first row was created by a backfill when the feature shipped &mdash; it&rsquo;s the agent&rsquo;s current default model, with no overrides. Click <em>Monthly $</em>, type a number. That&rsquo;s the cap. Save is automatic on blur.
+      </p>
+      <p>
+        If a model arrives in production that you haven&rsquo;t configured yet, Origin auto-detects it and adds a row with an &ldquo;Auto-detected&rdquo; badge so admins see what&rsquo;s new. You decide whether to set a cap or ignore it.
+      </p>
+      <p>
+        Per-engineer and per-repo caps live on the <Link to="/budget" className="text-indigo-400 hover:text-indigo-300">Budget</Link> page under their respective tabs. Same edit pattern: chevron expands the row, click any model to set a cap.
+      </p>
+      <p>
+        The era of &ldquo;we&rsquo;re spending a lot on AI but I don&rsquo;t know where&rdquo; is ending. About time.
+      </p>
+    </>
+  ),
   'nobody-in-the-chain-wrote-this-code': (
     <>
       <p>

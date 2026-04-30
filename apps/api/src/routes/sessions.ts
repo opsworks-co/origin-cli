@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import { expensiveLimiter } from '../middleware/rate-limit.js';
 import { notifyOrgAdmins, notifyOrgMembers } from '../services/notifications.js';
 import { safeParseArray, safeParseObject } from '../utils/safe-json.js';
@@ -9,7 +9,7 @@ import { generateSessionTitle } from '../services/ai-summarize.js';
 
 /** Check if user has admin/owner role */
 function isAdminUser(req: AuthRequest): boolean {
-  const role = (req.user!.role || '').toUpperCase();
+  const role = (req.activeRole! || '').toUpperCase();
   return role === 'ADMIN' || role === 'OWNER';
 }
 
@@ -37,6 +37,7 @@ import { runAIReview } from '../services/ai-review.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 const IDLE_THRESHOLD_MS = 15 * 60 * 1000; // 15 min without prompt activity → IDLE
 // Auto-end sessions idle for 1 hour even if heartbeat is alive (agent stopped working)
@@ -44,6 +45,10 @@ const AUTO_END_IDLE_MS = 60 * 60 * 1000; // 1 hour
 // Safety net: if heartbeat hasn't pinged in 2 hours, the agent is truly dead.
 // This only catches cases where the heartbeat daemon crashed without sending session/end.
 const ABANDONED_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+// Hard cap: no real coding session should run longer than this. Catches
+// runaway heartbeats and ghost sessions that never sent a prompt or end
+// event. If startedAt was >24h ago and we're still "RUNNING", force-close.
+const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 function computeStatus(s: any): string {
   // COMPLETED/ERROR = terminal states. Only set by explicit session/end call.
@@ -275,7 +280,7 @@ function mapSession(s: any, pullRequests?: any[]) {
 // GET / — list coding sessions for org
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const offset = parseInt(req.query.offset as string) || 0;
 
@@ -327,7 +332,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // User-level scoping: non-admin users only see their own sessions
     // Admin/Owner can see all org sessions, or pass ?mine=true to see only theirs
-    const userRole = (req.user!.role || '').toUpperCase();
+    const userRole = (req.activeRole! || '').toUpperCase();
     const isAdmin = userRole === 'ADMIN' || userRole === 'OWNER';
     if (!isAdmin || req.query.mine === 'true') {
       where.userId = req.user!.id;
@@ -382,6 +387,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       if (s.status === 'RUNNING') {
         const lastHeartbeat = new Date(s.updatedAt || s.createdAt).getTime();
         const lastPrompt = s.lastActivityAt ? new Date(s.lastActivityAt).getTime() : 0;
+        const startedAt = new Date(s.startedAt || s.createdAt).getTime();
 
         // Heartbeat died
         if (now - lastHeartbeat > ABANDONED_THRESHOLD_MS) {
@@ -395,6 +401,16 @@ router.get('/', async (req: AuthRequest, res: Response) => {
           abandonedIds.push(s.id);
           s.status = 'COMPLETED';
           s.endedAt = new Date(lastPrompt + AUTO_END_IDLE_MS);
+          continue;
+        }
+        // Hard cap: a single session running for more than 24h is always a
+        // ghost. Catches heartbeat-only sessions that never sent a prompt
+        // (so the lastPrompt check above short-circuits) and runaway
+        // heartbeat loops.
+        if (now - startedAt > MAX_SESSION_AGE_MS) {
+          abandonedIds.push(s.id);
+          s.status = 'COMPLETED';
+          s.endedAt = new Date(startedAt + MAX_SESSION_AGE_MS);
           continue;
         }
       }
@@ -459,7 +475,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 // GET /active — currently running sessions
 router.get('/active', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const activeWhere: any = {
       status: 'RUNNING',
@@ -467,7 +483,7 @@ router.get('/active', async (req: AuthRequest, res: Response) => {
     };
 
     // Non-admin users only see their own active sessions
-    const activeRole = (req.user!.role || '').toUpperCase();
+    const activeRole = (req.activeRole! || '').toUpperCase();
     const activeIsAdmin = activeRole === 'ADMIN' || activeRole === 'OWNER';
     if (!activeIsAdmin) {
       activeWhere.userId = req.user!.id;
@@ -531,7 +547,7 @@ router.get('/active', async (req: AuthRequest, res: Response) => {
 // GET /by-pr — sessions grouped by pull request
 router.get('/by-pr', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     // Get all repos for org (cap — the in(...) filter below otherwise
     // scales with total org repos, and unbounded materialization of
@@ -636,7 +652,7 @@ router.get('/by-pr', async (req: AuthRequest, res: Response) => {
 // GET /by-commit — find session linked to a specific commit SHA
 router.get('/by-commit', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const sha = req.query.sha as string;
 
     if (!sha) {
@@ -710,7 +726,7 @@ router.get('/by-commit', async (req: AuthRequest, res: Response) => {
 const MAX_STREAMS_PER_USER = 10;
 const activeStreamCounts = new Map<string, number>();
 router.get('/stream', async (req: AuthRequest, res: Response) => {
-  const orgId = req.user!.orgId;
+  const orgId = req.activeOrgId!;
   const streamUserId = req.user!.id;
 
   const current = activeStreamCounts.get(streamUserId) || 0;
@@ -769,7 +785,7 @@ router.patch('/bulk/archive', requireRole('ADMIN'), async (req: AuthRequest, res
       return res.status(400).json({ error: 'Cannot archive more than 1000 sessions at once' });
     }
 
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const result = await prisma.codingSession.updateMany({
       where: {
         id: { in: sessionIds },
@@ -792,11 +808,11 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 
     const detailWhere: any = {
       id: id.length < 36 ? { startsWith: id } : id,
-      commit: { repo: { orgId: req.user!.orgId } },
+      commit: { repo: { orgId: req.activeOrgId! } },
     };
 
     // Non-admin users can only view their own sessions
-    const detailRole = (req.user!.role || '').toUpperCase();
+    const detailRole = (req.activeRole! || '').toUpperCase();
     const detailIsAdmin = detailRole === 'ADMIN' || detailRole === 'OWNER';
     if (!detailIsAdmin) {
       detailWhere.userId = req.user!.id;
@@ -869,6 +885,19 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       mapped.chainSessions = chainSessions;
     }
 
+    // Mid-session model switches: surface every distinct model the session
+    // saw across its prompt changes. Falls back to [session.model] when no
+    // PromptChange.model values are present (older clients / single-model
+    // sessions). Order: first-seen-first.
+    const seen = new Set<string>();
+    const modelsUsed: string[] = [];
+    for (const pc of session.promptChanges ?? []) {
+      const m = (pc as { model?: string | null }).model || null;
+      if (m && !seen.has(m)) { seen.add(m); modelsUsed.push(m); }
+    }
+    if (modelsUsed.length === 0 && session.model) modelsUsed.push(session.model);
+    mapped.modelsUsed = modelsUsed;
+
     res.json(mapped);
   } catch (err) {
     console.error('Get session error:', err);
@@ -883,7 +912,7 @@ router.get('/:id/diff', async (req: AuthRequest, res: Response) => {
     const session = await prisma.codingSession.findFirst({
       where: scopedSessionWhere(req, {
         id,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       }),
       include: { sessionDiff: true },
     });
@@ -930,7 +959,7 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
     const session = await prisma.codingSession.findFirst({
       where: {
         id,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       },
     });
 
@@ -955,7 +984,7 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'SESSION_REVIEWED',
         resource: id,
@@ -966,7 +995,7 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
     // Notify based on review status
     if (status === 'FLAGGED') {
       await notifyOrgAdmins(
-        req.user!.orgId,
+        req.activeOrgId!,
         'SESSION_FLAGGED',
         'Session Flagged',
         `A coding session has been flagged for review`,
@@ -975,7 +1004,7 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
       );
     } else {
       await notifyOrgAdmins(
-        req.user!.orgId,
+        req.activeOrgId!,
         'REVIEW_COMPLETED',
         'Review Completed',
         `A coding session has been ${status.toLowerCase()}`,
@@ -988,7 +1017,7 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
     let githubUpdated = false;
     let prsUpdated = 0;
     try {
-      const integration = await getIntegrationConfig(req.user!.orgId);
+      const integration = await getIntegrationConfig(req.activeOrgId!);
       if (integration?.parsedSettings.checkOnReview && session.commitId) {
         const commit = await prisma.commit.findUnique({
           where: { id: session.commitId },
@@ -1043,7 +1072,7 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
 
             // Update or create PR comment
             if (integration.parsedSettings.postComments && parsed) {
-              const org = await prisma.org.findUnique({ where: { id: req.user!.orgId }, select: { slug: true } });
+              const org = await prisma.org.findUnique({ where: { id: req.activeOrgId! }, select: { slug: true } });
               const commentBody = buildSessionSummaryComment(sessions, originBaseUrl, org?.slug);
               if (pr.commentId) {
                 await updatePRComment(
@@ -1092,7 +1121,7 @@ router.post('/:id/review', requireRole('ADMIN'), async (req: AuthRequest, res: R
     emitSessionEvent({
       type: 'session:reviewed',
       sessionId: id,
-      orgId: req.user!.orgId,
+      orgId: req.activeOrgId!,
       data: { status },
       timestamp: new Date().toISOString(),
     });
@@ -1116,7 +1145,7 @@ router.post('/:id/ai-review', expensiveLimiter, async (req: AuthRequest, res: Re
     const session = await prisma.codingSession.findFirst({
       where: {
         id,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       },
       include: {
         commit: { include: { repo: true } },
@@ -1144,7 +1173,7 @@ router.post('/:id/ai-review', expensiveLimiter, async (req: AuthRequest, res: Re
 
     const result = await runAIReview({
       sessionId: id,
-      orgId: req.user!.orgId,
+      orgId: req.activeOrgId!,
       model: session.model,
       prompt: session.prompt || '',
       filesChanged,
@@ -1207,7 +1236,7 @@ router.post('/:id/end', async (req: AuthRequest, res: Response) => {
       where: {
         id: idFilter,
         OR: [
-          { commit: { repo: { orgId: req.user!.orgId } } },
+          { commit: { repo: { orgId: req.activeOrgId! } } },
           { userId: req.user!.id },
         ],
       },
@@ -1246,7 +1275,7 @@ router.post('/:id/end', async (req: AuthRequest, res: Response) => {
       }),
       prisma.auditLog.create({
         data: {
-          orgId: req.user!.orgId,
+          orgId: req.activeOrgId!,
           userId: req.user!.id,
           action: 'SESSION_ENDED',
           resource: session.id,
@@ -1266,7 +1295,7 @@ router.post('/:id/end', async (req: AuthRequest, res: Response) => {
 router.post('/:id/branch', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { commitSha, branchName, checkout } = req.body;
 
     if (!commitSha) return res.status(400).json({ error: 'commitSha required' });
@@ -1302,7 +1331,7 @@ router.post('/:id/branch', async (req: AuthRequest, res: Response) => {
 router.post('/:id/restore', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { treeSha, commitSha, promptIndex } = req.body;
 
     if (!treeSha && !commitSha) {
@@ -1342,7 +1371,7 @@ router.post('/:id/restore', async (req: AuthRequest, res: Response) => {
 router.get('/:id/restore-status', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const session = await prisma.codingSession.findFirst({
       where: { id, commit: { repo: { orgId } } },
@@ -1375,7 +1404,7 @@ router.patch('/:id/archive', requireRole('ADMIN'), async (req: AuthRequest, res:
     const session = await prisma.codingSession.findFirst({
       where: {
         id,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       },
     });
 
@@ -1390,7 +1419,7 @@ router.patch('/:id/archive', requireRole('ADMIN'), async (req: AuthRequest, res:
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: archived !== false ? 'SESSION_ARCHIVED' : 'SESSION_UNARCHIVED',
         resource: id,
@@ -1412,7 +1441,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     const session = await prisma.codingSession.findFirst({
       where: {
         id,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       },
     });
 
@@ -1435,7 +1464,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'SESSION_DELETED',
         resource: id,
@@ -1635,7 +1664,7 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
     const session = await prisma.codingSession.findFirst({
       where: scopedSessionWhere(req, {
         id,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       }),
       include: {
         promptChanges: { orderBy: { promptIndex: 'asc' } },
@@ -1759,10 +1788,21 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
       (l) => l.attribution !== null && !l.isGap,
     ).length;
 
+    // Distinct list of models used across this session's prompts. Falls back
+    // to [session.model] when no per-prompt model field is populated.
+    const blameSeen = new Set<string>();
+    const blameModelsUsed: string[] = [];
+    for (const pc of session.promptChanges ?? []) {
+      const m = (pc as { model?: string | null }).model || null;
+      if (m && !blameSeen.has(m)) { blameSeen.add(m); blameModelsUsed.push(m); }
+    }
+    if (blameModelsUsed.length === 0 && session.model) blameModelsUsed.push(session.model);
+
     res.json({
       file,
       sessionId: id,
       model: session.model,
+      modelsUsed: blameModelsUsed,
       totalAttributedLines,
       lines: blameLines,
       prompts: promptsInfo.map((p) => ({
@@ -1836,7 +1876,7 @@ router.post('/:id/ask', expensiveLimiter, async (req: AuthRequest, res: Response
     const session = await prisma.codingSession.findFirst({
       where: scopedSessionWhere(req, {
         id,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       }),
       include: {
         commit: true,
@@ -1937,7 +1977,7 @@ router.post('/:id/ask', expensiveLimiter, async (req: AuthRequest, res: Response
     }
 
     // Use org-level LLM config (same key configured in Settings)
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const [orgKey, orgModel, orgProvider] = await Promise.all([
       getOrgLLMKey(orgId),
       getOrgLLMModel(orgId),
@@ -1982,7 +2022,7 @@ router.post('/:id/secrets', async (req: AuthRequest, res: Response) => {
     const session = await prisma.codingSession.findFirst({
       where: {
         id: sessionId,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       },
     });
 
@@ -2006,7 +2046,7 @@ router.post('/:id/secrets', async (req: AuthRequest, res: Response) => {
     }
 
     // Audit log
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     await prisma.auditLog.create({
       data: {
         orgId,
@@ -2056,7 +2096,7 @@ router.post('/:id/share', async (req: AuthRequest, res: Response) => {
     const session = await prisma.codingSession.findFirst({
       where: {
         id: sessionId.length < 36 ? { startsWith: sessionId } : sessionId,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       },
     });
 
@@ -2123,7 +2163,7 @@ router.delete('/:id/share', async (req: AuthRequest, res: Response) => {
     const session = await prisma.codingSession.findFirst({
       where: {
         id: sessionId.length < 36 ? { startsWith: sessionId } : sessionId,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       },
     });
 
@@ -2148,7 +2188,7 @@ router.delete('/:id/share', async (req: AuthRequest, res: Response) => {
 router.get('/bookmarked', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const bookmarks = await prisma.sessionBookmark.findMany({
       where: { userId },

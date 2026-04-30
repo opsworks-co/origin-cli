@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { request } from '../api';
 import NotificationBell from './NotificationBell';
+import OrgSwitcher from './OrgSwitcher';
 import { LogoMark } from './Logo';
 // import ChatWidget from './ChatWidget'; // disabled — see <ChatWidget> block below
 import {
@@ -24,7 +25,9 @@ import {
   X,
   Sun,
   Moon,
+  Sparkles,
 } from 'lucide-react';
+import ProductTour, { TEAM_TOUR } from './ProductTour';
 
 // Team navigation — same grouped-sidebar pattern as solo, team accent (indigo).
 // Workspace    = daily work (what happened today)
@@ -67,6 +70,17 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  // Tour highlight: if the user hasn't run (or dismissed) the tour, the
+  // sidebar Tour button glows. Same persistence key as the tour completion
+  // flag so it self-clears once they finish or close the tour. URL
+  // ?tour=1 param triggers an immediate launch — used by deep-links and
+  // the post-redirect step from the welcome page.
+  const [tourHighlight, setTourHighlight] = useState(() => {
+    try {
+      const completed = localStorage.getItem('origin:tour:team-tour-v1') === '1';
+      return !completed;
+    } catch { return true; }
+  });
 
   useEffect(() => {
     request<{ isSuperAdmin: boolean }>('/api/admin/check')
@@ -123,7 +137,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </div>
 
         {/* Nav groups */}
-        <nav className="flex-1 overflow-y-auto px-2 py-4 space-y-5">
+        <nav data-tour="sidebar-nav" className="flex-1 overflow-y-auto px-2 py-4 space-y-5">
           {NAV_GROUPS.map((group) => (
             <div key={group.label}>
               <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-gray-400 dark:text-gray-600">
@@ -134,6 +148,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                   <NavLink
                     key={item.to}
                     to={item.to}
+                    data-tour={`team-nav-${item.to.replace('/', '').replace(/\W/g, '-') || 'home'}`}
                     className={linkClasses}
                     onClick={() => setSidebarOpen(false)}
                   >
@@ -176,31 +191,70 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </nav>
 
         {/* User footer */}
-        <div className="border-t border-gray-200 dark:border-white/[0.05] px-2 py-3">
-          <div className="flex items-center gap-2.5 px-2 py-2 rounded-lg">
-            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500/25 to-indigo-600/15 ring-1 ring-indigo-500/25 flex items-center justify-center text-indigo-600 dark:text-indigo-300 text-[12px] font-semibold">
-              {user?.name?.charAt(0).toUpperCase() ?? '?'}
+        <div className="border-t border-gray-200 dark:border-white/[0.05] px-2 py-3 space-y-2">
+          {/* Combined card: org switcher → divider → user identity. The two
+              halves share a single rounded surface so they read as one
+              account block, instead of two floating rows. */}
+          <div className="rounded-xl border border-gray-200 dark:border-white/[0.05] bg-white/40 dark:bg-white/[0.015] overflow-hidden">
+            {/* Org switcher — drives every API request via X-Origin-Org. */}
+            <OrgSwitcher />
+            <div className="h-px bg-gray-200/60 dark:bg-white/[0.04]" />
+            <div className="flex items-center gap-2.5 px-2.5 py-2">
+              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500/25 to-indigo-600/15 ring-1 ring-indigo-500/25 flex items-center justify-center text-indigo-600 dark:text-indigo-300 text-[12px] font-semibold flex-shrink-0">
+                {user?.name?.charAt(0).toUpperCase() ?? '?'}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[12.5px] font-medium text-gray-800 dark:text-gray-100 truncate leading-tight">{user?.name}</p>
+                <p className="text-[10px] text-gray-500 dark:text-gray-500 truncate leading-tight">{user?.email}</p>
+              </div>
+              <NotificationBell />
+              <button
+                onClick={toggleTheme}
+                className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 rounded-md transition-colors"
+                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              >
+                {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+              </button>
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-medium text-gray-800 dark:text-gray-100 truncate leading-tight">{user?.name}</p>
-              <p className="text-[10px] text-gray-500 dark:text-gray-500 truncate leading-tight">{user?.orgName}</p>
-            </div>
-            <NotificationBell />
+          </div>
+          <div className="flex items-center gap-1">
             <button
-              onClick={toggleTheme}
-              className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 rounded-md transition-colors"
-              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              onClick={() => {
+                // Tour acknowledged regardless of how it ends — clear the
+                // sidebar glow now even if they cancel the tour itself.
+                setTourHighlight(false);
+                // ProductTour is mounted only inside Layout, so when the
+                // user is on a non-team route (rare; redirects keep team
+                // accounts inside Layout), navigate first then dispatch.
+                if (window.location.pathname === '/dashboard') {
+                  window.dispatchEvent(new CustomEvent('origin:start-tour'));
+                } else {
+                  window.location.href = '/dashboard?tour=1';
+                }
+              }}
+              className={
+                tourHighlight
+                  ? 'relative flex-1 flex items-center justify-center gap-1.5 text-[11px] font-semibold text-white px-2 py-1.5 rounded-md bg-gradient-to-r from-indigo-600 to-violet-600 shadow-[0_0_0_1px_rgba(139,92,246,0.5),0_0_18px_rgba(139,92,246,0.45)] hover:shadow-[0_0_0_1px_rgba(139,92,246,0.7),0_0_24px_rgba(139,92,246,0.6)] transition-all'
+                  : 'flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors'
+              }
             >
-              {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+              <Sparkles className={`w-3.5 h-3.5 ${tourHighlight ? 'animate-pulse' : ''}`} />
+              Tour
+              {tourHighlight && (
+                <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-fuchsia-400 opacity-75 animate-ping" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-fuchsia-500" />
+                </span>
+              )}
+            </button>
+            <button
+              onClick={handleLogout}
+              className="flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sign out
             </button>
           </div>
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center justify-center gap-1.5 mt-1 text-[11px] text-gray-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            Sign out
-          </button>
         </div>
       </aside>
 
@@ -230,6 +284,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
       {/* AI Assistant — disabled for now, re-enable when the feature is ready.
           To restore: uncomment this <ChatWidget> block and the import above. */}
+
+      {/* Product tour — TEAM_TOUR walks new admins through Dashboard →
+          Repos → Agents → IAM → Policies → Budget → Insights. Auto-fires
+          on first ?tour=1 visit; re-runnable from the sidebar Tour button. */}
+      <ProductTour
+        steps={TEAM_TOUR}
+        tourId="team-tour-v1"
+        onComplete={() => setTourHighlight(false)}
+      />
     </div>
   );
 }

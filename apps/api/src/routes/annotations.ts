@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 
 const router = Router({ mergeParams: true });
 
@@ -91,7 +91,7 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    const role = (req.user!.role || '').toUpperCase();
+    const role = (req.activeRole! || '').toUpperCase();
     const isAdmin = role === 'ADMIN' || role === 'OWNER';
     const isOwner = session.userId === req.user!.id;
 

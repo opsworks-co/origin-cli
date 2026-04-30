@@ -40,6 +40,12 @@ export default function AgentDetail() {
   const [addRuleSeverity, setAddRuleSeverity] = useState('MEDIUM');
   const [addingRule, setAddingRule] = useState(false);
 
+  // AgentModel rows
+  const [agentModels, setAgentModels] = useState<api.AgentModel[]>([]);
+  const [showAddModel, setShowAddModel] = useState(false);
+  const [newModelName, setNewModelName] = useState('');
+  const [savingModelKey, setSavingModelKey] = useState<string | null>(null);
+
   // Edit state
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
@@ -62,9 +68,56 @@ export default function AgentDetail() {
       }),
       api.getAgentVersions(id).then(r => setVersions(r.versions)),
       api.getPolicies().then(setPolicies).catch(() => {}),
+      api.getAgentModels(id).then(setAgentModels).catch(() => {}),
     ])
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
+  };
+
+  // Update one field on a model row. Inline-edit pattern: blur or Enter
+  // commits, the API returns the updated row, we splice it back in. An empty
+  // string / non-number clears the override (sends null) so the row falls
+  // back to the agent's default.
+  const handleModelFieldChange = async (
+    model: string,
+    field: 'monthlyLimit' | 'tokenLimit' | 'maxCostPerSession' | 'maxTokensPerSession',
+    raw: string,
+  ) => {
+    if (!id) return;
+    setSavingModelKey(`${model}:${field}`);
+    try {
+      const num = raw.trim() === '' ? null : Number(raw);
+      const value = typeof num === 'number' && Number.isFinite(num) && num > 0 ? num : null;
+      const updated = await api.updateAgentModel(id, model, { [field]: value });
+      setAgentModels((prev) => prev.map((m) => (m.model === model ? updated : m)));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingModelKey(null);
+    }
+  };
+
+  const handleAddModel = async () => {
+    if (!id || !newModelName.trim()) return;
+    try {
+      const created = await api.createAgentModel(id, { model: newModelName.trim() });
+      setAgentModels((prev) => [...prev, created].sort((a, b) => a.model.localeCompare(b.model)));
+      setNewModelName('');
+      setShowAddModel(false);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleRemoveModel = async (model: string) => {
+    if (!id) return;
+    if (!confirm(`Remove "${model}" override? This model will fall back to agent defaults.`)) return;
+    try {
+      await api.deleteAgentModel(id, model);
+      setAgentModels((prev) => prev.filter((m) => m.model !== model));
+    } catch (err: any) {
+      setError(err.message);
+    }
   };
 
   const populateForm = (a: api.Agent) => {
@@ -278,7 +331,19 @@ export default function AgentDetail() {
             {agent.description && <><br />{agent.description}</>}
           </>
         }
-        meta={<Pill variant={agentStatusToVariant(agent.status)}>{agent.status}</Pill>}
+        meta={
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <Pill variant={agentStatusToVariant(agent.status)}>{agent.status}</Pill>
+            {agent.isCustom ? (
+              <Pill variant="neutral">Custom agent</Pill>
+            ) : (
+              <Pill variant="ai">Catalog agent</Pill>
+            )}
+            <Pill variant={agent.isEnabled ? 'success' : 'neutral'}>
+              {agent.isEnabled ? 'Enabled' : 'Disabled'}
+            </Pill>
+          </div>
+        }
       />
 
       {error && (
@@ -288,7 +353,7 @@ export default function AgentDetail() {
         <div className="card bg-green-900/20 border-green-800 text-green-400 text-sm mb-4">{success}</div>
       )}
 
-      <div className="flex gap-2 mb-6">
+      <div className="flex gap-2 mb-6 flex-wrap">
         <button onClick={() => setTab('config')} className={tabClasses('config')}>
           Configuration
         </button>
@@ -301,6 +366,12 @@ export default function AgentDetail() {
         <button onClick={() => setTab('versions')} className={tabClasses('versions')}>
           Versions ({versions.length})
         </button>
+        <Link
+          to={`/agents/${agent.id}/access`}
+          className="px-3 py-1.5 text-sm rounded-md text-gray-400 hover:text-gray-200 hover:bg-white/[0.04] transition-colors"
+        >
+          Access
+        </Link>
       </div>
 
       {/* Configuration Tab */}
@@ -421,6 +492,155 @@ export default function AgentDetail() {
                 />
               </div>
             </div>
+          </div>
+
+          {/* Models — per-model budget overrides */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-gray-300">Models</h3>
+              <button
+                type="button"
+                onClick={() => setShowAddModel((v) => !v)}
+                className="text-xs text-indigo-400 hover:text-indigo-300"
+              >
+                {showAddModel ? 'Cancel' : '+ Add model'}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-3">
+              Per-model budget overrides. Leave a field blank to inherit the agent's default ({agent?.model}).
+            </p>
+
+            {showAddModel && (
+              <div className="flex items-center gap-2 mb-3 p-2 rounded border border-gray-700/50 bg-gray-900/40">
+                <input
+                  type="text"
+                  value={newModelName}
+                  onChange={(e) => setNewModelName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddModel(); if (e.key === 'Escape') { setShowAddModel(false); setNewModelName(''); } }}
+                  className="input flex-1 text-sm"
+                  placeholder="e.g. claude-opus-4-7"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={handleAddModel}
+                  disabled={!newModelName.trim()}
+                  className="text-xs text-green-400 hover:text-green-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Add
+                </button>
+              </div>
+            )}
+
+            {agentModels.length === 0 ? (
+              <p className="text-xs text-gray-600 py-2">No model overrides yet — every session uses the agent defaults.</p>
+            ) : (
+              <div className="divide-y divide-gray-800">
+                {agentModels.map((m) => (
+                  <div key={m.id} className="py-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-mono text-gray-200">{m.model}</span>
+                        {m.autoDetected && (
+                          <span
+                            className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/20"
+                            title="Auto-detected by the server when this model first appeared in a session. Set limits below or remove to dismiss."
+                          >
+                            Auto-detected
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {savingModelKey?.startsWith(`${m.model}:`) && (
+                          <span className="text-[10px] text-gray-600">saving…</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveModel(m.model)}
+                          className="text-xs text-gray-500 hover:text-red-400"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                    <div className="grid sm:grid-cols-4 gap-3">
+                      <div>
+                        <label className="block text-[10px] text-gray-500 uppercase tracking-wider mb-1">Monthly $ (USD)</label>
+                        <input
+                          key={`${m.id}:monthlyLimit:${m.monthlyLimit}`}
+                          type="number"
+                          step="0.01"
+                          defaultValue={m.monthlyLimit ?? ''}
+                          onBlur={(e) => {
+                            const cur = m.monthlyLimit;
+                            const next = e.target.value.trim() === '' ? null : Number(e.target.value);
+                            if ((cur ?? null) !== (Number.isFinite(next) ? next : null)) {
+                              handleModelFieldChange(m.model, 'monthlyLimit', e.target.value);
+                            }
+                          }}
+                          className="input w-full text-sm"
+                          placeholder="inherit"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 uppercase tracking-wider mb-1">Monthly tokens</label>
+                        <input
+                          key={`${m.id}:tokenLimit:${m.tokenLimit}`}
+                          type="number"
+                          step="1000"
+                          defaultValue={m.tokenLimit ?? ''}
+                          onBlur={(e) => {
+                            const cur = m.tokenLimit;
+                            const next = e.target.value.trim() === '' ? null : Number(e.target.value);
+                            if ((cur ?? null) !== (Number.isFinite(next) ? next : null)) {
+                              handleModelFieldChange(m.model, 'tokenLimit', e.target.value);
+                            }
+                          }}
+                          className="input w-full text-sm"
+                          placeholder="inherit"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 uppercase tracking-wider mb-1">Max $/session</label>
+                        <input
+                          key={`${m.id}:maxCostPerSession:${m.maxCostPerSession}`}
+                          type="number"
+                          step="0.01"
+                          defaultValue={m.maxCostPerSession ?? ''}
+                          onBlur={(e) => {
+                            const cur = m.maxCostPerSession;
+                            const next = e.target.value.trim() === '' ? null : Number(e.target.value);
+                            if ((cur ?? null) !== (Number.isFinite(next) ? next : null)) {
+                              handleModelFieldChange(m.model, 'maxCostPerSession', e.target.value);
+                            }
+                          }}
+                          className="input w-full text-sm"
+                          placeholder={editMaxCost || 'inherit'}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 uppercase tracking-wider mb-1">Max tokens/session</label>
+                        <input
+                          key={`${m.id}:maxTokensPerSession:${m.maxTokensPerSession}`}
+                          type="number"
+                          step="1000"
+                          defaultValue={m.maxTokensPerSession ?? ''}
+                          onBlur={(e) => {
+                            const cur = m.maxTokensPerSession;
+                            const next = e.target.value.trim() === '' ? null : Number(e.target.value);
+                            if ((cur ?? null) !== (Number.isFinite(next) ? next : null)) {
+                              handleModelFieldChange(m.model, 'maxTokensPerSession', e.target.value);
+                            }
+                          }}
+                          className="input w-full text-sm"
+                          placeholder={editMaxTokens || 'inherit'}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Allowed Tools */}

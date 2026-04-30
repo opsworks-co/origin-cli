@@ -32,13 +32,43 @@ const CHART_THEME = {
 const MODEL_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899'];
 
 const TT_STYLE = {
-  backgroundColor: '#0b1220',
+  backgroundColor: 'rgba(11, 18, 32, 0.96)',
   border: '1px solid #1f2937',
-  borderRadius: '0.5rem',
+  borderRadius: '0.625rem',
   color: '#f3f4f6',
   fontSize: '0.75rem',
   boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+  padding: '0.5rem 0.75rem',
 };
+// Subtle vertical-line cursor for area/line charts. The default recharts
+// rectangle cursor is heavy on dark backgrounds; a thin dashed indigo line
+// reads as "you are here" without obscuring the curve.
+const CHART_CURSOR = { stroke: '#6366f1', strokeWidth: 1, strokeDasharray: '4 3', strokeOpacity: 0.5 };
+
+// Format YYYY-MM-DD → MMM DD so axis ticks stay one line on narrow charts.
+// Falls through unchanged when the input is already short (e.g. "Mon",
+// week labels, or projection markers).
+function shortDate(s: string | number): string {
+  if (typeof s !== 'string') return String(s);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return s;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${months[Number(m[2]) - 1]} ${Number(m[3])}`;
+}
+
+// Color tied to each model name. Mirrors the `agentColor` palette on the
+// Dashboard so a "claude-opus-4-7" bar in Insights matches the indigo/
+// purple of Claude everywhere else.
+function modelColor(name: string): string {
+  const lower = (name || '').toLowerCase();
+  if (lower.includes('claude') || lower.includes('opus') || lower.includes('sonnet') || lower.includes('haiku')) return '#a78bfa';
+  if (lower.includes('cursor') || lower.includes('composer')) return '#38bdf8';
+  if (lower.includes('codex') || lower.includes('gpt') || lower.includes('o3') || lower.includes('o1')) return '#34d399';
+  if (lower.includes('gemini')) return '#fbbf24';
+  if (lower.includes('copilot')) return '#f472b6';
+  if (lower.includes('aider')) return '#fb7185';
+  return '#8b5cf6';
+}
 
 // ── Layout primitives ────────────────────────────────────────────────────────
 
@@ -115,9 +145,18 @@ function StatCard({
 
 function EmptyState({ message }: { message: string }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full text-gray-600">
-      <svg className="w-8 h-8 mb-2 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+    <div className="flex flex-col items-center justify-center h-full text-gray-600 gap-2">
+      {/* Faint mock-chart so the empty card still feels like a chart, not
+          a blank box. SVG, no animation, no DOM cost. */}
+      <svg className="w-20 h-12 opacity-25" viewBox="0 0 80 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="emptyGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#6366f1" stopOpacity="0.5" />
+            <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path d="M0 28 L10 22 L20 24 L30 16 L40 18 L50 10 L60 14 L70 6 L80 8 L80 32 L0 32 Z" fill="url(#emptyGrad)" />
+        <path d="M0 28 L10 22 L20 24 L30 16 L40 18 L50 10 L60 14 L70 6 L80 8" stroke="#6366f1" strokeWidth="1" strokeOpacity="0.6" fill="none" strokeLinejoin="round" />
       </svg>
       <span className="text-xs">{message}</span>
     </div>
@@ -374,49 +413,50 @@ export default function Insights() {
           <ChartCard title="AI Authorship %" hint="Running average % AI-authored">
             {aiAuthorshipOverTime.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={aiAuthorshipOverTime}>
+                <AreaChart data={aiAuthorshipOverTime} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                   <defs>
                     <linearGradient id="gradAi" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={CHART_THEME.indigo} stopOpacity={0.4} />
-                      <stop offset="95%" stopColor={CHART_THEME.indigo} stopOpacity={0} />
+                      <stop offset="0%" stopColor={CHART_THEME.indigo} stopOpacity={0.55} />
+                      <stop offset="100%" stopColor={CHART_THEME.indigo} stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />
-                  <XAxis dataKey="date" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
-                  <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [`${v}%`, 'AI Authored']} />
-                  <Area type="monotone" dataKey="percent" stroke={CHART_THEME.indigo} strokeWidth={2.5} fill="url(#gradAi)" />
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={shortDate} minTickGap={24} />
+                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} unit="%" width={36} domain={[0, 100]} />
+                  <Tooltip contentStyle={TT_STYLE} cursor={CHART_CURSOR} formatter={(v: number) => [`${v}%`, 'AI Authored']} labelFormatter={shortDate} />
+                  <Area type="monotone" dataKey="percent" stroke={CHART_THEME.indigo} strokeWidth={2.5} fill="url(#gradAi)" activeDot={{ r: 4, strokeWidth: 0 }} />
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState message="No data yet" />
+              <EmptyState message="No authorship data yet" />
             )}
           </ChartCard>
 
-          <ChartCard title="Lines changed" hint="Cumulative added vs removed">
+          <ChartCard title="Lines changed" hint="Added vs removed per day">
             {linesByDay.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={linesByDay}>
+                <AreaChart data={linesByDay} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                   <defs>
                     <linearGradient id="gradAdded" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={CHART_THEME.green} stopOpacity={0.4} />
-                      <stop offset="95%" stopColor={CHART_THEME.green} stopOpacity={0} />
+                      <stop offset="0%" stopColor={CHART_THEME.green} stopOpacity={0.5} />
+                      <stop offset="100%" stopColor={CHART_THEME.green} stopOpacity={0} />
                     </linearGradient>
                     <linearGradient id="gradRemoved" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={CHART_THEME.red} stopOpacity={0.4} />
-                      <stop offset="95%" stopColor={CHART_THEME.red} stopOpacity={0} />
+                      <stop offset="0%" stopColor={CHART_THEME.red} stopOpacity={0.45} />
+                      <stop offset="100%" stopColor={CHART_THEME.red} stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />
-                  <XAxis dataKey="date" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <Tooltip contentStyle={TT_STYLE} />
-                  <Area type="monotone" dataKey="added" stroke={CHART_THEME.green} strokeWidth={2} fill="url(#gradAdded)" name="Added" />
-                  <Area type="monotone" dataKey="removed" stroke={CHART_THEME.red} strokeWidth={2} fill="url(#gradRemoved)" name="Removed" />
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={shortDate} minTickGap={24} />
+                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} width={36} />
+                  <Tooltip contentStyle={TT_STYLE} cursor={CHART_CURSOR} labelFormatter={shortDate} />
+                  <Legend wrapperStyle={{ fontSize: '0.7rem', paddingTop: 4 }} iconType="circle" iconSize={8} />
+                  <Area type="monotone" dataKey="added" stroke={CHART_THEME.green} strokeWidth={2} fill="url(#gradAdded)" name="Added" activeDot={{ r: 4, strokeWidth: 0 }} />
+                  <Area type="monotone" dataKey="removed" stroke={CHART_THEME.red} strokeWidth={2} fill="url(#gradRemoved)" name="Removed" activeDot={{ r: 4, strokeWidth: 0 }} />
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState message="No data yet" />
+              <EmptyState message="No line-change data yet" />
             )}
           </ChartCard>
 
@@ -427,57 +467,61 @@ export default function Insights() {
       <section>
         <SectionHeader title="Cost & tokens" subtitle="Where your AI budget is going" />
         <div className="grid lg:grid-cols-2 gap-5">
-          <ChartCard title="Cost over time" hint="Cumulative spend">
+          <ChartCard title="Cost over time" hint="Daily spend">
             {costByDay.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={costByDay}>
+                <AreaChart data={costByDay} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                   <defs>
                     <linearGradient id="gradCost" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={CHART_THEME.cyan} stopOpacity={0.4} />
-                      <stop offset="95%" stopColor={CHART_THEME.cyan} stopOpacity={0} />
+                      <stop offset="0%" stopColor={CHART_THEME.cyan} stopOpacity={0.55} />
+                      <stop offset="100%" stopColor={CHART_THEME.cyan} stopOpacity={0} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />
-                  <XAxis dataKey="date" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v}`} />
-                  <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']} />
-                  <Area type="monotone" dataKey="cost" stroke={CHART_THEME.cyan} strokeWidth={2.5} fill="url(#gradCost)" />
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={shortDate} minTickGap={24} />
+                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v}`} width={42} />
+                  <Tooltip contentStyle={TT_STYLE} cursor={CHART_CURSOR} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']} labelFormatter={shortDate} />
+                  <Area type="monotone" dataKey="cost" stroke={CHART_THEME.cyan} strokeWidth={2.5} fill="url(#gradCost)" activeDot={{ r: 4, strokeWidth: 0 }} />
                 </AreaChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState message="No data yet" />
+              <EmptyState message="No spend recorded yet" />
             )}
           </ChartCard>
 
-          <ChartCard title="Cost by model">
+          <ChartCard title="Cost by model" hint="Top model spenders">
             {stats.costByModel && stats.costByModel.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={stats.costByModel} layout="vertical">
+                <BarChart data={[...stats.costByModel].sort((a, b) => b.cost - a.cost)} layout="vertical" margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} horizontal={false} />
                   <XAxis type="number" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v}`} />
                   <YAxis type="category" dataKey="model" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} width={140} />
-                  <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']} />
-                  <Bar dataKey="cost" fill={CHART_THEME.purple} radius={[0, 4, 4, 0]} />
+                  <Tooltip contentStyle={TT_STYLE} cursor={{ fill: 'rgba(99,102,241,0.06)' }} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']} />
+                  <Bar dataKey="cost" radius={[0, 4, 4, 0]}>
+                    {stats.costByModel.map((m) => (
+                      <Cell key={m.model} fill={modelColor(m.model)} />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState message="No data yet" />
+              <EmptyState message="No model spend yet" />
             )}
           </ChartCard>
 
-          <ChartCard title="Cost by repository">
+          <ChartCard title="Cost by repository" hint="Top repos by spend">
             {stats.costByRepo && stats.costByRepo.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={stats.costByRepo} layout="vertical">
+                <BarChart data={[...stats.costByRepo].sort((a, b) => b.cost - a.cost)} layout="vertical" margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} horizontal={false} />
                   <XAxis type="number" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v}`} />
                   <YAxis type="category" dataKey="repo" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} width={140} />
-                  <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']} />
+                  <Tooltip contentStyle={TT_STYLE} cursor={{ fill: 'rgba(99,102,241,0.06)' }} formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']} />
                   <Bar dataKey="cost" fill={CHART_THEME.indigo} radius={[0, 4, 4, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState message="No data yet" />
+              <EmptyState message="No repo spend yet" />
             )}
           </ChartCard>
         </div>
@@ -565,21 +609,22 @@ export default function Insights() {
             {trendData.length > 0 && (
               <ChartCard title="Adoption trend" hint="Weekly share by model" tall>
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={trendData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />
-                    <XAxis dataKey="week" tick={{ fontSize: 10, fill: CHART_THEME.text }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10, fill: CHART_THEME.text }} axisLine={false} tickLine={false} width={34} />
-                    <Tooltip contentStyle={TT_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: '0.7rem' }} />
-                    {modelNames.map((name, i) => (
+                  <AreaChart data={trendData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} vertical={false} />
+                    <XAxis dataKey="week" tick={{ fontSize: 10, fill: CHART_THEME.text }} axisLine={false} tickLine={false} tickFormatter={shortDate} minTickGap={32} />
+                    <YAxis tick={{ fontSize: 10, fill: CHART_THEME.text }} axisLine={false} tickLine={false} width={36} />
+                    <Tooltip contentStyle={TT_STYLE} cursor={CHART_CURSOR} labelFormatter={shortDate} />
+                    <Legend wrapperStyle={{ fontSize: '0.7rem', paddingTop: 4 }} iconType="circle" iconSize={8} />
+                    {modelNames.map((name) => (
                       <Area
                         key={name}
                         type="monotone"
                         dataKey={name}
                         stackId="1"
-                        stroke={MODEL_COLORS[i % MODEL_COLORS.length]}
-                        fill={MODEL_COLORS[i % MODEL_COLORS.length]}
-                        fillOpacity={0.35}
+                        stroke={modelColor(name)}
+                        fill={modelColor(name)}
+                        fillOpacity={0.4}
+                        strokeWidth={1.5}
                       />
                     ))}
                   </AreaChart>
@@ -594,19 +639,19 @@ export default function Insights() {
       <section>
         <SectionHeader title="Repositories" subtitle="Where work is happening" />
         <div className="grid lg:grid-cols-2 gap-5">
-          <ChartCard title="Sessions by repository">
+          <ChartCard title="Sessions by repository" hint="Where AI is most active">
             {stats.sessionsByRepo && stats.sessionsByRepo.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={stats.sessionsByRepo}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} />
-                  <XAxis dataKey="repo" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [v, 'Sessions']} />
+                <BarChart data={[...stats.sessionsByRepo].sort((a, b) => b.count - a.count)} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} vertical={false} />
+                  <XAxis dataKey="repo" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} interval={0} angle={-12} textAnchor="end" height={50} />
+                  <YAxis tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} width={36} />
+                  <Tooltip contentStyle={TT_STYLE} cursor={{ fill: 'rgba(99,102,241,0.06)' }} formatter={(v: number) => [v, 'Sessions']} />
                   <Bar dataKey="count" fill={CHART_THEME.cyan} radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             ) : (
-              <EmptyState message="No data yet" />
+              <EmptyState message="No repository activity yet" />
             )}
           </ChartCard>
 
@@ -614,16 +659,16 @@ export default function Insights() {
             <ChartCard title="Top engineers" hint="By AI session count">
               {stats.topEngineers && stats.topEngineers.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={stats.topEngineers} layout="vertical">
+                  <BarChart data={[...stats.topEngineers].sort((a, b) => b.sessions - a.sessions)} layout="vertical" margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke={CHART_THEME.grid} horizontal={false} />
                     <XAxis type="number" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fill: CHART_THEME.text, fontSize: 11 }} axisLine={false} tickLine={false} width={120} />
-                    <Tooltip contentStyle={TT_STYLE} formatter={(v: number) => [v, 'Sessions']} />
+                    <Tooltip contentStyle={TT_STYLE} cursor={{ fill: 'rgba(99,102,241,0.06)' }} formatter={(v: number) => [v, 'Sessions']} />
                     <Bar dataKey="sessions" fill={CHART_THEME.amber} radius={[0, 4, 4, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               ) : (
-                <EmptyState message="No data yet" />
+                <EmptyState message="No engineer activity yet" />
               )}
             </ChartCard>
           )}
@@ -635,35 +680,44 @@ export default function Insights() {
         <section>
           <SectionHeader title="Governance" subtitle="Quality, secrets, and policy enforcement" />
           <div className="grid lg:grid-cols-2 gap-5">
-            <ChartCard title="Session quality">
-              {stats.qualityMetrics ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={[
-                        { name: 'Approved', value: stats.qualityMetrics.approved },
-                        { name: 'Rejected', value: stats.qualityMetrics.rejected },
-                        { name: 'Flagged', value: stats.qualityMetrics.flagged },
-                        { name: 'Pending', value: stats.qualityMetrics.pending },
-                      ]}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={55}
-                      outerRadius={90}
-                      paddingAngle={3}
-                      dataKey="value"
-                    >
-                      <Cell fill={CHART_THEME.green} />
-                      <Cell fill={CHART_THEME.red} />
-                      <Cell fill={CHART_THEME.amber} />
-                      <Cell fill="#6b7280" />
-                    </Pie>
-                    <Tooltip contentStyle={TT_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: '0.7rem' }} />
-                  </PieChart>
-                </ResponsiveContainer>
-              ) : (
-                <EmptyState message="No data yet" />
+            <ChartCard title="Session quality" hint="Review status mix">
+              {stats.qualityMetrics ? (() => {
+                const data = [
+                  { name: 'Approved', value: stats.qualityMetrics.approved, color: CHART_THEME.green },
+                  { name: 'Rejected', value: stats.qualityMetrics.rejected, color: CHART_THEME.red },
+                  { name: 'Flagged',  value: stats.qualityMetrics.flagged,  color: CHART_THEME.amber },
+                  { name: 'Pending',  value: stats.qualityMetrics.pending,  color: '#6b7280' },
+                ];
+                const total = data.reduce((s, d) => s + d.value, 0);
+                if (total === 0) return <EmptyState message="No reviewed sessions yet" />;
+                return (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={data}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={55}
+                        outerRadius={90}
+                        paddingAngle={3}
+                        dataKey="value"
+                        // Donut center "total" via secondary <text> drawn
+                        // by recharts' label callback. Cheap and stays
+                        // dynamic without extra render plumbing.
+                        labelLine={false}
+                        label={({ percent, name }) =>
+                          percent && percent >= 0.06 ? `${name} ${(percent * 100).toFixed(0)}%` : ''
+                        }
+                      >
+                        {data.map((d) => <Cell key={d.name} fill={d.color} stroke="rgba(11,18,32,0.6)" strokeWidth={2} />)}
+                      </Pie>
+                      <Tooltip contentStyle={TT_STYLE} formatter={(v: number, _n, p: any) => [`${v} (${total > 0 ? ((v / total) * 100).toFixed(0) : 0}%)`, p.payload.name]} />
+                      <Legend wrapperStyle={{ fontSize: '0.7rem', paddingTop: 4 }} iconType="circle" iconSize={8} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                );
+              })() : (
+                <EmptyState message="No reviewed sessions yet" />
               )}
             </ChartCard>
 

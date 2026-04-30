@@ -901,6 +901,7 @@ export default function RepoDetail() {
           <ActionButtonGroup
             secondary={[
               { label: 'Issues', onClick: () => navigate(`/repos/${repo.id}/issues`) },
+              { label: 'Manage access', onClick: () => navigate(`/repos/${repo.id}/access`) },
             ]}
             overflow={overflowItems}
           />

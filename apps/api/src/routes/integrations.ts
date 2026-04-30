@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import { testGitHubConnection } from '../services/github-integration.js';
 import { testGitHubAppConnection } from '../services/github-app.js';
 import { testGitLabConnection } from '../services/gitlab-integration.js';
@@ -9,12 +9,13 @@ import { checkSafeExternalUrl } from '../utils/ssrf-guard.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — list org integrations (ADMIN+ only, never expose tokens)
 router.get('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const integrations = await prisma.integrationConfig.findMany({
-      where: { orgId: req.user!.orgId },
+      where: { orgId: req.activeOrgId! },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -64,7 +65,7 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
 
     // Check for existing integration of same provider
     const existing = await prisma.integrationConfig.findFirst({
-      where: { orgId: req.user!.orgId, provider },
+      where: { orgId: req.activeOrgId!, provider },
     });
     if (existing) {
       return res.status(409).json({ error: `A ${provider} integration already exists. Update or delete it first.` });
@@ -72,7 +73,7 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
 
     const integration = await prisma.integrationConfig.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         provider,
         token,
         baseUrl: baseUrl || '',
@@ -82,7 +83,7 @@ router.post('/', requireRole('ADMIN'), async (req: AuthRequest, res: Response) =
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'INTEGRATION_CREATED',
         resource: integration.id,
@@ -113,7 +114,7 @@ router.put('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response)
     const { token, baseUrl, settings } = req.body;
 
     const existing = await prisma.integrationConfig.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!existing) {
       return res.status(404).json({ error: 'Integration not found' });
@@ -134,7 +135,7 @@ router.put('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response)
 
     // Defense-in-depth: scope by orgId in the update itself.
     const updateResult = await prisma.integrationConfig.updateMany({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
       data,
     });
     if (updateResult.count === 0) {
@@ -147,7 +148,7 @@ router.put('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response)
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'INTEGRATION_UPDATED',
         resource: id,
@@ -177,7 +178,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     const id = req.params.id as string;
 
     const existing = await prisma.integrationConfig.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!existing) {
       return res.status(404).json({ error: 'Integration not found' });
@@ -190,7 +191,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     // from org B by guessing UUIDs). deleteMany with a compound where makes
     // the authorization boundary explicit at the DB call itself.
     const deleted = await prisma.integrationConfig.deleteMany({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (deleted.count === 0) {
       // Lost a race (deleted between precheck and delete) or authz drift.
@@ -199,7 +200,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'INTEGRATION_DELETED',
         resource: id,
@@ -220,7 +221,7 @@ router.post('/:id/test', requireRole('ADMIN'), async (req: AuthRequest, res: Res
     const id = req.params.id as string;
 
     const integration = await prisma.integrationConfig.findFirst({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
     if (!integration) {
       return res.status(404).json({ error: 'Integration not found' });

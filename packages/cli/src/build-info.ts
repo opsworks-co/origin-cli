@@ -1,10 +1,10 @@
 // AUTO-GENERATED at build time by scripts/write-build-info.cjs.
 // Do not edit by hand. This file is gitignored.
 export const BUILD_INFO = {
-  "version": "0.20260428.0124",
-  "gitSha": "a97f2af30732d03e73287eba6455f5019fcd831e",
-  "gitShortSha": "a97f2af30732",
+  "version": "0.20260430.1015",
+  "gitSha": "cf73892abe7f3da7f68344f0cdfe658e240ee06d",
+  "gitShortSha": "cf73892abe7f",
   "gitBranch": "main",
   "gitDirty": true,
-  "builtAt": "2026-04-28T05:24:11.958Z"
+  "builtAt": "2026-04-30T14:15:50.327Z"
 } as const;

@@ -206,3 +206,104 @@ export function importGitLabRepos(repos: Array<{ fullPath: string; name?: string
     body: JSON.stringify({ repos, originBaseUrl: window.location.origin }),
   });
 }
+
+// ── Repo Member Access ─────────────────────────────────────────────────
+
+export type RepoLevel = 'read' | 'write' | 'admin';
+
+export interface RepoMember {
+  id: string;
+  name: string;
+  email: string;
+  avatarUrl: string | null;
+  level: RepoLevel;
+  inherited: boolean;
+  orgRole?: string;
+  grantedAt?: string;
+}
+
+export function getRepoMembers(repoId: string) {
+  return request<{ members: RepoMember[] }>(`/api/repos/${repoId}/members`);
+}
+
+export function setRepoMember(repoId: string, userId: string, level: RepoLevel) {
+  return request<{ userId: string; repoId: string; level: RepoLevel }>(
+    `/api/repos/${repoId}/members/${userId}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ level }),
+    },
+  );
+}
+
+export function removeRepoMember(repoId: string, userId: string) {
+  return request<{ success: boolean }>(`/api/repos/${repoId}/members/${userId}`, {
+    method: 'DELETE',
+  });
+}
+
+// ── Agent Member Access ────────────────────────────────────────────────
+
+export type AgentLevel = 'use' | 'admin';
+
+export interface AgentMember {
+  id: string;
+  name: string;
+  email: string;
+  avatarUrl: string | null;
+  level: AgentLevel;
+  inherited: boolean;
+  orgRole?: string;
+  grantedAt?: string;
+}
+
+export function getAgentMembers(agentId: string) {
+  return request<{ members: AgentMember[] }>(`/api/agents/${agentId}/members`);
+}
+
+export function setAgentMember(agentId: string, userId: string, level: AgentLevel) {
+  return request<{ userId: string; agentId: string; level: AgentLevel }>(
+    `/api/agents/${agentId}/members/${userId}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ level }),
+    },
+  );
+}
+
+export function removeAgentMember(agentId: string, userId: string) {
+  return request<{ success: boolean }>(`/api/agents/${agentId}/members/${userId}`, {
+    method: 'DELETE',
+  });
+}
+
+// ── User Access Matrix ─────────────────────────────────────────────────
+
+export interface UserAccessRepo {
+  id: string;
+  name: string;
+  path: string;
+  provider: string;
+  level: RepoLevel | null;
+  inherited: boolean;
+}
+
+export interface UserAccessAgent {
+  id: string;
+  name: string;
+  slug: string;
+  model: string;
+  level: AgentLevel | null;
+  inherited: boolean;
+}
+
+export interface UserAccessSummary {
+  orgRole: string;
+  inheritsAll: boolean;
+  repos: UserAccessRepo[];
+  agents: UserAccessAgent[];
+}
+
+export function getUserAccess(userId: string) {
+  return request<UserAccessSummary>(`/api/users/${userId}/access`);
+}

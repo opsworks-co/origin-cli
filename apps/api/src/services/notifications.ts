@@ -35,7 +35,7 @@ export async function notifyOrgMembers(
   // already causes a massive createMany write; above this we'd risk
   // throttling the Notification table and the Slack path below.
   const users = await prisma.user.findMany({
-    where: { orgId, role: { in: ['MEMBER', 'ADMIN', 'OWNER'] } },
+    where: { memberships: { some: { orgId, role: { in: ['MEMBER', 'ADMIN', 'OWNER'] } } } },
     select: { id: true },
     take: 10_000,
   });
@@ -64,7 +64,7 @@ export async function notifyOrgAdmins(
   metadata?: Record<string, any>
 ) {
   const users = await prisma.user.findMany({
-    where: { orgId, role: { in: ['ADMIN', 'OWNER'] } },
+    where: { memberships: { some: { orgId, role: { in: ['ADMIN', 'OWNER'] } } } },
     select: { id: true },
     take: 2000,
   });

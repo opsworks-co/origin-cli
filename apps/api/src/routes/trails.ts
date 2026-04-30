@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import { validateFieldLengths, COMMON_LIMITS } from '../utils/validate.js';
 
 const TRAIL_LIMITS = {
@@ -12,11 +12,12 @@ const TRAIL_LIMITS = {
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — List trails for org
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const status = req.query.status as string | undefined;
     const label = req.query.label as string | undefined;
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
@@ -84,7 +85,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 // POST / — Create trail
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { name, description, branch, priority, labels } = req.body;
 
     if (!name) {
@@ -120,7 +121,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 // GET /:id — Trail detail with sessions
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const id = req.params.id as string;
 
     const trail = await prisma.trail.findFirst({
@@ -237,7 +238,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 // PUT /:id — Update trail
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const id = req.params.id as string;
 
     const existing = await prisma.trail.findFirst({
@@ -290,7 +291,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 // history and shouldn't be deletable by any org member).
 router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const id = req.params.id as string;
 
     const existing = await prisma.trail.findFirst({
@@ -321,7 +322,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 // POST /:id/sessions — Add sessions to trail
 router.post('/:id/sessions', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const id = req.params.id as string;
     const { sessionIds } = req.body;
 
@@ -393,7 +394,7 @@ router.post('/:id/sessions', async (req: AuthRequest, res: Response) => {
 // DELETE /:id/sessions/:sessionId — Remove session from trail
 router.delete('/:id/sessions/:sessionId', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const id = req.params.id as string;
     const sessionId = req.params.sessionId as string;
 

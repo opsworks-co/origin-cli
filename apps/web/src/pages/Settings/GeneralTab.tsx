@@ -1,11 +1,37 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { User, Lock, Link2, Building2, AlertTriangle, Wrench } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
 import ProfileEditor from './ProfileEditor';
 import PasswordChanger from './PasswordChanger';
 
+function SectionHeader({ icon: Icon, title, subtitle, accent = 'indigo' }: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  subtitle?: React.ReactNode;
+  accent?: 'indigo' | 'emerald' | 'amber' | 'red';
+}) {
+  const colors: Record<string, string> = {
+    indigo:  'bg-indigo-500/10 text-indigo-300 ring-indigo-500/30',
+    emerald: 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/30',
+    amber:   'bg-amber-500/10 text-amber-300 ring-amber-500/30',
+    red:     'bg-red-500/10 text-red-300 ring-red-500/30',
+  };
+  return (
+    <div className="flex items-center gap-3">
+      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ring-1 ${colors[accent]}`}>
+        <Icon className="w-4 h-4" />
+      </div>
+      <div>
+        <h2 className={`text-base font-semibold ${accent === 'red' ? 'text-red-400' : 'text-gray-100'}`}>{title}</h2>
+        {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
+      </div>
+    </div>
+  );
+}
+
 export default function GeneralTab() {
-  const { user } = useAuth();
+  const { user, activeOrg } = useAuth();
   const isDev = user?.accountType === 'developer';
 
   // Org settings
@@ -55,32 +81,23 @@ export default function GeneralTab() {
   return (
     <>
       {/* Profile section — both solo and team */}
-      <section className="card space-y-4">
-        <div>
-          <h2 className="text-lg font-semibold">Profile</h2>
-          <p className="text-sm text-gray-500 mt-0.5">Manage your account details</p>
-        </div>
+      <section className="card space-y-5">
+        <SectionHeader icon={User} title="Profile" subtitle="Manage your account details" accent="indigo" />
         <ProfileEditor />
       </section>
 
       {/* Change Password — only for email/password accounts */}
       {user && !user.provider && (
-      <section className="card space-y-4">
-        <div>
-          <h2 className="text-lg font-semibold">Change Password</h2>
-          <p className="text-sm text-gray-500 mt-0.5">Update your account password</p>
-        </div>
+      <section className="card space-y-5">
+        <SectionHeader icon={Lock} title="Change Password" subtitle="Update your account password" accent="indigo" />
         <PasswordChanger />
       </section>
       )}
 
       {/* Connected Accounts */}
       {user?.provider && (
-      <section className="card space-y-4">
-        <div>
-          <h2 className="text-lg font-semibold">Connected Account</h2>
-          <p className="text-sm text-gray-500 mt-0.5">Your account is linked to an external provider</p>
-        </div>
+      <section className="card space-y-5">
+        <SectionHeader icon={Link2} title="Connected Account" subtitle="Your account is linked to an external provider" accent="emerald" />
         <div className="flex items-center gap-3 bg-gray-800/50 rounded-lg px-4 py-3">
           <div className="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center">
             {user.provider === 'github' && (
@@ -99,11 +116,8 @@ export default function GeneralTab() {
       )}
 
       {/* Danger Zone */}
-      <section className="card space-y-4 border-red-900/30">
-        <div>
-          <h2 className="text-lg font-semibold text-red-400">Danger Zone</h2>
-          <p className="text-sm text-gray-500 mt-0.5">Irreversible actions for your account</p>
-        </div>
+      <section className="card space-y-5 border-red-900/30">
+        <SectionHeader icon={AlertTriangle} title="Danger Zone" subtitle="Irreversible actions for your account" accent="red" />
         <div className="flex items-center justify-between bg-red-900/10 border border-red-900/30 rounded-lg px-4 py-3">
           <div>
             <p className="text-sm text-gray-200">Delete Account</p>
@@ -124,16 +138,20 @@ export default function GeneralTab() {
 
       {/* Org Section — hidden for developer accounts */}
       {!isDev && (
-      <section className="card space-y-4">
-        <div>
-          <h2 className="text-lg font-semibold">Organization</h2>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Manage your organization settings
-            {user?.role !== 'OWNER' && user?.role !== 'ADMIN' && (
-              <span className="text-gray-600 ml-1">(read-only for your role)</span>
-            )}
-          </p>
-        </div>
+      <section className="card space-y-5">
+        <SectionHeader
+          icon={Building2}
+          title="Organization"
+          subtitle={
+            <>
+              Manage your organization settings
+              {activeOrg?.role !== 'OWNER' && activeOrg?.role !== 'ADMIN' && (
+                <span className="text-gray-600 ml-1">(read-only for your role)</span>
+              )}
+            </>
+          }
+          accent="indigo"
+        />
 
         {orgMsg && (
           <div
@@ -154,7 +172,7 @@ export default function GeneralTab() {
             <div className="grid sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Organization Name</label>
-                {user?.role === 'OWNER' || user?.role === 'ADMIN' ? (
+                {activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN' ? (
                   <input
                     value={orgName}
                     onChange={(e) => setOrgName(e.target.value)}
@@ -170,7 +188,7 @@ export default function GeneralTab() {
               </div>
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Slug</label>
-                {user?.role === 'OWNER' || user?.role === 'ADMIN' ? (
+                {activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN' ? (
                   <>
                     <input
                       value={orgSlug}
@@ -198,7 +216,7 @@ export default function GeneralTab() {
               <div>
                 <label className="block text-sm text-gray-500 mb-1">Your Role</label>
                 <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-gray-200 text-sm">
-                  {user?.role ?? '\u2014'}
+                  {activeOrg?.role ?? '\u2014'}
                 </div>
               </div>
               <div>
@@ -237,7 +255,7 @@ export default function GeneralTab() {
               </p>
             )}
 
-            {(user?.role === 'OWNER' || user?.role === 'ADMIN') && (
+            {(activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN') && (
               <button
                 type="submit"
                 disabled={savingOrg}
@@ -252,7 +270,7 @@ export default function GeneralTab() {
       )}
 
       {/* Admin-only diagnostic. Not common-path enough for its own tab. */}
-      {(isDev || user?.role === 'OWNER' || user?.role === 'ADMIN') && (
+      {(isDev || activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN') && (
         <RecomputeCostsCard />
       )}
     </>
@@ -317,15 +335,20 @@ function RecomputeCostsCard() {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between text-left"
+        className="w-full flex items-center justify-between text-left gap-3"
       >
-        <div>
-          <h2 className="text-base font-semibold text-gray-200">Recompute session costs</h2>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Diagnostic. Re-derives every session's cost from stored token counts using the current pricing table.
-          </p>
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center ring-1 bg-amber-500/10 text-amber-300 ring-amber-500/30 shrink-0">
+            <Wrench className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-gray-100">Recompute session costs</h2>
+            <p className="text-xs text-gray-500 mt-0.5 truncate">
+              Diagnostic. Re-derives every session's cost from stored token counts using the current pricing table.
+            </p>
+          </div>
         </div>
-        <span className="text-gray-500 text-sm">{open ? '▾' : '▸'}</span>
+        <span className="text-gray-500 text-sm shrink-0">{open ? '▾' : '▸'}</span>
       </button>
 
       {open && (

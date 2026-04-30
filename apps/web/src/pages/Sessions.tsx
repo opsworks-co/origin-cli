@@ -10,6 +10,7 @@ import { safeHref } from '../utils/safe-url';
 import { PageHeader, Pill, PulseDot } from '../components/ui';
 import type { PillVariant } from '../components/ui';
 import { agentColor } from './MyDashboard/utils';
+import { TagEditor } from './MyDashboard/TagEditor';
 
 // Maps a session/review status string to the Pill variant defined in design-tokens.md.
 // Kept as a simple function so the rest of the file can swap badges for Pills
@@ -83,6 +84,7 @@ export default function Sessions() {
   // the Insights page's SessionsTab filter.
   const [showSaved, setShowSaved] = useState(false);
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
+  const [sessionTags, setSessionTags] = useState<Record<string, string[]>>({});
   useEffect(() => {
     const req = (api as any).request;
     if (typeof req !== 'function') return;
@@ -90,10 +92,28 @@ export default function Sessions() {
       .then((data: any) => {
         if (Array.isArray(data)) {
           setSavedIds(new Set(data.map((s: { id: string }) => s.id)));
+          const tagMap: Record<string, string[]> = {};
+          for (const s of data as Array<{ id: string; bookmark?: { tags?: string[] } }>) {
+            if (s.bookmark?.tags?.length) tagMap[s.id] = s.bookmark.tags;
+          }
+          setSessionTags(tagMap);
         }
       })
       .catch(() => {});
   }, []);
+  const updateTags = async (id: string, tags: string[]) => {
+    const prev = sessionTags[id] ?? [];
+    setSessionTags((p) => ({ ...p, [id]: tags }));
+    setSavedIds((p) => new Set(p).add(id));
+    try {
+      await (api as any).request(`/api/sessions/${id}/bookmark`, {
+        method: 'POST',
+        body: JSON.stringify({ tags, note: '' }),
+      });
+    } catch {
+      setSessionTags((p) => ({ ...p, [id]: prev }));
+    }
+  };
   const toggleSaved = async (id: string) => {
     const isBookmarked = savedIds.has(id);
     setSavedIds((prev) => {
@@ -442,7 +462,23 @@ export default function Sessions() {
   ) : null;
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-6">
+      {/* Header — matches the Insights / Dashboard / Agents pattern so the
+          page chrome is consistent across the app. */}
+      <div className="flex items-end justify-between flex-wrap gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Sessions</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            {isDev
+              ? 'Every AI coding session you ran, with prompts, files, and review status'
+              : 'Every AI coding session your team ran, with prompts, files, and review status'}
+          </p>
+        </div>
+        <div className="text-xs text-gray-500">
+          {total.toLocaleString()} session{total !== 1 ? 's' : ''}
+        </div>
+      </div>
+
       {/* SessionsTab-style filter row — clean, flat, no page header band.
           Search input takes remaining space; small right-side pills carry
           the live/archive/view-mode chrome that used to eat a whole row. */}
@@ -798,14 +834,34 @@ export default function Sessions() {
                       <td className="px-3 py-2 text-gray-400 text-sm">
                         {(s.repoNames && s.repoNames.length > 1 ? s.repoNames.join(', ') : s.repoName) ?? '—'}
                       </td>
-                      {/* Branch */}
-                      <td className="px-3 py-2 text-gray-500 hidden md:table-cell font-mono text-xs max-w-[140px] truncate">
-                        {s.branch ? (
-                          <span className="inline-flex items-center gap-1">
-                            <GitBranch className="w-3 h-3 text-gray-500" />
-                            {s.branch}
-                          </span>
-                        ) : '—'}
+                      {/* Branches — show every branch the session touched, not just the primary one */}
+                      <td className="px-3 py-2 text-gray-500 hidden md:table-cell font-mono text-xs max-w-[200px]">
+                        {(() => {
+                          const branches = Array.from(
+                            new Set(
+                              [
+                                s.branch,
+                                ...((s.commits ?? []).map((c) => c.branch) as (string | null)[]),
+                              ].filter((b): b is string => !!b),
+                            ),
+                          );
+                          if (branches.length === 0) return <span>—</span>;
+                          const [first, ...rest] = branches;
+                          return (
+                            <span
+                              className="inline-flex items-center gap-1"
+                              title={branches.join(', ')}
+                            >
+                              <GitBranch className="w-3 h-3 text-gray-500 flex-shrink-0" />
+                              <span className="truncate">{first}</span>
+                              {rest.length > 0 && (
+                                <span className="text-[10px] text-gray-600 flex-shrink-0">
+                                  +{rest.length}
+                                </span>
+                              )}
+                            </span>
+                          );
+                        })()}
                       </td>
                       {/* Duration */}
                       <td className="px-3 py-2 text-right text-gray-300 tabular-nums">
@@ -874,7 +930,12 @@ export default function Sessions() {
                         </td>
                       )}
                       {/* Tags — xl only to keep table dense */}
-                      <td className="px-3 py-2 hidden xl:table-cell text-gray-600 text-xs">+</td>
+                      <td className="px-3 py-2 hidden xl:table-cell" onClick={(e) => e.stopPropagation()}>
+                        <TagEditor
+                          tags={sessionTags[s.id] || []}
+                          onSave={(tags) => updateTags(s.id, tags)}
+                        />
+                      </td>
                       {/* When */}
                       <td className="px-3 py-2 text-right text-gray-500 text-xs whitespace-nowrap">
                         {timeAgo(s.createdAt)}

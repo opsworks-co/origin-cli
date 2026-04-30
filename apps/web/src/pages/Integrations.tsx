@@ -470,7 +470,7 @@ export default function Integrations() {
     setInstallingApp(true);
     setIntegrationError(null);
     try {
-      const { installUrl } = await api.getGitHubAppInstallUrl();
+      const { installUrl } = await api.getGitHubAppInstallUrl({ from: 'settings' });
       window.location.href = installUrl;
     } catch (err: any) {
       setIntegrationError(err.message || 'Failed to start GitHub App installation');
@@ -1066,7 +1066,7 @@ export default function Integrations() {
                     onClick={async () => {
                       setConnectingGitlabOAuth(true);
                       try {
-                        const { authorizeUrl } = await api.getGitLabOAuthInstallUrl();
+                        const { authorizeUrl } = await api.getGitLabOAuthInstallUrl({ from: 'settings' });
                         window.location.href = authorizeUrl;
                       } catch (err: any) {
                         setIntegrationError(err.message);

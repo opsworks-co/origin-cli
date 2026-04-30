@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import Anthropic from '@anthropic-ai/sdk';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 import { getDocsContext, getOrgContext } from '../services/chat-context.js';
 import { getOrgLLMKey, getOrgLLMModel, getOrgLLMProvider } from './settings.js';
 
@@ -271,7 +271,7 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000).unref();
 
-router.post('/assistant', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/assistant', requireAuth, resolveOrgContext, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
     if (!checkAssistantRateLimit(userId)) {
@@ -285,7 +285,7 @@ router.post('/assistant', requireAuth, async (req: AuthRequest, res: Response) =
       return res.status(400).json({ error: 'messages array is required' });
     }
 
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     // Allow longer conversations for authenticated users
     const trimmedMessages = messages.slice(-20);
 

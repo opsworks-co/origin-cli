@@ -1,28 +1,40 @@
 // ── Auth API ────────────────────────────────────────────────────────────
 import { request } from './_client.js';
 
+// Server returns the user, full membership list, and the chosen active org
+// for this request. Frontend uses `memberships` to render the org switcher
+// and `activeOrgId` to know which org's data the response is for.
 export interface AuthResponse {
-  token: string;
+  token?: string;          // Optional — cookie auth alone is enough
   user: User;
-  apiKey?: string; // Auto-generated for solo developer accounts
+  memberships: Membership[];
+  activeOrgId: string | null;
+  activeRole: string | null;
+  apiKey?: string;         // Auto-generated for solo developer accounts
+  isNewAccount?: boolean;
 }
 
 export interface User {
   id: string;
   email: string;
   name: string;
-  role: string;
   accountType: 'org' | 'developer';
   avatarUrl: string | null;
   emailVerified?: boolean;
-  orgId: string;
-  orgName: string;
-  orgSlug: string;
   provider?: string | null;
 }
 
+export interface Membership {
+  orgId: string;
+  name: string;
+  slug: string;
+  type: 'team' | 'personal';
+  role: string;
+  joinedAt?: string;
+}
+
 export function updateProfile(data: { name?: string; email?: string; avatarUrl?: string }) {
-  return request<User>('/api/auth/profile', {
+  return request<AuthResponse>('/api/auth/profile', {
     method: 'PATCH',
     body: JSON.stringify(data),
   });
@@ -103,5 +115,31 @@ export function oauthCallback(provider: string, code: string, state: string, acc
 }
 
 export function getMe() {
-  return request<User>('/api/auth/me');
+  return request<AuthResponse>('/api/auth/me');
+}
+
+// ── Multi-org self endpoints ────────────────────────────────────────────
+
+export function listMemberships() {
+  return request<Membership[]>('/api/me/memberships');
+}
+
+export function setActiveOrg(orgId: string) {
+  return request<{ activeOrgId: string }>('/api/me/active-org', {
+    method: 'POST',
+    body: JSON.stringify({ orgId }),
+  });
+}
+
+export function createOrg(name: string, slug?: string) {
+  return request<{ orgId: string; name: string; slug: string; type: string; role: string }>('/api/orgs', {
+    method: 'POST',
+    body: JSON.stringify({ name, slug }),
+  });
+}
+
+export function leaveOrg(orgId: string) {
+  return request<{ success: boolean }>(`/api/orgs/${orgId}/leave`, {
+    method: 'POST',
+  });
 }

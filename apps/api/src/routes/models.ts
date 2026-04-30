@@ -1,14 +1,15 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET /comparison — Model comparison stats
 router.get('/comparison', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     // 1. Get repoIds for org. Cap at 5000 — see identical rationale in
     // routes/stats.ts and routes/prompts.ts. An org with more repos than

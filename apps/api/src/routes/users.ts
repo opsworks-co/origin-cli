@@ -1,68 +1,76 @@
 import { Router, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 const VALID_ROLES = ['VIEWER', 'MEMBER', 'ADMIN', 'OWNER'];
+
+// All endpoints below operate on org members — i.e. rows in `Membership`
+// joined with `User`. With multi-org, "remove member" detaches the user
+// from this org rather than deleting the user; "list members" enumerates
+// memberships rather than users-by-orgId; role lives on Membership.
 
 // GET / — list org members with activity stats
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
-    const users = await prisma.user.findMany({
+    const memberships = await prisma.membership.findMany({
       where: { orgId },
       select: {
-        id: true,
-        name: true,
-        email: true,
         role: true,
-        createdAt: true,
-        apiKeys: {
-          select: { keyPrefix: true },
-          take: 1,
-          orderBy: { createdAt: 'desc' },
-        },
-        _count: {
+        joinedAt: true,
+        user: {
           select: {
-            reviews: true,
-            sessions: true,
+            id: true,
+            name: true,
+            email: true,
+            createdAt: true,
+            apiKeys: {
+              where: { orgId },
+              select: { keyPrefix: true },
+              take: 1,
+              orderBy: { createdAt: 'desc' },
+            },
+            _count: { select: { reviews: true, sessions: true } },
           },
         },
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { joinedAt: 'asc' },
       take: 5000,
     });
 
-    // Get cost and last active per user
-    const userIds = users.map((u) => u.id);
+    const userIds = memberships.map((m) => m.user.id);
 
-    const costAggs = await prisma.codingSession.groupBy({
-      by: ['userId'],
-      where: { userId: { in: userIds } },
-      _sum: { costUsd: true, linesAdded: true },
-    });
+    const [costAggs, lastSessions] = await Promise.all([
+      prisma.codingSession.groupBy({
+        by: ['userId'],
+        where: { userId: { in: userIds } },
+        _sum: { costUsd: true, linesAdded: true },
+      }),
+      prisma.codingSession.groupBy({
+        by: ['userId'],
+        where: { userId: { in: userIds } },
+        _max: { createdAt: true },
+      }),
+    ]);
     const costMap = new Map(costAggs.map((c) => [c.userId, c]));
-
-    // Last session date per user
-    const lastSessions = await prisma.codingSession.groupBy({
-      by: ['userId'],
-      where: { userId: { in: userIds } },
-      _max: { createdAt: true },
-    });
     const lastSessionMap = new Map(lastSessions.map((s) => [s.userId, s._max.createdAt]));
 
-    const members = users.map((u) => {
+    const members = memberships.map((m) => {
+      const u = m.user;
       const costs = costMap.get(u.id);
       return {
         id: u.id,
         name: u.name,
         email: u.email,
-        role: u.role,
+        role: m.role,
         createdAt: u.createdAt,
+        joinedAt: m.joinedAt,
         sessions: u._count.sessions,
         reviews: u._count.reviews,
         totalCost: parseFloat((costs?._sum.costUsd || 0).toFixed(2)),
@@ -79,28 +87,92 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /:id/access — every repo + agent in the active org with the
+// target user's effective level on each. Org OWNER/ADMIN show as
+// `inherited: true` on every row. Used by the IAM "Manage access" page
+// so an admin can see the full access matrix in one shot.
+router.get('/:id/access', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.activeOrgId!;
+    const id = req.params.id as string;
+
+    const membership = await prisma.membership.findUnique({
+      where: { userId_orgId: { userId: id, orgId } },
+      select: { role: true },
+    });
+    if (!membership) return res.status(404).json({ error: 'User not found in this org' });
+
+    const inheritsAll = membership.role === 'OWNER' || membership.role === 'ADMIN';
+
+    const [repos, agents, repoGrants, agentGrants] = await Promise.all([
+      prisma.repo.findMany({
+        where: { orgId, archived: false },
+        select: { id: true, name: true, path: true, provider: true },
+        orderBy: { name: 'asc' },
+      }),
+      prisma.agent.findMany({
+        where: { orgId },
+        select: { id: true, name: true, slug: true, model: true },
+        orderBy: { name: 'asc' },
+      }),
+      prisma.repoMember.findMany({
+        where: { userId: id, repo: { orgId } },
+        select: { repoId: true, level: true },
+      }),
+      prisma.agentMember.findMany({
+        where: { userId: id, agent: { orgId } },
+        select: { agentId: true, level: true },
+      }),
+    ]);
+
+    const repoLevelById = new Map(repoGrants.map((g) => [g.repoId, g.level]));
+    const agentLevelById = new Map(agentGrants.map((g) => [g.agentId, g.level]));
+
+    res.json({
+      orgRole: membership.role,
+      inheritsAll,
+      repos: repos.map((r) => ({
+        id: r.id,
+        name: r.name,
+        path: r.path,
+        provider: r.provider,
+        level: inheritsAll ? 'admin' : (repoLevelById.get(r.id) ?? null),
+        inherited: inheritsAll,
+      })),
+      agents: agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        slug: a.slug,
+        model: a.model,
+        level: inheritsAll ? 'admin' : (agentLevelById.get(a.id) ?? null),
+        inherited: inheritsAll,
+      })),
+    });
+  } catch (err) {
+    console.error('Get user access error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET /:id — user detail with recent sessions, reviews, audit
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const id = req.params.id as string;
 
-    const user = await prisma.user.findFirst({
-      where: { id, orgId },
+    const membership = await prisma.membership.findUnique({
+      where: { userId_orgId: { userId: id, orgId } },
       select: {
-        id: true,
-        name: true,
-        email: true,
         role: true,
-        createdAt: true,
+        user: {
+          select: {
+            id: true, name: true, email: true, createdAt: true,
+          },
+        },
       },
     });
+    if (!membership) return res.status(404).json({ error: 'User not found' });
 
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    // Stats
     const [sessionCount, reviewCount, costAgg] = await Promise.all([
       prisma.codingSession.count({ where: { userId: id } }),
       prisma.sessionReview.count({ where: { userId: id } }),
@@ -110,7 +182,6 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       }),
     ]);
 
-    // Recent sessions
     const recentSessions = await prisma.codingSession.findMany({
       where: { userId: id },
       include: {
@@ -122,19 +193,15 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       take: 20,
     });
 
-    // Recent reviews
     const recentReviews = await prisma.sessionReview.findMany({
       where: { userId: id },
       include: {
-        session: {
-          include: { commit: { include: { repo: true } } },
-        },
+        session: { include: { commit: { include: { repo: true } } } },
       },
       orderBy: { createdAt: 'desc' },
       take: 20,
     });
 
-    // Recent audit activity
     const recentAudit = await prisma.auditLog.findMany({
       where: { userId: id, orgId },
       orderBy: { createdAt: 'desc' },
@@ -143,7 +210,8 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 
     res.json({
       user: {
-        ...user,
+        ...membership.user,
+        role: membership.role,
         stats: {
           sessions: sessionCount,
           reviews: reviewCount,
@@ -162,9 +230,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         tokensUsed: s.tokensUsed,
         linesAdded: s.linesAdded,
         createdAt: s.createdAt,
-        review: s.review
-          ? { status: s.review.status, note: s.review.note }
-          : null,
+        review: s.review ? { status: s.review.status, note: s.review.note } : null,
       })),
       reviews: recentReviews.map((r) => ({
         id: r.id,
@@ -188,47 +254,37 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// ── Team Management ─────────────────────────────────────────
-
-// PATCH /:id/role — update member role
+// PATCH /:id/role — update a member's role in the active org.
 router.patch('/:id/role', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const targetId = req.params.id as string;
     const { role } = req.body;
 
     if (!role || !VALID_ROLES.includes(role.toUpperCase())) {
       return res.status(400).json({ error: 'Invalid role. Must be VIEWER, MEMBER, ADMIN, or OWNER' });
     }
-
-    // Can't change own role
     if (targetId === req.user!.id) {
       return res.status(400).json({ error: 'Cannot change your own role' });
     }
 
-    const target = await prisma.user.findFirst({ where: { id: targetId, orgId } });
-    if (!target) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    const target = await prisma.membership.findUnique({
+      where: { userId_orgId: { userId: targetId, orgId } },
+      include: { user: { select: { email: true } } },
+    });
+    if (!target) return res.status(404).json({ error: 'User not found' });
 
-    // Can't demote the last OWNER
     if (target.role === 'OWNER' && role.toUpperCase() !== 'OWNER') {
-      const ownerCount = await prisma.user.count({ where: { orgId, role: 'OWNER' } });
+      const ownerCount = await prisma.membership.count({ where: { orgId, role: 'OWNER' } });
       if (ownerCount <= 1) {
         return res.status(400).json({ error: 'Cannot demote the last owner' });
       }
     }
 
-    // Defense in depth: scope the role update by (id, orgId) so we can
-    // never accidentally flip a user's role in another org if the
-    // precheck is ever dropped or reordered in a future refactor.
-    const updated = await prisma.user.updateMany({
-      where: { id: targetId, orgId },
+    await prisma.membership.update({
+      where: { userId_orgId: { userId: targetId, orgId } },
       data: { role: role.toUpperCase() },
     });
-    if (updated.count === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
 
     await prisma.auditLog.create({
       data: {
@@ -236,7 +292,7 @@ router.patch('/:id/role', requireRole('ADMIN'), async (req: AuthRequest, res: Re
         userId: req.user!.id,
         action: 'MEMBER_ROLE_CHANGED',
         resource: targetId,
-        metadata: JSON.stringify({ from: target.role, to: role.toUpperCase(), targetEmail: target.email }),
+        metadata: JSON.stringify({ from: target.role, to: role.toUpperCase(), targetEmail: target.user.email }),
       },
     });
 
@@ -247,44 +303,38 @@ router.patch('/:id/role', requireRole('ADMIN'), async (req: AuthRequest, res: Re
   }
 });
 
-// DELETE /:id — remove member
+// DELETE /:id — remove member from this org. Does NOT delete the user; they
+// may be a member of other orgs. Cleans up only this-org-scoped resources
+// (api keys, audit log entries) and unlinks sessions in this org.
 router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const targetId = req.params.id as string;
 
     if (targetId === req.user!.id) {
       return res.status(400).json({ error: 'Cannot remove yourself' });
     }
 
-    const target = await prisma.user.findFirst({ where: { id: targetId, orgId } });
-    if (!target) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    const target = await prisma.membership.findUnique({
+      where: { userId_orgId: { userId: targetId, orgId } },
+      include: { user: { select: { name: true, email: true } } },
+    });
+    if (!target) return res.status(404).json({ error: 'User not found' });
 
     if (target.role === 'OWNER') {
-      const ownerCount = await prisma.user.count({ where: { orgId, role: 'OWNER' } });
+      const ownerCount = await prisma.membership.count({ where: { orgId, role: 'OWNER' } });
       if (ownerCount <= 1) {
         return res.status(400).json({ error: 'Cannot remove the last owner' });
       }
     }
 
-    // Clean up related records before deleting user
-    await prisma.notification.deleteMany({ where: { userId: targetId } });
-    await prisma.sessionBookmark.deleteMany({ where: { userId: targetId } });
-    await prisma.authToken.deleteMany({ where: { userId: targetId } });
-    await prisma.apiKey.deleteMany({ where: { userId: targetId } });
-    await prisma.sessionReview.deleteMany({ where: { userId: targetId } });
-    await prisma.auditLog.deleteMany({ where: { userId: targetId } });
-    // Unlink sessions (keep them, just remove user reference)
-    await prisma.codingSession.updateMany({ where: { userId: targetId }, data: { userId: null } });
-
-    const deleted = await prisma.user.deleteMany({
-      where: { id: targetId, orgId },
+    // Org-scoped cleanup: drop their API keys for this org, drop the
+    // membership row. Do NOT touch User, AuthToken, SessionBookmark, or
+    // sessions/reviews — those may belong to other orgs the user is in.
+    await prisma.apiKey.deleteMany({ where: { userId: targetId, orgId } });
+    await prisma.membership.delete({
+      where: { userId_orgId: { userId: targetId, orgId } },
     });
-    if (deleted.count === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
 
     await prisma.auditLog.create({
       data: {
@@ -292,7 +342,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
         userId: req.user!.id,
         action: 'MEMBER_REMOVED',
         resource: targetId,
-        metadata: JSON.stringify({ email: target.email, name: target.name, role: target.role }),
+        metadata: JSON.stringify({ email: target.user.email, name: target.user.name, role: target.role }),
       },
     });
 
@@ -303,36 +353,19 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
   }
 });
 
-// ── Add Member (direct creation with API key) ──────────────
-
-// POST /add-member — create user + API key directly
+// POST /add-member — direct creation: User (if new) + Membership + API key.
 router.post('/add-member', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { name, email, role, repoIds, agentIds } = req.body;
 
-    if (!name || !email) {
-      return res.status(400).json({ error: 'Name and email are required' });
-    }
+    if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
 
     const memberRole = (role || 'MEMBER').toUpperCase();
     if (!['VIEWER', 'MEMBER', 'ADMIN'].includes(memberRole)) {
       return res.status(400).json({ error: 'Invalid role. Must be VIEWER, MEMBER, or ADMIN.' });
     }
 
-    // Check if email already exists in org
-    const existing = await prisma.user.findFirst({ where: { email, orgId } });
-    if (existing) {
-      return res.status(409).json({ error: 'User with this email is already a member' });
-    }
-
-    // Check if email is globally taken
-    const globalExisting = await prisma.user.findUnique({ where: { email } });
-    if (globalExisting) {
-      return res.status(409).json({ error: 'A user with this email already exists' });
-    }
-
-    // Validate repoIds belong to this org
     if (repoIds && Array.isArray(repoIds) && repoIds.length > 0) {
       const validRepos = await prisma.repo.findMany({
         where: { orgId, id: { in: repoIds } },
@@ -342,8 +375,6 @@ router.post('/add-member', requireRole('ADMIN'), async (req: AuthRequest, res: R
         return res.status(400).json({ error: 'One or more repos do not belong to your organization' });
       }
     }
-
-    // Validate agentIds belong to this org
     if (agentIds && Array.isArray(agentIds) && agentIds.length > 0) {
       const validAgents = await prisma.agent.findMany({
         where: { orgId, id: { in: agentIds } },
@@ -354,62 +385,111 @@ router.post('/add-member', requireRole('ADMIN'), async (req: AuthRequest, res: R
       }
     }
 
-    // Create user (no password needed — authenticates via API key only)
-    const placeholderHash = crypto.randomBytes(32).toString('hex');
-    const newUser = await prisma.user.create({
-      data: {
-        orgId,
-        name,
-        email,
-        passwordHash: placeholderHash,
-        role: memberRole,
-      },
-    });
+    let userId: string;
+    let userCreated = false;
 
-    // Generate API key linked to the new user
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      // User exists globally — just create the membership if they're not
+      // already in this org. This is the multi-org happy path: an admin
+      // adds a teammate who already has an Origin account elsewhere.
+      const existingMembership = await prisma.membership.findUnique({
+        where: { userId_orgId: { userId: existing.id, orgId } },
+      });
+      if (existingMembership) {
+        return res.status(409).json({ error: 'User with this email is already a member' });
+      }
+      userId = existing.id;
+      await prisma.membership.create({
+        data: { userId, orgId, role: memberRole },
+      });
+    } else {
+      // New user — create with placeholder password (they'll log in via
+      // API key or be invited to set a password later).
+      const placeholderHash = crypto.randomBytes(32).toString('hex');
+      const created = await prisma.$transaction(async (tx) => {
+        const u = await tx.user.create({
+          data: { name, email, passwordHash: placeholderHash, accountType: 'org' },
+        });
+        await tx.membership.create({
+          data: { userId: u.id, orgId, role: memberRole },
+        });
+        return u;
+      });
+      userId = created.id;
+      userCreated = true;
+    }
+
     const rawKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
     const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
     const keyPrefix = rawKey.slice(0, 14);
 
-    // Only assign scopes that were explicitly provided — default is no access
     const repoScopeIds: string[] = (repoIds && Array.isArray(repoIds)) ? repoIds : [];
     const agentScopeIds: string[] = (agentIds && Array.isArray(agentIds)) ? agentIds : [];
 
     await prisma.apiKey.create({
       data: {
         orgId,
-        userId: newUser.id,
+        userId,
         name: `${name}'s key`,
         keyHash,
         keyPrefix,
-        role: null, // Uses linked user's role
-        repoScopes: {
-          create: repoScopeIds.map((repoId: string) => ({ repoId })),
-        },
-        agentScopes: {
-          create: agentScopeIds.map((agentId: string) => ({ agentId })),
-        },
+        role: null,
+        repoScopes: { create: repoScopeIds.map((repoId: string) => ({ repoId })) },
+        agentScopes: { create: agentScopeIds.map((agentId: string) => ({ agentId })) },
       },
     });
+
+    // Beyond the API-key scoping above, also create RepoMember/AgentMember
+    // rows so the new user has actual *human* access to the same set of
+    // resources their key can talk to. Org OWNER/ADMIN don't need rows
+    // (they inherit), so we only write them for MEMBER/VIEWER.
+    if (memberRole !== 'OWNER' && memberRole !== 'ADMIN') {
+      const repoLevel = (typeof req.body.repoLevel === 'string' && ['read', 'write', 'admin'].includes(req.body.repoLevel))
+        ? req.body.repoLevel
+        : 'write';
+      const agentLevel = (typeof req.body.agentLevel === 'string' && ['use', 'admin'].includes(req.body.agentLevel))
+        ? req.body.agentLevel
+        : 'use';
+      for (const repoId of repoScopeIds) {
+        try {
+          await prisma.repoMember.upsert({
+            where: { userId_repoId: { userId, repoId } },
+            update: { level: repoLevel, grantedBy: req.user!.id },
+            create: { userId, repoId, level: repoLevel, grantedBy: req.user!.id },
+          });
+        } catch { /* skip on race */ }
+      }
+      for (const agentId of agentScopeIds) {
+        try {
+          await prisma.agentMember.upsert({
+            where: { userId_agentId: { userId, agentId } },
+            update: { level: agentLevel, grantedBy: req.user!.id },
+            create: { userId, agentId, level: agentLevel, grantedBy: req.user!.id },
+          });
+        } catch { /* skip on race */ }
+      }
+    }
 
     await prisma.auditLog.create({
       data: {
         orgId,
         userId: req.user!.id,
         action: 'MEMBER_ADDED',
-        resource: newUser.id,
-        metadata: JSON.stringify({ email, name, role: memberRole }),
+        resource: userId,
+        metadata: JSON.stringify({
+          email, name, role: memberRole, userCreated,
+          repos: repoScopeIds.length, agents: agentScopeIds.length,
+        }),
       },
     });
 
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, name: true, email: true, createdAt: true },
+    });
     res.status(201).json({
-      user: {
-        id: newUser.id,
-        name: newUser.name,
-        email: newUser.email,
-        role: newUser.role,
-        createdAt: newUser.createdAt,
-      },
+      user: { ...user, role: memberRole },
       apiKey: rawKey,
       keyPrefix,
     });
@@ -419,26 +499,23 @@ router.post('/add-member', requireRole('ADMIN'), async (req: AuthRequest, res: R
   }
 });
 
-// POST /:id/regenerate-key — generate new API key, invalidate old ones
 router.post('/:id/regenerate-key', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const targetId = req.params.id as string;
 
-    const target = await prisma.user.findFirst({ where: { id: targetId, orgId } });
-    if (!target) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    const target = await prisma.membership.findUnique({
+      where: { userId_orgId: { userId: targetId, orgId } },
+      include: { user: { select: { name: true, email: true } } },
+    });
+    if (!target) return res.status(404).json({ error: 'User not found' });
 
-    // Delete all existing keys for this user
     await prisma.apiKey.deleteMany({ where: { userId: targetId, orgId } });
 
-    // Generate new key
     const rawKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
     const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
     const keyPrefix = rawKey.slice(0, 14);
 
-    // Scope to all repos + all agents
     const allRepos = await prisma.repo.findMany({ where: { orgId }, select: { id: true } });
     const allAgents = await prisma.agent.findMany({ where: { orgId }, select: { id: true } });
 
@@ -446,16 +523,12 @@ router.post('/:id/regenerate-key', requireRole('ADMIN'), async (req: AuthRequest
       data: {
         orgId,
         userId: targetId,
-        name: `${target.name}'s key`,
+        name: `${target.user.name}'s key`,
         keyHash,
         keyPrefix,
         role: null,
-        repoScopes: {
-          create: allRepos.map((r) => ({ repoId: r.id })),
-        },
-        agentScopes: {
-          create: allAgents.map((a) => ({ agentId: a.id })),
-        },
+        repoScopes: { create: allRepos.map((r) => ({ repoId: r.id })) },
+        agentScopes: { create: allAgents.map((a) => ({ agentId: a.id })) },
       },
     });
 
@@ -465,7 +538,7 @@ router.post('/:id/regenerate-key', requireRole('ADMIN'), async (req: AuthRequest
         userId: req.user!.id,
         action: 'MEMBER_KEY_REGENERATED',
         resource: targetId,
-        metadata: JSON.stringify({ email: target.email, name: target.name }),
+        metadata: JSON.stringify({ email: target.user.email, name: target.user.name }),
       },
     });
 
@@ -476,16 +549,16 @@ router.post('/:id/regenerate-key', requireRole('ADMIN'), async (req: AuthRequest
   }
 });
 
-// POST /:id/revoke-key — delete all API keys for a user
 router.post('/:id/revoke-key', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const targetId = req.params.id as string;
 
-    const target = await prisma.user.findFirst({ where: { id: targetId, orgId } });
-    if (!target) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    const target = await prisma.membership.findUnique({
+      where: { userId_orgId: { userId: targetId, orgId } },
+      include: { user: { select: { name: true, email: true } } },
+    });
+    if (!target) return res.status(404).json({ error: 'User not found' });
 
     await prisma.apiKey.deleteMany({ where: { userId: targetId, orgId } });
 
@@ -495,7 +568,7 @@ router.post('/:id/revoke-key', requireRole('ADMIN'), async (req: AuthRequest, re
         userId: req.user!.id,
         action: 'MEMBER_KEY_REVOKED',
         resource: targetId,
-        metadata: JSON.stringify({ email: target.email, name: target.name }),
+        metadata: JSON.stringify({ email: target.user.email, name: target.user.name }),
       },
     });
 
@@ -506,34 +579,33 @@ router.post('/:id/revoke-key', requireRole('ADMIN'), async (req: AuthRequest, re
   }
 });
 
-// ── Invitations (legacy) ─────────────────────────────────────
+// ── Invitations ─────────────────────────────────────────────
 
-// POST /invite — create invitation link
 router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { email, role } = req.body;
     const inviteRole = (role || 'MEMBER').toUpperCase();
 
-    if (!VALID_ROLES.includes(inviteRole)) {
-      return res.status(400).json({ error: 'Invalid role' });
-    }
-
-    // Don't allow inviting as OWNER
+    if (!VALID_ROLES.includes(inviteRole)) return res.status(400).json({ error: 'Invalid role' });
     if (inviteRole === 'OWNER') {
       return res.status(400).json({ error: 'Cannot invite as owner. Invite as admin and promote later.' });
     }
 
-    // Check if email already exists in org
     if (email) {
-      const existing = await prisma.user.findFirst({ where: { email, orgId } });
-      if (existing) {
-        return res.status(409).json({ error: 'User with this email is already a member' });
+      const existingUser = await prisma.user.findUnique({ where: { email } });
+      if (existingUser) {
+        const existingMembership = await prisma.membership.findUnique({
+          where: { userId_orgId: { userId: existingUser.id, orgId } },
+        });
+        if (existingMembership) {
+          return res.status(409).json({ error: 'User with this email is already a member' });
+        }
       }
     }
 
     const token = crypto.randomBytes(16).toString('hex');
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     const invitation = await prisma.invitation.create({
       data: {
@@ -569,12 +641,11 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
   }
 });
 
-// GET /invites — list pending invitations
 router.get('/invites', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const invites = await prisma.invitation.findMany({
       where: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         usedAt: null,
         expiresAt: { gt: new Date() },
       },
@@ -583,12 +654,8 @@ router.get('/invites', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
 
     res.json({
       invites: invites.map((i) => ({
-        id: i.id,
-        token: i.token,
-        email: i.email,
-        role: i.role,
-        createdAt: i.createdAt,
-        expiresAt: i.expiresAt,
+        id: i.id, token: i.token, email: i.email, role: i.role,
+        createdAt: i.createdAt, expiresAt: i.expiresAt,
       })),
     });
   } catch (err) {
@@ -597,32 +664,136 @@ router.get('/invites', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
   }
 });
 
-// DELETE /invites/:id — cancel invitation
 router.delete('/invites/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const invite = await prisma.invitation.findFirst({
-      where: { id, orgId: req.user!.orgId, usedAt: null },
+      where: { id, orgId: req.activeOrgId!, usedAt: null },
     });
+    if (!invite) return res.status(404).json({ error: 'Invitation not found' });
 
-    if (!invite) {
-      return res.status(404).json({ error: 'Invitation not found' });
-    }
-
-    // Defense-in-depth: compound-scoped delete so a future refactor that
-    // drops the precheck above can't turn this into a cross-tenant wipe.
-    // invitation.delete({id}) accepts only the @id field, so we use
-    // deleteMany with {id, orgId} and verify count===1.
     const { count } = await prisma.invitation.deleteMany({
-      where: { id, orgId: req.user!.orgId },
+      where: { id, orgId: req.activeOrgId! },
     });
-    if (count === 0) {
-      return res.status(404).json({ error: 'Invitation not found' });
-    }
+    if (count === 0) return res.status(404).json({ error: 'Invitation not found' });
 
     res.json({ success: true });
   } catch (err) {
     console.error('Cancel invite error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Per-(user, model) budget overrides ─────────────────────────────────────
+// Membership-scoped target validation: a user belongs to the active org iff
+// a Membership row exists for (userId, orgId). Same IDOR-safe pattern as
+// before.
+
+async function isMemberOfActiveOrg(userId: string, orgId: string): Promise<boolean> {
+  const m = await prisma.membership.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+    select: { userId: true },
+  });
+  return !!m;
+}
+
+router.get('/:id/models', async (req: AuthRequest, res: Response) => {
+  try {
+    if (!await isMemberOfActiveOrg(req.params.id as string, req.activeOrgId!)) {
+      return res.status(404).json({ error: 'User not found in your organization' });
+    }
+    const models = await prisma.userModelLimit.findMany({
+      where: { userId: req.params.id as string },
+      orderBy: { model: 'asc' },
+    });
+    res.json(models);
+  } catch (err) {
+    console.error('List user models error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/:id/models', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!await isMemberOfActiveOrg(req.params.id as string, req.activeOrgId!)) {
+      return res.status(404).json({ error: 'User not found in your organization' });
+    }
+    const { model, monthlyLimit, tokenLimit, maxCostPerSession, maxTokensPerSession } = req.body || {};
+    if (typeof model !== 'string' || !model.trim()) {
+      return res.status(400).json({ error: 'model is required' });
+    }
+    if (model.length > 200) return res.status(413).json({ error: 'model exceeds max length of 200' });
+    try {
+      const created = await prisma.userModelLimit.create({
+        data: {
+          userId: req.params.id as string,
+          model: model.trim(),
+          monthlyLimit: typeof monthlyLimit === 'number' && monthlyLimit > 0 ? monthlyLimit : null,
+          tokenLimit: typeof tokenLimit === 'number' && tokenLimit > 0 ? tokenLimit : null,
+          maxCostPerSession: typeof maxCostPerSession === 'number' && maxCostPerSession > 0 ? maxCostPerSession : null,
+          maxTokensPerSession: typeof maxTokensPerSession === 'number' && maxTokensPerSession > 0 ? maxTokensPerSession : null,
+        },
+      });
+      res.json(created);
+    } catch (e: any) {
+      if (e?.code === 'P2002') {
+        return res.status(409).json({ error: 'Model already configured for this user. PUT to update.' });
+      }
+      throw e;
+    }
+  } catch (err) {
+    console.error('Create user model error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.put('/:id/models/:modelKey', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!await isMemberOfActiveOrg(req.params.id as string, req.activeOrgId!)) {
+      return res.status(404).json({ error: 'User not found in your organization' });
+    }
+    const model = decodeURIComponent(req.params.modelKey as string);
+    const data: Record<string, unknown> = {};
+    const body = req.body || {};
+    for (const key of ['monthlyLimit', 'tokenLimit', 'maxCostPerSession', 'maxTokensPerSession'] as const) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) {
+        const v = body[key];
+        data[key] = typeof v === 'number' && v > 0 ? v : null;
+      }
+    }
+    try {
+      const updated = await prisma.userModelLimit.update({
+        where: { userId_model: { userId: req.params.id as string, model } },
+        data,
+      });
+      res.json(updated);
+    } catch (e: any) {
+      if (e?.code === 'P2025') return res.status(404).json({ error: 'Model not configured for this user' });
+      throw e;
+    }
+  } catch (err) {
+    console.error('Update user model error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.delete('/:id/models/:modelKey', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!await isMemberOfActiveOrg(req.params.id as string, req.activeOrgId!)) {
+      return res.status(404).json({ error: 'User not found in your organization' });
+    }
+    const model = decodeURIComponent(req.params.modelKey as string);
+    try {
+      await prisma.userModelLimit.delete({
+        where: { userId_model: { userId: req.params.id as string, model } },
+      });
+      res.json({ ok: true });
+    } catch (e: any) {
+      if (e?.code === 'P2025') return res.status(404).json({ error: 'Model not configured for this user' });
+      throw e;
+    }
+  } catch (err) {
+    console.error('Delete user model error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

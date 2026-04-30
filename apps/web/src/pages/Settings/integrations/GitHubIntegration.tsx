@@ -132,7 +132,7 @@ export default function GitHubIntegration() {
     setInstallingApp(true);
     setIntegrationError(null);
     try {
-      const { installUrl } = await api.getGitHubAppInstallUrl();
+      const { installUrl } = await api.getGitHubAppInstallUrl({ from: 'settings' });
       window.location.href = installUrl;
     } catch (err: any) {
       setIntegrationError(err.message || 'Failed to start GitHub App installation');

@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Per-model budget caps for AI coding teams',
+    slug: 'per-model-budget-caps-team',
+    date: '2026-04-29',
+    author: 'Artem Dolobanko',
+    tags: ['cost-tracking', 'ai-governance', 'budgets', 'engineering-leadership'],
+    excerpt:
+      'Most teams using AI for code don\'t have one model — they have four, each with a ten-fold cost spread between the high end and the low end. And nobody can tell you what each one cost, what each one shipped, or whether the dev who burned $400 on the flagship model this week could\'ve used the cheap one for the same task. This week Origin shipped per-model budget caps for teams: hard enforcement at session start, not a monthly surprise.',
+  },
+  {
     title: 'Nobody in the chain actually wrote this code',
     slug: 'nobody-in-the-chain-wrote-this-code',
     date: '2026-04-20',

@@ -162,36 +162,176 @@ interface BudgetCheckResult {
   spent: number;
   limit: number;
   percentage: number;
+  level?: 'model' | 'agent' | 'user-model' | 'repo-model' | 'org';
 }
 
-export async function checkBudget(orgId: string): Promise<BudgetCheckResult> {
-  const config = await getBudgetConfig(orgId);
+export interface BudgetCheckScope {
+  agentId?: string;
+  model?: string;
+  userId?: string;
+  repoId?: string;
+}
 
-  if (config.monthlyLimit <= 0) {
+// Sum of session cost in the current month, optionally narrowed to a single
+// agent / user / repo / model. Used by the per-level limit checks so each
+// scope's "spent so far" is computed against the matching scope only.
+async function getMonthlySpendScope(opts: {
+  orgId: string;
+  agentId?: string;
+  userId?: string;
+  repoId?: string;
+  model?: string;
+}): Promise<number> {
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const result = await prisma.codingSession.aggregate({
+    _sum: { costUsd: true },
+    where: {
+      createdAt: { gte: startOfMonth },
+      commit: {
+        repo: {
+          orgId: opts.orgId,
+          ...(opts.repoId ? { id: opts.repoId } : {}),
+        },
+      },
+      ...(opts.agentId ? { agentId: opts.agentId } : {}),
+      ...(opts.userId ? { userId: opts.userId } : {}),
+      ...(opts.model ? { model: opts.model } : {}),
+    },
+  });
+  return result._sum.costUsd ?? 0;
+}
+
+// Session-start budget check. Walks every applicable level (agent-model →
+// user-model → repo-model → org). Each level evaluates independently; the
+// first that's over its cap and configured to block fires. Per spec,
+// "fall back" means inheritance for null-valued fields, not short-circuit
+// evaluation — a too-loose model limit can't bypass a tighter org cap.
+//
+// Backward-compatible: callers passing only `orgId` get the org-only check.
+// Old (orgId, agentId, model) signature is still accepted via union typing.
+export async function checkBudget(
+  orgId: string,
+  scopeOrAgentId?: BudgetCheckScope | string,
+  legacyModel?: string,
+): Promise<BudgetCheckResult> {
+  // Coerce legacy positional args into the scope bag.
+  const scope: BudgetCheckScope =
+    typeof scopeOrAgentId === 'string'
+      ? { agentId: scopeOrAgentId, model: legacyModel }
+      : scopeOrAgentId ?? {};
+
+  const orgConfig = await getBudgetConfig(orgId);
+
+  type Level = {
+    name: NonNullable<BudgetCheckResult['level']>;
+    label: string;
+    limit: number;
+    spent: number;
+    block: boolean;
+  };
+  const levels: Level[] = [];
+
+  // 1. AgentModel-level (most specific to agent + model)
+  if (scope.agentId && scope.model) {
+    const am = await prisma.agentModel.findUnique({
+      where: { agentId_model: { agentId: scope.agentId, model: scope.model } },
+      select: { monthlyLimit: true, agent: { select: { name: true } } },
+    });
+    if (am?.monthlyLimit && am.monthlyLimit > 0) {
+      const spent = await getMonthlySpendScope({ orgId, agentId: scope.agentId, model: scope.model });
+      levels.push({
+        name: 'model',
+        label: `${am.agent.name} · ${scope.model} monthly model limit`,
+        limit: am.monthlyLimit,
+        spent,
+        block: orgConfig.blockOnExceed,
+      });
+    }
+  }
+
+  // 2. UserModelLimit (per-developer × model). Only fires when both userId
+  // and model are known, e.g. from a session bound to a logged-in dev's
+  // API key.
+  if (scope.userId && scope.model) {
+    const um = await prisma.userModelLimit.findUnique({
+      where: { userId_model: { userId: scope.userId, model: scope.model } },
+      select: { monthlyLimit: true, user: { select: { name: true } } },
+    });
+    if (um?.monthlyLimit && um.monthlyLimit > 0) {
+      const spent = await getMonthlySpendScope({ orgId, userId: scope.userId, model: scope.model });
+      levels.push({
+        name: 'user-model',
+        label: `${um.user.name} · ${scope.model} monthly user limit`,
+        limit: um.monthlyLimit,
+        spent,
+        block: orgConfig.blockOnExceed,
+      });
+    }
+  }
+
+  // 3. RepoModelLimit (per-repo × model). Same shape, scoped by repo.
+  if (scope.repoId && scope.model) {
+    const rm = await prisma.repoModelLimit.findUnique({
+      where: { repoId_model: { repoId: scope.repoId, model: scope.model } },
+      select: { monthlyLimit: true, repo: { select: { name: true } } },
+    });
+    if (rm?.monthlyLimit && rm.monthlyLimit > 0) {
+      const spent = await getMonthlySpendScope({ orgId, repoId: scope.repoId, model: scope.model });
+      levels.push({
+        name: 'repo-model',
+        label: `${rm.repo.name} · ${scope.model} monthly repo limit`,
+        limit: rm.monthlyLimit,
+        spent,
+        block: orgConfig.blockOnExceed,
+      });
+    }
+  }
+
+  // 4. Org-level (least specific). Existing budget_agent_limits /
+  // budget_user_limits JSON maps remain display-only and aren't enforced
+  // here (see open question #3 in the plan).
+  if (orgConfig.monthlyLimit > 0) {
+    const spent = await getMonthlySpend(orgId);
+    levels.push({
+      name: 'org',
+      label: 'Monthly budget',
+      limit: orgConfig.monthlyLimit,
+      spent,
+      block: orgConfig.blockOnExceed,
+    });
+  }
+
+  if (levels.length === 0) {
     return { blocked: false, message: 'No budget limit set', spent: 0, limit: 0, percentage: 0 };
   }
 
-  const spent = await getMonthlySpend(orgId);
-  const percentage = (spent / config.monthlyLimit) * 100;
-
-  if (config.blockOnExceed && spent >= config.monthlyLimit) {
+  const blocking = levels.find((l) => l.block && l.spent >= l.limit);
+  if (blocking) {
     return {
       blocked: true,
-      message: `Monthly budget of $${config.monthlyLimit.toFixed(2)} exceeded. Current spend: $${spent.toFixed(2)}`,
-      spent,
-      limit: config.monthlyLimit,
-      percentage,
+      level: blocking.name,
+      message: `${blocking.label} exceeded ($${blocking.spent.toFixed(2)} / $${blocking.limit.toFixed(2)})`,
+      spent: blocking.spent,
+      limit: blocking.limit,
+      percentage: (blocking.spent / blocking.limit) * 100,
     };
   }
 
+  const hottest = levels.reduce((best, l) =>
+    l.spent / l.limit > best.spent / best.limit ? l : best,
+  );
+  const pct = (hottest.spent / hottest.limit) * 100;
   return {
     blocked: false,
-    message: percentage >= 90
-      ? `Warning: ${percentage.toFixed(0)}% of monthly budget used ($${spent.toFixed(2)}/$${config.monthlyLimit.toFixed(2)})`
+    level: hottest.name,
+    message: pct >= 90
+      ? `Warning: ${pct.toFixed(0)}% of ${hottest.label} used ($${hottest.spent.toFixed(2)}/$${hottest.limit.toFixed(2)})`
       : 'Budget OK',
-    spent,
-    limit: config.monthlyLimit,
-    percentage,
+    spent: hottest.spent,
+    limit: hottest.limit,
+    percentage: pct,
   };
 }
 

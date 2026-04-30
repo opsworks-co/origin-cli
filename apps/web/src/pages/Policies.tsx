@@ -15,6 +15,27 @@ const TYPE_BADGE: Record<string, string> = {
   COMMIT_MESSAGE: 'badge-cyan',
 };
 
+// One color per policy type, used to drive icon tile, accent edge, and
+// hover shadow. Palette stays in sync with TYPE_BADGE so the type pills
+// and the cards reinforce each other visually instead of competing.
+const TYPE_COLOR: Record<string, string> = {
+  FILE_RESTRICTION: '#ef4444',  // red
+  REQUIRE_REVIEW:   '#f59e0b',  // amber
+  MODEL_ALLOWLIST:  '#3b82f6',  // blue
+  COST_LIMIT:       '#a855f7',  // purple
+  CONTENT_FILTER:   '#10b981',  // emerald
+  COMMIT_MESSAGE:   '#06b6d4',  // cyan
+};
+
+const TYPE_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
+  FILE_RESTRICTION: FileWarning,
+  REQUIRE_REVIEW:   Eye,
+  MODEL_ALLOWLIST:  Cpu,
+  COST_LIMIT:       DollarSign,
+  CONTENT_FILTER:   Filter,
+  COMMIT_MESSAGE:   MessageSquare,
+};
+
 const TYPE_DESCRIPTIONS: Record<string, string> = {
   FILE_RESTRICTION:
     'Block or flag access to specific file patterns (e.g. .env, secrets, prod configs). Enforced via MCP server check_file_access tool and at session end.',
@@ -327,39 +348,38 @@ export default function Policies() {
         </div>
       )}
 
-      {/* Natural language policy creation */}
-      <form onSubmit={handleNaturalLanguage} className="card space-y-3">
-        <div className="flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-indigo-400" />
-          <h3 className="text-sm font-semibold text-gray-200">Create with Natural Language</h3>
-        </div>
-        <div className="flex gap-2">
+      {/* Natural-language policy creation — collapsed to a single row.
+          Icon prefix + ghost input + flush Create button. The verbose
+          subtitle was redundant with the placeholder, so it's gone. */}
+      <form
+        onSubmit={handleNaturalLanguage}
+        className="relative rounded-xl border border-indigo-500/20 bg-gradient-to-br from-indigo-500/[0.04] via-purple-500/[0.02] to-transparent p-1 hover:border-indigo-500/30 transition-colors"
+      >
+        <div className="flex items-center gap-2 pl-3 pr-1">
+          <Sparkles className="w-4 h-4 text-indigo-400 flex-shrink-0" />
           <input
             value={nlPrompt}
             onChange={(e) => setNlPrompt(e.target.value)}
-            className="input flex-1 text-sm"
-            placeholder='e.g. "Block access to .env files and flag sessions costing over $2 for review"'
+            className="flex-1 bg-transparent border-0 outline-none text-sm text-gray-200 placeholder-gray-500 py-2.5"
+            placeholder='Describe a policy in plain English — e.g. "Block .env files and flag sessions over $2 for review"'
             disabled={nlLoading}
           />
           <button
             type="submit"
             disabled={nlLoading || !nlPrompt.trim()}
-            className="btn-primary text-sm whitespace-nowrap"
+            className="text-xs font-medium px-3 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors flex-shrink-0"
           >
-            {nlLoading ? 'Creating...' : 'Create'}
+            {nlLoading ? 'Creating…' : 'Create'}
           </button>
         </div>
         {nlResult && (
-          <div className="text-sm text-green-400 bg-green-900/20 border border-green-800/50 rounded-lg px-3 py-2 flex items-center justify-between">
+          <div className="mt-1 text-xs text-green-400 bg-green-900/20 border border-green-800/50 rounded-lg px-3 py-2 flex items-center justify-between">
             <span>{nlResult}</span>
             <button onClick={() => setNlResult(null)} className="text-green-500 hover:text-green-300 ml-2">
               &times;
             </button>
           </div>
         )}
-        <p className="text-xs text-gray-600">
-          Describe your policy in plain English. AI will create the policy with rules automatically.
-        </p>
       </form>
 
       {/* Create form */}
@@ -447,26 +467,34 @@ export default function Policies() {
             return (
               <>
                 {orgPolicies.length > 0 && (
-                  <div>
-                    <div className="flex items-center gap-2 mb-3">
-                      <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Org-wide Policies</h2>
-                      <span className="text-xs text-gray-600">Apply to all agents and sessions</span>
-                    </div>
-                    <div className="space-y-3">
+                  <section>
+                    <header className="flex items-baseline gap-3 mb-3 pb-2 border-b border-white/[0.05]">
+                      <h2 className="text-[11px] font-semibold text-gray-400 uppercase tracking-[0.12em]">
+                        Org-wide
+                      </h2>
+                      <span className="text-[11px] text-gray-600">
+                        Applies to every agent and session · {orgPolicies.length} polic{orgPolicies.length === 1 ? 'y' : 'ies'}
+                      </span>
+                    </header>
+                    <div className="space-y-2">
                       {orgPolicies.map((policy) => renderPolicy(policy))}
                     </div>
-                  </div>
+                  </section>
                 )}
                 {agentPolicies.length > 0 && (
-                  <div>
-                    <div className="flex items-center gap-2 mb-3">
-                      <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Per-Agent Policies</h2>
-                      <span className="text-xs text-gray-600">Scoped to specific agents</span>
-                    </div>
-                    <div className="space-y-3">
+                  <section>
+                    <header className="flex items-baseline gap-3 mb-3 pb-2 border-b border-white/[0.05]">
+                      <h2 className="text-[11px] font-semibold text-gray-400 uppercase tracking-[0.12em]">
+                        Per-agent
+                      </h2>
+                      <span className="text-[11px] text-gray-600">
+                        Scoped to specific agents · {agentPolicies.length} polic{agentPolicies.length === 1 ? 'y' : 'ies'}
+                      </span>
+                    </header>
+                    <div className="space-y-2">
                       {agentPolicies.map((policy) => renderPolicy(policy))}
                     </div>
-                  </div>
+                  </section>
                 )}
               </>
             );
@@ -496,78 +524,114 @@ export default function Policies() {
 
   function renderPolicy(policy: Policy) {
             const expanded = expandedId === policy.id;
+            const color = TYPE_COLOR[policy.type] ?? '#6b7280';
+            const TypeIcon = TYPE_ICON[policy.type] ?? Shield;
+            const ruleCount = policy.rules?.length ?? 0;
+            const isOrgWide = !policy.assignments || policy.assignments.length === 0;
             return (
-              <div key={policy.id} className="card p-0 overflow-hidden">
-                {/* Policy header */}
+              <div
+                key={policy.id}
+                className={`group/card relative rounded-xl border bg-gray-900/40 overflow-hidden transition-all duration-200 ${
+                  policy.active
+                    ? 'border-white/[0.07] hover:border-white/[0.14] hover:-translate-y-0.5'
+                    : 'border-white/[0.04] opacity-70 hover:opacity-100'
+                }`}
+                onMouseEnter={(e) => {
+                  if (policy.active) (e.currentTarget as HTMLDivElement).style.boxShadow = `0 12px 30px -16px ${color}55`;
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLDivElement).style.boxShadow = '';
+                }}
+              >
+                {/* Left edge accent — colored bar matching the policy type. */}
                 <div
-                  className="flex items-center gap-3 px-5 py-4 cursor-pointer hover:bg-gray-800/30 transition-colors"
+                  className="absolute inset-y-0 left-0 w-0.5"
+                  style={{ background: policy.active ? color : 'rgba(255,255,255,0.06)' }}
+                />
+
+                {/* Policy header row */}
+                <div
+                  className="flex items-center gap-3 pl-5 pr-4 py-3.5 cursor-pointer"
                   onClick={() => setExpandedId(expanded ? null : policy.id)}
                 >
-                  {expanded ? <ChevronDown className="w-3.5 h-3.5 text-gray-500" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}
+                  {/* Type icon tile */}
+                  <div
+                    className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors"
+                    style={{
+                      backgroundColor: policy.active ? `${color}15` : 'rgba(255,255,255,0.04)',
+                      color: policy.active ? color : '#6b7280',
+                      boxShadow: policy.active ? `inset 0 0 0 1px ${color}33` : undefined,
+                    }}
+                  >
+                    <TypeIcon className="w-4 h-4" />
+                  </div>
+
+                  {/* Name + meta */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <Link
                         to={`/policies/${policy.id}`}
-                        className="font-semibold text-gray-100 hover:text-indigo-400 transition-colors"
+                        className="font-semibold text-gray-100 hover:text-indigo-400 transition-colors truncate"
                         onClick={(e) => e.stopPropagation()}
                       >
                         {policy.name}
                       </Link>
-                      <span className={TYPE_BADGE[policy.type] ?? 'badge-gray'}>
+                      <span
+                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium tracking-wider uppercase"
+                        style={{
+                          backgroundColor: `${color}1a`,
+                          color: color,
+                          border: `1px solid ${color}33`,
+                        }}
+                      >
                         {policy.type.replace(/_/g, ' ')}
                       </span>
                     </div>
                     {policy.description && (
-                      <p className="text-xs text-gray-500 mt-0.5">{policy.description}</p>
+                      <p className="text-xs text-gray-500 mt-0.5 truncate">{policy.description}</p>
                     )}
-                    {/* Assigned agents */}
-                    {policy.assignments && policy.assignments.length > 0 && (
-                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                        {policy.assignments.map(a => (
+                    {/* Scope row: agent chips for per-agent policies, nothing for org-wide
+                        (the section header already says ORG-WIDE — saying it again is noise). */}
+                    {!isOrgWide && (
+                      <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                        {policy.assignments!.map(a => (
                           <Link
                             key={a.agent.id}
                             to={`/agents/${a.agent.id}`}
                             onClick={(e) => e.stopPropagation()}
-                            className="text-xs px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 hover:bg-indigo-500/25 transition-colors"
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 transition-colors"
                           >
                             {a.agent.name}
                           </Link>
                         ))}
                       </div>
                     )}
-                    {policy.assignments && policy.assignments.length === 0 && (
-                      <span className="text-xs text-gray-600 mt-1 inline-block">org-wide</span>
-                    )}
                   </div>
+
+                  {/* Right cluster: rule count, toggle, expand chevron */}
                   <div className="flex items-center gap-3 flex-shrink-0">
-                    {policy.active ? (
-                      <span className="inline-flex items-center gap-1.5 text-xs text-green-400">
-                        <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                        Active
-                      </span>
-                    ) : (
-                      <span className="text-xs text-gray-600">Inactive</span>
-                    )}
-                    <span className="text-xs text-gray-500">
-                      {policy.rules?.length ?? 0} rule
-                      {(policy.rules?.length ?? 0) !== 1 ? 's' : ''}
+                    <span className="text-[11px] text-gray-500 tabular-nums">
+                      {ruleCount} rule{ruleCount !== 1 ? 's' : ''}
                     </span>
-                    {/* Toggle */}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         handleToggle(policy);
                       }}
+                      title={policy.active ? 'Disable policy' : 'Enable policy'}
                       className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                        policy.active ? 'bg-indigo-600' : 'bg-gray-700'
+                        policy.active ? 'bg-indigo-500' : 'bg-gray-700 hover:bg-gray-600'
                       }`}
                     >
                       <span
-                        className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                          policy.active ? 'translate-x-4' : 'translate-x-1'
+                        className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${
+                          policy.active ? 'translate-x-[18px]' : 'translate-x-0.5'
                         }`}
                       />
                     </button>
+                    <ChevronRight
+                      className={`w-3.5 h-3.5 text-gray-600 transition-transform ${expanded ? 'rotate-90' : ''}`}
+                    />
                   </div>
                 </div>
 

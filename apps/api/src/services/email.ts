@@ -86,7 +86,7 @@ export async function sendWeeklyReport(orgId: string): Promise<void> {
     let recipients = settings.recipients.filter(Boolean);
     if (recipients.length === 0) {
       const admins = await prisma.user.findMany({
-        where: { orgId, role: { in: ['ADMIN', 'OWNER'] } },
+        where: { memberships: { some: { orgId, role: { in: ['ADMIN', 'OWNER'] } } } },
         select: { email: true },
       });
       recipients = admins.map(a => a.email);
@@ -248,7 +248,7 @@ export async function sendWeeklyDigest(orgId: string): Promise<{ success: boolea
 
   // Get admin/owner emails
   const admins = await prisma.user.findMany({
-    where: { orgId, role: { in: ['ADMIN', 'OWNER'] } },
+    where: { memberships: { some: { orgId, role: { in: ['ADMIN', 'OWNER'] } } } },
     select: { email: true },
   });
   const recipients = admins.map(a => a.email).filter(Boolean);

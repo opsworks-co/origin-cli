@@ -1,15 +1,16 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 import { parseLimit, parseOffset } from '../utils/validate.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — Search prompts
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const q = req.query.q as string | undefined;
     const model = req.query.model as string | undefined;
     const repoId = req.query.repoId as string | undefined;
@@ -65,7 +66,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // Non-admins can only filter prompts by their own userId — previously
     // any org member could read a coworker's entire prompt history just
     // by guessing/knowing their user UUID.
-    const role = (req.user!.role || '').toUpperCase();
+    const role = (req.activeRole! || '').toUpperCase();
     const canViewOthers = role === 'ADMIN' || role === 'OWNER';
     if (userId) {
       if (!canViewOthers && userId !== req.user!.id) {
@@ -137,7 +138,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 // GET /patterns — Prompt pattern analysis
 router.get('/patterns', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     // Get repo IDs for org (same cap as the search endpoint).
     const repos = await prisma.repo.findMany({

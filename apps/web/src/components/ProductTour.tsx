@@ -134,6 +134,95 @@ export const DASHBOARD_TOUR: TourStep[] = [
   },
 ];
 
+// ── Team / org tour ─────────────────────────────────────────────────────────
+// Counterpart to DASHBOARD_TOUR but for team admins. Walks through the seven
+// surfaces an admin actually uses to get from "just signed up" to "team is
+// productive": Dashboard → Repos → Agents → IAM → Policies → Budget →
+// Insights. ~90 seconds end to end. Each step targets a stable
+// `data-tour="..."` anchor so layout tweaks don't silently break the tour.
+export const TEAM_TOUR: TourStep[] = [
+  {
+    target: '[data-tour="sidebar-nav"]',
+    title: 'Welcome to Origin',
+    content: 'Origin gives you visibility, governance, and budgets over every AI coding session your team runs. Quick tour — about 90 seconds.',
+    placement: 'right',
+    route: '/dashboard',
+    delay: 200,
+  },
+
+  // ── Dashboard ─────────────────────────────────────────────────
+  {
+    target: '[data-tour="team-nav-dashboard"]',
+    title: '1. Dashboard',
+    content: 'The team\'s pulse. Sessions, tokens, cost, and adoption — all this week vs last week. Click any of the four KPI cards to break it down by agent.',
+    placement: 'right',
+    route: '/dashboard',
+  },
+
+  // ── Repositories ──────────────────────────────────────────────
+  {
+    target: '[data-tour="team-nav-repos"]',
+    title: '2. Repositories',
+    content: 'Connect GitHub, GitLab, or paste a repo path. Origin only tracks AI work in repos you\'ve added — this is the gate.',
+    placement: 'right',
+    route: '/repos',
+  },
+
+  // ── Agents ────────────────────────────────────────────────────
+  {
+    target: '[data-tour="team-nav-agents"]',
+    title: '3. Agents',
+    content: 'An agent is "Claude Code", "Cursor", "Codex", etc. Each one can have many models with their own per-model budgets and per-session caps.',
+    placement: 'right',
+    route: '/agents',
+  },
+
+  // ── IAM (the most-overlooked step in onboarding) ──────────────
+  {
+    target: '[data-tour="team-nav-iam"]',
+    title: '4. Invite your team',
+    content: 'Add engineers here. When you add a member, you pick the agents and repos their API key can access — scope on creation, no reconfiguration after.',
+    placement: 'right',
+    route: '/iam',
+  },
+
+  // ── Policies (with NL hint) ───────────────────────────────────
+  {
+    target: '[data-tour="team-nav-policies"]',
+    title: '5. Policies',
+    content: 'Block .env access, require human review on big sessions, cap costs, restrict models. Type a policy in plain English at the top — Origin generates the rules.',
+    placement: 'right',
+    route: '/policies',
+  },
+
+  // ── Budget ────────────────────────────────────────────────────
+  {
+    target: '[data-tour="team-nav-budget"]',
+    title: '6. Budget',
+    content: 'Set monthly caps per agent, per engineer, or per repo × model. Sessions block at the cap if you opt in. Slack + email alerts at 50/80/90/100%.',
+    placement: 'right',
+    route: '/budget',
+  },
+
+  // ── Insights / Analytics ──────────────────────────────────────
+  {
+    target: '[data-tour="team-nav-insights"]',
+    title: '7. Insights',
+    content: 'Deep analytics: AI-authorship % over time, cost-by-model, top engineers, adoption trend. Date-range filter on the right.',
+    placement: 'right',
+    route: '/insights',
+  },
+
+  // ── Wrap-up ───────────────────────────────────────────────────
+  {
+    target: '[data-tour="team-nav-dashboard"]',
+    title: 'You\'re set',
+    content: 'That\'s the tour. The Dashboard\'s "What did the team ship today?" banner is a nice place to land each morning. Re-run the tour anytime from the sidebar.',
+    placement: 'right',
+    route: '/dashboard',
+  },
+];
+
 // ── Tooltip positioning ─────────────────────────────────────────────────────
 
 interface Position {
@@ -196,8 +285,31 @@ interface ProductTourProps {
 }
 
 export default function ProductTour({ steps, tourId, onComplete }: ProductTourProps) {
-  const [active, setActive] = useState(false);
-  const [currentStep, setCurrentStep] = useState(0);
+  // In-progress state has to survive component remounts. Each route in
+  // App.tsx wraps its content in <AppLayout>, which means navigating from
+  // /dashboard → /repos unmounts the AppLayout that contains ProductTour
+  // and mounts a fresh one on the new route. Without persistence, `active`
+  // and `currentStep` reset to defaults and the tour visibly "dies" on the
+  // first route change. Use sessionStorage for in-progress state (one
+  // browser session = one tour run) and localStorage for the completed
+  // flag (sticks across sessions so we don't auto-relaunch every visit).
+  const sessionKey = `origin:tour-state-${tourId}`;
+  const storageKey = `origin:tour-${tourId}`;
+
+  const initial = (() => {
+    try {
+      const raw = sessionStorage.getItem(sessionKey);
+      if (!raw) return { active: false, step: 0 };
+      const parsed = JSON.parse(raw) as { active?: boolean; step?: number };
+      return {
+        active: !!parsed.active,
+        step: typeof parsed.step === 'number' && parsed.step >= 0 ? parsed.step : 0,
+      };
+    } catch { return { active: false, step: 0 }; }
+  })();
+
+  const [active, setActive] = useState(initial.active);
+  const [currentStep, setCurrentStep] = useState(initial.step);
   const [pos, setPos] = useState<Position | null>(null);
   const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
   const [transitioning, setTransitioning] = useState(false);
@@ -205,7 +317,16 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
   const navigate = useNavigate();
   const location = useLocation();
 
-  const storageKey = `origin:tour-${tourId}`;
+  // Mirror in-progress state to sessionStorage so route remounts can rehydrate.
+  useEffect(() => {
+    try {
+      if (active) {
+        sessionStorage.setItem(sessionKey, JSON.stringify({ active, step: currentStep }));
+      } else {
+        sessionStorage.removeItem(sessionKey);
+      }
+    } catch { /* ignore */ }
+  }, [active, currentStep, sessionKey]);
 
   const isCompleted = () => {
     try { return localStorage.getItem(storageKey) === 'done'; } catch { return false; }
@@ -267,9 +388,12 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
     setActive(false);
     setPos(null);
     setTargetRect(null);
-    try { localStorage.setItem(storageKey, 'done'); } catch {}
+    try {
+      localStorage.setItem(storageKey, 'done');
+      sessionStorage.removeItem(sessionKey);
+    } catch {}
     onComplete?.();
-  }, [storageKey, onComplete]);
+  }, [storageKey, sessionKey, onComplete]);
 
   // Position the tooltip for the current step
   const positionTooltip = useCallback(() => {

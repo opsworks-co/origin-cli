@@ -174,8 +174,7 @@ async function backlinkCommitsToSessions(repoId: string, orgId: string): Promise
   // SHA (e.g. amend/rebase) or the commitShas array wasn't populated.
   if (stillUnlinked.length > 0) {
     const users = await prisma.user.findMany({
-      where: { orgId },
-      select: { id: true, email: true, name: true },
+      where: { memberships: { some: { orgId } } },      select: { id: true, email: true, name: true },
     });
     const userByKey = new Map<string, { id: string; email: string; name: string | null }>();
     for (const u of users) {

@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import {
   getGitLabOAuthConfig,
   getGitLabOAuthConfigForOrg,
@@ -27,9 +27,9 @@ router.get('/debug-config', (_req: Request, res: Response) => {
 
 // ── GET /config — get GitLab OAuth app config for this org ──
 
-router.get('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.get('/config', requireAuth, resolveOrgContext, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     // Check env vars first
     const envConfig = getGitLabOAuthConfig();
@@ -71,9 +71,9 @@ router.get('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest
 
 // ── PUT /config — save GitLab OAuth app credentials for this org ──
 
-router.put('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.put('/config', requireAuth, resolveOrgContext, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { clientId, clientSecret, redirectUri } = req.body;
 
     if (!clientId || !clientSecret || !redirectUri) {
@@ -115,9 +115,9 @@ router.put('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest
 
 // ── DELETE /config — remove GitLab OAuth app credentials ──
 
-router.delete('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.delete('/config', requireAuth, resolveOrgContext, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const existing = await prisma.integrationConfig.findFirst({
       where: { orgId, provider: 'gitlab_oauth_app' },
     });
@@ -135,8 +135,8 @@ router.delete('/config', requireAuth, requireRole('ADMIN'), async (req: AuthRequ
 
 // ── GET /install — redirect user to GitLab OAuth authorization page ──
 
-router.get('/install', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
-  const oauthConfig = await getGitLabOAuthConfigForOrg(req.user!.orgId);
+router.get('/install', requireAuth, resolveOrgContext, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  const oauthConfig = await getGitLabOAuthConfigForOrg(req.activeOrgId!);
 
   if (!oauthConfig.configured) {
     return res.status(500).json({
@@ -147,7 +147,7 @@ router.get('/install', requireAuth, requireRole('ADMIN'), async (req: AuthReques
   // Determine GitLab instance URL from org's existing integration or default to gitlab.com
   let gitlabBaseUrl = 'https://gitlab.com';
   const existing = await prisma.integrationConfig.findFirst({
-    where: { orgId: req.user!.orgId, provider: 'gitlab' },
+    where: { orgId: req.activeOrgId!, provider: 'gitlab' },
   });
   if (existing?.baseUrl) {
     gitlabBaseUrl = getGitLabOAuthBaseUrl(existing.baseUrl);
@@ -156,7 +156,7 @@ router.get('/install', requireAuth, requireRole('ADMIN'), async (req: AuthReques
   // Create signed state token (CSRF protection + org association)
   const from = (req.query.from as string) || '';
   const state = jwt.sign(
-    { orgId: req.user!.orgId, userId: req.user!.id, from },
+    { orgId: req.activeOrgId!, userId: req.user!.id, from },
     JWT_SECRET,
     { expiresIn: '15m' },
   );
@@ -297,15 +297,17 @@ router.get('/callback', async (req: Request, res: Response) => {
       },
     });
 
-    // Redirect — onboarding flow goes back to /onboarding, solo to /repos, org to /settings
-    const callbackUser = await prisma.user.findUnique({ where: { id: statePayload.userId }, select: { accountType: true } });
+    // Redirect — onboarding goes back to onboarding; everywhere else lands on
+    // /repos with ?gitlab_oauth=success which the Repos page picks up to
+    // auto-open the import dialog. Settings callers explicitly pass
+    // from=settings if they want to stay on Settings after install.
     let successRedirect: string;
     if (statePayload.from === 'onboarding') {
       successRedirect = '/onboarding?step=1&gitlab_oauth=success';
-    } else if (callbackUser?.accountType === 'developer') {
-      successRedirect = '/repos?gitlab_oauth=success';
-    } else {
+    } else if (statePayload.from === 'settings') {
       successRedirect = '/settings?tab=integrations&gitlab_oauth=success';
+    } else {
+      successRedirect = '/repos?gitlab_oauth=success&import=open';
     }
     res.redirect(successRedirect);
   } catch (err) {
@@ -316,9 +318,9 @@ router.get('/callback', async (req: Request, res: Response) => {
 
 // ── GET /status — check GitLab OAuth status ──
 
-router.get('/status', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/status', requireAuth, resolveOrgContext, async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const oauthConfig = await getGitLabOAuthConfigForOrg(orgId);
 
     const config = await prisma.integrationConfig.findFirst({
@@ -352,10 +354,10 @@ router.get('/status', requireAuth, async (req: AuthRequest, res: Response) => {
 
 // ── POST /test — test GitLab OAuth connection ──
 
-router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.post('/test', requireAuth, resolveOrgContext, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const config = await prisma.integrationConfig.findFirst({
-      where: { orgId: req.user!.orgId, provider: 'gitlab' },
+      where: { orgId: req.activeOrgId!, provider: 'gitlab' },
     });
 
     if (!config || (config as any).authType !== 'gitlab_oauth') {
@@ -363,7 +365,7 @@ router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest,
     }
 
     // Get valid token (auto-refresh if expired)
-    const token = await getValidGitLabOAuthToken({ ...config, orgId: req.user!.orgId });
+    const token = await getValidGitLabOAuthToken({ ...config, orgId: req.activeOrgId! });
     const apiBase = config.baseUrl || 'https://gitlab.com/api/v4';
     assertSafeExternalUrl(apiBase, 'gitlab-oauth.test');
     const result = await testGitLabConnection(token, apiBase, 'gitlab_oauth');
@@ -378,10 +380,10 @@ router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest,
 
 // ── POST /disconnect — revoke GitLab OAuth and revert to PAT or remove ──
 
-router.post('/disconnect', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.post('/disconnect', requireAuth, resolveOrgContext, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const config = await prisma.integrationConfig.findFirst({
-      where: { orgId: req.user!.orgId, provider: 'gitlab' },
+      where: { orgId: req.activeOrgId!, provider: 'gitlab' },
     });
 
     if (!config || (config as any).authType !== 'gitlab_oauth') {
@@ -390,7 +392,7 @@ router.post('/disconnect', requireAuth, requireRole('ADMIN'), async (req: AuthRe
 
     // Try to revoke the token on GitLab
     try {
-      const oauthConfig = await getGitLabOAuthConfigForOrg(req.user!.orgId);
+      const oauthConfig = await getGitLabOAuthConfigForOrg(req.activeOrgId!);
       const gitlabBaseUrl = getGitLabOAuthBaseUrl(config.baseUrl || 'https://gitlab.com/api/v4');
       const revokeUrl = `${gitlabBaseUrl}/oauth/revoke`;
       assertSafeExternalUrl(revokeUrl, 'gitlab-oauth.disconnect');
@@ -414,7 +416,7 @@ router.post('/disconnect', requireAuth, requireRole('ADMIN'), async (req: AuthRe
 
     await prisma.auditLog.create({
       data: {
-        orgId: req.user!.orgId,
+        orgId: req.activeOrgId!,
         userId: req.user!.id,
         action: 'GITLAB_OAUTH_DISCONNECTED',
         resource: 'gitlab',

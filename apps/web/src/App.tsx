@@ -5,6 +5,7 @@ import Layout from './components/Layout';
 import DeveloperLayout from './components/DeveloperLayout';
 import PublicLayout from './components/PublicLayout';
 import { ToastProvider } from './components/Toast';
+import { UpdateBanner } from './components/UpdateBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 // ── Eagerly loaded: first-paint critical, tiny, or always-visible pages ──
 import Landing from './pages/Landing';
@@ -42,6 +43,9 @@ const SessionCompare = lazy(() => import('./pages/SessionCompare'));
 const Repos = lazy(() => import('./pages/Repos'));
 const RepoDetail = lazy(() => import('./pages/RepoDetail'));
 const RepoIssues = lazy(() => import('./pages/RepoIssues'));
+const RepoAccess = lazy(() => import('./pages/RepoAccess'));
+const AgentAccess = lazy(() => import('./pages/AgentAccess'));
+const UserAccess = lazy(() => import('./pages/UserAccess'));
 const CommitDetail = lazy(() => import('./pages/CommitDetail'));
 const Agents = lazy(() => import('./pages/Agents'));
 const AgentDetail = lazy(() => import('./pages/AgentDetail'));
@@ -81,19 +85,23 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-/** Picks Layout or DeveloperLayout based on accountType */
+/** Picks Layout or DeveloperLayout based on the *active org's* type. */
 function AppLayout({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
-  if (user?.accountType === 'developer') {
+  const { activeOrg, user } = useAuth();
+  // Pre-membership-fetch fall-back: trust user.accountType. Once memberships
+  // load, activeOrg.type is the source of truth.
+  const isPersonal = activeOrg ? activeOrg.type === 'personal' : user?.accountType === 'developer';
+  if (isPersonal) {
     return <DeveloperLayout>{children}</DeveloperLayout>;
   }
   return <Layout>{children}</Layout>;
 }
 
-/** Redirects developer accounts to /me, shows org Dashboard for org accounts */
+/** Redirects to /me when the active org is a personal workspace. */
 function DashboardRedirect() {
-  const { user } = useAuth();
-  if (user?.accountType === 'developer') {
+  const { activeOrg, user } = useAuth();
+  const isPersonal = activeOrg ? activeOrg.type === 'personal' : user?.accountType === 'developer';
+  if (isPersonal) {
     return <Navigate to="/me" replace />;
   }
   return <Layout><Dashboard /></Layout>;
@@ -115,6 +123,7 @@ export default function App() {
   return (
     <ToastProvider>
     <ScrollToTop />
+    <UpdateBanner />
     <ErrorBoundary label="Origin">
     <Suspense fallback={<div className="flex items-center justify-center min-h-screen"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500" /></div>}>
     <Routes>
@@ -145,7 +154,9 @@ export default function App() {
       <Route path="/register/developer" element={<RegisterDeveloper />} />
       <Route path="/onboarding" element={<ProtectedRoute><Onboarding /></ProtectedRoute>} />
       <Route path="/invite/:token" element={<AcceptInvite />} />
+      <Route path="/invite" element={<AcceptInvite />} />
       <Route path="/accept-invite/:token" element={<AcceptInvite />} />
+      <Route path="/accept-invite" element={<AcceptInvite />} />
 
       {/* Protected routes — wrapped in AppLayout (auto-picks org vs developer layout) */}
       <Route
@@ -192,6 +203,36 @@ export default function App() {
           <ProtectedRoute>
             <AppLayout>
               <RepoIssues />
+            </AppLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/repos/:id/access"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <RepoAccess />
+            </AppLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/agents/:id/access"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <AgentAccess />
+            </AppLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/iam/users/:id/access"
+        element={
+          <ProtectedRoute>
+            <AppLayout>
+              <UserAccess />
             </AppLayout>
           </ProtectedRoute>
         }

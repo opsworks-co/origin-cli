@@ -1,14 +1,15 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — list all secret findings for the org
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const { severity, type } = req.query;
 
     // Get all repo IDs for this org
@@ -55,7 +56,7 @@ router.get('/session/:sessionId', async (req: AuthRequest, res: Response) => {
     const session = await prisma.codingSession.findFirst({
       where: {
         id: sessionId,
-        commit: { repo: { orgId: req.user!.orgId } },
+        commit: { repo: { orgId: req.activeOrgId! } },
       },
       select: { id: true },
     });
@@ -79,7 +80,7 @@ router.get('/session/:sessionId', async (req: AuthRequest, res: Response) => {
 // GET /stats — aggregate counts by type and severity
 router.get('/stats', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const repos = await prisma.repo.findMany({
       where: { orgId },

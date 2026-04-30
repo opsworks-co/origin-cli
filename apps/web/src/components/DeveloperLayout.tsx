@@ -3,6 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import NotificationBell from './NotificationBell';
+import OrgSwitcher from './OrgSwitcher';
 // import ChatWidget from './ChatWidget'; // disabled — see comment below
 import ProductTour, { DASHBOARD_TOUR } from './ProductTour';
 import { LogoMark } from './Logo';
@@ -149,6 +150,11 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
 
         {/* User footer */}
         <div className="border-t border-gray-200 dark:border-white/[0.05] px-2 py-3">
+          {/* Org switcher — even personal users see it so they can spin up
+              or join a team org without leaving the layout. */}
+          <div className="px-1 pb-1.5">
+            <OrgSwitcher />
+          </div>
           <div className="flex items-center gap-2.5 px-2 py-2 rounded-lg">
             <div className="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500/25 to-emerald-600/15 ring-1 ring-emerald-500/25 flex items-center justify-center text-emerald-600 dark:text-emerald-300 text-[12px] font-semibold">
               {user?.name?.charAt(0).toUpperCase() ?? '?'}

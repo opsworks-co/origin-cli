@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
-import { Check, X, Loader2, Minus, GitPullRequest } from 'lucide-react';
+import { Check, X, Loader2, Minus, GitPullRequest, ChevronRight, HelpCircle } from 'lucide-react';
 import { safeHref } from '../utils/safe-url';
 import { PageHeader, Pill, EmptyState } from '../components/ui';
 
@@ -34,14 +34,20 @@ function StateBadge({ state }: { state: string }) {
 }
 
 export default function PullRequests() {
-  const { user } = useAuth();
+  const { user, activeOrg } = useAuth();
   const [prs, setPrs] = useState<api.PullRequestInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<PRFilter>('all');
   const [recheckingId, setRecheckingId] = useState<string | null>(null);
+  // The "How PR Blocking Works" explainer was a permanent block at the
+  // bottom of the page. Useful once when learning, noise after that.
+  // Default to collapsed; remember the user's preference per browser.
+  const [howItWorksOpen, setHowItWorksOpen] = useState(() => {
+    try { return localStorage.getItem('origin:pr-howitworks-open') === '1'; } catch { return false; }
+  });
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  const isAdmin = user?.role === 'ADMIN' || user?.role === 'OWNER';
+  const isAdmin = activeOrg?.role === 'ADMIN' || activeOrg?.role === 'OWNER';
 
   const fetchPRs = useCallback(async () => {
     try {
@@ -289,19 +295,32 @@ export default function PullRequests() {
         </div>
       )}
 
-      {/* How it works */}
-      <div className="card bg-gray-900/50 border-gray-800">
-        <h3 className="text-sm font-semibold text-gray-300 mb-2">How PR Blocking Works</h3>
-        <div className="text-xs text-gray-500 space-y-1">
-          <p>1. Developer codes with an AI agent and pushes to GitHub</p>
-          <p>2. Origin receives the webhook and links commits to AI sessions</p>
-          <p>3. Policy engine evaluates the session (cost, files, model, review requirements)</p>
-          <p>
-            4. Origin posts a <code className="text-gray-400 bg-gray-800 px-1 rounded">origin/ai-governance</code> status check to the PR
-          </p>
-          <p>5. With GitHub branch protection enabled, the PR cannot be merged if the check fails</p>
-          <p>6. Admin reviews/approves the session in Origin → check updates to ✅ → merge unblocked</p>
-        </div>
+      {/* How it works — collapsible. Closed by default; preference is
+          persisted so power users don't see it after the first read. */}
+      <div className="rounded-xl border border-gray-800/80 bg-gray-900/40 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => {
+            const next = !howItWorksOpen;
+            setHowItWorksOpen(next);
+            try { localStorage.setItem('origin:pr-howitworks-open', next ? '1' : '0'); } catch { /* ignore */ }
+          }}
+          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/[0.02] transition-colors"
+        >
+          <HelpCircle className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+          <span className="text-sm font-medium text-gray-200 flex-1 text-left">How PR Blocking Works</span>
+          <ChevronRight className={`w-4 h-4 text-gray-500 transition-transform ${howItWorksOpen ? 'rotate-90' : ''}`} />
+        </button>
+        {howItWorksOpen && (
+          <div className="border-t border-gray-800/80 px-4 py-3 text-xs text-gray-500 space-y-1.5">
+            <p>1. Developer codes with an AI agent and pushes to GitHub</p>
+            <p>2. Origin receives the webhook and links commits to AI sessions</p>
+            <p>3. Policy engine evaluates the session (cost, files, model, review requirements)</p>
+            <p>4. Origin posts a <code className="text-gray-400 bg-gray-800 px-1 rounded">origin/ai-governance</code> status check to the PR</p>
+            <p>5. With GitHub branch protection enabled, the PR cannot be merged if the check fails</p>
+            <p>6. Admin reviews/approves the session in Origin → check updates to ✅ → merge unblocked</p>
+          </div>
+        )}
       </div>
     </div>
   );

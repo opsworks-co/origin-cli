@@ -70,10 +70,13 @@ import leaderboardRoutes from './routes/leaderboard.js';
 import promptRoutes from './routes/prompts.js';
 import modelRoutes from './routes/models.js';
 import pricingRoutes, { seedDefaultPricing } from './routes/pricing.js';
+import { backfillAgentModels } from './services/agent-models.js';
+import { backfillCatalogForAllOrgs } from './services/seed-catalog.js';
 import forecastRoutes from './routes/forecast.js';
 import shareRoutes from './routes/share.js';
 import budgetRoutes from './routes/budget.js';
 import adminRoutes from './routes/admin.js';
+import orgsRoutes from './routes/orgs.js';
 import annotationRoutes from './routes/annotations.js';
 import issueRoutes from './routes/issues.js';
 import feedRoutes from './routes/feed.js';
@@ -234,6 +237,11 @@ mountRoute('/pricing', pricingRoutes);
 mountRoute('/forecast', forecastRoutes);
 mountRoute('/budget', budgetRoutes);
 mountRoute('/admin', adminRoutes);
+// Mount the multi-org user-self endpoints (/me/memberships, /me/active-org,
+// /orgs, /orgs/:id/leave) at the root /api so the router's per-route
+// paths resolve directly. They're not org-scoped — each route validates
+// membership of the affected org on its own.
+mountRoute('', orgsRoutes);
 mountRoute('/sessions/:sessionId/annotations', annotationRoutes);
 mountRoute('/repos/:repoId/issues', issueRoutes);
 
@@ -345,6 +353,12 @@ app.listen(Number(PORT), HOST, () => {
   console.log(`Origin v2 running on http://${HOST}:${PORT}`);
   startAutoSync();
   seedDefaultPricing();
+  backfillAgentModels();
+  // Ensure every existing org has the four catalog Agent rows. Idempotent
+  // — re-running on every boot only writes when something is missing.
+  backfillCatalogForAllOrgs().catch((err) => {
+    console.error('[seed-catalog] backfill failed:', err);
+  });
   startScheduler();
   startWebhookQueue();
 

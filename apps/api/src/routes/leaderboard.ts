@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 import { pickAllowed } from '../utils/validate.js';
 
 const LEADERBOARD_PERIODS = ['week', 'month', 'quarter', 'all'] as const;
@@ -8,11 +8,12 @@ const LEADERBOARD_SORTS = ['sessions', 'cost', 'tokens', 'lines', 'quality'] as 
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — Leaderboard rankings
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const period = pickAllowed(req.query.period, LEADERBOARD_PERIODS, 'month');
     const sortBy = pickAllowed(req.query.sortBy, LEADERBOARD_SORTS, 'sessions');
 

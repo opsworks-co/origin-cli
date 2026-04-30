@@ -5,6 +5,17 @@ import { postPRAuthorshipCheck } from './pr-authorship.js';
 import { updateMRGitLabStatus, listMRCommits, getGitLabIntegrationConfig, parseGitLabProjectPath } from './gitlab-integration.js';
 import { detectAITool } from './ai-commit-detector.js';
 import { isGitNotesMetadataCommit } from '../utils/commit-filter.js';
+import { importOriginSessionsFromGit } from './origin-sessions-import.js';
+
+// Fire-and-forget pull of session data + git notes from the origin-sessions
+// branch on this repo's git host. Called after every push webhook so a
+// developer who runs `git push` from the CLI immediately sees their new
+// prompts/snapshots in the web app — no manual "import" step required.
+function autoImportSessions(repoId: string) {
+  prisma.repo.findUnique({ where: { id: repoId }, select: { orgId: true } })
+    .then((r) => r && importOriginSessionsFromGit(repoId, r.orgId))
+    .catch((err) => console.error('[webhook] auto import-sessions failed:', err));
+}
 
 export function generateWebhookSecret(): string {
   return crypto.randomBytes(32).toString('hex');
@@ -141,6 +152,10 @@ export async function processGitHubPush(repoId: string, payload: GitHubPushPaylo
     where: { id: repoId },
     data: { syncedAt: new Date() },
   });
+
+  // Pull any new sessions/notes the developer just pushed. Async — does
+  // not block the webhook response.
+  autoImportSessions(repoId);
 
   return results;
 }
@@ -387,6 +402,9 @@ export async function processGitLabPush(repoId: string, payload: GitLabPushPaylo
     where: { id: repoId },
     data: { syncedAt: new Date() },
   });
+
+  // Same auto-import on every GitLab push.
+  autoImportSessions(repoId);
 
   return results;
 }

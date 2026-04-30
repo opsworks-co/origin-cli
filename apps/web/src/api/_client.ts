@@ -15,6 +15,25 @@ function legacyAuthHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// X-Origin-Org pin: the dashboard reads it from localStorage on every
+// request so the backend's resolveOrgContext middleware locks the response
+// to the org the user is currently viewing. Falls back silently when not
+// set (server uses lastOrgId / first membership).
+const ACTIVE_ORG_KEY = 'origin:activeOrgId';
+export function getActiveOrgId(): string | null {
+  try { return localStorage.getItem(ACTIVE_ORG_KEY); } catch { return null; }
+}
+export function setActiveOrgId(orgId: string | null) {
+  try {
+    if (orgId) localStorage.setItem(ACTIVE_ORG_KEY, orgId);
+    else localStorage.removeItem(ACTIVE_ORG_KEY);
+  } catch { /* storage unavailable — fall through */ }
+}
+function activeOrgHeader(): Record<string, string> {
+  const id = getActiveOrgId();
+  return id ? { 'X-Origin-Org': id } : {};
+}
+
 export async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...opts,
@@ -26,6 +45,7 @@ export async function request<T>(path: string, opts: RequestInit = {}): Promise<
     headers: {
       'Content-Type': 'application/json',
       ...legacyAuthHeaders(),
+      ...activeOrgHeader(),
       ...(opts.headers as Record<string, string> | undefined),
     },
   });

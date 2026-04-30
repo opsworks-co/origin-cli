@@ -466,7 +466,7 @@ export async function applyEnforcementActions(
     if (!existingReview) {
       // Find the first admin/owner user to attribute the auto-review to
       const adminUser = await prisma.user.findFirst({
-        where: { orgId: ctx.orgId, role: { in: ['ADMIN', 'OWNER'] } },
+        where: { memberships: { some: { orgId: ctx.orgId, role: { in: ["ADMIN", "OWNER"] } } } },
       });
 
       if (adminUser) {
@@ -540,26 +540,43 @@ export async function enforceAgentLimits(ctx: SessionContext): Promise<AgentEnfo
       maxCostPerSession: true,
       maxTokensPerSession: true,
       permissions: true,
+      // Per-session caps can be overridden per-model. Strict null-coalesce
+      // inheritance: AgentModel value (when present) wins; otherwise fall
+      // through to the Agent's own field. The per-model row's existence
+      // doesn't disable agent caps unless its own field is also non-null.
+      models: {
+        where: { model: ctx.model },
+        select: { maxCostPerSession: true, maxTokensPerSession: true },
+        take: 1,
+      },
     },
   });
 
   if (!agent) return result;
 
+  const am = agent.models?.[0];
+  const effCost = am?.maxCostPerSession ?? agent.maxCostPerSession ?? null;
+  const effTokens = am?.maxTokensPerSession ?? agent.maxTokensPerSession ?? null;
+  const costFromModel = am?.maxCostPerSession != null;
+  const tokensFromModel = am?.maxTokensPerSession != null;
+
   // Check per-session cost limit
-  if (agent.maxCostPerSession && agent.maxCostPerSession > 0 && ctx.costUsd > agent.maxCostPerSession) {
+  if (effCost && effCost > 0 && ctx.costUsd > effCost) {
+    const scope = costFromModel ? `model "${ctx.model}"` : 'agent';
     result.violations.push({
       field: 'maxCostPerSession',
-      message: `Agent "${agent.name}" cost $${ctx.costUsd.toFixed(2)} exceeds per-session limit $${agent.maxCostPerSession.toFixed(2)}`,
+      message: `Agent "${agent.name}" ${scope} cost $${ctx.costUsd.toFixed(2)} exceeds per-session limit $${effCost.toFixed(2)}`,
       severity: 'HIGH',
     });
     result.requiresReview = true;
   }
 
   // Check per-session token limit
-  if (agent.maxTokensPerSession && agent.maxTokensPerSession > 0 && ctx.tokensUsed > agent.maxTokensPerSession) {
+  if (effTokens && effTokens > 0 && ctx.tokensUsed > effTokens) {
+    const scope = tokensFromModel ? `model "${ctx.model}"` : 'agent';
     result.violations.push({
       field: 'maxTokensPerSession',
-      message: `Agent "${agent.name}" used ${ctx.tokensUsed.toLocaleString()} tokens, exceeds per-session limit ${agent.maxTokensPerSession.toLocaleString()}`,
+      message: `Agent "${agent.name}" ${scope} used ${ctx.tokensUsed.toLocaleString()} tokens, exceeds per-session limit ${effTokens.toLocaleString()}`,
       severity: 'HIGH',
     });
     result.requiresReview = true;
@@ -628,7 +645,7 @@ export async function enforceAgentLimits(ctx: SessionContext): Promise<AgentEnfo
 
     if (!existingReview) {
       const adminUser = await prisma.user.findFirst({
-        where: { orgId: ctx.orgId, role: { in: ['ADMIN', 'OWNER'] } },
+        where: { memberships: { some: { orgId: ctx.orgId, role: { in: ["ADMIN", "OWNER"] } } } },
       });
 
       if (adminUser) {

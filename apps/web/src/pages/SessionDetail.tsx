@@ -10,9 +10,41 @@ import TurnTimeline from '../components/TurnTimeline';
 import { formatCost, formatDuration, getStatusBadgeClass } from '../utils';
 import { safeHref } from '../utils/safe-url';
 import { useToast } from '../components/Toast';
+import { Sparkles, Check, X as XIcon, Flag } from 'lucide-react';
 
 function statusBadge(status: string) {
   return <span className={`${getStatusBadgeClass(status)} text-sm`}>{status}</span>;
+}
+
+// Outline-style review action button. Three semantic colors (emerald=approve,
+// red=reject, amber=flag) share the same shape so they group visually as
+// one disposition cluster — only the trim color differs. Hover fills the
+// button with the trim color so the click target is obvious.
+function ReviewActionButton({
+  label, icon, color, onClick, disabled,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  color: 'emerald' | 'red' | 'amber';
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  const palette: Record<typeof color, { text: string; border: string; hoverBg: string; hoverText: string }> = {
+    emerald: { text: 'text-emerald-400', border: 'border-emerald-500/30', hoverBg: 'hover:bg-emerald-500/15', hoverText: 'hover:text-emerald-300' },
+    red:     { text: 'text-red-400',     border: 'border-red-500/30',     hoverBg: 'hover:bg-red-500/15',     hoverText: 'hover:text-red-300'     },
+    amber:   { text: 'text-amber-400',   border: 'border-amber-500/30',   hoverBg: 'hover:bg-amber-500/15',   hoverText: 'hover:text-amber-300'   },
+  };
+  const c = palette[color];
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`inline-flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg border ${c.text} ${c.border} ${c.hoverBg} ${c.hoverText} transition-colors disabled:opacity-40 disabled:cursor-not-allowed`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
 }
 
 // ── HeaderCommits ──────────────────────────────────────────────────────────
@@ -208,7 +240,7 @@ function ConsoleView({ transcript }: { transcript: string }) {
 export default function SessionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, activeOrg } = useAuth();
   const { toast } = useToast();
   const isDev = user?.accountType === 'developer';
   const [session, setSession] = useState<Session | null>(null);
@@ -1284,7 +1316,7 @@ export default function SessionDetail() {
               promptChanges={session.promptChanges || []}
               model={session.model}
               annotations={annotations}
-              canAnnotate={!!(session.userId === user?.id || ['ADMIN', 'OWNER'].includes((user?.role || '').toUpperCase()))}
+              canAnnotate={!!(session.userId === user?.id || ['ADMIN', 'OWNER'].includes((activeOrg?.role || '').toUpperCase()))}
               currentUserId={user?.id}
               focusPromptIndex={focusPromptIndex}
               onAddAnnotation={async (turnIndex, text) => {
@@ -1379,7 +1411,7 @@ export default function SessionDetail() {
 
       {/* Review feedback banner */}
       {reviewFeedback && (
-        <div className="bg-green-900/20 border border-green-800/30 rounded-lg px-4 py-3 flex items-center justify-between flex-shrink-0">
+        <div className="bg-green-900/20 border border-green-800/30 rounded-lg px-4 py-3 flex items-center justify-between flex-shrink-0 mx-6 mb-3">
           <p className="text-sm text-green-400">{reviewFeedback}</p>
           <button
             onClick={() => setReviewFeedback('')}
@@ -1390,60 +1422,72 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* Review bar — team only */}
+      {/* Review bar — team only.
+          Two visual tiers: AI Review is the "smart" path and gets a soft
+          gradient pill, Approve/Reject/Flag are the manual disposition
+          actions and use outlined-with-tinted-border styling so they share
+          weight without all four buttons screaming for attention. */}
       {!isDev && (!session.review || session.review.isAutoReview) && (
-        <div className="card flex-shrink-0">
-          <div className="flex flex-col sm:flex-row gap-3 items-center">
-            <span className="text-sm text-gray-400 whitespace-nowrap">
-              {session.review?.isAutoReview ? 'Override AI Review' : 'Review'}
-            </span>
-            <input
-              type="text"
-              value={reviewNote}
-              onChange={(e) => setReviewNote(e.target.value)}
-              placeholder="Optional note..."
-              className="input flex-1"
-            />
-            <div className="flex gap-2">
-              {/* AI Review trigger */}
+        <div className="rounded-xl border border-white/[0.06] bg-gray-900/40 p-3 flex-shrink-0 mx-6 mb-4">
+          <div className="flex flex-col lg:flex-row gap-3 lg:items-center">
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+              <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-[0.12em] whitespace-nowrap">
+                {session.review?.isAutoReview ? 'Override AI' : 'Review'}
+              </span>
+              <input
+                type="text"
+                value={reviewNote}
+                onChange={(e) => setReviewNote(e.target.value)}
+                placeholder="Add a note (optional)…"
+                className="flex-1 bg-transparent border-0 outline-none text-sm text-gray-200 placeholder-gray-600 focus:placeholder-gray-500 transition-colors"
+              />
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* AI Review — primary "smart" action, soft gradient pill */}
               <button
                 onClick={handleAIReview}
                 disabled={aiReviewLoading || submitting}
-                className="bg-purple-600 hover:bg-purple-500 text-white font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                className="inline-flex items-center gap-1.5 text-sm font-medium px-3.5 py-2 rounded-lg bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-400 hover:to-purple-400 text-white shadow-sm shadow-purple-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Run AI scoring on this session"
               >
                 {aiReviewLoading ? (
                   <>
                     <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" />
-                    Scoring...
+                    Scoring…
                   </>
                 ) : (
                   <>
-                    <span className="text-xs">&#9733;</span>
+                    <Sparkles className="w-3.5 h-3.5" />
                     {session.review?.isAutoReview ? 'Re-run AI' : 'AI Review'}
                   </>
                 )}
               </button>
-              <button
+
+              {/* Visual divider between AI and manual actions */}
+              <span className="hidden sm:block w-px h-5 bg-white/[0.08] mx-0.5" />
+
+              {/* Manual disposition — outline style with type-tinted border */}
+              <ReviewActionButton
+                label="Approve"
+                icon={<Check className="w-3.5 h-3.5" />}
+                color="emerald"
                 onClick={() => handleReview('approved')}
                 disabled={submitting}
-                className="bg-green-600 hover:bg-green-500 text-white font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
-              >
-                Approve
-              </button>
-              <button
+              />
+              <ReviewActionButton
+                label="Reject"
+                icon={<XIcon className="w-3.5 h-3.5" />}
+                color="red"
                 onClick={() => handleReview('rejected')}
                 disabled={submitting}
-                className="btn-danger"
-              >
-                Reject
-              </button>
-              <button
+              />
+              <ReviewActionButton
+                label="Flag"
+                icon={<Flag className="w-3.5 h-3.5" />}
+                color="amber"
                 onClick={() => handleReview('flagged')}
                 disabled={submitting}
-                className="bg-amber-600 hover:bg-amber-500 text-white font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
-              >
-                Flag
-              </button>
+              />
             </div>
           </div>
         </div>

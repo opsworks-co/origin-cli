@@ -1,15 +1,16 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 import { parseLimit, parseOffset } from '../utils/validate.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — list audit logs for org
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const limit = parseLimit(req.query.limit, 100, 500);
     const offset = parseOffset(req.query.offset);
 
@@ -23,7 +24,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // Non-privileged users are forced to see only their own entries —
     // otherwise any org member could snoop on a coworker's audit trail
     // just by passing `?userId=<coworker-id>`.
-    const role = (req.user!.role || '').toUpperCase();
+    const role = (req.activeRole! || '').toUpperCase();
     const canViewOthers = role === 'ADMIN' || role === 'OWNER';
     if (req.query.userId) {
       const requestedUserId = req.query.userId as string;

@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import {
   createInstallationToken,
   generateAppJWT,
@@ -17,7 +17,7 @@ if (!JWT_SECRET) throw new Error('JWT_SECRET environment variable is required');
 
 // ── GET /install — redirect user to GitHub App installation page ──
 
-router.get('/install', requireAuth, requireRole('ADMIN'), (req: AuthRequest, res: Response) => {
+router.get('/install', requireAuth, resolveOrgContext, requireRole('ADMIN'), (req: AuthRequest, res: Response) => {
   const appConfig = getGitHubAppConfig();
 
   if (!appConfig.configured) {
@@ -29,7 +29,7 @@ router.get('/install', requireAuth, requireRole('ADMIN'), (req: AuthRequest, res
   // Create a signed state token with orgId to prevent CSRF and associate installation with org
   const from = (req.query.from as string) || '';
   const state = jwt.sign(
-    { orgId: req.user!.orgId, userId: req.user!.id, from },
+    { orgId: req.activeOrgId!, userId: req.user!.id, from },
     JWT_SECRET,
     { expiresIn: '15m' },
   );
@@ -143,15 +143,17 @@ router.get('/callback', async (req: Request, res: Response) => {
       },
     });
 
-    // Redirect — onboarding flow goes back to /onboarding, solo to /repos, org to /settings
-    const cbUser = await prisma.user.findUnique({ where: { id: statePayload.userId }, select: { accountType: true } });
+    // Redirect — onboarding goes back to onboarding; everywhere else lands on
+    // /repos with ?github_app=success which the Repos page picks up to
+    // auto-open the import dialog (so the user lands on the next step
+    // instead of having to find it themselves).
     let successUrl: string;
     if (statePayload.from === 'onboarding') {
       successUrl = '/onboarding?step=1&github_app=success';
-    } else if (cbUser?.accountType === 'developer') {
-      successUrl = '/repos?github_app=success';
-    } else {
+    } else if (statePayload.from === 'settings') {
       successUrl = '/settings?tab=integrations&github_app=success';
+    } else {
+      successUrl = '/repos?github_app=success&import=open';
     }
     res.redirect(successUrl);
   } catch (err) {
@@ -162,12 +164,12 @@ router.get('/callback', async (req: Request, res: Response) => {
 
 // ── GET /status — check GitHub App installation status ──
 
-router.get('/status', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/status', requireAuth, resolveOrgContext, async (req: AuthRequest, res: Response) => {
   try {
     const appConfig = getGitHubAppConfig();
 
     const config = await prisma.integrationConfig.findFirst({
-      where: { orgId: req.user!.orgId, provider: 'github' },
+      where: { orgId: req.activeOrgId!, provider: 'github' },
     });
 
     if (!config || (config as any).authType !== 'github_app') {
@@ -197,10 +199,10 @@ router.get('/status', requireAuth, async (req: AuthRequest, res: Response) => {
 
 // ── POST /test — test GitHub App connection ──
 
-router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.post('/test', requireAuth, resolveOrgContext, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const config = await prisma.integrationConfig.findFirst({
-      where: { orgId: req.user!.orgId, provider: 'github' },
+      where: { orgId: req.activeOrgId!, provider: 'github' },
     });
 
     if (!config || (config as any).authType !== 'github_app') {
@@ -237,7 +239,7 @@ router.post('/test', requireAuth, requireRole('ADMIN'), async (req: AuthRequest,
 // redirect back with a new installation_id. This endpoint lists all installations
 // of the Origin GitHub App and lets the admin pick/auto-link one.
 
-router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+router.post('/detect', requireAuth, resolveOrgContext, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const appConfig = getGitHubAppConfig();
     if (!appConfig.configured) {
@@ -246,7 +248,7 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
 
     // Already connected?
     const existing = await prisma.integrationConfig.findFirst({
-      where: { orgId: req.user!.orgId, provider: 'github', authType: 'github_app' },
+      where: { orgId: req.activeOrgId!, provider: 'github', authType: 'github_app' },
     });
     if (existing) {
       let s: any = {};
@@ -376,7 +378,7 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
       } else {
         await prisma.integrationConfig.create({
           data: {
-            orgId: req.user!.orgId,
+            orgId: req.activeOrgId!,
             provider: 'github',
             token: tokenResult.token,
             authType: 'github_app',
@@ -387,7 +389,7 @@ router.post('/detect', requireAuth, requireRole('ADMIN'), async (req: AuthReques
 
       await prisma.auditLog.create({
         data: {
-          orgId: req.user!.orgId,
+          orgId: req.activeOrgId!,
           userId: req.user!.id,
           action: 'GITHUB_APP_LINKED',
           resource: linkedId,

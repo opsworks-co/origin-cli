@@ -1,15 +1,16 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — list machines for org
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const machines = await prisma.machine.findMany({
-      where: { orgId: req.user!.orgId },
+      where: { orgId: req.activeOrgId! },
       orderBy: { lastSeenAt: 'desc' },
       take: 500,
     });
@@ -24,7 +25,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const machine = await prisma.machine.findFirst({
-      where: { id: req.params.id as string, orgId: req.user!.orgId },
+      where: { id: req.params.id as string, orgId: req.activeOrgId! },
       include: {
         policyRules: {
           include: {
@@ -52,7 +53,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
     // Dedup: find existing machines with same hostname in same org and merge
     const existingByHostname = await prisma.machine.findMany({
-      where: { orgId: req.user!.orgId, hostname },
+      where: { orgId: req.activeOrgId!, hostname },
     });
 
     let machine;
@@ -71,7 +72,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         // here means no future refactor can accidentally turn this into
         // a cross-org mass delete if the source query changes.
         await prisma.machine.deleteMany({
-          where: { id: { in: extraIds }, orgId: req.user!.orgId },
+          where: { id: { in: extraIds }, orgId: req.activeOrgId! },
         });
       }
       // Update the kept machine
@@ -88,7 +89,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       machine = await prisma.machine.upsert({
         where: { machineId },
         create: {
-          orgId: req.user!.orgId,
+          orgId: req.activeOrgId!,
           hostname,
           machineId,
           detectedTools: detectedTools ? JSON.stringify(detectedTools) : '[]',
@@ -106,7 +107,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     try {
       await prisma.auditLog.create({
         data: {
-          orgId: req.user!.orgId,
+          orgId: req.activeOrgId!,
           userId: req.user!.id,
           action: 'MACHINE_REGISTERED',
           resource: machine.id,
@@ -117,7 +118,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       // FK constraint fails for standalone API keys — log without userId
       await prisma.auditLog.create({
         data: {
-          orgId: req.user!.orgId,
+          orgId: req.activeOrgId!,
           action: 'MACHINE_REGISTERED',
           resource: machine.id,
           metadata: JSON.stringify({ hostname, machineId }),
@@ -146,14 +147,14 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const machine = await prisma.machine.findFirst({
-      where: { id: req.params.id as string, orgId: req.user!.orgId },
+      where: { id: req.params.id as string, orgId: req.activeOrgId! },
     });
     if (!machine) return res.status(404).json({ error: 'Machine not found' });
 
     // deleteMany with compound (id, orgId) enforces org scope at the DB
     // call even if the precheck above is ever dropped.
     const deleted = await prisma.machine.deleteMany({
-      where: { id: machine.id, orgId: req.user!.orgId },
+      where: { id: machine.id, orgId: req.activeOrgId! },
     });
     if (deleted.count === 0) {
       return res.status(404).json({ error: 'Machine not found' });
@@ -162,7 +163,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     try {
       await prisma.auditLog.create({
         data: {
-          orgId: req.user!.orgId,
+          orgId: req.activeOrgId!,
           userId: req.user!.id,
           action: 'MACHINE_DELETED',
           resource: machine.id,
@@ -172,7 +173,7 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
     } catch {
       await prisma.auditLog.create({
         data: {
-          orgId: req.user!.orgId,
+          orgId: req.activeOrgId!,
           action: 'MACHINE_DELETED',
           resource: machine.id,
           metadata: JSON.stringify({ hostname: machine.hostname, machineId: machine.machineId }),

@@ -1,15 +1,16 @@
 import { Router, Response } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
 import { parseLimit, parseOffset } from '../utils/validate.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
 // GET / — compute dashboard stats
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     // Get repo IDs — optionally filtered by repoName
     const repoWhere: any = { orgId };
@@ -104,23 +105,123 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       },
     });
 
-    // Model breakdown + cost by model
+    // Model breakdown + cost + tokens by model.
+    //
+    // Two layers, merged: session-level groupBy gives the baseline (every
+    // session, attributed to its session.model). Per-prompt groupBy then
+    // adds the multi-model accuracy: for any prompt with per-prompt cost
+    // data, we attribute that prompt's cost+tokens to its own pc.model
+    // instead of the session's. We subtract those amounts from the
+    // session-level totals first so they don't double-count.
     const modelGroups = await prisma.codingSession.groupBy({
       by: ['model'],
       where: { commit: { repoId: { in: repoIds } } },
       _count: true,
-      _sum: { costUsd: true },
+      _sum: { costUsd: true, tokensUsed: true },
     });
 
-    const modelBreakdown: Record<string, number> = {};
-    const costByModel = modelGroups.map((g) => ({
-      model: g.model,
-      cost: parseFloat((g._sum.costUsd || 0).toFixed(2)),
-      count: g._count,
-    }));
-    for (const group of modelGroups) {
-      modelBreakdown[group.model] = group._count;
+    // Per-prompt groupBy — only rows where pc.model is set AND we have a
+    // non-zero costUsd / token count. Sessions that pre-date per-prompt
+    // tracking will have no rows here, so the session-level layer carries
+    // them.
+    const promptGroups = await prisma.promptChange.groupBy({
+      by: ['model'],
+      where: {
+        session: { commit: { repoId: { in: repoIds } } },
+        model: { not: null },
+        OR: [
+          { costUsd: { gt: 0 } },
+          { inputTokens: { gt: 0 } },
+          { outputTokens: { gt: 0 } },
+        ],
+      },
+      _sum: { costUsd: true, inputTokens: true, outputTokens: true },
+    });
+
+    // Build a map of "amounts already attributed at the prompt level" so we
+    // can subtract them from the session-level layer for matching models.
+    // Without this, a session running 60% Opus + 40% Sonnet would be counted
+    // once under session.model (Opus) at full cost AND once again under each
+    // pc.model — doubling the spend.
+    const promptModelData = new Map<string, { cost: number; tokens: number }>();
+    for (const g of promptGroups) {
+      if (!g.model) continue;
+      promptModelData.set(g.model, {
+        cost: g._sum.costUsd || 0,
+        tokens: (g._sum.inputTokens || 0) + (g._sum.outputTokens || 0),
+      });
     }
+    // Total attribution at the prompt level — subtract from each
+    // session-level row in proportion to its share. Cheap approximation:
+    // since we don't know per-(session.model, pc.model) breakdown without
+    // a heavier query, just subtract the prompt-level totals from the
+    // matching pc.model row. session.model rows for sessions that switched
+    // models stay overcounted slightly; refine if it becomes a real issue.
+    const totalPromptCostByModel = new Map(
+      Array.from(promptModelData.entries()).map(([m, v]) => [m, v.cost]),
+    );
+    const totalPromptTokensByModel = new Map(
+      Array.from(promptModelData.entries()).map(([m, v]) => [m, v.tokens]),
+    );
+
+    const modelBreakdown: Record<string, number> = {};
+    const merged = new Map<string, { cost: number; count: number; tokens: number }>();
+    for (const g of modelGroups) {
+      const sessionCost = g._sum.costUsd || 0;
+      const sessionTokens = g._sum.tokensUsed || 0;
+      // Subtract any prompt-level cost we'll add below for this model.
+      const promptCost = totalPromptCostByModel.get(g.model) || 0;
+      const promptTokens = totalPromptTokensByModel.get(g.model) || 0;
+      merged.set(g.model, {
+        cost: Math.max(0, sessionCost - promptCost),
+        count: g._count,
+        tokens: Math.max(0, sessionTokens - promptTokens),
+      });
+      modelBreakdown[g.model] = g._count;
+    }
+    // Add the prompt-level totals (these are the per-prompt-model accurate
+    // attributions). Sessions counts come from the session layer above.
+    for (const [model, data] of promptModelData) {
+      const existing = merged.get(model) || { cost: 0, count: 0, tokens: 0 };
+      merged.set(model, {
+        cost: existing.cost + data.cost,
+        count: existing.count,
+        tokens: existing.tokens + data.tokens,
+      });
+    }
+    const costByModel = Array.from(merged.entries()).map(([model, v]) => ({
+      model,
+      cost: parseFloat(v.cost.toFixed(2)),
+      count: v.count,
+      tokens: v.tokens,
+    }));
+
+    // Tokens by agent (separate from model — same model can run under multiple agents)
+    const agentGroups = await prisma.codingSession.groupBy({
+      by: ['agentId'],
+      where: { commit: { repoId: { in: repoIds } } },
+      _count: true,
+      _sum: { tokensUsed: true, costUsd: true },
+    });
+    const tokenAgentIds = agentGroups.map((a) => a.agentId).filter((a): a is string => !!a);
+    const agentRecords = tokenAgentIds.length > 0
+      ? await prisma.agent.findMany({ where: { id: { in: tokenAgentIds } }, select: { id: true, name: true, model: true } })
+      : [];
+    const agentById = new Map(agentRecords.map((a) => [a.id, a]));
+    const tokensByAgent = agentGroups
+      .filter((g) => g.agentId && agentById.has(g.agentId))
+      .map((g) => {
+        const a = agentById.get(g.agentId!)!;
+        return {
+          agentId: a.id,
+          name: a.name,
+          model: a.model,
+          tokens: g._sum.tokensUsed || 0,
+          cost: parseFloat((g._sum.costUsd || 0).toFixed(2)),
+          count: g._count,
+        };
+      })
+      .sort((a, b) => b.tokens - a.tokens);
 
     // Date range filter (defaults to last 30 days)
     const thirtyDaysAgo = new Date();
@@ -401,7 +502,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     });
 
     const orgUsers = await prisma.user.findMany({
-      where: { orgId },
+      where: { memberships: { some: { orgId } } },
       select: { id: true, name: true },
     });
     const orgUserMap = new Map(orgUsers.map((u) => [u.id, u.name]));
@@ -500,6 +601,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       unreviewed,
       modelBreakdown,
       costByModel,
+      tokensByAgent,
       sessionsByDay,
       sessionsByRepo,
       aiAuthorshipOverTime,
@@ -545,7 +647,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 router.get('/me', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const repoIds = (
       await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
@@ -752,7 +854,7 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
 router.get('/me/agents', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const repoIds = (
       await prisma.repo.findMany({
@@ -897,7 +999,7 @@ router.get('/me/agents', async (req: AuthRequest, res: Response) => {
 router.get('/me/patterns', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const repoIds = (
       await prisma.repo.findMany({
@@ -981,7 +1083,7 @@ router.get('/me/patterns', async (req: AuthRequest, res: Response) => {
 router.get('/me/efficiency', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const repoIds = (
       await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
@@ -1091,7 +1193,7 @@ router.get('/me/efficiency', async (req: AuthRequest, res: Response) => {
 router.get('/me/prompts', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const limit = parseLimit(req.query.limit, 50, 200);
     const offset = parseOffset(req.query.offset);
@@ -1157,7 +1259,7 @@ router.get('/me/prompts', async (req: AuthRequest, res: Response) => {
 router.get('/me/commits', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
 
     const limit = parseLimit(req.query.limit, 50, 200);
     const offset = parseOffset(req.query.offset);
@@ -1268,6 +1370,249 @@ router.get('/me/commits', async (req: AuthRequest, res: Response) => {
     });
   } catch (err) {
     console.error('Commits stats error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /team/prompts — org-wide prompt search ─────────────────────────────
+//
+// Mirrors /me/prompts but scoped to the whole org and surfaces the engineer
+// who wrote the prompt, so teams can search across institutional knowledge.
+
+router.get('/team/prompts', async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.activeOrgId!;
+
+    const limit = parseLimit(req.query.limit, 50, 200);
+    const offset = parseOffset(req.query.offset);
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    const q = (req.query.q as string)?.trim();
+    const userIdFilter = (req.query.userId as string)?.trim();
+    const repoIdFilter = (req.query.repoId as string)?.trim();
+    const agentIdFilter = (req.query.agentId as string)?.trim();
+    const modelFilter = (req.query.model as string)?.trim();
+
+    const baseWhere: any = {
+      session: {
+        commit: { repoId: { in: repoIds } },
+        ...(userIdFilter ? { userId: userIdFilter } : {}),
+        ...(agentIdFilter ? { agentId: agentIdFilter } : {}),
+        ...(modelFilter ? { model: modelFilter } : {}),
+        ...(repoIdFilter ? { commit: { repoId: repoIdFilter } } : {}),
+      },
+      ...(q ? { promptText: { contains: q } } : {}),
+    };
+
+    const [prompts, total] = await Promise.all([
+      prisma.promptChange.findMany({
+        where: baseWhere,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+        select: {
+          sessionId: true,
+          promptIndex: true,
+          promptText: true,
+          filesChanged: true,
+          createdAt: true,
+          session: {
+            select: {
+              agent: { select: { name: true } },
+              user: { select: { id: true, name: true } },
+              commit: { select: { repo: { select: { id: true, name: true } } } },
+            },
+          },
+        },
+      }),
+      prisma.promptChange.count({ where: baseWhere }),
+    ]);
+
+    res.json({
+      prompts: prompts.map((p) => ({
+        sessionId: p.sessionId,
+        agentName: p.session.agent?.name || 'Unknown',
+        userId: p.session.user?.id || null,
+        userName: p.session.user?.name || 'Unknown',
+        repoId: p.session.commit?.repo?.id || null,
+        repoName: p.session.commit?.repo?.name || null,
+        promptIndex: p.promptIndex,
+        promptText: p.promptText,
+        filesChanged: (() => {
+          try { return JSON.parse(p.filesChanged); } catch { return []; }
+        })(),
+        createdAt: p.createdAt.toISOString(),
+      })),
+      total,
+    });
+  } catch (err) {
+    console.error('Team prompts error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /team/efficiency — org-wide cost/efficiency metrics ────────────────
+
+router.get('/team/efficiency', async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.activeOrgId!;
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    const baseWhere = {
+      commit: { repoId: { in: repoIds } },
+    };
+
+    const [agg, sessionsByUser, totalCommits, sampleCommits] = await Promise.all([
+      prisma.codingSession.aggregate({
+        where: baseWhere,
+        _sum: { tokensUsed: true, costUsd: true, linesAdded: true, linesRemoved: true, durationMs: true },
+        _count: true,
+      }),
+      prisma.codingSession.groupBy({
+        by: ['userId'],
+        where: baseWhere,
+        _sum: { tokensUsed: true, costUsd: true, linesAdded: true },
+        _count: true,
+      }),
+      prisma.commit.count({
+        where: { repoId: { in: repoIds }, message: { not: '' } },
+      }),
+      prisma.commit.findMany({
+        where: { repoId: { in: repoIds }, message: { not: '' } },
+        select: { filesChanged: true },
+        take: 5_000,
+        orderBy: { committedAt: 'desc' },
+      }),
+    ]);
+
+    const totalTokens = agg._sum.tokensUsed || 0;
+    const totalCost = agg._sum.costUsd || 0;
+    const totalLines = agg._sum.linesAdded || 0;
+    const sessionCount = agg._count || 1;
+
+    const tokensPerLine = totalLines > 0 ? parseFloat((totalTokens / totalLines).toFixed(1)) : 0;
+    const costPerSession = parseFloat((totalCost / sessionCount).toFixed(4));
+    const avgLinesPerSession = Math.round(totalLines / sessionCount);
+    const costPerCommit = totalCommits > 0 ? parseFloat((totalCost / totalCommits).toFixed(4)) : 0;
+    const commitsPerSession = sessionCount > 0 ? parseFloat((totalCommits / sessionCount).toFixed(1)) : 0;
+
+    let totalFiles = 0;
+    for (const c of sampleCommits) {
+      try {
+        const files = JSON.parse(c.filesChanged);
+        totalFiles += Array.isArray(files) ? files.length : 0;
+      } catch { /* ignore */ }
+    }
+    const avgFilesPerCommit = sampleCommits.length > 0
+      ? parseFloat((totalFiles / sampleCommits.length).toFixed(1))
+      : 0;
+
+    // Per-engineer efficiency rows so the UI can highlight outliers.
+    const userIds = sessionsByUser.map((u) => u.userId).filter((u): u is string => !!u);
+    const users = userIds.length > 0
+      ? await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true } })
+      : [];
+    const userById = new Map(users.map((u) => [u.id, u.name]));
+
+    const byEngineer = sessionsByUser
+      .filter((u) => u.userId)
+      .map((u) => {
+        const tokens = u._sum.tokensUsed || 0;
+        const cost = u._sum.costUsd || 0;
+        const lines = u._sum.linesAdded || 0;
+        const sessions = u._count || 1;
+        return {
+          userId: u.userId!,
+          name: userById.get(u.userId!) || 'Unknown',
+          sessions,
+          cost: parseFloat(cost.toFixed(2)),
+          tokensPerLine: lines > 0 ? parseFloat((tokens / lines).toFixed(1)) : 0,
+          costPerSession: parseFloat((cost / sessions).toFixed(4)),
+        };
+      })
+      .sort((a, b) => b.cost - a.cost);
+
+    res.json({
+      tokensPerLine,
+      costPerSession,
+      costPerCommit,
+      avgLinesPerSession,
+      avgFilesPerCommit,
+      commitsPerSession,
+      totalSessions: sessionCount,
+      totalCommits,
+      totalCost: parseFloat(totalCost.toFixed(2)),
+      byEngineer,
+    });
+  } catch (err) {
+    console.error('Team efficiency error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── GET /team/adoption — adoption + new-adopter signals ────────────────────
+
+router.get('/team/adoption', async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.activeOrgId!;
+
+    const repoIds = (
+      await prisma.repo.findMany({ where: { orgId }, select: { id: true } })
+    ).map((r) => r.id);
+
+    const now = new Date();
+    const startOfThisWeek = new Date(now);
+    startOfThisWeek.setDate(now.getDate() - now.getDay());
+    startOfThisWeek.setHours(0, 0, 0, 0);
+    const startOfLastWeek = new Date(startOfThisWeek);
+    startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
+
+    const [totalEngineers, sessionsThisWeek, sessionsLastWeek, allEngineerActivity] = await Promise.all([
+      prisma.user.count({ where: { memberships: { some: { orgId } } } }),
+      prisma.codingSession.findMany({
+        where: { commit: { repoId: { in: repoIds } }, createdAt: { gte: startOfThisWeek } },
+        select: { userId: true },
+        distinct: ['userId'],
+      }),
+      prisma.codingSession.findMany({
+        where: {
+          commit: { repoId: { in: repoIds } },
+          createdAt: { gte: startOfLastWeek, lt: startOfThisWeek },
+        },
+        select: { userId: true },
+        distinct: ['userId'],
+      }),
+      // First session per engineer — used to compute new adopters this week.
+      prisma.codingSession.groupBy({
+        by: ['userId'],
+        where: { commit: { repoId: { in: repoIds } } },
+        _min: { createdAt: true },
+      }),
+    ]);
+
+    const activeThisWeek = sessionsThisWeek.map((s) => s.userId).filter((u): u is string => !!u);
+    const activeLastWeek = sessionsLastWeek.map((s) => s.userId).filter((u): u is string => !!u);
+    const newAdopters = allEngineerActivity.filter(
+      (e) => e._min.createdAt && e._min.createdAt >= startOfThisWeek,
+    ).length;
+
+    res.json({
+      totalEngineers,
+      activeThisWeek: activeThisWeek.length,
+      activeLastWeek: activeLastWeek.length,
+      newAdopters,
+      adoptionPct: totalEngineers > 0
+        ? Math.round((activeThisWeek.length / totalEngineers) * 100)
+        : 0,
+    });
+  } catch (err) {
+    console.error('Team adoption error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

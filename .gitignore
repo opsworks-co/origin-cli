@@ -9,3 +9,4 @@ apps/api/public/index.html
 apps/api/public/favicon.svg
 apps/api/public/robots.txt
 apps/api/public/sitemap.xml
+apps/api/public/web/

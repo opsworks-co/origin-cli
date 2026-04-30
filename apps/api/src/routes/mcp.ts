@@ -18,6 +18,7 @@ function withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 import { notifyOrgAdmins } from '../services/notifications.js';
 import { runAIReview } from '../services/ai-review.js';
 import { checkBudget, recordSpend } from '../services/budget.js';
+import { ensureAgentModel } from '../services/agent-models.js';
 import { emitSessionEvent } from '../services/session-events.js';
 import { enforceSessionStart, enforceSessionEnd, applyEnforcementActions, enforceAgentLimits, loadOrgPolicies, shouldSkipRule, shouldSkipPolicy } from '../services/policy-engine.js';
 import { describeCondition, describeAction } from '../utils/policy-descriptions.js';
@@ -74,7 +75,8 @@ const DEFAULT_SECURITY_RULES = `CRITICAL: Follow these security rules at all tim
 8. When writing configuration examples, always use clearly fake placeholder values.`;
 
 interface McpRequest extends Request {
-  orgId?: string;
+  activeOrgId?: string;
+  activeRole?: string;
   mcpUserId?: string;  // User ID resolved from the API key (for per-member attribution)
   apiKeyId?: string;   // ID of the API key that created this session
   apiKeyName?: string; // Name of the API key (for standalone key attribution)
@@ -97,7 +99,18 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     const found = await prisma.apiKey.findFirst({
       where: { keyHash },
       include: {
-        org: { include: { users: { where: { role: 'OWNER' }, take: 1 } } },
+        // Resolve a fallback user for standalone keys (no linked userId) by
+        // grabbing one OWNER membership in the key's org. Sessions created
+        // via the key are attributed to that user.
+        org: {
+          include: {
+            memberships: {
+              where: { role: 'OWNER' },
+              take: 1,
+              select: { userId: true },
+            },
+          },
+        },
         user: { select: { accountType: true } },
         repoScopes: { select: { repoId: true } },
         agentScopes: { select: { agentId: true } },
@@ -108,17 +121,15 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
       return res.status(401).json({ error: 'Invalid API key' });
     }
 
-    req.orgId = found.orgId;
+    req.activeOrgId = found.orgId;
+    req.activeRole = found.role || 'MEMBER';
     req.apiKeyId = found.id;
     req.apiKeyName = found.name;
     req.keyType = (found as any).keyType || 'team';
     req.accountType = (found as any).user?.accountType || 'org';
     req.repoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
     req.agentScopes = found.agentScopes.map((s: { agentId: string }) => s.agentId);
-    // Resolve user for session attribution:
-    // Linked key: use the key's userId
-    // Standalone key (has role, no userId): fall back to org owner so sessions are visible
-    req.mcpUserId = found.userId ?? found.org.users[0]?.id ?? undefined;
+    req.mcpUserId = found.userId ?? found.org.memberships[0]?.userId ?? undefined;
     next();
   } catch (err) {
     console.error('API key auth error:', err);
@@ -131,7 +142,7 @@ router.use(authByApiKey);
 // GET /whoami — verify API key and return org info
 router.get('/whoami', async (req: McpRequest, res: Response) => {
   try {
-    const org = await prisma.org.findUnique({ where: { id: req.orgId as string } });
+    const org = await prisma.org.findUnique({ where: { id: req.activeOrgId as string } });
     if (!org) return res.status(404).json({ error: 'Organization not found' });
 
     const agentCount = await prisma.agent.count({ where: { orgId: org.id, status: 'ACTIVE' } });
@@ -159,7 +170,7 @@ router.get('/whoami', async (req: McpRequest, res: Response) => {
 router.get('/policies', async (req: McpRequest, res: Response) => {
   try {
     const policies = await prisma.policy.findMany({
-      where: { orgId: req.orgId as string, active: true },
+      where: { orgId: req.activeOrgId as string, active: true },
       include: {
         rules: true,
         assignments: {
@@ -231,10 +242,12 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       return res.status(413).json({ error: `additionalRepoPaths exceeds max of ${MAX_ADDITIONAL_REPOS}` });
     }
 
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
     console.log('[session/start]', { orgId, repoPath, repoUrl: repoUrl || '(none)', agentSlug, machineId, additionalRepoPaths: additionalRepoPaths?.length || 0 });
 
-    // Check budget before allowing session
+    // Org-level budget pre-check — fast fail before agent resolution. The
+    // model-scoped check below runs once we know which agent + model the
+    // session belongs to.
     const budgetCheck = await checkBudget(orgId);
     if (budgetCheck.blocked) {
       return res.status(429).json({
@@ -242,6 +255,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         message: budgetCheck.message,
         spent: budgetCheck.spent,
         limit: budgetCheck.limit,
+        level: budgetCheck.level,
       });
     }
 
@@ -453,6 +467,34 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         message: violation?.message || 'Model is not in the allowed list',
         policy: violation?.policyName,
       });
+    }
+
+    // Model-scoped budget check — runs in addition to the org-level check
+    // above. Now that we know the agent + model, evaluate any AgentModel
+    // monthly cap (plus per-user-model and per-repo-model caps). The
+    // org-level cap was already evaluated; this only fires when a tighter
+    // narrower cap is set and over.
+    if (agent?.id) {
+      // Auto-detect: ensure an AgentModel row exists for this (agent, model).
+      // First-time sightings are flagged autoDetected=true so admins see them
+      // in the UI without manual paperwork.
+      await ensureAgentModel(agent.id, model);
+
+      const modelBudget = await checkBudget(orgId, {
+        agentId: agent.id,
+        model,
+        userId: req.mcpUserId ?? undefined,
+        repoId: repo.id,
+      });
+      if (modelBudget.blocked) {
+        return res.status(429).json({
+          error: 'Budget limit exceeded',
+          message: modelBudget.message,
+          spent: modelBudget.spent,
+          limit: modelBudget.limit,
+          level: modelBudget.level,
+        });
+      }
     }
 
     // ── Server-side dedup with mutex lock ──────────────────────────────────
@@ -807,7 +849,7 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
 router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
     // Scope the lookup by orgId. Previously this used findUnique({id})
     // which let any org's API key resume (and flip RUNNING) a session in
     // any other org — a classic cross-tenant IDOR via the MCP surface.
@@ -868,7 +910,7 @@ router.post('/session/:id/resume', async (req: McpRequest, res: Response) => {
 router.post('/session/:id/command-result', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
     const { type, status, message } = req.body;
 
     const session = await prisma.codingSession.findFirst({
@@ -901,7 +943,7 @@ router.post('/session/:id/command-result', async (req: McpRequest, res: Response
 router.post('/session/:id/attach-repo', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
     const { repoPath } = req.body;
 
     if (typeof repoPath !== 'string' || !repoPath || repoPath.length > 1000) {
@@ -950,7 +992,7 @@ router.post('/session/:id/attach-repo', async (req: McpRequest, res: Response) =
 router.post('/session/:id/snapshot', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
     const {
       snapshotId,
       type,
@@ -1010,7 +1052,7 @@ router.post('/session/:id/snapshot', async (req: McpRequest, res: Response) => {
 router.post('/session/:id/ping', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
     const session = await prisma.codingSession.findFirst({
       where: { id, commit: { repo: { orgId } } },
       select: { status: true, pendingCommand: true, branch: true },
@@ -1060,7 +1102,7 @@ router.post('/session/:id/ping', async (req: McpRequest, res: Response) => {
 router.patch('/session/:id', async (req: McpRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
     const {
       prompt, transcript, filesChanged, tokensUsed, toolCalls,
       linesAdded, linesRemoved, model, inputTokens, outputTokens,
@@ -1309,6 +1351,24 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         const pcCheckpointType = typeof pc?.checkpointType === 'string' ? pc.checkpointType : null;
         const pcCommitSha = typeof pc?.commitSha === 'string' ? pc.commitSha : null;
         const pcTreeSha = typeof pc?.treeSha === 'string' ? pc.treeSha : null;
+        // Mid-session model tracking — the CLI sends the model that was
+        // active for this prompt. We persist it on the PromptChange so a
+        // session that switched models surfaces the full sequence.
+        const pcModel = typeof pc?.model === 'string' && pc.model.length > 0 && pc.model.length <= 200
+          ? pc.model
+          : null;
+        // Per-prompt cost / tokens (multi-model pricing). Each PromptChange
+        // is priced at its own model's rates by the CLI, so analytics can
+        // accurately attribute spend per model in mixed-model sessions.
+        // Negative or non-finite values get coerced to 0 so a hostile client
+        // can't subtract from existing aggregates.
+        const safePosInt = (v: unknown) => Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.floor(Number(v)) : 0;
+        const safePosFloat = (v: unknown) => Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0;
+        const pcInputTokens = safePosInt(pc?.inputTokens);
+        const pcOutputTokens = safePosInt(pc?.outputTokens);
+        const pcCacheReadTokens = safePosInt(pc?.cacheReadTokens);
+        const pcCacheCreationTokens = safePosInt(pc?.cacheCreationTokens);
+        const pcCostUsd = safePosFloat(pc?.costUsd);
 
         const updateData = {
           promptText: promptText || existing?.promptText || '',
@@ -1321,7 +1381,22 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           ...(pcCheckpointType && { checkpointType: pcCheckpointType }),
           ...(pcCommitSha && { commitSha: pcCommitSha }),
           ...(pcTreeSha && { treeSha: pcTreeSha }),
+          ...(pcModel && { model: pcModel }),
+          ...(pcInputTokens > 0 && { inputTokens: pcInputTokens }),
+          ...(pcOutputTokens > 0 && { outputTokens: pcOutputTokens }),
+          ...(pcCacheReadTokens > 0 && { cacheReadTokens: pcCacheReadTokens }),
+          ...(pcCacheCreationTokens > 0 && { cacheCreationTokens: pcCacheCreationTokens }),
+          ...(pcCostUsd > 0 && { costUsd: pcCostUsd }),
         };
+
+        // Auto-detect any new model that surfaced mid-session. Cheap upsert
+        // gated by the existence of an agentId on the session.
+        if (pcModel) {
+          const sess = await prisma.codingSession.findUnique({
+            where: { id }, select: { agentId: true },
+          });
+          if (sess?.agentId) ensureAgentModel(sess.agentId, pcModel).catch(() => {});
+        }
 
         return prisma.promptChange.upsert({
           where: { sessionId_promptIndex: { sessionId: id, promptIndex } },
@@ -1352,7 +1427,7 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
 
     // Emit rich real-time events for Live Feed
     const now = new Date().toISOString();
-    const emitOrgId = req.orgId as string;
+    const emitOrgId = req.activeOrgId as string;
     const emitUserId = req.mcpUserId;
 
     // Always emit a generic update
@@ -1459,7 +1534,7 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
 
           const result = await enforceAgentLimits({
             sessionId: id,
-            orgId: req.orgId as string,
+            orgId: req.activeOrgId as string,
             model: session.model,
             costUsd: session.costUsd,
             tokensUsed: session.tokensUsed,
@@ -1515,7 +1590,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       return res.status(400).json({ error: 'Missing required field: sessionId' });
     }
 
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
 
     // Update the coding session with final data
     // transcript field: prefer full transcript if provided, fall back to summary
@@ -1842,6 +1917,21 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         const pcCheckpointType = typeof pc?.checkpointType === 'string' ? pc.checkpointType : null;
         const pcCommitSha = typeof pc?.commitSha === 'string' ? pc.commitSha : null;
         const pcTreeSha = typeof pc?.treeSha === 'string' ? pc.treeSha : null;
+        const pcModel = typeof pc?.model === 'string' && pc.model.length > 0 && pc.model.length <= 200
+          ? pc.model
+          : null;
+        // Per-prompt cost / tokens (multi-model pricing). Each PromptChange
+        // is priced at its own model's rates by the CLI, so analytics can
+        // accurately attribute spend per model in mixed-model sessions.
+        // Negative or non-finite values get coerced to 0 so a hostile client
+        // can't subtract from existing aggregates.
+        const safePosInt = (v: unknown) => Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.floor(Number(v)) : 0;
+        const safePosFloat = (v: unknown) => Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0;
+        const pcInputTokens = safePosInt(pc?.inputTokens);
+        const pcOutputTokens = safePosInt(pc?.outputTokens);
+        const pcCacheReadTokens = safePosInt(pc?.cacheReadTokens);
+        const pcCacheCreationTokens = safePosInt(pc?.cacheCreationTokens);
+        const pcCostUsd = safePosFloat(pc?.costUsd);
 
         const updateData = {
           promptText: promptText || existing?.promptText || '',
@@ -1854,6 +1944,12 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           ...(pcCheckpointType && { checkpointType: pcCheckpointType }),
           ...(pcCommitSha && { commitSha: pcCommitSha }),
           ...(pcTreeSha && { treeSha: pcTreeSha }),
+          ...(pcModel && { model: pcModel }),
+          ...(pcInputTokens > 0 && { inputTokens: pcInputTokens }),
+          ...(pcOutputTokens > 0 && { outputTokens: pcOutputTokens }),
+          ...(pcCacheReadTokens > 0 && { cacheReadTokens: pcCacheReadTokens }),
+          ...(pcCacheCreationTokens > 0 && { cacheCreationTokens: pcCacheCreationTokens }),
+          ...(pcCostUsd > 0 && { costUsd: pcCostUsd }),
         };
 
         return prisma.promptChange.upsert({
@@ -2038,7 +2134,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
 // works whether or not Origin tracked the work that produced the commit.
 router.post('/commits/ingest', async (req: McpRequest, res: Response) => {
   try {
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
     const { repoPath, repoUrl, commits } = req.body as {
       repoPath?: string;
       repoUrl?: string;
@@ -2175,7 +2271,7 @@ router.post('/violations', async (req: McpRequest, res: Response) => {
     const safeDescription = stripHtml(String(description)).slice(0, 500);
     const safeFilepath = filepath ? stripHtml(String(filepath)).slice(0, 255) : undefined;
 
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
 
     await prisma.auditLog.create({
       data: {
@@ -2208,7 +2304,7 @@ router.post('/policies/:id/rules', async (req: McpRequest, res: Response) => {
   try {
     const policyId = req.params.id as string;
     const { condition, action, severity } = req.body;
-    const orgId = req.orgId as string;
+    const orgId = req.activeOrgId as string;
 
     const policy = await prisma.policy.findFirst({ where: { id: policyId, orgId } });
     if (!policy) return res.status(404).json({ error: 'Policy not found' });

@@ -407,8 +407,16 @@ export default function Repos() {
         api.syncRepo(id).catch(() => { /* background best-effort */ });
       }
       fetchRepos();
-      const updated = await api.discoverGitHubRepos();
-      setGithubRepos(updated.repos);
+      // Close the import panel as soon as anything imported successfully.
+      // If every selected repo failed (e.g. permission errors), leave it
+      // open so the user can read the per-row failure messages and retry.
+      const anySuccess = result.results.some((r) => r.success);
+      if (anySuccess) {
+        setShowImport(false);
+      } else {
+        const updated = await api.discoverGitHubRepos();
+        setGithubRepos(updated.repos);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -485,8 +493,15 @@ export default function Repos() {
         api.syncRepo(id).catch(() => { /* background best-effort */ });
       }
       fetchRepos();
-      const updated = await api.discoverGitLabRepos();
-      setGitlabRepos(updated.repos);
+      // Mirror the GitHub handler: close on any success, keep open on
+      // total failure so the user can read per-row errors.
+      const anySuccess = result.results.some((r) => r.success);
+      if (anySuccess) {
+        setShowGitLabImport(false);
+      } else {
+        const updated = await api.discoverGitLabRepos();
+        setGitlabRepos(updated.repos);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -516,41 +531,93 @@ export default function Repos() {
             {hasGitHub && !showImport && (
               <button
                 onClick={() => { handleDiscover(); setShowGitLabImport(false); setShowForm(false); }}
-                className="btn-primary text-sm"
+                className="group relative inline-flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg
+                           bg-gradient-to-b from-indigo-500 via-indigo-600 to-indigo-700
+                           hover:from-indigo-400 hover:via-indigo-500 hover:to-indigo-600
+                           text-white
+                           shadow-[0_1px_0_rgba(255,255,255,0.18)_inset,0_-1px_0_rgba(0,0,0,0.25)_inset,0_2px_6px_rgba(99,102,241,0.4)]
+                           hover:shadow-[0_1px_0_rgba(255,255,255,0.22)_inset,0_-1px_0_rgba(0,0,0,0.25)_inset,0_6px_20px_rgba(99,102,241,0.55)]
+                           ring-1 ring-indigo-400/40
+                           transition-all duration-150 hover:-translate-y-px active:translate-y-0 active:shadow-[0_1px_0_rgba(255,255,255,0.12)_inset,0_1px_3px_rgba(99,102,241,0.3)]
+                           overflow-hidden"
               >
-                Import from GitHub
+                {/* glossy shine sweep on hover */}
+                <span className="pointer-events-none absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 ease-out
+                                 bg-gradient-to-r from-transparent via-white/15 to-transparent" aria-hidden />
+                <svg className="relative w-4 h-4 opacity-95 group-hover:opacity-100 group-hover:rotate-[-6deg] transition-transform duration-200" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                </svg>
+                <span className="relative">Import from GitHub</span>
+                <svg className="relative w-3.5 h-3.5 opacity-70 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M5 12h14M13 5l7 7-7 7" />
+                </svg>
               </button>
             )}
             {!hasGitHub && (
               <button
                 onClick={() => handleConnectGitHub()}
-                className="text-sm px-3 py-1.5 rounded-lg border border-gray-700 hover:border-gray-600 text-gray-300 hover:text-white transition-colors"
+                className="inline-flex items-center gap-2 text-sm font-medium px-3.5 py-2 rounded-lg
+                           border border-gray-200 dark:border-white/[0.08]
+                           bg-white dark:bg-white/[0.02] hover:bg-gray-50 dark:hover:bg-white/[0.05]
+                           text-gray-700 dark:text-gray-200 transition-colors"
               >
+                <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                </svg>
                 Connect GitHub
               </button>
             )}
             {!hasGitLab && (
               <button
                 onClick={() => handleConnectGitLab()}
-                className="text-sm px-3 py-1.5 rounded-lg border border-gray-700 hover:border-gray-600 text-gray-300 hover:text-white transition-colors"
+                className="inline-flex items-center gap-2 text-sm font-medium px-3.5 py-2 rounded-lg
+                           border border-gray-200 dark:border-white/[0.08]
+                           bg-white dark:bg-white/[0.02] hover:bg-gray-50 dark:hover:bg-white/[0.05]
+                           text-gray-700 dark:text-gray-200 transition-colors"
               >
+                <svg className="w-4 h-4 text-[#fc6d26]" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M23.6 9.6L23.6 9.6l-.1-.3-3.3-8.5a.85.85 0 0 0-.8-.5.84.84 0 0 0-.8.6l-2.2 6.7H7.6L5.4.9A.84.84 0 0 0 4.6.3a.85.85 0 0 0-.8.5L.5 9.4l-.1.3a6 6 0 0 0 2 6.9l1.1.8 5.5 4.1 2.7 2.1a1 1 0 0 0 1.2 0l2.7-2.1 5.5-4.1 1.1-.8a6 6 0 0 0 2-6.9z" />
+                </svg>
                 Connect GitLab
               </button>
             )}
             {hasGitLab && !showGitLabImport && (
               <button
                 onClick={() => { handleDiscoverGitLab(); setShowImport(false); setShowForm(false); }}
-                className="btn-primary text-sm"
-                style={{ background: '#FC6D26' }}
+                className="group inline-flex items-center gap-2 text-sm font-medium px-3.5 py-2 rounded-lg
+                           bg-gradient-to-b from-[#fc6d26] to-[#e24329] hover:from-[#fd8246] hover:to-[#fc6d26]
+                           text-white shadow-[0_1px_0_rgba(255,255,255,0.1)_inset,0_2px_6px_rgba(252,109,38,0.35)]
+                           hover:shadow-[0_1px_0_rgba(255,255,255,0.14)_inset,0_4px_14px_rgba(252,109,38,0.45)]
+                           ring-1 ring-orange-400/40 transition-all"
               >
+                <svg className="w-4 h-4 opacity-90 group-hover:opacity-100" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M23.6 9.6L23.6 9.6l-.1-.3-3.3-8.5a.85.85 0 0 0-.8-.5.84.84 0 0 0-.8.6l-2.2 6.7H7.6L5.4.9A.84.84 0 0 0 4.6.3a.85.85 0 0 0-.8.5L.5 9.4l-.1.3a6 6 0 0 0 2 6.9l1.1.8 5.5 4.1 2.7 2.1a1 1 0 0 0 1.2 0l2.7-2.1 5.5-4.1 1.1-.8a6 6 0 0 0 2-6.9z" />
+                </svg>
                 Import from GitLab
               </button>
             )}
             <button
               onClick={() => { setShowForm(!showForm); setShowImport(false); setShowGitLabImport(false); }}
-              className="text-sm px-3 py-1.5 rounded-lg border border-gray-700 hover:border-indigo-500/50 text-gray-300 hover:text-white transition-colors"
+              className="inline-flex items-center gap-1.5 text-sm font-medium px-3.5 py-2 rounded-lg
+                         border border-gray-200 dark:border-white/[0.08]
+                         bg-white dark:bg-white/[0.02] hover:bg-gray-50 dark:hover:bg-white/[0.05]
+                         text-gray-700 dark:text-gray-200 transition-colors"
             >
-              {showForm ? 'Close' : '+ Add Repo'}
+              {showForm ? (
+                <>
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+                    <path d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                  Close
+                </>
+              ) : (
+                <>
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  Add Repo
+                </>
+              )}
             </button>
           </div>
         ) : undefined}
@@ -902,93 +969,57 @@ export default function Repos() {
 
       {/* Repos List */}
       {repos.length === 0 && !showImport && !showGitLabImport && !showForm ? (
-        <div className="card py-14 space-y-8">
-          <div className="text-center">
-            <div className="w-12 h-12 rounded-xl bg-indigo-500/10 flex items-center justify-center mx-auto mb-3">
-              <Package className="w-6 h-6 text-indigo-400" />
+        <div className="rounded-xl border border-gray-800/80 bg-gray-900/40 p-5 space-y-4">
+          {/* Compact empty state — single inline strip with icon, copy, and
+              three small action buttons. Replaces the previous full-page
+              banner that pushed everything else off-screen. */}
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="w-10 h-10 rounded-lg bg-indigo-500/10 flex items-center justify-center flex-shrink-0">
+              <Package className="w-5 h-5 text-indigo-400" />
             </div>
-            <p className="text-lg font-medium text-gray-200 mb-1">No repositories yet</p>
-            {!isSolo && (
-              <p className="text-sm text-gray-500">
-                Agents can only run sessions in registered repositories.
-              </p>
-            )}
-          </div>
-
-          <div className="grid sm:grid-cols-3 gap-4 max-w-3xl mx-auto">
-            {/* GitHub import option */}
-            <button
-              onClick={() => {
-                if (hasGitHub) {
-                  handleDiscover();
-                } else {
-                  handleConnectGitHub();
-                }
-              }}
-              className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-indigo-500/50 hover:bg-gray-800/50 transition-all group text-left"
-            >
-              <svg className="w-8 h-8 text-gray-400 group-hover:text-white transition-colors" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-              </svg>
-              <div className="text-center">
-                <p className="font-medium text-gray-200 group-hover:text-white transition-colors">
-                  {hasGitHub ? 'Import from GitHub' : 'Connect GitHub'}
+            <div className="flex-1 min-w-[200px]">
+              <p className="text-sm font-medium text-gray-200">No repositories yet</p>
+              {!isSolo && (
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Agents can only run sessions in registered repositories. Pick a source to get started.
                 </p>
-                <p className="text-xs text-gray-500 mt-1">
-                  {hasGitHub
-                    ? 'Select repos from your GitHub org'
-                    : 'Connect GitHub to import repos'}
-                </p>
-              </div>
-            </button>
-
-            {/* GitLab import option */}
-            <button
-              onClick={() => {
-                if (hasGitLab) {
-                  handleDiscoverGitLab();
-                } else {
-                  handleConnectGitLab();
-                }
-              }}
-              className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-orange-500/50 hover:bg-gray-800/50 transition-all group text-left"
-            >
-              <svg className="w-8 h-8 text-gray-400 group-hover:text-orange-400 transition-colors" viewBox="0 0 32 32" fill="currentColor">
-                <path d="M16 28.896L21.323 12.576H10.677L16 28.896Z" />
-                <path d="M16 28.896L10.677 12.576H2.867L16 28.896Z" opacity="0.7" />
-                <path d="M2.867 12.576L1.164 17.821C1.005 18.31 1.172 18.847 1.578 19.142L16 28.896L2.867 12.576Z" opacity="0.5" />
-                <path d="M2.867 12.576H10.677L7.334 2.279C7.155 1.736 6.393 1.736 6.214 2.279L2.867 12.576Z" />
-                <path d="M16 28.896L21.323 12.576H29.133L16 28.896Z" opacity="0.7" />
-                <path d="M29.133 12.576L30.836 17.821C30.995 18.31 30.828 18.847 30.422 19.142L16 28.896L29.133 12.576Z" opacity="0.5" />
-                <path d="M29.133 12.576H21.323L24.666 2.279C24.845 1.736 25.607 1.736 25.786 2.279L29.133 12.576Z" />
-              </svg>
-              <div className="text-center">
-                <p className="font-medium text-gray-200 group-hover:text-white transition-colors">
-                  {hasGitLab ? 'Import from GitLab' : 'Connect GitLab'}
-                </p>
-                <p className="text-xs text-gray-500 mt-1">
-                  {hasGitLab
-                    ? 'Select repos from your GitLab'
-                    : 'Connect GitLab to import repos'}
-                </p>
-              </div>
-            </button>
-
-            {/* Manual add option */}
-            <button
-              onClick={() => { setShowForm(true); setShowImport(false); setShowGitLabImport(false); }}
-              className="flex flex-col items-center gap-3 p-6 rounded-xl border border-gray-700 hover:border-indigo-500/50 hover:bg-gray-800/50 transition-all group text-left"
-            >
-              <svg className="w-8 h-8 text-gray-400 group-hover:text-white transition-colors" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-              </svg>
-              <div className="text-center">
-                <p className="font-medium text-gray-200 group-hover:text-white transition-colors">Add Manually</p>
-                <p className="text-xs text-gray-500 mt-1">
-                  Enter a repository path or URL directly
-                </p>
-              </div>
-            </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => { if (hasGitHub) handleDiscover(); else handleConnectGitHub(); }}
+                className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg border border-gray-700 hover:border-indigo-500/40 hover:bg-indigo-500/10 text-gray-200 transition-colors"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                </svg>
+                {hasGitHub ? 'Import from GitHub' : 'Connect GitHub'}
+              </button>
+              <button
+                onClick={() => { if (hasGitLab) handleDiscoverGitLab(); else handleConnectGitLab(); }}
+                className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg border border-gray-700 hover:border-orange-500/40 hover:bg-orange-500/10 text-gray-200 transition-colors"
+              >
+                <svg className="w-4 h-4 text-orange-400" viewBox="0 0 32 32" fill="currentColor">
+                  <path d="M16 28.896L21.323 12.576H10.677L16 28.896Z" />
+                  <path d="M16 28.896L10.677 12.576H2.867L16 28.896Z" opacity="0.7" />
+                  <path d="M2.867 12.576L1.164 17.821C1.005 18.31 1.172 18.847 1.578 19.142L16 28.896L2.867 12.576Z" opacity="0.5" />
+                  <path d="M2.867 12.576H10.677L7.334 2.279C7.155 1.736 6.393 1.736 6.214 2.279L2.867 12.576Z" />
+                  <path d="M16 28.896L21.323 12.576H29.133L16 28.896Z" opacity="0.7" />
+                  <path d="M29.133 12.576L30.836 17.821C30.995 18.31 30.828 18.847 30.422 19.142L16 28.896L29.133 12.576Z" opacity="0.5" />
+                  <path d="M29.133 12.576H21.323L24.666 2.279C24.845 1.736 25.607 1.736 25.786 2.279L29.133 12.576Z" />
+                </svg>
+                {hasGitLab ? 'Import from GitLab' : 'Connect GitLab'}
+              </button>
+              <button
+                onClick={() => { setShowForm(true); setShowImport(false); setShowGitLabImport(false); }}
+                className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg border border-gray-700 hover:border-gray-600 hover:bg-gray-800/50 text-gray-200 transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                </svg>
+                Add Manually
+              </button>
+            </div>
           </div>
 
           {/* Inline GitHub PAT form */}

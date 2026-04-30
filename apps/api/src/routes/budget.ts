@@ -1,22 +1,21 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
-import { requireAuth, requireRole } from '../middleware/auth.js';
+import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import { getSpendByUser } from '../services/budget.js';
 import { safeParseObject } from '../utils/safe-json.js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(resolveOrgContext);
 
-interface AuthRequest extends Request {
-  user?: { id: string; orgId: string; role: string };
-}
+
 
 // ---------------------------------------------------------------------------
 // GET /api/budget/agents — per-agent spend + limits (grouped by Origin agent, not model)
 // ---------------------------------------------------------------------------
 router.get('/agents', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
@@ -114,7 +113,7 @@ router.get('/agents', async (req: AuthRequest, res: Response) => {
 // ---------------------------------------------------------------------------
 router.put('/agents/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const agentId = req.params.id as string;
     const { monthlyLimit } = req.body;
 
@@ -168,7 +167,7 @@ router.put('/agents/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Re
 // ---------------------------------------------------------------------------
 router.get('/users', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const byUser = await getSpendByUser(orgId);
 
     // Get user emails
@@ -208,7 +207,7 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
 // ---------------------------------------------------------------------------
 router.put('/users/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const userId = req.params.id as string;
     const { monthlyLimit } = req.body;
 
@@ -216,7 +215,7 @@ router.put('/users/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Res
     // actually belongs to this org before writing a limit keyed by
     // their UUID into the settings blob.
     const ownedUser = await prisma.user.findFirst({
-      where: { id: userId, orgId },
+      where: { id: userId, memberships: { some: { orgId } } },
       select: { id: true },
     });
     if (!ownedUser) {
@@ -259,7 +258,7 @@ router.put('/users/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Res
 // ---------------------------------------------------------------------------
 router.get('/anomalies', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
@@ -321,7 +320,7 @@ router.get('/anomalies', async (req: AuthRequest, res: Response) => {
 // ---------------------------------------------------------------------------
 router.get('/pr-costs', async (req: AuthRequest, res: Response) => {
   try {
-    const orgId = req.user!.orgId;
+    const orgId = req.activeOrgId!;
     const now = new Date();
     const since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // last 30 days
 

@@ -16,14 +16,17 @@
 }
 
 .dark {
-  --bg-primary: #0A0B1E;    /* deep indigo */
-  --bg-card:    #13152B;    /* indigo card */
-  --bg-sidebar: rgba(19,21,43,0.8);
+  /* Unified dark palette anchored to #0a0b14 (the same near-black used
+     by the Agents-page cards). Was previously #0A0B1E (indigo) which
+     gave older pages a noticeably bluer cast than the newer ones. */
+  --bg-primary: #0a0b14;
+  --bg-card:    #10121c;     /* one step lighter for elevated surfaces */
+  --bg-sidebar: rgba(16,18,28,0.85);
   --bg-hover:   rgba(255,255,255,0.04);
   --text-primary:   #f3f4f6; /* gray-100 */
   --text-secondary: #9ca3af; /* gray-400 */
   --text-muted:     #6b7280; /* gray-500 */
-  --border:     #252849;     /* indigo border */
+  --border:     #1c1f2c;     /* desaturated dark border */
   --ring-muted: rgba(255,255,255,0.06);
 }
 

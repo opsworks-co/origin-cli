@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import type { TeamMember } from '../api';
 import { timeAgo } from '../utils';
-import { Key, Users, Shield, RefreshCw, XCircle, Copy, Check, Plus, ChevronDown } from 'lucide-react';
+import { Key, Users, Shield, RefreshCw, XCircle, Copy, Check, Plus, ChevronDown, Terminal, Sparkles } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   OWNER: 'badge-purple',
@@ -29,8 +29,8 @@ type AgentOption = { id: string; name: string; slug: string };
 type RepoOption = { id: string; name: string };
 
 export default function IAM() {
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'ADMIN' || user?.role === 'OWNER';
+  const { user, activeOrg } = useAuth();
+  const isAdmin = activeOrg?.role === 'ADMIN' || activeOrg?.role === 'OWNER';
 
   // ── State ────────────────────────────────────────────────────────────────
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -45,6 +45,11 @@ export default function IAM() {
   const [addName, setAddName] = useState('');
   const [addEmail, setAddEmail] = useState('');
   const [addRole, setAddRole] = useState('MEMBER');
+  // Scope the new key at creation time. agentIds defaults to "all agents"
+  // so admins don't have to manually select every one for the common case;
+  // empty repoIds = all repos.
+  const [addAgentIds, setAddAgentIds] = useState<string[]>([]);
+  const [addRepoIds, setAddRepoIds] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   const [generatedKey, setGeneratedKey] = useState('');
 
@@ -95,10 +100,21 @@ export default function IAM() {
   const handleAddMember = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!addName.trim() || !addEmail.trim()) return;
+    if (addAgentIds.length === 0) {
+      setError('Select at least one agent — the API key won\'t work without agent access.');
+      return;
+    }
     setAdding(true);
     setError('');
     try {
-      const res = await api.addMember({ name: addName, email: addEmail, role: addRole });
+      const res = await api.addMember({
+        name: addName,
+        email: addEmail,
+        role: addRole,
+        // Empty repoIds means "all repos"; agentIds is required.
+        agentIds: addAgentIds,
+        repoIds: addRepoIds.length > 0 ? addRepoIds : undefined,
+      });
       setGeneratedKey(res.apiKey);
       loadData();
     } catch (err: any) {
@@ -235,7 +251,17 @@ export default function IAM() {
         </div>
         {isAdmin && (
           <button
-            onClick={() => { setShowAdd(true); setGeneratedKey(''); setAddName(''); setAddEmail(''); setAddRole('MEMBER'); }}
+            onClick={() => {
+              setShowAdd(true);
+              setGeneratedKey('');
+              setAddName('');
+              setAddEmail('');
+              setAddRole('MEMBER');
+              // Default to all agents selected (matches /generate-key flow);
+              // empty repoIds = all repos.
+              setAddAgentIds(allAgents.map((a) => a.id));
+              setAddRepoIds([]);
+            }}
             className="btn-primary text-sm"
           >
             + Add Member
@@ -293,41 +319,220 @@ export default function IAM() {
                       <option value="ADMIN">Admin — can manage team & policies</option>
                     </select>
                   </div>
-                  <button type="submit" disabled={adding} className="btn-primary w-full text-sm">
-                    {adding ? 'Creating...' : 'Add Member & Generate Key'}
+
+                  {/* Scope-up-front: pick the agents + repos the new API key
+                      can use. Defaults: all agents selected, no repo filter
+                      (= access to all repos). Same chip style used in the
+                      Generate-Key modal. */}
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-2">
+                      Agents <span className="text-gray-600">— required</span>
+                    </label>
+                    {allAgents.length === 0 ? (
+                      <p className="text-[11px] text-gray-600 italic">No agents configured yet. Create one on the Agents page first.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {allAgents.map((a) => {
+                          const selected = addAgentIds.includes(a.id);
+                          return (
+                            <label
+                              key={a.id}
+                              className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full cursor-pointer transition-colors border ${
+                                selected
+                                  ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/40'
+                                  : 'bg-gray-800/50 text-gray-500 border-gray-700 hover:border-gray-600 hover:text-gray-300'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={() => setAddAgentIds(selected
+                                  ? addAgentIds.filter((id) => id !== a.id)
+                                  : [...addAgentIds, a.id])}
+                                className="sr-only"
+                              />
+                              {selected ? '✓ ' : ''}{a.name}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-2">
+                      Repos <span className="text-gray-600">— empty = all repos</span>
+                    </label>
+                    {allRepos.length === 0 ? (
+                      <p className="text-[11px] text-gray-600 italic">No repos imported yet. Import on the Repos page or leave empty for default access.</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                        {allRepos.map((r) => {
+                          const selected = addRepoIds.includes(r.id);
+                          return (
+                            <label
+                              key={r.id}
+                              className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full cursor-pointer transition-colors border ${
+                                selected
+                                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                  : 'bg-gray-800/50 text-gray-500 border-gray-700 hover:border-gray-600 hover:text-gray-300'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={() => setAddRepoIds(selected
+                                  ? addRepoIds.filter((id) => id !== r.id)
+                                  : [...addRepoIds, r.id])}
+                                className="sr-only"
+                              />
+                              {selected ? '✓ ' : ''}{r.name}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={adding || addAgentIds.length === 0}
+                    className="btn-primary w-full text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {adding ? 'Creating…' : 'Add Member & Generate Key'}
                   </button>
                 </form>
               </>
             ) : (
               <>
-                <h2 className="text-lg font-semibold mb-2 flex items-center gap-2 text-green-400">
-                  <Check className="w-5 h-5" />
-                  Member Added
-                </h2>
-                <p className="text-sm text-gray-400 mb-4">
-                  Give this API key to <span className="text-gray-200 font-medium">{addName}</span>. They run <code className="text-indigo-400">origin login</code> and paste it.
-                </p>
-                <div className="bg-amber-900/20 border border-amber-800 rounded-lg p-4 mb-4">
-                  <p className="text-xs text-amber-400 font-medium mb-2">This key is shown only once</p>
-                  <div className="flex items-center gap-2">
-                    <code className="text-sm text-gray-200 bg-gray-800 px-3 py-2 rounded flex-1 break-all font-mono">
+                {/* Celebration header */}
+                <div className="flex flex-col items-center text-center mb-5">
+                  <div className="relative mb-3">
+                    <div className="absolute inset-0 bg-emerald-500/20 blur-xl rounded-full" />
+                    <div className="relative w-14 h-14 rounded-full bg-gradient-to-br from-emerald-500/20 to-emerald-500/5 border border-emerald-500/40 flex items-center justify-center">
+                      <Check className="w-7 h-7 text-emerald-400" strokeWidth={3} />
+                    </div>
+                  </div>
+                  <h2 className="text-xl font-semibold text-gray-100 mb-1">
+                    {addName} is in
+                  </h2>
+                  <p className="text-sm text-gray-400">
+                    Send them the key below to get started.
+                  </p>
+                </div>
+
+                {/* Hero: API key card */}
+                <div className="relative rounded-xl bg-gradient-to-b from-amber-500/10 to-amber-500/[0.02] border border-amber-500/30 p-4 mb-4">
+                  <div className="flex items-center gap-1.5 mb-3">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    <p className="text-[11px] uppercase tracking-wider text-amber-400 font-semibold">
+                      Shown only once
+                    </p>
+                  </div>
+                  <div className="flex items-stretch gap-2">
+                    <code className="text-[13px] leading-relaxed text-gray-100 bg-black/40 border border-gray-800 px-3 py-2.5 rounded-lg flex-1 break-all font-mono select-all">
                       {generatedKey}
                     </code>
                     <button
                       onClick={() => copyKey(generatedKey)}
-                      className="btn-secondary text-xs px-3 py-2 flex items-center gap-1"
+                      className={`px-3 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all border ${
+                        copied
+                          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                          : 'bg-indigo-500/15 text-indigo-300 border-indigo-500/40 hover:bg-indigo-500/25'
+                      }`}
                     >
-                      {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                      {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                       {copied ? 'Copied' : 'Copy'}
                     </button>
                   </div>
                 </div>
-                <div className="bg-gray-800/50 rounded-lg p-3 text-xs text-gray-400 space-y-1">
-                  <p><span className="text-gray-300">Developer setup:</span></p>
-                  <p>1. Install: <code className="text-indigo-400">npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</code></p>
-                  <p>2. Login: <code className="text-indigo-400">origin login</code></p>
-                  <p>3. Paste the API key above</p>
-                  <p>4. Enable: <code className="text-indigo-400">origin init</code></p>
+
+                {/* Access summary */}
+                <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-3.5 mb-4 space-y-2.5">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-[11px] uppercase tracking-wider text-gray-500 font-medium w-14 shrink-0">Agents</span>
+                    <div className="flex flex-wrap gap-1.5 text-xs">
+                      {addAgentIds.length === allAgents.length ? (
+                        <span className="px-2 py-0.5 rounded-md bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-medium">
+                          All ({allAgents.length})
+                        </span>
+                      ) : (
+                        addAgentIds.map((id) => {
+                          const a = allAgents.find((x) => x.id === id);
+                          return a ? (
+                            <span key={id} className="px-2 py-0.5 rounded-md bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                              {a.name}
+                            </span>
+                          ) : null;
+                        })
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-[11px] uppercase tracking-wider text-gray-500 font-medium w-14 shrink-0">Repos</span>
+                    <div className="flex flex-wrap gap-1.5 text-xs">
+                      {addRepoIds.length === 0 ? (
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-medium">
+                          All repos
+                        </span>
+                      ) : (
+                        addRepoIds.map((id) => {
+                          const r = allRepos.find((x) => x.id === id);
+                          return r ? (
+                            <span key={id} className="px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                              {r.name}
+                            </span>
+                          ) : null;
+                        })
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-gray-600 pt-0.5 border-t border-gray-800/60">
+                    Edit anytime from this member's row → API Keys.
+                  </p>
+                </div>
+
+                {/* Developer setup */}
+                <div className="rounded-xl border border-gray-800 bg-gray-900/40 p-4">
+                  <div className="flex items-center gap-1.5 mb-3">
+                    <Terminal className="w-3.5 h-3.5 text-gray-400" />
+                    <p className="text-[11px] uppercase tracking-wider text-gray-400 font-semibold">
+                      Developer setup
+                    </p>
+                  </div>
+                  <ol className="space-y-2 text-xs text-gray-400">
+                    <li className="flex items-start gap-2.5">
+                      <span className="shrink-0 w-5 h-5 rounded-full bg-gray-800 text-gray-300 text-[10px] font-semibold flex items-center justify-center mt-px">1</span>
+                      <span className="leading-relaxed">
+                        Install:{' '}
+                        <code className="text-indigo-300 bg-gray-950/60 px-1.5 py-0.5 rounded border border-gray-800 break-all">
+                          npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
+                        </code>
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="shrink-0 w-5 h-5 rounded-full bg-gray-800 text-gray-300 text-[10px] font-semibold flex items-center justify-center mt-px">2</span>
+                      <span className="leading-relaxed">
+                        Login:{' '}
+                        <code className="text-indigo-300 bg-gray-950/60 px-1.5 py-0.5 rounded border border-gray-800">
+                          origin login
+                        </code>
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="shrink-0 w-5 h-5 rounded-full bg-gray-800 text-gray-300 text-[10px] font-semibold flex items-center justify-center mt-px">3</span>
+                      <span className="leading-relaxed">Paste the API key above</span>
+                    </li>
+                    <li className="flex items-start gap-2.5">
+                      <span className="shrink-0 w-5 h-5 rounded-full bg-gray-800 text-gray-300 text-[10px] font-semibold flex items-center justify-center mt-px">4</span>
+                      <span className="leading-relaxed">
+                        Enable:{' '}
+                        <code className="text-indigo-300 bg-gray-950/60 px-1.5 py-0.5 rounded border border-gray-800">
+                          origin init
+                        </code>
+                      </span>
+                    </li>
+                  </ol>
                 </div>
               </>
             )}
@@ -608,6 +813,13 @@ export default function IAM() {
                         {isAdmin && (
                           <td className="px-6 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-2">
+                              <Link
+                                to={`/iam/users/${m.id}/access`}
+                                className="text-xs text-indigo-300 hover:text-indigo-200 transition-colors"
+                                title="Manage repo + agent access"
+                              >
+                                Manage access
+                              </Link>
                               {m.id !== user?.id && (
                                 <>
                                   <button

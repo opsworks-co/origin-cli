@@ -212,7 +212,7 @@ export async function runAIReview(data: SessionData): Promise<AIReviewResult | n
 
     // Store structured review in database
     const adminUser = await prisma.user.findFirst({
-      where: { orgId: data.orgId, role: { in: ['OWNER', 'ADMIN'] } },
+      where: { memberships: { some: { orgId: data.orgId, role: { in: ['OWNER', 'ADMIN'] } } } },
     });
 
     if (adminUser) {
