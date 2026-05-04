@@ -2,9 +2,9 @@
 // Do not edit by hand. This file is gitignored.
 export const BUILD_INFO = {
   "version": "0.20260430.1015",
-  "gitSha": "cf73892abe7f3da7f68344f0cdfe658e240ee06d",
-  "gitShortSha": "cf73892abe7f",
+  "gitSha": "f1551284fe59f35e62bbb0e7279b8cbb7b29c5eb",
+  "gitShortSha": "f1551284fe59",
   "gitBranch": "main",
   "gitDirty": true,
-  "builtAt": "2026-04-30T14:15:50.327Z"
+  "builtAt": "2026-04-30T16:07:35.801Z"
 } as const;

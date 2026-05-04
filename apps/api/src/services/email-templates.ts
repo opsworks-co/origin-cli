@@ -283,3 +283,118 @@ export function buildWeeklyDigestHTML(data: WeeklyDigestData): string {
 </body>
 </html>`;
 }
+
+// Welcome email sent right after a successful registration or new org
+// creation. Confirms the account exists, links to the dashboard, and
+// surfaces the CLI quickstart so the user can act on it from inbox.
+interface WelcomeEmailData {
+  name: string;
+  orgName: string;
+  kind: 'solo' | 'team' | 'extra-org';
+}
+
+export function buildWelcomeEmailHTML(data: WelcomeEmailData): string {
+  const ORIGIN_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
+  const greeting =
+    data.kind === 'solo' ? `Welcome to Origin Solo, ${data.name}` :
+    data.kind === 'team' ? `Welcome to Origin — ${data.orgName} is ready` :
+    `New workspace ready — ${data.orgName}`;
+  const subline =
+    data.kind === 'solo' ? `Your personal workspace is set up. Track every AI coding session across every tool you use.` :
+    data.kind === 'team' ? `${data.orgName} is live. Invite teammates, connect repos, and start tracking AI sessions across the team.` :
+    `${data.orgName} is now in your sidebar org switcher.`;
+  const ctaLabel = data.kind === 'solo' ? 'Open Origin Solo' : 'Open dashboard';
+  const ctaUrl = data.kind === 'solo' ? `${ORIGIN_URL}/me` : `${ORIGIN_URL}/dashboard`;
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${greeting}</title>
+</head>
+<body style="margin: 0; padding: 0; background: #0a0b14; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+  <div style="max-width: 560px; margin: 40px auto; background: #111322; border: 1px solid #1f2333; border-radius: 12px; padding: 32px;">
+    <div style="margin-bottom: 24px;">
+      <a href="${ORIGIN_URL}" style="text-decoration: none; color: #818cf8; font-size: 14px; font-weight: 600; letter-spacing: 0.04em;">ORIGIN</a>
+    </div>
+
+    <h1 style="color: #f3f4f6; font-size: 22px; font-weight: 600; margin: 0 0 12px;">${greeting}</h1>
+    <p style="color: #9ca3af; font-size: 14px; line-height: 1.6; margin: 0 0 24px;">${subline}</p>
+
+    <div style="margin: 28px 0;">
+      <a href="${ctaUrl}" style="display: inline-block; background: #6366f1; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 12px 22px; border-radius: 8px;">
+        ${ctaLabel}
+      </a>
+    </div>
+
+    <div style="background: #0a0b14; border: 1px solid #1f2333; border-radius: 8px; padding: 16px; margin: 0 0 24px;">
+      <p style="color: #9ca3af; font-size: 12px; margin: 0 0 8px; font-weight: 600;">QUICKSTART — INSTALL THE CLI</p>
+      <code style="display: block; color: #818cf8; font-family: 'SF Mono', Menlo, monospace; font-size: 12px; line-height: 1.7;">npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</code>
+      <code style="display: block; color: #9ca3af; font-family: 'SF Mono', Menlo, monospace; font-size: 12px; line-height: 1.7;">origin login</code>
+    </div>
+
+    <p style="color: #6b7280; font-size: 12px; line-height: 1.6; margin: 0 0 8px;">
+      Need help? Reply to this email or visit <a href="${ORIGIN_URL}/docs" style="color: #818cf8;">getorigin.io/docs</a>.
+    </p>
+
+    <div style="border-top: 1px solid #1f2333; padding-top: 16px; margin-top: 24px;">
+      <p style="color: #555; font-size: 11px; margin: 0;">Origin AI Governance &mdash; <a href="${ORIGIN_URL}" style="color: #818cf8;">getorigin.io</a></p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+interface InviteEmailData {
+  inviterName: string;
+  inviterEmail: string;
+  orgName: string;
+  role: string;
+  acceptUrl: string;
+}
+
+export function buildInviteEmailHTML(data: InviteEmailData): string {
+  const ORIGIN_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
+  const roleLabel = data.role.charAt(0).toUpperCase() + data.role.slice(1).toLowerCase();
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>You're invited to ${data.orgName} on Origin</title>
+</head>
+<body style="margin: 0; padding: 0; background: #0a0b14; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+  <div style="max-width: 560px; margin: 40px auto; background: #111322; border: 1px solid #1f2333; border-radius: 12px; padding: 32px;">
+    <div style="margin-bottom: 24px;">
+      <a href="${ORIGIN_URL}" style="text-decoration: none; color: #818cf8; font-size: 14px; font-weight: 600; letter-spacing: 0.04em;">ORIGIN</a>
+    </div>
+
+    <h1 style="color: #f3f4f6; font-size: 22px; font-weight: 600; margin: 0 0 12px;">
+      You've been invited to <span style="color: #a78bfa;">${data.orgName}</span>
+    </h1>
+    <p style="color: #9ca3af; font-size: 14px; line-height: 1.6; margin: 0 0 24px;">
+      ${data.inviterName} (<a href="mailto:${data.inviterEmail}" style="color: #818cf8;">${data.inviterEmail}</a>)
+      invited you to join <strong style="color: #e5e7eb;">${data.orgName}</strong> as <strong style="color: #e5e7eb;">${roleLabel}</strong> on Origin.
+    </p>
+
+    <div style="margin: 28px 0;">
+      <a href="${data.acceptUrl}" style="display: inline-block; background: #6366f1; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 12px 22px; border-radius: 8px;">
+        Accept invitation
+      </a>
+    </div>
+
+    <p style="color: #6b7280; font-size: 12px; line-height: 1.6; margin: 0 0 8px;">
+      If you don't have an Origin account yet, you'll be able to create one in the next step. If you already have one, you'll be added to ${data.orgName} after signing in — and you can switch between your personal account and ${data.orgName} from the org switcher in the sidebar.
+    </p>
+    <p style="color: #6b7280; font-size: 12px; line-height: 1.6; margin: 0 0 24px;">
+      This invitation expires in 7 days. If the button above doesn't work, paste this link into your browser:<br>
+      <span style="color: #9ca3af; word-break: break-all;">${data.acceptUrl}</span>
+    </p>
+
+    <div style="border-top: 1px solid #1f2333; padding-top: 16px;">
+      <p style="color: #555; font-size: 11px; margin: 0;">Origin AI Governance &mdash; <a href="${ORIGIN_URL}" style="color: #818cf8;">getorigin.io</a></p>
+    </div>
+  </div>
+</body>
+</html>`;
+}

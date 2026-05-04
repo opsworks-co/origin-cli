@@ -3,6 +3,8 @@ import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth } from '../middleware/auth.js';
 import { seedCatalogForOrg } from '../services/seed-catalog.js';
+import { sendEmail } from '../services/email.js';
+import { buildWelcomeEmailHTML } from '../services/email-templates.js';
 
 const router = Router();
 
@@ -106,6 +108,21 @@ router.post('/orgs', requireAuth, async (req: AuthRequest, res: Response) => {
       await seedCatalogForOrg(org.id, tx);
       return org;
     });
+
+    // Welcome email — fire-and-forget. Confirms the new workspace is
+    // ready and surfaces the dashboard link from inbox. Never blocks the
+    // create response.
+    const fresh = await prisma.user.findUnique({
+      where: { id: req.user!.id },
+      select: { email: true, name: true },
+    });
+    if (fresh?.email) {
+      sendEmail(
+        fresh.email,
+        `New workspace ready — ${created.name}`,
+        buildWelcomeEmailHTML({ name: fresh.name || 'there', orgName: created.name, kind: 'extra-org' }),
+      ).catch((e) => console.error('[create-org] welcome email failed:', e?.message || e));
+    }
 
     res.status(201).json({
       orgId: created.id,

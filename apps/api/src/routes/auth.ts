@@ -14,6 +14,7 @@ import {
 } from '../middleware/auth.js';
 import { passwordResetLimiter } from '../middleware/rate-limit.js';
 import { sendEmail } from '../services/email.js';
+import { buildWelcomeEmailHTML } from '../services/email-templates.js';
 import { seedCatalogForOrg } from '../services/seed-catalog.js';
 
 const router = Router();
@@ -175,11 +176,31 @@ router.post('/register', async (req: AuthRequest, res: Response) => {
       return { user, org };
     });
 
+    // Auto-issue a CLI API key on signup so the new owner can run
+    // `origin login` without first hunting for the Settings → API Keys
+    // page. Plaintext is returned exactly once in this response — the DB
+    // only stores the hash, so if the user loses it they regenerate.
+    const rawApiKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
+    const keyHash = crypto.createHash('sha256').update(rawApiKey).digest('hex');
+    const keyPrefix = rawApiKey.slice(0, 14);
+    await prisma.apiKey.create({
+      data: { orgId: result.org.id, userId: result.user.id, name: 'Default', keyHash, keyPrefix },
+    });
+
     const token = signToken(result.user.id);
     setAuthCookie(res, token);
     const payload = await buildAuthPayload(result.user.id, result.org.id);
 
-    res.status(201).json({ token, ...payload });
+    // Welcome email — fire-and-forget. Confirms the account is real and
+    // gives them a click-through into the dashboard from inbox. We never
+    // block the registration response on email delivery.
+    sendEmail(
+      email,
+      `Welcome to Origin — ${result.org.name} is ready`,
+      buildWelcomeEmailHTML({ name, orgName: result.org.name, kind: 'team' }),
+    ).catch((e) => console.error('[register] welcome email failed:', e?.message || e));
+
+    res.status(201).json({ token, apiKey: rawApiKey, ...payload });
   } catch (err) {
     console.error('Register error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -234,6 +255,12 @@ router.post('/register/developer', async (req: AuthRequest, res: Response) => {
     const token = signToken(result.user.id);
     setAuthCookie(res, token);
     const payload = await buildAuthPayload(result.user.id, result.org.id);
+
+    sendEmail(
+      email,
+      'Welcome to Origin Solo',
+      buildWelcomeEmailHTML({ name, orgName: result.org.name, kind: 'solo' }),
+    ).catch((e) => console.error('[register-developer] welcome email failed:', e?.message || e));
 
     res.status(201).json({ token, apiKey: rawApiKey, ...payload });
   } catch (err) {
@@ -395,9 +422,20 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
       });
       // Once a user has joined any team, accountType becomes 'org' so the
       // dashboard treats them as a multi-tenant user (picker, etc.).
+      // Also pick up a new name when the re-invitee provides one — without
+      // this, an admin who removes + re-invites the same email keeps
+      // seeing the old display name in Sessions / IAM, even when the
+      // person typed a fresh name on the accept form. Password proves
+      // identity above, so trusting the name here is safe.
+      const trimmedName = (name || '').trim();
+      const nameChanged = trimmedName.length > 0 && trimmedName !== existingUser.name;
       await prisma.user.update({
         where: { id: userId },
-        data: { accountType: 'org', lastOrgId: invitation.orgId },
+        data: {
+          accountType: 'org',
+          lastOrgId: invitation.orgId,
+          ...(nameChanged ? { name: trimmedName } : {}),
+        },
       });
     } else {
       const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
@@ -414,13 +452,107 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
       where: { id: invitation.id },
       data: { usedAt: new Date(), usedBy: userId },
     });
+
+    // Auto-issue a team-scoped CLI key tied to (user, invited-org). Lets
+    // the new member paste a single `origin login --key …` instead of
+    // hunting for Settings → API Keys after they sign in. Returned once
+    // in the response; only the hash is persisted. Created BEFORE the
+    // pending-grants loop so we can attach matching ApiKeyRepoScope /
+    // ApiKeyAgentScope rows to it (the MCP layer enforces key-level
+    // scopes, not user-level ones — without them, sessions get rejected
+    // even though the user has RepoMember/AgentMember access).
+    const rawApiKey = 'org_sk_' + crypto.randomBytes(24).toString('hex');
+    const keyHash = crypto.createHash('sha256').update(rawApiKey).digest('hex');
+    const keyPrefix = rawApiKey.slice(0, 14);
+    const issuedKey = await prisma.apiKey.create({
+      data: {
+        orgId: invitation.orgId,
+        userId,
+        name: `${invitation.org.name} CLI`,
+        keyHash,
+        keyPrefix,
+      },
+    });
+
+    // Apply repo + agent grants the admin pre-staged at invite time.
+    // Two layers of access need to match:
+    //   1. User-level (RepoMember / AgentMember) — gates web UI access
+    //   2. Key-level (ApiKeyRepoScope / ApiKeyAgentScope) — gates MCP
+    //      session enforcement (mcp.ts line ~337). Empty key-level
+    //      scopes = no access for non-solo keys, regardless of what the
+    //      user can do via the web. Without this, the new member sees
+    //      "no repo access" warnings on `origin login` and can't start
+    //      sessions even though IAM shows them with grants.
+    // Failures here don't roll back the invite acceptance — admin can
+    // still grant access manually post-accept via the IAM page.
+    let appliedRepos = 0;
+    let appliedAgents = 0;
+    if (invitation.pendingGrants) {
+      try {
+        const grants = JSON.parse(invitation.pendingGrants) as {
+          repos?: Array<{ id: string; level: string }>;
+          agents?: Array<{ id: string; level: string }>;
+        };
+        const repos = Array.isArray(grants.repos) ? grants.repos : [];
+        const agents = Array.isArray(grants.agents) ? grants.agents : [];
+
+        // Re-validate that every id still belongs to the inviting org —
+        // the invite can sit in someone's inbox for days, and a repo or
+        // agent could have been deleted in the meantime.
+        const repoIds = repos.map((r) => r.id);
+        const agentIds = agents.map((a) => a.id);
+        const [validRepos, validAgents] = await Promise.all([
+          repoIds.length > 0
+            ? prisma.repo.findMany({ where: { orgId: invitation.orgId, id: { in: repoIds } }, select: { id: true } })
+            : Promise.resolve([] as Array<{ id: string }>),
+          agentIds.length > 0
+            ? prisma.agent.findMany({ where: { orgId: invitation.orgId, id: { in: agentIds } }, select: { id: true } })
+            : Promise.resolve([] as Array<{ id: string }>),
+        ]);
+        const validRepoIds = new Set(validRepos.map((r) => r.id));
+        const validAgentIds = new Set(validAgents.map((a) => a.id));
+
+        for (const r of repos) {
+          if (!validRepoIds.has(r.id)) continue;
+          await prisma.repoMember.upsert({
+            where: { userId_repoId: { userId, repoId: r.id } },
+            create: { repoId: r.id, userId, level: r.level, grantedBy: invitation.createdBy },
+            update: { level: r.level },
+          });
+          // Mirror to the auto-issued CLI key so MCP enforcement passes.
+          await prisma.apiKeyRepoScope.upsert({
+            where: { apiKeyId_repoId: { apiKeyId: issuedKey.id, repoId: r.id } },
+            create: { apiKeyId: issuedKey.id, repoId: r.id },
+            update: {},
+          });
+          appliedRepos++;
+        }
+        for (const a of agents) {
+          if (!validAgentIds.has(a.id)) continue;
+          await prisma.agentMember.upsert({
+            where: { userId_agentId: { userId, agentId: a.id } },
+            create: { agentId: a.id, userId, level: a.level, grantedBy: invitation.createdBy },
+            update: { level: a.level },
+          });
+          await prisma.apiKeyAgentScope.upsert({
+            where: { apiKeyId_agentId: { apiKeyId: issuedKey.id, agentId: a.id } },
+            create: { apiKeyId: issuedKey.id, agentId: a.id },
+            update: {},
+          });
+          appliedAgents++;
+        }
+      } catch (err) {
+        console.error('Failed to apply pending grants for invite', invitation.id, err);
+      }
+    }
+
     await prisma.auditLog.create({
       data: {
         orgId: invitation.orgId,
         userId,
         action: 'INVITATION_ACCEPTED',
         resource: invitation.id,
-        metadata: JSON.stringify({ email, role: invitation.role, existingUser: !!existingUser }),
+        metadata: JSON.stringify({ email, role: invitation.role, existingUser: !!existingUser, appliedRepos, appliedAgents }),
       },
     });
 
@@ -428,7 +560,7 @@ router.post('/accept-invite', async (req: AuthRequest, res: Response) => {
     setAuthCookie(res, jwtToken);
     const payload = await buildAuthPayload(userId, invitation.orgId);
 
-    res.status(201).json({ token: jwtToken, ...payload });
+    res.status(201).json({ token: jwtToken, apiKey: rawApiKey, orgName: invitation.org.name, ...payload });
   } catch (err) {
     console.error('Accept invite error:', err);
     res.status(500).json({ error: 'Internal server error' });

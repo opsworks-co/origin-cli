@@ -68,6 +68,7 @@ import gitlabOAuthRoutes from './routes/gitlab-oauth.js';
 import trailRoutes from './routes/trails.js';
 import leaderboardRoutes from './routes/leaderboard.js';
 import promptRoutes from './routes/prompts.js';
+import meRoutes from './routes/me.js';
 import modelRoutes from './routes/models.js';
 import pricingRoutes, { seedDefaultPricing } from './routes/pricing.js';
 import { backfillAgentModels } from './services/agent-models.js';
@@ -75,6 +76,7 @@ import { backfillCatalogForAllOrgs } from './services/seed-catalog.js';
 import forecastRoutes from './routes/forecast.js';
 import shareRoutes from './routes/share.js';
 import budgetRoutes from './routes/budget.js';
+import insightsRoutes from './routes/insights.js';
 import adminRoutes from './routes/admin.js';
 import orgsRoutes from './routes/orgs.js';
 import annotationRoutes from './routes/annotations.js';
@@ -232,10 +234,12 @@ mountRoute('/gitlab-oauth', gitlabOAuthRoutes);
 mountRoute('/trails', trailRoutes);
 mountRoute('/leaderboard', leaderboardRoutes);
 mountRoute('/prompts', promptRoutes);
+mountRoute('/me', meRoutes);
 mountRoute('/models', modelRoutes);
 mountRoute('/pricing', pricingRoutes);
 mountRoute('/forecast', forecastRoutes);
 mountRoute('/budget', budgetRoutes);
+mountRoute('/insights', insightsRoutes);
 mountRoute('/admin', adminRoutes);
 // Mount the multi-org user-self endpoints (/me/memberships, /me/active-org,
 // /orgs, /orgs/:id/leave) at the root /api so the router's per-route

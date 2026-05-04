@@ -10,7 +10,8 @@ export interface AuthResponse {
   memberships: Membership[];
   activeOrgId: string | null;
   activeRole: string | null;
-  apiKey?: string;         // Auto-generated for solo developer accounts
+  apiKey?: string;         // Auto-issued CLI token (register, register/developer, accept-invite)
+  orgName?: string;        // Set on accept-invite so the onboarding card can label the profile
   isNewAccount?: boolean;
 }
 

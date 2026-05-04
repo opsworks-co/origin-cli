@@ -39,6 +39,10 @@ async function request(path: string, opts: RequestInit = {}) {
     err.status = res.status;
     err.serverError = body?.error;
     err.serverMessage = body?.message;
+    // Surface structured codes (AGENT_DISABLED, etc.) so callers can switch
+    // on them instead of string-matching the message.
+    err.code = body?.code;
+    err.body = body;
     throw err;
   }
   return res.json();
@@ -58,6 +62,11 @@ export const api = {
   },
 
   // Session lifecycle (MCP API — used by hooks)
+  // All session-write endpoints fan out to every secondary profile so each
+  // logged-in account ends up with its own session record. Primary owns
+  // the canonical sessionId returned to the caller; mirror sessionIds are
+  // stashed in ~/.origin/mirrors/<primaryId>.json and consulted by the
+  // other endpoints below.
   startSession: async (data: {
     machineId: string;
     prompt: string;
@@ -70,6 +79,9 @@ export const api = {
     additionalRepoPaths?: string[];
     agentSessionId?: string;
   }) => {
+    // Single-key world: server federates session writes across the user's
+    // memberships on read (see /api/me/* on the API). No client-side
+    // mirroring needed — one POST, one session id, server handles the rest.
     const res = await request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) });
     assertFields(res, 'startSession', ['sessionId']);
     return res;

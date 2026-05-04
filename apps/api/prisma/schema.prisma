@@ -103,6 +103,11 @@ model Invitation {
   usedAt    DateTime?
   usedBy    String?
   createdAt DateTime  @default(now())
+  // JSON-encoded { repos: [{id, level}], agents: [{id, level}] } that
+  // the admin pre-staged at invite time. Applied to the new user as
+  // RepoMember / AgentMember rows when they accept the invite. Null /
+  // empty = no pre-staged grants (admin can still assign post-accept).
+  pendingGrants String?
 
   @@index([orgId])
   @@index([expiresAt])
@@ -282,6 +287,7 @@ model CodingSession {
   @@index([agentSessionId])
   @@index([parentSessionId])
   @@index([apiKeyId])
+  @@index([model, createdAt])
 }
 
 model SessionDiff {
@@ -331,6 +337,7 @@ model PromptChange {
 
   @@unique([sessionId, promptIndex])
   @@index([sessionId])
+  @@index([sessionId, createdAt])
 }
 
 // Auto-snapshots taken by the CLI throughout a session (via shadow git
@@ -456,6 +463,10 @@ model AgentModel {
   tokenLimit          Int?     // monthly tokens; null = inherit
   maxCostPerSession   Float?   // null = inherit Agent.maxCostPerSession
   maxTokensPerSession Int?     // null = inherit Agent.maxTokensPerSession
+  // Period that monthlyLimit/tokenLimit are evaluated against. "daily" |
+  // "weekly" | "monthly". The column name stays `monthlyLimit` for backward
+  // compatibility — read it as "spend cap per period."
+  period              String   @default("monthly")
   // Set true when the row is created by auto-detection (server saw a model
   // that wasn't yet registered for this agent). Lets the UI surface "new
   // models seen" to admins without manual paperwork.
@@ -479,6 +490,7 @@ model UserModelLimit {
   tokenLimit          Int?
   maxCostPerSession   Float?
   maxTokensPerSession Int?
+  period              String   @default("monthly")
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -497,6 +509,7 @@ model RepoModelLimit {
   tokenLimit          Int?
   maxCostPerSession   Float?
   maxTokensPerSession Int?
+  period              String   @default("monthly")
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -557,12 +570,19 @@ model Machine {
   orgId         String
   org           Org          @relation(fields: [orgId], references: [id])
   hostname      String
-  machineId     String       @unique
+  // The same physical machine can report to multiple orgs simultaneously
+  // (the CLI fans sessions out across all configured profiles), so we
+  // scope the natural key to (machineId, orgId) rather than making
+  // `machineId` globally unique. The previous global uniqueness pinned
+  // the machine to whichever org saw it first and silently dropped
+  // registrations to other orgs even though their sessions still landed.
+  machineId     String
   detectedTools String       @default("[]") // JSON array
   lastSeenAt    DateTime     @default(now())
   createdAt     DateTime     @default(now())
   policyRules   PolicyRule[]
 
+  @@unique([machineId, orgId])
   @@index([orgId])
 }
 

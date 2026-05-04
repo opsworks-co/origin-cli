@@ -1660,9 +1660,19 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         }
         debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt, verboseCapture });
       } catch (apiErr: any) {
-        // API failed — fall back to local session instead of aborting entirely
-        debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
-        process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
+        // API failed — fall back to local session instead of aborting entirely.
+        // AGENT_DISABLED is the expected response when an admin hasn't
+        // toggled the agent on yet; in that case the platform also fired
+        // notifications to the developer + admins, so the CLI just needs to
+        // explain why the session stayed local.
+        if (apiErr?.code === 'AGENT_DISABLED') {
+          const agentName = apiErr?.body?.agent?.name || finalAgentSlug || 'this agent';
+          debugLog('session-start', 'agent disabled, keeping session local', { agentName });
+          process.stderr.write(`[origin] ${agentName} is disabled in your org — session kept local. An admin has been notified to enable it.\n`);
+        } else {
+          debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
+          process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
+        }
         sessionId = `local-${crypto.randomUUID()}`;
       }
     } else {
@@ -1946,20 +1956,30 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         let activePolicies: string[] | undefined;
         let enforcementRules: any[] | undefined;
         if (isConnectedMode() && autoConfig) {
-          const result = await api.startSession({
-            machineId: autoAgentConfig.machineId,
-            prompt: input.prompt || '',
-            model,
-            repoPath,
-            repoUrl: repoUrl || undefined,
-            agentSlug: finalAgentSlug,
-            branch: branch || undefined,
-          });
-          sessionId = result.sessionId as string;
-          agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
-          activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
-          enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
-          debugLog('user-prompt-submit', 'api returned policies', { sessionId, policiesCount: activePolicies?.length || 0, rulesCount: enforcementRules?.length || 0 });
+          try {
+            const result = await api.startSession({
+              machineId: autoAgentConfig.machineId,
+              prompt: input.prompt || '',
+              model,
+              repoPath,
+              repoUrl: repoUrl || undefined,
+              agentSlug: finalAgentSlug,
+              branch: branch || undefined,
+            });
+            sessionId = result.sessionId as string;
+            agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
+            activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
+            enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+            debugLog('user-prompt-submit', 'api returned policies', { sessionId, policiesCount: activePolicies?.length || 0, rulesCount: enforcementRules?.length || 0 });
+          } catch (apiErr: any) {
+            if (apiErr?.code === 'AGENT_DISABLED') {
+              const agentName = apiErr?.body?.agent?.name || finalAgentSlug || 'this agent';
+              process.stderr.write(`[origin] ${agentName} is disabled in your org — session kept local. An admin has been notified to enable it.\n`);
+            } else {
+              process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
+            }
+            sessionId = `local-${crypto.randomUUID()}`;
+          }
         } else {
           sessionId = `local-${crypto.randomUUID()}`;
         }

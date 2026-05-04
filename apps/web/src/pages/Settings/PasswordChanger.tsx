@@ -36,7 +36,7 @@ export default function PasswordChanger() {
           type="password"
           value={currentPassword}
           onChange={(e) => setCurrentPassword(e.target.value)}
-          className="w-full max-w-sm bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+          className="input w-full max-w-sm text-sm"
         />
       </div>
       <div>
@@ -45,7 +45,7 @@ export default function PasswordChanger() {
           type="password"
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
-          className="w-full max-w-sm bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+          className="input w-full max-w-sm text-sm"
           placeholder="Min 8 characters"
         />
       </div>
@@ -55,7 +55,7 @@ export default function PasswordChanger() {
           type="password"
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
-          className="w-full max-w-sm bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+          className="input w-full max-w-sm text-sm"
         />
         {confirmPassword && newPassword !== confirmPassword && (
           <p className="text-xs text-red-400 mt-1">Passwords don't match</p>

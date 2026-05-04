@@ -191,8 +191,13 @@ export async function attachCommand(agent?: string) {
         state.sessionId = result.sessionId;
         saveSessionState(state, cwd);
       }
-    } catch {
-      // Non-fatal — session is tracked locally regardless
+    } catch (apiErr: any) {
+      // Non-fatal — session is tracked locally regardless. Surface
+      // AGENT_DISABLED so the user understands why upload was skipped.
+      if (apiErr?.code === 'AGENT_DISABLED') {
+        const agentName = apiErr?.body?.agent?.name || hookSlug || 'this agent';
+        process.stderr.write(`[origin] ${agentName} is disabled in your org — attached locally. An admin has been notified to enable it.\n`);
+      }
     }
   }
 

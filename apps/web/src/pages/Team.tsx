@@ -24,13 +24,13 @@ export default function Team() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Add member modal state
+  // Invite modal state — GitHub-style email invite. The recipient gets
+  // a link, signs up (or logs in), and joins this org as a separate user.
   const [showAdd, setShowAdd] = useState(false);
-  const [addName, setAddName] = useState('');
   const [addEmail, setAddEmail] = useState('');
   const [addRole, setAddRole] = useState('MEMBER');
   const [adding, setAdding] = useState(false);
-  const [generatedKey, setGeneratedKey] = useState('');
+  const [inviteResult, setInviteResult] = useState<{ link: string; emailSent: boolean; emailError?: string; email: string } | null>(null);
 
   // Regenerate key modal state
   const [regenKey, setRegenKey] = useState('');
@@ -56,12 +56,18 @@ export default function Team() {
 
   const handleAddMember = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!addName.trim() || !addEmail.trim()) return;
+    if (!addEmail.trim()) return;
     setAdding(true);
-    setGeneratedKey('');
+    setInviteResult(null);
     try {
-      const res = await api.addMember({ name: addName.trim(), email: addEmail.trim(), role: addRole });
-      setGeneratedKey(res.apiKey);
+      const res = await api.createInvite({ email: addEmail.trim(), role: addRole });
+      const link = `${window.location.origin}/accept-invite/${res.token}`;
+      setInviteResult({
+        link,
+        emailSent: !!res.emailSent,
+        emailError: res.emailError,
+        email: addEmail.trim(),
+      });
       loadData();
     } catch (err: any) {
       setError(err.message);
@@ -120,8 +126,7 @@ export default function Team() {
 
   const closeAddModal = () => {
     setShowAdd(false);
-    setGeneratedKey('');
-    setAddName('');
+    setInviteResult(null);
     setAddEmail('');
     setAddRole('MEMBER');
   };
@@ -136,10 +141,10 @@ export default function Team() {
         </div>
         {isAdmin && (
           <button
-            onClick={() => { setShowAdd(true); setGeneratedKey(''); setAddName(''); setAddEmail(''); setAddRole('MEMBER'); }}
+            onClick={() => { setShowAdd(true); setInviteResult(null); setAddEmail(''); setAddRole('MEMBER'); }}
             className="btn-primary text-sm"
           >
-            + Add Member
+            + Invite Member
           </button>
         )}
       </div>
@@ -151,26 +156,19 @@ export default function Team() {
         </div>
       )}
 
-      {/* Add Member Modal */}
+      {/* Invite Member Modal — GitHub-style email invite. The recipient
+          receives a link; signing up creates a personal Origin account
+          they can later switch out of into this org. */}
       {showAdd && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={closeAddModal}>
           <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-lg font-semibold mb-4">Add Team Member</h2>
+            <h2 className="text-lg font-semibold mb-1">Invite Member</h2>
+            <p className="text-xs text-gray-500 mb-4">
+              We'll email them a link to join {activeOrg?.name ?? 'your org'}. They can sign up or use an existing Origin account.
+            </p>
 
-            {!generatedKey ? (
+            {!inviteResult ? (
               <form onSubmit={handleAddMember} className="space-y-4">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Name *</label>
-                  <input
-                    type="text"
-                    value={addName}
-                    onChange={(e) => setAddName(e.target.value)}
-                    placeholder="Jane Smith"
-                    className="input w-full"
-                    required
-                    autoFocus
-                  />
-                </div>
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">Email *</label>
                   <input
@@ -180,6 +178,7 @@ export default function Team() {
                     placeholder="jane@company.com"
                     className="input w-full"
                     required
+                    autoFocus
                   />
                 </div>
                 <div>
@@ -191,30 +190,33 @@ export default function Team() {
                   </select>
                 </div>
                 <button type="submit" disabled={adding} className="btn-primary w-full text-sm">
-                  {adding ? 'Creating...' : 'Add Member'}
+                  {adding ? 'Sending invite...' : 'Send invite'}
                 </button>
               </form>
             ) : (
               <div className="space-y-4">
-                <div className="p-3 bg-green-900/20 border border-green-800 rounded-lg">
-                  <p className="text-sm text-green-400 font-medium mb-1">Member created successfully!</p>
-                </div>
+                {inviteResult.emailSent ? (
+                  <div className="p-3 bg-green-900/20 border border-green-800 rounded-lg">
+                    <p className="text-sm text-green-400 font-medium mb-1">Invite sent</p>
+                    <p className="text-xs text-green-400/80">An email is on its way to {inviteResult.email}.</p>
+                  </div>
+                ) : (
+                  <div className="p-3 bg-amber-900/20 border border-amber-800/50 rounded-lg">
+                    <p className="text-sm text-amber-300 font-medium mb-1">Invite created — email not delivered</p>
+                    <p className="text-xs text-amber-400/80">{inviteResult.emailError || 'Email service is not configured.'} Share the link manually:</p>
+                  </div>
+                )}
                 <div>
-                  <label className="block text-xs text-gray-400 mb-2">API Key</label>
-                  <div className="p-3 bg-gray-800 rounded-lg font-mono text-sm text-gray-200 break-all select-all">
-                    {generatedKey}
+                  <label className="block text-xs text-gray-400 mb-2">Invite link (also in the email)</label>
+                  <div className="p-3 bg-gray-800 rounded-lg font-mono text-xs text-gray-200 break-all select-all">
+                    {inviteResult.link}
                   </div>
                   <button
-                    onClick={() => copyToClipboard(generatedKey)}
+                    onClick={() => copyToClipboard(inviteResult.link)}
                     className="btn-secondary text-xs mt-2 w-full"
                   >
-                    {copied ? 'Copied!' : 'Copy to Clipboard'}
+                    {copied ? 'Copied!' : 'Copy link'}
                   </button>
-                </div>
-                <div className="p-3 bg-amber-900/20 border border-amber-800/50 rounded-lg">
-                  <p className="text-xs text-amber-400">
-                    Give this key to the developer. They run <code className="bg-gray-800 px-1.5 py-0.5 rounded text-amber-300">origin login</code> and paste it. This key is shown only once.
-                  </p>
                 </div>
               </div>
             )}

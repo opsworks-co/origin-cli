@@ -16,6 +16,7 @@ import {
 } from 'recharts';
 import * as api from '../api';
 import type { Stats, ModelStats, ModelTrend } from '../api';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 const CHART_THEME = {
@@ -198,8 +199,9 @@ function trimTrailingZeros<T extends Record<string, any>>(series: T[] | undefine
 // ── Main component ──────────────────────────────────────────────────────────
 
 export default function Insights() {
-  const { user } = useAuth();
+  const { user, activeOrg } = useAuth();
   const isDev = user?.accountType === 'developer';
+  const isAdmin = activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN';
 
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -326,6 +328,15 @@ export default function Insights() {
               ? 'Your personal AI coding analytics'
               : 'Analytics across your AI coding operations'}
           </p>
+          {isAdmin && (
+            <Link
+              to="/insights/spend-quality"
+              className="inline-flex items-center gap-2 mt-3 text-xs px-3 py-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/10 text-indigo-200 hover:bg-indigo-500/20 transition-colors"
+            >
+              <span className="font-medium">Open Spend Quality dashboard →</span>
+              <span className="text-[10px] uppercase tracking-wider text-indigo-300/70">manager view</span>
+            </Link>
+          )}
         </div>
 
         {/* Date range filter */}

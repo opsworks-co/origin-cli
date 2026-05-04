@@ -1,4 +1,7 @@
 import chalk from 'chalk';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { loadConfig, loadAgentConfig, loadRepoConfig, listProfiles } from '../config.js';
 import { api } from '../api.js';
 import { loadSessionState, listActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
@@ -26,6 +29,13 @@ export async function statusCommand() {
   const connected = config?.mode !== 'standalone' && config?.apiKey && config?.apiUrl;
   const isSolo = config?.keyType === 'solo' || config?.accountType === 'developer';
 
+  // Single-key world (Path B). The active key is what authenticates
+  // everything; the personal dashboard at /me federates the user's
+  // activity across every org they belong to via /api/me/*. Multi-profile
+  // storage exists for users who switch between workplaces (--profile
+  // flag) but is no longer the default flow.
+  const allProfiles = listProfiles();
+
   if (config?.mode === 'standalone') {
     console.log(chalk.yellow('  ⚡ Standalone mode (forced)'));
     console.log(chalk.gray('    Sessions tracked locally in git notes'));
@@ -36,7 +46,6 @@ export async function statusCommand() {
   } else if (connected) {
     const orgName = config.orgName || config.orgId || 'unknown';
     console.log(chalk.green(`  ✅ Connected · Team Member @ ${orgName}`));
-    // Fetch live scope info
     try {
       const data = await api.getWhoami() as any;
       const repoLabel = data.repoScopes?.length > 0 ? `${data.repoScopes.length} repos` : `${data.repoCount || 0} repos`;
@@ -49,6 +58,9 @@ export async function statusCommand() {
     console.log(chalk.green('  ✓ Standalone mode'));
     console.log(chalk.gray('    Sessions tracked locally in git notes'));
     console.log(chalk.gray('    Run `origin login` to connect to Origin platform'));
+  }
+  if (connected && allProfiles.length > 0) {
+    console.log(chalk.gray(`    Personal view: ${config!.apiUrl}/me · aggregates activity across all your orgs`));
   }
 
   // Agent status
@@ -118,6 +130,30 @@ export async function statusCommand() {
     console.log(chalk.gray('\n  No active session in this repo'));
   }
 
+  // ── Queued (local-only) sessions waiting to resync ──────────────
+  // These are sessions that were captured locally because the API rejected
+  // them (typically AGENT_DISABLED). Count them so the user knows to run
+  // `origin sessions sync` once an admin enables the agent.
+  if (connected) {
+    try {
+      const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+      if (fs.existsSync(sessionsDir)) {
+        const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+        let queued = 0;
+        for (const f of files) {
+          try {
+            const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, f), 'utf-8'));
+            if (typeof state?.sessionId === 'string' && state.sessionId.startsWith('local-')) queued++;
+          } catch { /* skip */ }
+        }
+        if (queued > 0) {
+          console.log(chalk.yellow(`\n  ⏸  ${queued} session${queued === 1 ? '' : 's'} kept local (agent was disabled)`));
+          console.log(chalk.gray('    Run `origin sessions sync` once an admin enables the agent.'));
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
   // ── Repo Context ────────────────────────────────────────────────
   if (repoPath) {
     const repoConfig = loadRepoConfig(repoPath);
@@ -180,19 +216,17 @@ export async function statusCommand() {
     }
   }
 
-  // ── Multi-account profiles ────────────────────────────────────────
-  const profiles = listProfiles();
-  if (profiles.length > 0) {
-    console.log(chalk.bold('\n  Accounts'));
-    for (const p of profiles) {
+  // Saved profiles other than the active one — useful when switching
+  // workplaces with `origin login --profile <name>`. Federation across
+  // orgs you belong to happens server-side, so this section is rare.
+  if (connected && allProfiles.length > 1) {
+    console.log(chalk.bold('\n  Saved profiles'));
+    for (const p of allProfiles) {
       const isActive = p.apiKey === config?.apiKey;
-      const mode = p.accountType === 'developer' ? chalk.green('solo') : chalk.blue('team');
       const indicator = isActive ? chalk.white('●') : chalk.gray('○');
-      const label = `${p.name} (${mode}) → ${p.orgName}`;
-      console.log(`    ${indicator} ${isActive ? chalk.white(label) : chalk.gray(label)}`);
-    }
-    if (profiles.length > 1) {
-      console.log(chalk.gray('    Sessions sent to all accounts simultaneously'));
+      const mode = p.accountType === 'developer' ? chalk.green('solo') : chalk.blue('team');
+      const line = `${p.name} (${mode}) → ${p.orgName}${isActive ? ' (active)' : ''}`;
+      console.log(`    ${indicator} ${isActive ? chalk.white(line) : chalk.gray(line)}`);
     }
   }
 

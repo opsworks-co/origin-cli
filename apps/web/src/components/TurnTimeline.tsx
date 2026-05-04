@@ -240,38 +240,54 @@ export default function TurnTimeline({
 
                 {isExpanded && (
                   <div className="border-t border-gray-800/50 px-3 py-2" onClick={(e) => e.stopPropagation()}>
-                    {/* Git reference info */}
-                    {(pc.commitSha || pc.treeSha) && (
-                      <div className="mb-2 flex items-center gap-3">
-                        {pc.commitSha && (
-                          <span className="text-[10px] text-gray-500">
-                            commit: <code className="text-gray-400 font-mono">{pc.commitSha.slice(0, 8)}</code>
-                          </span>
-                        )}
-                        {pc.treeSha && (
-                          <span className="text-[10px] text-gray-500">
-                            tree: <code className="text-gray-400 font-mono">{pc.treeSha.slice(0, 8)}</code>
-                          </span>
-                        )}
-                        {pc.createdAt && (
-                          <span className="text-[10px] text-gray-500">
-                            {new Date(pc.createdAt).toLocaleString()}
-                          </span>
-                        )}
-                        {pc.commitSha && (
+                    {/* Header row — git refs (when captured) + Restore.
+                        Restore is rendered for every expanded turn now,
+                        not just the rare case where a commit/tree sha was
+                        captured. When neither is present the button is
+                        disabled with an explainer tooltip; otherwise the
+                        modal shows the appropriate `origin rewind` cmd. */}
+                    <div className="mb-2 flex items-center gap-3 flex-wrap">
+                      {pc.commitSha && (
+                        <span className="text-[10px] text-gray-500">
+                          commit: <code className="text-gray-400 font-mono">{pc.commitSha.slice(0, 8)}</code>
+                        </span>
+                      )}
+                      {pc.treeSha && (
+                        <span className="text-[10px] text-gray-500">
+                          tree: <code className="text-gray-400 font-mono">{pc.treeSha.slice(0, 8)}</code>
+                        </span>
+                      )}
+                      {pc.createdAt && (
+                        <span className="text-[10px] text-gray-500">
+                          {new Date(pc.createdAt).toLocaleString()}
+                        </span>
+                      )}
+                      {(() => {
+                        const sha = (pc.commitSha || pc.treeSha) as string | undefined;
+                        const enabled = !!sha;
+                        return (
                           <button
                             onClick={() => {
-                              setRestoreTarget({ sha: pc.commitSha as string, turn: pc.promptIndex + 1 });
+                              if (!enabled || !sha) return;
+                              setRestoreTarget({ sha, turn: pc.promptIndex + 1 });
                               setRestoreCopied(false);
                             }}
-                            className="ml-auto text-[10px] px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/25 hover:bg-indigo-500/25 transition-colors"
-                            title="Restore working tree to this snapshot (runs locally)"
+                            disabled={!enabled}
+                            className={`ml-auto text-[10px] px-2 py-0.5 rounded border transition-colors ${
+                              enabled
+                                ? 'bg-indigo-500/15 text-indigo-400 border-indigo-500/25 hover:bg-indigo-500/25'
+                                : 'bg-gray-800/40 text-gray-600 border-gray-800 cursor-not-allowed'
+                            }`}
+                            title={enabled
+                              ? 'Restore working tree to this snapshot (runs locally)'
+                              : "No commit/tree ref captured for this snapshot — `origin rewind` can't target it. Take a new snapshot or use a sibling turn that has a ref."
+                            }
                           >
                             Restore
                           </button>
-                        )}
-                      </div>
-                    )}
+                        );
+                      })()}
+                    </div>
 
                     {/* AI Attribution bar */}
                     <div className="mb-2">

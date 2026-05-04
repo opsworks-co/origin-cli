@@ -85,9 +85,13 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         },
       });
     } else {
-      // No existing by hostname — upsert by machineId
+      // No existing by hostname — upsert by (machineId, orgId). Scoping by
+      // org is required: the same physical machine can register against
+      // multiple orgs (the CLI fans out to all configured profiles), and a
+      // global key on `machineId` would silently re-update the first-org
+      // row instead of creating a row in the current org.
       machine = await prisma.machine.upsert({
-        where: { machineId },
+        where: { machineId_orgId: { machineId, orgId: req.activeOrgId! } },
         create: {
           orgId: req.activeOrgId!,
           hostname,

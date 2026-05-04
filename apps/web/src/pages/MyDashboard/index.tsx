@@ -15,7 +15,6 @@ import {
   Terminal,
   ChevronDown,
   ChevronUp,
-  ExternalLink,
   ArrowRight,
   Search,
 } from 'lucide-react';
@@ -67,6 +66,19 @@ export default function MyDashboard() {
 
   // Show guide unless user dismissed it. Dismissal is always respected.
   const showGuide = !hideGuide;
+
+  // Onboarding token. The server returns the plaintext API key exactly once
+  // on register / accept-invite; we stash it in sessionStorage so this card
+  // can render a prefilled `origin login --key <key>` command. After the
+  // user closes the tab (or copies and dismisses the card) it's gone.
+  // The onboarding banner only needs to clear the stashed key when the
+  // user dismisses — the key itself is now displayed on the AcceptInvite
+  // welcome step (not here), so all the copy/render helpers that used to
+  // live here are gone.
+  const clearOnboardingKey = useCallback(() => {
+    try { sessionStorage.removeItem('origin:onboarding-key'); } catch { /* ignore */ }
+    try { sessionStorage.removeItem('origin:onboarding-org'); } catch { /* ignore */ }
+  }, []);
 
   // Agent cards
   const [agentCards, setAgentCards] = useState<AgentCard[]>([]);
@@ -192,21 +204,28 @@ export default function MyDashboard() {
   }, []);
 
   // ── Fetch sessions ──────────────────────────────────────────────────
+  // Path B: federated across every org the user belongs to. The personal
+  // dashboard is a lens over the user's full activity, not a per-org view.
+  // `repoFilter` is matched against repoName client-side since /api/me/sessions
+  // takes repoId; the dropdown still lists by name and the rare ambiguity
+  // (same repo name across orgs) is acceptable here.
   const fetchSessions = useCallback(async () => {
     setSessionsLoading(true);
     try {
-      const params = new URLSearchParams();
-      params.set('mine', 'true');
-      params.set('limit', String(LIMIT));
-      params.set('offset', String(sessionsOffset));
-      if (agentFilter) params.set('model', agentFilter);
-      if (repoFilter) params.set('repoName', repoFilter);
-      if (statusFilter) params.set('status', statusFilter);
-
       const data = await request<{ sessions: Session[]; total: number }>(
-        `/api/sessions?${params.toString()}`,
+        `/api/me/sessions?${new URLSearchParams({
+          limit: String(LIMIT),
+          offset: String(sessionsOffset),
+          ...(agentFilter ? { model: agentFilter } : {}),
+        }).toString()}`,
       );
-      setSessions(data.sessions);
+      const filtered = repoFilter
+        ? data.sessions.filter((s) => s.repoName === repoFilter)
+        : data.sessions;
+      const finalRows = statusFilter
+        ? filtered.filter((s) => (s.status || '').toLowerCase() === statusFilter.toLowerCase())
+        : filtered;
+      setSessions(finalRows);
       setSessionsTotal(data.total);
     } catch {
       // ignore
@@ -221,11 +240,7 @@ export default function MyDashboard() {
   // ── Fetch today's sessions for activity feed ──────────────────────
   useEffect(() => {
     setTodayLoading(true);
-    const params = new URLSearchParams();
-    params.set('mine', 'true');
-    params.set('limit', '50');
-    params.set('offset', '0');
-    request<{ sessions: Session[]; total: number }>(`/api/sessions?${params.toString()}`)
+    request<{ sessions: Session[]; total: number }>(`/api/me/sessions?limit=50&offset=0`)
       .then((data) => {
         const todayStr = new Date().toDateString();
         setTodaySessions(
@@ -459,108 +474,44 @@ export default function MyDashboard() {
         )}
       </div>
 
-      {/* Quick Start Guide — always visible until dismissed */}
-      {showGuide && (
-        <div className="rounded-xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 to-transparent p-6 space-y-5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center">
-                <Terminal className="w-5 h-5 text-emerald-400" />
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-gray-100">Get Started with Origin</h2>
-                <p className="text-sm text-gray-500">Set up session tracking in under 2 minutes</p>
-              </div>
-            </div>
-            {/* Always show the close button — users who already know the
-                ropes shouldn't have to produce a session just to dismiss the
-                onboarding card. */}
-            <button
-              onClick={() => { setHideGuide(true); try { localStorage.setItem('origin:hide-guide', '1'); } catch { /* ignore */ } }}
-              className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
-              title="Dismiss"
-              aria-label="Dismiss onboarding card"
-            >
-              <X className="w-4 h-4" />
-            </button>
+      {/* Onboarding banner — replaces the old static 4-card guide. Points
+          users into the actual interactive `/onboarding` wizard (AI Tools
+          → Install CLI → First Session) instead of duplicating it as
+          static copy here. Only renders until the user has at least one
+          session OR explicitly dismisses, so it self-clears naturally
+          once they're set up. */}
+      {showGuide && stats && stats.totalSessions === 0 && (
+        <a
+          href="/onboarding"
+          className="group flex items-center gap-4 rounded-xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/[0.07] to-transparent px-5 py-4 hover:border-emerald-500/50 hover:bg-emerald-500/[0.1] transition-colors"
+        >
+          <div className="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center flex-shrink-0">
+            <Terminal className="w-5 h-5 text-emerald-400" />
           </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Step 1 */}
-            <div className="bg-gray-900/60 rounded-lg p-4 border border-gray-800">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-bold">1</span>
-                <span className="text-sm font-semibold text-gray-200">Install CLI</span>
-              </div>
-              <div className="bg-gray-950 rounded-md p-3 font-mono text-xs text-emerald-400 mb-3 overflow-x-auto">
-                npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
-              </div>
-              <p className="text-xs text-gray-500">Works on macOS, Linux, and WSL</p>
-            </div>
-
-            {/* Step 2 */}
-            <div className="bg-gray-900/60 rounded-lg p-4 border border-gray-800">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-bold">2</span>
-                <span className="text-sm font-semibold text-gray-200">Create API Key</span>
-              </div>
-              <p className="text-xs text-gray-400 mb-3">
-                Go to{' '}
-                <a href="/api-keys" className="text-emerald-400 hover:text-emerald-300 underline">API Keys</a>
-                {' '}&rarr; create a key and copy it &mdash; you&apos;ll need it next.
-              </p>
-              <p className="text-xs text-gray-500">The key connects the CLI to your account</p>
-            </div>
-
-            {/* Step 3 */}
-            <div className="bg-gray-900/60 rounded-lg p-4 border border-gray-800">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-bold">3</span>
-                <span className="text-sm font-semibold text-gray-200">Configure &amp; Init</span>
-              </div>
-              <div className="bg-gray-950 rounded-md p-3 font-mono text-xs text-gray-300 space-y-1 mb-3">
-                <div><span className="text-gray-500">$</span> origin login --key YOUR_KEY</div>
-                <div><span className="text-gray-500">$</span> origin init</div>
-              </div>
-              <p className="text-xs text-gray-500">Auto-detects Claude, Cursor, Copilot, Gemini &amp; more</p>
-            </div>
-
-            {/* Step 4 */}
-            <div className="bg-gray-900/60 rounded-lg p-4 border border-gray-800">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="flex items-center justify-center w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-bold">4</span>
-                <span className="text-sm font-semibold text-gray-200">Start Coding</span>
-              </div>
-              <div className="bg-gray-950 rounded-md p-3 font-mono text-xs text-gray-300 space-y-1 mb-3">
-                <div><span className="text-gray-500">#</span> Use any AI coding tool</div>
-                <div><span className="text-gray-500">#</span> Sessions auto-track</div>
-                <div><span className="text-gray-500">$</span> origin sessions</div>
-              </div>
-              <p className="text-xs text-gray-500">Every AI session appears here automatically</p>
-            </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-semibold text-gray-100">Finish setting up Origin</div>
+            <p className="text-[12px] text-gray-500 mt-0.5">
+              Pick your AI tools, install the CLI, and watch your first session light up — under 2 minutes.
+            </p>
           </div>
-
-          <div className="flex items-center gap-4 pt-1">
-            <a
-              href="/docs/cli-install"
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
-            >
-              Full documentation <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-            <a
-              href="/docs/cli-hooks"
-              className="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-300 transition-colors"
-            >
-              How hooks work <ArrowRight className="w-3.5 h-3.5" />
-            </a>
-            <a
-              href="/docs/cli-local"
-              className="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-300 transition-colors"
-            >
-              Local / standalone mode <ArrowRight className="w-3.5 h-3.5" />
-            </a>
-          </div>
-        </div>
+          <span className="text-xs font-medium text-emerald-300 group-hover:text-emerald-200 flex items-center gap-1 flex-shrink-0">
+            Open setup <ArrowRight className="w-3.5 h-3.5" />
+          </span>
+          <button
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setHideGuide(true);
+              try { localStorage.setItem('origin:hide-guide', '1'); } catch { /* ignore */ }
+              clearOnboardingKey();
+            }}
+            className="p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors flex-shrink-0"
+            title="Hide"
+            aria-label="Hide setup banner"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </a>
       )}
 
       {/* Stat cards row */}

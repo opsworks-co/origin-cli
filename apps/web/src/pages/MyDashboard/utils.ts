@@ -21,6 +21,10 @@ export interface Session {
   mergedFrom: string[] | null;
   mergedInto: string | null;
   parentSessionId: string | null;
+  // Federated personal view chip — populated by /api/me/sessions so the
+  // row renderer can show "Brigada LTD" alongside the repo name. Null for
+  // org-scoped sessions returned by the legacy /api/sessions path.
+  org?: { id: string; name: string } | null;
 }
 
 export interface MyStats {

@@ -105,6 +105,15 @@ vi.mock('../middleware/auth.js', () => {
         res.status(403).json({ error: 'Forbidden: insufficient permissions' });
       };
     },
+    resolveOrgContext: (req: any, _res: any, next: any) => {
+      // Pass-through — tests that need real org-resolution behavior
+      // exercise it via multi-org-isolation.test.ts; route tests just want
+      // activeOrgId/activeRole wired for the handler to run.
+      req.activeOrgId = req.user?.orgId ?? 'org-1';
+      req.activeRole = req.user?.role ?? 'OWNER';
+      next();
+    },
+    ORG_CONTEXT_HEADER: 'x-origin-org-id',
     _setTestUser: (user: any) => { currentUser = user; },
   };
 });

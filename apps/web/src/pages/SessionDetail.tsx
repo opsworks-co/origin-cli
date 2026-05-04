@@ -243,6 +243,10 @@ export default function SessionDetail() {
   const { user, activeOrg } = useAuth();
   const { toast } = useToast();
   const isDev = user?.accountType === 'developer';
+  // Approve / Reject / Flag / AI Review are admin-level dispositions in
+  // a team org — members shouldn't see them. Solo devs already get the
+  // bar hidden via isDev below; canReview gates the team-org case.
+  const canReview = !isDev && (activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN');
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -1422,12 +1426,10 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* Review bar — team only.
-          Two visual tiers: AI Review is the "smart" path and gets a soft
-          gradient pill, Approve/Reject/Flag are the manual disposition
-          actions and use outlined-with-tinted-border styling so they share
-          weight without all four buttons screaming for attention. */}
-      {!isDev && (!session.review || session.review.isAutoReview) && (
+      {/* Review bar — admins of a team org only. Solo devs see no bar
+          (own work, no review queue); team members see the session but
+          can't dispose — disposition is an admin call. */}
+      {canReview && (!session.review || session.review.isAutoReview) && (
         <div className="rounded-xl border border-white/[0.06] bg-gray-900/40 p-3 flex-shrink-0 mx-6 mb-4">
           <div className="flex flex-col lg:flex-row gap-3 lg:items-center">
             <div className="flex items-center gap-3 flex-1 min-w-0">

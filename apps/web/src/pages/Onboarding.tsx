@@ -21,8 +21,11 @@ const AGENTS = [
 const TOTAL_STEPS = 5;
 
 // ── Step indicator ──────────────────────────────────────────────────────────
-function Steps({ current }: { current: number }) {
-  const steps = ['AI Tools', 'Connect', 'Import Repos', 'AI Summaries', 'Install CLI', 'First Session'];
+// `labels` lets the caller pass a slimmed step list for invited members
+// (who skip the admin-only Connect / Import / AI Summaries steps). Falls
+// back to the full solo-signup labels when not provided.
+function Steps({ current, labels }: { current: number; labels?: string[] }) {
+  const steps = labels ?? ['AI Tools', 'Connect', 'Import Repos', 'AI Summaries', 'Install CLI', 'First Session'];
   return (
     <div className="flex items-center justify-center gap-1.5 mb-8">
       {steps.map((label, i) => (
@@ -82,6 +85,29 @@ export default function Onboarding() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // `?from=invite` slims the wizard to the steps relevant to a brand-new
+  // team member: AI Tools → Install CLI → First Session. Connect / Import
+  // / AI Summaries are admin-only, so we route around them. Drives both
+  // the step indicator and the next/back navigation below.
+  const fromInvite = searchParams.get('from') === 'invite';
+  // Allow team admins who just created an org to walk through the same
+  // 6-step solo wizard. The flow shape is identical (Connect / Import
+  // are admin-relevant); only the redirect guard below needs to let
+  // accountType=org through when fromTeam.
+  const fromTeam = searchParams.get('from') === 'team';
+  const inviteLabels = ['AI Tools', 'Your Access', 'Install CLI', 'First Session'];
+  // Map a real step (0..6) to its position in the invited indicator so
+  // the progress dots line up with how the user perceives the wizard.
+  // Step 6 is the new "Your Access" step injected for invited members.
+  const visualStep = (s: number) => {
+    if (!fromInvite) return s;
+    if (s === 0) return 0; // AI Tools
+    if (s === 6) return 1; // Your Access
+    if (s === 4) return 2; // Install CLI
+    if (s === 5) return 3; // First Session
+    return 0;
+  };
 
   // Determine initial step — if returning from GitHub/GitLab OAuth, jump to step 1 (connect repos)
   const [step, setStep] = useState(() => {
@@ -145,12 +171,17 @@ export default function Onboarding() {
     }
   }, []);
 
-  // Redirect non-developers
+  // Redirect non-developers — except when arriving from an invite
+  // (`?from=invite`) or as a brand-new team admin (`?from=team`). Both
+  // intentionally route org-account users through the wizard:
+  // invite-mode runs the slimmed AI Tools → Your Access → Install CLI →
+  // First Session flow; team-mode runs the full 6-step setup an admin
+  // needs after creating a fresh team org.
   useEffect(() => {
-    if (user && user.accountType !== 'developer') {
+    if (user && user.accountType !== 'developer' && !fromInvite && !fromTeam) {
       navigate('/dashboard', { replace: true });
     }
-  }, [user, navigate]);
+  }, [user, navigate, fromInvite, fromTeam]);
 
   // Poll for first session in step 3
   useEffect(() => {
@@ -298,7 +329,7 @@ export default function Onboarding() {
           <span className="text-lg font-semibold">Origin Solo</span>
         </div>
 
-        <Steps current={step} />
+        <Steps current={visualStep(step)} labels={fromInvite ? inviteLabels : undefined} />
 
         {/* ─── STEP 1: AI Tools ───────────────────────────────────────────── */}
         {step === 0 && (
@@ -336,7 +367,7 @@ export default function Onboarding() {
                 Skip setup
               </button>
               <button
-                onClick={() => setStep(1)}
+                onClick={() => setStep(fromInvite ? 6 : 1)}
                 className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
               >
                 Continue &rarr;
@@ -663,7 +694,7 @@ export default function Onboarding() {
             </div>
 
             <div className="flex items-center justify-between pt-2">
-              <button onClick={() => setStep(3)} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+              <button onClick={() => setStep(fromInvite ? 6 : 3)} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
                 &larr; Back
               </button>
               <button
@@ -744,6 +775,117 @@ export default function Onboarding() {
             </div>
           </div>
         )}
+
+        {/* ─── STEP 6 (invite-only): Your Access ──────────────────────────
+            Shown only for invited team members. Surfaces the repos +
+            agents the admin granted via pendingGrants on accept-invite,
+            so the new member sees what they have BEFORE they install the
+            CLI and find out by trial. Empty state nudges them to ask the
+            admin instead of silently failing later. */}
+        {step === 6 && fromInvite && (
+          <YourAccessStep onContinue={() => setStep(4)} onBack={() => setStep(0)} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Reads /api/me/repos + /api/me/agents (or /api/agents/my as fallback)
+// and renders what the admin granted. Pure read view — no actions.
+function YourAccessStep({ onContinue, onBack }: { onContinue: () => void; onBack: () => void }) {
+  const [repos, setRepos] = useState<Array<{ id: string; name: string; org?: { name: string } | null }>>([]);
+  const [agents, setAgents] = useState<Array<{ id: string; name: string; slug: string }>>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.allSettled([api.getMeRepos(), api.getAgents()])
+      .then(([reposRes, agentsRes]) => {
+        if (cancelled) return;
+        if (reposRes.status === 'fulfilled') {
+          setRepos(reposRes.value.repos.map((r) => ({ id: r.id, name: r.name, org: r.org })));
+        }
+        if (agentsRes.status === 'fulfilled') {
+          const list = (agentsRes.value as any)?.agents ?? agentsRes.value ?? [];
+          setAgents(list.map((a: any) => ({ id: a.id, name: a.name, slug: a.slug })));
+        }
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  return (
+    <div className="animate-fade-in space-y-6">
+      <div className="text-center">
+        <h1 className="text-2xl font-bold text-white">Your access</h1>
+        <p className="text-sm text-gray-400 mt-2">
+          What your admin granted you. Sessions you run will show up against these repos and agents.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="rounded-xl border border-white/[0.06] bg-gray-900/40 p-4">
+          <div className="flex items-baseline justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-200">Repositories</h3>
+            <span className="text-[11px] text-gray-500 tabular-nums">{repos.length}</span>
+          </div>
+          {loading ? (
+            <div className="text-xs text-gray-500">Loading…</div>
+          ) : repos.length === 0 ? (
+            <p className="text-xs text-gray-500">
+              No repos granted yet. Ask your admin to add you to the repos you'll work in (Settings → IAM → Manage access).
+            </p>
+          ) : (
+            <ul className="space-y-1.5 max-h-64 overflow-y-auto">
+              {repos.slice(0, 50).map((r) => (
+                <li key={r.id} className="flex items-center gap-2 text-sm text-gray-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80" />
+                  <span className="truncate flex-1">{r.name}</span>
+                  {r.org && <span className="text-[10px] text-gray-500 truncate">{r.org.name}</span>}
+                </li>
+              ))}
+              {repos.length > 50 && (
+                <li className="text-[11px] text-gray-600 italic">+ {repos.length - 50} more</li>
+              )}
+            </ul>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-white/[0.06] bg-gray-900/40 p-4">
+          <div className="flex items-baseline justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-200">Agents</h3>
+            <span className="text-[11px] text-gray-500 tabular-nums">{agents.length}</span>
+          </div>
+          {loading ? (
+            <div className="text-xs text-gray-500">Loading…</div>
+          ) : agents.length === 0 ? (
+            <p className="text-xs text-gray-500">
+              No agents granted yet. Ask your admin which agent to use.
+            </p>
+          ) : (
+            <ul className="space-y-1.5 max-h-64 overflow-y-auto">
+              {agents.map((a) => (
+                <li key={a.id} className="flex items-center gap-2 text-sm text-gray-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500/80" />
+                  <span className="truncate flex-1">{a.name}</span>
+                  <span className="text-[10px] font-mono text-gray-500 truncate">{a.slug}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between pt-2">
+        <button onClick={onBack} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+          &larr; Back
+        </button>
+        <button
+          onClick={onContinue}
+          className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+        >
+          Install the CLI &rarr;
+        </button>
       </div>
     </div>
   );

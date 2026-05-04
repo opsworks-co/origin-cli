@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { request } from '../api';
@@ -20,7 +20,6 @@ import {
   DollarSign,
   Settings,
   Lightbulb,
-  LogOut,
   Menu,
   X,
   Sun,
@@ -28,11 +27,17 @@ import {
   Sparkles,
 } from 'lucide-react';
 import ProductTour, { TEAM_TOUR } from './ProductTour';
+import BudgetPill from './BudgetPill';
 
 // Team navigation — same grouped-sidebar pattern as solo, team accent (indigo).
 // Workspace    = daily work (what happened today)
 // Governance   = team oversight (policies, reviews, spend)
 // Account      = setup & access control
+//
+// Budget moved up into Workspace alongside the other "what's going on right
+// now?" views — admins kept missing the per-(agent|user|model) controls
+// when they were buried in Governance, and the live spend pill (rendered
+// inline next to the nav item) is most useful at-a-glance from anywhere.
 const NAV_GROUPS = [
   {
     label: 'Workspace',
@@ -40,6 +45,7 @@ const NAV_GROUPS = [
       { to: '/dashboard',  label: 'Dashboard',    icon: LayoutDashboard },
       { to: '/sessions',   label: 'Sessions',     icon: Play },
       { to: '/repos',      label: 'Repositories', icon: GitFork },
+      { to: '/budget',     label: 'Budgets',      icon: DollarSign, showBudgetPill: true },
       { to: '/insights',   label: 'Insights',     icon: Lightbulb },
     ],
   },
@@ -49,7 +55,6 @@ const NAV_GROUPS = [
       { to: '/agents',         label: 'Agents',         icon: Bot },
       { to: '/policies',       label: 'Policies',       icon: Shield },
       { to: '/pull-requests',  label: 'PR Checks',      icon: GitPullRequest },
-      { to: '/budget',         label: 'Budget',         icon: DollarSign },
       { to: '/infrastructure', label: 'Infrastructure', icon: Server },
     ],
   },
@@ -65,9 +70,8 @@ const NAV_GROUPS = [
 const ADMIN_NAV_ITEM = { to: '/admin', label: 'Admin', icon: ShieldAlert };
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const { theme, toggleTheme } = useTheme();
-  const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   // Tour highlight: if the user hasn't run (or dismissed) the tour, the
@@ -81,6 +85,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       return !completed;
     } catch { return true; }
   });
+  // Hide the Tour button entirely once the team tour is completed.
+  // ProductTour writes 'done' to localStorage[`origin:tour-${tourId}`]
+  // when the user finishes or skips. Sidebar stays clean after first run.
+  const [tourComplete, setTourComplete] = useState(() => {
+    try { return localStorage.getItem('origin:tour-team-tour-v1') === 'done'; } catch { return false; }
+  });
 
   useEffect(() => {
     request<{ isSuperAdmin: boolean }>('/api/admin/check')
@@ -88,10 +98,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       .catch(() => setIsSuperAdmin(false));
   }, [user?.id]);
 
-  const handleLogout = () => {
-    logout();
-    navigate('/login');
-  };
 
   const linkClasses = ({ isActive }: { isActive: boolean }) =>
     `group relative flex items-center gap-3 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-colors ${
@@ -159,6 +165,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                         )}
                         <item.icon className={iconClasses(isActive)} />
                         <span>{item.label}</span>
+                        {(item as { showBudgetPill?: boolean }).showBudgetPill && (
+                          <BudgetPill className="ml-auto" />
+                        )}
                       </>
                     )}
                   </NavLink>
@@ -190,42 +199,29 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           )}
         </nav>
 
-        {/* User footer */}
+        {/* Account footer — single GitHub-style switcher (org + signed-in
+            user collapsed into one button), with bell and theme toggle as
+            sibling icon controls. Sign out lives inside the dropdown. */}
         <div className="border-t border-gray-200 dark:border-white/[0.05] px-2 py-3 space-y-2">
-          {/* Combined card: org switcher → divider → user identity. The two
-              halves share a single rounded surface so they read as one
-              account block, instead of two floating rows. */}
-          <div className="rounded-xl border border-gray-200 dark:border-white/[0.05] bg-white/40 dark:bg-white/[0.015] overflow-hidden">
-            {/* Org switcher — drives every API request via X-Origin-Org. */}
-            <OrgSwitcher />
-            <div className="h-px bg-gray-200/60 dark:bg-white/[0.04]" />
-            <div className="flex items-center gap-2.5 px-2.5 py-2">
-              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500/25 to-indigo-600/15 ring-1 ring-indigo-500/25 flex items-center justify-center text-indigo-600 dark:text-indigo-300 text-[12px] font-semibold flex-shrink-0">
-                {user?.name?.charAt(0).toUpperCase() ?? '?'}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-[12.5px] font-medium text-gray-800 dark:text-gray-100 truncate leading-tight">{user?.name}</p>
-                <p className="text-[10px] text-gray-500 dark:text-gray-500 truncate leading-tight">{user?.email}</p>
-              </div>
-              <NotificationBell />
-              <button
-                onClick={toggleTheme}
-                className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 rounded-md transition-colors"
-                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-              >
-                {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
-              </button>
-            </div>
-          </div>
           <div className="flex items-center gap-1">
+            <div className="flex-1 min-w-0">
+              <OrgSwitcher />
+            </div>
+            <NotificationBell />
+            <button
+              onClick={toggleTheme}
+              className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] rounded-md transition-colors"
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+            </button>
+          </div>
+          {!tourComplete && (
             <button
               onClick={() => {
                 // Tour acknowledged regardless of how it ends — clear the
                 // sidebar glow now even if they cancel the tour itself.
                 setTourHighlight(false);
-                // ProductTour is mounted only inside Layout, so when the
-                // user is on a non-team route (rare; redirects keep team
-                // accounts inside Layout), navigate first then dispatch.
                 if (window.location.pathname === '/dashboard') {
                   window.dispatchEvent(new CustomEvent('origin:start-tour'));
                 } else {
@@ -234,8 +230,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               }}
               className={
                 tourHighlight
-                  ? 'relative flex-1 flex items-center justify-center gap-1.5 text-[11px] font-semibold text-white px-2 py-1.5 rounded-md bg-gradient-to-r from-indigo-600 to-violet-600 shadow-[0_0_0_1px_rgba(139,92,246,0.5),0_0_18px_rgba(139,92,246,0.45)] hover:shadow-[0_0_0_1px_rgba(139,92,246,0.7),0_0_24px_rgba(139,92,246,0.6)] transition-all'
-                  : 'flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors'
+                  ? 'relative w-full flex items-center justify-center gap-1.5 text-[11px] font-semibold text-white px-2 py-1.5 rounded-md bg-gradient-to-r from-indigo-600 to-violet-600 shadow-[0_0_0_1px_rgba(139,92,246,0.5),0_0_18px_rgba(139,92,246,0.45)] hover:shadow-[0_0_0_1px_rgba(139,92,246,0.7),0_0_24px_rgba(139,92,246,0.6)] transition-all'
+                  : 'w-full flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors'
               }
             >
               <Sparkles className={`w-3.5 h-3.5 ${tourHighlight ? 'animate-pulse' : ''}`} />
@@ -247,14 +243,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 </span>
               )}
             </button>
-            <button
-              onClick={handleLogout}
-              className="flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              Sign out
-            </button>
-          </div>
+          )}
         </div>
       </aside>
 
@@ -291,7 +280,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       <ProductTour
         steps={TEAM_TOUR}
         tourId="team-tour-v1"
-        onComplete={() => setTourHighlight(false)}
+        onComplete={() => {
+          setTourHighlight(false);
+          // Hide the sidebar Tour button immediately on the same load —
+          // ProductTour also persists the 'done' flag so the next page
+          // load sees it via the localStorage check above.
+          setTourComplete(true);
+        }}
       />
     </div>
   );

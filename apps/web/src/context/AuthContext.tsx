@@ -98,6 +98,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const res = await api.register(email, password, name, orgName, orgSlug);
         applyAuth(res);
+        // Stash the auto-issued CLI token so the onboarding card can render
+        // a prefilled `origin login` command without an extra round-trip.
+        // sessionStorage clears on tab close — by design, since we never
+        // get the plaintext back from the API after this response.
+        if (res.apiKey) {
+          try { sessionStorage.setItem('origin:onboarding-key', res.apiKey); } catch { /* ignore */ }
+        }
       } catch (err: any) {
         setError(err.message ?? 'Registration failed');
         throw err;

@@ -182,6 +182,8 @@ export function restoreAgentVersion(agentId: string, versionId: string) {
 
 // ---- Agent per-model budget overrides -----------------------------------
 
+export type BudgetPeriod = 'daily' | 'weekly' | 'monthly';
+
 export interface AgentModel {
   id: string;
   agentId: string;
@@ -190,6 +192,7 @@ export interface AgentModel {
   tokenLimit: number | null;
   maxCostPerSession: number | null;
   maxTokensPerSession: number | null;
+  period: BudgetPeriod;
   autoDetected: boolean;
   createdAt: string;
   updatedAt: string;
@@ -203,6 +206,7 @@ export interface UserModelLimit {
   tokenLimit: number | null;
   maxCostPerSession: number | null;
   maxTokensPerSession: number | null;
+  period: BudgetPeriod;
   createdAt: string;
   updatedAt: string;
 }
@@ -215,6 +219,7 @@ export interface RepoModelLimit {
   tokenLimit: number | null;
   maxCostPerSession: number | null;
   maxTokensPerSession: number | null;
+  period: BudgetPeriod;
   createdAt: string;
   updatedAt: string;
 }
@@ -229,6 +234,7 @@ export function createAgentModel(agentId: string, data: {
   tokenLimit?: number | null;
   maxCostPerSession?: number | null;
   maxTokensPerSession?: number | null;
+  period?: BudgetPeriod;
 }) {
   return request<AgentModel>(`/api/agents/${agentId}/models`, {
     method: 'POST',
@@ -241,6 +247,7 @@ export function updateAgentModel(agentId: string, model: string, data: Partial<{
   tokenLimit: number | null;
   maxCostPerSession: number | null;
   maxTokensPerSession: number | null;
+  period: BudgetPeriod;
 }>) {
   return request<AgentModel>(`/api/agents/${agentId}/models/${encodeURIComponent(model)}`, {
     method: 'PUT',
@@ -265,6 +272,7 @@ export function createUserModel(userId: string, data: {
   tokenLimit?: number | null;
   maxCostPerSession?: number | null;
   maxTokensPerSession?: number | null;
+  period?: BudgetPeriod;
 }) {
   return request<UserModelLimit>(`/api/users/${userId}/models`, {
     method: 'POST',
@@ -276,6 +284,7 @@ export function updateUserModel(userId: string, model: string, data: Partial<{
   tokenLimit: number | null;
   maxCostPerSession: number | null;
   maxTokensPerSession: number | null;
+  period: BudgetPeriod;
 }>) {
   return request<UserModelLimit>(`/api/users/${userId}/models/${encodeURIComponent(model)}`, {
     method: 'PUT',
@@ -299,6 +308,7 @@ export function createRepoModel(repoId: string, data: {
   tokenLimit?: number | null;
   maxCostPerSession?: number | null;
   maxTokensPerSession?: number | null;
+  period?: BudgetPeriod;
 }) {
   return request<RepoModelLimit>(`/api/repos/${repoId}/models`, {
     method: 'POST',
@@ -310,6 +320,7 @@ export function updateRepoModel(repoId: string, model: string, data: Partial<{
   tokenLimit: number | null;
   maxCostPerSession: number | null;
   maxTokensPerSession: number | null;
+  period: BudgetPeriod;
 }>) {
   return request<RepoModelLimit>(`/api/repos/${repoId}/models/${encodeURIComponent(model)}`, {
     method: 'PUT',
@@ -319,6 +330,30 @@ export function updateRepoModel(repoId: string, model: string, data: Partial<{
 export function deleteRepoModel(repoId: string, model: string) {
   return request<{ ok: boolean }>(`/api/repos/${repoId}/models/${encodeURIComponent(model)}`, {
     method: 'DELETE',
+  });
+}
+
+// ---- Per-repo flat dollar cap (no model dimension) ----------------------
+// Mirrors getBudgetAgents / updateAgentBudget. Storage is the
+// `budget_repo_limits` IntegrationConfig blob keyed by repo UUID.
+
+export interface RepoBudgetRow {
+  repoId: string;
+  repoName: string;
+  monthlyLimit: number;
+  period: BudgetPeriod;
+  currentSpend: number;
+  sessions: number;
+}
+
+export function getRepoBudgets() {
+  return request<RepoBudgetRow[]>('/api/budget/repos');
+}
+
+export function updateRepoBudget(repoId: string, data: { monthlyLimit: number; period?: BudgetPeriod }) {
+  return request<{ ok: boolean }>(`/api/budget/repos/${repoId}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
   });
 }
 
@@ -582,7 +617,7 @@ export function getMachine(id: string) {
 
 // ---- API Key Management -----------------------------------------------------
 
-export function createApiKey(data: { name: string; role?: string; repoIds?: string[]; agentIds?: string[] }) {
+export function createApiKey(data: { name: string; role?: string; repoIds?: string[]; agentIds?: string[]; targetUserId?: string }) {
   return request<{ id: string; key: string; keyPrefix: string; role: string | null; repoScopes: { repoId: string; repoName: string }[]; agentScopes: { agentId: string; agentName: string; agentSlug: string }[] }>('/api/settings/api-keys', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -933,16 +968,27 @@ export function recheckPR(id: string) {
 
 // ---- Budget / Cost Controls --------------------------------------------------
 
+export interface PeriodCap {
+  limit: number;
+  block: boolean;
+}
+
 export interface BudgetConfig {
-  monthlyLimit: number;
+  monthlyLimit: number;          // legacy single-cap mirror (= dominant cap)
+  period: BudgetPeriod;          // legacy mirror
   alertThresholds: number[];
-  blockOnExceed: boolean;
+  blockOnExceed: boolean;        // legacy mirror
   alertedAt: number[];
+  // Multi-tier caps. Any of daily/weekly/monthly may be set independently.
+  // Empty/missing entry = no cap for that window.
+  caps?: Partial<Record<BudgetPeriod, PeriodCap>>;
 }
 
 export interface BudgetSpend {
-  monthly: number;
+  monthly: number; // legacy: spend for the active period; equals byPeriod[config.period]
   percentage: number;
+  period: BudgetPeriod;
+  byPeriod: { daily: number; weekly: number; monthly: number };
   dailySpend: Array<{ date: string; cost: number }>;
   byModel: Array<{ model: string; cost: number; sessions: number }>;
   byUser: Array<{ userId: string; name: string; cost: number; sessions: number }>;
@@ -962,6 +1008,87 @@ export function updateBudget(data: Partial<BudgetConfig>) {
     method: 'PUT',
     body: JSON.stringify(data),
   });
+}
+
+// ---- Federated personal view (/api/me/*) -------------------------------------
+// These endpoints aggregate the authenticated user's activity across every
+// org they're a member of, so a single team API key powers the personal
+// dashboard with no client-side dual-writes. See apps/api/src/routes/me.ts.
+
+export interface MeOrg {
+  id: string;
+  name: string;
+}
+
+// Mirrors the dashboard's `Session` shape (apps/web/src/pages/MyDashboard/utils.ts)
+// with one addition: `org` so the federated list can show org context inline.
+export interface MeSession {
+  id: string;
+  org: MeOrg | null;
+  repoId: string | null;
+  repoName: string | null;
+  branch: string | null;
+  commitSha: string | null;
+  commitMessage: string | null;
+  model: string;
+  agentName: string | null;
+  prompt: string | null;
+  aiTitle: string | null;
+  durationMs: number;
+  costUsd: number;
+  tokensUsed: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  linesAdded: number;
+  linesRemoved: number;
+  filesChanged: string;
+  toolCalls: number;
+  status: string;
+  review: { status: string; score: number | null } | null;
+  mergedFrom: string[] | null;
+  mergedInto: string | null;
+  parentSessionId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt: string;
+}
+
+export interface MeRepo {
+  id: string;
+  name: string;
+  path: string;
+  provider: string;
+  org: MeOrg | null;
+  archived: boolean;
+  syncedAt: string | null;
+  commitCount: number;
+}
+
+export interface MeSpend {
+  byPeriod: { daily: number; weekly: number; monthly: number };
+  byOrg: Array<{ orgId: string; orgName: string; cost: number; sessions: number }>;
+  dailySpend: Array<{ date: string; cost: number }>;
+}
+
+export function getMeSessions(params?: { limit?: number; offset?: number; orgId?: string; repoId?: string; model?: string; archived?: boolean }) {
+  const q = new URLSearchParams();
+  if (params?.limit !== undefined) q.set('limit', String(params.limit));
+  if (params?.offset !== undefined) q.set('offset', String(params.offset));
+  if (params?.orgId) q.set('orgId', params.orgId);
+  if (params?.repoId) q.set('repoId', params.repoId);
+  if (params?.model) q.set('model', params.model);
+  if (params?.archived) q.set('archived', 'true');
+  return request<{ sessions: MeSession[]; total: number }>(`/api/me/sessions${q.toString() ? `?${q}` : ''}`);
+}
+
+export function getMeRepos() {
+  return request<{ repos: MeRepo[] }>('/api/me/repos');
+}
+
+export function getMeSpend() {
+  return request<MeSpend>('/api/me/spend');
 }
 
 // ---- Cost Forecast -----------------------------------------------------------
@@ -1005,6 +1132,161 @@ export function testEmail(to?: string) {
 }
 
 // ---- Weekly Digest -----------------------------------------------------------
+
+// ---- Spend Quality (Insights) ---------------------------------------------
+
+export type InsightsRange = '7d' | '30d' | '90d' | 'custom';
+
+export interface InsightsConfig {
+  reworkWindowDays: number;
+  reworkRateAmber: number;
+  reworkRateRed: number;
+  expensiveSessionMultiplier: number;
+  modelFit: {
+    opusCheap: { maxCostUsd: number; maxPrompts: number; maxFilesChanged: number; savingsRatio: number };
+    sonnetLong: { minPrompts: number; savingsRatio: number };
+  };
+  wastedPromptWindowMinutes: number;
+  cacheRatioOutlierMultiplier: number;
+  topSessions: { default: number; max: number };
+  defaultRangeDays: number;
+}
+
+export interface SpendQualityRow {
+  userId: string;
+  name: string;
+  email: string;
+  spendUsd: number;
+  sessionCount: number;
+  aiAuthorship: number;       // 0..1
+  reworkRate: number;          // 0..1
+  costPerMergedPr: number | null;
+  mergedPrCount: number;
+}
+
+export interface TopSessionRow {
+  sessionId: string;
+  userName: string;
+  durationSec: number;
+  costUsd: number;
+  promptCount: number;
+  branch: string | null;
+  commitCount: number;
+  flags: ('zero-commit' | 'cost-outlier')[];
+  cliPath: string;
+}
+
+export interface ModelFitWarning {
+  sessionId: string;
+  userName: string;
+  modelUsed: string;
+  suggestedModel: string;
+  reason: 'oversized-for-cheap-task' | 'undersized-for-long-session';
+  estimatedSavingsUsd: number;
+}
+
+export interface HeatmapCell {
+  day: number; hour: number; costUsd: number; sessionCount: number;
+}
+
+export interface TokenBreakdownRow {
+  userId: string; name: string;
+  generatedTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  cacheReadRatio: number;
+  isOutlier: boolean;
+}
+
+// Per-agent rollup — same shape as TokenBreakdownRow but keyed by agentId.
+export interface TokenBreakdownAgentRow {
+  agentId: string;
+  name: string;
+  slug: string;
+  generatedTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  cacheReadRatio: number;
+  isOutlier: boolean;
+}
+
+// Per-model rollup — keyed on the raw model string (e.g. "claude-opus-4-7").
+export interface TokenBreakdownModelRow {
+  model: string;
+  name: string;
+  generatedTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  cacheReadRatio: number;
+  isOutlier: boolean;
+}
+
+export interface RangeMeta { from: string; to: string }
+
+function rangeQuery(params: { from?: Date; to?: Date; range?: string }): string {
+  const sp = new URLSearchParams();
+  if (params.from && params.to) {
+    sp.set('from', params.from.toISOString());
+    sp.set('to', params.to.toISOString());
+  } else if (params.range) {
+    sp.set('range', params.range);
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : '';
+}
+
+export function getInsightsConfig() {
+  return request<InsightsConfig>('/api/insights/config');
+}
+export function getSpendQuality(p: { from?: Date; to?: Date; range?: string }) {
+  return request<{ rows: SpendQualityRow[]; range: RangeMeta }>('/api/insights/spend-quality' + rangeQuery(p));
+}
+export function getTopSessions(p: { from?: Date; to?: Date; range?: string; limit?: number }) {
+  const q = rangeQuery(p);
+  const limit = p.limit ? `${q ? '&' : '?'}limit=${p.limit}` : '';
+  return request<{ sessions: TopSessionRow[]; range: RangeMeta }>('/api/insights/top-sessions' + q + limit);
+}
+export function getModelFitWarnings(p: { from?: Date; to?: Date; range?: string }) {
+  return request<{ warnings: ModelFitWarning[]; range: RangeMeta }>('/api/insights/model-fit-warnings' + rangeQuery(p));
+}
+export function getSpendHeatmap(p: { from?: Date; to?: Date; range?: string }) {
+  return request<{ cells: HeatmapCell[]; range: RangeMeta }>('/api/insights/spend-heatmap' + rangeQuery(p));
+}
+export function getWastedPrompts(p: { from?: Date; to?: Date; range?: string }) {
+  return request<{ perDev: Array<{ userId: string; name: string; wastedCount: number; wastedUsd: number }>;
+                   topPrompts: Array<{ promptId: string; userName: string; preview: string; costUsd: number; restoredAt: string; fileContext: string[] }>;
+                   degraded: boolean; degradedReason?: string;
+                   range: RangeMeta }>('/api/insights/wasted-prompts' + rangeQuery(p));
+}
+export function getTokenBreakdown(p: { from?: Date; to?: Date; range?: string }) {
+  return request<{
+    rows: TokenBreakdownRow[];
+    byAgent: TokenBreakdownAgentRow[];
+    byModel: TokenBreakdownModelRow[];
+    range: RangeMeta;
+  }>('/api/insights/token-breakdown' + rangeQuery(p));
+}
+
+// ---- Org-wide per-model spend caps -----------------------------------------
+
+export interface ModelBudget {
+  model: string;
+  monthlyLimit: number;
+  period: BudgetPeriod;
+  currentSpend: number;
+  sessions: number;
+}
+
+export function getModelBudgets() {
+  return request<ModelBudget[]>('/api/budget/models');
+}
+
+export function updateModelBudget(model: string, data: { monthlyLimit: number; period?: BudgetPeriod }) {
+  return request<{ ok: boolean }>(`/api/budget/models/${encodeURIComponent(model)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
 
 export function sendDigest() {
   return request<{ success: boolean; html: string; error?: string }>('/api/settings/send-digest', { method: 'POST' });
@@ -1109,8 +1391,17 @@ export function updateUserRole(id: string, role: string) {
   return request<{ success: boolean }>(`/api/users/${id}/role`, { method: 'PATCH', body: JSON.stringify({ role }) });
 }
 
-export function removeUser(id: string) {
-  return request<{ success: boolean }>(`/api/users/${id}`, { method: 'DELETE' });
+export function removeUser(id: string, opts?: { purgeData?: boolean }) {
+  // DELETE with a body is unusual but Express + the route handler read
+  // the JSON body fine. Defaults to no purge — old call sites that omit
+  // opts keep historical behavior (Membership + ApiKey removal only).
+  return request<{ success: boolean; purged: { sessions: number; reviews: number; repoGrants: number; agentGrants: number } | null }>(
+    `/api/users/${id}`,
+    {
+      method: 'DELETE',
+      body: opts ? JSON.stringify({ purgeData: !!opts.purgeData }) : undefined,
+    },
+  );
 }
 
 export function addMember(data: { name: string; email: string; role?: string; repoIds?: string[]; agentIds?: string[] }) {
@@ -1134,8 +1425,13 @@ export interface Invitation {
   expiresAt: string;
 }
 
-export function createInvite(data: { email?: string; role: string }) {
-  return request<{ id: string; token: string; role: string; email: string | null; expiresAt: string }>('/api/users/invite', { method: 'POST', body: JSON.stringify(data) });
+export interface InvitePendingGrants {
+  repos?: Array<{ id: string; level: 'read' | 'write' | 'admin' }>;
+  agents?: Array<{ id: string; level: 'use' | 'admin' }>;
+}
+
+export function createInvite(data: { email?: string; role: string; pendingGrants?: InvitePendingGrants }) {
+  return request<{ id: string; token: string; role: string; email: string | null; expiresAt: string; emailSent?: boolean; emailError?: string }>('/api/users/invite', { method: 'POST', body: JSON.stringify(data) });
 }
 
 export function getInvites() {

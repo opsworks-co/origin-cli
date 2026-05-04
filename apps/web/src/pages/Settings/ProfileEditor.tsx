@@ -118,9 +118,11 @@ export default function ProfileEditor() {
             <label className="block text-xs font-medium text-gray-400 mb-1">Name</label>
             <input
               type="text"
+              name="full-name"
+              autoComplete="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+              className="input w-full text-sm"
               placeholder="Your name"
             />
           </div>
@@ -128,9 +130,11 @@ export default function ProfileEditor() {
             <label className="block text-xs font-medium text-gray-400 mb-1">Email</label>
             <input
               type="email"
+              name="email"
+              autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+              className="input w-full text-sm"
               placeholder="you@example.com"
             />
           </div>

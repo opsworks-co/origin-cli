@@ -1,5 +1,8 @@
 import chalk from 'chalk';
-import { isConnectedMode } from '../config.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { isConnectedMode, loadAgentConfig } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive } from '../session-state.js';
 import { git, gitOrNull } from '../utils/exec.js';
@@ -706,6 +709,116 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
       }
     } catch { /* branch doesn't exist */ }
   }
+}
+
+/**
+ * `origin sessions sync` — Resync local-only sessions to Origin.
+ *
+ * When the API rejected `session/start` (typically AGENT_DISABLED), the CLI
+ * stamped the session with a `local-${uuid}` id and kept all the captured
+ * data in `~/.origin/sessions/`. Once an admin enables the agent, run this
+ * to retry the upload: each queued session is replayed via `session/start`
+ * (to obtain a real id) followed by `session/end` with the captured prompts,
+ * branch, and duration. The local file is removed on success and left in
+ * place if the agent is still disabled (so a future run can try again).
+ */
+export async function sessionsSyncCommand(opts: { quiet?: boolean }): Promise<{ synced: number; blocked: number; failed: number }> {
+  const result = { synced: 0, blocked: 0, failed: 0 };
+  if (!isConnectedMode()) {
+    if (!opts.quiet) console.log(chalk.gray('Standalone mode — nothing to sync.'));
+    return result;
+  }
+
+  const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+  if (!fs.existsSync(sessionsDir)) {
+    if (!opts.quiet) console.log(chalk.gray('No queued sessions.'));
+    return result;
+  }
+
+  const agentConfig = loadAgentConfig();
+  if (!agentConfig?.machineId) {
+    if (!opts.quiet) console.log(chalk.yellow('Run `origin init` first — machine not registered.'));
+    return result;
+  }
+
+  const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+  const queued: { file: string; state: any }[] = [];
+  for (const file of files) {
+    try {
+      const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), 'utf-8'));
+      if (typeof state?.sessionId === 'string' && state.sessionId.startsWith('local-')) {
+        queued.push({ file, state });
+      }
+    } catch { /* skip corrupt */ }
+  }
+
+  if (queued.length === 0) {
+    if (!opts.quiet) console.log(chalk.gray('No queued sessions.'));
+    return result;
+  }
+
+  if (!opts.quiet) {
+    console.log(chalk.bold(`Resyncing ${queued.length} queued session${queued.length === 1 ? '' : 's'}...\n`));
+  }
+
+  for (const { file, state } of queued) {
+    const filePath = path.join(sessionsDir, file);
+    const label = `${state.agentSlug || 'session'} · ${state.sessionTag || state.sessionId.slice(0, 12)}`;
+
+    let realSessionId: string;
+    try {
+      const repoUrl = gitOrNull(['remote', 'get-url', 'origin'], { cwd: state.repoPath || process.cwd() }) || undefined;
+      const startRes = await api.startSession({
+        machineId: agentConfig.machineId,
+        prompt: state.prompts?.[0]?.text || state.prompts?.[0] || '',
+        model: state.model || 'unknown',
+        repoPath: state.repoPath || process.cwd(),
+        repoUrl,
+        agentSlug: state.agentSlug || undefined,
+        branch: state.branch || undefined,
+        hostname: agentConfig.hostname || undefined,
+      });
+      realSessionId = startRes.sessionId as string;
+    } catch (err: any) {
+      if (err?.code === 'AGENT_DISABLED') {
+        if (!opts.quiet) console.log(chalk.yellow(`  ⏸  ${label} — agent still disabled, kept local`));
+        result.blocked++;
+      } else {
+        if (!opts.quiet) console.log(chalk.red(`  ✗  ${label} — ${err.message}`));
+        result.failed++;
+      }
+      continue;
+    }
+
+    try {
+      const start = state.startedAt ? new Date(state.startedAt).getTime() : Date.now();
+      const end = state.endedAt ? new Date(state.endedAt).getTime() : Date.now();
+      const durationMs = Math.max(0, end - start);
+      const promptText = (state.prompts || [])
+        .map((p: any) => (typeof p === 'string' ? p : p.text || ''))
+        .filter(Boolean)
+        .join('\n\n---\n\n');
+      await api.endSession({
+        sessionId: realSessionId,
+        prompt: promptText || undefined,
+        durationMs: durationMs > 0 ? durationMs : undefined,
+        branch: state.branch || undefined,
+      });
+      fs.unlinkSync(filePath);
+      if (!opts.quiet) console.log(chalk.green(`  ✓  ${label}`));
+      result.synced++;
+    } catch (err: any) {
+      // Started but couldn't finalize — leave the file so a future run retries.
+      if (!opts.quiet) console.log(chalk.red(`  ✗  ${label} — end failed: ${err.message}`));
+      result.failed++;
+    }
+  }
+
+  if (!opts.quiet) {
+    console.log();
+    console.log(chalk.bold(`Resynced: ${chalk.green(result.synced)}  ·  Still blocked: ${chalk.yellow(result.blocked)}  ·  Failed: ${chalk.red(result.failed)}`));
+  }
+  return result;
 }
 
 function timeAgo(dateStr: string): string {

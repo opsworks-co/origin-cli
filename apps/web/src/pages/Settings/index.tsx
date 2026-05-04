@@ -29,9 +29,14 @@ export default function Settings() {
   const { user, activeOrg } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Active tab — read from URL ?tab= param, default to 'general'
+  // Active tab — read from URL ?tab= param, default to 'general'.
+  // Admin-only tabs (audit, reports, trails, compliance) are gated by role,
+  // not by accountType — a MEMBER of a team org has accountType='org' but
+  // shouldn't see org-wide audit/compliance surfaces meant for admins.
   const isDev = user?.accountType === 'developer';
-  const VALID_TABS = isDev ? DEV_TABS : ORG_TABS;
+  const isAdmin = activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN';
+  const showAdminTabs = !isDev && isAdmin;
+  const VALID_TABS = showAdminTabs ? ORG_TABS : DEV_TABS;
   const tabParam = searchParams.get('tab') as SettingsTab | null;
   const initialTab: SettingsTab = tabParam && VALID_TABS.includes(tabParam) ? tabParam : 'general';
   const [activeTab, setActiveTabState] = useState<SettingsTab>(initialTab);
@@ -100,8 +105,8 @@ export default function Settings() {
             <div className="flex items-center gap-0.5 border-b border-white/[0.06] flex-wrap">
               <TabBtn tab="general" />
               <TabBtn tab="keys" />
-              {(isDev || activeOrg?.role === 'ADMIN' || activeOrg?.role === 'OWNER') && <TabBtn tab="integrations" />}
-              {!isDev && (
+              {(isDev || isAdmin) && <TabBtn tab="integrations" />}
+              {showAdminTabs && (
                 <>
                   <span className="mx-1.5 h-4 w-px bg-white/[0.08]" />
                   <TabBtn tab="audit" />

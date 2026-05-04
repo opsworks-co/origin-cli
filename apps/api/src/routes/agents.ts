@@ -526,12 +526,15 @@ router.post('/:id/models', requireRole('ADMIN'), async (req: AuthRequest, res: R
     });
     if (!agent) return res.status(404).json({ error: 'Agent not found in your organization' });
 
-    const { model, monthlyLimit, tokenLimit, maxCostPerSession, maxTokensPerSession } = req.body || {};
+    const { model, monthlyLimit, tokenLimit, maxCostPerSession, maxTokensPerSession, period } = req.body || {};
     if (typeof model !== 'string' || !model.trim()) {
       return res.status(400).json({ error: 'model is required' });
     }
     if (model.length > AGENT_FIELD_LIMITS.model) {
       return res.status(413).json({ error: `model exceeds max length of ${AGENT_FIELD_LIMITS.model}` });
+    }
+    if (period !== undefined && period !== 'daily' && period !== 'weekly' && period !== 'monthly') {
+      return res.status(400).json({ error: 'period must be daily, weekly, or monthly' });
     }
 
     try {
@@ -543,6 +546,7 @@ router.post('/:id/models', requireRole('ADMIN'), async (req: AuthRequest, res: R
           tokenLimit: typeof tokenLimit === 'number' && tokenLimit > 0 ? tokenLimit : null,
           maxCostPerSession: typeof maxCostPerSession === 'number' && maxCostPerSession > 0 ? maxCostPerSession : null,
           maxTokensPerSession: typeof maxTokensPerSession === 'number' && maxTokensPerSession > 0 ? maxTokensPerSession : null,
+          ...(period ? { period } : {}),
         },
       });
       res.json(created);
@@ -587,6 +591,13 @@ router.put('/:id/models/:modelKey', requireRole('ADMIN'), async (req: AuthReques
     }
     if (Object.prototype.hasOwnProperty.call(req.body || {}, 'maxTokensPerSession')) {
       data.maxTokensPerSession = typeof maxTokensPerSession === 'number' && maxTokensPerSession > 0 ? maxTokensPerSession : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'period')) {
+      const p = (req.body as any).period;
+      if (p !== 'daily' && p !== 'weekly' && p !== 'monthly') {
+        return res.status(400).json({ error: 'period must be daily, weekly, or monthly' });
+      }
+      data.period = p;
     }
 
     try {

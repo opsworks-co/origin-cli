@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
-import { getBudgetConfig, saveBudgetConfig, getMonthlySpend, getDailySpend, getSpendByModel, getSpendByUser } from '../services/budget.js';
+import { getBudgetConfig, saveBudgetConfig, getMonthlySpend, getDailySpend, getSpendByModel, getSpendByUser, getSpend } from '../services/budget.js';
 import { sendTestEmail, sendWeeklyDigest, generateWeeklyDigestData } from '../services/email.js';
 import { buildWeeklyDigestHTML } from '../services/email-templates.js';
 import { recomputeOrgSessionCosts } from '../services/cost-recompute.js';
@@ -14,10 +14,19 @@ router.use(resolveOrgContext);
 
 
 // GET /api/settings/api-keys (ADMIN+ only)
-router.get('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+// Lists API keys for the active org. Admins see every key (so they can
+// audit and revoke); members see only their own keys (so the Settings →
+// API Keys page works for them too — they need to view, name, and delete
+// their own CLI tokens). Without this scope the page returned 403 on load
+// for any non-admin member.
+router.get('/api-keys', async (req: AuthRequest, res: Response) => {
   try {
+    const callerRole = (req.activeRole || '').toUpperCase();
+    const isAdmin = callerRole === 'OWNER' || callerRole === 'ADMIN';
+    const where: { orgId: string; userId?: string } = { orgId: req.activeOrgId! };
+    if (!isAdmin) where.userId = req.user!.id;
     const keys = await prisma.apiKey.findMany({
-      where: { orgId: req.activeOrgId! },
+      where,
       select: {
         id: true, name: true, keyPrefix: true, createdAt: true,
         userId: true, role: true,
@@ -39,14 +48,48 @@ router.get('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Resp
 });
 
 // POST /api/settings/api-keys (ADMIN+ only)
-router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+// Note: deliberately *not* gated by requireRole('ADMIN') — members of any
+// role need to be able to create CLI keys for themselves, which is what
+// solo dev workflows and team members onboarding both rely on. Admin
+// privilege is enforced *only* when the caller is targeting another user.
+router.post('/api-keys', async (req: AuthRequest, res: Response) => {
   try {
-    const { name, role, repoIds, agentIds } = req.body;
+    const { name, role, repoIds, agentIds, targetUserId } = req.body;
 
     // Validate role if provided (standalone key)
     const validRoles = ['VIEWER', 'MEMBER', 'ADMIN'];
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({ error: 'Invalid role. Must be VIEWER, MEMBER, or ADMIN.' });
+    }
+
+    // Resolve who this key is for. By default it's the caller — every
+    // member can mint their own CLI key. Admins (OWNER/ADMIN) may also
+    // issue keys on behalf of *other* members in the same org via
+    // `targetUserId` — the IAM "Generate Key for <member>" flow.
+    let ownerUserId = req.user!.id;
+    if (typeof targetUserId === 'string' && targetUserId.length > 0 && targetUserId !== req.user!.id) {
+      const callerRole = (req.activeRole || '').toUpperCase();
+      if (callerRole !== 'OWNER' && callerRole !== 'ADMIN') {
+        return res.status(403).json({ error: 'Only admins can issue keys on behalf of other members' });
+      }
+      const targetMembership = await prisma.membership.findUnique({
+        where: { userId_orgId: { userId: targetUserId, orgId: req.activeOrgId! } },
+        select: { userId: true },
+      });
+      if (!targetMembership) {
+        return res.status(404).json({ error: 'Target user is not a member of this organization' });
+      }
+      ownerUserId = targetMembership.userId;
+    }
+
+    // Only admins can mint keys with elevated `role` (a "standalone" key
+    // that escalates beyond the caller's own permission level). Members
+    // creating their own keys must use a member-level (or null) role.
+    if (role && role !== 'MEMBER' && role !== 'VIEWER') {
+      const callerRole = (req.activeRole || '').toUpperCase();
+      if (callerRole !== 'OWNER' && callerRole !== 'ADMIN') {
+        return res.status(403).json({ error: 'Only admins can mint elevated-role keys' });
+      }
     }
 
     // DoS caps on scope arrays — nobody legitimately scopes a key to
@@ -86,11 +129,12 @@ router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Res
     const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
     const keyPrefix = rawKey.slice(0, 14);
 
-    // Always link key to the current user
+    // Link key to the resolved owner — current user by default, or the
+    // targeted member when an admin uses the "Generate Key for <member>" flow.
     const key = await prisma.apiKey.create({
       data: {
         orgId: req.activeOrgId!,
-        userId: req.user!.id,
+        userId: ownerUserId,
         name: name || 'API Key',
         keyHash,
         keyPrefix,
@@ -119,8 +163,12 @@ router.post('/api-keys', requireRole('ADMIN'), async (req: AuthRequest, res: Res
   }
 });
 
-// PUT /api/settings/api-keys/:id — update agent/repo scopes on an existing key (ADMIN+)
-router.put('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+// PUT /api/settings/api-keys/:id — update agent/repo scopes on an existing key.
+// Members can update their *own* keys (rename/scope a CLI token they minted);
+// admins can update any key in the org. Without the self-update path,
+// non-admin members hit "Forbidden: insufficient permissions" trying to
+// manage the keys they created themselves.
+router.put('/api-keys/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const { agentIds, repoIds } = req.body;
@@ -136,6 +184,12 @@ router.put('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: 
 
     const key = await prisma.apiKey.findFirst({ where: { id, orgId: req.activeOrgId! } });
     if (!key) return res.status(404).json({ error: 'API key not found' });
+
+    const callerRole = (req.activeRole || '').toUpperCase();
+    const isAdmin = callerRole === 'OWNER' || callerRole === 'ADMIN';
+    if (!isAdmin && key.userId !== req.user!.id) {
+      return res.status(403).json({ error: 'You can only update your own API keys' });
+    }
 
     // Update agent scopes if provided
     if (agentIds !== undefined && Array.isArray(agentIds)) {
@@ -195,13 +249,21 @@ router.put('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: 
   }
 });
 
-// DELETE /api/settings/api-keys/:id (ADMIN+)
-router.delete('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+// DELETE /api/settings/api-keys/:id — members can revoke their own keys
+// (a lost laptop is the user's problem to fix immediately, not a ticket
+// for an admin); admins can revoke any key in the org.
+router.delete('/api-keys/:id', async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    await prisma.apiKey.deleteMany({
-      where: { id, orgId: req.activeOrgId! },
-    });
+    const callerRole = (req.activeRole || '').toUpperCase();
+    const isAdmin = callerRole === 'OWNER' || callerRole === 'ADMIN';
+    const where = isAdmin
+      ? { id, orgId: req.activeOrgId! }
+      : { id, orgId: req.activeOrgId!, userId: req.user!.id };
+    const result = await prisma.apiKey.deleteMany({ where });
+    if (result.count === 0) {
+      return res.status(403).json({ error: 'You can only revoke your own API keys' });
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -211,25 +273,36 @@ router.delete('/api-keys/:id', requireRole('ADMIN'), async (req: AuthRequest, re
 
 // ── Budget / Cost Controls ──────────────────────────────────────────────────
 
-// GET /api/settings/budget — get budget config + current spend
+// GET /api/settings/budget — get budget config + current spend.
+// Returns daily/weekly/monthly totals so the UI can show all three at a
+// glance without three round-trips.
 router.get('/budget', async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.activeOrgId!;
-    const [config, spent, dailySpend, spendByModel, spendByUser] = await Promise.all([
+    const [config, daily, weekly, monthly, dailySpend, spendByModel, spendByUser] = await Promise.all([
       getBudgetConfig(orgId),
+      getSpend(orgId, 'daily'),
+      getSpend(orgId, 'weekly'),
       getMonthlySpend(orgId),
       getDailySpend(orgId),
       getSpendByModel(orgId),
       getSpendByUser(orgId),
     ]);
 
-    const percentage = config.monthlyLimit > 0 ? (spent / config.monthlyLimit) * 100 : 0;
+    // The "current period" spend is whichever period the org has configured.
+    const periodSpend = config.period === 'daily' ? daily : config.period === 'weekly' ? weekly : monthly;
+    const percentage = config.monthlyLimit > 0 ? (periodSpend / config.monthlyLimit) * 100 : 0;
 
     res.json({
       config,
       currentSpend: {
-        monthly: spent,
+        // legacy: kept for clients that read .monthly directly. Now reflects
+        // whatever period is active so existing UI keeps showing the right
+        // number against the limit; new UI should prefer .period[period].
+        monthly: periodSpend,
         percentage,
+        period: config.period,
+        byPeriod: { daily, weekly, monthly },
         dailySpend,
         byModel: spendByModel,
         byUser: spendByUser,
@@ -241,18 +314,17 @@ router.get('/budget', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// PUT /api/settings/budget — update budget config
+// PUT /api/settings/budget — update budget config. Admin-only because it
+// changes a control that gates every member's session starts.
 router.put('/budget', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    if (req.activeRole! !== 'ADMIN') {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-
-    const { monthlyLimit, alertThresholds, blockOnExceed } = req.body;
+    const { monthlyLimit, alertThresholds, blockOnExceed, period, caps } = req.body;
     const config = await saveBudgetConfig(req.activeOrgId!, {
       ...(monthlyLimit !== undefined && { monthlyLimit }),
       ...(alertThresholds !== undefined && { alertThresholds }),
       ...(blockOnExceed !== undefined && { blockOnExceed }),
+      ...(period !== undefined && { period }),
+      ...(caps !== undefined && { caps }),
       alertedAt: [], // Reset alerts when config changes
     });
 
@@ -262,7 +334,7 @@ router.put('/budget', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
         userId: req.user!.id,
         action: 'BUDGET_UPDATED',
         resource: 'budget',
-        metadata: JSON.stringify({ monthlyLimit, alertThresholds, blockOnExceed }),
+        metadata: JSON.stringify({ monthlyLimit, alertThresholds, blockOnExceed, period, caps }),
       },
     });
 

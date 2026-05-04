@@ -62,7 +62,7 @@ const UserDetail = lazy(() => import('./pages/UserDetail'));
 const MachineDetail = lazy(() => import('./pages/MachineDetail'));
 const Infrastructure = lazy(() => import('./pages/Infrastructure'));
 const PullRequests = lazy(() => import('./pages/PullRequests'));
-const Leaderboard = lazy(() => import('./pages/Leaderboard'));
+const SpendQuality = lazy(() => import('./pages/SpendQuality'));
 const TrailDetail = lazy(() => import('./pages/TrailDetail'));
 const Snapshots = lazy(() => import('./pages/Snapshots'));
 const Admin = lazy(() => import('./pages/Admin'));
@@ -85,26 +85,64 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-/** Picks Layout or DeveloperLayout based on the *active org's* type. */
+/**
+ * Roles that get the slim DeveloperLayout (self-only view: Dashboard,
+ * Sessions, Repos, Insights, Settings — no Governance/IAM/Budget). Admin
+ * and Owner keep the full Layout with the management surfaces. The backend
+ * already scopes most "team" data (sessions, stats) to `userId = me` for
+ * non-admins, so this layout swap is the missing piece on the UI side.
+ */
+function isAdminRole(role: string | undefined | null): boolean {
+  const r = (role || '').toUpperCase();
+  return r === 'OWNER' || r === 'ADMIN';
+}
+
+function shouldUseDeveloperLayout(activeOrg: { type?: string; role?: string } | null | undefined, user: { accountType?: string } | null | undefined): boolean {
+  if (activeOrg) {
+    return activeOrg.type === 'personal' || !isAdminRole(activeOrg.role);
+  }
+  // Pre-membership-fetch fall-back: trust user.accountType.
+  return user?.accountType === 'developer';
+}
+
+/** Picks Layout or DeveloperLayout based on the active org's type *and* the
+ *  user's role within it — non-admin members of team orgs get the slim view. */
 function AppLayout({ children }: { children: React.ReactNode }) {
   const { activeOrg, user } = useAuth();
-  // Pre-membership-fetch fall-back: trust user.accountType. Once memberships
-  // load, activeOrg.type is the source of truth.
-  const isPersonal = activeOrg ? activeOrg.type === 'personal' : user?.accountType === 'developer';
-  if (isPersonal) {
+  if (shouldUseDeveloperLayout(activeOrg, user)) {
     return <DeveloperLayout>{children}</DeveloperLayout>;
   }
   return <Layout>{children}</Layout>;
 }
 
-/** Redirects to /me when the active org is a personal workspace. */
+/** Redirects to /me when the active org is a personal workspace or the
+ *  user is a non-admin member (their dashboard is /me, not the team one). */
 function DashboardRedirect() {
   const { activeOrg, user } = useAuth();
-  const isPersonal = activeOrg ? activeOrg.type === 'personal' : user?.accountType === 'developer';
-  if (isPersonal) {
+  if (shouldUseDeveloperLayout(activeOrg, user)) {
     return <Navigate to="/me" replace />;
   }
   return <Layout><Dashboard /></Layout>;
+}
+
+/** Route guard: bounce non-admin members away from admin-only surfaces.
+ *  Used for /budget, /policies, /infrastructure, /iam, /agents, /pull-requests,
+ *  /admin — pages that exist only to manage the org. They're already hidden
+ *  from the member's nav (DeveloperLayout doesn't link them), but a member
+ *  who types the URL or clicks a stale link should land back on their
+ *  dashboard rather than seeing a 403 wall or a forbidden-feeling page. */
+function AdminOnlyRoute({ children }: { children: React.ReactNode }) {
+  const { activeOrg, user, loading } = useAuth();
+  // While memberships load, render nothing rather than flashing the
+  // page — once activeOrg arrives we'll redirect or render.
+  if (loading) return null;
+  // Solo personal workspaces are always "admin" of themselves.
+  if (activeOrg?.type === 'personal') return <>{children}</>;
+  if (activeOrg && isAdminRole(activeOrg.role)) return <>{children}</>;
+  // Pre-membership-fetch fall-back for accountType=org users — let it
+  // through; resolveOrgContext on the server still gates writes.
+  if (!activeOrg && user?.accountType === 'org') return <>{children}</>;
+  return <Navigate to="/me" replace />;
 }
 
 // Scrolls the window to the top whenever the route path changes — avoids the
@@ -211,9 +249,11 @@ export default function App() {
         path="/repos/:id/access"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <RepoAccess />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <RepoAccess />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -221,9 +261,11 @@ export default function App() {
         path="/agents/:id/access"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <AgentAccess />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <AgentAccess />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -231,9 +273,11 @@ export default function App() {
         path="/iam/users/:id/access"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <UserAccess />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <UserAccess />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -291,9 +335,11 @@ export default function App() {
         path="/agents"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <Agents />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <Agents />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -301,9 +347,11 @@ export default function App() {
         path="/policies"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <Policies />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <Policies />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -311,9 +359,11 @@ export default function App() {
         path="/policies/:id"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <PolicyDetail />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <PolicyDetail />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -321,9 +371,11 @@ export default function App() {
         path="/agents/:id"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <AgentDetail />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <AgentDetail />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -341,9 +393,11 @@ export default function App() {
         path="/pull-requests"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <PullRequests />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <PullRequests />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -352,22 +406,31 @@ export default function App() {
         path="/team/:id"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <UserDetail />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <UserDetail />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
       <Route path="/audit" element={<Navigate to="/settings?tab=audit" replace />} />
       <Route path="/insights" element={<ProtectedRoute><AppLayout><Insights /></AppLayout></ProtectedRoute>} />
+      <Route path="/insights/spend-quality" element={<ProtectedRoute><AppLayout><SpendQuality /></AppLayout></ProtectedRoute>} />
+      {/* Leaderboard folded into Spend Quality — same per-dev rollups + four
+          new columns. Existing /leaderboard URLs continue to work via
+          redirect so nobody's bookmark dies. */}
+      <Route path="/leaderboard" element={<Navigate to="/insights/spend-quality" replace />} />
       <Route path="/reports" element={<Navigate to="/settings?tab=reports" replace />} />
       <Route
         path="/infrastructure"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <Infrastructure />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <Infrastructure />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -375,9 +438,11 @@ export default function App() {
         path="/machines/:id"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <MachineDetail />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <MachineDetail />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -385,9 +450,11 @@ export default function App() {
         path="/budget"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <BudgetPage />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <BudgetPage />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -395,9 +462,11 @@ export default function App() {
         path="/iam"
         element={
           <ProtectedRoute>
-            <AppLayout>
-              <IAM />
-            </AppLayout>
+            <AdminOnlyRoute>
+              <AppLayout>
+                <IAM />
+              </AppLayout>
+            </AdminOnlyRoute>
           </ProtectedRoute>
         }
       />
@@ -415,10 +484,8 @@ export default function App() {
           </ProtectedRoute>
         }
       />
-      <Route
-        path="/leaderboard"
-        element={<ProtectedRoute><AppLayout><Leaderboard /></AppLayout></ProtectedRoute>}
-      />
+      {/* Old /leaderboard route removed — folded into /insights/spend-quality
+          via the redirect declared earlier in this file. */}
       <Route
         path="/api-keys"
         element={<Navigate to="/settings?tab=keys" replace />}

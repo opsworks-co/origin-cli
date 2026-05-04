@@ -87,9 +87,20 @@ function groupByOrg(repos: Repo[]): OrgGroup[] {
 
 export default function Repos() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, activeOrg } = useAuth();
   const isSolo = user?.accountType === 'developer';
+  // Connect GitHub / GitLab and Add Repo all hit admin-gated endpoints
+  // (`/api/github-app/install`, `/api/gitlab-oauth/install`, `POST /api/repos`).
+  // Without this guard, a member sees the buttons, clicks one, and the
+  // request silently 403s — looks "broken" to them. Solo developers are
+  // implicit admins of their personal workspace.
+  const isAdmin = isSolo || activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN';
   const [repos, setRepos] = useState<Repo[]>([]);
+  // Repos this user has access to in *other* orgs they belong to —
+  // surfaced in a separate "Inherited from teams" section below the
+  // primary list so members can see at a glance what the admin granted
+  // them across the org boundary.
+  const [inheritedRepos, setInheritedRepos] = useState<Array<{ id: string; name: string; orgId: string; orgName: string; commitCount: number }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -220,12 +231,36 @@ export default function Repos() {
 
   const fetchRepos = useCallback((silent = false) => {
     if (!silent) setLoading(true);
-    api
-      .getRepos()
-      .then(setRepos)
+    // Pull both:
+    //   1. /api/repos → repos in the active org (the canonical view; admin
+    //      has full control over these).
+    //   2. /api/me/repos → federated across every org the user belongs
+    //      to. Used to populate the "Inherited from teams" section below
+    //      so members see what their admin granted them in OTHER orgs
+    //      without having to switch context.
+    Promise.allSettled([
+      api.getRepos(),
+      api.getMeRepos(),
+    ])
+      .then(([primary, federated]) => {
+        if (primary.status === 'fulfilled') setRepos(primary.value);
+        if (federated.status === 'fulfilled') {
+          const activeOrgId = activeOrg?.orgId;
+          const inherited = federated.value.repos
+            .filter((r) => r.org && r.org.id !== activeOrgId)
+            .map((r) => ({
+              id: r.id,
+              name: r.name,
+              orgId: r.org!.id,
+              orgName: r.org!.name,
+              commitCount: r.commitCount,
+            }));
+          setInheritedRepos(inherited);
+        }
+      })
       .catch((err) => { if (!silent) setError(err.message); })
       .finally(() => { if (!silent) setLoading(false); });
-  }, []);
+  }, [activeOrg?.orgId]);
 
   // Auto-refresh repo list every 20s so commit/session counts stay live as
   // the CLI shadow-syncs new commits and the background sync pulls from
@@ -553,7 +588,12 @@ export default function Repos() {
                 </svg>
               </button>
             )}
-            {!hasGitHub && (
+            {/* Connect / Add buttons hit admin-gated endpoints. Hide for
+                non-admins so they don't click into a silent 403 — the
+                "Inherited from teams" section below shows what their
+                admin already granted them, which is the only thing they
+                can act on at this level. */}
+            {isAdmin && !hasGitHub && (
               <button
                 onClick={() => handleConnectGitHub()}
                 className="inline-flex items-center gap-2 text-sm font-medium px-3.5 py-2 rounded-lg
@@ -567,7 +607,7 @@ export default function Repos() {
                 Connect GitHub
               </button>
             )}
-            {!hasGitLab && (
+            {isAdmin && !hasGitLab && (
               <button
                 onClick={() => handleConnectGitLab()}
                 className="inline-flex items-center gap-2 text-sm font-medium px-3.5 py-2 rounded-lg
@@ -596,6 +636,7 @@ export default function Repos() {
                 Import from GitLab
               </button>
             )}
+            {isAdmin && (
             <button
               onClick={() => { setShowForm(!showForm); setShowImport(false); setShowGitLabImport(false); }}
               className="inline-flex items-center gap-1.5 text-sm font-medium px-3.5 py-2 rounded-lg
@@ -619,6 +660,7 @@ export default function Repos() {
                 </>
               )}
             </button>
+            )}
           </div>
         ) : undefined}
       />
@@ -1223,6 +1265,38 @@ export default function Repos() {
             </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Inherited from teams — repos the user can access in OTHER orgs
+          they belong to (granted by an admin in that team). Read-only at
+          this level: clicking opens the repo detail in its source org.
+          Empty list = nothing to show; we just hide the section. */}
+      {inheritedRepos.length > 0 && (
+        <div className="pt-4 space-y-2">
+          <div className="flex items-baseline justify-between">
+            <h3 className="text-sm font-semibold text-gray-200">Inherited from teams</h3>
+            <span className="text-[11px] text-gray-500">{inheritedRepos.length} repo{inheritedRepos.length === 1 ? '' : 's'} granted by team admins</span>
+          </div>
+          <div className="rounded-xl border border-gray-800/80 bg-gray-900/40 divide-y divide-gray-800/80">
+            {inheritedRepos.map((r) => (
+              <a
+                key={`${r.orgId}:${r.id}`}
+                href={`/repos/${r.id}`}
+                className="px-3 py-2.5 flex items-center gap-3 hover:bg-gray-800/40 transition-colors"
+              >
+                <span className="text-sm font-medium text-gray-200 truncate flex-1">{r.name}</span>
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-indigo-500/10 text-indigo-300 border border-indigo-500/30 whitespace-nowrap">
+                  {r.orgName}
+                </span>
+                <span className="text-[11px] text-gray-500 tabular-nums whitespace-nowrap">{r.commitCount} commit{r.commitCount === 1 ? '' : 's'}</span>
+                <span className="text-gray-500 text-xs">→</span>
+              </a>
+            ))}
+          </div>
+          <p className="text-[11px] text-gray-600">
+            Granted by an admin in the source team. To request access changes, contact that team's admin.
+          </p>
         </div>
       )}
 

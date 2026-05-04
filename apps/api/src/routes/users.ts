@@ -2,6 +2,8 @@ import { Router, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
+import { sendEmail } from '../services/email.js';
+import { buildInviteEmailHTML } from '../services/email-templates.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -36,7 +38,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
               take: 1,
               orderBy: { createdAt: 'desc' },
             },
-            _count: { select: { reviews: true, sessions: true } },
+            // Reviews are written against sessions, but a user's review
+            // count is org-agnostic on the schema, so we still pull it via
+            // _count and accept it as a global lifetime stat.
+            _count: { select: { reviews: true } },
           },
         },
       },
@@ -46,18 +51,32 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     const userIds = memberships.map((m) => m.user.id);
 
-    const [costAggs, lastSessions] = await Promise.all([
+    // CodingSession has no direct orgId column — we scope through
+    // commit.repo.orgId so a member's stats here are *this org's* sessions
+    // only. Without this scoping, a user who's also active in another org
+    // had their other-org sessions and costs bleed into this listing.
+    const sessionScope = {
+      userId: { in: userIds },
+      commit: { repo: { orgId } },
+    };
+    const [sessionCounts, costAggs, lastSessions] = await Promise.all([
       prisma.codingSession.groupBy({
         by: ['userId'],
-        where: { userId: { in: userIds } },
+        where: sessionScope,
+        _count: { _all: true },
+      }),
+      prisma.codingSession.groupBy({
+        by: ['userId'],
+        where: sessionScope,
         _sum: { costUsd: true, linesAdded: true },
       }),
       prisma.codingSession.groupBy({
         by: ['userId'],
-        where: { userId: { in: userIds } },
+        where: sessionScope,
         _max: { createdAt: true },
       }),
     ]);
+    const sessionCountMap = new Map(sessionCounts.map((c) => [c.userId, c._count._all]));
     const costMap = new Map(costAggs.map((c) => [c.userId, c]));
     const lastSessionMap = new Map(lastSessions.map((s) => [s.userId, s._max.createdAt]));
 
@@ -71,7 +90,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         role: m.role,
         createdAt: u.createdAt,
         joinedAt: m.joinedAt,
-        sessions: u._count.sessions,
+        sessions: sessionCountMap.get(u.id) || 0,
         reviews: u._count.reviews,
         totalCost: parseFloat((costs?._sum.costUsd || 0).toFixed(2)),
         linesAdded: costs?._sum.linesAdded || 0,
@@ -173,17 +192,23 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     });
     if (!membership) return res.status(404).json({ error: 'User not found' });
 
+    // Org-scoped filter — without it, sessions and reviews from the user's
+    // *other* orgs leak into this org's user-detail page (Brigada showing
+    // 40 sessions / $43.97 from a personal-workspace history).
+    const userOrgScope = { userId: id, commit: { repo: { orgId } } };
+    const reviewOrgScope = { userId: id, session: { commit: { repo: { orgId } } } };
+
     const [sessionCount, reviewCount, costAgg] = await Promise.all([
-      prisma.codingSession.count({ where: { userId: id } }),
-      prisma.sessionReview.count({ where: { userId: id } }),
+      prisma.codingSession.count({ where: userOrgScope }),
+      prisma.sessionReview.count({ where: reviewOrgScope }),
       prisma.codingSession.aggregate({
-        where: { userId: id },
+        where: userOrgScope,
         _sum: { costUsd: true, linesAdded: true, linesRemoved: true, tokensUsed: true },
       }),
     ]);
 
     const recentSessions = await prisma.codingSession.findMany({
-      where: { userId: id },
+      where: userOrgScope,
       include: {
         commit: { include: { repo: true } },
         agent: true,
@@ -194,7 +219,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     });
 
     const recentReviews = await prisma.sessionReview.findMany({
-      where: { userId: id },
+      where: reviewOrgScope,
       include: {
         session: { include: { commit: { include: { repo: true } } } },
       },
@@ -310,6 +335,11 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
   try {
     const orgId = req.activeOrgId!;
     const targetId = req.params.id as string;
+    // Optional flag — when true, also delete every org-scoped artifact
+    // this user owns (sessions, reviews, repo/agent grants). Default
+    // (omitted / false) keeps the historical record for audit + team
+    // visibility, removing only Membership + this org's API keys.
+    const purgeData = req.body?.purgeData === true;
 
     if (targetId === req.user!.id) {
       return res.status(400).json({ error: 'Cannot remove yourself' });
@@ -328,25 +358,116 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       }
     }
 
-    // Org-scoped cleanup: drop their API keys for this org, drop the
-    // membership row. Do NOT touch User, AuthToken, SessionBookmark, or
-    // sessions/reviews — those may belong to other orgs the user is in.
-    await prisma.apiKey.deleteMany({ where: { userId: targetId, orgId } });
-    await prisma.membership.delete({
-      where: { userId_orgId: { userId: targetId, orgId } },
+    // Track what got purged so the audit entry shows the blast radius.
+    let purgedSessions = 0;
+    let purgedReviews = 0;
+    let purgedRepoGrants = 0;
+    let purgedAgentGrants = 0;
+
+    // Wrap everything in one transaction. Previously the purge ran as a
+    // sequence of un-wrapped deleteMany calls, and `codingSession.deleteMany`
+    // would fail mid-way with a FK error (SessionDiff, PromptChange,
+    // SecretFinding, TrailSession, SharedSession, and the optional
+    // Commit.sessionId all reference CodingSession without onDelete:
+    // Cascade), but the membership delete that ran AFTER it still
+    // committed — so the admin saw "Removed" while the sessions silently
+    // survived. Re-inviting the same email reuses the User row, so the
+    // resurrected member would see all their old work. Bundling the
+    // whole flow in $transaction means a failure rolls back, and
+    // explicitly deleting the non-cascading children means it doesn't
+    // fail in the first place.
+    await prisma.$transaction(async (tx) => {
+      if (purgeData) {
+        // Pull session IDs first so we can drive the child cleanups by
+        // a stable list. Org-scoped via primary commit's repo, same rule
+        // as the Sessions list query — a user's sessions in OTHER orgs
+        // they belong to stay intact.
+        const ownedSessions = await tx.codingSession.findMany({
+          where: { userId: targetId, commit: { repo: { orgId } } },
+          select: { id: true },
+        });
+        const sessionIds = ownedSessions.map((s) => s.id);
+
+        if (sessionIds.length > 0) {
+          // Children that DON'T cascade — must be cleared before the
+          // sessions themselves. Snapshot / SessionRepo / SessionBookmark
+          // / SessionAnnotation / IssueSession all have onDelete: Cascade
+          // and clean themselves up.
+          await tx.sessionReview.deleteMany({ where: { sessionId: { in: sessionIds } } });
+          await tx.sessionDiff.deleteMany({ where: { sessionId: { in: sessionIds } } });
+          await tx.promptChange.deleteMany({ where: { sessionId: { in: sessionIds } } });
+          await tx.secretFinding.deleteMany({ where: { sessionId: { in: sessionIds } } });
+          await tx.trailSession.deleteMany({ where: { sessionId: { in: sessionIds } } });
+          await tx.sharedSession.deleteMany({ where: { sessionId: { in: sessionIds } } });
+          // Secondary commits (Commit.sessionId) — soft FK that's
+          // nullable. Unlink rather than delete: those commits still
+          // exist in git history.
+          await tx.commit.updateMany({
+            where: { sessionId: { in: sessionIds } },
+            data: { sessionId: null },
+          });
+
+          const r2 = await tx.codingSession.deleteMany({
+            where: { id: { in: sessionIds } },
+          });
+          purgedSessions = r2.count;
+        }
+
+        // Reviews this user wrote on OTHER members' sessions in this
+        // org. Reviews on their own sessions are already gone via the
+        // sessionReview deleteMany above.
+        const r1 = await tx.sessionReview.deleteMany({
+          where: { userId: targetId, session: { commit: { repo: { orgId } } } },
+        });
+        purgedReviews = r1.count;
+
+        // Org-scoped access grants. The user's grants in OTHER orgs stay
+        // intact — same membership-boundary rule as everywhere else.
+        const r3 = await tx.repoMember.deleteMany({
+          where: { userId: targetId, repo: { orgId } },
+        });
+        purgedRepoGrants = r3.count;
+
+        const r4 = await tx.agentMember.deleteMany({
+          where: { userId: targetId, agent: { orgId } },
+        });
+        purgedAgentGrants = r4.count;
+      }
+
+      // Always-on cleanup: drop their API keys for this org, drop the
+      // membership row. Do NOT touch User, AuthToken — those may belong
+      // to other orgs the user is in.
+      await tx.apiKey.deleteMany({ where: { userId: targetId, orgId } });
+      await tx.membership.delete({
+        where: { userId_orgId: { userId: targetId, orgId } },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          orgId,
+          userId: req.user!.id,
+          action: 'MEMBER_REMOVED',
+          resource: targetId,
+          metadata: JSON.stringify({
+            email: target.user.email,
+            name: target.user.name,
+            role: target.role,
+            purgeData,
+            purgedSessions,
+            purgedReviews,
+            purgedRepoGrants,
+            purgedAgentGrants,
+          }),
+        },
+      });
     });
 
-    await prisma.auditLog.create({
-      data: {
-        orgId,
-        userId: req.user!.id,
-        action: 'MEMBER_REMOVED',
-        resource: targetId,
-        metadata: JSON.stringify({ email: target.user.email, name: target.user.name, role: target.role }),
-      },
+    res.json({
+      success: true,
+      purged: purgeData
+        ? { sessions: purgedSessions, reviews: purgedReviews, repoGrants: purgedRepoGrants, agentGrants: purgedAgentGrants }
+        : null,
     });
-
-    res.json({ success: true });
   } catch (err) {
     console.error('Remove member error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -584,7 +705,7 @@ router.post('/:id/revoke-key', requireRole('ADMIN'), async (req: AuthRequest, re
 router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const orgId = req.activeOrgId!;
-    const { email, role } = req.body;
+    const { email, role, pendingGrants } = req.body;
     const inviteRole = (role || 'MEMBER').toUpperCase();
 
     if (!VALID_ROLES.includes(inviteRole)) return res.status(400).json({ error: 'Invalid role' });
@@ -604,6 +725,43 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
       }
     }
 
+    // Sanitize pendingGrants: drop bad shapes, clamp levels to known
+    // values, and confirm every repo/agent id actually belongs to this
+    // org. Saves us from someone hand-crafting a request body that grants
+    // access to a repo in a different org.
+    let pendingGrantsJson: string | null = null;
+    if (pendingGrants && typeof pendingGrants === 'object') {
+      const repos = Array.isArray(pendingGrants.repos) ? pendingGrants.repos : [];
+      const agents = Array.isArray(pendingGrants.agents) ? pendingGrants.agents : [];
+      const repoIds = repos.map((r: any) => r?.id).filter((id: any) => typeof id === 'string');
+      const agentIds = agents.map((a: any) => a?.id).filter((id: any) => typeof id === 'string');
+      const [validRepos, validAgents] = await Promise.all([
+        repoIds.length > 0
+          ? prisma.repo.findMany({ where: { orgId, id: { in: repoIds } }, select: { id: true } })
+          : Promise.resolve([] as Array<{ id: string }>),
+        agentIds.length > 0
+          ? prisma.agent.findMany({ where: { orgId, id: { in: agentIds } }, select: { id: true } })
+          : Promise.resolve([] as Array<{ id: string }>),
+      ]);
+      const validRepoIds = new Set(validRepos.map((r) => r.id));
+      const validAgentIds = new Set(validAgents.map((a) => a.id));
+      const cleanRepos = repos
+        .filter((r: any) => validRepoIds.has(r.id))
+        .map((r: any) => ({
+          id: r.id as string,
+          level: ['read', 'write', 'admin'].includes(r.level) ? r.level : 'read',
+        }));
+      const cleanAgents = agents
+        .filter((a: any) => validAgentIds.has(a.id))
+        .map((a: any) => ({
+          id: a.id as string,
+          level: ['use', 'admin'].includes(a.level) ? a.level : 'use',
+        }));
+      if (cleanRepos.length > 0 || cleanAgents.length > 0) {
+        pendingGrantsJson = JSON.stringify({ repos: cleanRepos, agents: cleanAgents });
+      }
+    }
+
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
@@ -615,6 +773,7 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
         token,
         createdBy: req.user!.id,
         expiresAt,
+        pendingGrants: pendingGrantsJson,
       },
     });
 
@@ -628,12 +787,41 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
       },
     });
 
+    // Send the invite email if an address was provided. Non-blocking — a
+    // delivery failure shouldn't fail the API call. Admins can still copy
+    // the link from the response or the /invites list as a fallback.
+    let emailSent = false;
+    let emailError: string | undefined;
+    if (email) {
+      const [org, inviter] = await Promise.all([
+        prisma.org.findUnique({ where: { id: orgId }, select: { name: true } }),
+        prisma.user.findUnique({ where: { id: req.user!.id }, select: { name: true, email: true } }),
+      ]);
+      const webUrl = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
+      const acceptUrl = `${webUrl}/accept-invite/${token}`;
+      const inviterName = inviter?.name || inviter?.email || 'A teammate';
+      const inviterEmail = inviter?.email || '';
+      const html = buildInviteEmailHTML({
+        inviterName,
+        inviterEmail,
+        orgName: org?.name || 'an organization',
+        role: inviteRole,
+        acceptUrl,
+      });
+      const subject = `${inviterName} invited you to ${org?.name || 'their team'} on Origin`;
+      const result = await sendEmail(email, subject, html);
+      emailSent = result.success;
+      emailError = result.error;
+    }
+
     res.status(201).json({
       id: invitation.id,
       token,
       role: inviteRole,
       email: email || null,
       expiresAt,
+      emailSent,
+      emailError,
     });
   } catch (err) {
     console.error('Create invite error:', err);
@@ -718,11 +906,14 @@ router.post('/:id/models', requireRole('ADMIN'), async (req: AuthRequest, res: R
     if (!await isMemberOfActiveOrg(req.params.id as string, req.activeOrgId!)) {
       return res.status(404).json({ error: 'User not found in your organization' });
     }
-    const { model, monthlyLimit, tokenLimit, maxCostPerSession, maxTokensPerSession } = req.body || {};
+    const { model, monthlyLimit, tokenLimit, maxCostPerSession, maxTokensPerSession, period } = req.body || {};
     if (typeof model !== 'string' || !model.trim()) {
       return res.status(400).json({ error: 'model is required' });
     }
     if (model.length > 200) return res.status(413).json({ error: 'model exceeds max length of 200' });
+    if (period !== undefined && period !== 'daily' && period !== 'weekly' && period !== 'monthly') {
+      return res.status(400).json({ error: 'period must be daily, weekly, or monthly' });
+    }
     try {
       const created = await prisma.userModelLimit.create({
         data: {
@@ -732,6 +923,7 @@ router.post('/:id/models', requireRole('ADMIN'), async (req: AuthRequest, res: R
           tokenLimit: typeof tokenLimit === 'number' && tokenLimit > 0 ? tokenLimit : null,
           maxCostPerSession: typeof maxCostPerSession === 'number' && maxCostPerSession > 0 ? maxCostPerSession : null,
           maxTokensPerSession: typeof maxTokensPerSession === 'number' && maxTokensPerSession > 0 ? maxTokensPerSession : null,
+          ...(period ? { period } : {}),
         },
       });
       res.json(created);
@@ -760,6 +952,13 @@ router.put('/:id/models/:modelKey', requireRole('ADMIN'), async (req: AuthReques
         const v = body[key];
         data[key] = typeof v === 'number' && v > 0 ? v : null;
       }
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'period')) {
+      const p = (body as any).period;
+      if (p !== 'daily' && p !== 'weekly' && p !== 'monthly') {
+        return res.status(400).json({ error: 'period must be daily, weekly, or monthly' });
+      }
+      data.period = p;
     }
     try {
       const updated = await prisma.userModelLimit.update({

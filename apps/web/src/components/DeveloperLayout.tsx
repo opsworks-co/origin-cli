@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import NotificationBell from './NotificationBell';
@@ -13,7 +13,6 @@ import {
   Lightbulb,
   LayoutDashboard,
   Play,
-  LogOut,
   Menu,
   X,
   Sun,
@@ -45,9 +44,16 @@ const NAV_GROUPS = [
 ];
 
 export default function DeveloperLayout({ children }: { children: React.ReactNode }) {
-  const { user, logout } = useAuth();
+  const { user, activeOrg } = useAuth();
   const { theme, toggleTheme } = useTheme();
-  const navigate = useNavigate();
+  // The slim layout is also used for non-admin members of team orgs (per
+  // App.tsx). "SOLO" is correct only for personal workspaces — for team
+  // members render their actual role so the brand badge stops misleading
+  // them ("Origin SOLO" while they're sitting in a team org as MEMBER).
+  const brandBadge: string =
+    activeOrg?.type === 'personal' ? 'SOLO'
+    : activeOrg?.role ? activeOrg.role.toUpperCase()
+    : 'SOLO';
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // One-time tour nudge: Register pages set `origin:tour-highlight = '1'`
   // so new accounts see a pulsing Tour button on their very first session.
@@ -55,6 +61,13 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
   // clicking — so it never lingers forever.
   const [tourHighlight, setTourHighlight] = useState(() => {
     try { return localStorage.getItem('origin:tour-highlight') === '1'; } catch { return false; }
+  });
+  // Hide the Tour button entirely once the user has completed (or
+  // dismissed) the dashboard tour. ProductTour writes `done` to this
+  // localStorage key on completion (see ProductTour.tsx:392). Keeping the
+  // sidebar tidy after first run — no permanent self-help button.
+  const [tourComplete, setTourComplete] = useState(() => {
+    try { return localStorage.getItem('origin:tour-dashboard-v1') === 'done'; } catch { return false; }
   });
 
   useEffect(() => {
@@ -65,11 +78,6 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
     }, 60_000);
     return () => clearTimeout(t);
   }, [tourHighlight]);
-
-  const handleLogout = () => {
-    logout();
-    navigate('/login');
-  };
 
   const linkClasses = ({ isActive }: { isActive: boolean }) =>
     `group relative flex items-center gap-3 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-colors ${
@@ -104,7 +112,7 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
           <LogoMark size={26} variant="solo" />
           <div className="flex-1 min-w-0">
             <span className="text-[14px] font-semibold text-gray-900 dark:text-gray-100 tracking-tight">Origin</span>
-            <span className="text-[10px] ml-1.5 uppercase tracking-wider text-emerald-600/80 dark:text-emerald-400/80 font-medium">Solo</span>
+            <span className="text-[10px] ml-1.5 uppercase tracking-wider text-emerald-600/80 dark:text-emerald-400/80 font-medium">{brandBadge}</span>
           </div>
           <button
             onClick={() => setSidebarOpen(false)}
@@ -148,40 +156,28 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
           ))}
         </nav>
 
-        {/* User footer */}
-        <div className="border-t border-gray-200 dark:border-white/[0.05] px-2 py-3">
-          {/* Org switcher — even personal users see it so they can spin up
-              or join a team org without leaving the layout. */}
-          <div className="px-1 pb-1.5">
-            <OrgSwitcher />
-          </div>
-          <div className="flex items-center gap-2.5 px-2 py-2 rounded-lg">
-            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500/25 to-emerald-600/15 ring-1 ring-emerald-500/25 flex items-center justify-center text-emerald-600 dark:text-emerald-300 text-[12px] font-semibold">
-              {user?.name?.charAt(0).toUpperCase() ?? '?'}
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-medium text-gray-800 dark:text-gray-100 truncate leading-tight">{user?.name}</p>
-              <p className="text-[10px] text-gray-500 dark:text-gray-500 truncate leading-tight">{user?.email}</p>
+        {/* Account footer — single GitHub-style switcher (org + signed-in
+            user collapsed into one button), with bell and theme toggle as
+            sibling icon controls. Sign out lives inside the dropdown. */}
+        <div className="border-t border-gray-200 dark:border-white/[0.05] px-2 py-3 space-y-2">
+          <div className="flex items-center gap-1">
+            <div className="flex-1 min-w-0">
+              <OrgSwitcher />
             </div>
             <NotificationBell />
             <button
               onClick={toggleTheme}
-              className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 rounded-md transition-colors"
+              className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] rounded-md transition-colors"
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             >
               {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
             </button>
           </div>
-          <div className="flex items-center gap-1 mt-1">
+          {!tourComplete && (
             <button
               onClick={() => {
-                // Clear the one-time highlight flag — even if they click
-                // from a different page, they've acknowledged the tour.
                 try { localStorage.removeItem('origin:tour-highlight'); } catch { /* private mode */ }
                 setTourHighlight(false);
-                // If we're not on the dashboard, the ProductTour component is
-                // unmounted — navigate there first, then dispatch on the next
-                // tick once the component mounts and attaches its listener.
                 const onDashboard = window.location.pathname === '/me';
                 if (!onDashboard) {
                   window.location.href = '/me?tour=1';
@@ -191,8 +187,8 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
               }}
               className={
                 tourHighlight
-                  ? 'relative flex-1 flex items-center justify-center gap-1.5 text-[11px] font-semibold text-white px-2 py-1.5 rounded-md bg-gradient-to-r from-indigo-600 to-violet-600 shadow-[0_0_0_1px_rgba(139,92,246,0.5),0_0_18px_rgba(139,92,246,0.45)] hover:shadow-[0_0_0_1px_rgba(139,92,246,0.7),0_0_24px_rgba(139,92,246,0.6)] transition-all'
-                  : 'flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors'
+                  ? 'relative w-full flex items-center justify-center gap-1.5 text-[11px] font-semibold text-white px-2 py-1.5 rounded-md bg-gradient-to-r from-indigo-600 to-violet-600 shadow-[0_0_0_1px_rgba(139,92,246,0.5),0_0_18px_rgba(139,92,246,0.45)] hover:shadow-[0_0_0_1px_rgba(139,92,246,0.7),0_0_24px_rgba(139,92,246,0.6)] transition-all'
+                  : 'w-full flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors'
               }
             >
               <Sparkles className={`w-3.5 h-3.5 ${tourHighlight ? 'animate-pulse' : ''}`} />
@@ -204,14 +200,7 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
                 </span>
               )}
             </button>
-            <button
-              onClick={handleLogout}
-              className="flex-1 flex items-center justify-center gap-1.5 text-[11px] text-gray-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] px-2 py-1.5 rounded-md transition-colors"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              Sign out
-            </button>
-          </div>
+          )}
         </div>
       </aside>
 
@@ -242,8 +231,14 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
       {/* AI Assistant — disabled for now, re-enable when the feature is ready.
           To restore: uncomment the <ChatWidget> block and the import above. */}
 
-      {/* Product tour */}
-      <ProductTour steps={DASHBOARD_TOUR} tourId="dashboard-v1" />
+      {/* Product tour — onComplete flips the local state so the sidebar
+          Tour button hides immediately, no reload needed. The same flag
+          is read on next mount via localStorage. */}
+      <ProductTour
+        steps={DASHBOARD_TOUR}
+        tourId="dashboard-v1"
+        onComplete={() => setTourComplete(true)}
+      />
     </div>
   );
 }

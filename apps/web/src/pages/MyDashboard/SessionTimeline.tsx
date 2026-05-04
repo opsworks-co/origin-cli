@@ -70,6 +70,15 @@ export function SessionTimeline({ sessions, navigate }: { sessions: Session[]; n
                           >
                             {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-')}
                           </span>
+                          {s.org && (
+                            // Federated view chip — only shown when /api/me/sessions
+                            // populated `org`. Lets users tell apart same-named
+                            // repos across orgs ("api in Brigada LTD" vs. "api
+                            // in Personal").
+                            <span className="hidden sm:inline px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 whitespace-nowrap">
+                              {s.org.name}
+                            </span>
+                          )}
                           {s.repoName && (
                             <span className="text-xs text-gray-500 truncate">{s.repoName}</span>
                           )}

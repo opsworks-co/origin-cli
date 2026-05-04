@@ -7,6 +7,21 @@ const router = Router();
 router.use(requireAuth);
 router.use(resolveOrgContext);
 
+/** Owners and admins see org-wide aggregates; everyone else sees only
+ *  their own data. Mirrors the pattern in routes/sessions.ts so the
+ *  Insights page on a member account can't reveal teammates' sessions. */
+function isAdminUser(req: AuthRequest): boolean {
+  const role = (req.activeRole || '').toUpperCase();
+  return role === 'OWNER' || role === 'ADMIN';
+}
+
+/** Returns a Prisma where-fragment that pins the query to `userId = me`
+ *  for non-admins, or an empty object (no extra filter) for admins.
+ *  Spreadable into any CodingSession.where: `{ ...sessionUserScope(req), foo: 'bar' }`. */
+function sessionUserScope(req: AuthRequest): { userId?: string } {
+  return isAdminUser(req) ? {} : { userId: req.user!.id };
+}
+
 // GET / — compute dashboard stats
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
@@ -33,14 +48,15 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where: { repoId: { in: repoIds } },
     });
 
-    // Total coding sessions
+    // Total coding sessions — scoped to the caller for non-admins so a
+    // member's Insights tab shows only their own work, not the whole team's.
     const totalSessions = await prisma.codingSession.count({
-      where: { commit: { repoId: { in: repoIds } } },
+      where: { ...sessionUserScope(req), commit: { repoId: { in: repoIds } } },
     });
 
     // Active (running) sessions
     const activeSessions = await prisma.codingSession.count({
-      where: { commit: { repoId: { in: repoIds } }, status: 'RUNNING' },
+      where: { ...sessionUserScope(req), commit: { repoId: { in: repoIds } }, status: 'RUNNING' },
     });
 
     // Sessions this week
@@ -48,6 +64,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     weekAgo.setDate(weekAgo.getDate() - 7);
     const sessionsThisWeek = await prisma.codingSession.count({
       where: {
+        ...sessionUserScope(req),
         commit: { repoId: { in: repoIds } },
         createdAt: { gte: weekAgo },
       },
@@ -69,7 +86,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // Aggregates
     const aggregates = await prisma.codingSession.aggregate({
-      where: { commit: { repoId: { in: repoIds } } },
+      where: { ...sessionUserScope(req), commit: { repoId: { in: repoIds } } },
       _sum: {
         tokensUsed: true,
         costUsd: true,
@@ -89,6 +106,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     monthStart.setHours(0, 0, 0, 0);
     const monthAggs = await prisma.codingSession.aggregate({
       where: {
+        ...sessionUserScope(req),
         commit: { repoId: { in: repoIds } },
         createdAt: { gte: monthStart },
       },
@@ -100,6 +118,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // Unreviewed sessions
     const unreviewed = await prisma.codingSession.count({
       where: {
+        ...sessionUserScope(req),
         commit: { repoId: { in: repoIds } },
         review: null,
       },
@@ -115,7 +134,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // session-level totals first so they don't double-count.
     const modelGroups = await prisma.codingSession.groupBy({
       by: ['model'],
-      where: { commit: { repoId: { in: repoIds } } },
+      where: { ...sessionUserScope(req), commit: { repoId: { in: repoIds } } },
       _count: true,
       _sum: { costUsd: true, tokensUsed: true },
     });
@@ -127,7 +146,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const promptGroups = await prisma.promptChange.groupBy({
       by: ['model'],
       where: {
-        session: { commit: { repoId: { in: repoIds } } },
+        session: { ...sessionUserScope(req), commit: { repoId: { in: repoIds } } },
         model: { not: null },
         OR: [
           { costUsd: { gt: 0 } },
@@ -199,7 +218,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // Tokens by agent (separate from model — same model can run under multiple agents)
     const agentGroups = await prisma.codingSession.groupBy({
       by: ['agentId'],
-      where: { commit: { repoId: { in: repoIds } } },
+      where: { ...sessionUserScope(req), commit: { repoId: { in: repoIds } } },
       _count: true,
       _sum: { tokensUsed: true, costUsd: true },
     });
@@ -242,6 +261,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     const recentSessions = await prisma.codingSession.findMany({
       where: {
+        ...sessionUserScope(req),
         commit: { repoId: { in: repoIds } },
         createdAt: { gte: rangeFrom, lte: rangeTo },
       },
@@ -349,6 +369,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const topAgentGroups = await prisma.codingSession.groupBy({
       by: ['agentId'],
       where: {
+        ...sessionUserScope(req),
         commit: { repoId: { in: repoIds } },
         agentId: { not: null },
       },
@@ -379,14 +400,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         };
       });
 
-    // Top engineers by AI usage
-    const authorGroups = await prisma.commit.groupBy({
-      by: ['author'],
-      where: { repoId: { in: repoIds }, session: { isNot: null } },
-      _count: true,
-      orderBy: { _count: { author: 'desc' } },
-      take: 5,
-    });
+    // Top engineers by AI usage. For non-admins this is intentionally
+    // hidden — exposing other members' commit authorship under
+    // "top engineers" leaks the same info we just scoped out of sessions.
+    const authorGroups = isAdminUser(req)
+      ? await prisma.commit.groupBy({
+          by: ['author'],
+          where: { repoId: { in: repoIds }, session: { isNot: null } },
+          _count: true,
+          orderBy: { _count: { author: 'desc' } },
+          take: 5,
+        })
+      : [];
     const topEngineers = authorGroups.map((g) => ({
       name: g.author,
       sessions: g._count,
@@ -402,10 +427,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // ── New enriched fields ──────────────────────────────────────
 
-    // Top contributors (from User model)
+    // Top contributors (from User model). Members only ever see themselves
+    // here — the userId scope collapses the leaderboard to a single row.
     const contributorAggs = await prisma.codingSession.groupBy({
       by: ['userId'],
       where: {
+        ...sessionUserScope(req),
         commit: { repoId: { in: repoIds } },
         userId: { not: null },
       },
@@ -439,7 +466,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const reviewStatusCounts = await prisma.sessionReview.groupBy({
       by: ['status'],
       where: {
-        session: { commit: { repoId: { in: repoIds } } },
+        session: { ...sessionUserScope(req), commit: { repoId: { in: repoIds } } },
       },
       _count: true,
     });
@@ -483,7 +510,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // Session averages
     const sessionAvgs = await prisma.codingSession.aggregate({
-      where: { commit: { repoId: { in: repoIds } } },
+      where: { ...sessionUserScope(req), commit: { repoId: { in: repoIds } } },
       _avg: { costUsd: true, durationMs: true, tokensUsed: true },
     });
 
@@ -495,6 +522,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const costByUserAggs = await prisma.codingSession.groupBy({
       by: ['userId'],
       where: {
+        ...sessionUserScope(req),
         commit: { repoId: { in: repoIds } },
         userId: { not: null },
       },
@@ -518,6 +546,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // ── New: Cost by repo (cap 500k) ─────────────────────────────
     const costByRepoAggs = await prisma.codingSession.findMany({
       where: {
+        ...sessionUserScope(req),
         commit: { repoId: { in: repoIds } },
         createdAt: { gte: rangeFrom, lte: rangeTo },
       },

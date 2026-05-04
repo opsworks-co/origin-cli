@@ -15,7 +15,7 @@ function withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   result.finally(() => { setTimeout(() => sessionStartLocks.delete(key), 10000); });
   return result;
 }
-import { notifyOrgAdmins } from '../services/notifications.js';
+import { notifyOrgAdmins, createNotification } from '../services/notifications.js';
 import { runAIReview } from '../services/ai-review.js';
 import { checkBudget, recordSpend } from '../services/budget.js';
 import { ensureAgentModel } from '../services/agent-models.js';
@@ -127,9 +127,62 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     req.apiKeyName = found.name;
     req.keyType = (found as any).keyType || 'team';
     req.accountType = (found as any).user?.accountType || 'org';
-    req.repoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
-    req.agentScopes = found.agentScopes.map((s: { agentId: string }) => s.agentId);
     req.mcpUserId = found.userId ?? found.org.memberships[0]?.userId ?? undefined;
+
+    const explicitRepoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
+    const explicitAgentScopes = found.agentScopes.map((s: { agentId: string }) => s.agentId);
+
+    // Effective scope semantics:
+    //   - explicit ApiKeyRepoScope/ApiKeyAgentScope rows → restrict the
+    //     key tighter than the user (defense-in-depth for CI keys etc.)
+    //   - no explicit rows → fall back to the linked user's user-level
+    //     access (Membership + RepoMember + AgentMember). Avoids the
+    //     long-standing trap where an admin grants a user access via the
+    //     IAM page but the user's auto-issued CLI key — created with no
+    //     explicit scopes — keeps getting "Access denied" from MCP.
+    if (explicitRepoScopes.length > 0) {
+      req.repoScopes = explicitRepoScopes;
+    } else if (found.userId) {
+      // Resolve user-level access. OWNER/ADMIN of this org get every repo.
+      const membership = await prisma.membership.findUnique({
+        where: { userId_orgId: { userId: found.userId, orgId: found.orgId } },
+        select: { role: true },
+      });
+      if (membership && (membership.role === 'OWNER' || membership.role === 'ADMIN')) {
+        const repos = await prisma.repo.findMany({ where: { orgId: found.orgId }, select: { id: true } });
+        req.repoScopes = repos.map((r) => r.id);
+      } else {
+        const memberRows = await prisma.repoMember.findMany({
+          where: { userId: found.userId, repo: { orgId: found.orgId } },
+          select: { repoId: true },
+        });
+        req.repoScopes = memberRows.map((r) => r.repoId);
+      }
+    } else {
+      req.repoScopes = [];
+    }
+
+    if (explicitAgentScopes.length > 0) {
+      req.agentScopes = explicitAgentScopes;
+    } else if (found.userId) {
+      const membership = await prisma.membership.findUnique({
+        where: { userId_orgId: { userId: found.userId, orgId: found.orgId } },
+        select: { role: true },
+      });
+      if (membership && (membership.role === 'OWNER' || membership.role === 'ADMIN')) {
+        const agents = await prisma.agent.findMany({ where: { orgId: found.orgId }, select: { id: true } });
+        req.agentScopes = agents.map((a) => a.id);
+      } else {
+        const memberRows = await prisma.agentMember.findMany({
+          where: { userId: found.userId, agent: { orgId: found.orgId } },
+          select: { agentId: true },
+        });
+        req.agentScopes = memberRows.map((m) => m.agentId);
+      }
+    } else {
+      req.agentScopes = [];
+    }
+
     next();
   } catch (err) {
     console.error('API key auth error:', err);
@@ -342,18 +395,23 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     }
 
     // Look up machine DB id for policy scoping — auto-register if missing
+    // *in this org*. Scoping by orgId is critical for multi-account setups
+    // where the same machineId reports to multiple orgs: a global lookup
+    // would find the first-org row and silently skip registering against
+    // every subsequent org, leaving them without a Machine record even
+    // though sessions still land.
     let machine = await prisma.machine.findFirst({
-      where: { machineId },
+      where: { machineId, orgId },
     });
     if (!machine) {
       try {
         const hostname = req.body.hostname || machineId.slice(0, 8);
         machine = await prisma.machine.upsert({
-          where: { machineId },
+          where: { machineId_orgId: { machineId, orgId } },
           create: { orgId, hostname, machineId, detectedTools: '[]', lastSeenAt: new Date() },
           update: { lastSeenAt: new Date() },
         });
-        console.log('[session/start] auto-registered machine', { machineId, hostname });
+        console.log('[session/start] auto-registered machine', { machineId, orgId, hostname });
       } catch { /* non-fatal */ }
     } else {
       // Update lastSeenAt
@@ -362,28 +420,53 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
 
     // Resolve agent from API key scopes + tool type
     // The API key is already assigned to specific agents — use those, no slug guessing needed
-    let agent: { id: string; systemPrompt?: string | null; securityRulesEnabled?: boolean; securityRules?: string | null; slug?: string; name?: string; versions?: { version: number }[] } | null = null;
-    const agentSelect = { id: true, systemPrompt: true, securityRulesEnabled: true, securityRules: true, slug: true, name: true, versions: { orderBy: { version: 'desc' as const }, take: 1, select: { version: true } } };
+    let agent: { id: string; systemPrompt?: string | null; securityRulesEnabled?: boolean; securityRules?: string | null; slug?: string; name?: string; isEnabled?: boolean; versions?: { version: number }[] } | null = null;
+    const agentSelect = { id: true, systemPrompt: true, securityRulesEnabled: true, securityRules: true, slug: true, name: true, isEnabled: true, versions: { orderBy: { version: 'desc' as const }, take: 1, select: { version: true } } };
 
-    // Enforce API key → agent scope: solo keys skip this check
-    if (!isSoloKey) {
-      if (!req.agentScopes || req.agentScopes.length === 0) {
-        return res.status(403).json({
-          error: 'No agent access',
-          message: 'This API key has no agent assignments. Assign agents in Settings → API Keys.',
-        });
-      }
+    // Permission union: a team session can use any agent the user can
+    // reach via *either* track —
+    //   (a) ApiKeyAgentScope: the agents pinned to the API key at creation
+    //       (legacy / "Add Member" / "Generate Key" chip selection),
+    //   (b) AgentMember: per-user grants written by Settings → IAM → Manage
+    //       access (UserAccess.tsx). This is the system the UI now writes
+    //       to when an admin toggles per-user agent access; honoring it
+    //       here is what makes those toggles immediately gate sessions.
+    //   (c) Inherited admin: OWNER/ADMIN of the org inherit access to
+    //       every agent in the org (same rule as resolveAgentAccess).
+    // Solo keys skip the whole check — they manage their own org.
+    const isOrgAdmin = req.activeRole === 'OWNER' || req.activeRole === 'ADMIN';
+    let memberAgentIds: string[] = [];
+    if (!isSoloKey && req.mcpUserId) {
+      const memberships = await prisma.agentMember.findMany({
+        where: { userId: req.mcpUserId, agent: { orgId } },
+        select: { agentId: true },
+      });
+      memberAgentIds = memberships.map((m) => m.agentId);
+    }
+    const grantedAgentIds = Array.from(new Set([
+      ...(req.agentScopes || []),
+      ...memberAgentIds,
+    ]));
+
+    if (!isSoloKey && grantedAgentIds.length === 0 && !isOrgAdmin) {
+      return res.status(403).json({
+        error: 'No agent access',
+        message: 'You have not been granted access to any agents. Ask an admin to grant access in Settings → IAM → Manage access.',
+      });
     }
 
-    // Get all agents this API key has access to
+    // Get all agents this user can reach. Org admins see every agent in
+    // the org; everyone else sees the union from the granted ids.
     const allowedAgents = isSoloKey
       ? await prisma.agent.findMany({ where: { orgId, status: 'ACTIVE' }, select: agentSelect })
-      : await prisma.agent.findMany({ where: { orgId, id: { in: req.agentScopes }, status: 'ACTIVE' }, select: agentSelect });
+      : isOrgAdmin
+        ? await prisma.agent.findMany({ where: { orgId, status: 'ACTIVE' }, select: agentSelect })
+        : await prisma.agent.findMany({ where: { orgId, id: { in: grantedAgentIds }, status: 'ACTIVE' }, select: agentSelect });
 
     if (allowedAgents.length === 0 && !isSoloKey) {
       return res.status(403).json({
         error: 'No active agents',
-        message: 'This API key is assigned to agents that no longer exist or are inactive.',
+        message: 'The agents you have access to no longer exist or are inactive.',
       });
     }
 
@@ -391,10 +474,13 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     if (allowedAgents.length === 0 && isSoloKey) {
       const autoSlug = agentSlug || 'ai-agent';
       const autoName = autoSlug.split('-').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      // Solo devs administer their own org, so auto-created agents are
+      // enabled by default — the per-agent toggle is meaningful for teams,
+      // not for someone tracking their own sessions.
       const created = await prisma.agent.upsert({
         where: { orgId_slug: { orgId, slug: autoSlug } },
-        create: { orgId, name: autoName, slug: autoSlug, model: model || 'unknown', status: 'ACTIVE' },
-        update: { status: 'ACTIVE' },
+        create: { orgId, name: autoName, slug: autoSlug, model: model || 'unknown', status: 'ACTIVE', isEnabled: true },
+        update: { status: 'ACTIVE', isEnabled: true },
       });
       agent = { ...created, systemPrompt: null, securityRulesEnabled: false, securityRules: null, versions: [] };
       console.log('[session/start] auto-created agent for solo dev', { slug: autoSlug, agentId: created.id });
@@ -432,26 +518,72 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
     if (!agent && isSoloKey && agentSlug) {
       const autoSlug = agentSlug.toLowerCase();
       const autoName = autoSlug.split('-').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      // Solo devs administer their own org, so auto-created agents are
+      // enabled by default — the per-agent toggle is meaningful for teams,
+      // not for someone tracking their own sessions.
       const created = await prisma.agent.upsert({
         where: { orgId_slug: { orgId, slug: autoSlug } },
-        create: { orgId, name: autoName, slug: autoSlug, model: model || 'unknown', status: 'ACTIVE' },
-        update: { status: 'ACTIVE' },
+        create: { orgId, name: autoName, slug: autoSlug, model: model || 'unknown', status: 'ACTIVE', isEnabled: true },
+        update: { status: 'ACTIVE', isEnabled: true },
       });
       agent = { ...created, systemPrompt: null, securityRulesEnabled: false, securityRules: null, versions: [] };
       console.log('[session/start] auto-created agent for solo dev', { slug: autoSlug, agentId: created.id });
     }
 
-    // Team key: reject if no matching agent — API key must have explicit agent permission
+    // Team key: reject if no matching agent — the user must be granted
+    // access to this agent (via API key scope, AgentMember, or admin role).
     if (!agent && !isSoloKey) {
       return res.status(403).json({
         error: 'Agent not permitted',
-        message: `This API key does not have access to agent "${agentSlug || 'unknown'}". Available agents: ${allowedAgents.map((a) => a.name).join(', ')}. Assign the correct agent in Settings → API Keys.`,
+        message: `You don't have access to agent "${agentSlug || 'unknown'}". Available agents: ${allowedAgents.map((a) => a.name).join(', ')}. Ask an admin to grant access in Settings → IAM → Manage access.`,
       });
     }
 
     // Solo fallback
     if (!agent) {
       agent = allowedAgents[0] || null;
+    }
+
+    // Agent enablement gate (team only) — admins flip the per-agent toggle
+    // on /agents to opt the org in to tracking. Until that flip happens, we
+    // refuse to ingest the session and notify both the developer (so the CLI
+    // can keep it local) and the org admins (so they can act). Solo keys
+    // bypass: they self-manage and their auto-created agents are enabled.
+    if (!isSoloKey && agent && agent.isEnabled === false) {
+      const agentName = agent.name || agent.slug || 'agent';
+      const developerId = req.mcpUserId;
+      const developer = developerId
+        ? await prisma.user.findUnique({ where: { id: developerId }, select: { name: true, email: true } })
+        : null;
+      const developerName = developer?.name || developer?.email || req.apiKeyName || 'A teammate';
+      const link = `/agents`;
+      // Best-effort notifications — don't block the API response on these.
+      if (developerId) {
+        createNotification(
+          orgId,
+          developerId,
+          'AGENT_DISABLED',
+          `${agentName} is disabled`,
+          `Your session was kept local. Ask an admin to enable ${agentName} in Origin.`,
+          link,
+          { agentId: agent.id, agentSlug: agent.slug, agentName },
+        ).catch((err) => console.warn('[session/start] developer notify failed:', err));
+      }
+      notifyOrgAdmins(
+        orgId,
+        'AGENT_DISABLED_ATTEMPT',
+        `${developerName} tried to use ${agentName}`,
+        `${agentName} is disabled — enable it on the Agents page to start tracking sessions.`,
+        link,
+        { agentId: agent.id, agentSlug: agent.slug, agentName, userId: developerId },
+      ).catch((err) => console.warn('[session/start] admin notify failed:', err));
+
+      return res.status(403).json({
+        error: 'Agent disabled',
+        code: 'AGENT_DISABLED',
+        message: `Agent "${agentName}" is disabled for this org. The session was not uploaded — keep it local until an admin enables tracking.`,
+        agent: { id: agent.id, slug: agent.slug, name: agentName },
+      });
     }
 
     // Check model allowlist policies (with agent/machine/repo scope) — skip for solo devs
@@ -794,9 +926,10 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
       }
     }
 
-    // Update machine lastSeenAt
+    // Update machine lastSeenAt for this org's row only — multi-account
+    // setups have one row per org for the same physical machine.
     await prisma.machine.updateMany({
-      where: { machineId },
+      where: { machineId, orgId },
       data: { lastSeenAt: new Date() },
     });
 
@@ -2030,9 +2163,11 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
       }).catch(err => console.error('[secret-scanner] Diff lookup error:', err));
     }
 
-    // Look up machine DB id for policy scoping at session end
+    // Look up machine DB id for policy scoping at session end. Scope by
+    // (machineId, orgId) — same physical machine can have rows in multiple
+    // orgs and we always want the one matching the current API key's org.
     const endMachineId = req.body.machineId
-      ? (await prisma.machine.findFirst({ where: { machineId: req.body.machineId } }))?.id ?? null
+      ? (await prisma.machine.findFirst({ where: { machineId: req.body.machineId, orgId } }))?.id ?? null
       : null;
     const sessionRepoId = codingSession.commit?.repoId ?? null;
 

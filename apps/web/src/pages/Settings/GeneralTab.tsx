@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { User, Lock, Link2, Building2, AlertTriangle, Wrench } from 'lucide-react';
+import { User, Lock, Link2, Building2, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
 import ProfileEditor from './ProfileEditor';
@@ -11,21 +11,19 @@ function SectionHeader({ icon: Icon, title, subtitle, accent = 'indigo' }: {
   subtitle?: React.ReactNode;
   accent?: 'indigo' | 'emerald' | 'amber' | 'red';
 }) {
-  const colors: Record<string, string> = {
-    indigo:  'bg-indigo-500/10 text-indigo-300 ring-indigo-500/30',
-    emerald: 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/30',
-    amber:   'bg-amber-500/10 text-amber-300 ring-amber-500/30',
-    red:     'bg-red-500/10 text-red-300 ring-red-500/30',
+  const iconColor: Record<string, string> = {
+    indigo:  'text-indigo-400',
+    emerald: 'text-emerald-400',
+    amber:   'text-amber-400',
+    red:     'text-red-400',
   };
   return (
-    <div className="flex items-center gap-3">
-      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ring-1 ${colors[accent]}`}>
-        <Icon className="w-4 h-4" />
+    <div className="space-y-0.5">
+      <div className="flex items-center gap-2">
+        <Icon className={`w-3.5 h-3.5 ${iconColor[accent]}`} />
+        <h2 className={`text-sm font-semibold ${accent === 'red' ? 'text-red-400' : 'text-gray-200'}`}>{title}</h2>
       </div>
-      <div>
-        <h2 className={`text-base font-semibold ${accent === 'red' ? 'text-red-400' : 'text-gray-100'}`}>{title}</h2>
-        {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
-      </div>
+      {subtitle && <p className="text-xs text-gray-500">{subtitle}</p>}
     </div>
   );
 }
@@ -114,27 +112,6 @@ export default function GeneralTab() {
         </div>
       </section>
       )}
-
-      {/* Danger Zone */}
-      <section className="card space-y-5 border-red-900/30">
-        <SectionHeader icon={AlertTriangle} title="Danger Zone" subtitle="Irreversible actions for your account" accent="red" />
-        <div className="flex items-center justify-between bg-red-900/10 border border-red-900/30 rounded-lg px-4 py-3">
-          <div>
-            <p className="text-sm text-gray-200">Delete Account</p>
-            <p className="text-xs text-gray-500">Permanently delete your account and all associated data</p>
-          </div>
-          <button
-            className="text-xs font-medium text-red-400 hover:text-red-300 border border-red-800 hover:border-red-700 px-3 py-1.5 rounded-lg transition-colors"
-            onClick={() => {
-              if (window.confirm('Are you sure? This will permanently delete your account, all sessions, and all data. This cannot be undone.')) {
-                alert('Please contact support@getorigin.io to delete your account.');
-              }
-            }}
-          >
-            Delete Account
-          </button>
-        </div>
-      </section>
 
       {/* Org Section — hidden for developer accounts */}
       {!isDev && (
@@ -269,160 +246,28 @@ export default function GeneralTab() {
       </section>
       )}
 
-      {/* Admin-only diagnostic. Not common-path enough for its own tab. */}
-      {(isDev || activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN') && (
-        <RecomputeCostsCard />
-      )}
+      {/* Danger Zone — pinned to the bottom of General so it never hides
+          above an org/diagnostic block the user isn't reading. */}
+      <section className="card space-y-5 border-red-900/30">
+        <SectionHeader icon={AlertTriangle} title="Danger Zone" subtitle="Irreversible actions for your account" accent="red" />
+        <div className="flex items-center justify-between bg-red-900/10 border border-red-900/30 rounded-lg px-4 py-3">
+          <div>
+            <p className="text-sm text-gray-200">Delete Account</p>
+            <p className="text-xs text-gray-500">Permanently delete your account and all associated data</p>
+          </div>
+          <button
+            className="text-xs font-medium text-red-400 hover:text-red-300 border border-red-800 hover:border-red-700 px-3 py-1.5 rounded-lg transition-colors"
+            onClick={() => {
+              if (window.confirm('Are you sure? This will permanently delete your account, all sessions, and all data. This cannot be undone.')) {
+                alert('Please contact support@getorigin.io to delete your account.');
+              }
+            }}
+          >
+            Delete Account
+          </button>
+        </div>
+      </section>
     </>
   );
 }
 
-interface RecomputeResult {
-  scanned: number;
-  updated: number;
-  unchanged: number;
-  skipped: number;
-  totalCostBefore: number;
-  totalCostAfter: number;
-  topChanges: Array<{
-    sessionId: string;
-    model: string;
-    before: number;
-    after: number;
-    delta: number;
-  }>;
-}
-
-/**
- * Re-derive every session's costUsd from stored token counts using the
- * current pricing table. Useful when older sessions were stamped with
- * a stale price (e.g. before the Opus rate fix).
- *
- * Lives at the bottom of the General tab as an admin diagnostic — not
- * its own tab. Most users will never need it.
- */
-function RecomputeCostsCard() {
-  const [open, setOpen] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<RecomputeResult | null>(null);
-  const [error, setError] = useState('');
-
-  const run = async (dryRun: boolean) => {
-    setError('');
-    setResult(null);
-    setRunning(true);
-    try {
-      const res = await fetch('/api/settings/recompute-costs', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dryRun }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || `HTTP ${res.status}`);
-      }
-      setResult(await res.json());
-    } catch (err: any) {
-      setError(err?.message || 'Failed to recompute');
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  return (
-    <section className="card">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between text-left gap-3"
-      >
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center ring-1 bg-amber-500/10 text-amber-300 ring-amber-500/30 shrink-0">
-            <Wrench className="w-4 h-4" />
-          </div>
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold text-gray-100">Recompute session costs</h2>
-            <p className="text-xs text-gray-500 mt-0.5 truncate">
-              Diagnostic. Re-derives every session's cost from stored token counts using the current pricing table.
-            </p>
-          </div>
-        </div>
-        <span className="text-gray-500 text-sm shrink-0">{open ? '▾' : '▸'}</span>
-      </button>
-
-      {open && (
-        <div className="mt-5 space-y-4">
-          <p className="text-xs text-gray-500">
-            Idempotent — sessions whose stored cost already matches the recompute are skipped. Use this if older sessions
-            were stamped with a stale price (e.g. before the Opus rate fix).
-          </p>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => run(true)}
-              disabled={running}
-              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors disabled:opacity-50"
-            >
-              {running ? 'Computing…' : 'Dry-run preview'}
-            </button>
-            <button
-              onClick={() => run(false)}
-              disabled={running}
-              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50"
-            >
-              {running ? 'Running…' : 'Run recompute'}
-            </button>
-          </div>
-
-          {error && <div className="text-xs text-red-400">{error}</div>}
-
-          {result && (
-            <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-3 space-y-3 text-xs">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div><div className="text-gray-500">Scanned</div><div className="text-gray-100 font-mono">{result.scanned}</div></div>
-                <div><div className="text-gray-500">Updated</div><div className="text-indigo-300 font-mono">{result.updated}</div></div>
-                <div><div className="text-gray-500">Unchanged</div><div className="text-gray-400 font-mono">{result.unchanged}</div></div>
-                <div><div className="text-gray-500">Skipped</div><div className="text-gray-500 font-mono" title="No token data — can't recompute">{result.skipped}</div></div>
-              </div>
-              <div className="flex items-center gap-3 pt-2 border-t border-gray-800">
-                <span className="text-gray-500">Org total:</span>
-                <span className="text-gray-300 font-mono">${result.totalCostBefore.toFixed(2)}</span>
-                <span className="text-gray-600">→</span>
-                <span className="text-emerald-400 font-mono">${result.totalCostAfter.toFixed(2)}</span>
-                {Math.abs(result.totalCostAfter - result.totalCostBefore) > 0.01 && (
-                  <span className={`px-1.5 py-0.5 rounded ${
-                    result.totalCostAfter < result.totalCostBefore
-                      ? 'bg-emerald-500/15 text-emerald-400'
-                      : 'bg-amber-500/15 text-amber-400'
-                  }`}>
-                    {result.totalCostAfter < result.totalCostBefore ? '−' : '+'}
-                    ${Math.abs(result.totalCostAfter - result.totalCostBefore).toFixed(2)}
-                  </span>
-                )}
-              </div>
-              {result.topChanges.length > 0 && (
-                <div className="pt-2 border-t border-gray-800">
-                  <div className="text-gray-500 mb-1.5">Largest changes</div>
-                  <div className="space-y-1">
-                    {result.topChanges.map((c) => (
-                      <div key={c.sessionId} className="flex items-center justify-between">
-                        <code className="text-gray-500 font-mono">{c.sessionId.slice(0, 8)}</code>
-                        <span className="text-gray-400 font-mono">{c.model}</span>
-                        <span className="text-gray-300 font-mono">
-                          ${c.before.toFixed(2)} → ${c.after.toFixed(2)}
-                          <span className={c.delta < 0 ? 'text-emerald-400 ml-2' : 'text-amber-400 ml-2'}>
-                            ({c.delta > 0 ? '+' : ''}${c.delta.toFixed(2)})
-                          </span>
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
