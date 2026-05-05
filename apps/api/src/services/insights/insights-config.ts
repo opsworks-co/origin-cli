@@ -12,11 +12,15 @@
 export const INSIGHTS_CONFIG = {
   // Window for "did this AI-authored line get rewritten?" — Section 1
   // rework rate counts touches by *later* prompts within this many days.
-  reworkWindowDays: 7,
+  // 14d default matches what we tell users in the launch post; tune down to
+  // 7 for fast-shipping teams or up to 30 for slower release cycles.
+  reworkWindowDays: 14,
 
   // Color thresholds for the rework column in Section 1. Numbers are
-  // fractions, not percentages.
-  reworkRateAmber: 0.05,
+  // fractions, not percentages. Amber bumped from 0.05 to 0.07 — at 5%
+  // every dev was permanently amber, which broke the signal value of the
+  // colour. 7% is the threshold the Spend Quality launch post documents.
+  reworkRateAmber: 0.07,
   reworkRateRed: 0.15,
 
   // Section 2 cost-outlier flag fires when a session is more than this
@@ -24,19 +28,25 @@ export const INSIGHTS_CONFIG = {
   expensiveSessionMultiplier: 2,
 
   // Section 3 model-fit heuristics. All thresholds inclusive.
+  // Loosened from the original "≤2 prompts AND ≤$0.50 AND ≤1 file" rule
+  // (which almost never fired) to match the launch-post promise: anything
+  // run on a flagship model that looked like a small task. Fires more
+  // freely now — the savings estimate is conservative so that's fine.
   modelFit: {
     // "Opus on a tiny task" — fires when Opus was used but the work
-    // looked trivial. All four conditions must hold.
+    // looked trivial. All conditions must hold.
     opusCheap: {
-      maxCostUsd: 0.5,
-      maxPrompts: 2,
-      maxFilesChanged: 1,
+      maxCostUsd: 1.0,
+      maxPrompts: 4,
+      maxFilesChanged: 2,
       // Estimated savings = costUsd × this ratio (Haiku is ~10% of Opus).
       savingsRatio: 0.9,
     },
-    // "Sonnet ran 100+ prompts and produced no commit" — scope problem.
+    // "Sonnet ran 40+ prompts and produced no commit" — scope problem.
+    // Was 100; lowered to 40 so the warning fires while a session is
+    // still actionable (a 100-prompt session is already over).
     sonnetLong: {
-      minPrompts: 100,
+      minPrompts: 40,
       // Suggested action is "reduce scope," not a cheaper model — savings
       // estimate is 50% of session cost (assumes half the session was
       // wasted spinning).
@@ -77,6 +87,9 @@ export const INSIGHTS_CONFIG = {
   // (rather than aggregate). 50k is well past the 10k-session benchmark
   // and matches existing budget service caps.
   scanCap: 50_000,
-} as const;
+};
+// Note: intentionally not `as const` — the per-org override layer in
+// routes/insights.ts merges this object with admin-tuned values, so the
+// fields need to type as widened primitives (e.g. `number`, not `7`).
 
 export type InsightsConfig = typeof INSIGHTS_CONFIG;

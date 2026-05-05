@@ -155,8 +155,9 @@ router.get('/install', requireAuth, resolveOrgContext, requireRole('ADMIN'), asy
 
   // Create signed state token (CSRF protection + org association)
   const from = (req.query.from as string) || '';
+  const flavor = (req.query.flavor as string) || '';
   const state = jwt.sign(
-    { orgId: req.activeOrgId!, userId: req.user!.id, from },
+    { orgId: req.activeOrgId!, userId: req.user!.id, from, flavor },
     JWT_SECRET,
     { expiresIn: '15m' },
   );
@@ -191,11 +192,11 @@ router.get('/callback', async (req: Request, res: Response) => {
     }
 
     // Verify state token
-    let statePayload: { orgId: string; userId: string; from?: string };
+    let statePayload: { orgId: string; userId: string; from?: string; flavor?: string };
     try {
       // Pin HS256 — we sign the state token with HS256 and must reject
       // any other algorithm, including alg=none / key-confusion attacks.
-      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string; from?: string };
+      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string; from?: string; flavor?: string };
     } catch {
       return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=invalid_state');
     }
@@ -303,7 +304,8 @@ router.get('/callback', async (req: Request, res: Response) => {
     // from=settings if they want to stay on Settings after install.
     let successRedirect: string;
     if (statePayload.from === 'onboarding') {
-      successRedirect = '/onboarding?step=1&gitlab_oauth=success';
+      const flavorParam = statePayload.flavor ? `&from=${encodeURIComponent(statePayload.flavor)}` : '';
+      successRedirect = `/onboarding?step=1&gitlab_oauth=success${flavorParam}`;
     } else if (statePayload.from === 'settings') {
       successRedirect = '/settings?tab=integrations&gitlab_oauth=success';
     } else {

@@ -80,14 +80,32 @@ describe('resolveOrgContext — cross-org IDOR gate', () => {
     expect(getBody().error).toMatch(/unauthorized/i);
   });
 
-  it('rejects header pointing at an org the user is not a member of', async () => {
+  it('falls through to the user\'s real membership when header points at an org they\'re not in', async () => {
+    // Stale header (e.g. localStorage left over from a prior session) must
+    // not 403 the user — fall through to lastOrgId / first membership.
+    // IDOR is still safe: req.activeOrgId is set from the membership row,
+    // never from the header alone.
+    membershipFindUnique.mockResolvedValue(null); // header org has no row
+    userFindUnique.mockResolvedValue({ lastOrgId: null });
+    membershipFindFirst.mockResolvedValue({ orgId: 'org-a', role: 'MEMBER' });
+    const { req, res } = makeReqRes({ userId: 'u1', headerOrg: 'other-org' });
+    const next = vi.fn();
+    await resolveOrgContext(req, res, next);
+    expect(next).toHaveBeenCalled();
+    expect(req.activeOrgId).toBe('org-a');
+    expect(req.activeRole).toBe('MEMBER');
+  });
+
+  it('rejects when user has no memberships at all (even with a header set)', async () => {
     membershipFindUnique.mockResolvedValue(null);
+    userFindUnique.mockResolvedValue({ lastOrgId: null });
+    membershipFindFirst.mockResolvedValue(null);
     const { req, res, getStatus, getBody } = makeReqRes({ userId: 'u1', headerOrg: 'other-org' });
     const next = vi.fn();
     await resolveOrgContext(req, res, next);
     expect(next).not.toHaveBeenCalled();
     expect(getStatus()).toBe(403);
-    expect(getBody().error).toMatch(/no membership/i);
+    expect(getBody().error).toMatch(/no org memberships/i);
     expect(req.activeOrgId).toBeUndefined();
   });
 

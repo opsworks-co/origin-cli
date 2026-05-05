@@ -61,9 +61,12 @@ export interface PromptForRework {
  *
  * Returns a fraction 0..1.
  */
-export function computeReworkRate(prompts: PromptForRework[]): number {
+export function computeReworkRate(
+  prompts: PromptForRework[],
+  cfg: { reworkWindowDays: number } = INSIGHTS_CONFIG,
+): number {
   if (prompts.length === 0) return 0;
-  const windowMs = INSIGHTS_CONFIG.reworkWindowDays * 24 * 60 * 60 * 1000;
+  const windowMs = cfg.reworkWindowDays * 24 * 60 * 60 * 1000;
   const sorted = [...prompts]
     .map((p) => ({
       ...p,
@@ -169,10 +172,11 @@ export interface SessionForFlag {
 export function flagSession(
   s: SessionForFlag,
   devAvgCostUsd: number,
+  cfg: { expensiveSessionMultiplier: number } = INSIGHTS_CONFIG,
 ): SessionFlag[] {
   const flags: SessionFlag[] = [];
   if (s.commitId === null) flags.push('zero-commit');
-  if (devAvgCostUsd > 0 && s.costUsd > devAvgCostUsd * INSIGHTS_CONFIG.expensiveSessionMultiplier) {
+  if (devAvgCostUsd > 0 && s.costUsd > devAvgCostUsd * cfg.expensiveSessionMultiplier) {
     flags.push('cost-outlier');
   }
   return flags;
@@ -200,10 +204,36 @@ export interface ModelFitWarning {
 const isOpus = (model: string) => /opus/i.test(model);
 const isSonnet = (model: string) => /sonnet/i.test(model);
 
-export function flagModelFit(s: SessionForModelFit): ModelFitWarning | null {
-  const cfg = INSIGHTS_CONFIG.modelFit;
+// Pick a versioned cheaper alternative for a flagship model. Used by the
+// "Opus on a tiny task" branch so the suggestion is concrete (e.g.
+// `claude-haiku-4-5`) rather than the vague `'claude-haiku'` the first
+// version emitted. We try to keep the family version suffix the model
+// already uses, so an org standardised on the 4-x family stays in family.
+function pickCheaperAlternative(modelUsed: string): string {
+  // Claude family: Opus → Haiku within the same major version when possible.
+  // Match `claude-opus-4-7`, `claude-opus-4-6`, etc. and rewrite the slug.
+  const claudeMatch = modelUsed.match(/^claude-opus-(\d+)(?:[-.](\d+))?/i);
+  if (claudeMatch) {
+    const major = claudeMatch[1];
+    return `claude-haiku-${major}-5`;
+  }
+  if (isOpus(modelUsed)) return 'claude-haiku-4-5';
+  // OpenAI flagship → mini equivalent.
+  if (/^gpt-5/i.test(modelUsed)) return 'gpt-5-mini';
+  if (/^gpt-4o/i.test(modelUsed)) return 'gpt-4o-mini';
+  // Gemini flagship → Flash.
+  if (/^gemini-.*-pro/i.test(modelUsed)) return modelUsed.replace(/pro/i, 'flash');
+  // Fallback — generic Haiku slug. Better than the un-versioned one.
+  return 'claude-haiku-4-5';
+}
 
-  // "Opus on a tiny task" — all four conditions inclusive
+export function flagModelFit(
+  s: SessionForModelFit,
+  fullCfg: { modelFit: typeof INSIGHTS_CONFIG.modelFit } = INSIGHTS_CONFIG,
+): ModelFitWarning | null {
+  const cfg = fullCfg.modelFit;
+
+  // "Opus on a tiny task" — all conditions inclusive
   if (
     isOpus(s.model) &&
     s.costUsd <= cfg.opusCheap.maxCostUsd &&
@@ -213,13 +243,13 @@ export function flagModelFit(s: SessionForModelFit): ModelFitWarning | null {
     return {
       sessionId: s.sessionId,
       modelUsed: s.model,
-      suggestedModel: 'claude-haiku',
+      suggestedModel: pickCheaperAlternative(s.model),
       reason: 'oversized-for-cheap-task',
       estimatedSavingsUsd: s.costUsd * cfg.opusCheap.savingsRatio,
     };
   }
 
-  // "Sonnet over 100 prompts and produced no commit" — scope warning
+  // "Sonnet over N prompts and produced no commit" — scope warning
   if (
     isSonnet(s.model) &&
     s.promptCount >= cfg.sonnetLong.minPrompts &&

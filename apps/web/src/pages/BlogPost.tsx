@@ -8,6 +8,382 @@ import { blogPosts } from '../data/blogPosts';
 /* ------------------------------------------------------------------ */
 
 const postContent: Record<string, React.ReactNode> = {
+  'spend-quality-roi-dashboard': (
+    <>
+      <p>
+        Here&rsquo;s the question I keep getting from heads of engineering: &ldquo;Our AI bill is up 4&times; year-over-year. Is that a problem, or is the team shipping 4&times; the work?&rdquo;
+      </p>
+      <p>
+        It&rsquo;s a fair question, and the cost dashboards we&rsquo;ve all been building &mdash; ours included &mdash; mostly fail to answer it. They&rsquo;re very good at telling you the bill. Per-model, per-engineer, per-day, sliced however you like. None of them tell you whether the bill bought working code or got rolled back the next day.
+      </p>
+      <p className="text-gray-100 font-medium">
+        So this week we shipped <strong>Spend Quality</strong> &mdash; six lenses on the same dataset, all aimed at one question: <em>are we getting our money&rsquo;s worth?</em>
+      </p>
+
+      <h2>The bill answers the wrong question</h2>
+
+      <p>
+        Every cost dashboard out there is built on the same axis: dollars, broken down by some dimension. Origin shipped that 18 months ago. So did everyone else. It&rsquo;s the easy half of the problem.
+      </p>
+
+      {/* Cost vs Quality side-by-side card */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-6 shadow-2xl">
+          <p className="text-[10px] uppercase tracking-[0.12em] text-gray-500 font-semibold mb-4">
+            Two questions, two dashboards
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="rounded-lg border border-gray-800 bg-gray-900/40 p-4">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-2">Cost dashboard</div>
+              <p className="text-sm text-gray-200 mb-3">&ldquo;How much did we spend?&rdquo;</p>
+              <ul className="text-[11px] text-gray-500 space-y-1">
+                <li>&middot; Total: <span className="text-gray-300 font-mono">$8,412</span></li>
+                <li>&middot; By engineer, by model, by repo</li>
+                <li>&middot; Daily / weekly / monthly</li>
+                <li>&middot; Caps + alerts</li>
+              </ul>
+            </div>
+            <div className="rounded-lg border border-indigo-500/40 bg-indigo-500/[0.06] p-4">
+              <div className="text-[10px] uppercase tracking-wider text-indigo-300 font-semibold mb-2">Spend Quality</div>
+              <p className="text-sm text-gray-50 mb-3">&ldquo;What did we get for it?&rdquo;</p>
+              <ul className="text-[11px] text-gray-300 space-y-1">
+                <li>&middot; Rework rate per dev</li>
+                <li>&middot; $ per merged PR</li>
+                <li>&middot; Sessions that burned the most for the least</li>
+                <li>&middot; Where Haiku would have done it</li>
+                <li>&middot; When the spend actually happens</li>
+                <li>&middot; Cache-hit ratio (sessions that pay 10&times; for nothing new)</li>
+              </ul>
+            </div>
+          </div>
+          <p className="mt-4 text-[11px] text-gray-500 text-center">
+            One tells you the bill. The other tells you whether the bill paid for itself.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        Spend Quality lives at <Link to="/insights/spend-quality" className="text-indigo-400 hover:text-indigo-300"><code>/insights/spend-quality</code></Link>. Six sections. Date-range picker at the top &mdash; <code>7d</code> / <code>30d</code> / <code>90d</code> &mdash; serialised to the URL so a refresh or a Slack-share preserves state.
+      </p>
+
+      <h2>Section 1: who&rsquo;s burning budget without shipping?</h2>
+
+      <p>
+        The first row, full width, is a per-developer table. Same dollar column you&rsquo;ve seen everywhere &mdash; but to its right, four columns nobody else surfaces:
+      </p>
+
+      {/* Spend quality table mockup */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm font-semibold text-gray-100">Spend Quality</p>
+              <p className="text-[11px] text-gray-500">per developer &middot; last 30 days</p>
+            </div>
+            <span className="text-[10px] uppercase tracking-wider text-gray-500">8 devs</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wider text-gray-500 border-b border-gray-800">
+                  <th className="py-2 pr-4 font-normal">Dev</th>
+                  <th className="py-2 pr-4 font-normal text-right">$ spent</th>
+                  <th className="py-2 pr-4 font-normal text-right">AI %</th>
+                  <th className="py-2 pr-4 font-normal text-right">Rework</th>
+                  <th className="py-2 pr-4 font-normal text-right">$/PR</th>
+                  <th className="py-2 font-normal text-right">Sessions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { name: 'Sarah K.',   spend: 412.80, ai: 78, rework: 3.1,  costPr: 18.74, sess: 64,  reworkTone: 'text-emerald-400' },
+                  { name: 'Marcus T.',  spend: 387.40, ai: 91, rework: 18.4, costPr: 96.85, sess: 52,  reworkTone: 'text-red-400'    },
+                  { name: 'Priya S.',   spend: 286.50, ai: 64, rework: 4.7,  costPr: 22.04, sess: 41,  reworkTone: 'text-emerald-400' },
+                  { name: 'Devon R.',   spend: 241.10, ai: 82, rework: 11.9, costPr: 80.37, sess: 38,  reworkTone: 'text-amber-400'  },
+                  { name: 'Helena M.',  spend: 198.30, ai: 71, rework: 5.2,  costPr: 28.33, sess: 33,  reworkTone: 'text-emerald-400' },
+                  { name: 'Ben C.',     spend: 167.90, ai: 88, rework: 6.8,  costPr: 33.58, sess: 28,  reworkTone: 'text-emerald-400' },
+                ].map((r) => (
+                  <tr key={r.name} className="border-b border-gray-800/60">
+                    <td className="py-2.5 pr-4 text-gray-200">{r.name}</td>
+                    <td className="py-2.5 pr-4 text-right tabular-nums text-gray-200">${r.spend.toFixed(2)}</td>
+                    <td className="py-2.5 pr-4 text-right tabular-nums text-gray-300">{r.ai}%</td>
+                    <td className={`py-2.5 pr-4 text-right tabular-nums ${r.reworkTone}`}>{r.rework.toFixed(1)}%</td>
+                    <td className="py-2.5 pr-4 text-right tabular-nums text-gray-300">${r.costPr.toFixed(2)}</td>
+                    <td className="py-2.5 text-right tabular-nums text-gray-400">{r.sess}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-3 text-[11px] text-gray-500">
+            Click any column to sort. Rework &gt; 15% turns red, &gt; 7% amber. Marcus spent the same as Sarah and produced PRs at 5&times; the rebuild cost.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        The single most useful column on this table is <strong>rework rate</strong> &mdash; the percentage of files this developer&rsquo;s AI sessions touched that got rewritten within the next 14 days. High rework means the AI was &ldquo;productive&rdquo; on a Tuesday and someone (often the same dev) was undoing it on Thursday. <strong>$/merged-PR</strong> is the next one: total spend divided by PRs that actually shipped, which is the closest thing to a unit economics number for AI coding.
+      </p>
+      <p>
+        Marcus in the table above &mdash; same monthly spend as Sarah, 6&times; the rework, 5&times; the cost per shipped PR. That&rsquo;s the conversation Spend Quality wants you to be able to have. With numbers, on the same screen.
+      </p>
+
+      <h2>Section 2: the outliers, before they show up on the invoice</h2>
+
+      <p>
+        Below the table is a ranked list of the most expensive sessions in the period &mdash; with two flag chips that catch the worst patterns:
+      </p>
+
+      {/* Top expensive sessions mockup */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm font-semibold text-gray-100">Top expensive sessions</p>
+              <p className="text-[11px] text-gray-500">ranked by cost &middot; flags surface zero-output and outlier-cost runs</p>
+            </div>
+            <span className="text-[10px] uppercase tracking-wider text-gray-500">show 10</span>
+          </div>
+          <ul className="divide-y divide-gray-800/60">
+            {[
+              { rank: 1, who: 'Marcus T.',  dur: '2h 14m', cost: 84.20, prompts: 41, branch: 'feature/checkout-v3', flags: ['cost-outlier'] },
+              { rank: 2, who: 'Devon R.',   dur: '1h 38m', cost: 71.60, prompts: 22, branch: 'fix/audit-log',       flags: ['zero-commit'] },
+              { rank: 3, who: 'Marcus T.',  dur: '1h 52m', cost: 64.10, prompts: 35, branch: 'feature/checkout-v3', flags: ['cost-outlier'] },
+              { rank: 4, who: 'Sarah K.',   dur: '1h 04m', cost: 41.80, prompts: 18, branch: 'main',                 flags: [] },
+              { rank: 5, who: 'Devon R.',   dur: '0h 47m', cost: 38.40, prompts: 12, branch: 'fix/audit-log',       flags: ['zero-commit'] },
+              { rank: 6, who: 'Priya S.',   dur: '1h 12m', cost: 32.70, prompts: 24, branch: 'feature/sso',          flags: [] },
+            ].map((s) => (
+              <li key={s.rank} className="py-2.5 flex items-center gap-3">
+                <span className="text-xs text-gray-500 w-8 tabular-nums">#{s.rank}</span>
+                <span className="flex-1 text-sm text-gray-200 truncate">
+                  {s.who} &middot; {s.dur} &middot; <span className="tabular-nums">${s.cost.toFixed(2)}</span> &middot; {s.prompts} prompts
+                  <span className="text-gray-500"> &middot; {s.branch}</span>
+                </span>
+                {s.flags.includes('zero-commit') && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-300">&#9888; 0 commits</span>
+                )}
+                {s.flags.includes('cost-outlier') && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300">&#9888; outlier</span>
+                )}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-[11px] text-gray-500">
+            <span className="text-red-300">0 commits</span> &mdash; session ended without producing a real commit. Money paid, nothing shipped.{' '}
+            <span className="text-amber-300">outlier</span> &mdash; cost &gt; 2&times; this dev&rsquo;s typical session. Worth a conversation.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        The <code>zero-commit</code> flag is the one that pays for the whole feature on its own. A two-hour session that burned $71 and produced no commit is a session somebody is going to redo from scratch tomorrow &mdash; and now they have a chance to figure out what went sideways before they do.
+      </p>
+
+      <h2>Section 3: where Haiku would have done it</h2>
+
+      <p>
+        On the left of the next row, Spend Quality flags sessions where the model the engineer reached for was meaningfully overpowered for the work that actually happened. Two patterns trigger it:
+      </p>
+      <ul>
+        <li><strong>Oversized for cheap task</strong> &mdash; flagship model, &lt; 4 prompts, no complex tool use. Haiku would have produced the same output at ~5% of the cost.</li>
+        <li><strong>Undersized for long session</strong> &mdash; cheap model running 40+ prompts on what looks like architecture work. The engineer is fighting the model; a one-tier upgrade probably ends the session in half the prompts.</li>
+      </ul>
+
+      {/* Model-fit warnings mockup */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm font-semibold text-gray-100">Model-fit warnings</p>
+              <p className="text-[11px] text-gray-500">suggested savings &middot; last 30 days</p>
+            </div>
+            <span className="text-[10px] uppercase tracking-wider text-emerald-400 font-mono">~$184 / mo</span>
+          </div>
+          <ul className="divide-y divide-gray-800/60">
+            {[
+              { who: 'Marcus T.',  used: 'claude-opus-4-7',   suggest: 'claude-haiku-4-5',  reason: 'Haiku may have sufficed', save: 38.20 },
+              { who: 'Sarah K.',   used: 'claude-opus-4-7',   suggest: 'claude-sonnet-4-6', reason: 'Haiku may have sufficed', save: 28.40 },
+              { who: 'Devon R.',   used: 'claude-opus-4-7',   suggest: 'claude-haiku-4-5',  reason: 'Haiku may have sufficed', save: 24.10 },
+              { who: 'Marcus T.',  used: 'claude-haiku-4-5',  suggest: 'claude-sonnet-4-6', reason: 'Consider scope reduction', save: 11.80 },
+              { who: 'Priya S.',   used: 'claude-opus-4-7',   suggest: 'claude-haiku-4-5',  reason: 'Haiku may have sufficed', save: 8.60 },
+            ].map((w, i) => (
+              <li key={i} className="py-2.5 flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-gray-300 truncate">
+                    <span className="text-gray-400">{w.who}</span> &middot; <span className="font-mono">{w.used}</span>
+                  </p>
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    {w.reason} &rarr; <span className="text-gray-300 font-mono">{w.suggest}</span>
+                  </p>
+                </div>
+                <span className="text-xs tabular-nums text-emerald-400">~${w.save.toFixed(2)}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 text-[11px] text-gray-500">
+            Conservative pricing assumptions. The savings number is the floor, not the ceiling.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        The page surfaces the savings in dollars at the top right &mdash; <span className="text-emerald-400 font-mono">~$184/mo</span> in the example above. That&rsquo;s the <em>opportunity</em> cost, not a refund. But it&rsquo;s the kind of number that turns into a Tuesday standup conversation: &ldquo;hey team, we&rsquo;re leaving $180 a month on the table by reaching for Opus on tasks Sonnet would&rsquo;ve handled.&rdquo;
+      </p>
+
+      <h2>Section 4: spend has a clock</h2>
+
+      <p>
+        On the right of the same row is a 7&times;24 heatmap &mdash; cost summed by day-of-week and hour-of-day across the period:
+      </p>
+
+      {/* Heatmap mockup */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm font-semibold text-gray-100">Time-of-spend heatmap</p>
+              <p className="text-[11px] text-gray-500">day &times; hour &middot; click any cell to filter sessions</p>
+            </div>
+            <span className="text-[10px] uppercase tracking-wider text-gray-500">UTC</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="text-[10px] border-separate border-spacing-0.5">
+              <thead>
+                <tr>
+                  <th className="w-8"></th>
+                  {Array.from({ length: 24 }, (_, h) => (
+                    <th key={h} className="text-gray-600 font-normal w-3.5 text-center">{h % 6 === 0 ? h : ''}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { day: 'Sun', vals: [0,0,0.7,0.4,0,0,0,0,0,0.1,0.1,0.2,0.3,0.5,0.4,0.2,0.1,0,0,0,0.1,0.3,0.6,0.4] },
+                  { day: 'Mon', vals: [0,0,0,0,0,0,0,0,0.5,0.8,0.9,0.95,1.0,0.7,0.85,0.9,0.6,0.5,0.2,0.1,0,0,0,0] },
+                  { day: 'Tue', vals: [0,0,0,0,0,0,0,0,0.6,0.85,0.95,1.0,0.95,0.6,0.8,0.9,0.7,0.4,0.1,0,0,0,0,0] },
+                  { day: 'Wed', vals: [0,0,0,0,0,0,0,0,0.5,0.8,0.85,0.95,0.9,0.65,0.85,0.95,0.65,0.5,0.2,0,0,0,0,0] },
+                  { day: 'Thu', vals: [0,0,0,0,0,0,0,0,0.55,0.8,0.9,0.85,0.85,0.7,0.85,0.9,0.55,0.4,0.1,0,0,0,0,0] },
+                  { day: 'Fri', vals: [0,0,0,0,0,0,0,0,0.45,0.7,0.75,0.8,0.7,0.5,0.6,0.4,0.2,0.1,0,0,0,0,0,0] },
+                  { day: 'Sat', vals: [0,0,0,0,0,0,0,0,0.05,0.1,0.15,0.1,0.05,0,0.05,0.1,0,0,0,0,0,0,0,0] },
+                ].map((row) => (
+                  <tr key={row.day}>
+                    <td className="text-gray-500 pr-2">{row.day}</td>
+                    {row.vals.map((v, h) => (
+                      <td key={h}>
+                        <div
+                          className="w-3.5 h-3.5 rounded-sm"
+                          style={{ background: v > 0 ? `rgba(99,102,241,${0.1 + v * 0.7})` : 'rgba(75,85,99,0.15)' }}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-3 text-[11px] text-gray-500">
+            Working hours light up. The Sunday 02:00 cell is the sound of someone unblocking themselves at 2 AM &mdash; a Monday-morning conversation that didn&rsquo;t happen.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        Heatmaps look decorative until they aren&rsquo;t. The Sunday 2 AM cell that lights up every week is the one that tells you somebody&rsquo;s on-call duty has been quietly absorbed by Claude Code. The Friday afternoon dropoff at 14:00 instead of 17:00 is the team protecting deploy-Friday discipline. Click any cell &mdash; the page filters the rest of the data to that hour-of-week.
+      </p>
+
+      <h2>Section 5 + 6: the cache-hit ratio that nobody&rsquo;s watching</h2>
+
+      <p>
+        The bottom row pairs a <strong>wasted prompts</strong> panel (prompts that triggered a session-restore &mdash; in flight; lights up when the CLI ships the metric) with a token-mix breakdown:
+      </p>
+
+      {/* Token mix mockup */}
+      <div className="not-prose my-10">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0b14] p-5 shadow-2xl">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm font-semibold text-gray-100">Token breakdown</p>
+              <p className="text-[11px] text-gray-500">generated vs cache-read vs cache-write &middot; last 30 days</p>
+            </div>
+            <span className="text-[10px] uppercase tracking-wider text-emerald-400 font-mono">cache hit 62%</span>
+          </div>
+          <div className="grid grid-cols-3 gap-3 mb-4">
+            <div className="rounded border border-gray-800 bg-gray-900/40 p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Generated</p>
+              <p className="text-lg font-mono text-gray-100">144M</p>
+              <p className="text-[10px] text-gray-600">input + output (full price)</p>
+            </div>
+            <div className="rounded border border-cyan-500/30 bg-cyan-500/5 p-3">
+              <p className="text-[10px] uppercase tracking-wider text-cyan-400 mb-1">Cache reads</p>
+              <p className="text-lg font-mono text-cyan-300">238M</p>
+              <p className="text-[10px] text-gray-600">~10% of input pricing</p>
+            </div>
+            <div className="rounded border border-amber-500/30 bg-amber-500/5 p-3">
+              <p className="text-[10px] uppercase tracking-wider text-amber-400 mb-1">Cache writes</p>
+              <p className="text-lg font-mono text-amber-300">29M</p>
+              <p className="text-[10px] text-gray-600">~125% of input pricing</p>
+            </div>
+          </div>
+          <div className="flex h-2 rounded-full overflow-hidden bg-gray-800">
+            <div className="bg-indigo-500/80" style={{ width: '35%' }} />
+            <div className="bg-cyan-500/70" style={{ width: '58%' }} />
+            <div className="bg-amber-500/60" style={{ width: '7%' }} />
+          </div>
+          <p className="mt-3 text-[11px] text-gray-500">
+            Cache-hit ratio under 30% is usually a misconfigured agent &mdash; the prompt prefix isn&rsquo;t stable session-to-session, so every turn re-reads the world. Sessions flagged as <span className="text-amber-300">cache outliers</span> in the breakdown almost always trace to one engineer&rsquo;s setup.
+          </p>
+        </div>
+      </div>
+
+      <p>
+        The cache-hit ratio is the most under-watched number in AI coding cost. A team running at 60%+ cache reads is paying ~10% of list price for the bulk of their tokens. A team running at 15% is paying full freight, and almost nobody knows that&rsquo;s why their bill is 4&times; their peers&rsquo;. The token breakdown panel surfaces it on the same page as everything else &mdash; one fewer dashboard to context-switch into.
+      </p>
+
+      <h2>What you do with this</h2>
+
+      <p>
+        Spend Quality isn&rsquo;t a wall of metrics for its own sake. Each section is built around a specific intervention an engineering manager can make on a Tuesday:
+      </p>
+
+      <div className="not-prose my-8 rounded-xl border border-gray-800 bg-[#0a0b14] p-6 shadow-2xl space-y-3">
+        {[
+          { metric: 'Rework rate &gt; 15%', do: 'One-on-one with the dev. Their AI is confidently wrong and they\'re not catching it in review.' },
+          { metric: '$/PR is a 3&times; outlier', do: 'Likely a model-fit problem. Suggest they try the next tier down for the same tasks.' },
+          { metric: 'Top expensive session has 0 commits', do: 'Open it. Read the transcript. The session got stuck — figure out where.' },
+          { metric: 'Model-fit warnings &gt; $100/mo', do: 'Set per-engineer Opus caps. Cheap models become first-choice within a week.' },
+          { metric: 'Heatmap shows Saturday/Sunday spend', do: 'On-call has quietly become "AI coding on weekends." Investigate.' },
+          { metric: 'Cache hit % &lt; 30%', do: 'The CLI prompt prefix is unstable. Check the agent\'s system prompt — usually one engineer\'s misconfig.' },
+        ].map((row, i) => (
+          <div key={i} className="flex items-start gap-3">
+            <span className="text-[10px] text-indigo-400 font-mono mt-0.5">{String(i + 1).padStart(2, '0')}</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-gray-100" dangerouslySetInnerHTML={{ __html: row.metric }} />
+              <p className="text-[11px] text-gray-500 mt-0.5">{row.do}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <h2>How to turn it on</h2>
+
+      <p>
+        Open <Link to="/insights/spend-quality" className="text-indigo-400 hover:text-indigo-300">Insights &rarr; Spend Quality</Link>. Defaults work for most teams &mdash; rework rate alarms at 7% / 15%, model-fit detection runs on the same data the budget enforcer already uses, no extra capture needed.
+      </p>
+      <p>
+        Two things you&rsquo;ll probably want to tune:
+      </p>
+      <ul>
+        <li><strong>Rework window.</strong> Default is 14 days. Teams that ship slower bump it to 30; teams that ship multiple times a day drop it to 7.</li>
+        <li><strong>Model-fit thresholds.</strong> Default flags anything with &lt; 4 prompts on a flagship model. Adjustable per-org under <Link to="/settings" className="text-indigo-400 hover:text-indigo-300">Settings</Link>.</li>
+      </ul>
+      <p>
+        Everything else is automatic. Sessions are already being captured at the prompt level by the CLI; Spend Quality is just six new ways of asking the dataset what it knows.
+      </p>
+      <p>
+        For 18 months the answer to &ldquo;is the AI bill worth it?&rdquo; has been &ldquo;hard to say.&rdquo; That&rsquo;s the easy answer. It&rsquo;s the wrong answer to give a CFO. Spend Quality is the dashboard that lets you give the right one.
+      </p>
+    </>
+  ),
   'per-model-budget-caps-team': (
     <>
       <p>

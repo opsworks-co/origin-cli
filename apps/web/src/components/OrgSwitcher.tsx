@@ -172,14 +172,20 @@ export default function OrgSwitcher() {
                   <Plus className="w-3.5 h-3.5 text-gray-400" />
                   Create new org
                 </button>
-                <button
-                  type="button"
-                  onClick={() => { setOpen(false); navigate('/accept-invite'); }}
-                  className="w-full flex items-center gap-2 px-2.5 py-2 text-[12px] text-gray-700 dark:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors"
-                >
-                  <Users className="w-3.5 h-3.5 text-gray-400" />
-                  Join with invite link
-                </button>
+                {/* Hidden for OWNER / ADMIN of the active org — they're the
+                    ones SENDING invites, not redeeming them. Members and
+                    viewers still see it because they may want to join
+                    additional orgs they were invited to. */}
+                {activeOrg?.role !== 'OWNER' && activeOrg?.role !== 'ADMIN' && (
+                  <button
+                    type="button"
+                    onClick={() => { setOpen(false); navigate('/accept-invite'); }}
+                    className="w-full flex items-center gap-2 px-2.5 py-2 text-[12px] text-gray-700 dark:text-gray-200 hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors"
+                  >
+                    <Users className="w-3.5 h-3.5 text-gray-400" />
+                    Join with invite link
+                  </button>
+                )}
               </div>
               <div className="border-t border-gray-200 dark:border-white/[0.08]">
                 <button

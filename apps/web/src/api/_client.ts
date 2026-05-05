@@ -34,8 +34,15 @@ function activeOrgHeader(): Record<string, string> {
   return id ? { 'X-Origin-Org': id } : {};
 }
 
+// Cleared on a 401 response so a stale legacy Bearer in localStorage
+// doesn't poison every subsequent request. (Cookie auth doesn't need
+// this — the browser stops sending an expired cookie on its own.)
+function clearLegacyAuthToken() {
+  try { localStorage.removeItem('origin_token'); } catch { /* ignore */ }
+}
+
 export async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const doFetch = (extraHeaders: Record<string, string> = {}) => fetch(`${BASE}${path}`, {
     ...opts,
     // Auth is carried by the httpOnly `origin_auth` cookie. 'same-origin' is
     // sufficient because the API is served from the same origin as the web
@@ -46,9 +53,26 @@ export async function request<T>(path: string, opts: RequestInit = {}): Promise<
       'Content-Type': 'application/json',
       ...legacyAuthHeaders(),
       ...activeOrgHeader(),
+      ...extraHeaders,
       ...(opts.headers as Record<string, string> | undefined),
     },
   });
+
+  let res = await doFetch();
+
+  // If a stale legacy Bearer token is the reason auth failed, drop it
+  // and retry with cookie-only. The auth middleware prefers Bearer over
+  // cookie — so a bogus Bearer (e.g. signed with a previous JWT_SECRET,
+  // or pointing at a deleted user) shorts out the cookie path entirely.
+  // One-shot retry: if cookie auth ALSO fails, the second 401 stands.
+  if (res.status === 401) {
+    let hadLegacy = false;
+    try { hadLegacy = !!localStorage.getItem('origin_token'); } catch { /* ignore */ }
+    if (hadLegacy) {
+      clearLegacyAuthToken();
+      res = await doFetch();
+    }
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

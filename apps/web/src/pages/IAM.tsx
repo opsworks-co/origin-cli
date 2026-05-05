@@ -35,6 +35,13 @@ export default function IAM() {
   // ── State ────────────────────────────────────────────────────────────────
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKeyEntry[]>([]);
+  // Pending invites — admins issue an invite via "Invite Member" but until
+  // the invitee accepts, no Membership row exists, so /api/users (members)
+  // doesn't include them. We fetch /api/users/invites separately and
+  // render those as pending rows above the active members so the admin can
+  // see "I sent it, here's the status" without leaving IAM.
+  const [pendingInvites, setPendingInvites] = useState<api.Invitation[]>([]);
+  const [revokingInviteId, setRevokingInviteId] = useState<string | null>(null);
   const [allAgents, setAllAgents] = useState<AgentOption[]>([]);
   const [allRepos, setAllRepos] = useState<RepoOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -47,7 +54,7 @@ export default function IAM() {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('MEMBER');
   const [inviting, setInviting] = useState(false);
-  const [inviteResult, setInviteResult] = useState<{ link: string; emailSent: boolean; emailError?: string; email: string; grantCount: number } | null>(null);
+  const [inviteResult, setInviteResult] = useState<{ link: string | null; addedDirectly?: boolean; emailSent: boolean; emailError?: string; email: string; grantCount: number } | null>(null);
   // Two-step modal: 'form' = email + role; 'permissions' = pre-stage repo
   // and agent grants the new member will receive when they accept the
   // invite. Result screen ('result') replaces both once the POST succeeds.
@@ -102,20 +109,40 @@ export default function IAM() {
   // ── Data loading ─────────────────────────────────────────────────────────
   const loadData = async () => {
     try {
-      const [usersRes, keysRes, agentsRes, reposRes] = await Promise.allSettled([
+      const [usersRes, keysRes, agentsRes, reposRes, invitesRes] = await Promise.allSettled([
         api.getUsers(),
         api.getApiKeys(),
         api.getAgents(),
         api.getRepos(),
+        // Pending invites — non-admins get a 403 here; allSettled means
+        // their page still renders without the pending block.
+        api.getInvites(),
       ]);
       if (usersRes.status === 'fulfilled') setMembers(usersRes.value.users);
       if (keysRes.status === 'fulfilled') setApiKeys(keysRes.value);
       if (agentsRes.status === 'fulfilled') setAllAgents((agentsRes.value as any[]).map((a) => ({ id: a.id, name: a.name, slug: a.slug })));
       if (reposRes.status === 'fulfilled') setAllRepos((reposRes.value as any[]).map((r) => ({ id: r.id, name: r.name })));
+      if (invitesRes.status === 'fulfilled') setPendingInvites(invitesRes.value.invites);
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Revoke a pending invite. Optimistic remove from the list — the
+  // backend cancels the token; if the call fails we put the row back.
+  const handleRevokeInvite = async (inv: api.Invitation) => {
+    setRevokingInviteId(inv.id);
+    const prev = pendingInvites;
+    setPendingInvites((list) => list.filter((i) => i.id !== inv.id));
+    try {
+      await api.cancelInvite(inv.id);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to revoke invite');
+      setPendingInvites(prev);
+    } finally {
+      setRevokingInviteId(null);
     }
   };
 
@@ -146,14 +173,19 @@ export default function IAM() {
         role: inviteRole,
         pendingGrants: (repos.length > 0 || agents.length > 0) ? { repos, agents } : undefined,
       });
-      const link = `${window.location.origin}/accept-invite/${res.token}`;
+      const link = res.added ? null : `${window.location.origin}/accept-invite/${res.token}`;
       setInviteResult({
         link,
+        addedDirectly: res.added === true,
         emailSent: !!res.emailSent,
         emailError: res.emailError,
         email: inviteEmail.trim(),
         grantCount: repos.length + agents.length,
       });
+      // Refresh the page state so the new invite shows up as a Pending row
+      // immediately. Without this, the admin sees "invite created" in the
+      // modal but the IAM table doesn't reflect it until they reload.
+      loadData();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -650,7 +682,18 @@ export default function IAM() {
             {/* ─── RESULT: invite created ────────────────────────────────── */}
             {inviteResult && (
               <div className="space-y-4">
-                {inviteResult.emailSent ? (
+                {inviteResult.addedDirectly ? (
+                  <div className="p-3 bg-emerald-900/20 border border-emerald-800/40 rounded-lg flex items-start gap-2">
+                    <Check className="w-4 h-4 text-emerald-400 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm text-emerald-300 font-medium">Added to the org</p>
+                      <p className="text-xs text-emerald-400/80">
+                        {inviteResult.email} already had an Origin account, so we added them directly. They'll see the org in their switcher next time they sign in.
+                        {inviteResult.grantCount > 0 && ` ${inviteResult.grantCount} permission${inviteResult.grantCount === 1 ? '' : 's'} applied.`}
+                      </p>
+                    </div>
+                  </div>
+                ) : inviteResult.emailSent ? (
                   <div className="p-3 bg-emerald-900/20 border border-emerald-800/40 rounded-lg flex items-start gap-2">
                     <Check className="w-4 h-4 text-emerald-400 mt-0.5 flex-shrink-0" />
                     <div>
@@ -667,19 +710,21 @@ export default function IAM() {
                     <p className="text-xs text-amber-400/80">{inviteResult.emailError || 'Email service is not configured.'} Share this link manually:</p>
                   </div>
                 )}
-                <div>
-                  <label className="block text-xs text-gray-400 mb-2">Invite link</label>
-                  <div className="p-3 bg-gray-800 rounded-lg font-mono text-xs text-gray-200 break-all select-all">
-                    {inviteResult.link}
+                {inviteResult.link && (
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-2">Invite link</label>
+                    <div className="p-3 bg-gray-800 rounded-lg font-mono text-xs text-gray-200 break-all select-all">
+                      {inviteResult.link}
+                    </div>
+                    <button
+                      onClick={() => { navigator.clipboard.writeText(inviteResult.link!); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+                      className="btn-secondary text-xs mt-2 w-full flex items-center justify-center gap-1.5"
+                    >
+                      <Copy className="w-3 h-3" />
+                      {copied ? 'Copied' : 'Copy link'}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => { navigator.clipboard.writeText(inviteResult.link); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-                    className="btn-secondary text-xs mt-2 w-full flex items-center justify-center gap-1.5"
-                  >
-                    <Copy className="w-3 h-3" />
-                    {copied ? 'Copied' : 'Copy link'}
-                  </button>
-                </div>
+                )}
               </div>
             )}
 
@@ -1197,18 +1242,68 @@ export default function IAM() {
                     <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-500 mx-auto" />
                   </td>
                 </tr>
-              ) : members.length === 0 ? (
+              ) : (members.length === 0 && pendingInvites.length === 0) ? (
                 <tr>
                   <td colSpan={isAdmin ? 7 : 6} className="px-6 py-12 text-center text-gray-500">
                     No team members yet. Click "Add Member" to get started.
                   </td>
                 </tr>
               ) : (
-                members.map((m) => {
-                  const memberKeys = getMemberKeys(m.id);
-                  const isExpanded = expandedMembers.has(m.id);
-                  return (
-                    <>
+                <>
+                  {/* Pending invites — render above active members so admins
+                      see "I sent it, hasn't accepted yet" at a glance.
+                      Each row shows the invitee email, the role they'll
+                      land at on accept, and a Revoke action for admins. */}
+                  {pendingInvites.map((inv) => {
+                    const expires = new Date(inv.expiresAt);
+                    const daysLeft = Math.max(0, Math.ceil((expires.getTime() - Date.now()) / 86400000));
+                    return (
+                      <tr key={`invite-${inv.id}`} className="bg-amber-500/[0.03]">
+                        <td className="px-6 py-3">
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-full bg-amber-500/15 flex items-center justify-center text-amber-300 text-sm font-medium flex-shrink-0">
+                              {(inv.email || '?').charAt(0).toUpperCase()}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium text-gray-200 truncate">{inv.email || '(link-only invite)'}</p>
+                              <p className="text-xs text-gray-500 truncate">
+                                Awaiting acceptance · {daysLeft > 0 ? `${daysLeft} day${daysLeft !== 1 ? 's' : ''} left` : 'expired'}
+                              </p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-3">
+                          <span className="text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded ring-1 ring-inset ring-amber-500/40 bg-amber-500/10 text-amber-300">
+                            Pending · {inv.role.toLowerCase()}
+                          </span>
+                        </td>
+                        <td className="px-6 py-3 text-xs text-gray-600">—</td>
+                        <td className="px-6 py-3 text-right text-xs text-gray-600">—</td>
+                        <td className="px-6 py-3 text-right text-xs text-gray-600">—</td>
+                        <td className="px-6 py-3 text-right text-xs text-gray-500 tabular-nums">
+                          invited {new Date(inv.createdAt).toLocaleDateString()}
+                        </td>
+                        {isAdmin && (
+                          <td className="px-6 py-3 text-right">
+                            <button
+                              type="button"
+                              onClick={() => handleRevokeInvite(inv)}
+                              disabled={revokingInviteId === inv.id}
+                              className="text-xs text-gray-400 hover:text-red-400 disabled:opacity-50"
+                              title="Revoke this pending invite"
+                            >
+                              {revokingInviteId === inv.id ? 'Revoking…' : 'Revoke'}
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                  {members.map((m) => {
+                    const memberKeys = getMemberKeys(m.id);
+                    const isExpanded = expandedMembers.has(m.id);
+                    return (
+                      <>
                       <tr
                         key={m.id}
                         className={`hover:bg-gray-800/30 transition-colors cursor-pointer ${isExpanded ? 'bg-gray-800/20' : ''}`}
@@ -1450,7 +1545,8 @@ export default function IAM() {
                       )}
                     </>
                   );
-                })
+                  })}
+                </>
               )}
             </tbody>
           </table>

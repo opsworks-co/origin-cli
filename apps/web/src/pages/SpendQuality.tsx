@@ -144,24 +144,56 @@ function SpendQualityTable({
 type SortCol = 'name' | 'spend' | 'authorship' | 'rework' | 'costPerPr' | 'sessions';
 
 // ── Section 2 — Top expensive sessions ─────────────────────────────────────
+// Day labels mirror bucketHeatmap()'s 0=Sun..6=Sat ordering so the
+// (day, hour) tuple emitted by SpendHeatmap.onPick lines up with what
+// rows we want to filter to.
+const DAY_LABEL_FROM_INDEX = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
 function TopSessions({
-  rows, status, error, limit, onLimitChange, max,
+  rows, status, error, limit, onLimitChange, max, pickedHour, onClearPick,
 }: {
   rows: TopSessionRow[]; status: 'idle' | 'loading' | 'ready' | 'error'; error?: string;
   limit: number; onLimitChange: (n: number) => void; max: number;
+  pickedHour: { day: number; hour: number } | null;
+  onClearPick: () => void;
 }) {
+  // Filter rows by the heatmap-picked hour-of-week if one is set. We bucket
+  // each session's startedAtIso through the same getDay()/getHours() the
+  // backend uses for the heatmap so a click on a cell narrows to exactly
+  // the sessions that built that cell's value.
+  const filtered = pickedHour
+    ? rows.filter((s) => {
+        if (!s.startedAtIso) return false;
+        const t = new Date(s.startedAtIso);
+        return t.getDay() === pickedHour.day && t.getHours() === pickedHour.hour;
+      })
+    : rows;
+  const hourLabel = pickedHour
+    ? `${DAY_LABEL_FROM_INDEX[pickedHour.day]} ${String(pickedHour.hour).padStart(2, '0')}:00`
+    : null;
+
   return (
     <SectionShell
       title="Top expensive sessions"
-      subtitle="ranked by cost"
+      subtitle={hourLabel ? `filtered to ${hourLabel}` : 'ranked by cost'}
       icon={TrendingUp}
       status={status}
       error={error}
-      isEmpty={rows.length === 0}
-      emptyMessage="No expensive sessions in this range."
+      isEmpty={filtered.length === 0}
+      emptyMessage={pickedHour ? `No sessions in ${hourLabel}.` : 'No expensive sessions in this range.'}
     >
-      <div className="flex justify-end mb-2">
-        <label className="text-[10px] uppercase tracking-wider text-gray-500 flex items-center gap-2">
+      <div className="flex items-center justify-between mb-2 gap-3">
+        {pickedHour && (
+          <button
+            type="button"
+            onClick={onClearPick}
+            className="text-[10px] uppercase tracking-wider text-indigo-300 hover:text-indigo-200 px-2 py-0.5 rounded border border-indigo-500/30 bg-indigo-500/10"
+            title="Clear hour-of-week filter"
+          >
+            Filtered: {hourLabel} · clear ✕
+          </button>
+        )}
+        <label className="text-[10px] uppercase tracking-wider text-gray-500 flex items-center gap-2 ml-auto">
           show
           <select
             value={limit}
@@ -174,7 +206,7 @@ function TopSessions({
         </label>
       </div>
       <ul className="divide-y divide-gray-800/60">
-        {rows.map((s, i) => {
+        {filtered.map((s, i) => {
           const hh = Math.floor(s.durationSec / 3600);
           const mm = Math.floor((s.durationSec % 3600) / 60);
           const dur = hh > 0 ? `${hh}h${mm > 0 ? ` ${mm}m` : ''}` : `${mm}m`;
@@ -210,10 +242,14 @@ function ModelFitWarnings({ rows, status, error }: {
     'oversized-for-cheap-task': 'Haiku may have sufficed',
     'undersized-for-long-session': 'Consider scope reduction',
   };
+  // Sum the per-row savings into a section-level "~$X / mo" total. Floor
+  // estimate, mirrored from the per-row text — gives admins a one-glance
+  // sense of the total opportunity sitting in this card.
+  const totalSavings = rows.reduce((sum, w) => sum + w.estimatedSavingsUsd, 0);
   return (
     <SectionShell
       title="Model-fit warnings"
-      subtitle="suggested savings"
+      subtitle={rows.length > 0 ? `suggested savings · ~$${totalSavings.toFixed(2)} total` : 'suggested savings'}
       icon={Cpu}
       status={status}
       error={error}
@@ -503,11 +539,15 @@ export default function SpendQualityPage() {
     else { setSortCol(col); setSortDir(col === 'name' ? 'asc' : 'desc'); }
   };
 
-  // Heatmap click — currently a no-op visual hint (we'd narrow the date range
-  // to a single hour but that needs a custom-range implementation; the picker
-  // change updates the URL so refresh preserves it). Surface a subtle toast
-  // via setSearchParams + a transient flag if we end up wiring the narrow.
-  const handleHeatmapPick = (_day: number, _hour: number) => { /* placeholder */ };
+  // Heatmap click → narrow the Top expensive sessions list to that hour-of-
+  // week. Click the same cell again to clear; the chip in the TopSessions
+  // header is the other affordance for clearing. Frontend-only — every
+  // session row already carries `startedAtIso`, so we filter in memory
+  // without re-fetching.
+  const [pickedHour, setPickedHour] = useState<{ day: number; hour: number } | null>(null);
+  const handleHeatmapPick = (day: number, hour: number) => {
+    setPickedHour((prev) => (prev && prev.day === day && prev.hour === hour ? null : { day, hour }));
+  };
 
   return (
     <div className="space-y-6">
@@ -552,6 +592,8 @@ export default function SpendQualityPage() {
         limit={limitParam}
         onLimitChange={setTopLimit}
         max={cfg?.topSessions.max || 25}
+        pickedHour={pickedHour}
+        onClearPick={() => setPickedHour(null)}
       />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

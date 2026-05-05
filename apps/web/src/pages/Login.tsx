@@ -135,7 +135,7 @@ export default function Login() {
               Solo
             </Link>
             {' or '}
-            <Link to="/register" className="text-indigo-400 hover:text-indigo-300 transition-colors">
+            <Link to="/register?type=team" className="text-indigo-400 hover:text-indigo-300 transition-colors">
               Team
             </Link>
           </p>

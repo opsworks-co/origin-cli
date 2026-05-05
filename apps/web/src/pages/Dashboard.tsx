@@ -1142,7 +1142,94 @@ function CostTab({ stats }: { stats: Stats }) {
           </div>
         )}
       </div>
+
+      {/* Time-of-spend heatmap — full row. Self-fetching so we don't touch
+          the existing Stats payload. Same data + look as the Spend Quality
+          page; lives here so admins on the Cost tab see "when does the
+          spend actually happen?" without leaving the dashboard. */}
+      <div className="card lg:col-span-3">
+        <DashboardSpendHeatmap />
+      </div>
     </div>
+  );
+}
+
+// Self-contained heatmap card for the Cost tab. Fetches the same /spend-
+// heatmap endpoint Spend Quality uses; we don't share the SpendHeatmap
+// component there because that one is wrapped in a SectionShell with
+// loading/error semantics tuned to that page.
+function DashboardSpendHeatmap() {
+  const [cells, setCells] = React.useState<api.HeatmapCell[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [err, setErr] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    api.getSpendHeatmap({ range: '30d' })
+      .then((res) => { if (!cancelled) { setCells(res.cells); setLoading(false); } })
+      .catch((e) => { if (!cancelled) { setErr(e.message || 'Failed to load'); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, []);
+
+  const max = cells.reduce((m, c) => Math.max(m, c.costUsd), 0.01);
+  const grid = new Map<string, api.HeatmapCell>();
+  for (const c of cells) grid.set(`${c.day}-${c.hour}`, c);
+  const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  return (
+    <>
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Time-of-spend heatmap</p>
+          <p className="text-xs text-gray-600 mt-0.5">Last 30 days · day × hour</p>
+        </div>
+        <Link to="/insights/spend-quality" className="text-xs text-indigo-400 hover:text-indigo-300">Open Spend Quality →</Link>
+      </div>
+      {loading && <p className="text-xs text-gray-500">Loading…</p>}
+      {err && <p className="text-xs text-red-400">{err}</p>}
+      {!loading && !err && cells.length === 0 && (
+        <p className="text-xs text-gray-600">No spend in the last 30 days.</p>
+      )}
+      {!loading && !err && cells.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="text-[10px] border-separate border-spacing-0.5" aria-label="Spend heatmap day by hour">
+            <thead>
+              <tr>
+                <th></th>
+                {Array.from({ length: 24 }, (_, h) => (
+                  <th key={h} className="text-gray-600 font-normal w-4 text-center">{h % 6 === 0 ? h : ''}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {dayLabels.map((label, day) => (
+                <tr key={day}>
+                  <td className="text-gray-500 pr-2">{label}</td>
+                  {Array.from({ length: 24 }, (_, hour) => {
+                    const cell = grid.get(`${day}-${hour}`);
+                    const intensity = cell ? Math.min(1, cell.costUsd / max) : 0;
+                    const bg = intensity > 0
+                      ? `rgba(99,102,241,${0.1 + intensity * 0.7})`
+                      : 'rgba(75,85,99,0.15)';
+                    const title = cell
+                      ? `${label} ${hour}:00 · $${cell.costUsd.toFixed(2)} · ${cell.sessionCount} sessions`
+                      : `${label} ${hour}:00 · no spend`;
+                    return (
+                      <td key={hour}>
+                        <div
+                          className="w-4 h-4 rounded-sm"
+                          title={title}
+                          style={{ background: bg }}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 

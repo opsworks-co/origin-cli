@@ -20,6 +20,15 @@ export interface BlogPostData {
 
 export const blogPosts: BlogPostData[] = [
   {
+    title: 'Spend Quality: stop measuring the AI bill, start measuring what it bought',
+    slug: 'spend-quality-roi-dashboard',
+    date: '2026-05-04',
+    author: 'Artem Dolobanko',
+    tags: ['cost-tracking', 'ai-roi', 'spend-quality', 'engineering-leadership'],
+    excerpt:
+      'Every cost dashboard tells you the AI bill went up. None of them tell you whether that bill bought working code or got rolled back the next day. Spend Quality is six lenses on a single question — "are we getting our money\'s worth?" — rework rate per developer, $/merged-PR, model-fit warnings for the times you reached for Opus when Haiku would have done it, a heatmap of when the spend actually happens, and a ranked list of the sessions that burned the most for the least. Live now at /insights/spend-quality.',
+  },
+  {
     title: 'Per-model budget caps for AI coding teams',
     slug: 'per-model-budget-caps-team',
     date: '2026-04-29',

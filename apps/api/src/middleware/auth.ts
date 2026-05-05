@@ -250,52 +250,55 @@ export async function resolveOrgContext(req: AuthRequest, res: Response, next: N
     return next();
   }
 
-  // Header → lastOrgId → first membership.
-  const headerOrgId = (req.headers[ORG_CONTEXT_HEADER] as string | undefined)?.trim();
-  let chosenOrgId = headerOrgId || null;
+  // Header → lastOrgId → first membership. Each is a *hint*; if the user
+  // has no membership in the hinted org we silently fall through to the
+  // next source rather than 403ing. This matches /me's behavior and keeps
+  // a stale `X-Origin-Org` value (e.g. left over in localStorage from a
+  // prior session, or pointing to an org the user was removed from) from
+  // bricking every API call until the user clears storage.
+  const headerOrgId = (req.headers[ORG_CONTEXT_HEADER] as string | undefined)?.trim() || null;
 
-  if (!chosenOrgId) {
-    try {
-      const u = await prisma.user.findUnique({
-        where: { id: req.user.id },
-        select: { lastOrgId: true },
-      });
-      chosenOrgId = u?.lastOrgId || null;
-    } catch { /* ignore — fall through to first membership */ }
-  }
+  let lastOrgId: string | null = null;
+  try {
+    const u = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { lastOrgId: true },
+    });
+    lastOrgId = u?.lastOrgId || null;
+  } catch { /* ignore — fall through */ }
 
-  if (chosenOrgId) {
-    const membership = await prisma.membership.findUnique({
-      where: { userId_orgId: { userId: req.user.id, orgId: chosenOrgId } },
+  const tryOrg = async (orgId: string | null) => {
+    if (!orgId) return null;
+    return prisma.membership.findUnique({
+      where: { userId_orgId: { userId: req.user!.id, orgId } },
       select: { role: true, orgId: true },
     });
-    if (!membership) {
-      return res.status(403).json({ error: 'No membership in the requested org' });
-    }
-    req.activeOrgId = membership.orgId;
-    req.activeRole = membership.role;
-    // Lazy-update lastOrgId when the user explicitly switched (header set).
-    // Fire-and-forget — never gates the request, never used for authz.
-    if (headerOrgId) {
-      prisma.user.update({
-        where: { id: req.user.id },
-        data: { lastOrgId: membership.orgId },
-      }).catch(() => { /* non-fatal */ });
-    }
-    return next();
-  }
+  };
 
-  // No header, no lastOrgId — pick any membership.
-  const fallback = await prisma.membership.findFirst({
-    where: { userId: req.user.id },
-    orderBy: { joinedAt: 'asc' },
-    select: { orgId: true, role: true },
-  });
-  if (!fallback) {
+  let membership = await tryOrg(headerOrgId);
+  if (!membership) membership = await tryOrg(lastOrgId);
+  if (!membership) {
+    membership = await prisma.membership.findFirst({
+      where: { userId: req.user.id },
+      orderBy: { joinedAt: 'asc' },
+      select: { role: true, orgId: true },
+    });
+  }
+  if (!membership) {
     return res.status(403).json({ error: 'User has no org memberships' });
   }
-  req.activeOrgId = fallback.orgId;
-  req.activeRole = fallback.role;
+
+  req.activeOrgId = membership.orgId;
+  req.activeRole = membership.role;
+
+  // Lazy-update lastOrgId when the user explicitly switched (header set
+  // AND it matched a real membership). Fire-and-forget.
+  if (headerOrgId && headerOrgId === membership.orgId && lastOrgId !== membership.orgId) {
+    prisma.user.update({
+      where: { id: req.user.id },
+      data: { lastOrgId: membership.orgId },
+    }).catch(() => { /* non-fatal */ });
+  }
   next();
 }
 

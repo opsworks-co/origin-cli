@@ -30,7 +30,7 @@ export default function Team() {
   const [addEmail, setAddEmail] = useState('');
   const [addRole, setAddRole] = useState('MEMBER');
   const [adding, setAdding] = useState(false);
-  const [inviteResult, setInviteResult] = useState<{ link: string; emailSent: boolean; emailError?: string; email: string } | null>(null);
+  const [inviteResult, setInviteResult] = useState<{ link: string | null; addedDirectly?: boolean; emailSent: boolean; emailError?: string; email: string } | null>(null);
 
   // Regenerate key modal state
   const [regenKey, setRegenKey] = useState('');
@@ -61,9 +61,10 @@ export default function Team() {
     setInviteResult(null);
     try {
       const res = await api.createInvite({ email: addEmail.trim(), role: addRole });
-      const link = `${window.location.origin}/accept-invite/${res.token}`;
+      const link = res.added ? null : `${window.location.origin}/accept-invite/${res.token}`;
       setInviteResult({
         link,
+        addedDirectly: res.added === true,
         emailSent: !!res.emailSent,
         emailError: res.emailError,
         email: addEmail.trim(),
@@ -195,7 +196,14 @@ export default function Team() {
               </form>
             ) : (
               <div className="space-y-4">
-                {inviteResult.emailSent ? (
+                {inviteResult.addedDirectly ? (
+                  <div className="p-3 bg-green-900/20 border border-green-800 rounded-lg">
+                    <p className="text-sm text-green-400 font-medium mb-1">Added to the org</p>
+                    <p className="text-xs text-green-400/80">
+                      {inviteResult.email} already had an Origin account, so we added them directly. They'll see the org in their switcher next time they sign in.
+                    </p>
+                  </div>
+                ) : inviteResult.emailSent ? (
                   <div className="p-3 bg-green-900/20 border border-green-800 rounded-lg">
                     <p className="text-sm text-green-400 font-medium mb-1">Invite sent</p>
                     <p className="text-xs text-green-400/80">An email is on its way to {inviteResult.email}.</p>
@@ -206,18 +214,20 @@ export default function Team() {
                     <p className="text-xs text-amber-400/80">{inviteResult.emailError || 'Email service is not configured.'} Share the link manually:</p>
                   </div>
                 )}
-                <div>
-                  <label className="block text-xs text-gray-400 mb-2">Invite link (also in the email)</label>
-                  <div className="p-3 bg-gray-800 rounded-lg font-mono text-xs text-gray-200 break-all select-all">
-                    {inviteResult.link}
+                {inviteResult.link && (
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-2">Invite link (also in the email)</label>
+                    <div className="p-3 bg-gray-800 rounded-lg font-mono text-xs text-gray-200 break-all select-all">
+                      {inviteResult.link}
+                    </div>
+                    <button
+                      onClick={() => copyToClipboard(inviteResult.link!)}
+                      className="btn-secondary text-xs mt-2 w-full"
+                    >
+                      {copied ? 'Copied!' : 'Copy link'}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => copyToClipboard(inviteResult.link)}
-                    className="btn-secondary text-xs mt-2 w-full"
-                  >
-                    {copied ? 'Copied!' : 'Copy link'}
-                  </button>
-                </div>
+                )}
               </div>
             )}
 

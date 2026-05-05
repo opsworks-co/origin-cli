@@ -2,11 +2,15 @@ import { prisma } from '../db.js';
 import { AGENT_CATALOG, type CatalogEntry } from '../data/agent-catalog.js';
 
 // Idempotent catalog seeder. Every org should own one Agent row per
-// AGENT_CATALOG entry. New rows start with isEnabled=false; existing rows
-// (e.g. a user-created Agent that already used `claude-code` as its slug)
-// get marked as catalog (isCustom=false) and have name/description/default
-// model nudged toward the catalog values *only if those fields are empty*
-// — we don't clobber an admin's custom branding mid-flight.
+// AGENT_CATALOG entry. New rows start with isEnabled=true so the team
+// can run a session through any catalog agent immediately — Origin only
+// records sessions for enabled agents, and forcing every team to flip
+// four toggles before the first session was a needless onboarding
+// friction. Existing rows (e.g. a user-created Agent that already used
+// `claude-code` as its slug) get marked as catalog (isCustom=false) and
+// have name/description/default model nudged toward the catalog values
+// *only if those fields are empty* — we don't clobber an admin's custom
+// branding mid-flight.
 //
 // Safe to call repeatedly. Runs on:
 //   1. Server startup (backfillCatalogForAllOrgs) — covers existing orgs
@@ -26,6 +30,9 @@ async function upsertCatalogRow(client: PrismaLike, orgId: string, entry: Catalo
       description: true,
       model: true,
       isCustom: true,
+      isEnabled: true,
+      createdAt: true,
+      updatedAt: true,
     },
   });
 
@@ -37,7 +44,7 @@ async function upsertCatalogRow(client: PrismaLike, orgId: string, entry: Catalo
         name: entry.name,
         description: entry.description,
         model: entry.defaultModel,
-        isEnabled: false,
+        isEnabled: true,
         isCustom: false,
       },
     });
@@ -52,6 +59,17 @@ async function upsertCatalogRow(client: PrismaLike, orgId: string, entry: Catalo
   if (!existing.name || existing.name === entry.slug) patch.name = entry.name;
   if (!existing.description) patch.description = entry.description;
   if (!existing.model) patch.model = entry.defaultModel;
+  // One-time enable: catalog rows were originally seeded with
+  // isEnabled=false. Default-on is the new policy, but we only flip
+  // rows the admin has never touched (heuristic: updatedAt === createdAt
+  // means no PATCH /toggle has run since seeding). Admins who
+  // intentionally disabled an agent keep their choice.
+  if (
+    !existing.isEnabled
+    && existing.updatedAt.getTime() === existing.createdAt.getTime()
+  ) {
+    patch.isEnabled = true;
+  }
 
   if (Object.keys(patch).length > 0) {
     await client.agent.update({ where: { id: existing.id }, data: patch });

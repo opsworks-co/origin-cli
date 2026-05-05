@@ -353,6 +353,55 @@ interface InviteEmailData {
   acceptUrl: string;
 }
 
+interface AddedToOrgEmailData {
+  inviterName: string;
+  inviterEmail: string;
+  orgName: string;
+  role: string;
+  dashboardUrl: string;
+}
+
+// Sent when an admin invites an email that already belongs to an Origin
+// user — they're added directly to the org (no token round-trip), so the
+// email is a heads-up + a link straight into the dashboard.
+export function buildAddedToOrgEmailHTML(data: AddedToOrgEmailData): string {
+  const ORIGIN_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
+  const roleLabel = data.role.charAt(0).toUpperCase() + data.role.slice(1).toLowerCase();
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>You've been added to ${data.orgName} on Origin</title>
+</head>
+<body style="margin: 0; padding: 0; background: #0a0b14; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+  <div style="max-width: 560px; margin: 40px auto; background: #111322; border: 1px solid #1f2333; border-radius: 12px; padding: 32px;">
+    <div style="margin-bottom: 24px;">
+      <a href="${ORIGIN_URL}" style="text-decoration: none; color: #818cf8; font-size: 14px; font-weight: 600; letter-spacing: 0.04em;">ORIGIN</a>
+    </div>
+
+    <h1 style="color: #f3f4f6; font-size: 22px; font-weight: 600; margin: 0 0 12px;">
+      You've been added to <span style="color: #a78bfa;">${data.orgName}</span>
+    </h1>
+    <p style="color: #9ca3af; font-size: 14px; line-height: 1.6; margin: 0 0 24px;">
+      ${data.inviterName} (<a href="mailto:${data.inviterEmail}" style="color: #818cf8;">${data.inviterEmail}</a>)
+      added you to <strong style="color: #e5e7eb;">${data.orgName}</strong> as <strong style="color: #e5e7eb;">${roleLabel}</strong>. Sign in with your existing Origin account to switch into it from the org picker.
+    </p>
+
+    <div style="margin: 28px 0;">
+      <a href="${data.dashboardUrl}" style="display: inline-block; background: #6366f1; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 600; padding: 12px 22px; border-radius: 8px;">
+        Open Origin
+      </a>
+    </div>
+
+    <div style="border-top: 1px solid #1f2333; padding-top: 16px;">
+      <p style="color: #555; font-size: 11px; margin: 0;">Origin AI Governance &mdash; <a href="${ORIGIN_URL}" style="color: #818cf8;">getorigin.io</a></p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
 export function buildInviteEmailHTML(data: InviteEmailData): string {
   const ORIGIN_URL = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
   const roleLabel = data.role.charAt(0).toUpperCase() + data.role.slice(1).toLowerCase();

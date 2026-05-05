@@ -91,22 +91,44 @@ export default function Onboarding() {
   // / AI Summaries are admin-only, so we route around them. Drives both
   // the step indicator and the next/back navigation below.
   const fromInvite = searchParams.get('from') === 'invite';
-  // Allow team admins who just created an org to walk through the same
-  // 6-step solo wizard. The flow shape is identical (Connect / Import
-  // are admin-relevant); only the redirect guard below needs to let
-  // accountType=org through when fromTeam.
+  // Team-admin mode: the wizard takes the same shape but inserts a
+  // team-only "Invite teammates" step between Import Repos and AI
+  // Summaries. Branding swaps to "Origin Team" so the admin doesn't
+  // walk through a flow titled "Origin Solo." Step 7 is the new invite
+  // step (lazily numbered to avoid renumbering existing branches).
   const fromTeam = searchParams.get('from') === 'team';
-  const inviteLabels = ['AI Tools', 'Your Access', 'Install CLI', 'First Session'];
-  // Map a real step (0..6) to its position in the invited indicator so
-  // the progress dots line up with how the user perceives the wizard.
-  // Step 6 is the new "Your Access" step injected for invited members.
+  // Invited members run a slim 3-step flow. We used to tack on a
+  // "First Session" polling page after Install CLI, but that doubled
+  // the perceived CLI setup work — Install CLI already lists the three
+  // commands they need; the polling page added no new instructions, just
+  // a wait. Drop it; they land on /me where the same listener lives if
+  // they want to confirm.
+  const inviteLabels = ['AI Tools', 'Your Access', 'Install CLI'];
+  // Team admins finish at AI Summaries — Install CLI / First Session
+  // are individual-developer steps that the invited teammates each run
+  // through in their own (`?from=invite`) onboarding. Forcing them on
+  // the org admin just blocks them from reaching the dashboard for a
+  // task they don't need to do as admin.
+  const teamLabels = ['AI Tools', 'Connect', 'Import Repos', 'Invite Team', 'AI Summaries'];
+  // Map a real step (0..7) to its position in whichever progress
+  // indicator we're rendering. Solo and team share most steps; team
+  // injects step 7 (Invite Team) between 2 and 3.
   const visualStep = (s: number) => {
-    if (!fromInvite) return s;
-    if (s === 0) return 0; // AI Tools
-    if (s === 6) return 1; // Your Access
-    if (s === 4) return 2; // Install CLI
-    if (s === 5) return 3; // First Session
-    return 0;
+    if (fromInvite) {
+      if (s === 0) return 0; // AI Tools
+      if (s === 6) return 1; // Your Access
+      if (s === 4) return 2; // Install CLI (final step for invitees)
+      return 0;
+    }
+    if (fromTeam) {
+      if (s === 0) return 0; // AI Tools
+      if (s === 1) return 1; // Connect
+      if (s === 2) return 2; // Import Repos
+      if (s === 7) return 3; // Invite Team
+      if (s === 3) return 4; // AI Summaries (final step for team admins)
+      return 0;
+    }
+    return s;
   };
 
   // Determine initial step — if returning from GitHub/GitLab OAuth, jump to step 1 (connect repos)
@@ -212,7 +234,9 @@ export default function Onboarding() {
       sessionStorage.removeItem('origin:onboarding-key');
       localStorage.setItem('origin:hide-guide', '1');
     } catch { /* ignore */ }
-    navigate('/me', { replace: true });
+    // Team admins land on the org dashboard; everyone else (solo /
+    // invited developers) on the personal `/me` view.
+    navigate(fromTeam ? '/dashboard' : '/me', { replace: true });
   };
 
   // Discover repos from connected providers
@@ -293,7 +317,8 @@ export default function Onboarding() {
     try {
       // Save onboarding state so we resume after redirect
       sessionStorage.setItem('origin:onboarding-step', '1');
-      const { installUrl } = await api.getGitHubAppInstallUrl({ from: 'onboarding' });
+      const flavor = fromTeam ? 'team' : fromInvite ? 'invite' : '';
+      const { installUrl } = await api.getGitHubAppInstallUrl({ from: 'onboarding', flavor });
       window.location.href = installUrl;
     } catch (err: any) {
       setConnectError(err.message || 'Failed to start GitHub connection');
@@ -306,7 +331,8 @@ export default function Onboarding() {
     setConnectError(null);
     try {
       sessionStorage.setItem('origin:onboarding-step', '1');
-      const { authorizeUrl } = await api.getGitLabOAuthInstallUrl({ from: 'onboarding' });
+      const flavor = fromTeam ? 'team' : fromInvite ? 'invite' : '';
+      const { authorizeUrl } = await api.getGitLabOAuthInstallUrl({ from: 'onboarding', flavor });
       window.location.href = authorizeUrl;
     } catch (err: any) {
       setConnectError(err.message || 'Failed to start GitLab connection');
@@ -326,10 +352,10 @@ export default function Onboarding() {
         {/* Logo */}
         <div className="flex items-center justify-center gap-2 mb-6">
           <LogoMark size={36} variant="solo" />
-          <span className="text-lg font-semibold">Origin Solo</span>
+          <span className="text-lg font-semibold">{fromTeam ? 'Origin Team' : fromInvite ? 'Origin Member' : 'Origin Solo'}</span>
         </div>
 
-        <Steps current={visualStep(step)} labels={fromInvite ? inviteLabels : undefined} />
+        <Steps current={visualStep(step)} labels={fromInvite ? inviteLabels : (fromTeam ? teamLabels : undefined)} />
 
         {/* ─── STEP 1: AI Tools ───────────────────────────────────────────── */}
         {step === 0 && (
@@ -486,7 +512,10 @@ export default function Onboarding() {
                     // Auto-discover repos when entering import step
                     setTimeout(discoverRepos, 100);
                   } else {
-                    setStep(3); // Skip import if nothing connected
+                    // Skip import if nothing connected. Team admins jump
+                    // to Invite Team (7) so they don't lose the team-only
+                    // step; solo / dev jumps straight to AI Summaries (3).
+                    setStep(fromTeam ? 7 : 3);
                   }
                 }}
                 className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
@@ -615,7 +644,7 @@ export default function Onboarding() {
                   </button>
                 )}
                 <button
-                  onClick={() => setStep(3)}
+                  onClick={() => setStep(fromTeam ? 7 : 3)}
                   className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
                 >
                   {importDone ? 'Continue' : discoveredRepos.length === 0 ? 'Continue' : 'Skip'} &rarr;
@@ -627,7 +656,19 @@ export default function Onboarding() {
 
         {/* ─── STEP 4: AI Summaries — optional org-level LLM key ─────────── */}
         {step === 3 && (
-          <AiSummariesStep onContinue={() => setStep(4)} onBack={() => setStep(2)} />
+          <AiSummariesStep
+            onContinue={fromTeam ? goToDashboard : () => setStep(4)}
+            onBack={() => setStep(fromTeam ? 7 : 2)}
+            isFinalStep={fromTeam}
+          />
+        )}
+
+        {/* ─── STEP (team-only): Invite teammates ────────────────────────── */}
+        {step === 7 && fromTeam && (
+          <InviteTeamStep
+            onContinue={() => setStep(3)}
+            onBack={() => setStep(2)}
+          />
         )}
 
         {/* ─── STEP 5: Install & Connect ──────────────────────────────────── */}
@@ -698,10 +739,18 @@ export default function Onboarding() {
                 &larr; Back
               </button>
               <button
-                onClick={() => { setStep(5); setPolling(true); }}
+                onClick={() => {
+                  // Invitees finish here — they don't need a separate
+                  // First Session polling step. /me has the same listener
+                  // if they want to confirm. Solo flow still walks
+                  // through step 5 since they self-installed top-to-bottom.
+                  if (fromInvite) { goToDashboard(); return; }
+                  setStep(5);
+                  setPolling(true);
+                }}
                 className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
               >
-                I've run the commands &rarr;
+                {fromInvite ? "I've run the commands — finish" : "I've run the commands →"}
               </button>
             </div>
           </div>
@@ -891,13 +940,188 @@ function YourAccessStep({ onContinue, onBack }: { onContinue: () => void; onBack
   );
 }
 
+// ─── Invite teammates step (team-only) ────────────────────────────────────
+//
+// Starts with a single email field; admins can click "+ Add another" to
+// invite more. Each filled row is sent as a MEMBER-role invitation via
+// api.createInvite. Skipping is fine — admins can invite from /iam later.
+// We don't surface roles or per-repo grants here; the goal is "get one
+// teammate in the door so the team has more than one person on day 1."
+// Anything richer belongs in IAM.
+function InviteTeamStep({ onContinue, onBack }: { onContinue: () => void; onBack: () => void }) {
+  const [emails, setEmails] = React.useState<string[]>(['']);
+  const [sending, setSending] = React.useState(false);
+  const [sentCount, setSentCount] = React.useState(0);
+  const [error, setError] = React.useState('');
+  // Per-row outcome — surfaced inline so an admin can see exactly which
+  // invite failed and why. Previous behavior swallowed errors and
+  // advanced to the next step, which left admins thinking they'd
+  // invited people who weren't actually in IAM.
+  type RowStatus = { ok: boolean; message?: string };
+  const [rowStatus, setRowStatus] = React.useState<Record<number, RowStatus>>({});
+
+  const setEmail = (i: number, v: string) => {
+    setEmails((prev) => prev.map((e, idx) => (idx === i ? v : e)));
+    setRowStatus((prev) => {
+      if (!prev[i]) return prev;
+      const next = { ...prev };
+      delete next[i];
+      return next;
+    });
+  };
+  const addRow = () => setEmails((prev) => [...prev, '']);
+  const removeRow = (i: number) => {
+    setEmails((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev));
+    setRowStatus((prev) => {
+      const next: Record<number, RowStatus> = {};
+      Object.entries(prev).forEach(([k, v]) => {
+        const idx = Number(k);
+        if (idx === i) return;
+        next[idx > i ? idx - 1 : idx] = v;
+      });
+      return next;
+    });
+  };
+
+  const isValidEmail = (e: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+  const validEmails = emails
+    .map((e, i) => ({ email: e.trim(), index: i }))
+    .filter((r) => isValidEmail(r.email));
+
+  const sendInvites = async () => {
+    setError('');
+    setRowStatus({});
+    if (validEmails.length === 0) { onContinue(); return; }
+    setSending(true);
+    try {
+      let ok = 0;
+      const status: Record<number, RowStatus> = {};
+      for (const { email, index } of validEmails) {
+        try {
+          await api.createInvite({ email, role: 'MEMBER' });
+          status[index] = { ok: true };
+          ok++;
+        } catch (err: any) {
+          // Surface the per-row error so the admin knows which invite
+          // failed and why (409 already-member, 403 wrong-role, etc.).
+          status[index] = { ok: false, message: err?.message || 'Failed' };
+        }
+      }
+      setRowStatus(status);
+      setSentCount(ok);
+      // Only auto-advance when at least one invite succeeded. Otherwise
+      // keep the admin on this step so they can read the errors and
+      // either fix the emails or skip explicitly.
+      if (ok > 0) setTimeout(onContinue, 800);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to send invites');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="animate-fade-in space-y-6">
+      <div className="text-center">
+        <h1 className="text-2xl font-bold text-white">Invite your teammates</h1>
+        <p className="text-sm text-gray-400 mt-2">
+          Send invite links now or add more later from IAM.
+        </p>
+      </div>
+
+      {error && (
+        <div className="p-3 rounded-lg bg-red-900/30 border border-red-800 text-red-400 text-sm">
+          {error}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {emails.map((value, i) => {
+          const status = rowStatus[i];
+          const borderClass = status?.ok
+            ? 'border-emerald-500/40'
+            : status && !status.ok
+              ? 'border-red-500/40'
+              : 'border-white/[0.08] focus-within:border-indigo-500/60';
+          return (
+            <div key={i} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <input
+                  type="email"
+                  value={value}
+                  onChange={(e) => setEmail(i, e.target.value)}
+                  placeholder="teammate@yourcompany.com"
+                  className={`flex-1 px-4 py-2.5 rounded-lg border bg-gray-900/40 text-sm text-gray-100 placeholder:text-gray-600 focus:outline-none ${borderClass}`}
+                />
+                {emails.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeRow(i)}
+                    aria-label="Remove invitee"
+                    className="shrink-0 w-9 h-9 rounded-lg border border-white/[0.06] text-gray-500 hover:text-gray-300 hover:border-white/[0.12] transition-colors"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+              {status?.ok && (
+                <p className="text-[11px] text-emerald-400 pl-1">Invite sent</p>
+              )}
+              {status && !status.ok && (
+                <p className="text-[11px] text-red-400 pl-1">{status.message}</p>
+              )}
+            </div>
+          );
+        })}
+        <button
+          type="button"
+          onClick={addRow}
+          className="text-xs font-medium text-indigo-400 hover:text-indigo-300 transition-colors"
+        >
+          + Add another
+        </button>
+        <p className="text-[11px] text-gray-600 pt-1">
+          Each invitee gets an email with a link to join your org. They'll arrive at a 4-step setup of their own — no admin work needed on their end.
+        </p>
+      </div>
+
+      <div className="flex items-center justify-between pt-2">
+        <button onClick={onBack} className="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+          &larr; Back
+        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onContinue}
+            className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            Skip
+          </button>
+          <button
+            type="button"
+            onClick={sendInvites}
+            disabled={sending || validEmails.length === 0}
+            className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+          >
+            {sending
+              ? 'Sending…'
+              : sentCount > 0
+                ? `Sent ${sentCount} ✓`
+                : `Invite ${validEmails.length || ''}${validEmails.length > 0 ? ' →' : ''}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── AI Summaries onboarding step ──────────────────────────────────────────
 //
 // Optional. The org admin can paste an Anthropic / OpenAI API key here and
 // every session in the dashboard gets a real AI-generated label
 // ("Refactored auth middleware") instead of the heuristic first-line
 // fallback. Skipping is fine — the heuristic still works.
-function AiSummariesStep({ onContinue, onBack }: { onContinue: () => void; onBack: () => void }) {
+function AiSummariesStep({ onContinue, onBack, isFinalStep }: { onContinue: () => void; onBack: () => void; isFinalStep?: boolean }) {
   const [provider, setProvider] = React.useState<'anthropic' | 'openai'>('anthropic');
   const [apiKey, setApiKey] = React.useState('');
   const [saving, setSaving] = React.useState(false);
@@ -910,16 +1134,15 @@ function AiSummariesStep({ onContinue, onBack }: { onContinue: () => void; onBac
     try {
       // /api/settings/chat is the canonical LLM-key endpoint — same row
       // backs Chat, AI session titles, and any future LLM features.
-      const res = await fetch('/api/settings/chat', {
+      // Going through the shared `request()` helper (instead of raw
+      // fetch) makes sure the X-Origin-Org header is sent, so the key
+      // lands in the same org the user is currently viewing — without
+      // it the API would fall back to lastOrgId, which can drift if the
+      // user has more than one membership.
+      await request('/api/settings/chat', {
         method: 'PUT',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey, llmProvider: provider }),
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || `HTTP ${res.status}`);
-      }
       setSaved(true);
       setTimeout(onContinue, 600);
     } catch (err: any) {
@@ -953,7 +1176,7 @@ function AiSummariesStep({ onContinue, onBack }: { onContinue: () => void; onBac
                   : 'bg-gray-900/40 text-gray-400 border-white/[0.06] hover:text-gray-200'
               }`}
             >
-              {p === 'anthropic' ? 'Anthropic (Claude Haiku)' : 'OpenAI (gpt-4o-mini)'}
+              {p === 'anthropic' ? 'Anthropic' : 'OpenAI'}
             </button>
           ))}
         </div>
@@ -989,14 +1212,14 @@ function AiSummariesStep({ onContinue, onBack }: { onContinue: () => void; onBac
             onClick={onContinue}
             className="text-sm text-gray-500 hover:text-gray-300 transition-colors"
           >
-            Skip for now
+            {isFinalStep ? 'Skip — go to dashboard' : 'Skip for now'}
           </button>
           <button
             onClick={save}
             disabled={saving || apiKey.trim().length < 10}
             className="px-6 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {saving ? 'Saving…' : 'Save & continue'}
+            {saving ? 'Saving…' : isFinalStep ? 'Save & finish' : 'Save & continue'}
           </button>
         </div>
       </div>

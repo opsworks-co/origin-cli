@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../middleware/auth.js';
 import { sendEmail } from '../services/email.js';
-import { buildInviteEmailHTML } from '../services/email-templates.js';
+import { buildInviteEmailHTML, buildAddedToOrgEmailHTML } from '../services/email-templates.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -713,15 +713,15 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
       return res.status(400).json({ error: 'Cannot invite as owner. Invite as admin and promote later.' });
     }
 
-    if (email) {
-      const existingUser = await prisma.user.findUnique({ where: { email } });
-      if (existingUser) {
-        const existingMembership = await prisma.membership.findUnique({
-          where: { userId_orgId: { userId: existingUser.id, orgId } },
-        });
-        if (existingMembership) {
-          return res.status(409).json({ error: 'User with this email is already a member' });
-        }
+    const existingUser = email
+      ? await prisma.user.findUnique({ where: { email } })
+      : null;
+    if (existingUser) {
+      const existingMembership = await prisma.membership.findUnique({
+        where: { userId_orgId: { userId: existingUser.id, orgId } },
+      });
+      if (existingMembership) {
+        return res.status(409).json({ error: 'User with this email is already a member' });
       }
     }
 
@@ -729,6 +729,8 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
     // values, and confirm every repo/agent id actually belongs to this
     // org. Saves us from someone hand-crafting a request body that grants
     // access to a repo in a different org.
+    let cleanRepos: Array<{ id: string; level: string }> = [];
+    let cleanAgents: Array<{ id: string; level: string }> = [];
     let pendingGrantsJson: string | null = null;
     if (pendingGrants && typeof pendingGrants === 'object') {
       const repos = Array.isArray(pendingGrants.repos) ? pendingGrants.repos : [];
@@ -745,13 +747,13 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
       ]);
       const validRepoIds = new Set(validRepos.map((r) => r.id));
       const validAgentIds = new Set(validAgents.map((a) => a.id));
-      const cleanRepos = repos
+      cleanRepos = repos
         .filter((r: any) => validRepoIds.has(r.id))
         .map((r: any) => ({
           id: r.id as string,
           level: ['read', 'write', 'admin'].includes(r.level) ? r.level : 'read',
         }));
-      const cleanAgents = agents
+      cleanAgents = agents
         .filter((a: any) => validAgentIds.has(a.id))
         .map((a: any) => ({
           id: a.id as string,
@@ -760,6 +762,83 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
       if (cleanRepos.length > 0 || cleanAgents.length > 0) {
         pendingGrantsJson = JSON.stringify({ repos: cleanRepos, agents: cleanAgents });
       }
+    }
+
+    // If the email already belongs to an Origin user (with no membership
+    // in this org), add them directly. The accept-invite flow exists for
+    // *new* signups — running an existing user through it asks them to
+    // re-type their account password to "join", which surfaced as the
+    // confusing "Incorrect password" error admins reported when inviting
+    // emails they didn't realise already had Origin accounts.
+    if (existingUser) {
+      await prisma.membership.create({
+        data: { userId: existingUser.id, orgId, role: inviteRole },
+      });
+
+      // Apply pendingGrants directly — same shape as accept-invite, just
+      // run inline since there's no token to defer behind.
+      let appliedRepos = 0;
+      let appliedAgents = 0;
+      for (const r of cleanRepos) {
+        await prisma.repoMember.upsert({
+          where: { userId_repoId: { userId: existingUser.id, repoId: r.id } },
+          create: { repoId: r.id, userId: existingUser.id, level: r.level, grantedBy: req.user!.id },
+          update: { level: r.level },
+        });
+        appliedRepos++;
+      }
+      for (const a of cleanAgents) {
+        await prisma.agentMember.upsert({
+          where: { userId_agentId: { userId: existingUser.id, agentId: a.id } },
+          create: { agentId: a.id, userId: existingUser.id, level: a.level, grantedBy: req.user!.id },
+          update: { level: a.level },
+        });
+        appliedAgents++;
+      }
+
+      await prisma.auditLog.create({
+        data: {
+          orgId,
+          userId: req.user!.id,
+          action: 'MEMBER_ADDED_DIRECTLY',
+          resource: existingUser.id,
+          metadata: JSON.stringify({ email, role: inviteRole, appliedRepos, appliedAgents }),
+        },
+      });
+
+      // Heads-up email so the user knows a new org appeared in their
+      // switcher. Non-blocking — delivery failure shouldn't fail the API.
+      let emailSent = false;
+      let emailError: string | undefined;
+      try {
+        const [org, inviter] = await Promise.all([
+          prisma.org.findUnique({ where: { id: orgId }, select: { name: true } }),
+          prisma.user.findUnique({ where: { id: req.user!.id }, select: { name: true, email: true } }),
+        ]);
+        const webUrl = process.env.ORIGIN_WEB_URL || 'https://getorigin.io';
+        const inviterName = inviter?.name || inviter?.email || 'A teammate';
+        const inviterEmail = inviter?.email || '';
+        const html = buildAddedToOrgEmailHTML({
+          inviterName,
+          inviterEmail,
+          orgName: org?.name || 'an organization',
+          role: inviteRole,
+          dashboardUrl: `${webUrl}/dashboard`,
+        });
+        const subject = `${inviterName} added you to ${org?.name || 'their team'} on Origin`;
+        const result = await sendEmail(email!, subject, html);
+        emailSent = result.success;
+        emailError = result.error;
+      } catch { /* email is best-effort */ }
+
+      return res.status(201).json({
+        added: true,
+        userId: existingUser.id,
+        email,
+        role: inviteRole,
+        emailSent,
+        emailError,
+      });
     }
 
     const token = crypto.randomBytes(16).toString('hex');

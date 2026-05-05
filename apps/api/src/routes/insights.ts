@@ -46,10 +46,119 @@ function rangeOrError(req: AuthRequest, res: Response): DateRange | null {
   }
 }
 
-// Public expose for the frontend's section legends — keeps thresholds in sync
-// without bundling them twice.
-router.get('/config', (_req: AuthRequest, res: Response) => {
-  res.json(INSIGHTS_CONFIG);
+// ── Per-org overrides ──────────────────────────────────────────────────────
+// Admins can tune a small set of thresholds via Settings. Overrides live in
+// IntegrationConfig under provider `insights_config` as a JSON blob; the
+// loader below merges them into INSIGHTS_CONFIG and the routes pass the
+// merged result into every metric function. Only the user-tunable subset is
+// honoured — hard caps like scanCap / maxRowsPerEndpoint stay global.
+type InsightsOverrides = Partial<{
+  reworkWindowDays: number;
+  reworkRateAmber: number;
+  reworkRateRed: number;
+  expensiveSessionMultiplier: number;
+  modelFit: Partial<{
+    opusCheap: Partial<{ maxPrompts: number; maxCostUsd: number; maxFilesChanged: number }>;
+    sonnetLong: Partial<{ minPrompts: number }>;
+  }>;
+}>;
+
+async function loadOrgInsightsConfig(orgId: string): Promise<typeof INSIGHTS_CONFIG> {
+  try {
+    const row = await prisma.integrationConfig.findFirst({
+      where: { orgId, provider: 'insights_config' },
+      select: { settings: true },
+    });
+    if (!row) return INSIGHTS_CONFIG;
+    const ov = JSON.parse(row.settings) as InsightsOverrides;
+    return {
+      ...INSIGHTS_CONFIG,
+      reworkWindowDays: ov.reworkWindowDays ?? INSIGHTS_CONFIG.reworkWindowDays,
+      reworkRateAmber: ov.reworkRateAmber ?? INSIGHTS_CONFIG.reworkRateAmber,
+      reworkRateRed: ov.reworkRateRed ?? INSIGHTS_CONFIG.reworkRateRed,
+      expensiveSessionMultiplier: ov.expensiveSessionMultiplier ?? INSIGHTS_CONFIG.expensiveSessionMultiplier,
+      modelFit: {
+        ...INSIGHTS_CONFIG.modelFit,
+        opusCheap: {
+          ...INSIGHTS_CONFIG.modelFit.opusCheap,
+          ...(ov.modelFit?.opusCheap ?? {}),
+        },
+        sonnetLong: {
+          ...INSIGHTS_CONFIG.modelFit.sonnetLong,
+          ...(ov.modelFit?.sonnetLong ?? {}),
+        },
+      },
+    };
+  } catch {
+    // Malformed override blob — fall back to defaults rather than 500-ing
+    // every Spend Quality query.
+    return INSIGHTS_CONFIG;
+  }
+}
+
+// GET /config — returns the effective config (defaults merged with this
+// org's overrides). Keeps the UI legend accurate when the thresholds change.
+router.get('/config', async (req: AuthRequest, res: Response) => {
+  const orgId = req.activeOrgId!;
+  const cfg = await loadOrgInsightsConfig(orgId);
+  res.json(cfg);
+});
+
+// PUT /config — admin writes a new override blob. We take the same partial
+// shape as `InsightsOverrides`; missing fields fall back to defaults.
+router.put('/config', async (req: AuthRequest, res: Response) => {
+  try {
+    const orgId = req.activeOrgId!;
+    const body = (req.body ?? {}) as InsightsOverrides;
+
+    // Bound sanity-check the inputs — refuse silly values rather than store
+    // them and break the dashboard's number formatting.
+    const num = (v: unknown, lo: number, hi: number): number | undefined => {
+      if (v === undefined || v === null || v === '') return undefined;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < lo || n > hi) {
+        throw new Error(`value out of range [${lo}, ${hi}]`);
+      }
+      return n;
+    };
+    const sanitised: InsightsOverrides = {};
+    if (body.reworkWindowDays !== undefined) sanitised.reworkWindowDays = num(body.reworkWindowDays, 1, 90);
+    if (body.reworkRateAmber !== undefined) sanitised.reworkRateAmber = num(body.reworkRateAmber, 0, 1);
+    if (body.reworkRateRed !== undefined) sanitised.reworkRateRed = num(body.reworkRateRed, 0, 1);
+    if (body.expensiveSessionMultiplier !== undefined) sanitised.expensiveSessionMultiplier = num(body.expensiveSessionMultiplier, 1, 100);
+    if (body.modelFit) {
+      sanitised.modelFit = {};
+      if (body.modelFit.opusCheap) {
+        sanitised.modelFit.opusCheap = {};
+        if (body.modelFit.opusCheap.maxPrompts !== undefined) sanitised.modelFit.opusCheap.maxPrompts = num(body.modelFit.opusCheap.maxPrompts, 1, 100);
+        if (body.modelFit.opusCheap.maxCostUsd !== undefined) sanitised.modelFit.opusCheap.maxCostUsd = num(body.modelFit.opusCheap.maxCostUsd, 0, 1000);
+        if (body.modelFit.opusCheap.maxFilesChanged !== undefined) sanitised.modelFit.opusCheap.maxFilesChanged = num(body.modelFit.opusCheap.maxFilesChanged, 1, 100);
+      }
+      if (body.modelFit.sonnetLong) {
+        sanitised.modelFit.sonnetLong = {};
+        if (body.modelFit.sonnetLong.minPrompts !== undefined) sanitised.modelFit.sonnetLong.minPrompts = num(body.modelFit.sonnetLong.minPrompts, 1, 1000);
+      }
+    }
+
+    const existing = await prisma.integrationConfig.findFirst({
+      where: { orgId, provider: 'insights_config' },
+    });
+    if (existing) {
+      await prisma.integrationConfig.update({
+        where: { id: existing.id },
+        data: { settings: JSON.stringify(sanitised) },
+      });
+    } else {
+      await prisma.integrationConfig.create({
+        data: { orgId, provider: 'insights_config', token: '', settings: JSON.stringify(sanitised) },
+      });
+    }
+
+    const cfg = await loadOrgInsightsConfig(orgId);
+    res.json(cfg);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Invalid config payload' });
+  }
 });
 
 // ── Section 1 — Spend Quality table ────────────────────────────────────────
@@ -66,6 +175,7 @@ router.get('/spend-quality', async (req: AuthRequest, res: Response) => {
 
   try {
     const orgId = req.activeOrgId!;
+    const cfg = await loadOrgInsightsConfig(orgId);
 
     // Per-user cost + session count via groupBy. SQLite handles this fine
     // up to ~10k sessions without a custom index — userId is already
@@ -176,7 +286,7 @@ router.get('/spend-quality', async (req: AuthRequest, res: Response) => {
       const u = userMap.get(uid);
       const bucket = promptsByUser.get(uid);
       const aiAuthorship = bucket ? computeAiAuthorship(bucket.authorship) : 0;
-      const reworkRate = bucket ? computeReworkRate(bucket.rework) : 0;
+      const reworkRate = bucket ? computeReworkRate(bucket.rework, cfg) : 0;
       const pr = computeCostPerMergedPr(uid, sessionsForPr, mergedPrs);
       return {
         userId: uid,
@@ -206,14 +316,14 @@ router.get('/top-sessions', async (req: AuthRequest, res: Response) => {
   const range = rangeOrError(req, res);
   if (!range) return;
 
+  const orgId = req.activeOrgId!;
+  const cfg = await loadOrgInsightsConfig(orgId);
   const limitParam = Number(req.query.limit);
   const limit = Number.isFinite(limitParam) && limitParam > 0
     ? Math.min(Math.floor(limitParam), INSIGHTS_CONFIG.topSessions.max)
     : INSIGHTS_CONFIG.topSessions.default;
 
   try {
-    const orgId = req.activeOrgId!;
-
     // Pull top-N most expensive sessions. To compute the dev-avg flag we
     // also need each user's average; one extra groupBy pass.
     const top = await prisma.codingSession.findMany({
@@ -254,6 +364,7 @@ router.get('/top-sessions', async (req: AuthRequest, res: Response) => {
       const flags = flagSession(
         { costUsd: s.costUsd, commitId: s.commitId },
         avgByUser.get(s.userId) ?? 0,
+        cfg,
       );
       return {
         sessionId: s.id,
@@ -265,6 +376,11 @@ router.get('/top-sessions', async (req: AuthRequest, res: Response) => {
         commitCount: s.commitId ? 1 : 0,
         flags,
         cliPath: `/sessions/${s.id}`,
+        // ISO start so the frontend can filter by hour-of-week when the
+        // user clicks a heatmap cell. We emit ISO and let the client do
+        // the bucketing — same getDay()/getHours() semantics as
+        // bucketHeatmap() so filter and heatmap agree.
+        startedAtIso: start.toISOString(),
       };
     });
 
@@ -282,6 +398,7 @@ router.get('/model-fit-warnings', async (req: AuthRequest, res: Response) => {
 
   try {
     const orgId = req.activeOrgId!;
+    const cfg = await loadOrgInsightsConfig(orgId);
 
     // Only Opus/Sonnet sessions can trigger warnings — pre-filter via
     // case-insensitive contains on `model` to keep the scan bounded.
@@ -324,7 +441,7 @@ router.get('/model-fit-warnings', async (req: AuthRequest, res: Response) => {
         filesTouched: fileSet.size,
         commitId: s.commitId,
       };
-      const w = flagModelFit(input);
+      const w = flagModelFit(input, cfg);
       if (w) warnings.push({ ...w, userName: s.user?.name || 'Unknown' });
       if (warnings.length >= 10) break; // top-10 cap per spec
     }

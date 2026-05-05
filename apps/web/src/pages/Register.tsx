@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Building2, User } from 'lucide-react';
 import * as api from '../api';
@@ -18,7 +18,13 @@ type AccountType = 'team' | 'developer';
 export default function Register() {
   const { register, registerDeveloper, error: authError } = useAuth();
   const navigate = useNavigate();
-  const [accountType, setAccountType] = useState<AccountType>('developer');
+  const [searchParams] = useSearchParams();
+  // Initial tab honours `?type=team|developer` so the Login page footer's
+  // "Team" link can land directly on the Team tab. Falls back to developer
+  // so the bare /register URL still defaults to Solo (the higher-volume
+  // signup path historically).
+  const initialAccountType: AccountType = searchParams.get('type') === 'team' ? 'team' : 'developer';
+  const [accountType, setAccountType] = useState<AccountType>(initialAccountType);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -49,7 +55,11 @@ export default function Register() {
         navigate('/onboarding');
       } else {
         await register(email, password, name, orgName, orgSlug);
-        navigate('/dashboard');
+        // Team admins go through the same onboarding wizard as solo —
+        // the ?from=team flag swaps branding to "Origin Team" and adds
+        // the team-only "Invite Team" step. Previously this jumped
+        // straight to /dashboard, so admins never saw the wizard.
+        navigate('/onboarding?from=team');
       }
     } catch (err: any) {
       setError(err.message ?? 'Registration failed');

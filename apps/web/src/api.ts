@@ -839,8 +839,11 @@ export function testIntegration(id: string) {
 
 // ---- GitHub App ---------------------------------------------------------------
 
-export function getGitHubAppInstallUrl(opts?: { from?: string }) {
-  const q = opts?.from ? `?from=${encodeURIComponent(opts.from)}` : '';
+export function getGitHubAppInstallUrl(opts?: { from?: string; flavor?: string }) {
+  const params = new URLSearchParams();
+  if (opts?.from) params.set('from', opts.from);
+  if (opts?.flavor) params.set('flavor', opts.flavor);
+  const q = params.toString() ? `?${params.toString()}` : '';
   return request<{ installUrl: string }>(`/api/github-app/install${q}`);
 }
 
@@ -898,8 +901,11 @@ export function deleteGitLabOAuthConfig() {
   return request<{ success: boolean }>('/api/gitlab-oauth/config', { method: 'DELETE' });
 }
 
-export function getGitLabOAuthInstallUrl(opts?: { from?: string }) {
-  const q = opts?.from ? `?from=${encodeURIComponent(opts.from)}` : '';
+export function getGitLabOAuthInstallUrl(opts?: { from?: string; flavor?: string }) {
+  const params = new URLSearchParams();
+  if (opts?.from) params.set('from', opts.from);
+  if (opts?.flavor) params.set('flavor', opts.flavor);
+  const q = params.toString() ? `?${params.toString()}` : '';
   return request<{ authorizeUrl: string }>(`/api/gitlab-oauth/install${q}`);
 }
 
@@ -1174,6 +1180,9 @@ export interface TopSessionRow {
   commitCount: number;
   flags: ('zero-commit' | 'cost-outlier')[];
   cliPath: string;
+  // ISO timestamp of session start. Used by the heatmap-pick filter on
+  // the Spend Quality page to narrow rows to a specific hour-of-week.
+  startedAtIso: string;
 }
 
 export interface ModelFitWarning {
@@ -1237,6 +1246,23 @@ function rangeQuery(params: { from?: Date; to?: Date; range?: string }): string 
 
 export function getInsightsConfig() {
   return request<InsightsConfig>('/api/insights/config');
+}
+// Per-org override write — partial shape, the backend merges with defaults.
+// Empty/undefined fields fall back to the global INSIGHTS_CONFIG defaults.
+export function updateInsightsConfig(overrides: Partial<{
+  reworkWindowDays: number;
+  reworkRateAmber: number;
+  reworkRateRed: number;
+  expensiveSessionMultiplier: number;
+  modelFit: Partial<{
+    opusCheap: Partial<{ maxPrompts: number; maxCostUsd: number; maxFilesChanged: number }>;
+    sonnetLong: Partial<{ minPrompts: number }>;
+  }>;
+}>) {
+  return request<InsightsConfig>('/api/insights/config', {
+    method: 'PUT',
+    body: JSON.stringify(overrides),
+  });
 }
 export function getSpendQuality(p: { from?: Date; to?: Date; range?: string }) {
   return request<{ rows: SpendQualityRow[]; range: RangeMeta }>('/api/insights/spend-quality' + rangeQuery(p));
@@ -1430,8 +1456,12 @@ export interface InvitePendingGrants {
   agents?: Array<{ id: string; level: 'use' | 'admin' }>;
 }
 
+export type CreateInviteResponse =
+  | { added?: false; id: string; token: string; role: string; email: string | null; expiresAt: string; emailSent?: boolean; emailError?: string }
+  | { added: true; userId: string; role: string; email: string | null; emailSent?: boolean; emailError?: string };
+
 export function createInvite(data: { email?: string; role: string; pendingGrants?: InvitePendingGrants }) {
-  return request<{ id: string; token: string; role: string; email: string | null; expiresAt: string; emailSent?: boolean; emailError?: string }>('/api/users/invite', { method: 'POST', body: JSON.stringify(data) });
+  return request<CreateInviteResponse>('/api/users/invite', { method: 'POST', body: JSON.stringify(data) });
 }
 
 export function getInvites() {

@@ -65,18 +65,16 @@ function BudgetStat({
 }
 
 // ── KPI detail panel ────────────────────────────────────────────────────────
-// One panel that renders below the top KPI grid when any of the 6 cards is
-// clicked. Spend cards (today/week/month) get a 3-tab sub-view (engineers /
-// agents / models). Projected gets a forecast read-out. Models/Engineers
-// cards each get a single ranked list. Closing the panel collapses it.
-type KpiPanelKey = 'today' | 'week' | 'month' | 'projected' | 'models' | 'engineers';
+// One dropdown panel that renders below the 3-card KPI strip when any card
+// is clicked. Three keys, three panels:
+//   • spend → period strip (today/week/month) + 3-tab breakdown
+//   • forecast → projected month-end with per-model ranking
+//   • activity → engineers list + models list under a 2-tab switcher
+type KpiPanelKey = 'spend' | 'forecast' | 'activity';
 const KPI_TITLES: Record<KpiPanelKey, string> = {
-  today: "Today's spend — who and what",
-  week: "This week's spend — who and what",
-  month: "This month's spend — who and what",
-  projected: 'Month-end forecast',
-  models: 'Models in use',
-  engineers: 'Engineers active',
+  spend: 'Spend — who and what',
+  forecast: 'Month-end forecast',
+  activity: 'Activity — engineers and models',
 };
 
 const KpiDetailPanel = React.forwardRef<HTMLDivElement, {
@@ -86,64 +84,68 @@ const KpiDetailPanel = React.forwardRef<HTMLDivElement, {
   forecast: ForecastData | null;
   agentBudgets: Array<{ agentId: string; agentName: string; slug: string; currentSpend: number; sessions: number }>;
 }>(function KpiDetailPanel({ kpi, onClose, spend, forecast, agentBudgets }, ref) {
-  // Spend cards share a 3-tab inner switcher; default tab varies by which
-  // card was clicked so the most-relevant breakdown opens first.
-  const isSpendCard = kpi === 'today' || kpi === 'week' || kpi === 'month';
-  const [tab, setTab] = useState<'engineers' | 'agents' | 'models'>('engineers');
+  // Spend panel — 3-tab inner switcher (engineers / agents / models).
+  const [spendTab, setSpendTab] = useState<'engineers' | 'agents' | 'models'>('engineers');
+  // Activity panel — 2-tab inner switcher (engineers / models).
+  const [actTab, setActTab] = useState<'engineers' | 'models'>('engineers');
 
-  const totalForCard =
-    kpi === 'today'   ? spend.byPeriod?.daily   ?? 0 :
-    kpi === 'week'    ? spend.byPeriod?.weekly  ?? 0 :
-    kpi === 'month'   ? spend.byPeriod?.monthly ?? 0 :
-    null;
+  const byPeriod = spend.byPeriod ?? { daily: 0, weekly: 0, monthly: 0 };
 
   return (
     <div ref={ref} className="rounded-xl border border-indigo-500/30 bg-gray-900/60 p-5 space-y-4">
       <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-sm font-semibold text-gray-100">{KPI_TITLES[kpi]}</h3>
-          {isSpendCard && totalForCard !== null && (
-            <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">${totalForCard.toFixed(2)} this period</p>
-          )}
-        </div>
+        <h3 className="text-sm font-semibold text-gray-100">{KPI_TITLES[kpi]}</h3>
         <button type="button" onClick={onClose} className="text-xs text-gray-500 hover:text-gray-300 px-2 py-1" aria-label="Close panel">
           Close ✕
         </button>
       </div>
 
-      {/* Spend cards — 3 sub-tabs */}
-      {isSpendCard && (
+      {/* Spend — period strip on top, then 3-tab breakdown */}
+      {kpi === 'spend' && (
         <>
+          <div className="grid grid-cols-3 gap-2">
+            {([
+              ['Today',    byPeriod.daily,   'since 00:00'],
+              ['This week', byPeriod.weekly,  'since Monday'],
+              ['This month', byPeriod.monthly, 'lifetime since 1st'],
+            ] as Array<[string, number, string]>).map(([label, value, sub]) => (
+              <div key={label} className="rounded-lg bg-gray-800/40 px-3 py-2">
+                <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
+                <div className="text-lg font-semibold text-gray-100 tabular-nums">${value.toFixed(2)}</div>
+                <div className="text-[10px] text-gray-600">{sub}</div>
+              </div>
+            ))}
+          </div>
           <div className="border-b border-gray-800 flex items-center gap-1" role="tablist">
             {([
               ['engineers', 'Engineers', spend.byUser?.length ?? 0],
               ['agents',    'Agents',    agentBudgets.length],
               ['models',    'Models',    spend.byModel?.length ?? 0],
-            ] as Array<[typeof tab, string, number]>).map(([key, label, count]) => (
+            ] as Array<[typeof spendTab, string, number]>).map(([key, label, count]) => (
               <button
                 key={key}
                 type="button"
                 role="tab"
-                aria-selected={tab === key}
-                onClick={() => setTab(key)}
+                aria-selected={spendTab === key}
+                onClick={() => setSpendTab(key)}
                 className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  tab === key ? 'border-indigo-500 text-indigo-300' : 'border-transparent text-gray-500 hover:text-gray-300'
+                  spendTab === key ? 'border-indigo-500 text-indigo-300' : 'border-transparent text-gray-500 hover:text-gray-300'
                 }`}
               >
                 {label} <span className="text-[10px] text-gray-600 ml-1 tabular-nums">({count})</span>
               </button>
             ))}
           </div>
-          {tab === 'engineers' && (
+          {spendTab === 'engineers' && (
             <RankedList
               rows={(spend.byUser ?? []).map((u) => ({
                 key: u.userId, name: u.name || u.userId, sub: `${u.sessions} session${u.sessions !== 1 ? 's' : ''}`, value: u.cost,
               }))}
-              emptyMsg="No engineer activity in this period."
+              emptyMsg="No engineer activity yet."
               format={(n) => `$${n.toFixed(2)}`}
             />
           )}
-          {tab === 'agents' && (
+          {spendTab === 'agents' && (
             <RankedList
               rows={agentBudgets.map((a) => ({
                 key: a.agentId, name: a.agentName, sub: `${a.sessions} session${a.sessions !== 1 ? 's' : ''} · ${a.slug}`, value: a.currentSpend,
@@ -152,25 +154,21 @@ const KpiDetailPanel = React.forwardRef<HTMLDivElement, {
               format={(n) => `$${n.toFixed(2)}`}
             />
           )}
-          {tab === 'models' && (
+          {spendTab === 'models' && (
             <RankedList
               rows={(spend.byModel ?? []).map((m) => ({
                 key: m.model, name: m.model, sub: `${m.sessions} session${m.sessions !== 1 ? 's' : ''}`, value: m.cost,
               }))}
-              emptyMsg="No model usage in this period."
+              emptyMsg="No model usage yet."
               format={(n) => `$${n.toFixed(2)}`}
               mono
             />
           )}
-          <p className="text-[10px] text-gray-600">
-            Breakdown shows the active enforcement period — same scope as the highlighted Today/Week/Month cell.
-          </p>
         </>
       )}
 
-      {/* Projected month-end — show forecast.byModel ranked, plus
-          confidence + trend explanation. */}
-      {kpi === 'projected' && (
+      {/* Forecast — projected month-end with confidence + trend + per-model */}
+      {kpi === 'forecast' && (
         <div className="space-y-3">
           {forecast ? (
             <>
@@ -207,27 +205,48 @@ const KpiDetailPanel = React.forwardRef<HTMLDivElement, {
         </div>
       )}
 
-      {/* Models in use — single ranked list of cost/sessions per model */}
-      {kpi === 'models' && (
-        <RankedList
-          rows={(spend.byModel ?? []).map((m) => ({
-            key: m.model, name: m.model, sub: `${m.sessions} session${m.sessions !== 1 ? 's' : ''}`, value: m.cost,
-          }))}
-          emptyMsg="No models recorded yet."
-          format={(n) => `$${n.toFixed(2)}`}
-          mono
-        />
-      )}
-
-      {/* Engineers active — single ranked list of cost/sessions per engineer */}
-      {kpi === 'engineers' && (
-        <RankedList
-          rows={(spend.byUser ?? []).map((u) => ({
-            key: u.userId, name: u.name || u.userId, sub: `${u.sessions} session${u.sessions !== 1 ? 's' : ''}`, value: u.cost,
-          }))}
-          emptyMsg="No engineer activity recorded yet."
-          format={(n) => `$${n.toFixed(2)}`}
-        />
+      {/* Activity — engineers + models combined into one panel with a switcher */}
+      {kpi === 'activity' && (
+        <>
+          <div className="border-b border-gray-800 flex items-center gap-1" role="tablist">
+            {([
+              ['engineers', 'Engineers', spend.byUser?.length ?? 0],
+              ['models',    'Models',    spend.byModel?.length ?? 0],
+            ] as Array<[typeof actTab, string, number]>).map(([key, label, count]) => (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={actTab === key}
+                onClick={() => setActTab(key)}
+                className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  actTab === key ? 'border-indigo-500 text-indigo-300' : 'border-transparent text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                {label} <span className="text-[10px] text-gray-600 ml-1 tabular-nums">({count})</span>
+              </button>
+            ))}
+          </div>
+          {actTab === 'engineers' && (
+            <RankedList
+              rows={(spend.byUser ?? []).map((u) => ({
+                key: u.userId, name: u.name || u.userId, sub: `${u.sessions} session${u.sessions !== 1 ? 's' : ''}`, value: u.cost,
+              }))}
+              emptyMsg="No engineer activity recorded yet."
+              format={(n) => `$${n.toFixed(2)}`}
+            />
+          )}
+          {actTab === 'models' && (
+            <RankedList
+              rows={(spend.byModel ?? []).map((m) => ({
+                key: m.model, name: m.model, sub: `${m.sessions} session${m.sessions !== 1 ? 's' : ''}`, value: m.cost,
+              }))}
+              emptyMsg="No models recorded yet."
+              format={(n) => `$${n.toFixed(2)}`}
+              mono
+            />
+          )}
+        </>
       )}
     </div>
   );
@@ -406,8 +425,14 @@ export default function BudgetPage() {
   const [digestSending, setDigestSending] = useState(false);
   const [digestMsg, setDigestMsg] = useState('');
 
-  // ── Active section tab ───────────────────────────────────────────────────
+  // ── Active section tab — Agents | Engineers | Repos under the scope-
+  //    overrides block. Tab choice is local-only (no URL param) since the
+  //    block sits inside a longer page and tab churn shouldn't change the
+  //    URL.
   const [activeSection, setActiveSection] = useState<'agents' | 'developers' | 'repos'>('agents');
+  // Track which row is expanded inside the active table. `null` collapses
+  // everything. Single-expand keeps the table compact on long lists.
+  const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
 
   // ── Top-level page tab — Budget vs Tokens ────────────────────────────────
   // The page got too long — splitting into two top tabs keeps each view in
@@ -421,7 +446,7 @@ export default function BudgetPage() {
 
   // Which top-of-page KPI card is "expanded" — drives the inline detail
   // panel rendered below the two card rows. Null = nothing expanded.
-  type KpiKey = 'today' | 'week' | 'month' | 'projected' | 'models' | 'engineers';
+  type KpiKey = KpiPanelKey;
   const [expandedKpi, setExpandedKpi] = useState<KpiKey | null>(null);
   const kpiPanelRef = useRef<HTMLDivElement>(null);
   const toggleKpi = (k: KpiKey) => {
@@ -495,6 +520,30 @@ export default function BudgetPage() {
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Lazy-load per-model overrides whenever a row is expanded. Cached in
+  // the {agent,user,repo}Models maps so re-expanding the same row is
+  // instant. Encoded keys: "agent-<id>" / "user-<id>" / "repo-<id>".
+  useEffect(() => {
+    if (!expandedRowKey) return;
+    const dash = expandedRowKey.indexOf('-');
+    if (dash <= 0) return;
+    const kind = expandedRowKey.slice(0, dash);
+    const id = expandedRowKey.slice(dash + 1);
+    if (kind === 'agent' && !agentModels[id] && id !== '__other__') {
+      api.getAgentModels(id)
+        .then((models) => setAgentModels((prev) => ({ ...prev, [id]: models })))
+        .catch(() => setAgentModels((prev) => ({ ...prev, [id]: [] })));
+    } else if (kind === 'user' && !userModels[id]) {
+      api.getUserModels(id)
+        .then((models) => setUserModels((prev) => ({ ...prev, [id]: models })))
+        .catch(() => setUserModels((prev) => ({ ...prev, [id]: [] })));
+    } else if (kind === 'repo' && !repoModels[id]) {
+      api.getRepoModels(id)
+        .then((models) => setRepoModels((prev) => ({ ...prev, [id]: models })))
+        .catch(() => setRepoModels((prev) => ({ ...prev, [id]: [] })));
+    }
+  }, [expandedRowKey, agentModels, userModels, repoModels]);
 
   // ── Save org budget ──────────────────────────────────────────────────────
   const handleSave = async (e: React.FormEvent) => {
@@ -798,100 +847,82 @@ export default function BudgetPage() {
             RecomputeCostsCard at the bottom. ──────────────────────────── */}
       {pageTab === 'budget' && (<>
 
-      {/* Three-period strip — daily/weekly/monthly side-by-side. Each cell
-          is a button: click expands the inline detail panel below the
-          two-row card grid, scoped to that period. */}
+      {/* ── Three KPI cards — Spend / Forecast / Activity ───────────────
+          Consolidated from the old 6-card layout (Today/Week/Month +
+          Projected/Models/Engineers). Each card is a button → opens the
+          KpiDetailPanel below with the matching dropdown content.
+          • Spend headline = this-month total (the enforcement default);
+            cap % shows when a monthly cap is set.
+          • Forecast headline = projected month-end + confidence.
+          • Activity headline = engineers active + models in use. */}
       {budgetData && (() => {
         const byPeriod = budgetData.currentSpend.byPeriod || { daily: 0, weekly: 0, monthly: budgetData.currentSpend.monthly };
+        const monthSpend = byPeriod.monthly;
         const activePeriod: Period = (budgetData.config.period || 'monthly') as Period;
-        const limit = budgetData.config.monthlyLimit;
-        const cells: Array<{ key: Period; kpi: KpiKey; label: string; value: number }> = [
-          { key: 'daily',   kpi: 'today', label: 'Today',      value: byPeriod.daily   },
-          { key: 'weekly',  kpi: 'week',  label: 'This week',  value: byPeriod.weekly  },
-          { key: 'monthly', kpi: 'month', label: 'This month', value: byPeriod.monthly },
-        ];
+        const monthlyLimit = budgetData.config.monthlyLimit;
+        const showCap = activePeriod === 'monthly' && monthlyLimit > 0;
+        const pct = showCap ? Math.min((monthSpend / monthlyLimit) * 100, 110) : 0;
+        const tier = pct >= 100 ? 'red' : pct >= 80 ? 'amber' : 'green';
+        const spendTone =
+          tier === 'red' ? 'border-red-500/40 bg-red-500/[0.06]' :
+          tier === 'amber' ? 'border-amber-500/40 bg-amber-500/[0.05]' :
+          'border-gray-800 bg-gray-900/40';
+        const engineers = budgetData.currentSpend.byUser.length;
+        const models = budgetData.currentSpend.byModel.length;
+        const expandedTone = (active: boolean) => active ? ' ring-2 ring-indigo-400/60 bg-gray-900/70' : '';
+
         return (
-          <div className="grid grid-cols-3 gap-3">
-            {cells.map(({ key, kpi, label, value }) => {
-              const isActive = key === activePeriod;
-              const isExpanded = expandedKpi === kpi;
-              const showLimit = isActive && limit > 0;
-              const pct = showLimit ? Math.min((value / limit) * 100, 110) : 0;
-              const tier = pct >= 100 ? 'red' : pct >= 80 ? 'amber' : 'green';
-              const baseTone =
-                tier === 'red' ? 'border-red-500/40 bg-red-500/[0.06]' :
-                tier === 'amber' ? 'border-amber-500/40 bg-amber-500/[0.05]' :
-                isActive ? 'border-indigo-500/40 bg-indigo-500/[0.05]' : 'border-gray-800 bg-gray-900/40';
-              const expandedTone = isExpanded ? 'ring-2 ring-indigo-400/60 bg-gray-900/70' : '';
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => toggleKpi(kpi)}
-                  aria-pressed={isExpanded}
-                  className={`relative rounded-xl border p-4 text-left w-full transition-colors hover:bg-gray-900/60 cursor-pointer ${baseTone} ${expandedTone}`}
-                  title="Click for breakdown"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-medium text-gray-500 uppercase tracking-wider">{label}</span>
-                    {isActive ? (
-                      <span className="text-[9px] font-semibold uppercase tracking-wider text-indigo-300">Enforcing</span>
-                    ) : (
-                      <span className={`text-[9px] uppercase tracking-wider ${isExpanded ? 'text-indigo-300' : 'text-gray-600'}`}>
-                        {isExpanded ? 'shown ↓' : 'details →'}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-2xl font-semibold text-gray-50 tabular-nums mt-1">${value.toFixed(2)}</div>
-                  {showLimit ? (
-                    <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">{pct.toFixed(0)}% of ${limit.toFixed(0)} {key} cap</p>
-                  ) : (
-                    <p className="text-[11px] text-gray-600 mt-0.5">{key === 'monthly' ? 'lifetime since 1st' : key === 'weekly' ? 'since Monday' : 'since 00:00'}</p>
-                  )}
-                </button>
-              );
-            })}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {/* Spend */}
+            <button
+              type="button"
+              onClick={() => toggleKpi('spend')}
+              aria-pressed={expandedKpi === 'spend'}
+              className={`relative rounded-xl border p-4 text-left w-full transition-colors hover:bg-gray-900/60 cursor-pointer ${spendTone}${expandedTone(expandedKpi === 'spend')}`}
+              title="Click for spend breakdown"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-medium text-gray-500 uppercase tracking-wider">This month</span>
+                <span className={`text-[9px] uppercase tracking-wider ${expandedKpi === 'spend' ? 'text-indigo-300' : 'text-gray-600'}`}>
+                  {expandedKpi === 'spend' ? 'shown ↓' : 'details →'}
+                </span>
+              </div>
+              <div className="text-2xl font-semibold text-gray-50 tabular-nums mt-1">${monthSpend.toFixed(2)}</div>
+              {showCap ? (
+                <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">{pct.toFixed(0)}% of ${monthlyLimit.toFixed(0)} monthly cap</p>
+              ) : (
+                <p className="text-[11px] text-gray-600 mt-0.5 tabular-nums">
+                  ${byPeriod.daily.toFixed(2)} today · ${byPeriod.weekly.toFixed(2)} this week
+                </p>
+              )}
+            </button>
+
+            {/* Forecast */}
+            <BudgetStat
+              accent={forecastData?.trend === 'up' ? 'red' : forecastData?.trend === 'down' ? 'green' : 'cyan'}
+              label="Projected month-end"
+              Icon={forecastData?.trend === 'up' ? TrendingUp : forecastData?.trend === 'down' ? TrendingDown : Minus}
+              value={`$${forecastData?.projectedMonthly.toFixed(2) || '0.00'}`}
+              sub={`${Math.round((forecastData?.confidence ?? 0) * 100)}% confidence`}
+              active={expandedKpi === 'forecast'}
+              onClick={() => toggleKpi('forecast')}
+            />
+
+            {/* Activity — engineers + models combined */}
+            <BudgetStat
+              accent="indigo"
+              label="Activity"
+              Icon={Users}
+              value={engineers}
+              sub={engineers === 0
+                ? 'No activity yet'
+                : `${engineers} engineer${engineers !== 1 ? 's' : ''} · ${models} model${models !== 1 ? 's' : ''}`}
+              active={expandedKpi === 'activity'}
+              onClick={() => toggleKpi('activity')}
+            />
           </div>
         );
       })()}
-
-      {/* Slim KPI strip — Projected + Models + Engineers. "Monthly spend"
-          and "Anomalies" used to live here too, but they duplicate the
-          period-strip number above and the Anomalies tab badge. Three
-          forward-looking cells is enough; raw spend belongs in the strip. */}
-      <div className="grid grid-cols-3 gap-4">
-        <BudgetStat
-          accent={forecastData?.trend === 'up' ? 'red' : forecastData?.trend === 'down' ? 'green' : 'cyan'}
-          label="Projected month-end"
-          Icon={forecastData?.trend === 'up' ? TrendingUp : forecastData?.trend === 'down' ? TrendingDown : Minus}
-          value={`$${forecastData?.projectedMonthly.toFixed(2) || '0.00'}`}
-          sub={`${Math.round((forecastData?.confidence ?? 0) * 100)}% confidence`}
-          active={expandedKpi === 'projected'}
-          onClick={() => toggleKpi('projected')}
-        />
-        <BudgetStat
-          accent="purple"
-          label="Models in use"
-          Icon={Cpu}
-          value={budgetData?.currentSpend.byModel.length || 0}
-          sub={budgetData?.currentSpend.byUser.length
-            ? `${budgetData.currentSpend.byUser.length} engineer${budgetData.currentSpend.byUser.length !== 1 ? 's' : ''}`
-            : 'No engineers yet'}
-          active={expandedKpi === 'models'}
-          onClick={() => toggleKpi('models')}
-        />
-        <BudgetStat
-          accent="indigo"
-          label="Engineers active"
-          Icon={Users}
-          value={budgetData?.currentSpend.byUser.length || 0}
-          sub={budgetData?.currentSpend.byUser.length
-            ? 'this period'
-            : 'No activity yet'}
-          active={expandedKpi === 'engineers'}
-          onClick={() => toggleKpi('engineers')}
-        />
-      </div>
 
       {/* ── KPI detail panel — inline expansion below the card grid.
           Drives off `expandedKpi`. Each card opens to a default sub-tab
@@ -1074,647 +1105,412 @@ export default function BudgetPage() {
             below the limits card. Now everything lives on the same surface
             and switches between scopes without leaving the card. */}
         {(() => {
+          // Table-style scope overrides. Tab bar switches between
+          // Agents / Engineers / Repos; each tab is a single compact
+          // table where rows expand inline to show per-model overrides.
+          // No more separate "+ Add limit" button — the expand toggle
+          // and the cap-edit badge are the only interactive surfaces in
+          // each row, so the row is denser and scannable side-by-side.
           const agentLimitCount = agentBudgets.filter((a) => a.monthlyLimit > 0).length;
           const userLimitCount = userBudgets.filter((u) => u.monthlyLimit > 0).length;
-          const repoLimitCount = Object.values(repoModels).filter((arr) => arr.some((m) => m.monthlyLimit && m.monthlyLimit > 0)).length;
+          const repoLimitCount = repoBudgets.filter((r) => r.monthlyLimit > 0).length;
+
           type SectionKey = 'agents' | 'developers' | 'repos';
-          const tabs: Array<{ key: SectionKey; label: string; Icon: typeof Cpu; count: number; total: number | null }> = [
-            { key: 'agents',     label: 'Agents',    Icon: Cpu,        count: agentLimitCount, total: agentBudgets.length || null },
-            { key: 'developers', label: 'Engineers', Icon: Users,      count: userLimitCount,  total: userBudgets.length || null },
-            { key: 'repos',      label: 'Repos',     Icon: FolderOpen, count: repoLimitCount,  total: null },
+          const tabs: Array<{ key: SectionKey; label: string; Icon: typeof Cpu; capped: number; total: number }> = [
+            { key: 'agents',     label: 'Agents',    Icon: Cpu,        capped: agentLimitCount, total: agentBudgets.length },
+            { key: 'developers', label: 'Engineers', Icon: Users,      capped: userLimitCount,  total: userBudgets.length },
+            { key: 'repos',      label: 'Repos',     Icon: FolderOpen, capped: repoLimitCount,  total: repoBudgets.length },
           ];
+
+          // ── Inline cap-badge / cap-editor ──────────────────────────
+          // One render path for both the row-level "scope cap" and the
+          // per-model cap. Each caller passes its own state slot so the
+          // editor is isolated per row even though the visual is shared.
+          const renderCapCell = (opts: {
+            isEditing: boolean;
+            currentLimit: number;
+            currentPeriod: Period;
+            value: string;
+            setValue: (v: string) => void;
+            periodValue: Period;
+            setPeriodValue: (p: Period) => void;
+            beginEdit: () => void;
+            cancelEdit: () => void;
+            save: () => void;
+            placeholderLabel?: string; // text shown when no cap, e.g. "no cap" or "Set cap →"
+          }) => {
+            if (opts.isEditing) {
+              return (
+                <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1 rounded-md border border-indigo-500/40 bg-gray-950/60 px-2 py-1">
+                    <span className="text-[11px] text-gray-500">$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={opts.value}
+                      onChange={(e) => opts.setValue(e.target.value)}
+                      className="bg-transparent text-xs text-gray-100 w-16 focus:outline-none tabular-nums"
+                      autoFocus
+                      onKeyDown={(e) => { if (e.key === 'Enter') opts.save(); if (e.key === 'Escape') opts.cancelEdit(); }}
+                    />
+                    <select
+                      value={opts.periodValue}
+                      onChange={(e) => opts.setPeriodValue(e.target.value as Period)}
+                      className="bg-transparent text-[11px] text-gray-300 focus:outline-none"
+                      aria-label="Period"
+                    >
+                      <option value="daily">/d</option>
+                      <option value="weekly">/w</option>
+                      <option value="monthly">/mo</option>
+                    </select>
+                  </div>
+                  <button onClick={opts.save} className="text-[11px] px-2 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white font-medium">Save</button>
+                  <button onClick={opts.cancelEdit} className="text-[11px] px-1.5 py-1 rounded-md text-gray-500 hover:text-gray-300">×</button>
+                </div>
+              );
+            }
+            const has = opts.currentLimit > 0;
+            return (
+              <button
+                type="button"
+                onClick={opts.beginEdit}
+                className={`text-[11px] tabular-nums px-2 py-1 rounded-md transition-colors ${
+                  has
+                    ? 'text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30'
+                    : 'text-gray-500 hover:text-gray-200 hover:bg-gray-800/60 border border-gray-800'
+                }`}
+                title="Click to edit"
+              >
+                {has
+                  ? `$${opts.currentLimit.toFixed(0)}${PERIOD_SUFFIX[opts.currentPeriod]}`
+                  : (opts.placeholderLabel || 'no cap')}
+              </button>
+            );
+          };
+
+          // ── Usage cell: bar + dollar amounts (or just dash if no cap) ──
+          const renderUsageCell = (currentSpend: number, monthlyLimit: number) => {
+            if (monthlyLimit > 0) {
+              const p = pct(currentSpend, monthlyLimit);
+              return (
+                <div className="flex items-center gap-2">
+                  <div className="w-20 h-1.5 rounded-full bg-gray-800 overflow-hidden flex-shrink-0">
+                    <div className={`h-full rounded-full transition-all ${barColor(p)}`} style={{ width: `${Math.min(p, 100)}%` }} />
+                  </div>
+                  <span className="text-[11px] text-gray-500 tabular-nums whitespace-nowrap">
+                    ${currentSpend.toFixed(2)}<span className="text-gray-700"> / ${monthlyLimit.toFixed(0)}</span>
+                  </span>
+                </div>
+              );
+            }
+            return (
+              <span className="text-[11px] text-gray-500 tabular-nums">
+                ${currentSpend.toFixed(2)} <span className="text-gray-700">spent</span>
+              </span>
+            );
+          };
+
+          // ── One scope row + (when expanded) the per-model sub-rows ──
+          // Wraps both the parent row and its expanded body so the visual
+          // tree mirrors the data: same indent baseline, same column widths.
+          const renderScopeRow = (opts: {
+            rowKey: string;
+            name: string;
+            sub: string;
+            sessions: number;
+            currentSpend: number;
+            monthlyLimit: number;
+            period: Period;
+            expandable: boolean;
+            // scope-cap edit hooks
+            isEditingFlat: boolean;
+            beginEditFlat: () => void;
+            cancelEditFlat: () => void;
+            saveFlat: () => void;
+            flatValue: string;
+            setFlatValue: (v: string) => void;
+            flatPeriod: Period;
+            setFlatPeriod: (p: Period) => void;
+            // model section
+            models: Array<{ id: string; model: string; monthlyLimit: number | null; period: string | null }>;
+            addModel: (m: string) => void;
+            // per-model edit (uses ctx-specific state — one editing slot
+            // shared across the active table is fine since UI is one-at-a-time)
+            modelEditPrefix: string;
+            beginEditModel: (m: string, current: number | null, p: Period) => void;
+            cancelEditModel: () => void;
+            saveModel: (m: string) => void;
+            modelValue: string;
+            setModelValue: (v: string) => void;
+            activeEditKey: string | null;
+          }) => {
+            const isExpanded = expandedRowKey === opts.rowKey;
+            return (
+              <div key={opts.rowKey}>
+                <div
+                  className={`grid grid-cols-[20px_minmax(0,1fr)_220px_auto] items-center gap-3 px-3 py-2 cursor-pointer transition-colors ${
+                    isExpanded ? 'bg-gray-900/50' : 'hover:bg-gray-900/30'
+                  }`}
+                  onClick={() => opts.expandable && setExpandedRowKey(isExpanded ? null : opts.rowKey)}
+                >
+                  <span className={`text-gray-500 transition-transform ${isExpanded ? 'rotate-90' : ''} ${opts.expandable ? '' : 'opacity-0'}`}>▸</span>
+                  <div className="min-w-0">
+                    <div className="text-sm text-gray-200 truncate">{opts.name}</div>
+                    {opts.sub && (
+                      <div className="text-[11px] text-gray-500 truncate">
+                        {opts.sub}
+                        <span className="text-gray-700"> · {opts.sessions} session{opts.sessions === 1 ? '' : 's'}</span>
+                      </div>
+                    )}
+                    {!opts.sub && (
+                      <div className="text-[11px] text-gray-700 truncate">{opts.sessions} session{opts.sessions === 1 ? '' : 's'}</div>
+                    )}
+                  </div>
+                  <div onClick={(e) => e.stopPropagation()}>
+                    {renderUsageCell(opts.currentSpend, opts.monthlyLimit)}
+                  </div>
+                  <div onClick={(e) => e.stopPropagation()}>
+                    {renderCapCell({
+                      isEditing: opts.isEditingFlat,
+                      currentLimit: opts.monthlyLimit,
+                      currentPeriod: opts.period,
+                      value: opts.flatValue,
+                      setValue: opts.setFlatValue,
+                      periodValue: opts.flatPeriod,
+                      setPeriodValue: opts.setFlatPeriod,
+                      beginEdit: opts.beginEditFlat,
+                      cancelEdit: opts.cancelEditFlat,
+                      save: opts.saveFlat,
+                    })}
+                  </div>
+                </div>
+
+                {isExpanded && opts.expandable && (
+                  <div className="bg-gray-950/40 border-t border-gray-800/60 pl-10 pr-3 py-2 space-y-1">
+                    {opts.models.length > 0 && opts.models.map((m) => {
+                      const editKey = `${opts.modelEditPrefix}${m.model}`;
+                      const isEdit = opts.activeEditKey === editKey;
+                      return (
+                        <div key={m.id} className="grid grid-cols-[minmax(0,1fr)_220px_auto] items-center gap-3 py-1">
+                          <span className="font-mono text-[11px] text-gray-300 truncate">{m.model}</span>
+                          <span className="text-[11px] text-gray-600 tabular-nums">— per-model cap</span>
+                          {renderCapCell({
+                            isEditing: isEdit,
+                            currentLimit: m.monthlyLimit && m.monthlyLimit > 0 ? m.monthlyLimit : 0,
+                            currentPeriod: ((m.period as Period) || 'monthly'),
+                            value: opts.modelValue,
+                            setValue: opts.setModelValue,
+                            periodValue: modelPeriodValue,
+                            setPeriodValue: setModelPeriodValue,
+                            beginEdit: () => opts.beginEditModel(m.model, m.monthlyLimit ?? null, ((m.period as Period) || 'monthly')),
+                            cancelEdit: opts.cancelEditModel,
+                            save: () => opts.saveModel(m.model),
+                            placeholderLabel: 'Set cap →',
+                          })}
+                        </div>
+                      );
+                    })}
+                    {/* Always-visible add-model input. Pressing Enter
+                        creates the override and clears the field so the
+                        admin can keep typing to add another. */}
+                    <div className="flex items-center gap-2 mt-1 rounded-md border border-dashed border-gray-800 hover:border-indigo-500/40 focus-within:border-indigo-500/60 px-2.5 py-1.5">
+                      <span className="text-indigo-400 text-sm leading-none">+</span>
+                      <span className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">Model</span>
+                      <input
+                        type="text"
+                        placeholder="e.g. claude-opus-4-7"
+                        className="bg-transparent flex-1 text-xs font-mono text-gray-100 focus:outline-none placeholder:text-gray-600"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            const v = (e.target as HTMLInputElement).value.trim();
+                            if (v) {
+                              opts.addModel(v);
+                              (e.target as HTMLInputElement).value = '';
+                            }
+                          }
+                        }}
+                      />
+                      <span className="text-[10px] text-gray-600 whitespace-nowrap">↵ to add</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          };
+
           return (
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] uppercase tracking-wider text-gray-500 font-medium">Tighter caps for specific scopes</label>
+              <div className="flex items-end justify-between">
+                <div>
+                  <label className="text-[11px] uppercase tracking-wider text-gray-500 font-medium">Tighter caps for specific scopes</label>
+                  <p className="text-[11px] text-gray-600 mt-0.5">Override the defaults for an individual agent, engineer, or repo.</p>
+                </div>
                 <span className="text-[10px] text-gray-600">overrides default caps</span>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-[180px_1fr] gap-4">
-                <div className="space-y-1" role="tablist" aria-orientation="vertical" aria-label="Scope">
-                  {tabs.map((t) => {
-                    const Icon = t.Icon;
-                    const isActive = activeSection === t.key;
-                    const hasOverrides = t.count > 0;
-                    return (
-                      <button
-                        key={t.key}
-                        type="button"
-                        role="tab"
-                        aria-selected={isActive}
-                        onClick={() => setActiveSection(t.key)}
-                        className={`w-full flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs transition-all ${
-                          isActive
-                            ? 'border-transparent ring-2 ring-indigo-400/60 bg-indigo-500/15 text-gray-50'
-                            : hasOverrides
-                              ? 'border-indigo-500/40 bg-indigo-500/[0.06] text-gray-100 hover:border-indigo-400/70 hover:bg-indigo-500/[0.12]'
-                              : 'border-gray-700/80 bg-gray-800/30 text-gray-300 hover:border-gray-600 hover:bg-gray-800/60'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2">
-                          <Icon className={`w-3.5 h-3.5 ${isActive || hasOverrides ? 'text-indigo-300' : 'text-gray-500'}`} />
-                          <span className="font-medium">{t.label}</span>
-                        </span>
-                        <span className={`tabular-nums text-[11px] ${isActive ? 'text-indigo-100' : hasOverrides ? 'text-indigo-200' : 'text-gray-500'}`}>
-                          {t.count}{t.total !== null ? `/${t.total}` : ''}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
 
-                <div role="tabpanel" className="rounded-xl border border-gray-800/80 bg-gray-950/40 divide-y divide-gray-800/80 min-h-[180px]">
-
-      {activeSection === 'agents' && (
-        <div className="divide-y divide-gray-800/80">
-          {agentBudgets.length === 0 ? (
-            <div className="p-6 text-center text-sm text-gray-500">
-              No agents yet — they'll appear here after their first session.
-            </div>
-          ) : (
-            agentBudgets.sort((a, b) => b.currentSpend - a.currentSpend).map((agent) => {
-              const p = agent.monthlyLimit > 0 ? pct(agent.currentSpend, agent.monthlyLimit) : 0;
-              const isExpanded = expandedAgentId === agent.agentId;
-              const models = agentModels[agent.agentId] || [];
-              // Skip the synthetic "Other" bucket — it has no real Agent row
-              // backing it, so no AgentModel rows exist for it.
-              const expandable = agent.agentId !== '__other__';
-              const hasLimit = agent.monthlyLimit > 0;
-              const isEditing = editingAgentLimit === agent.agentId;
-              // "+ Add limit" focuses the per-model input inside the expand
-              // body. Mirrors the repo flow so all three scopes share the
-              // same one-click-then-type rhythm.
-              const focusAgentAddInput = () => {
-                setTimeout(() => {
-                  const el = document.getElementById(`agent-add-${agent.agentId}`) as HTMLInputElement | null;
-                  el?.focus();
-                }, 0);
-              };
-              const handleAgentAddClick = () => {
-                if (!expandable) return;
-                if (!isExpanded) toggleAgentExpand(agent.agentId);
-                focusAgentAddInput();
-              };
-              return (
-                <div key={agent.agentId}>
-                  <div className="px-3 py-2 flex items-center gap-3">
-                    {expandable ? (
-                      <button
-                        type="button"
-                        onClick={() => toggleAgentExpand(agent.agentId)}
-                        className={`text-gray-500 hover:text-gray-300 transition-transform flex-shrink-0 w-4 ${isExpanded ? 'rotate-90' : ''}`}
-                        title={isExpanded ? 'Collapse' : 'Show per-model breakdown'}
-                      >
-                        ▸
-                      </button>
-                    ) : (
-                      <span className="w-4 flex-shrink-0" />
-                    )}
-                    <div className="flex items-baseline gap-2 min-w-0 flex-1">
-                      <span className="text-sm font-medium text-gray-200 truncate">{agent.agentName}</span>
-                      <span className="text-[11px] text-gray-500 truncate">{agent.slug}</span>
-                      <span className="text-[11px] text-gray-600 whitespace-nowrap">· {agent.sessions} sess · ${agent.currentSpend.toFixed(2)} spent</span>
-                    </div>
-                    {hasLimit && !isEditing && (
-                      <div className="w-20 h-1.5 rounded-full bg-gray-800 overflow-hidden flex-shrink-0">
-                        <div className={`h-full rounded-full transition-all ${barColor(p)}`} style={{ width: `${Math.min(p, 100)}%` }} />
-                      </div>
-                    )}
-                    {isEditing ? (
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        <span className="text-xs text-gray-500">$</span>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          value={agentLimitValue}
-                          onChange={(e) => setAgentLimitValue(e.target.value)}
-                          className="input text-xs w-20 py-0.5 px-1 tabular-nums"
-                          autoFocus
-                          onKeyDown={(e) => { if (e.key === 'Enter') handleSaveAgentLimit(agent.agentId); if (e.key === 'Escape') setEditingAgentLimit(null); }}
-                        />
-                        <select
-                          value={agentPeriodValue}
-                          onChange={(e) => setAgentPeriodValue(e.target.value as Period)}
-                          className="input text-[10px] py-0.5 px-1"
-                          aria-label="Period"
-                        >
-                          <option value="daily">/d</option>
-                          <option value="weekly">/w</option>
-                          <option value="monthly">/mo</option>
-                        </select>
-                        <button onClick={() => handleSaveAgentLimit(agent.agentId)} className="text-xs text-green-400 hover:text-green-300 px-1">✓</button>
-                        <button onClick={() => setEditingAgentLimit(null)} className="text-xs text-gray-500 hover:text-gray-300 px-1">✕</button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => {
-                          setEditingAgentLimit(agent.agentId);
-                          setAgentLimitValue(hasLimit ? String(agent.monthlyLimit) : '');
-                          setAgentPeriodValue((agent.period || 'monthly') as Period);
-                        }}
-                        className={`text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors flex-shrink-0 ${
-                          hasLimit
-                            ? 'text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30'
-                            : 'text-gray-500 hover:text-gray-200 hover:bg-gray-800/60 border border-gray-800'
-                        }`}
-                        title="Click to edit limit"
-                      >
-                        {hasLimit
-                          ? `$${agent.monthlyLimit.toFixed(0)}${PERIOD_SUFFIX[(agent.period || 'monthly') as Period]}`
-                          : 'no cap'}
-                      </button>
-                    )}
-                    {expandable && (
-                      <button
-                        type="button"
-                        onClick={handleAgentAddClick}
-                        className="inline-flex items-center gap-1 text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors flex-shrink-0 text-gray-400 hover:text-indigo-200 hover:bg-indigo-500/10 border border-gray-800 hover:border-indigo-500/30"
-                        title="Add a per-model override for this agent"
-                      >
-                        <span className="text-sm leading-none">+</span> Add limit
-                      </button>
-                    )}
-                  </div>
-
-                  {isExpanded && expandable && (
-                    <div className="px-4 pb-4 pl-12 space-y-2">
-                      <div className="flex items-center gap-2 rounded-md border border-gray-800 bg-gray-950/50 px-3 py-1.5 focus-within:border-indigo-500/60">
-                        <span className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">Model</span>
-                        <input
-                          id={`agent-add-${agent.agentId}`}
-                          type="text"
-                          placeholder="e.g. claude-opus-4-7"
-                          className="bg-transparent flex-1 text-xs font-mono text-gray-100 focus:outline-none placeholder:text-gray-600"
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              const v = (e.target as HTMLInputElement).value.trim();
-                              if (v) {
-                                handleAddAgentModel(agent.agentId, v);
-                                (e.target as HTMLInputElement).value = '';
-                              }
-                            }
-                          }}
-                        />
-                        <span className="text-[10px] text-gray-600 whitespace-nowrap">press ↵ to add</span>
-                      </div>
-                      {models.length > 0 && (
-                        <div className="rounded border border-gray-800/80 divide-y divide-gray-800">
-                          {models.map((m) => {
-                            const key = `${agent.agentId}::${m.model}`;
-                            const isEdit = editingModelKey === key;
-                            return (
-                              <div key={m.id} className="px-3 py-2 flex items-center gap-3">
-                                <span className="font-mono text-xs text-gray-300 flex-1 truncate">{m.model}</span>
-                                {isEdit ? (
-                                  <div className="flex items-center gap-1">
-                                    <span className="text-xs text-gray-500">$</span>
-                                    <input
-                                      type="number"
-                                      step="0.01"
-                                      min="0"
-                                      value={modelLimitValue}
-                                      onChange={(e) => setModelLimitValue(e.target.value)}
-                                      className="input text-xs w-20 py-0.5 px-1"
-                                      autoFocus
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter') handleSaveModelLimit(agent.agentId, m.model);
-                                        if (e.key === 'Escape') setEditingModelKey(null);
-                                      }}
-                                    />
-                                    <select
-                                      value={modelPeriodValue}
-                                      onChange={(e) => setModelPeriodValue(e.target.value as Period)}
-                                      className="input text-[10px] py-0.5 px-1"
-                                      aria-label="Period"
-                                    >
-                                      <option value="daily">/d</option>
-                                      <option value="weekly">/w</option>
-                                      <option value="monthly">/mo</option>
-                                    </select>
-                                    <button type="button" onClick={() => handleSaveModelLimit(agent.agentId, m.model)} className="text-xs text-green-400 hover:text-green-300">✓</button>
-                                    <button type="button" onClick={() => setEditingModelKey(null)} className="text-xs text-gray-500 hover:text-gray-300">✕</button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingModelKey(key);
-                                      setModelLimitValue(m.monthlyLimit && m.monthlyLimit > 0 ? String(m.monthlyLimit) : '');
-                                      setModelPeriodValue((m.period || 'monthly') as Period);
-                                    }}
-                                    className={`text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors ${
-                                      m.monthlyLimit && m.monthlyLimit > 0
-                                        ? 'text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30'
-                                        : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 border border-gray-800'
-                                    }`}
-                                  >
-                                    {m.monthlyLimit && m.monthlyLimit > 0
-                                      ? `$${m.monthlyLimit.toFixed(0)}${PERIOD_SUFFIX[(m.period || 'monthly') as Period]}`
-                                      : 'Inherits agent default'}
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
-
-      {activeSection === 'developers' && (
-        <div className="divide-y divide-gray-800/80">
-          {userBudgets.length === 0 ? (
-            <div className="p-6 text-center text-sm text-gray-500">
-              No developer activity yet — they'll appear here after their first session.
-            </div>
-          ) : (
-            userBudgets.sort((a, b) => b.currentSpend - a.currentSpend).map((user) => {
-              const p = user.monthlyLimit > 0 ? pct(user.currentSpend, user.monthlyLimit) : 0;
-              const isExpanded = expandedUserId === user.userId;
-              const models = userModels[user.userId] || [];
-              const hasLimit = user.monthlyLimit > 0;
-              const isEditing = editingUserLimit === user.userId;
-              const focusUserAddInput = () => {
-                setTimeout(() => {
-                  const el = document.getElementById(`user-add-${user.userId}`) as HTMLInputElement | null;
-                  el?.focus();
-                }, 0);
-              };
-              const handleUserAddClick = () => {
-                if (!isExpanded) toggleUserExpand(user.userId);
-                focusUserAddInput();
-              };
-              return (
-                <div key={user.userId}>
-                  <div className="px-3 py-2 flex items-center gap-3">
+              {/* Tab bar */}
+              <div className="border-b border-gray-800/80 flex items-center gap-1 -mb-px" role="tablist" aria-label="Scope">
+                {tabs.map((t) => {
+                  const Icon = t.Icon;
+                  const isActive = activeSection === t.key;
+                  const hasOverrides = t.capped > 0;
+                  return (
                     <button
+                      key={t.key}
                       type="button"
-                      onClick={() => toggleUserExpand(user.userId)}
-                      className={`text-gray-500 hover:text-gray-300 transition-transform flex-shrink-0 w-4 ${isExpanded ? 'rotate-90' : ''}`}
-                      title={isExpanded ? 'Collapse' : 'Show per-model breakdown'}
+                      role="tab"
+                      aria-selected={isActive}
+                      onClick={() => { setActiveSection(t.key); setExpandedRowKey(null); }}
+                      className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                        isActive
+                          ? 'border-indigo-500 text-indigo-300'
+                          : 'border-transparent text-gray-500 hover:text-gray-300'
+                      }`}
                     >
-                      ▸
-                    </button>
-                    <div className="flex items-baseline gap-2 min-w-0 flex-1">
-                      <span className="text-sm font-medium text-gray-200 truncate">{user.name}</span>
-                      <span className="text-[11px] text-gray-500 truncate">{user.email}</span>
-                      <span className="text-[11px] text-gray-600 whitespace-nowrap">· {user.sessions} sess · ${user.currentSpend.toFixed(2)} spent</span>
-                    </div>
-                    {hasLimit && !isEditing && (
-                      <div className="w-20 h-1.5 rounded-full bg-gray-800 overflow-hidden flex-shrink-0">
-                        <div className={`h-full rounded-full transition-all ${barColor(p)}`} style={{ width: `${Math.min(p, 100)}%` }} />
-                      </div>
-                    )}
-                    {isEditing ? (
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        <span className="text-xs text-gray-500">$</span>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          value={userLimitValue}
-                          onChange={(e) => setUserLimitValue(e.target.value)}
-                          className="input text-xs w-20 py-0.5 px-1 tabular-nums"
-                          autoFocus
-                          onKeyDown={(e) => { if (e.key === 'Enter') handleSaveUserLimit(user.userId); if (e.key === 'Escape') setEditingUserLimit(null); }}
-                        />
-                        <select
-                          value={userPeriodValue}
-                          onChange={(e) => setUserPeriodValue(e.target.value as Period)}
-                          className="input text-[10px] py-0.5 px-1"
-                          aria-label="Period"
-                        >
-                          <option value="daily">/d</option>
-                          <option value="weekly">/w</option>
-                          <option value="monthly">/mo</option>
-                        </select>
-                        <button onClick={() => handleSaveUserLimit(user.userId)} className="text-xs text-green-400 hover:text-green-300 px-1">✓</button>
-                        <button onClick={() => setEditingUserLimit(null)} className="text-xs text-gray-500 hover:text-gray-300 px-1">✕</button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => {
-                          setEditingUserLimit(user.userId);
-                          setUserLimitValue(hasLimit ? String(user.monthlyLimit) : '');
-                          setUserPeriodValue((user.period || 'monthly') as Period);
-                        }}
-                        className={`text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors flex-shrink-0 ${
-                          hasLimit
-                            ? 'text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30'
-                            : 'text-gray-500 hover:text-gray-200 hover:bg-gray-800/60 border border-gray-800'
-                        }`}
-                        title="Click to edit limit"
-                      >
-                        {hasLimit
-                          ? `$${user.monthlyLimit.toFixed(0)}${PERIOD_SUFFIX[(user.period || 'monthly') as Period]}`
-                          : 'no cap'}
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleUserAddClick}
-                      className="inline-flex items-center gap-1 text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors flex-shrink-0 text-gray-400 hover:text-indigo-200 hover:bg-indigo-500/10 border border-gray-800 hover:border-indigo-500/30"
-                      title="Add a per-model override for this engineer"
-                    >
-                      <span className="text-sm leading-none">+</span> Add limit
-                    </button>
-                  </div>
-                  {isExpanded && (
-                    <div className="px-4 pb-4 pl-12 space-y-2">
-                      <div className="flex items-center gap-2 rounded-md border border-gray-800 bg-gray-950/50 px-3 py-1.5 focus-within:border-indigo-500/60">
-                        <span className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">Model</span>
-                        <input
-                          id={`user-add-${user.userId}`}
-                          type="text"
-                          placeholder="e.g. claude-opus-4-7"
-                          className="bg-transparent flex-1 text-xs font-mono text-gray-100 focus:outline-none placeholder:text-gray-600"
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              const v = (e.target as HTMLInputElement).value.trim();
-                              if (v) {
-                                handleAddUserModel(user.userId, v);
-                                (e.target as HTMLInputElement).value = '';
-                              }
-                            }
-                          }}
-                        />
-                        <span className="text-[10px] text-gray-600 whitespace-nowrap">press ↵ to add</span>
-                      </div>
-                      {models.length > 0 && (
-                        <div className="rounded border border-gray-800/80 divide-y divide-gray-800">
-                          {models.map((m) => {
-                            const key = `user:${user.userId}::${m.model}`;
-                            const isEdit = editingModelKey === key;
-                            return (
-                              <div key={m.id} className="px-3 py-2 flex items-center gap-3">
-                                <span className="font-mono text-xs text-gray-300 flex-1 truncate">{m.model}</span>
-                                {isEdit ? (
-                                  <div className="flex items-center gap-1">
-                                    <span className="text-xs text-gray-500">$</span>
-                                    <input
-                                      type="number"
-                                      step="0.01"
-                                      min="0"
-                                      value={modelLimitValue}
-                                      onChange={(e) => setModelLimitValue(e.target.value)}
-                                      className="input text-xs w-20 py-0.5 px-1"
-                                      autoFocus
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter') handleSaveUserModelLimit(user.userId, m.model);
-                                        if (e.key === 'Escape') setEditingModelKey(null);
-                                      }}
-                                    />
-                                    <select
-                                      value={modelPeriodValue}
-                                      onChange={(e) => setModelPeriodValue(e.target.value as Period)}
-                                      className="input text-[10px] py-0.5 px-1"
-                                      aria-label="Period"
-                                    >
-                                      <option value="daily">/d</option>
-                                      <option value="weekly">/w</option>
-                                      <option value="monthly">/mo</option>
-                                    </select>
-                                    <button type="button" onClick={() => handleSaveUserModelLimit(user.userId, m.model)} className="text-xs text-green-400 hover:text-green-300">✓</button>
-                                    <button type="button" onClick={() => setEditingModelKey(null)} className="text-xs text-gray-500 hover:text-gray-300">✕</button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingModelKey(key);
-                                      setModelLimitValue(m.monthlyLimit && m.monthlyLimit > 0 ? String(m.monthlyLimit) : '');
-                                      setModelPeriodValue((m.period || 'monthly') as Period);
-                                    }}
-                                    className={`text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors ${
-                                      m.monthlyLimit && m.monthlyLimit > 0
-                                        ? 'text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30'
-                                        : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 border border-gray-800'
-                                    }`}
-                                  >
-                                    {m.monthlyLimit && m.monthlyLimit > 0
-                                      ? `$${m.monthlyLimit.toFixed(0)}${PERIOD_SUFFIX[(m.period || 'monthly') as Period]}`
-                                      : 'Inherits user default'}
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
-
-      {activeSection === 'repos' && (
-        <div className="divide-y divide-gray-800/80">
-          {repoBudgets.length === 0 ? (
-            <div className="p-6 text-center text-sm text-gray-500">No repositories yet.</div>
-          ) : (
-            repoBudgets.map((repo) => {
-              const isExpanded = expandedRepoId === repo.repoId;
-              const models = repoModels[repo.repoId] || [];
-              const cappedCount = models.filter((m) => m.monthlyLimit && m.monthlyLimit > 0).length;
-              const hasOverrides = cappedCount > 0;
-              // Click "+ Add limit" → expand the row (if collapsed) and
-              // immediately focus the model-name input so the user goes
-              // straight from one click to typing. Without the focus jump,
-              // they'd have to expand → mouse-over → click input → type.
-              const focusAddInput = () => {
-                setTimeout(() => {
-                  const el = document.getElementById(`repo-add-${repo.repoId}`) as HTMLInputElement | null;
-                  el?.focus();
-                }, 0);
-              };
-              const handleAddClick = () => {
-                if (!isExpanded) toggleRepoExpand(repo.repoId);
-                focusAddInput();
-              };
-              const hasFlatLimit = repo.monthlyLimit > 0;
-              const isEditingFlat = editingRepoFlatLimit === repo.repoId;
-              const flatPct = hasFlatLimit ? pct(repo.currentSpend, repo.monthlyLimit) : 0;
-              return (
-                <div key={repo.repoId}>
-                  <div className="px-3 py-2 flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => toggleRepoExpand(repo.repoId)}
-                      className={`text-gray-500 hover:text-gray-300 transition-transform flex-shrink-0 w-4 ${isExpanded ? 'rotate-90' : ''}`}
-                      title={isExpanded ? 'Collapse' : 'Show per-model overrides'}
-                    >
-                      ▸
-                    </button>
-                    <div className="flex items-baseline gap-2 min-w-0 flex-1">
-                      <span className="text-sm font-medium text-gray-200 truncate">{repo.repoName}</span>
-                      <span className="text-[11px] text-gray-600 whitespace-nowrap tabular-nums">
-                        · {repo.sessions} sess · ${repo.currentSpend.toFixed(2)} spent
-                        {hasOverrides && ` · ${cappedCount} model cap${cappedCount !== 1 ? 's' : ''}`}
+                      <Icon className={`w-4 h-4 ${isActive || hasOverrides ? 'text-indigo-300' : ''}`} />
+                      {t.label}
+                      <span className={`tabular-nums text-[11px] ml-0.5 ${isActive ? 'text-indigo-200' : hasOverrides ? 'text-indigo-300/80' : 'text-gray-600'}`}>
+                        ({t.capped}/{t.total})
                       </span>
-                    </div>
-                    {hasFlatLimit && !isEditingFlat && (
-                      <div className="w-20 h-1.5 rounded-full bg-gray-800 overflow-hidden flex-shrink-0">
-                        <div className={`h-full rounded-full transition-all ${barColor(flatPct)}`} style={{ width: `${Math.min(flatPct, 100)}%` }} />
-                      </div>
-                    )}
-                    {isEditingFlat ? (
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        <span className="text-xs text-gray-500">$</span>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          value={repoFlatLimitValue}
-                          onChange={(e) => setRepoFlatLimitValue(e.target.value)}
-                          className="input text-xs w-20 py-0.5 px-1 tabular-nums"
-                          autoFocus
-                          onKeyDown={(e) => { if (e.key === 'Enter') handleSaveRepoFlatLimit(repo.repoId); if (e.key === 'Escape') setEditingRepoFlatLimit(null); }}
-                        />
-                        <select
-                          value={repoFlatPeriodValue}
-                          onChange={(e) => setRepoFlatPeriodValue(e.target.value as Period)}
-                          className="input text-[10px] py-0.5 px-1"
-                          aria-label="Period"
-                        >
-                          <option value="daily">/d</option>
-                          <option value="weekly">/w</option>
-                          <option value="monthly">/mo</option>
-                        </select>
-                        <button type="button" onClick={() => handleSaveRepoFlatLimit(repo.repoId)} className="text-xs text-green-400 hover:text-green-300 px-1">✓</button>
-                        <button type="button" onClick={() => setEditingRepoFlatLimit(null)} className="text-xs text-gray-500 hover:text-gray-300 px-1">✕</button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingRepoFlatLimit(repo.repoId);
-                          setRepoFlatLimitValue(hasFlatLimit ? String(repo.monthlyLimit) : '');
-                          setRepoFlatPeriodValue((repo.period || 'monthly') as Period);
-                        }}
-                        className={`text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors flex-shrink-0 ${
-                          hasFlatLimit
-                            ? 'text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30'
-                            : 'text-gray-500 hover:text-gray-200 hover:bg-gray-800/60 border border-gray-800'
-                        }`}
-                        title="Click to set a flat dollar cap on this repo"
-                      >
-                        {hasFlatLimit
-                          ? `$${repo.monthlyLimit.toFixed(0)}${PERIOD_SUFFIX[(repo.period || 'monthly') as Period]}`
-                          : 'no cap'}
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={handleAddClick}
-                      className="inline-flex items-center gap-1 text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors flex-shrink-0 text-gray-400 hover:text-indigo-200 hover:bg-indigo-500/10 border border-gray-800 hover:border-indigo-500/30"
-                      title="Add a per-model override for this repo"
-                    >
-                      <span className="text-sm leading-none">+</span> Add limit
                     </button>
-                  </div>
-                  {isExpanded && (
-                    <div className="px-4 pb-4 pl-12 space-y-2">
-                      {/* Always-visible add input — same surface whether
-                          this repo has 0 or N existing model caps. Removes
-                          the dead-end where users had to leave the page to
-                          add a 2nd model after the 1st. */}
-                      <div className="flex items-center gap-2 rounded-md border border-gray-800 bg-gray-950/50 px-3 py-1.5 focus-within:border-indigo-500/60">
-                        <span className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">Model</span>
-                        <input
-                          id={`repo-add-${repo.repoId}`}
-                          type="text"
-                          placeholder="e.g. claude-opus-4-7"
-                          className="bg-transparent flex-1 text-xs font-mono text-gray-100 focus:outline-none placeholder:text-gray-600"
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              const v = (e.target as HTMLInputElement).value.trim();
-                              if (v) {
-                                handleAddRepoModel(repo.repoId, v);
-                                (e.target as HTMLInputElement).value = '';
-                              }
-                            }
-                          }}
-                        />
-                        <span className="text-[10px] text-gray-600 whitespace-nowrap">press ↵ to add</span>
-                      </div>
-                      {models.length > 0 && (
-                        <div className="rounded border border-gray-800/80 divide-y divide-gray-800">
-                          {models.map((m) => {
-                            const key = `repo:${repo.repoId}::${m.model}`;
-                            const isEdit = editingRepoLimit === key;
-                            return (
-                              <div key={m.id} className="px-3 py-2 flex items-center gap-3">
-                                <span className="font-mono text-xs text-gray-300 flex-1 truncate">{m.model}</span>
-                                {isEdit ? (
-                                  <div className="flex items-center gap-1">
-                                    <span className="text-xs text-gray-500">$</span>
-                                    <input
-                                      type="number"
-                                      step="0.01"
-                                      min="0"
-                                      value={repoLimitValue}
-                                      onChange={(e) => setRepoLimitValue(e.target.value)}
-                                      className="input text-xs w-20 py-0.5 px-1"
-                                      autoFocus
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter') handleSaveRepoModelLimit(repo.repoId, m.model);
-                                        if (e.key === 'Escape') setEditingRepoLimit(null);
-                                      }}
-                                    />
-                                    <select
-                                      value={modelPeriodValue}
-                                      onChange={(e) => setModelPeriodValue(e.target.value as Period)}
-                                      className="input text-[10px] py-0.5 px-1"
-                                      aria-label="Period"
-                                    >
-                                      <option value="daily">/d</option>
-                                      <option value="weekly">/w</option>
-                                      <option value="monthly">/mo</option>
-                                    </select>
-                                    <button type="button" onClick={() => handleSaveRepoModelLimit(repo.repoId, m.model)} className="text-xs text-green-400 hover:text-green-300">✓</button>
-                                    <button type="button" onClick={() => setEditingRepoLimit(null)} className="text-xs text-gray-500 hover:text-gray-300">✕</button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingRepoLimit(key);
-                                      setRepoLimitValue(m.monthlyLimit && m.monthlyLimit > 0 ? String(m.monthlyLimit) : '');
-                                      setModelPeriodValue((m.period || 'monthly') as Period);
-                                    }}
-                                    className={`text-[11px] tabular-nums px-2 py-0.5 rounded-md transition-colors ${
-                                      m.monthlyLimit && m.monthlyLimit > 0
-                                        ? 'text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30'
-                                        : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 border border-gray-800'
-                                    }`}
-                                  >
-                                    {m.monthlyLimit && m.monthlyLimit > 0
-                                      ? `$${m.monthlyLimit.toFixed(0)}${PERIOD_SUFFIX[(m.period || 'monthly') as Period]}`
-                                      : 'Set limit →'}
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  );
+                })}
+              </div>
+
+              {/* Table */}
+              <div role="tabpanel" className="rounded-xl border border-gray-800/80 bg-gray-950/40 overflow-hidden">
+                {/* Column header */}
+                <div className="grid grid-cols-[20px_minmax(0,1fr)_220px_auto] gap-3 px-3 py-2 text-[10px] uppercase tracking-wider text-gray-600 font-medium border-b border-gray-800/80 bg-gray-950/60">
+                  <span />
+                  <span>Name</span>
+                  <span>Usage</span>
+                  <span className="justify-self-end pr-1">Cap</span>
                 </div>
-              );
-            })
-          )}
-        </div>
-      )}
+
+                <div className="divide-y divide-gray-800/60">
+                  {activeSection === 'agents' && (
+                    agentBudgets.length === 0
+                      ? <div className="p-6 text-center text-sm text-gray-500">No agents yet — they'll appear here after their first session.</div>
+                      : [...agentBudgets].sort((a, b) => b.currentSpend - a.currentSpend).map((agent) => renderScopeRow({
+                          rowKey: `agent-${agent.agentId}`,
+                          name: agent.agentName,
+                          sub: agent.slug,
+                          sessions: agent.sessions,
+                          currentSpend: agent.currentSpend,
+                          monthlyLimit: agent.monthlyLimit,
+                          period: (agent.period || 'monthly') as Period,
+                          // Synthetic "Other" aggregate has no real Agent row
+                          // → no AgentModel rows can hang off it. Keep the cap
+                          // editor; just disable expansion.
+                          expandable: agent.agentId !== '__other__',
+                          isEditingFlat: editingAgentLimit === agent.agentId,
+                          beginEditFlat: () => {
+                            setEditingAgentLimit(agent.agentId);
+                            setAgentLimitValue(agent.monthlyLimit > 0 ? String(agent.monthlyLimit) : '');
+                            setAgentPeriodValue((agent.period || 'monthly') as Period);
+                          },
+                          cancelEditFlat: () => setEditingAgentLimit(null),
+                          saveFlat: () => handleSaveAgentLimit(agent.agentId),
+                          flatValue: agentLimitValue,
+                          setFlatValue: setAgentLimitValue,
+                          flatPeriod: agentPeriodValue,
+                          setFlatPeriod: setAgentPeriodValue,
+                          models: (agentModels[agent.agentId] || []) as any,
+                          addModel: (model) => handleAddAgentModel(agent.agentId, model),
+                          modelEditPrefix: `${agent.agentId}::`,
+                          beginEditModel: (model, current, p) => {
+                            setEditingModelKey(`${agent.agentId}::${model}`);
+                            setModelLimitValue(current && current > 0 ? String(current) : '');
+                            setModelPeriodValue(p);
+                          },
+                          cancelEditModel: () => setEditingModelKey(null),
+                          saveModel: (model) => handleSaveModelLimit(agent.agentId, model),
+                          modelValue: modelLimitValue,
+                          setModelValue: setModelLimitValue,
+                          activeEditKey: editingModelKey,
+                        }))
+                  )}
+
+                  {activeSection === 'developers' && (
+                    userBudgets.length === 0
+                      ? <div className="p-6 text-center text-sm text-gray-500">No engineer activity yet — they'll appear here after their first session.</div>
+                      : [...userBudgets].sort((a, b) => b.currentSpend - a.currentSpend).map((user) => renderScopeRow({
+                          rowKey: `user-${user.userId}`,
+                          name: user.name,
+                          sub: user.email,
+                          sessions: user.sessions,
+                          currentSpend: user.currentSpend,
+                          monthlyLimit: user.monthlyLimit,
+                          period: (user.period || 'monthly') as Period,
+                          expandable: true,
+                          isEditingFlat: editingUserLimit === user.userId,
+                          beginEditFlat: () => {
+                            setEditingUserLimit(user.userId);
+                            setUserLimitValue(user.monthlyLimit > 0 ? String(user.monthlyLimit) : '');
+                            setUserPeriodValue((user.period || 'monthly') as Period);
+                          },
+                          cancelEditFlat: () => setEditingUserLimit(null),
+                          saveFlat: () => handleSaveUserLimit(user.userId),
+                          flatValue: userLimitValue,
+                          setFlatValue: setUserLimitValue,
+                          flatPeriod: userPeriodValue,
+                          setFlatPeriod: setUserPeriodValue,
+                          models: (userModels[user.userId] || []) as any,
+                          addModel: (model) => handleAddUserModel(user.userId, model),
+                          modelEditPrefix: `user:${user.userId}::`,
+                          beginEditModel: (model, current, p) => {
+                            setEditingModelKey(`user:${user.userId}::${model}`);
+                            setModelLimitValue(current && current > 0 ? String(current) : '');
+                            setModelPeriodValue(p);
+                          },
+                          cancelEditModel: () => setEditingModelKey(null),
+                          saveModel: (model) => handleSaveUserModelLimit(user.userId, model),
+                          modelValue: modelLimitValue,
+                          setModelValue: setModelLimitValue,
+                          activeEditKey: editingModelKey,
+                        }))
+                  )}
+
+                  {activeSection === 'repos' && (
+                    repoBudgets.length === 0
+                      ? <div className="p-6 text-center text-sm text-gray-500">No repositories yet.</div>
+                      : [...repoBudgets].sort((a, b) => b.currentSpend - a.currentSpend).map((repo) => renderScopeRow({
+                          rowKey: `repo-${repo.repoId}`,
+                          name: repo.repoName,
+                          sub: '',
+                          sessions: repo.sessions,
+                          currentSpend: repo.currentSpend,
+                          monthlyLimit: repo.monthlyLimit,
+                          period: (repo.period || 'monthly') as Period,
+                          expandable: true,
+                          isEditingFlat: editingRepoFlatLimit === repo.repoId,
+                          beginEditFlat: () => {
+                            setEditingRepoFlatLimit(repo.repoId);
+                            setRepoFlatLimitValue(repo.monthlyLimit > 0 ? String(repo.monthlyLimit) : '');
+                            setRepoFlatPeriodValue((repo.period || 'monthly') as Period);
+                          },
+                          cancelEditFlat: () => setEditingRepoFlatLimit(null),
+                          saveFlat: () => handleSaveRepoFlatLimit(repo.repoId),
+                          flatValue: repoFlatLimitValue,
+                          setFlatValue: setRepoFlatLimitValue,
+                          flatPeriod: repoFlatPeriodValue,
+                          setFlatPeriod: setRepoFlatPeriodValue,
+                          models: (repoModels[repo.repoId] || []) as any,
+                          addModel: (model) => handleAddRepoModel(repo.repoId, model),
+                          modelEditPrefix: `repo:${repo.repoId}::`,
+                          beginEditModel: (model, current, p) => {
+                            setEditingRepoLimit(`repo:${repo.repoId}::${model}`);
+                            setRepoLimitValue(current && current > 0 ? String(current) : '');
+                            setModelPeriodValue(p);
+                          },
+                          cancelEditModel: () => setEditingRepoLimit(null),
+                          saveModel: (model) => handleSaveRepoModelLimit(repo.repoId, model),
+                          modelValue: repoLimitValue,
+                          setModelValue: setRepoLimitValue,
+                          activeEditKey: editingRepoLimit,
+                        }))
+                  )}
                 </div>
               </div>
             </div>
@@ -1787,16 +1583,10 @@ function TokensTab({ tokenMix, byAgent, byModel }: {
     }, 50);
   };
 
-  if (tokenMix.length === 0 && byAgent.length === 0 && byModel.length === 0) {
-    return (
-      <div className="rounded-xl border border-gray-800/80 bg-gray-900/40 p-12 text-center text-sm text-gray-500">
-        No token usage in the last 30 days.
-        <p className="text-xs text-gray-600 mt-2">
-          Sessions feed token data automatically — once activity lands, this view populates.
-        </p>
-      </div>
-    );
-  }
+  // Render the KPI cards + bar + breakdown shell even with zero data
+  // — the per-row lists already carry their own empty messages, and a
+  // skeleton view is more useful than a wall of "no data" text on a
+  // freshly-set-up org.
 
   // Org totals computed off whichever breakdown has the most rows — they
   // should sum to the same numbers, but engineer-rollup is the most likely

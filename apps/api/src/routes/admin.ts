@@ -1,6 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
 import { prisma } from '../db.js';
-import { AuthRequest, requireAuth, resolveOrgContext } from '../middleware/auth.js';
+import { AuthRequest, requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -28,7 +28,11 @@ async function requireSuperAdmin(req: AuthRequest, res: Response, next: NextFunc
 }
 
 router.use(requireAuth);
-router.use(resolveOrgContext);
+// Skip resolveOrgContext on the super-admin router. resolveOrgContext 403s
+// when the user has zero memberships, which blocks super-admins (whose
+// whole job is to manage *other* orgs) from ever reaching this surface.
+// requireSuperAdmin is the real gate; an org context isn't needed for
+// listing/editing orgs and users.
 router.use(requireSuperAdmin);
 
 // GET /orgs — list all organizations with aggregate stats

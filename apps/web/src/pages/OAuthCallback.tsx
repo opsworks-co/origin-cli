@@ -27,10 +27,17 @@ export default function OAuthCallback() {
     api.oauthCallback(provider, code, state, accountType)
       .then((res) => {
         applyAuthResponse(res);
-        // New developer accounts go to onboarding wizard
+        // New developer accounts go to the solo onboarding wizard.
         if (res.apiKey && res.user.accountType === 'developer') {
           try { sessionStorage.setItem('origin:onboarding-key', res.apiKey); } catch { /* ignore */ }
           navigate('/onboarding', { replace: true });
+        } else if (accountType === 'team' && res.user.accountType !== 'developer') {
+          // Fresh team-admin OAuth registration — route to the team-flavoured
+          // onboarding (Origin Team branding, Invite Team step). The
+          // accountType localStorage flag is set by Register.tsx on the
+          // OAuth click, so its presence reliably distinguishes "came from
+          // Register Team tab" from "signed in via Login OAuth".
+          navigate('/onboarding?from=team', { replace: true });
         } else {
           navigate(res.user.accountType === 'developer' ? '/me' : '/dashboard', { replace: true });
         }

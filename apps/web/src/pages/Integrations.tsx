@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import * as api from '../api';
+import { request } from '../api/_client';
 
 export default function Integrations() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -200,9 +201,18 @@ export default function Integrations() {
   const fetchChatConfig = async () => {
     setChatLoading(true);
     try {
-      const res = await fetch('/api/settings/chat', { credentials: 'same-origin' });
-      const data = await res.json();
-      setChatConfigured(data.configured || data.hasKey);
+      // Use the shared `request()` helper so X-Origin-Org is sent —
+      // mirrors the onboarding save path. Without it the GET could
+      // resolve to a different org than the PUT, making a freshly-saved
+      // key look "Not configured" on this page.
+      const data = await request<{
+        configured?: boolean;
+        hasKey?: boolean;
+        llmProvider?: 'anthropic' | 'openai' | 'google';
+        model?: string;
+        source?: 'org' | 'environment' | 'none';
+      }>('/api/settings/chat');
+      setChatConfigured(!!(data.configured || data.hasKey));
       setChatProvider(data.llmProvider || 'anthropic');
       setChatModel(data.model || 'claude-sonnet-4-20250514');
       setChatSource(data.source || 'none');
@@ -226,23 +236,16 @@ export default function Integrations() {
     setSavingChat(true);
     setChatMsg(null);
     try {
-      const res = await fetch('/api/settings/chat', {
+      await request('/api/settings/chat', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify({ apiKey: chatApiKey, model: chatModel, llmProvider: chatProvider }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        setChatMsg({ type: 'success', text: 'AI Chat configuration saved' });
-        setChatConfigured(true);
-        setChatSource('org');
-        setChatApiKey('');
-      } else {
-        setChatMsg({ type: 'error', text: data.error || 'Failed to save' });
-      }
+      setChatMsg({ type: 'success', text: 'AI Chat configuration saved' });
+      setChatConfigured(true);
+      setChatSource('org');
+      setChatApiKey('');
     } catch (err: any) {
-      setChatMsg({ type: 'error', text: err.message });
+      setChatMsg({ type: 'error', text: err.message || 'Failed to save' });
     }
     setSavingChat(false);
   };
@@ -251,13 +254,10 @@ export default function Integrations() {
     setTestingChat(true);
     setChatTestResult(null);
     try {
-      const res = await fetch('/api/settings/chat/test', {
+      const data = await request<{ success: boolean; error?: string }>('/api/settings/chat/test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
         body: JSON.stringify({ apiKey: chatApiKey || undefined, llmProvider: chatProvider }),
       });
-      const data = await res.json();
       setChatTestResult(data);
     } catch (err: any) {
       setChatTestResult({ success: false, error: err.message });
@@ -1618,38 +1618,6 @@ export default function Integrations() {
               {chatSource === 'org' && 'Organization key is configured. Enter a new key to update it.'}
               {chatSource === 'none' && 'Required for the in-app AI assistant and AI-powered session reviews.'}
             </p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">Model</label>
-            <select value={chatModel} onChange={(e) => setChatModel(e.target.value)} className="select w-full">
-              {chatProvider === 'anthropic' && (
-                <>
-                  <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
-                  <option value="claude-opus-4-20250514">Claude Opus 4</option>
-                  <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
-                </>
-              )}
-              {chatProvider === 'openai' && (
-                <>
-                  <option value="gpt-4o">GPT-4o</option>
-                  <option value="gpt-4o-mini">GPT-4o Mini</option>
-                  <option value="gpt-4.1">GPT-4.1</option>
-                  <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
-                  <option value="gpt-4.1-nano">GPT-4.1 Nano</option>
-                  <option value="o3">o3</option>
-                  <option value="o3-mini">o3-mini</option>
-                  <option value="o4-mini">o4-mini</option>
-                </>
-              )}
-              {chatProvider === 'google' && (
-                <>
-                  <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                  <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                </>
-              )}
-            </select>
           </div>
 
           {chatMsg && (

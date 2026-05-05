@@ -28,8 +28,9 @@ router.get('/install', requireAuth, resolveOrgContext, requireRole('ADMIN'), (re
 
   // Create a signed state token with orgId to prevent CSRF and associate installation with org
   const from = (req.query.from as string) || '';
+  const flavor = (req.query.flavor as string) || '';
   const state = jwt.sign(
-    { orgId: req.activeOrgId!, userId: req.user!.id, from },
+    { orgId: req.activeOrgId!, userId: req.user!.id, from, flavor },
     JWT_SECRET,
     { expiresIn: '15m' },
   );
@@ -51,11 +52,11 @@ router.get('/callback', async (req: Request, res: Response) => {
     }
 
     // Verify state token
-    let statePayload: { orgId: string; userId: string; from?: string };
+    let statePayload: { orgId: string; userId: string; from?: string; flavor?: string };
     try {
       // Pin HS256 — we sign the state token with HS256 and must reject
       // any other algorithm, including alg=none / key-confusion attacks.
-      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string; from?: string };
+      statePayload = jwt.verify(state as string, JWT_SECRET, { algorithms: ['HS256'] }) as { orgId: string; userId: string; from?: string; flavor?: string };
     } catch {
       return res.redirect('/settings?tab=integrations&github_app=error&msg=invalid_state');
     }
@@ -149,7 +150,8 @@ router.get('/callback', async (req: Request, res: Response) => {
     // instead of having to find it themselves).
     let successUrl: string;
     if (statePayload.from === 'onboarding') {
-      successUrl = '/onboarding?step=1&github_app=success';
+      const flavorParam = statePayload.flavor ? `&from=${encodeURIComponent(statePayload.flavor)}` : '';
+      successUrl = `/onboarding?step=1&github_app=success${flavorParam}`;
     } else if (statePayload.from === 'settings') {
       successUrl = '/settings?tab=integrations&github_app=success';
     } else {

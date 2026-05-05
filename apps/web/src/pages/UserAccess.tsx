@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, Lock, Save, X } from 'lucide-react';
+import { ArrowLeft, Loader2, Lock } from 'lucide-react';
 import * as api from '../api';
 import type { UserAccessSummary, RepoLevel, AgentLevel } from '../api';
 import { useAuth } from '../context/AuthContext';
@@ -23,11 +23,6 @@ export default function UserAccess() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [savingKey, setSavingKey] = useState<string | null>(null);
-  // Local edits keyed by `repo:<id>` / `agent:<id>` — we only commit on
-  // explicit Save click so the admin can scan the matrix without each
-  // dropdown change firing a request.
-  const [pendingRepo, setPendingRepo] = useState<Record<string, RepoLevel | null>>({});
-  const [pendingAgent, setPendingAgent] = useState<Record<string, AgentLevel | null>>({});
 
   const canManage = activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN';
 
@@ -46,8 +41,6 @@ export default function UserAccess() {
         setUserName(u.name);
         setUserEmail(u.email);
       }
-      setPendingRepo({});
-      setPendingAgent({});
     } catch (err: any) {
       setError(err?.message || 'Failed to load access');
     } finally {
@@ -57,20 +50,10 @@ export default function UserAccess() {
 
   useEffect(() => { load(); }, [targetUserId]);
 
-  function repoCurrentLevel(repoId: string): RepoLevel | null {
-    if (Object.prototype.hasOwnProperty.call(pendingRepo, repoId)) return pendingRepo[repoId];
-    return summary?.repos.find((r) => r.id === repoId)?.level ?? null;
-  }
-
-  function agentCurrentLevel(agentId: string): AgentLevel | null {
-    if (Object.prototype.hasOwnProperty.call(pendingAgent, agentId)) return pendingAgent[agentId];
-    return summary?.agents.find((a) => a.id === agentId)?.level ?? null;
-  }
-
-  async function saveRepo(repoId: string) {
+  async function saveRepo(repoId: string, next: RepoLevel | null) {
     if (!targetUserId) return;
-    const next = repoCurrentLevel(repoId);
     setSavingKey(`repo:${repoId}`);
+    setError(null);
     try {
       if (next === null) {
         await api.removeRepoMember(repoId, targetUserId).catch((err) => {
@@ -88,10 +71,10 @@ export default function UserAccess() {
     }
   }
 
-  async function saveAgent(agentId: string) {
+  async function saveAgent(agentId: string, next: AgentLevel | null) {
     if (!targetUserId) return;
-    const next = agentCurrentLevel(agentId);
     setSavingKey(`agent:${agentId}`);
+    setError(null);
     try {
       if (next === null) {
         await api.removeAgentMember(agentId, targetUserId).catch((err) => {
@@ -147,10 +130,9 @@ export default function UserAccess() {
               <div className="p-6 text-center text-sm text-gray-500">No repositories in this org yet.</div>
             ) : (
               summary?.repos.map((r) => {
-                const stored = r.level;
-                const current = repoCurrentLevel(r.id);
-                const dirty = current !== stored;
+                const current = r.level;
                 const locked = r.inherited || !canManage;
+                const saving = savingKey === `repo:${r.id}`;
                 return (
                   <div key={r.id} className="grid grid-cols-[1fr_auto] gap-3 items-center px-4 py-2.5 border-b border-gray-200 dark:border-white/[0.05] last:border-b-0">
                     <div className="min-w-0">
@@ -165,10 +147,11 @@ export default function UserAccess() {
                       <div className="text-[11px] text-gray-500 truncate">{r.path}</div>
                     </div>
                     <div className="flex items-center gap-1.5">
+                      {saving && <Loader2 className="w-3.5 h-3.5 text-gray-500 animate-spin" />}
                       <select
                         value={current ?? 'none'}
-                        disabled={locked}
-                        onChange={(e) => setPendingRepo({ ...pendingRepo, [r.id]: e.target.value === 'none' ? null : (e.target.value as RepoLevel) })}
+                        disabled={locked || saving}
+                        onChange={(e) => saveRepo(r.id, e.target.value === 'none' ? null : (e.target.value as RepoLevel))}
                         className="text-[12px] px-2 py-1 rounded-md border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-[#0a0b14] text-gray-900 dark:text-gray-100 disabled:opacity-50"
                       >
                         <option value="none">— none</option>
@@ -176,31 +159,6 @@ export default function UserAccess() {
                         <option value="write">Write</option>
                         <option value="admin">Admin</option>
                       </select>
-                      {dirty && !locked && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => saveRepo(r.id)}
-                            disabled={savingKey === `repo:${r.id}`}
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-md bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors"
-                            title="Save"
-                          >
-                            <Save className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const next = { ...pendingRepo };
-                              delete next[r.id];
-                              setPendingRepo(next);
-                            }}
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-gray-200 dark:border-white/[0.08] text-gray-500 hover:text-gray-300 transition-colors"
-                            title="Discard"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </>
-                      )}
                     </div>
                   </div>
                 );
@@ -218,10 +176,9 @@ export default function UserAccess() {
               <div className="p-6 text-center text-sm text-gray-500">No agents in this org yet.</div>
             ) : (
               summary?.agents.map((a) => {
-                const stored = a.level;
-                const current = agentCurrentLevel(a.id);
-                const dirty = current !== stored;
+                const current = a.level;
                 const locked = a.inherited || !canManage;
+                const saving = savingKey === `agent:${a.id}`;
                 return (
                   <div key={a.id} className="grid grid-cols-[1fr_auto] gap-3 items-center px-4 py-2.5 border-b border-gray-200 dark:border-white/[0.05] last:border-b-0">
                     <div className="min-w-0">
@@ -236,41 +193,17 @@ export default function UserAccess() {
                       <div className="text-[11px] text-gray-500 truncate">{a.model}</div>
                     </div>
                     <div className="flex items-center gap-1.5">
+                      {saving && <Loader2 className="w-3.5 h-3.5 text-gray-500 animate-spin" />}
                       <select
                         value={current ?? 'none'}
-                        disabled={locked}
-                        onChange={(e) => setPendingAgent({ ...pendingAgent, [a.id]: e.target.value === 'none' ? null : (e.target.value as AgentLevel) })}
+                        disabled={locked || saving}
+                        onChange={(e) => saveAgent(a.id, e.target.value === 'none' ? null : (e.target.value as AgentLevel))}
                         className="text-[12px] px-2 py-1 rounded-md border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-[#0a0b14] text-gray-900 dark:text-gray-100 disabled:opacity-50"
                       >
                         <option value="none">— none</option>
                         <option value="use">Use</option>
                         <option value="admin">Admin</option>
                       </select>
-                      {dirty && !locked && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => saveAgent(a.id)}
-                            disabled={savingKey === `agent:${a.id}`}
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-md bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors"
-                            title="Save"
-                          >
-                            <Save className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const next = { ...pendingAgent };
-                              delete next[a.id];
-                              setPendingAgent(next);
-                            }}
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-gray-200 dark:border-white/[0.08] text-gray-500 hover:text-gray-300 transition-colors"
-                            title="Discard"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </>
-                      )}
                     </div>
                   </div>
                 );

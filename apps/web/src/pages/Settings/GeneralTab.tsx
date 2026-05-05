@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { User, Lock, Link2, Building2, AlertTriangle } from 'lucide-react';
+import { User, Lock, Link2, Building2, AlertTriangle, Sliders } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
 import ProfileEditor from './ProfileEditor';
@@ -246,6 +246,14 @@ export default function GeneralTab() {
       </section>
       )}
 
+      {/* Spend Quality thresholds — admin-only, per-org overrides for the
+          /insights/spend-quality page. Defaults are documented in the launch
+          post; this surface is the "adjustable per-org" promise it makes.
+          Member/viewer roles never see this card. */}
+      {(activeOrg?.role === 'OWNER' || activeOrg?.role === 'ADMIN') && (
+        <SpendQualityThresholdsCard />
+      )}
+
       {/* Danger Zone — pinned to the bottom of General so it never hides
           above an org/diagnostic block the user isn't reading. */}
       <section className="card space-y-5 border-red-900/30">
@@ -268,6 +276,220 @@ export default function GeneralTab() {
         </div>
       </section>
     </>
+  );
+}
+
+// ── Spend Quality thresholds card ──────────────────────────────────────────
+// Five user-tunable knobs for the /insights/spend-quality page. Reads the
+// effective config (defaults + this org's overrides) on mount; saves to the
+// override blob via PUT /api/insights/config. Defaults stay in the API
+// const file — clearing a field reverts to default on next save.
+function SpendQualityThresholdsCard() {
+  const [cfg, setCfg] = useState<api.InsightsConfig | null>(null);
+  const [reworkWindowDays, setReworkWindowDays] = useState('');
+  const [reworkAmber, setReworkAmber] = useState(''); // stored as percent (e.g. '7')
+  const [reworkRed, setReworkRed] = useState('');
+  const [expensiveMultiplier, setExpensiveMultiplier] = useState('');
+  const [opusMaxPrompts, setOpusMaxPrompts] = useState('');
+  const [sonnetMinPrompts, setSonnetMinPrompts] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.getInsightsConfig();
+      setCfg(data);
+      setReworkWindowDays(String(data.reworkWindowDays));
+      setReworkAmber(String(Math.round(data.reworkRateAmber * 1000) / 10));
+      setReworkRed(String(Math.round(data.reworkRateRed * 1000) / 10));
+      setExpensiveMultiplier(String(data.expensiveSessionMultiplier));
+      setOpusMaxPrompts(String(data.modelFit.opusCheap.maxPrompts));
+      setSonnetMinPrompts(String(data.modelFit.sonnetLong.minPrompts));
+    } catch (err: any) {
+      setMsg({ type: 'error', text: err.message || 'Failed to load thresholds' });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setMsg(null);
+    try {
+      // Convert the percent text back to a fraction. parseFloat tolerates
+      // empty strings → NaN → undefined, which the backend treats as
+      // "revert to default" via the partial-merge in loadOrgInsightsConfig.
+      const pctToFrac = (s: string) => {
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n / 100 : undefined;
+      };
+      const numOr = (s: string) => {
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const updated = await api.updateInsightsConfig({
+        reworkWindowDays: numOr(reworkWindowDays),
+        reworkRateAmber: pctToFrac(reworkAmber),
+        reworkRateRed: pctToFrac(reworkRed),
+        expensiveSessionMultiplier: numOr(expensiveMultiplier),
+        modelFit: {
+          opusCheap: { maxPrompts: numOr(opusMaxPrompts) },
+          sonnetLong: { minPrompts: numOr(sonnetMinPrompts) },
+        },
+      });
+      setCfg(updated);
+      setMsg({ type: 'success', text: 'Thresholds saved — Spend Quality recomputes on next page load.' });
+    } catch (err: any) {
+      setMsg({ type: 'error', text: err.message || 'Failed to save' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleReset = async () => {
+    if (!window.confirm('Reset all Spend Quality thresholds to defaults?')) return;
+    setSaving(true);
+    setMsg(null);
+    try {
+      const updated = await api.updateInsightsConfig({});
+      setCfg(updated);
+      setReworkWindowDays(String(updated.reworkWindowDays));
+      setReworkAmber(String(Math.round(updated.reworkRateAmber * 1000) / 10));
+      setReworkRed(String(Math.round(updated.reworkRateRed * 1000) / 10));
+      setExpensiveMultiplier(String(updated.expensiveSessionMultiplier));
+      setOpusMaxPrompts(String(updated.modelFit.opusCheap.maxPrompts));
+      setSonnetMinPrompts(String(updated.modelFit.sonnetLong.minPrompts));
+      setMsg({ type: 'success', text: 'Reverted to defaults.' });
+    } catch (err: any) {
+      setMsg({ type: 'error', text: err.message || 'Failed to reset' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="card space-y-5">
+      <SectionHeader
+        icon={Sliders}
+        title="Spend Quality thresholds"
+        subtitle="Tune the heuristics that drive /insights/spend-quality. Defaults are conservative — adjust to your team's pace."
+      />
+
+      {loading ? (
+        <p className="text-xs text-gray-500">Loading…</p>
+      ) : !cfg ? (
+        <p className="text-xs text-red-400">Failed to load configuration.</p>
+      ) : (
+        <form onSubmit={handleSave} className="space-y-4">
+          {msg && (
+            <div className={`text-xs rounded-lg px-3 py-2 border ${
+              msg.type === 'success'
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                : 'bg-red-500/10 border-red-500/30 text-red-300'
+            }`}>
+              {msg.text}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <ThresholdField
+              label="Rework window"
+              suffix="days"
+              hint="Files rewritten within this many days count toward rework rate."
+              value={reworkWindowDays}
+              onChange={setReworkWindowDays}
+              min={1} max={90} step={1}
+            />
+            <ThresholdField
+              label="Cost-outlier multiplier"
+              suffix="× avg"
+              hint="A session > N× the dev's average cost gets flagged in Top sessions."
+              value={expensiveMultiplier}
+              onChange={setExpensiveMultiplier}
+              min={1} max={100} step={0.5}
+            />
+            <ThresholdField
+              label="Rework — amber threshold"
+              suffix="%"
+              hint="Rework rate above this turns the column amber."
+              value={reworkAmber}
+              onChange={setReworkAmber}
+              min={0} max={100} step={0.1}
+            />
+            <ThresholdField
+              label="Rework — red threshold"
+              suffix="%"
+              hint="Rework rate above this turns the column red."
+              value={reworkRed}
+              onChange={setReworkRed}
+              min={0} max={100} step={0.1}
+            />
+            <ThresholdField
+              label="Opus-on-tiny-task: max prompts"
+              suffix="prompts"
+              hint="Sessions on Opus with ≤ this many prompts are flagged as oversized."
+              value={opusMaxPrompts}
+              onChange={setOpusMaxPrompts}
+              min={1} max={100} step={1}
+            />
+            <ThresholdField
+              label="Sonnet-long-session: min prompts"
+              suffix="prompts"
+              hint="Sessions on Sonnet with ≥ this many prompts and no commit are flagged."
+              value={sonnetMinPrompts}
+              onChange={setSonnetMinPrompts}
+              min={1} max={1000} step={1}
+            />
+          </div>
+
+          <div className="flex items-center gap-2 pt-2">
+            <button type="submit" disabled={saving} className="btn-primary text-sm disabled:opacity-50">
+              {saving ? 'Saving…' : 'Save thresholds'}
+            </button>
+            <button
+              type="button"
+              onClick={handleReset}
+              disabled={saving}
+              className="text-xs text-gray-400 hover:text-gray-200 px-3 py-1.5 border border-gray-800 hover:border-gray-700 rounded-lg transition-colors disabled:opacity-50"
+              title="Clear all overrides for this org"
+            >
+              Reset to defaults
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function ThresholdField({
+  label, suffix, hint, value, onChange, min, max, step,
+}: {
+  label: string; suffix: string; hint: string;
+  value: string; onChange: (s: string) => void;
+  min: number; max: number; step: number;
+}) {
+  return (
+    <label className="block">
+      <div className="text-xs text-gray-300 mb-1">{label}</div>
+      <div className="flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-1.5 focus-within:border-indigo-500/60">
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="bg-transparent text-sm tabular-nums text-gray-100 flex-1 focus:outline-none"
+        />
+        <span className="text-[11px] text-gray-500">{suffix}</span>
+      </div>
+      <p className="text-[10px] text-gray-600 mt-1">{hint}</p>
+    </label>
   );
 }
 
