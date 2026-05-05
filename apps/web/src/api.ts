@@ -1892,3 +1892,27 @@ export function deleteIssue(repoId: string, shortId: string) {
 export function linkIssueSession(repoId: string, shortId: string, sessionId: string) {
   return request<{ ok: boolean }>(`/api/repos/${repoId}/issues/${shortId}/link`, { method: 'POST', body: JSON.stringify({ sessionId }) });
 }
+
+// ---- Today brief (LLM-generated daily dispatch) -------------------------
+
+export interface TodayBriefSection {
+  title: string;
+  bullets: string[];
+}
+
+export interface TodayBrief {
+  headline: string;
+  sections: TodayBriefSection[];
+}
+
+export interface TodayBriefResponse {
+  brief: TodayBrief | null;
+  generatedAt: string;
+  fromCache: boolean;
+  sessionCount: number;
+  totalCost: number;
+}
+
+export function getTodayBrief() {
+  return request<TodayBriefResponse>('/api/today-brief');
+}

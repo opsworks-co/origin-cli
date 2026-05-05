@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
-import type { Stats, Session, Policy, IntegrationConfig, TeamPromptEntry, TeamEfficiency, TeamAdoption } from '../api';
+import type { Stats, Session, Policy, IntegrationConfig, TeamPromptEntry, TeamEfficiency, TeamAdoption, TodayBrief } from '../api';
 import { Trend } from './MyDashboard/Trend';
 import { agentColor } from './MyDashboard/utils';
 import { PageHeader } from '../components/ui';
@@ -288,6 +288,24 @@ export default function Dashboard() {
   // Today's sessions (org-wide) for the "What did the team ship today?" banner
   const [todaySessions, setTodaySessions] = useState<Session[]>([]);
   const [shipTodayOpen, setShipTodayOpen] = useState(false);
+  const [brief, setBrief] = useState<TodayBrief | null>(null);
+  const [briefLoading, setBriefLoading] = useState(false);
+  const [briefGeneratedAt, setBriefGeneratedAt] = useState<string | null>(null);
+  const [briefError, setBriefError] = useState<string | null>(null);
+
+  const fetchTodayBrief = () => {
+    setBriefLoading(true);
+    api.getTodayBrief()
+      .then((r) => {
+        setBrief(r.brief);
+        setBriefGeneratedAt(r.generatedAt);
+        setBriefError(null);
+      })
+      .catch((err: any) => {
+        setBriefError(err?.message || 'Failed to load brief');
+      })
+      .finally(() => setBriefLoading(false));
+  };
 
   const onboardingKey = `origin_onboarding_dismissed_${activeOrgId || ''}`;
   const [onboardingDismissed, setOnboardingDismissed] = useState(() => {
@@ -336,13 +354,21 @@ export default function Dashboard() {
       })
       .catch(() => {});
 
+    // Daily brief — server caches for 1h, page also re-fetches hourly so a
+    // long-lived tab gets fresh narrative without a manual reload.
+    fetchTodayBrief();
+    const briefInterval = setInterval(fetchTodayBrief, 60 * 60 * 1000);
+
     const interval = setInterval(() => {
       api.getActiveSessions()
         .then((r) => setActiveSessions(r.sessions))
         .catch(() => {});
     }, 10000);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      clearInterval(briefInterval);
+    };
   }, []);
 
   // Lazy-load efficiency on tab open
@@ -748,6 +774,10 @@ export default function Dashboard() {
         sessions={todaySessions}
         open={shipTodayOpen}
         onToggle={() => setShipTodayOpen((v) => !v)}
+        brief={brief}
+        briefLoading={briefLoading}
+        briefGeneratedAt={briefGeneratedAt}
+        briefError={briefError}
       />
 
       {/* ── Tabs ──────────────────────────────────────────────────────── */}
@@ -1493,11 +1523,15 @@ function TeamTab({
 // ── Ship-today banner ──────────────────────────────────────────────────────
 
 function ShipTodayBanner({
-  sessions, open, onToggle,
+  sessions, open, onToggle, brief, briefLoading, briefGeneratedAt, briefError,
 }: {
   sessions: Session[];
   open: boolean;
   onToggle: () => void;
+  brief: TodayBrief | null;
+  briefLoading: boolean;
+  briefGeneratedAt: string | null;
+  briefError: string | null;
 }) {
   // Group by engineer name. We aggregate session counts and total lines so the
   // collapsed summary is informative even when we can't see individual rows.
@@ -1549,6 +1583,16 @@ function ShipTodayBanner({
           <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${open ? 'rotate-180' : ''}`} />
         )}
       </div>
+      {open && !empty && (
+        <div className="border-t border-gray-800/80 px-4 py-3 space-y-3">
+          <BriefSection
+            brief={brief}
+            loading={briefLoading}
+            generatedAt={briefGeneratedAt}
+            error={briefError}
+          />
+        </div>
+      )}
       {open && !empty && byEngineer.length > 0 && (
         <div className="border-t border-gray-800/80 px-4 py-3 space-y-2">
           {byEngineer.slice(0, 8).map((e) => (
@@ -1575,6 +1619,63 @@ function ShipTodayBanner({
         </div>
       )}
     </button>
+  );
+}
+
+// ── LLM-generated daily brief, rendered inside the ShipTodayBanner ──────
+function BriefSection({
+  brief, loading, generatedAt, error,
+}: {
+  brief: TodayBrief | null;
+  loading: boolean;
+  generatedAt: string | null;
+  error: string | null;
+}) {
+  const ageLabel = useMemo(() => {
+    if (!generatedAt) return null;
+    const ms = Date.now() - new Date(generatedAt).getTime();
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    return `${hrs}h ago`;
+  }, [generatedAt]);
+
+  if (loading && !brief) {
+    return <p className="text-xs text-gray-500">Generating dispatch…</p>;
+  }
+  if (error) {
+    return <p className="text-xs text-amber-400">{error}</p>;
+  }
+  if (!brief) return null;
+
+  return (
+    <div className="space-y-3" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm text-gray-100 leading-relaxed">{brief.headline}</p>
+        {ageLabel && (
+          <span className="text-[10px] text-gray-600 uppercase tracking-wider whitespace-nowrap mt-0.5">
+            {ageLabel}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {brief.sections.map((sec) => (
+          <div key={sec.title} className="rounded-md border border-gray-800/60 bg-gray-950/40 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-indigo-400 mb-1.5">
+              {sec.title}
+            </p>
+            <ul className="space-y-1.5">
+              {sec.bullets.map((b, i) => (
+                <li key={i} className="text-xs text-gray-300 leading-snug">
+                  {b}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

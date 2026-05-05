@@ -9,6 +9,7 @@ import Compliance from '../Compliance';
 import GeneralTab from './GeneralTab';
 import IntegrationsTab from './IntegrationsTab';
 import ApiKeys from '../ApiKeys';
+import { PageHeader } from '../../components/ui';
 
 type SettingsTab = 'general' | 'keys' | 'integrations' | 'audit' | 'reports' | 'trails' | 'compliance';
 const ORG_TABS: SettingsTab[] = ['general', 'keys', 'integrations', 'audit', 'reports', 'trails', 'compliance'];
@@ -64,12 +65,10 @@ export default function Settings() {
 
   return (
     <div className={`space-y-8 ${['team', 'audit', 'insights', 'reports'].includes(activeTab) ? '' : 'max-w-3xl'}`}>
-      <div>
-        <h1 className="text-2xl font-bold">Settings</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          {isDev ? 'Manage your profile and settings' : 'Manage team, integrations, and organization'}
-        </p>
-      </div>
+      <PageHeader
+        title="Settings"
+        subtitle={isDev ? 'Manage your profile and settings' : 'Manage team, integrations, and organization'}
+      />
 
       {/* Tab Navigation */}
       {(() => {

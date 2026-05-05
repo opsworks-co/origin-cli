@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import * as api from '../api';
 import { restoreSnapshot, getRestoreStatus, branchFromSnapshot } from '../api/sessions';
 import type { Session, PromptChange } from '../api/sessions';
+import { PageHeader } from '../components/ui';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -291,11 +292,10 @@ export default function Snapshots() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold text-gray-100">Snapshots</h1>
-        <p className="text-sm text-gray-500 mt-1">What changed after every AI prompt, across all sessions</p>
-      </div>
+      <PageHeader
+        title="Snapshots"
+        subtitle="What changed after every AI prompt, across all sessions"
+      />
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

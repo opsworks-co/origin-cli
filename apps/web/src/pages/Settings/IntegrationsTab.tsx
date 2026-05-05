@@ -33,14 +33,14 @@ export default function IntegrationsTab() {
       setIntegrations(data);
     } catch { /* ignore */ }
     try {
-      const res = await fetch('/api/settings/chat/config', { credentials: 'include' });
+      const res = await fetch('/api/settings/chat', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setChatConfigured(!!(data.configured || data.hasKey));
       }
     } catch { /* ignore */ }
     try {
-      const res = await fetch('/api/settings/email-report', { credentials: 'include' });
+      const res = await fetch('/api/settings/email', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setEmailEnabled(!!data?.enabled);

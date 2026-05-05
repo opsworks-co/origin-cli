@@ -82,6 +82,7 @@ import orgsRoutes from './routes/orgs.js';
 import annotationRoutes from './routes/annotations.js';
 import issueRoutes from './routes/issues.js';
 import feedRoutes from './routes/feed.js';
+import todayBriefRoutes from './routes/today-brief.js';
 
 const app = express();
 
@@ -240,6 +241,7 @@ mountRoute('/pricing', pricingRoutes);
 mountRoute('/forecast', forecastRoutes);
 mountRoute('/budget', budgetRoutes);
 mountRoute('/insights', insightsRoutes);
+mountRoute('/today-brief', todayBriefRoutes);
 mountRoute('/admin', adminRoutes);
 // Mount the multi-org user-self endpoints (/me/memberships, /me/active-org,
 // /orgs, /orgs/:id/leave) at the root /api so the router's per-route

@@ -452,6 +452,15 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
       // membership row. Do NOT touch User, AuthToken — those may belong
       // to other orgs the user is in.
       await tx.apiKey.deleteMany({ where: { userId: targetId, orgId } });
+      // Stale pending invitations addressed to this user's email — without
+      // this, an admin who removes a member then re-invites them sees the
+      // dead invite linger in the IAM "Pending" list and any forgotten
+      // accept-link from before the removal would re-grant access.
+      if (target.user.email) {
+        await tx.invitation.deleteMany({
+          where: { orgId, email: target.user.email, usedAt: null },
+        });
+      }
       await tx.membership.delete({
         where: { userId_orgId: { userId: targetId, orgId } },
       });
@@ -532,7 +541,12 @@ router.post('/add-member', requireRole('ADMIN'), async (req: AuthRequest, res: R
         where: { userId_orgId: { userId: existing.id, orgId } },
       });
       if (existingMembership) {
-        return res.status(409).json({ error: 'User with this email is already a member' });
+        const isSelf = existing.id === req.user!.id;
+        return res.status(409).json({
+          error: isSelf
+            ? `You are already ${existingMembership.role.toLowerCase()} of this org`
+            : `${existing.name || existing.email} is already a ${existingMembership.role.toLowerCase()} of this org`,
+        });
       }
       userId = existing.id;
       await prisma.membership.create({
@@ -735,7 +749,16 @@ router.post('/invite', requireRole('ADMIN'), async (req: AuthRequest, res: Respo
         where: { userId_orgId: { userId: existingUser.id, orgId } },
       });
       if (existingMembership) {
-        return res.status(409).json({ error: 'User with this email is already a member' });
+        // Self-invite produces the same 409, but the generic copy hides
+        // why — admins were re-typing their own email after a delete-and-
+        // retest and assuming the deleted member came back. Specific
+        // copy on each branch makes the cause obvious.
+        const isSelf = existingUser.id === req.user!.id;
+        return res.status(409).json({
+          error: isSelf
+            ? `You are already ${existingMembership.role.toLowerCase()} of this org — you cannot invite yourself`
+            : `${existingUser.name || existingUser.email} is already a ${existingMembership.role.toLowerCase()} of this org`,
+        });
       }
     }
 

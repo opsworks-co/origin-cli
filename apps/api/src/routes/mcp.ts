@@ -91,6 +91,10 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
   try {
     const apiKey = req.headers['x-api-key'] as string;
     if (!apiKey) {
+      // Failed-auth visibility — without this, a CLI that never sends a
+      // key (e.g. codex hooks where ORIGIN_API_KEY isn't exported) is
+      // indistinguishable from "no traffic" in the server logs.
+      console.log('[mcp] 401 missing key', { method: req.method, path: req.path, ua: (req.headers['user-agent'] || '').toString().slice(0, 80) });
       return res.status(401).json({ error: 'Missing API key' });
     }
 
@@ -118,6 +122,7 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     });
 
     if (!found) {
+      console.log('[mcp] 401 invalid key', { method: req.method, path: req.path, prefix: apiKey.slice(0, 14), ua: (req.headers['user-agent'] || '').toString().slice(0, 80) });
       return res.status(401).json({ error: 'Invalid API key' });
     }
 
@@ -189,6 +194,18 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     res.status(500).json({ error: 'Internal server error' });
   }
 }
+
+// Lightweight access log — fires for every /api/mcp/* request so we can
+// see CLI traffic in fly logs even when auth fails before downstream
+// console.logs run. Strips request body and only logs path+method+status.
+router.use((req, res, next) => {
+  const startedAt = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - startedAt;
+    console.log('[mcp]', res.statusCode, req.method, req.path, `${ms}ms`);
+  });
+  next();
+});
 
 router.use(authByApiKey);
 
