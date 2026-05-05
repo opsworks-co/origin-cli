@@ -59,7 +59,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       userId: { in: userIds },
       commit: { repo: { orgId } },
     };
-    const [sessionCounts, costAggs, lastSessions] = await Promise.all([
+    const [sessionCounts, costAggs, lastSessions, repoGrants, agentGrants] = await Promise.all([
       prisma.codingSession.groupBy({
         by: ['userId'],
         where: sessionScope,
@@ -75,10 +75,22 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         where: sessionScope,
         _max: { createdAt: true },
       }),
+      prisma.repoMember.groupBy({
+        by: ['userId'],
+        where: { userId: { in: userIds }, repo: { orgId } },
+        _count: { _all: true },
+      }),
+      prisma.agentMember.groupBy({
+        by: ['userId'],
+        where: { userId: { in: userIds }, agent: { orgId } },
+        _count: { _all: true },
+      }),
     ]);
     const sessionCountMap = new Map(sessionCounts.map((c) => [c.userId, c._count._all]));
     const costMap = new Map(costAggs.map((c) => [c.userId, c]));
     const lastSessionMap = new Map(lastSessions.map((s) => [s.userId, s._max.createdAt]));
+    const repoGrantMap = new Map(repoGrants.map((g) => [g.userId, g._count._all]));
+    const agentGrantMap = new Map(agentGrants.map((g) => [g.userId, g._count._all]));
 
     const members = memberships.map((m) => {
       const u = m.user;
@@ -96,6 +108,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         linesAdded: costs?._sum.linesAdded || 0,
         lastActive: lastSessionMap.get(u.id) || u.createdAt,
         keyPrefix: u.apiKeys[0]?.keyPrefix || null,
+        repoGrants: repoGrantMap.get(u.id) || 0,
+        agentGrants: agentGrantMap.get(u.id) || 0,
       };
     });
 

@@ -257,6 +257,7 @@ export default function Dashboard() {
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [agents, setAgents] = useState<api.Agent[]>([]);
   const [apiKeys, setApiKeys] = useState<{ id: string; repoScopes: any[]; agentScopes: any[] }[]>([]);
+  const [memberGrants, setMemberGrants] = useState(false);
   const [activeSessions, setActiveSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -302,8 +303,9 @@ export default function Dashboard() {
       api.getActiveSessions().catch(() => ({ sessions: [] })),
       api.getAgents().catch(() => []),
       api.getApiKeys().catch(() => []),
+      api.getUsers().catch(() => ({ users: [] })),
     ])
-      .then(([s, sess, integ, pol, active, ag, keys]) => {
+      .then(([s, sess, integ, pol, active, ag, keys, usersResp]) => {
         setStats(s);
         setRecentSessions(sess.sessions);
         setIntegrations(integ);
@@ -311,6 +313,7 @@ export default function Dashboard() {
         setActiveSessions(active.sessions);
         setAgents(ag);
         setApiKeys(keys);
+        setMemberGrants(usersResp.users.some((u) => (u.repoGrants ?? 0) > 0 || (u.agentGrants ?? 0) > 0));
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -440,7 +443,7 @@ export default function Dashboard() {
   const hasRepos = (stats.totalRepos ?? 0) > 0;
   const hasAgents = agents.length > 0;
   const hasApiKey = apiKeys.length > 0;
-  const hasApiKeyScoped = apiKeys.some((k) => k.repoScopes.length > 0 || k.agentScopes.length > 0);
+  const hasApiKeyScoped = apiKeys.some((k) => k.repoScopes.length > 0 || k.agentScopes.length > 0) || memberGrants;
   const hasSessions = (stats.totalSessions ?? 0) > 0;
   const hasPolicies = policies.length > 0;
 

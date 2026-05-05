@@ -1357,6 +1357,8 @@ export interface TeamMember {
   linesAdded: number;
   lastActive: string;
   keyPrefix: string | null;
+  repoGrants?: number;
+  agentGrants?: number;
 }
 
 export interface UserDetail {
