@@ -88,14 +88,17 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
       accountType: accountType as 'developer' | 'org',
     });
 
+    // Single-key world (Path B). One key authenticates the user; the
+    // server federates the personal view across every org they belong to
+    // via /api/me/*. The old multi-account fan-out is gone — additional
+    // /me/* lenses populate automatically as admins grant the user access
+    // to more orgs/repos. No second login, no second key.
     if (isSolo) {
       console.log(chalk.green(`✓ Connected — Solo Developer`));
-      console.log(chalk.gray(`  Profile: ${profileName}`));
       console.log(chalk.gray(`  Workspace: ${data.orgName || 'Personal workspace'}`));
       console.log(chalk.gray(`  All repos · All agents · No restrictions`));
     } else {
       console.log(chalk.green(`✓ Connected — Team Member @ ${data.orgName || 'Unknown'}`));
-      console.log(chalk.gray(`  Profile: ${profileName}`));
       console.log(chalk.gray(`  API Key: ${data.apiKeyName || key.slice(0, 4) + '••••••••'}`));
       console.log(chalk.gray(`  Agents: ${data.agentCount || 0} configured`));
       console.log(chalk.gray(`  Repos: ${data.repoCount || 0} registered`));
@@ -106,19 +109,9 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
         console.log(chalk.yellow('  ⚠ This API key has no agent access. Ask your admin to assign agents.'));
       }
     }
-
-    // Show all active profiles
     const allProfiles = listProfiles();
     if (allProfiles.length > 1) {
-      console.log(chalk.gray('\n  Active accounts:'));
-      for (const p of allProfiles) {
-        const isActive = p.apiKey === key;
-        const mode = p.accountType === 'developer' ? 'solo' : 'team';
-        const displayName = p.accountType === 'developer' ? (p.orgName || 'Personal workspace') : p.orgName;
-        const label = `${p.name} (${mode}) → ${displayName}`;
-        console.log(isActive ? chalk.white(`    ● ${label}`) : chalk.gray(`    ○ ${label}`));
-      }
-      console.log(chalk.gray('\n  Sessions will be sent to all accounts simultaneously.'));
+      console.log(chalk.gray(`\n  Personal dashboard at ${url}/me aggregates your activity across every org you belong to.`));
     }
 
     console.log(chalk.gray(`  Config saved to ~/.origin/config.json`));

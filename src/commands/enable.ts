@@ -1010,7 +1010,16 @@ function configureNotesRefspecAndFetch(repoPath: string): void {
       return;
     }
 
-    const NOTES_SPEC = `+refs/notes/origin:refs/notes/origin`;
+    // We pull two refs alongside normal branches:
+    //   1. refs/notes/origin       — per-commit blame written by writeGitNotes
+    //   2. refs/heads/origin-sessions — orphan branch with full prompts/snapshots
+    // Both are pushed by pushSessionBranch in local-entrypoint.ts. Without
+    // these refspecs, a fresh clone never sees the data even though it's on
+    // the remote.
+    const SPECS = [
+      { spec: '+refs/notes/origin:refs/notes/origin', label: 'attribution notes (refs/notes/origin)' },
+      { spec: '+refs/heads/origin-sessions:refs/heads/origin-sessions', label: 'session branch (origin-sessions)' },
+    ];
 
     // Check current fetchspecs for this remote — only add if missing so
     // re-running `origin enable` doesn't keep appending duplicates.
@@ -1019,20 +1028,27 @@ function configureNotesRefspecAndFetch(repoPath: string): void {
       ['config', '--get-all', `remote.${remote}.fetch`],
       { cwd: repoPath, timeoutMs: 3000 },
     );
-    const existing = (current.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
-    if (!existing.includes(NOTES_SPEC)) {
+    const existing = new Set(
+      (current.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean),
+    );
+    for (const { spec, label } of SPECS) {
+      if (existing.has(spec)) continue;
       runDetailed(
         'git',
-        ['config', '--add', `remote.${remote}.fetch`, NOTES_SPEC],
+        ['config', '--add', `remote.${remote}.fetch`, spec],
         { cwd: repoPath, timeoutMs: 3000 },
       );
-      console.log(chalk.green(`  ✓ Configured ${remote} to fetch attribution notes (refs/notes/origin)`));
+      console.log(chalk.green(`  ✓ Configured ${remote} to fetch ${label}`));
     }
 
-    // One-shot fetch so any notes already on the remote land locally now.
-    // `|| true` semantics: we don't care if the remote has no notes ref yet
-    // (common for repos that never pushed them) — the config is what matters.
+    // One-shot fetch so any data already on the remote lands locally now.
+    // Independent calls: a remote may have notes but no session branch (or
+    // vice versa) — failing one shouldn't skip the other.
     runDetailed('git', ['fetch', remote, 'refs/notes/origin:refs/notes/origin', '--no-tags'], {
+      cwd: repoPath,
+      timeoutMs: 10_000,
+    });
+    runDetailed('git', ['fetch', remote, 'refs/heads/origin-sessions:refs/heads/origin-sessions', '--no-tags'], {
       cwd: repoPath,
       timeoutMs: 10_000,
     });

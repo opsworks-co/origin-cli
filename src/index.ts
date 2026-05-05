@@ -383,6 +383,8 @@ program.command('report')
   .option('-r, --range <range>', 'Date range: 7d, 14d, or 30d', '7d')
   .option('-o, --output <file>', 'Write report to file instead of stdout')
   .option('-f, --format <format>', 'Output format: md, json, or csv', 'md')
+  .option('-n, --narrative', 'AI-generated themed write-up instead of stats tables (requires ANTHROPIC_API_KEY)')
+  .option('--voice <voice>', 'Tone for narrative output (e.g. "neutral", "casual", "executive")', 'neutral')
   .action(reportCommand);
 
 program.command('verify')
