@@ -109,6 +109,8 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
         console.log(chalk.yellow('  ⚠ This API key has no agent access. Ask your admin to assign agents.'));
       }
     }
+    // Tell the user about the federation behavior so they don't go hunt
+    // for a "personal account" login that no longer exists.
     const allProfiles = listProfiles();
     if (allProfiles.length > 1) {
       console.log(chalk.gray(`\n  Personal dashboard at ${url}/me aggregates your activity across every org you belong to.`));

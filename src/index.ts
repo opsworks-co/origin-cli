@@ -6,7 +6,7 @@ import { statusCommand } from './commands/status.js';
 import { policiesCommand } from './commands/policies.js';
 import { syncCommand } from './commands/sync.js';
 import { whoamiCommand } from './commands/whoami.js';
-import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanCommand } from './commands/sessions.js';
+import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanCommand, sessionsSyncCommand } from './commands/sessions.js';
 import { reviewCommand } from './commands/review.js';
 import { reviewPRCommand } from './commands/review-pr.js';
 import { intentReviewCommand } from './commands/intent-review.js';
@@ -383,8 +383,6 @@ program.command('report')
   .option('-r, --range <range>', 'Date range: 7d, 14d, or 30d', '7d')
   .option('-o, --output <file>', 'Write report to file instead of stdout')
   .option('-f, --format <format>', 'Output format: md, json, or csv', 'md')
-  .option('-n, --narrative', 'AI-generated themed write-up instead of stats tables (requires ANTHROPIC_API_KEY)')
-  .option('--voice <voice>', 'Tone for narrative output (e.g. "neutral", "casual", "executive")', 'neutral')
   .action(reportCommand);
 
 program.command('verify')
@@ -659,6 +657,11 @@ sessions.command('clean')
   .description('End all stale RUNNING sessions')
   .option('--all', 'End all running sessions across all repos')
   .action(sessionCleanCommand);
+
+sessions.command('sync')
+  .description('Re-upload sessions that were kept local while their agent was disabled')
+  .option('-q, --quiet', 'Suppress progress output')
+  .action(async (opts) => { await sessionsSyncCommand(opts); });
 
 program.command('review <sessionId>')
   .description('Review a coding session')

@@ -39,9 +39,10 @@ async function request(path: string, opts: RequestInit = {}) {
     err.status = res.status;
     err.serverError = body?.error;
     err.serverMessage = body?.message;
-    // Whole body for callers that want to read structured fields like the
-    // budget-block `level` (model | agent | user-model | repo-model | org).
-    err.serverBody = body;
+    // Surface structured codes (AGENT_DISABLED, etc.) so callers can switch
+    // on them instead of string-matching the message.
+    err.code = body?.code;
+    err.body = body;
     throw err;
   }
   return res.json();

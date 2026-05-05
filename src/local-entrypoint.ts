@@ -283,47 +283,7 @@ export function writeSessionFiles(repoPath: string, data: SessionWriteData): voi
 }
 
 /**
- * Add fetch refspecs to the repo's `origin` remote so `git fetch` pulls
- * Origin's session branch and notes ref by default. Without this, the
- * data lives on the remote but a fresh clone never sees it locally.
- *
- * Idempotent — only adds each refspec if not already present. Never
- * throws.
- */
-export function configureGitFetchForOrigin(repoPath: string): void {
-  try {
-    const execOpts = { cwd: repoPath, timeoutMs: 5_000 };
-
-    // Bail if there's no `origin` remote.
-    const remote = gitDetailed(['remote', 'get-url', 'origin'], execOpts);
-    if (remote.status !== 0) return;
-
-    const refspecs = [
-      '+refs/notes/origin:refs/notes/origin',
-      '+refs/heads/origin-sessions:refs/heads/origin-sessions',
-    ];
-
-    // Read existing fetch refspecs once to avoid duplicates.
-    const existing = gitOrNull(['config', '--get-all', 'remote.origin.fetch'], execOpts) || '';
-    const existingLines = new Set(existing.split('\n').map((s) => s.trim()).filter(Boolean));
-
-    for (const refspec of refspecs) {
-      if (existingLines.has(refspec)) continue;
-      try {
-        git(['config', '--add', 'remote.origin.fetch', refspec], execOpts);
-      } catch { /* best-effort */ }
-    }
-  } catch {
-    // Never fail — config is best-effort
-  }
-}
-
-/**
- * Push the `origin-sessions` branch AND `refs/notes/origin` to remote so
- * session data + per-commit blame travel with the repo. Any clone of the
- * repo can then have its prompts/snapshots restored without needing the
- * original Origin account that captured them.
- *
+ * Push the `origin-sessions` branch to remote so session data is visible on GitHub.
  * Never blocks or throws. 15s timeout.
  *
  * Respects config.pushStrategy:
@@ -333,10 +293,19 @@ export function configureGitFetchForOrigin(repoPath: string): void {
  */
 export function pushSessionBranch(repoPath: string): void {
   try {
+    // F18: Check push strategy
     const config = loadConfig();
     const strategy = config?.pushStrategy || 'auto';
-    if (strategy === 'false') return;
-    if (strategy === 'prompt') return;
+    if (strategy === 'false') return; // Never push
+    if (strategy === 'prompt') return; // User pushes manually via pre-push hook
+
+    // In connected mode, session data goes to the API — no need to push
+    // session branches to the repo remote (which may be public).
+    // Only push if explicitly configured with a snapshotRepo or in standalone mode.
+    const connected = !!(config?.apiKey && config?.apiUrl);
+    if (connected && !config?.snapshotRepo && strategy !== 'always') {
+      return; // Connected mode — data is on the platform, don't push to repo
+    }
 
     const execOpts = {
       cwd: repoPath,
@@ -345,34 +314,22 @@ export function pushSessionBranch(repoPath: string): void {
 
     const snapshotRepo = config?.snapshotRepo;
 
-    // Single helper so we apply the same shell-injection guard to both the
-    // session branch and the notes ref.
-    const pushTo = (target: string, refspec: string) => {
-      if (target.startsWith('-')) return;
-      if (!/^[a-zA-Z0-9_./:@+%~=-]+$/.test(target)) return;
-      try {
-        git(['push', '--no-verify', '--quiet', '--', target, refspec], execOpts);
-      } catch {
-        // Swallow — push is best-effort. Common harmless failures: no
-        // remote, no permissions, branch already up to date.
-      }
-    };
-
-    const target = snapshotRepo || 'origin';
-    if (!snapshotRepo) {
-      // Validate the origin remote exists; otherwise nothing to push.
+    if (snapshotRepo) {
+      // Push to external snapshot repo. Validate the repo value — it may
+      // be a remote name, path, or URL configured by the user, so allow a
+      // restricted set of characters to block injection via shell metachars.
+      // Reject anything that starts with '-' to block git option injection
+      // (e.g. --upload-pack=/tmp/evil would otherwise be parsed as a flag).
+      if (snapshotRepo.startsWith('-')) return;
+      if (!/^[a-zA-Z0-9_./:@+%~=-]+$/.test(snapshotRepo)) return;
+      // Use '--' as end-of-options marker for defense in depth.
+      git(['push', '--no-verify', '--quiet', '--', snapshotRepo, BRANCH], execOpts);
+    } else {
+      // Push to same repo's origin remote
       const remote = gitDetailed(['remote', 'get-url', 'origin'], execOpts);
-      if (remote.status !== 0) return;
-      // Make sure this repo's git config will also *fetch* notes + the
-      // session branch on `git fetch` / `git pull`. Idempotent.
-      configureGitFetchForOrigin(repoPath);
+      if (remote.status !== 0) return; // no remote — nothing to push
+      git(['push', 'origin', BRANCH, '--no-verify', '--quiet'], execOpts);
     }
-
-    // 1) Session branch (prompts + snapshots).
-    pushTo(target, BRANCH);
-    // 2) Git notes ref (per-commit blame). Push as the same ref name so
-    //    a fresh clone can fetch it back with refs/notes/origin.
-    pushTo(target, 'refs/notes/origin:refs/notes/origin');
   } catch {
     // Never fail — push is best-effort
   }

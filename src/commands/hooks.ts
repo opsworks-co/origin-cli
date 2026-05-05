@@ -1660,9 +1660,19 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         }
         debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt, verboseCapture });
       } catch (apiErr: any) {
-        // API failed — fall back to local session instead of aborting entirely
-        debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
-        process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
+        // API failed — fall back to local session instead of aborting entirely.
+        // AGENT_DISABLED is the expected response when an admin hasn't
+        // toggled the agent on yet; in that case the platform also fired
+        // notifications to the developer + admins, so the CLI just needs to
+        // explain why the session stayed local.
+        if (apiErr?.code === 'AGENT_DISABLED') {
+          const agentName = apiErr?.body?.agent?.name || finalAgentSlug || 'this agent';
+          debugLog('session-start', 'agent disabled, keeping session local', { agentName });
+          process.stderr.write(`[origin] ${agentName} is disabled in your org — session kept local. An admin has been notified to enable it.\n`);
+        } else {
+          debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
+          process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
+        }
         sessionId = `local-${crypto.randomUUID()}`;
       }
     } else {
@@ -1818,19 +1828,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     } else if (status === 403) {
       process.stderr.write(`[origin] Session blocked — ${err.message}\n`);
     } else if (status === 429) {
-      // Server now tags 429 responses with `level` (model | agent | user-model
-      // | repo-model | org) so the user knows which budget cap fired. Falls
-      // back to the generic message on older servers.
-      const level = (err.serverBody && (err.serverBody as { level?: string }).level) || null;
-      const levelLabel: Record<string, string> = {
-        'model': 'agent model',
-        'agent': 'agent',
-        'user-model': 'developer model',
-        'repo-model': 'repo model',
-        'org': 'org',
-      };
-      const which = level && levelLabel[level] ? `${levelLabel[level]} budget` : 'budget';
-      process.stderr.write(`[origin] Session blocked — ${which} limit reached. ${err.message}\n`);
+      process.stderr.write(`[origin] Session blocked — budget limit reached. ${err.message}\n`);
     } else if (err.message?.includes('Unknown agent') || err.message?.includes('not registered')) {
       process.stderr.write(`[origin] Agent not registered. Ask your admin to add it in the Origin dashboard.\n`);
     } else {
@@ -1958,20 +1956,30 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         let activePolicies: string[] | undefined;
         let enforcementRules: any[] | undefined;
         if (isConnectedMode() && autoConfig) {
-          const result = await api.startSession({
-            machineId: autoAgentConfig.machineId,
-            prompt: input.prompt || '',
-            model,
-            repoPath,
-            repoUrl: repoUrl || undefined,
-            agentSlug: finalAgentSlug,
-            branch: branch || undefined,
-          });
-          sessionId = result.sessionId as string;
-          agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
-          activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
-          enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
-          debugLog('user-prompt-submit', 'api returned policies', { sessionId, policiesCount: activePolicies?.length || 0, rulesCount: enforcementRules?.length || 0 });
+          try {
+            const result = await api.startSession({
+              machineId: autoAgentConfig.machineId,
+              prompt: input.prompt || '',
+              model,
+              repoPath,
+              repoUrl: repoUrl || undefined,
+              agentSlug: finalAgentSlug,
+              branch: branch || undefined,
+            });
+            sessionId = result.sessionId as string;
+            agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
+            activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
+            enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+            debugLog('user-prompt-submit', 'api returned policies', { sessionId, policiesCount: activePolicies?.length || 0, rulesCount: enforcementRules?.length || 0 });
+          } catch (apiErr: any) {
+            if (apiErr?.code === 'AGENT_DISABLED') {
+              const agentName = apiErr?.body?.agent?.name || finalAgentSlug || 'this agent';
+              process.stderr.write(`[origin] ${agentName} is disabled in your org — session kept local. An admin has been notified to enable it.\n`);
+            } else {
+              process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
+            }
+            sessionId = `local-${crypto.randomUUID()}`;
+          }
         } else {
           sessionId = `local-${crypto.randomUUID()}`;
         }
@@ -2191,7 +2199,6 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                   model: codexData.model, tokensUsed: codexData.tokensUsed,
                   inputTokens: codexData.inputTokens, outputTokens: codexData.outputTokens,
                   cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0,
-                  perPrompt: [],
                 };
               }
             }
@@ -2221,22 +2228,9 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           hbOutputTokens = hbInputTokens * 3;
           hbTokensUsed = hbInputTokens + hbOutputTokens;
         }
-        // Per-prompt cost = sum of estimateCost(perPrompt[i].model, ...) across all
-        // prompts. Falls back to session-level pricing only when the parser
-        // couldn't attribute usage to a prompt boundary (older clients or the
-        // first heartbeat before any user message). When per-prompt data exists
-        // we use it as the authoritative session total — same numbers the
-        // server will store on each PromptChange.costUsd, summed.
-        const perPromptCosts = (parsed?.perPrompt ?? []).map((pp) => ({
-          ...pp,
-          costUsd: estimateCost(pp.model || model, pp.inputTokens, pp.outputTokens, pp.cacheReadTokens, pp.cacheCreationTokens),
-        }));
-        const costFromPerPrompt = perPromptCosts.reduce((s, pp) => s + pp.costUsd, 0);
-        const costUsd = costFromPerPrompt > 0
-          ? costFromPerPrompt
-          : (hbTokensUsed > 0
-            ? estimateCost(model, hbInputTokens, hbOutputTokens, parsed?.cacheReadTokens || 0, parsed?.cacheCreationTokens || 0)
-            : 0);
+        const costUsd = hbTokensUsed > 0
+          ? estimateCost(model, hbInputTokens, hbOutputTokens, parsed?.cacheReadTokens || 0, parsed?.cacheCreationTokens || 0)
+          : 0;
 
         // Redact secrets from prompts
         const shouldRedact = config.secretRedaction !== false;
@@ -2244,10 +2238,6 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           ? state.prompts.map(p => redactSecrets(p).redacted)
           : state.prompts;
         const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
-
-        // Index per-prompt accounting by promptIndex so the
-        // promptChanges.map below can attach matching cost / token data.
-        const perPromptByIdx = new Map(perPromptCosts.map((pp) => [pp.promptIndex, pp]));
 
         await api.updateSession(state.sessionId, {
           prompt: joinedPrompt || undefined,
@@ -2265,10 +2255,6 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           promptChanges: state.completedPromptMappings && state.completedPromptMappings.length > 0
             ? state.completedPromptMappings.map(pm => {
                 const dl = (pm.diff || '').split('\n');
-                const pp = perPromptByIdx.get(pm.promptIndex);
-                const pmModel = pp?.model
-                  || (pm as { model?: string }).model
-                  || (model && model !== 'unknown' && model !== 'default' ? model : undefined);
                 return {
                   ...pm,
                   promptText: (pm.promptText || '').slice(0, 1000),
@@ -2277,20 +2263,6 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                   linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
                   aiPercentage: 100,
                   checkpointType: 'auto',
-                  // Mid-session model switching: tag each prompt with the
-                  // model that was active when it ran.
-                  model: pmModel,
-                  // Per-prompt cost + token breakdown. Each prompt is priced
-                  // at its own model's rates; server stores on
-                  // PromptChange.{costUsd, inputTokens, outputTokens, ...}
-                  // and prefers their sum over session.costUsd in analytics.
-                  // Omitted when the parser didn't yield per-prompt data
-                  // (server falls back to session-level totals).
-                  inputTokens: pp?.inputTokens,
-                  outputTokens: pp?.outputTokens,
-                  cacheReadTokens: pp?.cacheReadTokens,
-                  cacheCreationTokens: pp?.cacheCreationTokens,
-                  costUsd: pp?.costUsd,
                 };
               })
             : undefined,
@@ -3651,7 +3623,7 @@ export async function handlePostCommit(): Promise<void> {
     // Parse transcript for full metrics (or use empty defaults for agents without transcripts)
     const parsed = state.transcriptPath
       ? parseTranscript(state.transcriptPath, { since: state.startedAt })
-      : { prompts: [], filesChanged: [], tokensUsed: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0, summary: '', model: '', transcript: '', perPrompt: [] };
+      : { prompts: [], filesChanged: [], tokensUsed: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0, summary: '', model: '', transcript: '' };
     const promptMappings = state.transcriptPath
       ? extractPromptFileMappings(state.transcriptPath)
       : [];

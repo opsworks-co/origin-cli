@@ -1,4 +1,7 @@
 import chalk from 'chalk';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { loadConfig, loadAgentConfig, loadRepoConfig, listProfiles } from '../config.js';
 import { api } from '../api.js';
 import { loadSessionState, listActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
@@ -26,11 +29,11 @@ export async function statusCommand() {
   const connected = config?.mode !== 'standalone' && config?.apiKey && config?.apiUrl;
   const isSolo = config?.keyType === 'solo' || config?.accountType === 'developer';
 
-  // Single-key world (Path B). The active key authenticates; the personal
-  // dashboard at /me federates the user's activity across every org they
-  // belong to via /api/me/*. Multi-profile storage exists for users who
-  // switch between workplaces (--profile flag) but is no longer the
-  // default flow.
+  // Single-key world (Path B). The active key is what authenticates
+  // everything; the personal dashboard at /me federates the user's
+  // activity across every org they belong to via /api/me/*. Multi-profile
+  // storage exists for users who switch between workplaces (--profile
+  // flag) but is no longer the default flow.
   const allProfiles = listProfiles();
 
   if (config?.mode === 'standalone') {
@@ -125,6 +128,30 @@ export async function statusCommand() {
     }
   } else if (repoPath) {
     console.log(chalk.gray('\n  No active session in this repo'));
+  }
+
+  // ── Queued (local-only) sessions waiting to resync ──────────────
+  // These are sessions that were captured locally because the API rejected
+  // them (typically AGENT_DISABLED). Count them so the user knows to run
+  // `origin sessions sync` once an admin enables the agent.
+  if (connected) {
+    try {
+      const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+      if (fs.existsSync(sessionsDir)) {
+        const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+        let queued = 0;
+        for (const f of files) {
+          try {
+            const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, f), 'utf-8'));
+            if (typeof state?.sessionId === 'string' && state.sessionId.startsWith('local-')) queued++;
+          } catch { /* skip */ }
+        }
+        if (queued > 0) {
+          console.log(chalk.yellow(`\n  ⏸  ${queued} session${queued === 1 ? '' : 's'} kept local (agent was disabled)`));
+          console.log(chalk.gray('    Run `origin sessions sync` once an admin enables the agent.'));
+        }
+      }
+    } catch { /* non-fatal */ }
   }
 
   // ── Repo Context ────────────────────────────────────────────────

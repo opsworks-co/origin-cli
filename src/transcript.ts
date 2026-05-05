@@ -43,20 +43,6 @@ export interface ParsedTranscript {
   summary: string;
   model: string;
   transcript: string;
-  // Per-prompt token + model breakdown. Indexed by promptIndex (0-based,
-  // matching `prompts[]`). Used by the CLI's heartbeat to price each prompt
-  // at its own model's rates rather than re-pricing the whole session at the
-  // last-seen model. Empty when the parser couldn't attribute usage to a
-  // prompt boundary (e.g. session-level summaries before the first user
-  // message); callers fall back to session-level totals.
-  perPrompt: Array<{
-    promptIndex: number;
-    model: string;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-  }>;
 }
 
 // Tools that modify files — we extract file paths from these
@@ -104,7 +90,6 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     summary: '',
     model: '',
     transcript: '',
-    perPrompt: [],
   };
 
   if (!fs.existsSync(transcriptPath)) {
@@ -134,19 +119,9 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
 
   const lines = raw.split('\n').filter((line) => line.trim());
 
-  // Track seen message IDs to deduplicate token usage (streaming can produce
-  // duplicates). The dedupe map now also remembers each message's
-  // promptIndex + model so per-prompt aggregation below can attribute the
-  // (deduplicated) usage to the right prompt without a second pass.
-  type DedupedMsg = { usage: MessageUsage; promptIndex: number; model: string };
-  const seenMessageIds = new Map<string, DedupedMsg>();
+  // Track seen message IDs to deduplicate token usage (streaming can produce duplicates)
+  const seenMessageIds = new Map<string, MessageUsage>();
   const filesSet = new Set<string>();
-  // Walks user messages to compute the active prompt-index for each
-  // assistant turn. -1 until the first user message lands. Assistant
-  // messages whose promptIndex stays -1 (e.g. a system summary before any
-  // prompt) get dropped from per-prompt accounting but still flow into the
-  // session-level totals below.
-  let currentPromptIndex = -1;
 
   for (const line of lines) {
     let entry: TranscriptLine;
@@ -167,10 +142,6 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
       const prompt = extractUserPrompt(entry);
       if (prompt) {
         result.prompts.push(prompt);
-        // promptIndex tracks against extracted-prompts, not raw user lines —
-        // tool-result user messages don't add a prompt and shouldn't
-        // advance the index.
-        currentPromptIndex = result.prompts.length - 1;
       }
     }
 
@@ -211,53 +182,20 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
       if (usage) {
         const msgId = entry.message?.id || entry.uuid || '';
         const existing = seenMessageIds.get(msgId);
-        if (!existing || (usage.output_tokens ?? 0) > (existing.usage.output_tokens ?? 0)) {
-          seenMessageIds.set(msgId, {
-            usage,
-            promptIndex: currentPromptIndex,
-            model: entry.message?.model || '',
-          });
+        if (!existing || (usage.output_tokens ?? 0) > (existing.output_tokens ?? 0)) {
+          seenMessageIds.set(msgId, usage);
         }
       }
     }
   }
 
   // Sum deduplicated token usage (track cache tokens separately for accurate cost)
-  // and bucket per-prompt at the same time. Per-prompt model = the model
-  // attached to the first assistant message of that prompt; switches mid-prompt
-  // are rare in practice, but if a model field arrives later in the same prompt
-  // we keep the first-seen value (matches Claude Code's behavior of binding the
-  // model at prompt-start).
-  type Bucket = {
-    model: string;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-  };
-  const perPromptBuckets = new Map<number, Bucket>();
-  for (const { usage, promptIndex, model } of seenMessageIds.values()) {
+  for (const usage of seenMessageIds.values()) {
     result.inputTokens += usage.input_tokens ?? 0;
     result.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
     result.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
     result.outputTokens += usage.output_tokens ?? 0;
-    if (promptIndex >= 0) {
-      let b = perPromptBuckets.get(promptIndex);
-      if (!b) {
-        b = { model: model || result.model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
-        perPromptBuckets.set(promptIndex, b);
-      } else if (!b.model && model) {
-        b.model = model;
-      }
-      b.inputTokens += usage.input_tokens ?? 0;
-      b.outputTokens += usage.output_tokens ?? 0;
-      b.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
-      b.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
-    }
   }
-  result.perPrompt = Array.from(perPromptBuckets.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([promptIndex, b]) => ({ promptIndex, ...b }));
   // `tokensUsed` is the "real" fresh-tokens total. Cache reads/creations are
   // tracked on their own fields so they can be reported without inflating the
   // headline number (cache reads are volumetrically huge but charged at 10%).
