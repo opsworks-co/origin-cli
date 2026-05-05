@@ -3,6 +3,7 @@ import * as api from '../api';
 import type { ComplianceReport, Stats } from '../api';
 import ScoreGauge from '../components/ScoreGauge';
 import KpiCard from '../components/KpiCard';
+import { PageHeader } from '../components/ui';
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
 } from 'recharts';
@@ -57,18 +58,15 @@ export default function Compliance() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Compliance Dashboard</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            AI governance compliance overview &middot; Last 90 days
-          </p>
-        </div>
-        <button onClick={handleExport} className="btn-secondary text-xs">
-          Export JSON
-        </button>
-      </div>
+      <PageHeader
+        title="Compliance Dashboard"
+        subtitle="AI governance compliance overview · Last 90 days"
+        actions={
+          <button onClick={handleExport} className="btn-secondary text-xs">
+            Export JSON
+          </button>
+        }
+      />
 
       {/* Score + KPIs */}
       <div className="grid lg:grid-cols-5 gap-4 items-start">

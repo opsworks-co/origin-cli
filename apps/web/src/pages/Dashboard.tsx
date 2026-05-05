@@ -5,6 +5,7 @@ import * as api from '../api';
 import type { Stats, Session, Policy, IntegrationConfig, TeamPromptEntry, TeamEfficiency, TeamAdoption } from '../api';
 import { Trend } from './MyDashboard/Trend';
 import { agentColor } from './MyDashboard/utils';
+import { PageHeader } from '../components/ui';
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
   Tooltip, ResponsiveContainer, XAxis,
@@ -467,15 +468,10 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {activeOrg?.name ? `${activeOrg.name} · Team coding activity` : 'Team coding activity'}
-          </p>
-        </div>
-        {activeSessions.length > 0 && (
+      <PageHeader
+        title="Dashboard"
+        subtitle={activeOrg?.name ? `${activeOrg.name} · Team coding activity` : 'Team coding activity'}
+        actions={activeSessions.length > 0 ? (
           <Link
             to="/sessions?status=running"
             className="flex items-center gap-2 rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1.5 text-xs font-medium text-purple-300 hover:bg-purple-500/15 transition-colors"
@@ -486,8 +482,8 @@ export default function Dashboard() {
             </span>
             {activeSessions.length} active now
           </Link>
-        )}
-      </div>
+        ) : undefined}
+      />
 
       {/* ── AI Insight Banner ──────────────────────────────────────────── */}
       <InsightBanner stats={stats} />

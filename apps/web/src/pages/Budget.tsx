@@ -5,6 +5,7 @@ import type { BudgetData, ForecastData } from '../api';
 import { AlertTriangle, TrendingUp, TrendingDown, Minus, DollarSign, Users, Cpu, GitPullRequest, Shield, Calculator, Mail, FolderOpen, Wrench } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import RecomputeCostsCard from '../components/RecomputeCostsCard';
+import { PageHeader } from '../components/ui';
 
 // Gradient stat card — same shape as the Dashboard StatCard so all the
 // admin pages share visual language. Inlined here (not extracted to a
@@ -771,27 +772,18 @@ export default function BudgetPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold text-gray-100">Budget</h1>
-        <p className="text-sm text-gray-500">Loading budget data...</p>
+        <PageHeader title="Budget" subtitle="Loading budget data..." />
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      {/* Page header — title + jump-to-limits CTA so admins land on the
-          control surface in one click instead of scrolling past charts. */}
-      <div className="flex items-end justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Budget</h1>
-          <p className="text-sm text-gray-500 mt-1">Cost controls, spending limits, and forecasting</p>
-        </div>
-        {isAdmin && pageTab === 'budget' && (
+      <PageHeader
+        title="Budget"
+        subtitle="Cost controls, spending limits, and forecasting"
+        actions={isAdmin && pageTab === 'budget' ? (
           <div className="flex items-center gap-2">
-            {/* Recompute costs — admin diagnostic. Used to live as a
-                full-width card at the bottom of the page; now a small
-                button up top that toggles the panel inline below the
-                header. Same component, smaller footprint. */}
             <button
               type="button"
               onClick={() => setShowRecompute((v) => !v)}
@@ -813,8 +805,8 @@ export default function BudgetPage() {
               Set limits
             </a>
           </div>
-        )}
-      </div>
+        ) : undefined}
+      />
 
       {isAdmin && pageTab === 'budget' && showRecompute && (
         <RecomputeCostsCard />

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import * as api from '../api';
 import { request } from '../api/_client';
+import { PageHeader } from '../components/ui';
 
 export default function Integrations() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -521,10 +522,10 @@ export default function Integrations() {
 
   return (
     <div className="space-y-6 max-w-4xl">
-      <div>
-        <h1 className="text-2xl font-bold">Integrations</h1>
-        <p className="text-sm text-gray-500 mt-1">Connect your tools and services</p>
-      </div>
+      <PageHeader
+        title="Integrations"
+        subtitle="Connect your tools and services"
+      />
 
       {/* Global messages */}
       {integrationError && (

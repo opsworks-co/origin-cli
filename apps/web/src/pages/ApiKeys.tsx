@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
+import { PageHeader } from '../components/ui';
 
 interface ApiKey {
   id: string;
@@ -92,19 +93,18 @@ export default function ApiKeys() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-100">API Keys</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Connect the Origin CLI to your account</p>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-gray-500">
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-          </svg>
-          <span>{apiKeys.length} active {apiKeys.length === 1 ? 'key' : 'keys'}</span>
-        </div>
-      </div>
+      <PageHeader
+        title="API Keys"
+        subtitle="Connect the Origin CLI to your account"
+        actions={
+          <div className="flex items-center gap-2 text-xs text-gray-500">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+            <span>{apiKeys.length} active {apiKeys.length === 1 ? 'key' : 'keys'}</span>
+          </div>
+        }
+      />
 
       {error && (
         <div className="bg-red-900/20 border border-red-800/50 rounded-lg px-4 py-3 text-red-400 text-sm flex items-start gap-2">

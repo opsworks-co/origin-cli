@@ -37,6 +37,7 @@ import { PatternsTab } from './tabs/PatternsTab';
 import { EfficiencyTab } from './tabs/EfficiencyTab';
 import { PromptsTab } from './tabs/PromptsTab';
 import { CommitsTab, CommitEntry, CommitSort } from './tabs/CommitsTab';
+import { PageHeader } from '../../components/ui';
 
 // ── Main component ──────────────────────────────────────────────────────────
 
@@ -457,22 +458,17 @@ export default function MyDashboard() {
   }, [tab, promptsOffset, promptSearchDebounced]);
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-gray-100">Insights</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            {user?.name || user?.email} &middot; Personal coding activity
-          </p>
-        </div>
-        {stats && stats.streak > 0 && (
+    <div className="space-y-6">
+      <PageHeader
+        title="Insights"
+        subtitle={`${user?.name || user?.email} · Personal coding activity`}
+        actions={stats && stats.streak > 0 ? (
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-500/10 border border-orange-500/20">
             <Flame className="w-4 h-4 text-orange-400" />
             <span className="text-sm font-semibold text-orange-400">{stats.streak} day streak</span>
           </div>
-        )}
-      </div>
+        ) : undefined}
+      />
 
       {/* Onboarding banner — replaces the old static 4-card guide. Points
           users into the actual interactive `/onboarding` wizard (AI Tools

@@ -5,6 +5,7 @@ import * as api from '../api';
 import type { TeamMember } from '../api';
 import { timeAgo } from '../utils';
 import { Key, Users, Shield, RefreshCw, XCircle, Copy, Check, Plus, ChevronDown, Terminal, Sparkles, Mail } from 'lucide-react';
+import { PageHeader } from '../components/ui';
 
 const ROLE_COLORS: Record<string, string> = {
   OWNER: 'badge-purple',
@@ -366,13 +367,10 @@ export default function IAM() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-100">IAM</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Team members, API keys, and access control</p>
-        </div>
-        {isAdmin && (
+      <PageHeader
+        title="IAM"
+        subtitle="Team members, API keys, and access control"
+        actions={isAdmin ? (
           <div className="flex items-center gap-2">
             <button
               onClick={() => {
@@ -402,8 +400,8 @@ export default function IAM() {
               Invite Member
             </button>
           </div>
-        )}
-      </div>
+        ) : undefined}
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm p-3 flex items-center justify-between">

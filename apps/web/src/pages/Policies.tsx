@@ -5,6 +5,7 @@ import type { Policy, Agent, Machine, Repo } from '../api';
 import { Shield, Plus, Sparkles, Trash2, FileWarning, Eye, Cpu, DollarSign, Hash, FolderOpen, FileText, Clock, ClipboardList, Filter, MessageSquare, ChevronDown, ChevronRight } from 'lucide-react';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
+import { PageHeader } from '../components/ui';
 
 const TYPE_BADGE: Record<string, string> = {
   FILE_RESTRICTION: 'badge-red',
@@ -327,17 +328,15 @@ export default function Policies() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Policies</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Governance rules enforced on AI coding sessions
-          </p>
-        </div>
-        <button onClick={() => setShowForm(!showForm)} className={`${showForm ? 'btn-secondary' : 'btn-primary'} text-sm flex items-center gap-2`}>
-          {showForm ? 'Cancel' : (<><Plus className="w-4 h-4" />Add Policy</>)}
-        </button>
-      </div>
+      <PageHeader
+        title="Policies"
+        subtitle="Governance rules enforced on AI coding sessions"
+        actions={
+          <button onClick={() => setShowForm(!showForm)} className={`${showForm ? 'btn-secondary' : 'btn-primary'} text-sm flex items-center gap-2`}>
+            {showForm ? 'Cancel' : (<><Plus className="w-4 h-4" />Add Policy</>)}
+          </button>
+        }
+      />
 
       {error && (
         <div className="card bg-red-900/20 border-red-800 text-red-400 text-sm flex items-center justify-between">

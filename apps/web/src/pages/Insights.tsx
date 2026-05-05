@@ -18,6 +18,7 @@ import * as api from '../api';
 import type { Stats, ModelStats, ModelTrend } from '../api';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { PageHeader } from '../components/ui';
 
 const CHART_THEME = {
   grid: '#1f2937',
@@ -318,69 +319,64 @@ export default function Insights() {
   }
 
   return (
-    <div className="space-y-8">
-      {/* ── Header ─────────────────────────────────────────────────────── */}
-      <div className="flex items-end justify-between flex-wrap gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Insights</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {isDev
-              ? 'Your personal AI coding analytics'
-              : 'Analytics across your AI coding operations'}
-          </p>
-          {isAdmin && (
-            <Link
-              to="/insights/spend-quality"
-              className="inline-flex items-center gap-2 mt-3 text-xs px-3 py-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/10 text-indigo-200 hover:bg-indigo-500/20 transition-colors"
-            >
-              <span className="font-medium">Open Spend Quality dashboard →</span>
-              <span className="text-[10px] uppercase tracking-wider text-indigo-300/70">manager view</span>
-            </Link>
-          )}
-        </div>
-
-        {/* Date range filter */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex gap-1 p-1 rounded-lg bg-gray-900/60 border border-gray-800">
-            {[
-              { label: '1d', days: 1 },
-              { label: '7d', days: 7 },
-              { label: '30d', days: 30 },
-              { label: '90d', days: 90 },
-            ].map(({ label, days }) => (
-              <button
-                key={label}
-                onClick={() => applyPreset(days, label)}
-                className={`px-3 py-1 text-xs rounded-md transition-colors ${
-                  activePreset === label
-                    ? 'bg-indigo-600 text-white shadow'
-                    : 'text-gray-400 hover:text-gray-200'
-                }`}
-              >
-                {label}
+    <div className="space-y-6">
+      <PageHeader
+        title="Insights"
+        subtitle={isDev
+          ? 'Your personal AI coding analytics'
+          : 'Analytics across your AI coding operations'}
+        meta={isAdmin ? (
+          <Link
+            to="/insights/spend-quality"
+            className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/10 text-indigo-200 hover:bg-indigo-500/20 transition-colors"
+          >
+            <span className="font-medium">Open Spend Quality dashboard →</span>
+            <span className="text-[10px] uppercase tracking-wider text-indigo-300/70">manager view</span>
+          </Link>
+        ) : undefined}
+        actions={
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex gap-1 p-1 rounded-lg bg-gray-900/60 border border-gray-800">
+              {[
+                { label: '1d', days: 1 },
+                { label: '7d', days: 7 },
+                { label: '30d', days: 30 },
+                { label: '90d', days: 90 },
+              ].map(({ label, days }) => (
+                <button
+                  key={label}
+                  onClick={() => applyPreset(days, label)}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors ${
+                    activePreset === label
+                      ? 'bg-indigo-600 text-white shadow'
+                      : 'text-gray-400 hover:text-gray-200'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="input text-xs py-1"
+              />
+              <span className="text-gray-600 text-xs">→</span>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="input text-xs py-1"
+              />
+              <button onClick={applyCustomRange} className="btn-secondary text-xs py-1">
+                Apply
               </button>
-            ))}
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <input
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              className="input text-xs py-1"
-            />
-            <span className="text-gray-600 text-xs">→</span>
-            <input
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              className="input text-xs py-1"
-            />
-            <button onClick={applyCustomRange} className="btn-secondary text-xs py-1">
-              Apply
-            </button>
-          </div>
-        </div>
-      </div>
+        }
+      />
 
       {loading && (
         <div className="flex items-center gap-2 text-sm text-gray-500">

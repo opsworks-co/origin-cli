@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo } from 'react';
 import * as api from '../api';
 import type { ModelStats, ModelTrend } from '../api';
 import { formatCost } from '../utils';
+import { PageHeader } from '../components/ui';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
   AreaChart, Area,
@@ -56,7 +57,7 @@ export default function ModelComparison() {
   if (models.length === 0) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold">Model Comparison</h1>
+        <PageHeader title="Model Comparison" />
         <div className="card text-center py-12 text-gray-500">No session data available for model comparison.</div>
       </div>
     );
@@ -69,11 +70,10 @@ export default function ModelComparison() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold">Model Comparison</h1>
-        <p className="text-sm text-gray-500 mt-1">Compare AI model performance across your sessions</p>
-      </div>
+      <PageHeader
+        title="Model Comparison"
+        subtitle="Compare AI model performance across your sessions"
+      />
 
       {/* Model Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

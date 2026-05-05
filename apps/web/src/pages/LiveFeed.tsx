@@ -28,6 +28,7 @@ import {
   ExternalLink,
   Archive,
 } from 'lucide-react';
+import { PageHeader } from '../components/ui';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -782,12 +783,11 @@ export default function LiveFeed() {
   }, [fetchActive, paused]);
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="space-y-6">
+      <PageHeader
+        title={
           <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-gray-100">Live Feed</h1>
+            <h1 className="text-xl font-semibold text-gray-100 tracking-tight leading-tight">Live Feed</h1>
             <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
               connected
                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
@@ -797,35 +797,34 @@ export default function LiveFeed() {
               {connected ? 'Connected' : 'Disconnected'}
             </div>
           </div>
-          <p className="text-sm text-gray-500 mt-0.5">
-            Real-time AI coding activity &middot; {activeSessions.length} active session{activeSessions.length !== 1 ? 's' : ''}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {activeSessions.length > 0 && (
-            <div className="hidden sm:flex items-center gap-4 text-xs text-gray-500">
-              <span className="flex items-center gap-1">
-                <Zap className="w-3 h-3 text-purple-400" /> {fmt(totalTokens)} tokens
-              </span>
-              <span className="flex items-center gap-1">
-                <DollarSign className="w-3 h-3 text-cyan-400" /> {fmtCost(totalCost)}
-              </span>
-            </div>
-          )}
-          <button
-            onClick={() => setPaused(!paused)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              paused
-                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                : 'bg-gray-800 text-gray-400 border border-white/[0.06] hover:text-gray-200'
-            }`}
-          >
-            {paused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
-            {paused ? 'Resume' : 'Pause'}
-          </button>
-        </div>
-      </div>
+        }
+        subtitle={`Real-time AI coding activity · ${activeSessions.length} active session${activeSessions.length !== 1 ? 's' : ''}`}
+        actions={
+          <div className="flex items-center gap-3">
+            {activeSessions.length > 0 && (
+              <div className="hidden sm:flex items-center gap-4 text-xs text-gray-500">
+                <span className="flex items-center gap-1">
+                  <Zap className="w-3 h-3 text-purple-400" /> {fmt(totalTokens)} tokens
+                </span>
+                <span className="flex items-center gap-1">
+                  <DollarSign className="w-3 h-3 text-cyan-400" /> {fmtCost(totalCost)}
+                </span>
+              </div>
+            )}
+            <button
+              onClick={() => setPaused(!paused)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                paused
+                  ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                  : 'bg-gray-800 text-gray-400 border border-white/[0.06] hover:text-gray-200'
+              }`}
+            >
+              {paused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+              {paused ? 'Resume' : 'Pause'}
+            </button>
+          </div>
+        }
+      />
 
       {/* ── Active Sessions ──────────────────────────────────────────── */}
       {activeSessions.length > 0 && (
