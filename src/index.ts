@@ -123,16 +123,20 @@ program.command('login')
   .option('--url <apiUrl>', 'API URL (default: https://getorigin.io)')
   .option('--profile <name>', 'Save as named profile (default: auto-detect "dev" or "team")')
   .action(loginCommand);
+// `init` is now an alias for `enable` — kept for back-compat with anyone
+// who already pasted `origin login && origin init` into their docs/scripts.
+// New users should run `origin enable` directly.
 program.command('init')
-  .description('Register this machine + install GLOBAL git hooks (tracks all repos)')
+  .description('Alias for `origin enable` — register machine + install global hooks')
   .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
-  .option('--local', 'Install hooks for this repo only (default: global — tracks every repo)')
+  .option('--local', 'Install hooks for this repo only (default: machine-wide)')
   .option('--no-hooks', 'Skip hook installation entirely')
   .action(initCommand);
 program.command('enable')
-  .description('Install Origin hooks for session tracking')
+  .description('Register this machine + install Origin git hooks (defaults to machine-wide so every repo is tracked)')
   .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, windsurf, aider). Auto-detects if omitted.')
-  .option('-g, --global', 'Install hooks globally (~/) so ALL repos are tracked automatically')
+  .option('--local', 'Install hooks for the current repo only (default: machine-wide)')
+  .option('-g, --global', 'Deprecated — global is now the default; flag kept for back-compat (no-op)')
   .option('-l, --link <slug>', 'Link this repo to an Origin agent by slug (writes .origin.json)')
   .option('-s, --agent-slug <slug>', 'Override agent slug for this tool (e.g. cursor-frontend). Saved to config.')
   .option('--no-chain', 'Replace existing hooks instead of chaining')

@@ -737,7 +737,7 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean }): Promise<{ 
 
   const agentConfig = loadAgentConfig();
   if (!agentConfig?.machineId) {
-    if (!opts.quiet) console.log(chalk.yellow('Run `origin init` first — machine not registered.'));
+    if (!opts.quiet) console.log(chalk.yellow('Run `origin enable` first — machine not registered.'));
     return result;
   }
 

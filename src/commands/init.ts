@@ -75,15 +75,15 @@ export async function initCommand(opts: { standalone?: boolean; hooks?: boolean;
       console.log(chalk.bold('\n📡 Installing GLOBAL git hooks\n'));
       console.log(chalk.gray('  Sets git config --global core.hooksPath → ~/.origin/git-hooks'));
       console.log(chalk.gray('  Every repo on this machine — past and future — gets tracked'));
-      console.log(chalk.gray('  automatically. No per-repo `origin init` needed.'));
-      console.log(chalk.gray('  Opt out with: origin init --local (per-repo only)\n'));
+      console.log(chalk.gray('  automatically. No per-repo `origin enable` needed.'));
+      console.log(chalk.gray('  Opt out with: origin enable --local (per-repo only)\n'));
       await enableCommand({ global: true });
       console.log(chalk.green('\n✓ Global hooks installed — every repo is now tracked'));
     } else {
       console.log(chalk.bold('\n📡 Installing LOCAL git hooks for this repo only\n'));
       await enableCommand({ global: false });
       console.log(chalk.green('\n✓ Local hooks installed — only this repo is tracked'));
-      console.log(chalk.gray('  Run `origin init` (no --local) to track ALL repos globally.'));
+      console.log(chalk.gray('  Run `origin enable` (no --local) to track ALL repos globally.'));
     }
   }
 

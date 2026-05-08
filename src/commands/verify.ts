@@ -98,7 +98,7 @@ export async function verifyCommand(opts?: { json?: boolean }) {
       console.log(chalk.gray(`    Agent:    ${agentConfig.agentSlug}`));
     }
   } else {
-    console.log(chalk.yellow(`  ⚠ No agent config`) + chalk.gray(' — run `origin init`'));
+    console.log(chalk.yellow(`  ⚠ No agent config`) + chalk.gray(' — run `origin enable`'));
   }
 
   // Repo config

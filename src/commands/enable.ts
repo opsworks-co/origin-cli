@@ -144,17 +144,36 @@ function installCursorHooks(gitRoot: string): void {
 
   if (!config.hooks) config.hooks = {};
 
+  // Cursor's hook event schema (v1.7+) uses `agentSessionStart` / `agentSessionEnd`
+  // — earlier `sessionStart` / `sessionEnd` names are NOT fired, which is why
+  // sessions silently never reached the platform. Write under the correct names.
   const hooks: Record<string, any[]> = {
-    sessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
+    agentSessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
     stop: [{ command: originCmd('origin hooks cursor stop') }],
     beforeSubmitPrompt: [{ command: originCmd('origin hooks cursor user-prompt-submit') }],
-    sessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
+    agentSessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
   };
+
+  // Strip our entries from the deprecated event names too, so an upgrade from
+  // an older CLI doesn't leave stale `sessionStart`/`sessionEnd` keys pointing
+  // at hooks Cursor never fires.
+  for (const legacy of ['sessionStart', 'sessionEnd']) {
+    if (Array.isArray(config.hooks[legacy])) {
+      config.hooks[legacy] = config.hooks[legacy].filter(
+        (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks cursor'))
+      );
+      if (config.hooks[legacy].length === 0) delete config.hooks[legacy];
+    }
+  }
 
   for (const [eventType, entries] of Object.entries(hooks)) {
     if (!config.hooks[eventType]) config.hooks[eventType] = [];
+    // Use `includes` not `startsWith` — installed commands carry a PATH=
+    // prefix (e.g. `PATH=/opt/homebrew/bin:$PATH origin hooks cursor stop`)
+    // which broke the previous startsWith check and produced duplicates on
+    // every re-run of `origin enable`.
     config.hooks[eventType] = config.hooks[eventType].filter(
-      (h: any) => !(h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks'))
+      (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks'))
     );
     config.hooks[eventType].push(...entries);
   }
@@ -200,11 +219,11 @@ function installGeminiHooks(gitRoot: string): void {
     settings.hooks[eventType] = settings.hooks[eventType].filter((entry: any) => {
       if (entry.hooks) {
         entry.hooks = entry.hooks.filter(
-          (h: any) => !(h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks'))
+          (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks'))
         );
         return entry.hooks.length > 0;
       }
-      return !(entry.command && typeof entry.command === 'string' && entry.command.startsWith('origin hooks'));
+      return !(entry.command && typeof entry.command === 'string' && entry.command.includes('origin hooks'));
     });
     settings.hooks[eventType].push(...entries);
   }
@@ -242,7 +261,7 @@ function installWindsurfHooks(gitRoot: string): void {
   for (const [eventType, entries] of Object.entries(hooks)) {
     if (!config.hooks[eventType]) config.hooks[eventType] = [];
     config.hooks[eventType] = config.hooks[eventType].filter(
-      (h: any) => !(h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks'))
+      (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks'))
     );
     config.hooks[eventType].push(...entries);
   }
@@ -379,10 +398,7 @@ function filterOriginHooks(entries: any[]): any[] {
   return entries.filter((entry: any) => {
     if (!entry.hooks) return true;
     return !entry.hooks.some((h: any) =>
-      h.command && typeof h.command === 'string' && (
-        h.command.startsWith('origin hooks') ||
-        h.command.includes('origin hooks') // catches PATH=... prefix variants
-      )
+      h.command && typeof h.command === 'string' && h.command.includes('origin hooks')
     );
   });
 }
@@ -490,26 +506,51 @@ function detectAgents(gitRoot: string): AgentType[] {
 // Only the 4 officially supported agents — Windsurf/Aider coming soon
 const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex'];
 
-export async function enableCommand(opts: { agent?: string; global?: boolean; link?: string; agentSlug?: string }): Promise<void> {
+export async function enableCommand(opts: { agent?: string; global?: boolean; local?: boolean; link?: string; agentSlug?: string }): Promise<void> {
   // Standalone mode doesn't require login
   const config = loadConfig();
 
-  const isGlobal = !!opts.global;
+  // Default = global. Pass --local to scope hooks to the current repo
+  // only. The legacy --global flag is still accepted (and is now a no-op
+  // since it matches the default) for back-compat with existing scripts.
+  const isGlobal = !opts.local;
   let basePath: string;
 
   if (isGlobal) {
     basePath = os.homedir();
-    console.log(chalk.bold('\n🌐 Enabling Origin session tracking globally\n'));
+    console.log(chalk.bold('\n🌐 Enabling Origin session tracking on this machine\n'));
     console.log(chalk.gray(`  Home directory: ${basePath}`));
+    console.log(chalk.gray('  Every repo on this machine — past and future — gets tracked.'));
+    console.log(chalk.gray('  Opt out with: origin enable --local (current repo only)'));
   } else {
     const gitRoot = getGitRoot();
     if (!gitRoot) {
       console.log(chalk.red('Not inside a git repository. Run this from your project directory.'));
-      console.log(chalk.gray('  Tip: Use --global to install hooks for ALL repos.'));
+      console.log(chalk.gray('  Or drop --local to install machine-wide hooks instead.'));
       process.exit(1);
     }
     basePath = gitRoot;
-    console.log(chalk.bold('\n🔗 Enabling Origin session tracking\n'));
+    console.log(chalk.bold('\n🔗 Enabling Origin session tracking for this repo\n'));
+  }
+
+  // Register this machine with Origin's API on first run so it appears in
+  // the dashboard. Idempotent — re-running just refreshes the heartbeat.
+  // Used to be a separate `origin init` step; folding it in here means
+  // `origin login && origin enable` is the entire onboarding flow.
+  if (isConnectedMode()) {
+    try {
+      const { detectTools } = await import('../tools-detector.js');
+      const { loadAgentConfig, saveAgentConfig } = await import('../config.js');
+      const crypto = await import('crypto');
+      const existingAgent = loadAgentConfig();
+      const machineId = existingAgent?.machineId ?? crypto.randomUUID();
+      const hostname = os.hostname();
+      const detectedTools = detectTools();
+      try {
+        await api.registerMachine({ hostname, machineId, detectedTools });
+      } catch { /* registration is best-effort — fall through */ }
+      saveAgentConfig({ machineId, hostname, detectedTools, orgId: config?.orgId || 'local' });
+    } catch { /* never block hook installation on registration hiccups */ }
   }
 
   // Determine which agents to enable

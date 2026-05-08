@@ -66,7 +66,7 @@ export async function statusCommand() {
   // Agent status
   if (!agentConfig) {
     console.log(chalk.yellow('\n  ⚠ Agent not initialized'));
-    console.log(chalk.gray('    Run: origin init'));
+    console.log(chalk.gray('    Run: origin enable'));
   } else {
     console.log(chalk.green('\n  ✓ Agent initialized'));
     console.log(chalk.gray(`    Machine: ${agentConfig.hostname} (${agentConfig.machineId.slice(0, 8)}...)`));

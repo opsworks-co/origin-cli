@@ -67,7 +67,7 @@ No login, no API keys. All data stored locally in git notes and `origin-sessions
 origin login
 
 # 2. Register this machine
-origin init
+origin enable
 
 # 3. Enable hooks (auto-detects installed agents)
 origin enable
@@ -95,12 +95,12 @@ origin login
 
 Config saved to `~/.origin/config.json`.
 
-### `origin init`
+### `origin enable`
 
 Register this machine as an agent host. Auto-detects installed AI tools.
 
 ```bash
-origin init
+origin enable
 # Detects: claude, cursor, aider, gemini, windsurf
 # Registers machine with Origin API
 # Saves to ~/.origin/agent.json

@@ -439,14 +439,11 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
   if (sessions.length > 0) {
     sessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
 
-    // Single session — no ambiguity, safe to use
-    if (sessions.length === 1) {
-      const best = sessions[0];
-      debugLog('findStateForHook', 'single active session', { sessionId: best.sessionId, model: best.model, tag: best.sessionTag });
-      return { state: best, saveCwd: best.repoPath || repoPath };
-    }
-
-    // Multiple sessions — require agent match to avoid misattribution
+    // Whenever the caller knows the agent slug, ONLY accept a session whose
+    // own slug matches. Previously a single-active-session shortcut returned
+    // the existing session unconditionally — that caused a fresh Cursor hook
+    // to attach its prompt to a still-active Gemini session in the same repo
+    // and the new turn ended up rendered as Gemini.
     if (agentSlug) {
       const matching = sessions.filter(s => sessionMatchesAgent(s, agentSlug));
       if (matching.length > 0) {
@@ -457,27 +454,29 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
           sessionId: best.sessionId,
           tag: best.sessionTag,
           candidateCount: matching.length,
+          totalSessions: sessions.length,
         });
         return { state: best, saveCwd: best.repoPath || repoPath };
       }
+      // No matching-agent session — fall through to legacy path / auto-create.
+      // Returning the most-recent session of a *different* agent would cause
+      // cross-agent prompt mixing (the bug we just fixed).
+      debugLog('findStateForHook', 'no matching-agent session', {
+        agentSlug,
+        totalSessions: sessions.length,
+        sessionAgents: sessions.map(s => ({ id: s.sessionId, slug: s.agentSlug, model: s.model })),
+      });
+      return null;
     }
 
-    // Multiple sessions, no agent-specific match found.
-    // If we know the agent slug, pick the most recent session — it's better than
-    // returning null (which causes auto-create and duplicate sessions).
-    if (agentSlug) {
-      const best = sessions[0]; // already sorted by startedAt desc
-      debugLog('findStateForHook', 'multiple sessions, using most recent', {
-        agentSlug,
-        sessionId: best.sessionId,
-        model: best.model,
-        tag: best.sessionTag,
-        totalSessions: sessions.length,
-      });
+    // No agent slug from the caller. Single session with unknown agent is
+    // safe to use; multiple is ambiguous and bails so the caller can decide.
+    if (sessions.length === 1) {
+      const best = sessions[0];
+      debugLog('findStateForHook', 'single active session (no agent slug)', { sessionId: best.sessionId, model: best.model, tag: best.sessionTag });
       return { state: best, saveCwd: best.repoPath || repoPath };
     }
 
-    // No agent slug at all — truly ambiguous
     debugLog('findStateForHook', 'ambiguous: multiple sessions, no agent slug', {
       claudeSessionId,
       totalSessions: sessions.length,
@@ -500,36 +499,67 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
 // ─── Gemini Transcript Discovery ──────────────────────────────────────────
 
 /**
- * Gemini CLI stores transcripts in ~/.gemini/tmp/<workspace>/chats/session-*.json
- * If the hook doesn't receive transcript_path via stdin, try to find the most
- * recently modified session file.
+ * Gemini CLI has used several storage layouts across versions:
+ *   - ~/.gemini/tmp/<workspace>/chats/session-*.json    (older)
+ *   - ~/.gemini/tmp/<projectHash>/chats/session-*.json  (hash-based)
+ *   - ~/.gemini/tmp/<projectHash>/checkpoints/*.json    (newer checkpoints)
+ *   - ~/.gemini/projects/<projectHash>/checkpoints/*.json
+ *
+ * Walk every plausible location and pick the newest matching JSON. The hook
+ * may also receive `transcript_path` via stdin — that wins over discovery.
  */
-function discoverGeminiTranscriptPath(): string | null {
+function discoverGeminiTranscriptPath(opts: { maxAgeMs?: number } = {}): string | null {
+  // Default: 60-minute window. Mid-session, Gemini may not touch its chat
+  // file for many minutes between user prompts (it's only re-written on
+  // /chat save or end-of-turn), so a 10-minute gate dropped active sessions.
+  const maxAgeMs = opts.maxAgeMs ?? 60 * 60 * 1000;
   try {
-    const geminiTmpDir = path.join(os.homedir(), '.gemini', 'tmp');
-    if (!fs.existsSync(geminiTmpDir)) return null;
+    const home = os.homedir();
+    const candidateRoots: string[] = [
+      path.join(home, '.gemini', 'tmp'),
+      path.join(home, '.gemini', 'projects'),
+    ];
 
-    // Walk through workspace dirs to find the newest session file
     let newestFile = '';
     let newestMtime = 0;
 
-    const workspaces = fs.readdirSync(geminiTmpDir);
-    for (const ws of workspaces) {
-      const chatsDir = path.join(geminiTmpDir, ws, 'chats');
-      if (!fs.existsSync(chatsDir)) continue;
-      const files = fs.readdirSync(chatsDir).filter(f => f.startsWith('session-') && f.endsWith('.json'));
-      for (const f of files) {
-        const fp = path.join(chatsDir, f);
+    const consider = (fp: string) => {
+      try {
         const stat = fs.statSync(fp);
+        if (!stat.isFile()) return;
         if (stat.mtimeMs > newestMtime) {
           newestMtime = stat.mtimeMs;
           newestFile = fp;
         }
+      } catch { /* ignore */ }
+    };
+
+    const isSessionLike = (name: string) =>
+      name.endsWith('.json') &&
+      (name.startsWith('session-') || name.startsWith('checkpoint') || name.startsWith('chat'));
+
+    for (const root of candidateRoots) {
+      if (!fs.existsSync(root)) continue;
+      let entries: string[] = [];
+      try { entries = fs.readdirSync(root); } catch { continue; }
+      for (const ws of entries) {
+        const wsDir = path.join(root, ws);
+        let isDir = false;
+        try { isDir = fs.statSync(wsDir).isDirectory(); } catch { /* ignore */ }
+        if (!isDir) continue;
+        for (const sub of ['chats', 'checkpoints']) {
+          const dir = path.join(wsDir, sub);
+          if (!fs.existsSync(dir)) continue;
+          let files: string[] = [];
+          try { files = fs.readdirSync(dir); } catch { continue; }
+          for (const f of files) {
+            if (isSessionLike(f)) consider(path.join(dir, f));
+          }
+        }
       }
     }
 
-    // Only use it if modified within the last 10 minutes (likely the active session)
-    if (newestFile && (Date.now() - newestMtime) < 10 * 60 * 1000) {
+    if (newestFile && (Date.now() - newestMtime) < maxAgeMs) {
       return newestFile;
     }
     return null;
@@ -557,7 +587,7 @@ interface CursorTranscriptData {
  * estimates by counting the actual conversation text (much better than
  * the previous chars/4 heuristic that only counted user prompts).
  */
-function discoverCursorTranscript(conversationId?: string, hookCwd?: string): CursorTranscriptData | null {
+function discoverCursorTranscript(conversationId?: string, hookCwd?: string, opts: { verbose?: boolean } = {}): CursorTranscriptData | null {
   try {
     const cursorProjectsDir = path.join(os.homedir(), '.cursor', 'projects');
     if (!fs.existsSync(cursorProjectsDir)) return null;
@@ -603,6 +633,9 @@ function discoverCursorTranscript(conversationId?: string, hookCwd?: string): Cu
     const raw = fs.readFileSync(transcriptFile, 'utf-8');
     const lines = raw.split('\n').filter(l => l.trim());
 
+    const TRUNC = opts.verbose ? Number.MAX_SAFE_INTEGER : 2000;
+    const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
+
     const turns: Array<{ role: string; content: string }> = [];
     let totalInputChars = 0;
     let totalOutputChars = 0;
@@ -612,28 +645,62 @@ function discoverCursorTranscript(conversationId?: string, hookCwd?: string): Cu
         const entry = JSON.parse(line);
         const role = entry.role || 'unknown';
         const content = entry.message?.content;
-        let text = '';
+
+        // Cursor blocks: text, tool_use, tool_result, thinking
+        // Pull out everything we can render — text + structured tool I/O —
+        // so reviewers see what the agent ran, not just the narration.
+        const parts: string[] = [];
+        let plainText = '';
 
         if (typeof content === 'string') {
-          text = content;
+          plainText = content;
+          parts.push(content);
         } else if (Array.isArray(content)) {
-          text = content
-            .filter((c: any) => c.type === 'text')
-            .map((c: any) => c.text || '')
-            .join('');
+          for (const c of content as any[]) {
+            const t = c?.type;
+            if (t === 'text' && typeof c.text === 'string') {
+              plainText += c.text;
+              parts.push(c.text);
+            } else if (t === 'thinking' && (c.thinking || c.text)) {
+              parts.push(`[Reasoning] ${truncate(c.thinking || c.text || '')}`);
+            } else if (t === 'tool_use' && c.name) {
+              const inp = c.input || {};
+              const argStr =
+                typeof inp.command === 'string' ? inp.command :
+                typeof inp.cmd === 'string' ? inp.cmd :
+                inp.file_path && (typeof inp.old_string === 'string' || typeof inp.new_string === 'string')
+                  ? [`file: ${inp.file_path}`,
+                     typeof inp.old_string === 'string' ? `--- old\n${inp.old_string}` : '',
+                     typeof inp.new_string === 'string' ? `+++ new\n${inp.new_string}` : '']
+                    .filter(Boolean).join('\n')
+                  : (() => { try { return JSON.stringify(inp, null, 2); } catch { return ''; } })();
+              parts.push(`[Tool: ${c.name}]`);
+              if (argStr) parts.push(truncate(argStr));
+            } else if (t === 'tool_result') {
+              const out =
+                typeof c.content === 'string' ? c.content :
+                Array.isArray(c.content)
+                  ? c.content.map((b: any) => typeof b === 'string' ? b : (b?.text || b?.content || '')).filter(Boolean).join('\n')
+                  : '';
+              if (out) parts.push(`[Output] ${truncate(out)}`);
+            }
+          }
         }
 
+        const text = parts.join('\n').trim();
         if (!text) continue;
 
         // Strip XML wrappers like <user_query>...</user_query>
-        text = text.replace(/<\/?user_query>/g, '').trim();
+        const cleaned = text.replace(/<\/?user_query>/g, '').trim();
+        if (!cleaned) continue;
 
-        turns.push({ role, content: text });
+        turns.push({ role, content: cleaned });
 
+        // Token estimation uses plain text only (tool I/O isn't billed by Cursor)
         if (role === 'user') {
-          totalInputChars += text.length;
+          totalInputChars += plainText.length;
         } else {
-          totalOutputChars += text.length;
+          totalOutputChars += plainText.length;
         }
       } catch {
         // skip malformed lines
@@ -703,7 +770,7 @@ interface CodexSessionData {
  * rollout_path, decompress and parse the JSONL for real token counts
  * and transcript. Fall back to SQLite `tokens_used` if rollout parsing fails.
  */
-function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
+function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } = {}): CodexSessionData | null {
   try {
     const codexDir = path.join(os.homedir(), '.codex');
     if (!fs.existsSync(codexDir)) return null;
@@ -739,7 +806,7 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
     const prompt = parts.slice(4).join('|') || '';
 
     // ── Step 2: Try to parse the rollout JSONL for real token counts ──
-    const rolloutResult = parseCodexRollout(codexDir, rolloutPath, threadId);
+    const rolloutResult = parseCodexRollout(codexDir, rolloutPath, threadId, { verbose: !!opts.verbose });
     if (rolloutResult) {
       debugLog('codex', 'parsed rollout JSONL', {
         inputTokens: rolloutResult.inputTokens,
@@ -956,6 +1023,7 @@ function parseCodexRollout(
   codexDir: string,
   rolloutPath: string,
   threadId: string,
+  opts: { verbose?: boolean } = {},
 ): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; toolCalls: number; transcript?: string } | null {
   try {
     // Try to resolve the rollout file
@@ -1010,15 +1078,45 @@ function parseCodexRollout(
     // Build transcript from conversation events
     const turns: Array<{ role: string; content: string }> = [];
 
+    // Truncation budget for tool args/output. Verbose mode keeps the full
+    // payload so reviewers can see exactly what the agent ran; default mode
+    // keeps each side ≤ 2 KB so a long session's transcript stays uploadable.
+    const TOOL_TRUNC = opts.verbose ? Number.MAX_SAFE_INTEGER : 2000;
+    const truncate = (s: string, max: number = TOOL_TRUNC): string =>
+      s.length > max ? s.slice(0, max) + `… [+${s.length - max} chars]` : s;
+
+    // Pending tool calls keyed by call_id so we can attach their outputs
+    // when the matching `function_call_output` arrives.
+    const pendingTools = new Map<string, number>();  // call_id → turns[] index
+
+    const extractMessageText = (content_: any): string => {
+      if (typeof content_ === 'string') return content_;
+      if (!Array.isArray(content_)) return '';
+      return content_
+        .map((c: any) => {
+          if (!c) return '';
+          if (typeof c === 'string') return c;
+          // Codex content blocks: {type: "input_text"|"output_text", text: "..."}
+          if (c.text) return c.text;
+          if (c.content) return typeof c.content === 'string' ? c.content : '';
+          return '';
+        })
+        .filter(Boolean)
+        .join('');
+    };
+
     for (const line of lines) {
       try {
         const event = JSON.parse(line);
 
-        // Extract token usage from TokenCountEvent or turn.completed events
-        // Codex uses total_token_usage for cumulative counts
+        // Extract token usage from TokenCountEvent or turn.completed events.
+        // Codex emits multiple shapes across versions — check the union.
         const tokenUsage =
           event?.total_token_usage ||
           event?.data?.total_token_usage ||
+          event?.payload?.info?.total_token_usage ||
+          event?.payload?.total_token_usage ||
+          event?.payload?.usage ||
           event?.usage ||
           event?.data?.usage;
 
@@ -1033,47 +1131,93 @@ function parseCodexRollout(
           }
         }
 
-        // Extract model from thread or turn events
-        if (!model && (event?.model || event?.data?.model)) {
-          model = event.model || event.data?.model;
+        // Extract model from thread/turn/session events
+        if (!model && (event?.model || event?.data?.model || event?.payload?.model)) {
+          model = event.model || event.data?.model || event.payload?.model;
         }
 
-        // Build transcript from conversation items
         const eventType = event?.type || event?.event || '';
+        const payload = event?.payload;
+        const payloadType = payload?.type || '';
 
-        // User messages
-        if (eventType === 'item.created' || eventType === 'message') {
+        // ── New-shape Codex rollouts: response_item events ────────────────
+        // Each conversation item is wrapped as {type: "response_item", payload: {...}}.
+        // The payload's `type` distinguishes message / reasoning / function_call /
+        // function_call_output / local_shell_call.
+        if (payloadType === 'message') {
+          const role = payload.role || 'assistant';
+          const text = extractMessageText(payload.content);
+          if (text.trim()) turns.push({ role, content: text });
+        } else if (payloadType === 'reasoning') {
+          // Chain-of-thought summary — show as assistant reasoning so reviewers
+          // can see the agent's plan, not just its actions.
+          const summary = Array.isArray(payload.summary) ? payload.summary : [];
+          const text = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n\n');
+          if (text.trim()) {
+            turns.push({ role: 'assistant', content: `[Reasoning] ${text}` });
+          }
+        } else if (payloadType === 'function_call' || payloadType === 'local_shell_call') {
+          toolCalls++;
+          const tool = payload.name || (payloadType === 'local_shell_call' ? 'shell' : 'tool');
+          const rawArgs = payload.arguments ?? payload.action ?? payload.command ?? '';
+          const argStr = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs);
+          const callId = payload.call_id || payload.id || '';
+          const idx = turns.length;
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(argStr)}` });
+          if (callId) pendingTools.set(callId, idx);
+        } else if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output') {
+          const callId = payload.call_id || payload.id || '';
+          const out = typeof payload.output === 'string'
+            ? payload.output
+            : (payload.output?.content
+                ? (typeof payload.output.content === 'string'
+                    ? payload.output.content
+                    : JSON.stringify(payload.output.content))
+                : JSON.stringify(payload.output ?? ''));
+          if (out) {
+            const idx = callId ? pendingTools.get(callId) : undefined;
+            if (idx !== undefined) {
+              turns[idx].content += `\n[Output] ${truncate(out)}`;
+              pendingTools.delete(callId);
+            } else {
+              turns.push({ role: 'assistant', content: `[Output] ${truncate(out)}` });
+            }
+          }
+        } else if (eventType === 'item.created' || eventType === 'message') {
+          // ── Legacy/older-shape rollouts ─────────────────────────────────
           const item = event?.data || event?.item || event;
           const role = item?.role || item?.type;
           const content_ = item?.content || item?.text || item?.message;
           if (role && content_) {
-            const text = typeof content_ === 'string' ? content_ :
-              Array.isArray(content_) ? content_.map((c: any) => c?.text || c?.content || '').join('') : '';
+            const text = extractMessageText(content_);
             if (text) turns.push({ role, content: text });
           }
+        } else if (
+          eventType === 'tool_call' || eventType === 'function_call' ||
+          event?.data?.type === 'function_call' || event?.data?.type === 'shell'
+        ) {
+          toolCalls++;
+          const tool = event?.data?.name || event?.data?.command || event?.name || 'tool';
+          const args = event?.data?.arguments || event?.data?.args || '';
+          const argStr = typeof args === 'string' ? args : JSON.stringify(args);
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(argStr)}` });
         }
 
         // Track turns
         if (eventType === 'turn.completed' || eventType === 'turn.started') {
           turnCount++;
         }
-
-        // Tool calls — record as assistant actions
-        if (eventType === 'tool_call' || eventType === 'function_call' ||
-            (event?.data?.type === 'function_call') || (event?.data?.type === 'shell')) {
-          toolCalls++;
-          const tool = event?.data?.name || event?.data?.command || event?.name || 'tool';
-          const args = event?.data?.arguments || event?.data?.args || '';
-          const argStr = typeof args === 'string' ? args : JSON.stringify(args);
-          const preview = argStr.length > 100 ? argStr.slice(0, 100) + '…' : argStr;
-          turns.push({ role: 'assistant', content: `[Tool: ${tool}${preview ? ' → ' + preview : ''}]` });
-        }
       } catch {
         // Skip malformed lines
       }
     }
 
-    if (maxTotalTokens === 0) return null;
+    // Don't bail when token usage hasn't fired yet — the rollout often
+    // contains a fully-formed transcript before the TokenCountEvent
+    // lands (especially when stop hooks fire mid-stream). Returning null
+    // here used to drop the entire conversation; now we keep whatever
+    // we parsed and let the next heartbeat / stop event refresh tokens.
+    if (maxTotalTokens === 0 && turns.length === 0) return null;
 
     return {
       tokensUsed: maxTotalTokens,
@@ -1142,7 +1286,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   // In standalone mode, create minimal agent config if missing
   if (!agentConfig) {
     if (connected) {
-      debugLog('session-start', 'ABORT: missing agent config (run origin init)', { hasConfig: !!config });
+      debugLog('session-start', 'ABORT: missing agent config (run origin enable)', { hasConfig: !!config });
       return;
     }
     // Auto-create minimal agent config for standalone
@@ -2190,7 +2334,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         // For Codex: try reading the rollout JSONL for full transcript + token data
         if (!displayTranscript && (agentSlug === 'codex' || (state as any).agentSlug === 'codex')) {
           try {
-            const codexData = discoverCodexSessionData(state.repoPath || hookCwd);
+            const codexData = discoverCodexSessionData(state.repoPath || hookCwd, { verbose: !!state.verboseCapture });
             if (codexData) {
               if (codexData.transcript) displayTranscript = codexData.transcript;
               if (!parsed && codexData.tokensUsed > 0) {
@@ -2201,6 +2345,27 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                   cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0,
                 };
               }
+            }
+          } catch { /* best effort */ }
+        }
+
+        // For Gemini: auto-discover the chat checkpoint file mid-session so
+        // heartbeats upload the assistant text + tool I/O instead of just
+        // user prompts. Stop-hook does the same lookup; running it here too
+        // means the Session tab shows real content while the session is
+        // still RUNNING (not just after it ends).
+        if (!displayTranscript && agentSlug === 'gemini') {
+          try {
+            if (!state.transcriptPath) {
+              const discovered = discoverGeminiTranscriptPath();
+              if (discovered) {
+                state.transcriptPath = discovered;
+                debugLog('user-prompt-submit', 'gemini transcript auto-discovered', { discovered });
+              }
+            }
+            if (state.transcriptPath && fs.existsSync(state.transcriptPath)) {
+              parsed = parseTranscript(state.transcriptPath, { since: state.startedAt });
+              displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
             }
           } catch { /* best effort */ }
         }
@@ -2406,7 +2571,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
     // For Cursor: discover agent transcript JSONL for real conversation data + better token estimates
     if (agentSlug === 'cursor' && parsed.tokensUsed === 0) {
-      const cursorData = discoverCursorTranscript(input.conversation_id, state.repoPath);
+      const cursorData = discoverCursorTranscript(input.conversation_id, state.repoPath, { verbose: !!state.verboseCapture });
       if (cursorData) {
         debugLog('stop', 'supplementing with Cursor transcript data', {
           tokens: cursorData.tokensUsed,
@@ -2443,11 +2608,12 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
     // For Codex: supplement with data from its SQLite database / rollout JSONL.
     // Gate on agentSlug so we don't accidentally pull Codex data into a
-    // different agent's session. Run whenever we don't yet have real tokens —
-    // don't also require empty transcriptPath, since Codex occasionally
-    // populates it and we still want the rollout's richer numbers.
-    const codexData = (agentSlug === 'codex' && parsed.tokensUsed === 0)
-      ? discoverCodexSessionData(state.repoPath)
+    // different agent's session. Always run for Codex sessions — the rollout
+    // is the authoritative source for both tokens AND the full transcript
+    // (assistant text, reasoning, tool I/O), so even when we already have
+    // tokens we still want the richer transcript.
+    const codexData = (agentSlug === 'codex')
+      ? discoverCodexSessionData(state.repoPath, { verbose: !!state.verboseCapture })
       : null;
     if (codexData) {
       debugLog('stop', 'supplementing with Codex data', {
@@ -2457,18 +2623,20 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         hasTranscript: !!codexData.transcript,
       });
       if (!parsed.model) parsed.model = codexData.model;
-      parsed.tokensUsed = codexData.tokensUsed;
-      parsed.inputTokens = codexData.inputTokens;
-      parsed.outputTokens = codexData.outputTokens;
+      if (parsed.tokensUsed === 0) {
+        parsed.tokensUsed = codexData.tokensUsed;
+        parsed.inputTokens = codexData.inputTokens;
+        parsed.outputTokens = codexData.outputTokens;
+      }
       if (codexData.toolCalls > 0 && parsed.toolCalls === 0) {
         parsed.toolCalls = codexData.toolCalls;
       }
       if (codexData.prompt && state.prompts.length === 0) {
         state.prompts.push(codexData.prompt);
       }
-      // Use the rollout-parsed transcript if we got one (much richer than
-      // the synthesized-from-prompts fallback)
-      if (codexData.transcript && !displayTranscript) {
+      // Prefer the rollout-parsed transcript over the synthesized-from-prompts
+      // fallback — it includes assistant text, reasoning, and tool I/O.
+      if (codexData.transcript) {
         displayTranscript = codexData.transcript;
         debugLog('stop', 'using Codex rollout transcript', { length: displayTranscript.length });
       }

@@ -674,8 +674,7 @@ export interface FormatTranscriptOptions {
 
 export function formatTranscriptForDisplay(
   transcriptPath: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _options?: FormatTranscriptOptions,
+  options?: FormatTranscriptOptions,
 ): string {
   if (!fs.existsSync(transcriptPath)) {
     return '';
@@ -685,24 +684,25 @@ export function formatTranscriptForDisplay(
   const trimmed = raw.trim();
   if (!trimmed) return '';
 
+  const verbose = !!options?.verbose;
   let messages: DisplayMessage[] = [];
 
   // Detect format: Gemini (single JSON with messages/history) vs Claude JSONL
   if (trimmed.startsWith('{') && !trimmed.includes('\n')) {
-    messages = formatGeminiMessages(raw);
+    messages = formatGeminiMessages(raw, verbose);
   } else if (trimmed.startsWith('{')) {
     try {
       const singleObj = JSON.parse(trimmed);
       if (singleObj.messages || singleObj.history) {
-        messages = formatGeminiMessages(raw);
+        messages = formatGeminiMessages(raw, verbose);
       } else {
-        messages = formatJSONLMessages(raw);
+        messages = formatJSONLMessages(raw, verbose);
       }
     } catch {
-      messages = formatJSONLMessages(raw);
+      messages = formatJSONLMessages(raw, verbose);
     }
   } else {
-    messages = formatJSONLMessages(raw);
+    messages = formatJSONLMessages(raw, verbose);
   }
 
   if (messages.length === 0) return '';
@@ -710,9 +710,78 @@ export function formatTranscriptForDisplay(
   return JSON.stringify(messages);
 }
 
-function formatJSONLMessages(raw: string): DisplayMessage[] {
+// Cap each tool arg/output blob so a single huge Read() doesn't bloat the
+// upload — verbose mode keeps the full payload.
+function makeTruncator(verbose: boolean): (s: string) => string {
+  const max = verbose ? Number.MAX_SAFE_INTEGER : 2000;
+  return (s: string) => (s.length > max ? s.slice(0, max) + `… [+${s.length - max} chars]` : s);
+}
+
+function serializeToolInput(input: Record<string, any>): string {
+  // Prefer human-readable single-field commands (Bash/Read/Edit) before
+  // falling back to a JSON dump of arbitrary tool args.
+  if (typeof input.command === 'string') return input.command;
+  if (typeof input.cmd === 'string') return input.cmd;
+  if (input.file_path && (typeof input.old_string === 'string' || typeof input.new_string === 'string')) {
+    // Edit tool — show the diff-style input
+    const parts: string[] = [`file: ${input.file_path}`];
+    if (typeof input.old_string === 'string') parts.push(`--- old\n${input.old_string}`);
+    if (typeof input.new_string === 'string') parts.push(`+++ new\n${input.new_string}`);
+    return parts.join('\n');
+  }
+  if (input.file_path && typeof input.content === 'string') {
+    return `file: ${input.file_path}\n${input.content}`;
+  }
+  if (typeof input.file_path === 'string') return input.file_path;
+  if (typeof input.path === 'string') return input.path;
+  if (typeof input.notebook_path === 'string') return input.notebook_path;
+  if (typeof input.pattern === 'string') return input.pattern;
+  if (typeof input.url === 'string') return input.url;
+  if (typeof input.query === 'string') return input.query;
+  if (typeof input.prompt === 'string') return input.prompt;
+  try { return JSON.stringify(input, null, 2); } catch { return ''; }
+}
+
+function serializeToolResult(content: any): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((b: any) => {
+        if (typeof b === 'string') return b;
+        if (b?.type === 'text' && typeof b.text === 'string') return b.text;
+        if (typeof b?.text === 'string') return b.text;
+        if (typeof b?.content === 'string') return b.content;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (content && typeof content === 'object' && typeof content.text === 'string') return content.text;
+  try { return JSON.stringify(content, null, 2); } catch { return ''; }
+}
+
+function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
   const lines = raw.split('\n').filter((line) => line.trim());
   const messages: DisplayMessage[] = [];
+  const truncate = makeTruncator(verbose);
+
+  // First pass: collect tool_result blocks keyed by tool_use_id so we can
+  // attach them inline with the corresponding [Tool: ...] line in the next
+  // assistant message (Claude Code emits these as separate user-role entries).
+  const resultByToolUseId = new Map<string, string>();
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      const content = entry.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+          const text = serializeToolResult(block.content);
+          if (text) resultByToolUseId.set(block.tool_use_id, text);
+        }
+      }
+    } catch { /* ignore */ }
+  }
 
   for (const line of lines) {
     let entry: TranscriptLine;
@@ -738,19 +807,26 @@ function formatJSONLMessages(raw: string): DisplayMessage[] {
       if (typeof content === 'string' && content) {
         text = content;
       } else if (Array.isArray(content)) {
-        // Collect text blocks, summarize tool_use blocks
         const parts: string[] = [];
-        for (const block of content) {
+        for (const block of content as any[]) {
           if (block.type === 'text' && block.text) {
             parts.push(block.text);
+          } else if (block.type === 'thinking' && (block.thinking || block.text)) {
+            // Claude extended thinking — render as a [Reasoning] block so the
+            // web formatter highlights it separately from actions.
+            const thoughtText = block.thinking || block.text || '';
+            parts.push(`[Reasoning] ${truncate(thoughtText)}`);
           } else if (block.type === 'tool_use' && block.name) {
-            // Show tool usage as a compact note
             const input = block.input || {};
-            const filePath = input.file_path || input.notebook_path || input.command || '';
-            if (filePath) {
-              parts.push(`[Tool: ${block.name} → ${typeof filePath === 'string' ? filePath.split('/').pop() : ''}]`);
-            } else {
-              parts.push(`[Tool: ${block.name}]`);
+            const argStr = serializeToolInput(input);
+            // Keep the marker on its own line so the web formatter can group
+            // [Tool: ...] + args + [Output] cleanly.
+            parts.push(`[Tool: ${block.name}]`);
+            if (argStr) parts.push(truncate(argStr));
+            // Inline the matching tool_result if we found one.
+            const resultText = block.id ? resultByToolUseId.get(block.id) : undefined;
+            if (resultText) {
+              parts.push(`[Output] ${truncate(resultText)}`);
             }
           }
         }
@@ -758,7 +834,6 @@ function formatJSONLMessages(raw: string): DisplayMessage[] {
       }
 
       if (text.trim()) {
-        // Merge consecutive assistant messages
         const last = messages[messages.length - 1];
         if (last && last.role === 'assistant') {
           last.content += '\n\n' + text;
@@ -772,11 +847,12 @@ function formatJSONLMessages(raw: string): DisplayMessage[] {
   return messages;
 }
 
-function formatGeminiMessages(raw: string): DisplayMessage[] {
+function formatGeminiMessages(raw: string, verbose: boolean): DisplayMessage[] {
   try {
     const data = JSON.parse(raw);
     const msgs: GeminiMessage[] = data.messages || data.history || [];
     const messages: DisplayMessage[] = [];
+    const truncate = makeTruncator(verbose);
 
     for (const msg of msgs) {
       const msgType = msg.type || msg.role || '';
@@ -795,6 +871,38 @@ function formatGeminiMessages(raw: string): DisplayMessage[] {
             messages.push({ role: 'user', content: cleaned });
           }
         }
+        continue;
+      }
+
+      // Gemini's tool responses come back as `tool` or `function` role
+      // messages — surface those as [Output] blocks so they pair with the
+      // preceding [Tool: ...] line.
+      if (msgType === 'tool' || msgType === 'function') {
+        const responseText = (() => {
+          if (typeof contentParts === 'string') return contentParts;
+          if (!Array.isArray(contentParts)) return '';
+          const out: string[] = [];
+          for (const p of contentParts as any[]) {
+            if (p?.functionResponse) {
+              const resp = p.functionResponse.response ?? p.functionResponse.output ?? p.functionResponse;
+              if (typeof resp === 'string') out.push(resp);
+              else { try { out.push(JSON.stringify(resp, null, 2)); } catch { /* ignore */ } }
+            } else if (typeof p?.text === 'string') {
+              out.push(p.text);
+            }
+          }
+          return out.join('\n');
+        })();
+        if (responseText.trim()) {
+          const last = messages[messages.length - 1];
+          const formatted = `[Output] ${truncate(responseText)}`;
+          if (last && last.role === 'assistant') {
+            last.content += '\n' + formatted;
+          } else {
+            messages.push({ role: 'assistant', content: formatted });
+          }
+        }
+        continue;
       }
 
       if (msgType === 'gemini' || msgType === 'model') {
@@ -804,11 +912,32 @@ function formatGeminiMessages(raw: string): DisplayMessage[] {
           }
         } else if (Array.isArray(contentParts)) {
           const parts: string[] = [];
-          for (const part of contentParts) {
-            if (part.text) {
+          for (const part of contentParts as any[]) {
+            // Reasoning takes priority over text — Gemini emits two shapes:
+            //   {thought: true, text: "..."}             ← Google AI spec
+            //   {thought: "string", text?: "..."}        ← Gemini CLI verbose log
+            //   {thought: true, thoughtSignature: "..."} ← thinking summary
+            // Without this branch, thought-only parts were silently dropped
+            // and {thought:true,text:...} parts were emitted as plain text.
+            const thoughtText =
+              typeof part.thought === 'string' ? part.thought :
+              part.thought === true ? (part.text || part.thoughtSummary || '') :
+              '';
+            if (thoughtText) {
+              parts.push(`[Reasoning] ${truncate(thoughtText)}`);
+            } else if (part.text) {
               parts.push(part.text);
             } else if (part.functionCall) {
+              const args = part.functionCall.args || {};
+              const argStr = serializeToolInput(args);
               parts.push(`[Tool: ${part.functionCall.name}]`);
+              if (argStr) parts.push(truncate(argStr));
+            } else if (part.functionResponse) {
+              // Sometimes function responses are inlined in the same model
+              // turn — surface them inline as [Output] too.
+              const resp = part.functionResponse.response ?? part.functionResponse.output ?? part.functionResponse;
+              const respStr = typeof resp === 'string' ? resp : (() => { try { return JSON.stringify(resp, null, 2); } catch { return ''; } })();
+              if (respStr) parts.push(`[Output] ${truncate(respStr)}`);
             }
           }
           const text = parts.join('\n');

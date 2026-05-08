@@ -31,7 +31,7 @@ npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ## Quick start
 
 ```bash
-origin init                     # auto-detect agents, install git hooks
+origin enable                     # auto-detect agents, install git hooks
 # ...code with any AI agent — Origin tracks automatically
 origin blame src/index.ts       # see which AI wrote each line
 ```
@@ -51,7 +51,7 @@ Continue, Cody, Cline, Codeium, Roo, Kilo. One command picks up whichever tool
 you use.
 
 ```bash
-origin init           # detect agents + install hooks
+origin enable           # detect agents + install hooks
 origin agents         # list detected agents
 origin status         # show the active session
 ```
@@ -134,7 +134,7 @@ solo developers, $29/user/month for teams.
 
 ```bash
 origin login      # authenticate with your Origin instance
-origin init       # register the machine + install hooks
+origin enable       # register the machine + install hooks
 ```
 
 ---
