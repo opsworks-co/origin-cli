@@ -30,7 +30,8 @@ import { redactSecrets } from '../redaction.js';
 import { findTrailByBranch, addSessionToTrail } from '../trail-state.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
-import { writeSessionMemory, buildMemoryContext } from '../memory.js';
+import { writeSessionMemory, buildMemoryContext, readRecentMemory } from '../memory.js';
+import { backfillAcceptanceForSession } from '../acceptance.js';
 import { addTodosFromSession } from '../todo.js';
 import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync } from 'child_process';
@@ -1825,6 +1826,22 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       debugLog('session-start', 'standalone session', { sessionId });
     }
 
+    // Look up the most recent session in this repo so we can record a
+    // previousSessionId pointer in this session's git notes. Lets future
+    // agents walk the chain of sessions across commits. We also stash the
+    // prior session's startedAt so the acceptance backfill at session-end
+    // can scope its commit scan instead of reading notes on every recent
+    // commit in the repo.
+    let previousSessionId: string | undefined;
+    let previousSessionStartedAt: string | undefined;
+    try {
+      const recent = readRecentMemory(repoPath, 1);
+      if (recent.length > 0 && recent[0].sessionId && recent[0].sessionId !== sessionId) {
+        previousSessionId = recent[0].sessionId;
+        previousSessionStartedAt = recent[0].startedAt;
+      }
+    } catch { /* non-fatal */ }
+
     const state: SessionState = {
       sessionId,
       claudeSessionId,
@@ -1844,6 +1861,8 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       activePolicies,
       enforcementRules,
       verboseCapture,
+      previousSessionId,
+      previousSessionStartedAt,
     };
 
     // Multi-repo: store all repo paths and per-repo git state
@@ -2915,9 +2934,12 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
           writeGitNotes(state.repoPath, missingNotes, {
             sessionId: state.sessionId,
             model: model || state.model || 'unknown',
-            agentSlug: agentSlug || undefined,
+            agentSlug: agentSlug || state.agentSlug,
             promptCount: prompts.length,
             promptSummary: prompts[prompts.length - 1] || '',
+            fullPrompt: prompts[prompts.length - 1] || undefined,
+            previousSessionId: state.previousSessionId,
+            filesRead: state.filesRead,
             tokensUsed: parsed.tokensUsed,
             costUsd,
             durationMs: durationMs > 0 ? durationMs : 0,
@@ -3292,8 +3314,12 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         writeGitNotes(state.repoPath, gitCapture.commitShas, {
           sessionId: state.sessionId,
           model,
+          agentSlug: agentSlug || state.agentSlug,
           promptCount: prompts.length,
           promptSummary: prompts[0] || '',
+          fullPrompt: prompts[prompts.length - 1] || prompts[0] || undefined,
+          previousSessionId: state.previousSessionId,
+          filesRead: state.filesRead,
           tokensUsed: parsed.tokensUsed,
           costUsd,
           durationMs,
@@ -3304,6 +3330,26 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         debugLog('session-end', 'git notes written', { commitCount: gitCapture.commitShas.length });
       } catch (err: any) {
         debugLog('session-end', 'git notes error (non-fatal)', { message: err.message });
+      }
+    }
+
+    // Backfill acceptance for the *previous* session's commits. Now that
+    // this session has ended, any of the prior session's lines that were
+    // overwritten (or kept) here will be reflected. Writes to a separate
+    // ref (refs/notes/origin-acceptance) so original notes stay immutable.
+    if (state.previousSessionId) {
+      try {
+        const written = backfillAcceptanceForSession(state.repoPath, state.previousSessionId, {
+          sinceIso: state.previousSessionStartedAt,
+        });
+        if (written > 0) {
+          debugLog('session-end', 'acceptance backfill written', {
+            previousSessionId: state.previousSessionId,
+            commitsAnnotated: written,
+          });
+        }
+      } catch (err: any) {
+        debugLog('session-end', 'acceptance backfill error (non-fatal)', { message: err.message });
       }
     }
 
@@ -3699,8 +3745,12 @@ export async function handlePostCommit(): Promise<void> {
     writeGitNotes(repoPath, [commitSha], {
       sessionId: state?.sessionId || 'unknown',
       model: noteModel || 'unknown',
+      agentSlug: state?.agentSlug,
       promptCount: state?.prompts?.length || 0,
       promptSummary: state?.prompts?.[state.prompts.length - 1] || '',
+      fullPrompt: state?.prompts?.[state.prompts.length - 1] || undefined,
+      previousSessionId: state?.previousSessionId,
+      filesRead: state?.filesRead,
       tokensUsed: 0,
       costUsd: 0,
       durationMs: 0,
@@ -4034,7 +4084,9 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
   // When an agent reads or edits a file, inject per-file attribution so
   // the agent knows who wrote each part before modifying it.
   const toolName = (input.tool_name || '').toLowerCase();
-  if (['read', 'edit', 'write', 'view'].some(t => toolName.includes(t))) {
+  const isReadStyle = ['read', 'view', 'open', 'cat', 'grep', 'glob'].some(t => toolName.includes(t));
+  const isWriteStyle = ['edit', 'write', 'patch', 'create', 'insert', 'replace', 'notebook_edit'].some(t => toolName.includes(t));
+  if (isReadStyle || isWriteStyle) {
     const toolInput = input.tool_input || {};
     const filePath = toolInput.file_path || toolInput.path || toolInput.filePath || toolInput.filename || '';
     if (filePath && state.repoPath) {
@@ -4049,6 +4101,28 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
       } catch {
         // Non-fatal
       }
+    }
+  }
+
+  // ── Track files the agent has loaded into context ────────────────────────
+  // Persisted into git notes at session-end as `filesRead` so the next
+  // agent can see what the prior agent looked at, not just what it changed.
+  // Dedup on the *normalized* (repo-relative) form so we don't double-count
+  // when the same file is read via both absolute and relative paths across
+  // pre-tool-use invocations.
+  if (isReadStyle && filePaths.length > 0) {
+    if (!state.filesRead) state.filesRead = [];
+    const cap = 100;
+    const seen = new Set(state.filesRead);
+    for (const fp of filePaths) {
+      if (!fp) continue;
+      const rel = state.repoPath && fp.startsWith(state.repoPath + '/')
+        ? fp.slice(state.repoPath.length + 1)
+        : fp;
+      if (seen.has(rel)) continue;
+      state.filesRead.push(rel);
+      seen.add(rel);
+      if (state.filesRead.length >= cap) break;
     }
   }
 

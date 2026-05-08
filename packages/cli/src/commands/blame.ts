@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
-import { getLineBlame } from '../attribution.js';
+import { getLineBlame, getSessionContextForCommit, type SessionContext } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -108,9 +108,21 @@ export async function blameCommand(
     return;
   }
 
-  // JSON output
+  // JSON output — emit a sessions map keyed by sessionId so callers can look
+  // up the rich context (full prompt, previousSessionId, filesRead, acceptance)
+  // once per session instead of per line.
   if (opts?.json) {
-    console.log(JSON.stringify(filtered, null, 2));
+    const sessions: Record<string, SessionContext> = {};
+    const seenCommits = new Set<string>();
+    for (const attr of attributions) {
+      if (!attr.commitSha || !attr.sessionId || seenCommits.has(attr.commitSha)) continue;
+      seenCommits.add(attr.commitSha);
+      const ctx = getSessionContextForCommit(repoPath, attr.commitSha);
+      if (ctx && !sessions[ctx.sessionId]) {
+        sessions[ctx.sessionId] = ctx;
+      }
+    }
+    console.log(JSON.stringify({ file, lines: filtered, sessions }, null, 2));
     return;
   }
 
