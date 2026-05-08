@@ -38,32 +38,32 @@ export default function WorkflowSection() {
             <H2>2. Developer installs CLI (one-time per machine)</H2>
             <CodeBlock title="Terminal">{`npm i -g ${window.location.origin}/cli/origin-cli-latest.tgz
 origin login         # authenticate with your Origin server
-origin init          # registers machine, detects tools, installs global hooks`}</CodeBlock>
+origin enable          # registers machine, detects tools, installs global hooks`}</CodeBlock>
             <P>
-              That&apos;s it &mdash; two commands. <code className="text-indigo-400">origin init</code> auto-detects
+              That&apos;s it &mdash; two commands. <code className="text-indigo-400">origin enable</code> auto-detects
               installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Codex, etc.), registers the machine,
               and installs global hooks. Tools are re-scanned on every session start, so new installations are picked up
               automatically without re-running init.
             </P>
 
             <Callout type="info">
-              If you install a new AI tool after running <code className="text-indigo-400">origin init</code>, run <code className="text-indigo-400">origin enable --agent &lt;slug&gt; --global</code> to add hooks for it. For example: <code className="text-indigo-400">origin enable --agent cursor --global</code>.
+              If you install a new AI tool after running <code className="text-indigo-400">origin enable</code>, run <code className="text-indigo-400">origin enable --agent &lt;slug&gt; --global</code> to add hooks for it. For example: <code className="text-indigo-400">origin enable --agent cursor --global</code>.
             </Callout>
 
             <H3>Codex CLI setup</H3>
             <P>
-              Running <code className="text-indigo-400">origin init</code> automatically enables the Codex hooks feature flag in <code className="text-indigo-400">~/.codex/config.toml</code> and installs hooks in <code className="text-indigo-400">~/.codex/hooks.json</code>.
+              Running <code className="text-indigo-400">origin enable</code> automatically enables the Codex hooks feature flag in <code className="text-indigo-400">~/.codex/config.toml</code> and installs hooks in <code className="text-indigo-400">~/.codex/hooks.json</code>.
             </P>
             <CodeBlock title="Terminal">{`# Install hooks + enable codex_hooks feature flag (one-time setup)
-origin init`}</CodeBlock>
+origin enable`}</CodeBlock>
             <P>
-              If you previously had to pass <code className="text-indigo-400">-c features.codex_hooks=true</code> each time, re-run <code className="text-indigo-400">origin init</code> to make it permanent.
+              If you previously had to pass <code className="text-indigo-400">-c features.codex_hooks=true</code> each time, re-run <code className="text-indigo-400">origin enable</code> to make it permanent.
               After setup, all Codex sessions will be tracked with prompts, code changes, and AI Blame attribution.
             </P>
 
             <H3>Cursor setup</H3>
             <P>
-              <code className="text-indigo-400">origin init</code> auto-detects Cursor and installs hooks to <code className="text-indigo-400">~/.cursor/hooks.json</code>.
+              <code className="text-indigo-400">origin enable</code> auto-detects Cursor and installs hooks to <code className="text-indigo-400">~/.cursor/hooks.json</code>.
               If Cursor was installed after init, run:
             </P>
             <CodeBlock title="Terminal">{`origin enable --agent cursor --global`}</CodeBlock>

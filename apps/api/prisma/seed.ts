@@ -1007,7 +1007,7 @@ async function main() {
   console.log(`  Created ${auditEntries.length} audit log entries`);
 
   // ── 9. Machines ─────────────────────────────────────────────────
-  // Machines are registered automatically via `origin init` — no seed data needed
+  // Machines are registered automatically via `origin enable` — no seed data needed
   const machineDefs: { hostname: string; tools: string[] }[] = [];
 
   for (const def of machineDefs) {

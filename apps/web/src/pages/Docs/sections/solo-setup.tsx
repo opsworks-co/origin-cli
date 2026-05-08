@@ -55,7 +55,7 @@ export default function SoloSetupSection() {
               Navigate to any Git repository and run:
             </P>
             <CodeBlock title="Terminal">{`cd ~/your-project
-origin init`}</CodeBlock>
+origin enable`}</CodeBlock>
             <P>
               This auto-detects installed AI tools (Claude Code, Cursor, Copilot, Gemini, Windsurf, Aider, Codex, etc.),
               installs git hooks, and starts tracking sessions. You&rsquo;ll see output like:
@@ -139,7 +139,7 @@ origin stats`}</CodeBlock>
             <P>
               <strong className="text-gray-200">How to set it up.</strong> Nothing &mdash; the dashboard
               populates itself the moment your first AI session is captured by the CLI. If it looks
-              empty, re-run <code className="text-indigo-400">origin init</code> inside a repo and do
+              empty, re-run <code className="text-indigo-400">origin enable</code> inside a repo and do
               an AI-assisted edit.
             </P>
 
@@ -178,7 +178,7 @@ origin stats`}</CodeBlock>
               <strong className="text-gray-200">How to set it up.</strong> Three options:
             </P>
             <ul className="space-y-2 mb-4">
-              <Li><strong className="text-gray-200">Automatic</strong> &mdash; run <code className="text-indigo-400">origin init</code> in a repo and it gets registered on first commit. Easiest path.</Li>
+              <Li><strong className="text-gray-200">Automatic</strong> &mdash; run <code className="text-indigo-400">origin enable</code> in a repo and it gets registered on first commit. Easiest path.</Li>
               <Li><strong className="text-gray-200">Connect GitHub / GitLab</strong> &mdash; click <em>Connect GitHub</em> or <em>Connect GitLab</em> to bulk-import repos via OAuth. Commits auto-sync right after import.</Li>
               <Li><strong className="text-gray-200">Add Manually</strong> &mdash; paste a repo path or URL. Use this for standalone repos you want to surface without OAuth.</Li>
             </ul>
@@ -312,7 +312,7 @@ origin stats`}</CodeBlock>
 
             <H2 id="solo-multiple-repos">Adding More Repositories</H2>
             <P>
-              Just run <code className="text-indigo-400">origin init</code> in any additional Git repo. Each repo is auto-registered in your dashboard.
+              Just run <code className="text-indigo-400">origin enable</code> in any additional Git repo. Each repo is auto-registered in your dashboard.
               There&rsquo;s no limit on the number of repos you can track.
             </P>
 
@@ -320,10 +320,10 @@ origin stats`}</CodeBlock>
             <P>
               If you prefer fully local tracking with no server connection, use standalone mode:
             </P>
-            <CodeBlock>{`origin init --standalone`}</CodeBlock>
+            <CodeBlock>{`origin enable --standalone`}</CodeBlock>
             <P>
               Sessions are stored locally via git notes and a local SQLite database. You can switch to connected mode later by running
-              <code className="text-indigo-400"> origin login</code> followed by <code className="text-indigo-400">origin init</code>.
+              <code className="text-indigo-400"> origin login</code> followed by <code className="text-indigo-400">origin enable</code>.
             </P>
 
             <H2 id="solo-next-steps">Next Steps</H2>

@@ -495,7 +495,7 @@ export default function Onboarding() {
               <div className="rounded-xl border border-white/[0.06] bg-gray-900/20 p-4">
                 <p className="text-xs text-gray-500 leading-relaxed">
                   <strong className="text-gray-400">Don't use GitHub or GitLab?</strong> No problem — Origin tracks any local git repo.
-                  Just run <code className="text-indigo-400 bg-indigo-500/10 px-1 py-0.5 rounded text-[11px]">origin init</code> in
+                  Just run <code className="text-indigo-400 bg-indigo-500/10 px-1 py-0.5 rounded text-[11px]">origin enable</code> in
                   any project. You can always connect a provider later from Settings.
                 </p>
               </div>
@@ -724,7 +724,7 @@ export default function Onboarding() {
                   <span className="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-500/20 text-indigo-400 text-xs font-bold">3</span>
                   <span className="text-sm font-semibold text-gray-200">Initialize in your project</span>
                 </div>
-                <CopyBlock text="cd ~/your-project && origin init" />
+                <CopyBlock text="cd ~/your-project && origin enable" />
                 <p className="text-xs text-gray-600 mt-2">
                   Auto-detects {selectedAgents.length > 0
                     ? selectedAgents.map(id => AGENTS.find(a => a.id === id)?.name).filter(Boolean).join(', ')
@@ -777,7 +777,7 @@ export default function Onboarding() {
                   </div>
                   <h1 className="text-2xl font-bold text-white">Listening for your first session...</h1>
                   <p className="text-sm text-gray-400 mt-2">
-                    Open a project where you ran <code className="text-indigo-400 text-xs bg-indigo-500/10 px-1.5 py-0.5 rounded">origin init</code> and start coding with any AI agent.
+                    Open a project where you ran <code className="text-indigo-400 text-xs bg-indigo-500/10 px-1.5 py-0.5 rounded">origin enable</code> and start coding with any AI agent.
                   </p>
                 </>
               )}
@@ -788,7 +788,7 @@ export default function Onboarding() {
                 <p className="text-xs text-gray-500 font-semibold uppercase tracking-wider">What to do now</p>
                 <div className="space-y-3">
                   {[
-                    { n: '1', title: 'Open your project in terminal', sub: 'Make sure you ran origin init in this project' },
+                    { n: '1', title: 'Open your project in terminal', sub: 'Make sure you ran origin enable in this project' },
                     { n: '2', title: 'Start any AI coding agent', sub: 'Claude Code, Cursor, Gemini CLI — any will work' },
                     { n: '3', title: 'Make a commit', sub: 'Origin hooks fire on git commit, capturing the session' },
                   ].map(item => (

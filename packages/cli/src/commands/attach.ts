@@ -86,7 +86,7 @@ export async function attachCommand(agent?: string) {
   const config = loadConfig();
   const agentConfig = loadAgentConfig();
   if (!agentConfig) {
-    console.error(chalk.red('\n  Error: Origin not initialized. Run `origin init` first.\n'));
+    console.error(chalk.red('\n  Error: Origin not initialized. Run `origin enable` first.\n'));
     process.exit(1);
   }
 

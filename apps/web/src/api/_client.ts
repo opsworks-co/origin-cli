@@ -76,7 +76,11 @@ export async function request<T>(path: string, opts: RequestInit = {}): Promise<
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    const msg = (body as any)?.error ?? (body as any)?.message ?? res.statusText;
+    // Prefer `message` over `error` — by convention server returns
+    // `error` as a short tag and `message` as the human-readable
+    // explanation. Most endpoints only set `error`, so the fallback
+    // chain still works there.
+    const msg = (body as any)?.message ?? (body as any)?.error ?? res.statusText;
     throw new Error(msg);
   }
 

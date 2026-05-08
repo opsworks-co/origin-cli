@@ -8,7 +8,7 @@ import { agentColor } from './MyDashboard/utils';
 import { PageHeader } from '../components/ui';
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
-  Tooltip, ResponsiveContainer, XAxis,
+  Tooltip, ResponsiveContainer, XAxis, YAxis, ReferenceLine, CartesianGrid,
 } from 'recharts';
 import {
   Sparkles, X, Play, Zap, DollarSign, Users, ChevronDown,
@@ -582,44 +582,10 @@ export default function Dashboard() {
         );
       })()}
 
-      {/* ── Active sessions ribbon (only when running) ────────────────── */}
-      {activeSessions.length > 0 && (
-        <div className="rounded-xl border border-purple-500/20 bg-purple-500/[0.03] p-3 space-y-1.5">
-          {activeSessions.slice(0, 2).map((s) => {
-            const elapsed = s.startedAt
-              ? Math.floor((Date.now() - new Date(s.startedAt).getTime()) / 1000)
-              : 0;
-            const elapsedStr = elapsed < 60
-              ? `${elapsed}s`
-              : elapsed < 3600
-                ? `${Math.floor(elapsed / 60)}m`
-                : `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`;
-            return (
-              <Link
-                key={s.id}
-                to={`/sessions/${s.id}`}
-                className="flex items-center justify-between gap-3 rounded-lg px-2.5 py-2 hover:bg-purple-500/[0.06] transition-colors"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded uppercase tracking-wider"
-                    style={{ backgroundColor: `${agentColor(s.agentName)}22`, color: agentColor(s.agentName) }}>
-                    {s.agentName || s.model}
-                  </span>
-                  <span className="text-sm text-gray-300 truncate">
-                    {s.prompt
-                      ? s.prompt.split('\n')[0].slice(0, 80) + (s.prompt.length > 80 ? '...' : '')
-                      : 'Session in progress…'}
-                  </span>
-                  {s.repoName && <span className="text-xs text-gray-600 truncate">· {s.repoName}</span>}
-                </div>
-                <span className="flex-shrink-0 inline-flex items-center gap-1 text-xs text-purple-300 font-mono">
-                  <Clock className="w-3 h-3" />{elapsedStr}
-                </span>
-              </Link>
-            );
-          })}
-        </div>
-      )}
+      {/* Active sessions ribbon removed from the top — the running-session
+          count is already exposed by the "N active now" pill in the page
+          header, and a full-width row here pushed the KPI cards too far
+          down for at-a-glance scanning. */}
 
       {/* ── Stat cards (gradient) ─────────────────────────────────────── */}
       <div className="space-y-2">
@@ -1062,35 +1028,95 @@ function CostTab({ stats }: { stats: Stats }) {
   const costByModel = stats.costByModel ?? [];
   const totalCost = costByModel.reduce((s, m) => s + m.cost, 0);
 
+  // Annotate each day with a rolling 7-day average and an `isToday` flag so we
+  // can render today's bar in a distinct shade — today is a partial day and
+  // the previous smooth-area chart made it look like spending was "dropping"
+  // when in fact it was the curve interpolating from a spike back to an
+  // incomplete point. A bar chart removes that artifact entirely.
+  const todayKey = new Date().toISOString().split('T')[0];
+  const last14 = costByDay14.map((d, i, arr) => {
+    const window = arr.slice(Math.max(0, i - 6), i + 1);
+    const avg = window.reduce((s, w) => s + w.cost, 0) / window.length;
+    const dt = new Date(d.date + 'T00:00:00Z');
+    return {
+      ...d,
+      avg7: parseFloat(avg.toFixed(2)),
+      isToday: d.date === todayKey,
+      label: dt.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' }),
+    };
+  });
+  const totalSpend14 = last14.reduce((s, d) => s + d.cost, 0);
+  const avgDaily = last14.length > 0 ? totalSpend14 / last14.length : 0;
+  const peakDay = last14.reduce((max, d) => (d.cost > max.cost ? d : max), { cost: 0, date: '', label: '', avg7: 0, isToday: false });
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       {/* Trend chart */}
       <div className="card lg:col-span-2">
-        <div className="flex items-center justify-between mb-3">
-          <div>
+        <div className="flex items-start justify-between mb-3 gap-3">
+          <div className="min-w-0">
             <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Daily spend</p>
-            <p className="text-xs text-gray-600 mt-0.5">Last 14 days</p>
+            <p className="text-xs text-gray-600 mt-0.5">
+              Last 14 days · ${totalSpend14.toFixed(2)} total · ${avgDaily.toFixed(2)}/day avg
+              {peakDay.cost > 0 && <> · peak ${peakDay.cost.toFixed(2)} on {peakDay.label}</>}
+            </p>
           </div>
-          <Link to="/budget" className="text-xs text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1">
+          <Link to="/budget" className="text-xs text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1 flex-shrink-0">
             Set budget <ArrowRight className="w-3 h-3" />
           </Link>
         </div>
-        <div className="h-40">
+        <div className="h-44">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={costByDay14}>
-              <defs>
-                <linearGradient id="costGradTab" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#22c55e" stopOpacity={0.4} />
-                  <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <Area type="monotone" dataKey="cost" stroke="#22c55e" strokeWidth={2} fill="url(#costGradTab)" />
-              <XAxis dataKey="date" hide />
-              <Tooltip
-                contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '0.5rem', color: '#f3f4f6', fontSize: '0.75rem' }}
-                formatter={(v: number) => [`$${v.toFixed(2)}`, 'Cost']}
+            <BarChart data={last14} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+              <XAxis
+                dataKey="label"
+                stroke="#6b7280"
+                tick={{ fontSize: 10, fill: '#9ca3af' }}
+                tickLine={false}
+                axisLine={{ stroke: '#1f2937' }}
+                interval={0}
               />
-            </AreaChart>
+              <YAxis
+                stroke="#6b7280"
+                tick={{ fontSize: 10, fill: '#9ca3af' }}
+                tickLine={false}
+                axisLine={false}
+                width={48}
+                tickFormatter={(v: number) => `$${v < 10 ? v.toFixed(2) : v.toFixed(0)}`}
+              />
+              {avgDaily > 0 && (
+                <ReferenceLine
+                  y={avgDaily}
+                  stroke="#6366f1"
+                  strokeDasharray="4 3"
+                  strokeOpacity={0.6}
+                  label={{
+                    value: `Avg $${avgDaily.toFixed(2)}`,
+                    position: 'right',
+                    fill: '#a5b4fc',
+                    fontSize: 10,
+                  }}
+                />
+              )}
+              <Tooltip
+                cursor={{ fill: '#1f293780' }}
+                contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '0.5rem', color: '#f3f4f6', fontSize: '0.75rem' }}
+                labelFormatter={(label: string, payload: any) => {
+                  const d = payload?.[0]?.payload;
+                  return d?.isToday ? `${label} (today, partial)` : label;
+                }}
+                formatter={(v: number, name: string) => {
+                  if (name === 'avg7') return [`$${v.toFixed(2)}`, '7-day avg'];
+                  return [`$${v.toFixed(2)}`, 'Cost'];
+                }}
+              />
+              <Bar dataKey="cost" radius={[3, 3, 0, 0]} maxBarSize={28}>
+                {last14.map((d) => (
+                  <Cell key={d.date} fill={d.isToday ? '#86efac' : '#22c55e'} fillOpacity={d.isToday ? 0.55 : 1} />
+                ))}
+              </Bar>
+            </BarChart>
           </ResponsiveContainer>
         </div>
       </div>

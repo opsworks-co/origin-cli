@@ -67,6 +67,55 @@ export function getRepoCommits(id: string, branch?: string) {
   return request<any[]>(`/api/repos/${id}/commits${q}`);
 }
 
+export interface RepoFileEntry {
+  path: string;
+  blobSha: string;
+  size: number;
+  totalCommits: number;
+  aiCommits: number;
+  humanCommits: number;
+  aiPct: number;
+  topAgent: { slug: string; name: string; count: number } | null;
+  topUser: { id: string; name: string; email: string | null } | null;
+  sessionCount: number;
+  lastCommittedAt: string | null;
+  lastSha: string | null;
+  lastMessage: string;
+  lastAuthor: string;
+}
+
+export function getRepoFiles(id: string, branch?: string) {
+  const q = branch ? `?branch=${encodeURIComponent(branch)}` : '';
+  return request<{ files: RepoFileEntry[]; totalFiles: number; ref: string; truncated: boolean }>(
+    `/api/repos/${id}/files${q}`,
+  );
+}
+
+export interface RepoFileLine {
+  lineNumber: number;
+  content: string;
+  sha: string | null;
+  isAi: boolean;
+  agentSlug: string | null;
+  agentName: string | null;
+  userName: string | null;
+  sessionId: string | null;
+}
+
+export interface RepoFileBlame {
+  path: string;
+  ref: string;
+  size: number;
+  lineCount: number;
+  lines: RepoFileLine[];
+}
+
+export function getRepoFile(id: string, path: string, ref?: string) {
+  const params = new URLSearchParams({ path });
+  if (ref) params.set('ref', ref);
+  return request<RepoFileBlame>(`/api/repos/${id}/file?${params.toString()}`);
+}
+
 export function getRepoBranches(id: string) {
   return request<{ branches: string[] }>(`/api/repos/${id}/branches`);
 }

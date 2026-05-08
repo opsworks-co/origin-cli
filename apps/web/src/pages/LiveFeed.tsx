@@ -892,7 +892,7 @@ export default function LiveFeed() {
           <h2 className="text-lg font-semibold text-gray-300 mb-2">Waiting for sessions...</h2>
           <p className="text-sm text-gray-500 max-w-md mx-auto">
             Start an AI coding agent in a project with{' '}
-            <code className="text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded text-xs">origin init</code>.
+            <code className="text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded text-xs">origin enable</code>.
             Prompts, file changes, and commits will appear here in real time.
           </p>
         </div>

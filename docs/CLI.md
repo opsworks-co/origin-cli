@@ -109,14 +109,14 @@ origin login --profile team  # team account (secondary)
 
 ---
 
-### `origin init`
+### `origin enable`
 
 Initialize Origin on this machine. Auto-detects installed AI tools, registers the machine, and installs global hooks.
 
 ```bash
-origin init
-origin init --standalone
-origin init --no-hooks
+origin enable
+origin enable --standalone
+origin enable --no-hooks
 ```
 
 | Flag | Description |
@@ -890,7 +890,7 @@ Kebab-case aliases are accepted (e.g., `commit-linking` for `commitLinking`).
 **Entering standalone mode:**
 
 ```bash
-origin init --standalone                   # At setup time
+origin enable --standalone                   # At setup time
 origin config set mode standalone          # Switch anytime (skip all API calls, everything local)
 ```
 
@@ -1604,7 +1604,7 @@ Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, JWTs, dat
 | Command | Description |
 |---------|-------------|
 | `origin login` | Authenticate with Origin |
-| `origin init` | Initialize + install hooks |
+| `origin enable` | Initialize + install hooks |
 | `origin enable` | Install hooks (--global, --agent) |
 | `origin disable` | Remove hooks (--global) |
 | `origin link [slug]` | Link repo to agent |

@@ -54,7 +54,7 @@ export default function McpSection() {
             <ul className="space-y-2 mb-4">
               <Li>Origin CLI installed globally (<code className="text-indigo-400">npm i -g ${window.location.origin}/cli/origin-cli-latest.tgz</code>)</Li>
               <Li>Authenticated via <code className="text-indigo-400">origin login</code></Li>
-              <Li>Machine registered via <code className="text-indigo-400">origin init</code></Li>
+              <Li>Machine registered via <code className="text-indigo-400">origin enable</code></Li>
             </ul>
 
             <H3>Resources</H3>

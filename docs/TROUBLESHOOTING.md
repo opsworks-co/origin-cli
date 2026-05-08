@@ -97,7 +97,7 @@ The Machines page in the dashboard shows no registered machines.
 ### Register your machine
 
 ```bash
-origin init
+origin enable
 ```
 
 This detects installed AI agents and registers the machine with your Origin org.
@@ -130,7 +130,7 @@ To get cost tracking, switch to connected mode:
 
 ```bash
 origin login
-origin init
+origin enable
 ```
 
 ### Connected mode — agent doesn't report cost

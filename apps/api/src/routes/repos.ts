@@ -32,6 +32,23 @@ const router = Router();
 router.use(requireAuth);
 router.use(resolveOrgContext);
 
+// Map a refs/notes/origin payload's `agent` slug (and optional `model`) to
+// the same display name the CLI's prepare-commit-msg trailer uses. Mirrors
+// resolveAgentDisplayName in packages/cli/src/commands/hooks.ts so the web
+// blame view labels lines the same way regardless of whether attribution
+// came from our DB or the on-repo note.
+function resolveAgentDisplayFromNote(o: { agent?: unknown; model?: unknown }): string | undefined {
+  const m = `${typeof o.agent === 'string' ? o.agent : ''} ${typeof o.model === 'string' ? o.model : ''}`.toLowerCase();
+  if (!m.trim()) return undefined;
+  if (m.includes('copilot')) return 'Copilot';
+  if (m.includes('codex')) return 'Codex CLI';
+  if (m.includes('gemini')) return 'Gemini CLI';
+  if (m.includes('cursor')) return 'Cursor';
+  if (m.includes('claude') || m.includes('sonnet') || m.includes('opus') || m.includes('haiku')) return 'Claude Code';
+  if (m.includes('gpt') || m.includes('o1-') || m.includes('o3-') || m.includes('o4-')) return 'AI';
+  return typeof o.agent === 'string' ? o.agent : undefined;
+}
+
 // GET / — list repos for org. For non-privileged users (MEMBER/VIEWER),
 // the list is filtered to repos they have an explicit RepoMember row for.
 // OWNER/ADMIN get the full list (readableRepoIds returns null).
@@ -1349,6 +1366,583 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
     res.json(mapped);
   } catch (err) {
     console.error('List commits error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:id/files — file directory view with per-file attribution.
+//
+// File existence is sourced from GitHub's tree API (the ground truth —
+// "what files are actually in this repo right now"). Attribution is then
+// merged in from our local Commit rows: per-path commit count, dominant
+// agent, top contributor, sessions touched. Files that exist on the
+// remote but have zero local activity still appear (with empty
+// attribution). Files in our DB that no longer exist on the remote drop
+// out — fixes the stale local-only-session ghost-file problem.
+router.get('/:id/files', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const repo = await prisma.repo.findFirst({
+      where: { id, orgId: req.activeOrgId! },
+    });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+    if (repo.provider !== 'github') {
+      return res.status(400).json({ error: 'Files view currently supports GitHub repos only' });
+    }
+    const parsed = parseRepoFullName(repo.path);
+    if (!parsed) return res.status(400).json({ error: 'Unable to parse repo path' });
+
+    const config = await getIntegrationConfig(req.activeOrgId!, 'github');
+    if (!config?.token) {
+      return res.status(503).json({ error: 'GitHub integration not configured for this org' });
+    }
+    const apiBase = config.apiBaseUrl || 'https://api.github.com';
+    const ghHeaders: Record<string, string> = {
+      'Authorization': `Bearer ${config.token}`,
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'origin',
+    };
+
+    // Resolve which ref to walk:
+    //   • explicit ?branch — use that
+    //   • else — repo's default branch (GET /repos/{owner}/{repo})
+    let ref: string = ((req.query.branch as string | undefined)?.trim() || '');
+    if (!ref) {
+      const repoResp = await fetch(`${apiBase}/repos/${parsed.owner}/${parsed.repo}`, { headers: ghHeaders });
+      if (!repoResp.ok) {
+        const t = await repoResp.text();
+        console.error('[files] repo lookup failed', repoResp.status, t.slice(0, 200));
+        return res.status(502).json({ error: `GitHub repo lookup failed (${repoResp.status})` });
+      }
+      const repoJson = await repoResp.json();
+      ref = repoJson?.default_branch || 'main';
+    }
+
+    // Fetch the recursive tree. GitHub returns up to ~100k entries per
+    // call; on monorepos that exceed this, the response is flagged with
+    // `truncated: true` and we surface the warning to the client.
+    const treeResp = await fetch(`${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`, { headers: ghHeaders });
+    if (!treeResp.ok) {
+      const t = await treeResp.text();
+      console.error('[files] tree fetch failed', treeResp.status, t.slice(0, 200));
+      return res.status(502).json({ error: `GitHub tree fetch failed (${treeResp.status})` });
+    }
+    const treeJson = await treeResp.json();
+    interface TreeEntry { path: string; type: 'blob' | 'tree' | 'commit'; sha: string; size?: number }
+    const blobs: TreeEntry[] = (treeJson?.tree || []).filter((e: any) => e?.type === 'blob' && typeof e?.path === 'string');
+    const truncated = !!treeJson?.truncated;
+
+    // ── Local attribution ────────────────────────────────────────────────
+    const where: any = { repoId: id };
+    if (req.query.branch) where.branch = req.query.branch as string;
+    const commitSelect = {
+      id: true,
+      sha: true,
+      message: true,
+      author: true,
+      committedAt: true,
+      filesChanged: true,
+      aiToolDetected: true,
+      session: {
+        select: {
+          id: true,
+          agent: { select: { slug: true, name: true } },
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
+      codingSession: {
+        select: {
+          id: true,
+          agent: { select: { slug: true, name: true } },
+          user: { select: { id: true, name: true, email: true } },
+        },
+      },
+    };
+    let rawCommits = await prisma.commit.findMany({
+      where,
+      select: commitSelect,
+      orderBy: { committedAt: 'desc' },
+      take: 2000,
+    });
+
+    // ── Self-healing inline backfill ────────────────────────────────────
+    // The dominant cause of "header says 52% AI but every file shows 0%"
+    // is commits whose `filesChanged` was never populated at ingest time
+    // (older webhook path, non-CLI commits, force-pushed branches, etc.).
+    // Without per-commit file paths, the per-path aggregation has nothing
+    // to attribute. Fix it on read: any commit that's flagged AI but has
+    // an empty file list gets its files fetched from GitHub right here,
+    // capped at 50 per request to bound rate-limit burn. Idempotent —
+    // once filled, future calls skip these rows.
+    const stale = rawCommits.filter((c) => {
+      const isAi = !!c.aiToolDetected || !!c.session || !!c.codingSession;
+      const empty = !c.filesChanged || c.filesChanged === '[]';
+      return isAi && empty;
+    }).slice(0, 50);
+    if (stale.length > 0) {
+      await Promise.all(stale.map(async (c) => {
+        try {
+          const r = await fetch(
+            `${apiBase}/repos/${parsed.owner}/${parsed.repo}/commits/${c.sha}`,
+            { headers: ghHeaders },
+          );
+          if (!r.ok) return;
+          const data = await r.json() as any;
+          const filenames: string[] = [];
+          let additions = 0;
+          let deletions = 0;
+          for (const f of (data.files || [])) {
+            if (typeof f?.filename === 'string') filenames.push(f.filename);
+            additions += f?.additions || 0;
+            deletions += f?.deletions || 0;
+          }
+          if (filenames.length === 0) return;
+          await prisma.commit.update({
+            where: { id: c.id },
+            data: {
+              filesChanged: JSON.stringify(filenames),
+              fileCount: filenames.length,
+              additions,
+              deletions,
+            },
+          });
+        } catch { /* per-commit best-effort — don't block /files */ }
+      }));
+      // Re-read the rows we just patched so the aggregator sees fresh data.
+      rawCommits = await prisma.commit.findMany({
+        where,
+        select: commitSelect,
+        orderBy: { committedAt: 'desc' },
+        take: 2000,
+      });
+    }
+
+    interface FileAgg {
+      totalCommits: number;
+      aiCommits: number;
+      humanCommits: number;
+      lastCommittedAt: string;
+      lastSha: string;
+      lastMessage: string;
+      lastAuthor: string;
+      agentTally: Map<string, { slug: string; name: string; count: number }>;
+      userTally: Map<string, { id: string; name: string; email: string | null; count: number }>;
+      sessionIds: Set<string>;
+    }
+    const aggByPath = new Map<string, FileAgg>();
+    for (const c of rawCommits) {
+      if (isGitNotesMetadataCommit(c.message)) continue;
+      let files: string[] = [];
+      try {
+        files = JSON.parse(c.filesChanged || '[]');
+        if (!Array.isArray(files)) files = [];
+      } catch { /* skip bad JSON */ }
+      if (files.length === 0) continue;
+
+      const sess = c.session || c.codingSession || null;
+      const isAi = !!sess || !!c.aiToolDetected;
+      const agentSlug = sess?.agent?.slug || c.aiToolDetected || (isAi ? 'ai' : null);
+      const agentName = sess?.agent?.name || c.aiToolDetected || (isAi ? 'AI' : null);
+
+      for (const p of files) {
+        let agg = aggByPath.get(p);
+        if (!agg) {
+          agg = {
+            totalCommits: 0,
+            aiCommits: 0,
+            humanCommits: 0,
+            lastCommittedAt: c.committedAt.toISOString(),
+            lastSha: c.sha,
+            lastMessage: (c.message || '').split('\n')[0].slice(0, 200),
+            lastAuthor: c.author || 'unknown',
+            agentTally: new Map(),
+            userTally: new Map(),
+            sessionIds: new Set(),
+          };
+          aggByPath.set(p, agg);
+        }
+        agg.totalCommits++;
+        if (isAi) agg.aiCommits++;
+        else agg.humanCommits++;
+        if (agentSlug && agentName) {
+          const cur = agg.agentTally.get(agentSlug) || { slug: agentSlug, name: agentName, count: 0 };
+          cur.count++;
+          agg.agentTally.set(agentSlug, cur);
+        }
+        const u = sess?.user;
+        if (u?.id) {
+          const cur = agg.userTally.get(u.id) || { id: u.id, name: u.name, email: u.email, count: 0 };
+          cur.count++;
+          agg.userTally.set(u.id, cur);
+        }
+        if (sess?.id) agg.sessionIds.add(sess.id);
+      }
+    }
+
+    // ── Merge: tree drives existence, agg drives attribution ────────────
+    const files = blobs.map((b) => {
+      const a = aggByPath.get(b.path);
+      const topAgent = a ? Array.from(a.agentTally.values()).sort((x, y) => y.count - x.count)[0] || null : null;
+      const topUser = a ? Array.from(a.userTally.values()).sort((x, y) => y.count - x.count)[0] || null : null;
+      return {
+        path: b.path,
+        // Pin to the file's blob SHA so the /file endpoint hits the right
+        // ref even when the path was renamed since the last commit. Falls
+        // back to the branch ref otherwise.
+        blobSha: b.sha,
+        size: b.size ?? 0,
+        totalCommits: a?.totalCommits ?? 0,
+        aiCommits: a?.aiCommits ?? 0,
+        humanCommits: a?.humanCommits ?? 0,
+        aiPct: a && a.totalCommits > 0 ? Math.round((a.aiCommits / a.totalCommits) * 100) : 0,
+        topAgent,
+        topUser: topUser ? { id: topUser.id, name: topUser.name, email: topUser.email } : null,
+        sessionCount: a?.sessionIds.size ?? 0,
+        lastCommittedAt: a?.lastCommittedAt ?? null,
+        lastSha: a?.lastSha ?? null,
+        lastMessage: a?.lastMessage ?? '',
+        lastAuthor: a?.lastAuthor ?? '',
+      };
+    }).sort((a, b) => a.path.localeCompare(b.path));
+
+    res.json({ files, totalFiles: files.length, ref, truncated });
+  } catch (err) {
+    console.error('List repo files error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /:id/file?path=<path>&ref=<branch-or-sha> — file contents + per-line
+// authorship for the Files tree drilldown. Pulls blame ranges from GitHub
+// GraphQL and joins them against our local Commit rows so each line carries
+// the originating agent / user / session.
+router.get('/:id/file', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const filePath = (req.query.path as string | undefined)?.trim();
+    const requestedRef = (req.query.ref as string | undefined)?.trim();
+    if (!filePath) return res.status(400).json({ error: 'path query param required' });
+
+    const repo = await prisma.repo.findFirst({
+      where: { id, orgId: req.activeOrgId! },
+    });
+    if (!repo) return res.status(404).json({ error: 'Repo not found' });
+    if (repo.provider !== 'github') {
+      return res.status(400).json({ error: 'File view currently supports GitHub repos only' });
+    }
+    const parsed = parseRepoFullName(repo.path);
+    if (!parsed) return res.status(400).json({ error: 'Unable to parse repo path' });
+
+    const config = await getIntegrationConfig(req.activeOrgId!, 'github');
+    if (!config?.token) {
+      return res.status(503).json({ error: 'GitHub integration not configured for this org' });
+    }
+    const apiBase = config.apiBaseUrl || 'https://api.github.com';
+    const authHeader = `Bearer ${config.token}`;
+
+    // ── Build a list of refs to try, in priority order ──────────────────
+    // The frontend pins lastSha (most recent commit-that-touched-this-file
+    // in our DB), but that SHA can be a local-only commit that never
+    // landed on the remote — fall through to the branches we've seen the
+    // file on, then to the repo's default branch (HEAD).
+    const candidateRefs: string[] = [];
+    if (requestedRef) candidateRefs.push(requestedRef);
+    // Pull every branch our DB has recorded for commits that touched this
+    // path. Cheap query — small index on (repoId, sha), filesChanged is a
+    // small JSON column.
+    const localCommitsForPath = await prisma.commit.findMany({
+      where: { repoId: id, filesChanged: { contains: JSON.stringify(filePath).slice(1, -1) } },
+      select: { branch: true },
+      take: 50,
+    });
+    const seenBranches = new Set<string>();
+    for (const c of localCommitsForPath) {
+      if (c.branch && !seenBranches.has(c.branch) && !candidateRefs.includes(c.branch)) {
+        seenBranches.add(c.branch);
+        candidateRefs.push(c.branch);
+      }
+    }
+    if (!candidateRefs.includes('HEAD')) candidateRefs.push('HEAD');
+
+    // ── Fetch raw file contents — first ref that 200s wins ──────────────
+    let contentsJson: any = null;
+    let usedRef: string = candidateRefs[0];
+    let lastStatus = 0;
+    for (const ref of candidateRefs) {
+      const contentsUrl = `${apiBase}/repos/${parsed.owner}/${parsed.repo}/contents/${encodeURIComponent(filePath).replace(/%2F/g, '/')}?ref=${encodeURIComponent(ref)}`;
+      const resp = await fetch(contentsUrl, {
+        headers: {
+          'Authorization': authHeader,
+          'Accept': 'application/vnd.github+json',
+          'User-Agent': 'origin',
+        },
+      });
+      lastStatus = resp.status;
+      if (resp.status === 404) continue;
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error('[file] contents fetch failed', resp.status, errText.slice(0, 200));
+        return res.status(502).json({ error: `GitHub contents fetch failed (${resp.status})` });
+      }
+      const json = await resp.json();
+      if (Array.isArray(json) || json.type !== 'file') {
+        return res.status(400).json({ error: 'Path does not point at a file' });
+      }
+      contentsJson = json;
+      usedRef = ref;
+      break;
+    }
+    if (!contentsJson) {
+      return res.status(404).json({
+        error: 'File not on the remote',
+        message:
+          'Origin tracked this file from session history, but it isn’t on GitHub at any of the refs we’ve seen for it. ' +
+          'Most often this means a session committed locally and never pushed (e.g. a fall-back from a blocked policy), ' +
+          'or the branch was force-pushed/deleted upstream.',
+        triedRefs: candidateRefs,
+      });
+    }
+    if (typeof contentsJson.size === 'number' && contentsJson.size > 1024 * 1024) {
+      return res.status(413).json({ error: 'File exceeds 1MB blame limit' });
+    }
+    let raw = '';
+    try {
+      raw = Buffer.from(contentsJson.content || '', 'base64').toString('utf-8');
+    } catch {
+      return res.status(500).json({ error: 'Failed to decode file contents' });
+    }
+    const lines = raw.split(/\r?\n/);
+    const ref = usedRef;
+
+    // ── Fetch blame via GraphQL ─────────────────────────────────────────
+    // GraphQL `blame(path:)` returns ranges per author/commit, which is
+    // dramatically cheaper than reconstructing line-by-line history. We
+    // walk the ranges once, expand them into a per-line array, then enrich
+    // each line with our local Commit/CodingSession data.
+    const graphqlQuery = `
+      query($owner:String!, $name:String!, $expr:String!, $path:String!) {
+        repository(owner:$owner, name:$name) {
+          object(expression:$expr) {
+            ... on Commit {
+              blame(path:$path) {
+                ranges {
+                  startingLine
+                  endingLine
+                  commit { oid author { name email } }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const blameResp = await fetch(`${apiBase}/graphql`, {
+      method: 'POST',
+      headers: {
+        'Authorization': authHeader,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'origin',
+      },
+      body: JSON.stringify({
+        query: graphqlQuery,
+        variables: { owner: parsed.owner, name: parsed.repo, expr: ref, path: filePath },
+      }),
+    });
+    let ranges: Array<{ startingLine: number; endingLine: number; sha: string; authorName?: string }> = [];
+    if (blameResp.ok) {
+      const blameJson = await blameResp.json();
+      const rawRanges = blameJson?.data?.repository?.object?.blame?.ranges as any[] | undefined;
+      if (Array.isArray(rawRanges)) {
+        ranges = rawRanges.map((r) => ({
+          startingLine: r.startingLine,
+          endingLine: r.endingLine,
+          sha: r.commit?.oid,
+          authorName: r.commit?.author?.name,
+        })).filter((r) => r.sha);
+      }
+    } else {
+      console.warn('[file] blame fetch failed', blameResp.status);
+    }
+
+    // Resolve commit metadata locally — agent, user, session — for any
+    // SHA the blame returns. Lines whose SHA we don't have locally fall
+    // back to {isAi: false, agent: null} unless we can hydrate from a
+    // refs/notes/origin git note (fallback below).
+    const shas = Array.from(new Set(ranges.map((r) => r.sha)));
+    const localCommits = shas.length === 0 ? [] : await prisma.commit.findMany({
+      where: { repoId: id, sha: { in: shas } },
+      select: {
+        sha: true,
+        aiToolDetected: true,
+        author: true,
+        session: {
+          select: {
+            id: true,
+            agent: { select: { slug: true, name: true } },
+            user: { select: { id: true, name: true } },
+          },
+        },
+        codingSession: {
+          select: {
+            id: true,
+            agent: { select: { slug: true, name: true } },
+            user: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+    const commitBySha = new Map<string, typeof localCommits[number]>();
+    for (const c of localCommits) commitBySha.set(c.sha, c);
+
+    // ── refs/notes/origin fallback ─────────────────────────────────────
+    // For SHAs we don't have in our DB (cloned-in repo, commits made by
+    // another team before they joined this org, etc.), pull the Origin
+    // git note from GitHub. The note carries the same {sessionId, agent,
+    // model, ...} payload the CLI writes — that's the durable on-repo
+    // attribution we already advertise as "travels with the repo".
+    //
+    // One tree fetch + N blob fetches per request, capped to 50 unknowns
+    // so a touchy file (lots of one-line authors) can't fan out the
+    // GitHub rate limit. The 200s of unique SHAs case is rare in practice.
+    interface NoteAttribution {
+      sessionId?: string;
+      agentSlug?: string;
+      agentName?: string;
+      model?: string;
+    }
+    const noteBySha = new Map<string, NoteAttribution>();
+    const unknownShas = shas.filter((s) => !commitBySha.has(s));
+    if (unknownShas.length > 0) {
+      try {
+        const refResp = await fetch(
+          `${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/refs/notes/origin`,
+          { headers: { 'Authorization': authHeader, 'Accept': 'application/vnd.github+json', 'User-Agent': 'origin' } },
+        );
+        if (refResp.ok) {
+          const refData = await refResp.json() as { object?: { sha?: string } };
+          const noteCommitSha = refData.object?.sha;
+          if (noteCommitSha) {
+            const commitResp = await fetch(
+              `${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/commits/${noteCommitSha}`,
+              { headers: { 'Authorization': authHeader, 'Accept': 'application/vnd.github+json', 'User-Agent': 'origin' } },
+            );
+            if (commitResp.ok) {
+              const commitData = await commitResp.json() as { tree?: { sha?: string } };
+              const treeSha = commitData.tree?.sha;
+              if (treeSha) {
+                const treeResp = await fetch(
+                  `${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/trees/${treeSha}?recursive=1`,
+                  { headers: { 'Authorization': authHeader, 'Accept': 'application/vnd.github+json', 'User-Agent': 'origin' } },
+                );
+                if (treeResp.ok) {
+                  const treeData = await treeResp.json() as { tree?: any[] };
+                  // git-notes path layout is either flat (`<sha>`) or
+                  // fanned (`<sha[:2]>/<sha[2:]>`) depending on note count.
+                  // Normalize both into a sha→blobSha map.
+                  const noteBlobBySha = new Map<string, string>();
+                  for (const e of (treeData.tree || [])) {
+                    if (e?.type !== 'blob' || typeof e?.path !== 'string' || !e?.sha) continue;
+                    const flat = e.path.toLowerCase();
+                    if (/^[a-f0-9]{40}$/.test(flat)) {
+                      noteBlobBySha.set(flat, e.sha);
+                    } else if (/^[a-f0-9]{2}\/[a-f0-9]{38}$/.test(flat)) {
+                      noteBlobBySha.set(flat.replace('/', ''), e.sha);
+                    }
+                  }
+                  // Fetch matching blobs in parallel, cap at 50 to bound
+                  // GitHub API spend per request.
+                  const targets = unknownShas
+                    .map((s) => ({ sha: s, blobSha: noteBlobBySha.get(s.toLowerCase()) }))
+                    .filter((t): t is { sha: string; blobSha: string } => !!t.blobSha)
+                    .slice(0, 50);
+                  await Promise.all(targets.map(async (t) => {
+                    try {
+                      const blobResp = await fetch(
+                        `${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/blobs/${t.blobSha}`,
+                        { headers: { 'Authorization': authHeader, 'Accept': 'application/vnd.github+json', 'User-Agent': 'origin' } },
+                      );
+                      if (!blobResp.ok) return;
+                      const blobJson = await blobResp.json() as { content?: string; encoding?: string };
+                      if (!blobJson.content) return;
+                      const text = Buffer.from(blobJson.content, (blobJson.encoding as BufferEncoding) || 'base64').toString('utf-8');
+                      let noteJson: any = null;
+                      try { noteJson = JSON.parse(text); } catch { return; }
+                      const o = noteJson?.origin;
+                      if (!o) return;
+                      noteBySha.set(t.sha, {
+                        sessionId: typeof o.sessionId === 'string' ? o.sessionId : undefined,
+                        agentSlug: typeof o.agent === 'string' ? o.agent : undefined,
+                        agentName: resolveAgentDisplayFromNote(o),
+                        model: typeof o.model === 'string' ? o.model : undefined,
+                      });
+                    } catch { /* per-blob best-effort */ }
+                  }));
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        // Notes fallback is best-effort — keep blame rendering even when
+        // GitHub git-refs API is rate-limited or the ref doesn't exist.
+        console.warn('[file] notes fallback failed:', (err as any)?.message);
+      }
+    }
+
+    // Build per-line attribution. lines.length is from the file contents;
+    // ranges from GraphQL. A trailing newline can produce an extra empty
+    // line — tolerate by falling off the end gracefully.
+    const lineAttr: Array<{
+      sha: string | null;
+      isAi: boolean;
+      agentSlug: string | null;
+      agentName: string | null;
+      userName: string | null;
+      sessionId: string | null;
+    }> = new Array(lines.length).fill(null).map(() => ({
+      sha: null, isAi: false, agentSlug: null, agentName: null, userName: null, sessionId: null,
+    }));
+    for (const r of ranges) {
+      const dbCommit = commitBySha.get(r.sha);
+      const sess = dbCommit?.session || dbCommit?.codingSession;
+      const aiToolDetected = dbCommit?.aiToolDetected;
+      const note = noteBySha.get(r.sha);
+      // DB session/agent wins; refs/notes/origin fills in for SHAs we
+      // never ingested locally (other team's commits, pre-Origin history).
+      const isAi = !!sess || !!aiToolDetected || !!note;
+      const agentSlug = sess?.agent?.slug || aiToolDetected || note?.agentSlug || (isAi ? 'ai' : null);
+      const agentName = sess?.agent?.name || aiToolDetected || note?.agentName || (isAi ? 'AI' : null);
+      const userName = sess?.user?.name || r.authorName || dbCommit?.author || null;
+      const sessionId = sess?.id || note?.sessionId || null;
+      const start = Math.max(1, r.startingLine);
+      const end = Math.min(lines.length, r.endingLine);
+      for (let i = start; i <= end; i++) {
+        lineAttr[i - 1] = {
+          sha: r.sha,
+          isAi,
+          agentSlug,
+          agentName,
+          userName,
+          sessionId,
+        };
+      }
+    }
+
+    res.json({
+      path: filePath,
+      ref,
+      size: contentsJson.size ?? raw.length,
+      lineCount: lines.length,
+      // Encode as JSON-safe strings; the client renders <pre> with each line
+      lines: lines.map((content, i) => ({
+        lineNumber: i + 1,
+        content,
+        ...lineAttr[i],
+      })),
+    });
+  } catch (err) {
+    console.error('Get repo file error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

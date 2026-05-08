@@ -16,7 +16,7 @@ interface EmptyStateProps {
  *   <EmptyState
  *     icon={<InboxIcon />}
  *     title="No sessions yet"
- *     description="Run origin init in any repo to start tracking."
+ *     description="Run origin enable in any repo to start tracking."
  *     action={<Link to="/docs" className="...">Setup guide</Link>}
  *   />
  */

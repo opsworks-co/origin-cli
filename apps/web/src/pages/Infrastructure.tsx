@@ -208,7 +208,7 @@ function formatAuditEntry(entry: AuditEntry): AuditDisplay {
 
 // Inline copyable command — the empty state needs to make it clear that
 // starting a Claude/Cursor/Codex session does NOT register a machine; only
-// `origin init` does. This is the most common confusion on first run.
+// `origin enable` does. This is the most common confusion on first run.
 function CopyableCommand({ cmd }: { cmd: string }) {
   const [copied, setCopied] = useState(false);
   const onCopy = () => {
@@ -393,7 +393,7 @@ export default function Infrastructure() {
                 Run this on each developer machine to install hooks and connect it to your org:
               </p>
             </div>
-            <CopyableCommand cmd="origin init" />
+            <CopyableCommand cmd="origin enable" />
             <p className="text-[11px] text-gray-600">
               Already ran it and no machine appears? Check that <code className="text-gray-400 bg-gray-900 px-1 rounded">origin login</code> succeeded and your API key has write access.
             </p>
@@ -487,7 +487,7 @@ export default function Infrastructure() {
                 so users know how to scale beyond their first registration. */}
             <div className="flex items-center gap-3 px-5 py-2.5 text-[11px] text-gray-500">
               <span className="text-gray-600">Add another machine:</span>
-              <CopyableCommand cmd="origin init" />
+              <CopyableCommand cmd="origin enable" />
             </div>
           </div>
         )}

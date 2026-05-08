@@ -56,7 +56,7 @@ Sessions on team repos appear in both dashboards. Personal repos only appear in 
 ## Step 3: Initialize your machine
 
 ```bash
-origin init
+origin enable
 ```
 
 This does four things:
@@ -67,7 +67,7 @@ This does four things:
 
 That's it — one command. Origin now captures every AI coding session automatically — prompts, file changes, token usage, and costs.
 
-> **Tip:** Use `origin init --no-hooks` if you want to skip automatic hook installation and configure them manually later with `origin enable`.
+> **Tip:** Use `origin enable --no-hooks` if you want to skip automatic hook installation and configure them manually later with `origin enable`.
 
 ---
 
@@ -164,7 +164,7 @@ See [POLICIES.md](./POLICIES.md) for the full policy reference.
 Register your AI agents in **Agents > Add Agent** to track usage per agent and apply agent-specific policies. See [AGENT_SETUP.md](./AGENT_SETUP.md) for per-agent instructions.
 
 ### Invite your team
-Go to **Settings > Team** to invite other developers. Each person installs the CLI on their machine and runs `origin login` + `origin init`.
+Go to **Settings > Team** to invite other developers. Each person installs the CLI on their machine and runs `origin login` + `origin enable`.
 
 ---
 
@@ -174,7 +174,7 @@ Go to **Settings > Team** to invite other developers. Each person installs the C
 |------|---------|
 | Install CLI | `npm i -g https://getorigin.io/cli/origin-cli-latest.tgz` |
 | Log in | `origin login` |
-| Initialize machine | `origin init` |
+| Initialize machine | `origin enable` |
 | List sessions | `origin sessions` |
 | View session detail | `origin session <id>` |
 | Git log with AI info | `origin log` |

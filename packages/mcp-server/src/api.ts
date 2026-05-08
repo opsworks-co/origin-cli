@@ -2,7 +2,7 @@ import { loadConfig } from './config.js';
 
 export async function originRequest(path: string, opts: RequestInit = {}) {
   const config = loadConfig();
-  if (!config) throw new Error('Origin not configured. Run: origin login && origin init');
+  if (!config) throw new Error('Origin not configured. Run: origin login && origin enable');
 
   const res = await fetch(`${config.apiUrl}${path}`, {
     ...opts,
@@ -28,8 +28,54 @@ export async function startSession(data: { machineId: string; prompt: string; mo
   return originRequest('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) });
 }
 
-export async function endSession(data: { sessionId: string; summary: string; tokensUsed: number; toolCalls: number; linesAdded?: number; linesRemoved?: number; costUsd?: number; filesChanged?: string; durationMs?: number }) {
+export async function endSession(data: {
+  sessionId: string;
+  summary: string;
+  tokensUsed: number;
+  toolCalls: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  costUsd?: number;
+  filesChanged?: string;
+  durationMs?: number;
+  // Full conversation transcript — JSON string of [{role, content}, …]. Without
+  // this the Session tab only shows the synthesized prompt-only fallback,
+  // which is why MCP-driven Gemini sessions historically rendered as a
+  // single user prompt + diff with no assistant text.
+  transcript?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}) {
   return originRequest('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(data) });
+}
+
+// PATCH /session/:id — incremental update during an active session. Use this
+// to stream transcript additions, token counts, and file changes mid-flight
+// so the dashboard shows live state instead of waiting for end_session.
+export async function updateSession(sessionId: string, data: {
+  prompt?: string;
+  transcript?: string;
+  filesChanged?: string[];
+  tokensUsed?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  toolCalls?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  model?: string;
+  durationMs?: number;
+  costUsd?: number;
+  branch?: string;
+  status?: string;
+}) {
+  return originRequest(`/api/mcp/session/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
 }
 
 export async function reportViolation(data: { machineId: string; policyId: string; description: string; filepath: string }) {

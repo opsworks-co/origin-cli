@@ -99,7 +99,7 @@ Each developer needs:
 ```bash
 curl -fsSL https://getorigin.io/install.sh | sh
 origin login
-origin init
+origin enable
 origin enable   # install hooks in their repo
 ```
 

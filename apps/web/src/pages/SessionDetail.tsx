@@ -7,10 +7,10 @@ import UnifiedSessionView from '../components/UnifiedSessionView';
 import AiBlameView from '../components/AiBlameView';
 import AskAuthorPanel from '../components/AskAuthorPanel';
 import TurnTimeline from '../components/TurnTimeline';
-import { formatCost, formatDuration, getStatusBadgeClass } from '../utils';
+import { formatCost, formatDuration, getStatusBadgeClass, timeAgo } from '../utils';
+import { ChevronDown, Shield, Target, Sparkles, DollarSign, AlertTriangle, Lightbulb, Check, X as XIcon, Flag } from 'lucide-react';
 import { safeHref } from '../utils/safe-url';
 import { useToast } from '../components/Toast';
-import { Sparkles, Check, X as XIcon, Flag } from 'lucide-react';
 
 function statusBadge(status: string) {
   return <span className={`${getStatusBadgeClass(status)} text-sm`}>{status}</span>;
@@ -882,123 +882,129 @@ export default function SessionDetail() {
       </div>
 
       {/* ── AI Quality Score Card (collapsible) — team only ── */}
-      {!isDev && session.review?.score != null && (
-        <div className={`rounded-lg flex-shrink-0 border ${
-          session.review.score >= 80 ? 'bg-green-900/10 border-green-800/30' :
-          session.review.score >= 50 ? 'bg-amber-900/10 border-amber-800/30' :
-          'bg-red-900/10 border-red-800/30'
-        }`}>
-          <button
-            onClick={() => setReviewExpanded((prev) => !prev)}
-            className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-white/5 transition-colors rounded-lg"
-          >
-            <div className="flex items-center gap-3">
-              <span className={`text-2xl font-bold tabular-nums ${
-                session.review.score >= 80 ? 'text-green-400' :
-                session.review.score >= 50 ? 'text-amber-400' : 'text-red-400'
-              }`}>{session.review.score}</span>
-              <span className="text-xs text-gray-500">AI Score</span>
-              {session.review.riskLevel && (
-                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium uppercase ${
-                  session.review.riskLevel === 'low' ? 'bg-green-500/20 text-green-400' :
-                  session.review.riskLevel === 'medium' ? 'bg-amber-500/20 text-amber-400' :
-                  'bg-red-500/20 text-red-400'
-                }`}>{session.review.riskLevel} risk</span>
-              )}
-              {session.review.concerns && session.review.concerns.length > 0 && (
-                <span className="text-xs text-gray-500">{session.review.concerns.length} concerns</span>
-              )}
-            </div>
-            <span className="text-gray-500 text-xs">{reviewExpanded ? '▲ Collapse' : '▼ Expand'}</span>
-          </button>
-          {reviewExpanded && (
-          <div className="px-5 pb-4">
-          <div className="flex items-start gap-5">
-            {/* Big score number */}
-            <div className="flex-shrink-0 text-center">
-              <div className={`text-4xl font-bold tabular-nums ${
-                session.review.score >= 80 ? 'text-green-400' :
-                session.review.score >= 50 ? 'text-amber-400' : 'text-red-400'
-              }`}>
-                {session.review.score}
+      {!isDev && session.review?.score != null && (() => {
+        const score = session.review.score;
+        const tone = score >= 80 ? 'green' : score >= 50 ? 'amber' : 'red';
+        const toneRing = { green: 'ring-green-500/20', amber: 'ring-amber-500/20', red: 'ring-red-500/20' }[tone];
+        const toneText = { green: 'text-green-400', amber: 'text-amber-400', red: 'text-red-400' }[tone];
+        const risk = session.review.riskLevel;
+        const riskClass =
+          risk === 'low' ? 'bg-green-500/15 text-green-300 ring-green-500/25' :
+          risk === 'medium' ? 'bg-amber-500/15 text-amber-300 ring-amber-500/25' :
+          risk === 'high' ? 'bg-orange-500/15 text-orange-300 ring-orange-500/25' :
+          'bg-red-500/15 text-red-300 ring-red-500/25';
+        const concernCount = session.review.concerns?.length ?? 0;
+        const suggestionCount = session.review.suggestions?.length ?? 0;
+        const categoryMeta: Array<{ key: 'security' | 'scope' | 'quality' | 'cost'; label: string; Icon: typeof Shield }> = [
+          { key: 'security', label: 'Security', Icon: Shield },
+          { key: 'scope',    label: 'Scope',    Icon: Target },
+          { key: 'quality',  label: 'Quality',  Icon: Sparkles },
+          { key: 'cost',     label: 'Cost',     Icon: DollarSign },
+        ];
+        return (
+          <div className="rounded-xl border border-gray-800/80 bg-gradient-to-b from-gray-900/40 to-gray-900/10 overflow-hidden">
+            <button
+              onClick={() => setReviewExpanded((prev) => !prev)}
+              className="w-full px-5 py-3.5 flex items-center justify-between gap-4 text-left hover:bg-white/[0.02] transition-colors"
+            >
+              <div className="flex items-center gap-4 min-w-0">
+                <div className={`flex items-baseline gap-1.5 px-3 py-1.5 rounded-lg bg-gray-950/60 ring-1 ${toneRing}`}>
+                  <span className={`text-2xl font-bold tabular-nums leading-none ${toneText}`}>{score}</span>
+                  <span className="text-[10px] text-gray-500 uppercase tracking-wider">/ 100</span>
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-gray-100">
+                      {session.review.isAutoReview ? 'AI Quality Review' : 'Quality Review'}
+                    </span>
+                    {risk && (
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wider ring-1 ${riskClass}`}>
+                        {risk} risk
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    {concernCount > 0 && <>{concernCount} concern{concernCount !== 1 ? 's' : ''}</>}
+                    {concernCount > 0 && suggestionCount > 0 && ' · '}
+                    {suggestionCount > 0 && <>{suggestionCount} suggestion{suggestionCount !== 1 ? 's' : ''}</>}
+                    {concernCount === 0 && suggestionCount === 0 && 'No issues flagged'}
+                    {session.review.createdAt && <> {' · '} {timeAgo(session.review.createdAt)}</>}
+                  </p>
+                </div>
               </div>
-              <div className="text-[10px] text-gray-500 uppercase tracking-wider mt-0.5">
-                {session.review.isAutoReview ? 'AI Score' : 'Score'}
-              </div>
-            </div>
+              <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform flex-shrink-0 ${reviewExpanded ? 'rotate-180' : ''}`} />
+            </button>
 
-            {/* Category breakdown bars */}
-            {session.review.categories && (
-              <div className="flex-1 grid grid-cols-2 gap-x-6 gap-y-2 min-w-0">
-                {(['security', 'scope', 'quality', 'cost'] as const).map((cat) => {
-                  const val = (session.review!.categories as any)?.[cat] ?? 0;
-                  return (
-                    <div key={cat}>
-                      <div className="flex items-center justify-between mb-0.5">
-                        <span className="text-xs text-gray-400 capitalize">{cat}</span>
-                        <span className={`text-xs font-medium tabular-nums ${
-                          val >= 80 ? 'text-green-400' : val >= 50 ? 'text-amber-400' : 'text-red-400'
-                        }`}>{val}</span>
-                      </div>
-                      <div className="w-full bg-gray-800 rounded-full h-1.5">
-                        <div className={`h-1.5 rounded-full transition-all ${
-                          val >= 80 ? 'bg-green-500/70' : val >= 50 ? 'bg-amber-500/70' : 'bg-red-500/70'
-                        }`} style={{ width: `${val}%` }} />
-                      </div>
+            {reviewExpanded && (
+              <div className="border-t border-gray-800/60 px-5 py-4 grid grid-cols-1 lg:grid-cols-5 gap-5">
+                {session.review.categories && (
+                  <div className="lg:col-span-3 grid grid-cols-2 gap-x-5 gap-y-3.5">
+                    {categoryMeta.map(({ key, label, Icon }) => {
+                      const val = (session.review!.categories as any)?.[key] ?? 0;
+                      const t = val >= 80 ? 'green' : val >= 50 ? 'amber' : 'red';
+                      const txt = { green: 'text-green-400', amber: 'text-amber-400', red: 'text-red-400' }[t];
+                      const fill = { green: 'bg-green-500', amber: 'bg-amber-500', red: 'bg-red-500' }[t];
+                      return (
+                        <div key={key}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="flex items-center gap-1.5 text-xs text-gray-400">
+                              <Icon className="w-3 h-3" />
+                              {label}
+                            </span>
+                            <span className={`text-xs font-semibold tabular-nums ${txt}`}>{val}</span>
+                          </div>
+                          <div className="w-full bg-gray-800/60 rounded-full h-1 overflow-hidden">
+                            <div className={`h-1 rounded-full transition-all ${fill}`} style={{ width: `${val}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="lg:col-span-2 space-y-3 min-w-0">
+                  {session.review.concerns && session.review.concerns.length > 0 && (
+                    <div>
+                      <p className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">
+                        <AlertTriangle className="w-3 h-3 text-amber-400" /> Concerns
+                      </p>
+                      <ul className="space-y-1">
+                        {session.review.concerns.slice(0, 4).map((c: string, i: number) => (
+                          <li key={i} className="text-xs text-gray-300 leading-snug pl-4 -indent-4">
+                            <span className="text-amber-400/70 mr-2">{'›'}</span>{c}
+                          </li>
+                        ))}
+                      </ul>
                     </div>
-                  );
-                })}
+                  )}
+                  {session.review.suggestions && session.review.suggestions.length > 0 && (
+                    <div>
+                      <p className="flex items-center gap-1.5 text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">
+                        <Lightbulb className="w-3 h-3 text-indigo-400" /> Suggestions
+                      </p>
+                      <ul className="space-y-1">
+                        {session.review.suggestions.slice(0, 3).map((s: string, i: number) => (
+                          <li key={i} className="text-xs text-gray-400 leading-snug pl-4 -indent-4">
+                            <span className="text-indigo-400/70 mr-2">{'›'}</span>{s}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {(!session.review.concerns?.length && !session.review.suggestions?.length) && (
+                    <p className="text-xs text-gray-500 italic">No concerns or suggestions from this review.</p>
+                  )}
+                  {!session.review.isAutoReview && session.review.reviewerName && (
+                    <p className="text-[10px] text-gray-600">
+                      Reviewed by {session.review.reviewerName}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
-
-            {/* Concerns & suggestions */}
-            <div className="flex-1 min-w-0 space-y-2">
-              {session.review.concerns && session.review.concerns.length > 0 && (
-                <div>
-                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Concerns</p>
-                  <ul className="space-y-0.5">
-                    {session.review.concerns.slice(0, 4).map((c: string, i: number) => (
-                      <li key={i} className="text-xs text-gray-300 flex items-start gap-1.5">
-                        <span className="text-amber-400 mt-0.5 flex-shrink-0">&#8226;</span>
-                        {c}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {session.review.suggestions && session.review.suggestions.length > 0 && (
-                <div>
-                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Suggestions</p>
-                  <ul className="space-y-0.5">
-                    {session.review.suggestions.slice(0, 3).map((s: string, i: number) => (
-                      <li key={i} className="text-xs text-gray-400 flex items-start gap-1.5">
-                        <span className="text-indigo-400 mt-0.5 flex-shrink-0">&#8250;</span>
-                        {s}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {session.review.riskLevel && (
-                <div className="flex items-center gap-2 mt-1">
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wider ${
-                    session.review.riskLevel === 'low' ? 'bg-green-500/20 text-green-400' :
-                    session.review.riskLevel === 'medium' ? 'bg-amber-500/20 text-amber-400' :
-                    session.review.riskLevel === 'high' ? 'bg-orange-500/20 text-orange-400' :
-                    'bg-red-500/20 text-red-400'
-                  }`}>{session.review.riskLevel} risk</span>
-                  <span className="text-[10px] text-gray-600">
-                    {session.review.isAutoReview ? 'AI review' : `by ${session.review.reviewerName ?? 'unknown'}`}
-                    {session.review.createdAt && ` \u00B7 ${new Date(session.review.createdAt).toLocaleString()}`}
-                  </span>
-                </div>
-              )}
-            </div>
           </div>
-          </div>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── Review Reason Banner (for flagged/rejected without score) — team only ── */}
       {!isDev && session.review && session.review.score == null && ['flagged', 'rejected'].includes(session.review.status?.toLowerCase()) && (

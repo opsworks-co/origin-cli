@@ -7,7 +7,7 @@ export default function CliHooksSection() {
             <h1 id="cli-hooks" className="text-2xl font-bold mb-2">Git Hooks</h1>
             <P>
               Origin uses git hooks to automatically capture session data. Hooks are installed globally
-              by <code className="text-indigo-400">origin init</code> or per-repo by <code className="text-indigo-400">origin enable</code>.
+              by <code className="text-indigo-400">origin enable</code> or per-repo by <code className="text-indigo-400">origin enable</code>.
             </P>
 
             <H2>How Hooks Work</H2>

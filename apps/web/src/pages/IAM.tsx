@@ -985,7 +985,7 @@ export default function IAM() {
                       <span className="leading-relaxed">
                         Enable:{' '}
                         <code className="text-indigo-300 bg-gray-950/60 px-1.5 py-0.5 rounded border border-gray-800">
-                          origin init
+                          origin enable
                         </code>
                       </span>
                     </li>

@@ -1,7 +1,68 @@
-import { useState, useMemo, useRef, useCallback } from 'react';
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import hljs from 'highlight.js/lib/core';
+import javascript from 'highlight.js/lib/languages/javascript';
+import typescript from 'highlight.js/lib/languages/typescript';
+import python from 'highlight.js/lib/languages/python';
+import bash from 'highlight.js/lib/languages/bash';
+import json from 'highlight.js/lib/languages/json';
+import diff from 'highlight.js/lib/languages/diff';
+import xml from 'highlight.js/lib/languages/xml';
+import css from 'highlight.js/lib/languages/css';
+import yaml from 'highlight.js/lib/languages/yaml';
+import 'highlight.js/styles/github-dark.css';
 import type { SessionDiff, PromptChange } from '../api';
 import type { SessionCommit, SessionSnapshot } from '../api/sessions';
+
+// Register only the languages we expect to see in agent transcripts —
+// each language adds ~10KB so we keep the list tight.
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('js', javascript);
+hljs.registerLanguage('jsx', javascript);
+hljs.registerLanguage('typescript', typescript);
+hljs.registerLanguage('ts', typescript);
+hljs.registerLanguage('tsx', typescript);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('py', python);
+hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('sh', bash);
+hljs.registerLanguage('shell', bash);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('diff', diff);
+hljs.registerLanguage('patch', diff);
+hljs.registerLanguage('html', xml);
+hljs.registerLanguage('xml', xml);
+hljs.registerLanguage('css', css);
+hljs.registerLanguage('yaml', yaml);
+hljs.registerLanguage('yml', yaml);
+
+function CodeBlock({ code, lang }: { code: string; lang?: string }) {
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    const language = (lang || '').toLowerCase();
+    try {
+      const result = language && hljs.getLanguage(language)
+        ? hljs.highlight(code, { language, ignoreIllegals: true })
+        : hljs.highlightAuto(code, ['javascript', 'typescript', 'python', 'bash', 'json', 'diff']);
+      ref.current.innerHTML = result.value;
+    } catch {
+      ref.current.textContent = code;
+    }
+  }, [code, lang]);
+  return (
+    <div className="my-2 rounded-md border border-gray-700 overflow-hidden">
+      {lang && (
+        <div className="bg-gray-800 px-3 py-1 text-[10px] text-gray-500 font-mono border-b border-gray-700">
+          {lang}
+        </div>
+      )}
+      <pre className="bg-gray-900/80 px-3 py-2 text-[12px] leading-[1.6] font-mono overflow-x-auto">
+        <code ref={ref} className={`hljs language-${lang || 'plaintext'}`}>{code}</code>
+      </pre>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -196,16 +257,18 @@ function toolCategory(name: string): ToolCategory {
 function ToolCallRow({
   name,
   arg,
+  output,
   swatch,
   structured,
 }: {
   name: string;
   arg: string;
+  output?: string;
   swatch: { border: string; label: string };
   structured?: ToolCallEntry;
 }) {
   const [open, setOpen] = useState(false);
-  const hasDetail = !!structured && (Object.keys(structured.input || {}).length > 0 || !!structured.result);
+  const hasDetail = !!output || (!!structured && (Object.keys(structured.input || {}).length > 0 || !!structured.result));
   // Pick the most readable input field for display — prefer commands/files
   // over arbitrary fields like description.
   const fullInputDisplay = (() => {
@@ -224,12 +287,20 @@ function ToolCallRow({
   return (
     <div className="my-1">
       <div
-        className={`group flex items-baseline gap-2 pl-3 border-l-2 text-[12px] leading-[1.65] font-mono ${
+        className={`group flex items-baseline gap-2 pl-2 border-l-2 text-[12px] leading-[1.65] font-mono ${
           hasDetail ? 'cursor-pointer hover:bg-gray-800/40 rounded-r' : ''
         }`}
         style={{ borderColor: swatch.border }}
         onClick={() => hasDetail && setOpen((v) => !v)}
       >
+        <span
+          className={`text-[10px] w-3 inline-block flex-shrink-0 text-center ${
+            hasDetail ? 'text-gray-500 group-hover:text-gray-300' : 'text-transparent'
+          }`}
+          aria-hidden="true"
+        >
+          {hasDetail ? (open ? '▾' : '▸') : '▸'}
+        </span>
         <span className={`text-[10px] uppercase tracking-wider font-semibold ${swatch.label}`}>
           {name}
         </span>
@@ -238,15 +309,19 @@ function ToolCallRow({
             {arg}
           </span>
         )}
-        {hasDetail && (
-          <span className="ml-auto text-[10px] text-gray-600 group-hover:text-gray-400">
-            {open ? '▾' : '▸'}
-          </span>
-        )}
       </div>
-      {open && structured && (
+      {open && (
         <div className="ml-3 mt-1 mb-2 pl-3 border-l-2 border-gray-800/60 space-y-2">
-          {fullInputDisplay && (
+          {/* Inline args from the parsed transcript (Codex tool calls) */}
+          {!structured && arg && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Input</div>
+              <pre className="text-[11px] leading-[1.5] font-mono text-gray-300 bg-gray-900/60 rounded-md px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all">
+                {arg}
+              </pre>
+            </div>
+          )}
+          {structured && fullInputDisplay && (
             <div>
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Input</div>
               <pre className="text-[11px] leading-[1.5] font-mono text-gray-300 bg-gray-900/60 rounded-md px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all">
@@ -254,13 +329,21 @@ function ToolCallRow({
               </pre>
             </div>
           )}
-          {structured.result && (
+          {structured?.result && (
             <div>
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">
                 Result {structured.resultTruncated && <span className="normal-case text-gray-600">(truncated)</span>}
               </div>
               <pre className="text-[11px] leading-[1.5] font-mono text-gray-400 bg-gray-900/40 rounded-md px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all max-h-72 overflow-y-auto">
                 {structured.result}
+              </pre>
+            </div>
+          )}
+          {output && !structured?.result && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Output</div>
+              <pre className="text-[11px] leading-[1.5] font-mono text-gray-400 bg-gray-900/40 rounded-md px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all max-h-72 overflow-y-auto">
+                {output}
               </pre>
             </div>
           )}
@@ -305,32 +388,155 @@ function FormattedMessage({
       }
       i++; // skip closing ```
       elements.push(
-        <div key={key++} className="my-2 rounded-md border border-gray-700 overflow-hidden">
-          {lang && (
-            <div className="bg-gray-800 px-3 py-1 text-[10px] text-gray-500 font-mono border-b border-gray-700">
-              {lang}
-            </div>
-          )}
-          <pre className="bg-gray-900/80 px-3 py-2 text-[12px] leading-[1.6] font-mono text-gray-300 overflow-x-auto">
-            {codeLines.join('\n')}
-          </pre>
+        <CodeBlock key={key++} code={codeLines.join('\n')} lang={lang || undefined} />,
+      );
+      continue;
+    }
+
+    // Markdown headings: # H1, ## H2, ### H3, #### H4
+    const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const txt = headingMatch[2].trim();
+      const sizeClass = level === 1
+        ? 'text-[15px] font-semibold text-gray-100 mt-3 mb-1'
+        : level === 2
+          ? 'text-[14px] font-semibold text-gray-100 mt-3 mb-1'
+          : level === 3
+            ? 'text-[13px] font-semibold text-gray-200 mt-2 mb-0.5'
+            : 'text-[12px] font-semibold text-gray-300 mt-2 mb-0.5';
+      elements.push(
+        <div key={key++} className={sizeClass}>{formatInlineText(txt)}</div>,
+      );
+      i++;
+      continue;
+    }
+
+    // Markdown bullet/numbered lists — collect contiguous list items.
+    const isUnordered = /^\s*[-*]\s+/.test(line);
+    const isOrdered = /^\s*\d+\.\s+/.test(line);
+    if (isUnordered || isOrdered) {
+      const items: string[] = [];
+      const re = isUnordered ? /^\s*[-*]\s+(.*)$/ : /^\s*\d+\.\s+(.*)$/;
+      while (i < lines.length) {
+        const m = lines[i].match(re);
+        if (!m) break;
+        items.push(m[1]);
+        i++;
+      }
+      const ListTag = isUnordered ? 'ul' : 'ol';
+      const listClass = isUnordered ? 'list-disc' : 'list-decimal';
+      elements.push(
+        <ListTag
+          key={key++}
+          className={`${listClass} pl-5 my-1 space-y-0.5 text-[13px] leading-[1.7] text-gray-400 marker:text-gray-600`}
+        >
+          {items.map((item, idx) => (
+            <li key={idx}>{formatInlineText(item)}</li>
+          ))}
+        </ListTag>,
+      );
+      continue;
+    }
+
+    // Blockquote: > text
+    if (line.trimStart().startsWith('>')) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && lines[i].trimStart().startsWith('>')) {
+        quoteLines.push(lines[i].trimStart().replace(/^>\s?/, ''));
+        i++;
+      }
+      elements.push(
+        <blockquote
+          key={key++}
+          className="my-2 border-l-2 border-gray-700 pl-3 text-[13px] leading-[1.7] text-gray-500 italic"
+        >
+          {quoteLines.map((q, idx) => (
+            <div key={idx}>{formatInlineText(q)}</div>
+          ))}
+        </blockquote>,
+      );
+      continue;
+    }
+
+    // Reasoning block: `[Reasoning] ...` — render as dimmed italic note so
+    // reviewers can see the agent's chain-of-thought separately from actions.
+    if (line.startsWith('[Reasoning]')) {
+      const reasoningLines: string[] = [line.slice('[Reasoning]'.length).trimStart()];
+      i++;
+      while (
+        i < lines.length &&
+        lines[i].trim() !== '' &&
+        !lines[i].startsWith('[Tool:') &&
+        !lines[i].startsWith('[Output]') &&
+        !lines[i].startsWith('[Reasoning]')
+      ) {
+        reasoningLines.push(lines[i]);
+        i++;
+      }
+      elements.push(
+        <div
+          key={key++}
+          className="my-2 rounded-md border border-amber-900/30 bg-amber-950/10 px-3 py-2 text-[12px] leading-[1.7] text-amber-200/70 italic"
+        >
+          <div className="text-[10px] font-medium uppercase tracking-wider text-amber-500/60 not-italic mb-1">Reasoning</div>
+          {reasoningLines.map((r, idx) => (
+            <div key={idx}>{formatInlineText(r)}</div>
+          ))}
         </div>,
       );
       continue;
     }
 
-    // Tool call patterns: [Tool: ToolName], [Tool: ToolName → arg], [Tool: ToolName: arg]
-    const toolMatch = line.match(/^\[Tool:\s*([^\]→:]+?)(?:\s*[→:]\s*(.+?))?\]$/);
+    // Tool-call line. Loosened: a tool call may now have JSON args trailing
+    // the closing bracket, e.g. `[Tool: exec_command] {"cmd":"..."}` followed
+    // (optionally) by a `[Output] ...` line on the next row.
+    const toolMatch = line.match(/^\[Tool:\s*([^\]]+?)\]\s*(.*)$/);
     if (toolMatch) {
       if (hideToolCalls) {
-        // Filter says hide tool calls — skip the line entirely.
-        // Still bump toolIdx so subsequent rows pair with the right entry.
         toolIdx++;
         i++;
+        // Skip the matching [Output] block too if present
+        while (i < lines.length && (lines[i].startsWith('[Output]') || lines[i].trim() === '')) i++;
         continue;
       }
       const rawName = toolMatch[1].trim();
-      const toolArg = toolMatch[2]?.trim() || '';
+      let trailing = toolMatch[2].trim();
+
+      // The CLI may put the args on the next non-blank line(s) instead of the
+      // same line. Pull anything that isn't another marker.
+      const argLines: string[] = [];
+      if (trailing) argLines.push(trailing);
+      while (
+        i + 1 < lines.length &&
+        lines[i + 1].trim() !== '' &&
+        !lines[i + 1].startsWith('[Tool:') &&
+        !lines[i + 1].startsWith('[Output]') &&
+        !lines[i + 1].startsWith('[Reasoning]')
+      ) {
+        i++;
+        argLines.push(lines[i]);
+      }
+      const toolArg = argLines.join('\n');
+      trailing = toolArg;
+
+      // Capture trailing [Output] block, if any.
+      let toolOutput = '';
+      if (i + 1 < lines.length && lines[i + 1].startsWith('[Output]')) {
+        i++;
+        const outLines: string[] = [lines[i].slice('[Output]'.length).trimStart()];
+        while (
+          i + 1 < lines.length &&
+          lines[i + 1].trim() !== '' &&
+          !lines[i + 1].startsWith('[Tool:') &&
+          !lines[i + 1].startsWith('[Output]') &&
+          !lines[i + 1].startsWith('[Reasoning]')
+        ) {
+          i++;
+          outLines.push(lines[i]);
+        }
+        toolOutput = outLines.join('\n').trim();
+      }
 
       // Simplify MCP tool names: mcp__Claude_Preview__preview_click → Preview: click
       let displayName = rawName;
@@ -354,12 +560,41 @@ function FormattedMessage({
         <ToolCallRow
           key={key++}
           name={displayName}
-          arg={toolArg}
+          arg={trailing}
+          output={toolOutput}
           swatch={swatch}
           structured={structured}
         />,
       );
       i++;
+      continue;
+    }
+
+    // Stray [Output] block (no preceding [Tool:]) — render as a result panel.
+    if (line.startsWith('[Output]')) {
+      const outLines: string[] = [line.slice('[Output]'.length).trimStart()];
+      i++;
+      while (
+        i < lines.length &&
+        lines[i].trim() !== '' &&
+        !lines[i].startsWith('[Tool:') &&
+        !lines[i].startsWith('[Output]') &&
+        !lines[i].startsWith('[Reasoning]')
+      ) {
+        outLines.push(lines[i]);
+        i++;
+      }
+      elements.push(
+        <div
+          key={key++}
+          className="my-2 rounded-md border border-gray-800 bg-gray-900/40 px-3 py-2"
+        >
+          <div className="text-[10px] font-medium uppercase tracking-wider text-gray-500 mb-1">Output</div>
+          <pre className="text-[11.5px] leading-[1.6] font-mono text-gray-400 whitespace-pre-wrap">
+            {outLines.join('\n').trim()}
+          </pre>
+        </div>,
+      );
       continue;
     }
 
@@ -376,6 +611,13 @@ function FormattedMessage({
       i < lines.length &&
       lines[i].trim() !== '' &&
       !lines[i].trimStart().startsWith('```') &&
+      !lines[i].match(/^#{1,4}\s+/) &&
+      !/^\s*[-*]\s+/.test(lines[i]) &&
+      !/^\s*\d+\.\s+/.test(lines[i]) &&
+      !lines[i].trimStart().startsWith('>') &&
+      !lines[i].startsWith('[Tool:') &&
+      !lines[i].startsWith('[Output]') &&
+      !lines[i].startsWith('[Reasoning]') &&
       !lines[i].match(
         /^\[(?:Tool:\s*)?(?:Read|Edit|Write|Grep|Glob|Bash|Search|WebFetch|Task)(?:\s*[→:]\s*.+?)?\]$/,
       )

@@ -8,7 +8,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, loadAgentConfig } from './config.js';
-import { fetchPolicies, startSession, endSession, reportViolation, logToolCall, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount, listUsers } from './api.js';
+import { fetchPolicies, startSession, endSession, updateSession, reportViolation, logToolCall, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount, listUsers } from './api.js';
 
 interface PolicyData {
   id: string;
@@ -158,13 +158,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'end_session',
-      description: 'End the current coding session',
+      description: 'End the current coding session. Pass `transcript` (JSON string of [{role, content}, …]) to capture the full conversation; without it the Session tab only shows your prompt and the diff.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           sessionId: { type: 'string', description: 'Session ID to end' },
           summary: { type: 'string', description: 'Summary of what was done' },
+          transcript: { type: 'string', description: 'Full conversation transcript as a JSON string of [{role:"user"|"assistant", content:"..."}, …]. Use [Tool: name] / [Output] / [Reasoning] line markers inside content for tool calls, results, and chain-of-thought.' },
           tokensUsed: { type: 'number', description: 'Total tokens used in session' },
+          inputTokens: { type: 'number', description: 'Input tokens (prompt)' },
+          outputTokens: { type: 'number', description: 'Output tokens (completion)' },
+          cacheReadTokens: { type: 'number', description: 'Cache read tokens' },
+          cacheCreationTokens: { type: 'number', description: 'Cache write tokens' },
           toolCalls: { type: 'number', description: 'Number of tool calls made' },
           linesAdded: { type: 'number', description: 'Lines of code added' },
           linesRemoved: { type: 'number', description: 'Lines of code removed' },
@@ -173,6 +178,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           durationMs: { type: 'number', description: 'Session duration in milliseconds' },
         },
         required: ['sessionId', 'summary'],
+      },
+    },
+    {
+      name: 'update_session',
+      description: 'Incrementally update an active session with live transcript / token / file changes. Call this after each turn so the Session tab reflects state in real-time instead of waiting for end_session.',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          sessionId: { type: 'string', description: 'Session ID to update' },
+          transcript: { type: 'string', description: 'Full conversation transcript so far as a JSON string of [{role, content}, …]' },
+          prompt: { type: 'string', description: 'Latest or accumulated user prompt(s)' },
+          filesChanged: { type: 'array', items: { type: 'string' }, description: 'Changed file paths' },
+          tokensUsed: { type: 'number' },
+          inputTokens: { type: 'number' },
+          outputTokens: { type: 'number' },
+          cacheReadTokens: { type: 'number' },
+          cacheCreationTokens: { type: 'number' },
+          toolCalls: { type: 'number' },
+          linesAdded: { type: 'number' },
+          linesRemoved: { type: 'number' },
+          model: { type: 'string' },
+          durationMs: { type: 'number' },
+          costUsd: { type: 'number' },
+          branch: { type: 'string', description: 'Current git branch (updates dashboard mid-session)' },
+        },
+        required: ['sessionId'],
       },
     },
     {
@@ -354,9 +385,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           costUsd: (args?.costUsd as number) || undefined,
           filesChanged: args?.filesChanged as string | undefined,
           durationMs: (args?.durationMs as number) || undefined,
+          transcript: (args?.transcript as string) || undefined,
+          inputTokens: (args?.inputTokens as number) || undefined,
+          outputTokens: (args?.outputTokens as number) || undefined,
+          cacheReadTokens: (args?.cacheReadTokens as number) || undefined,
+          cacheCreationTokens: (args?.cacheCreationTokens as number) || undefined,
         });
         currentSessionId = null;
         return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'update_session': {
+      try {
+        const sessionId = (args?.sessionId as string) || currentSessionId;
+        if (!sessionId) {
+          return { content: [{ type: 'text', text: JSON.stringify({ error: 'No active session — pass sessionId or call start_session first' }) }] };
+        }
+        await updateSession(sessionId, {
+          prompt: (args?.prompt as string) || undefined,
+          transcript: (args?.transcript as string) || undefined,
+          filesChanged: Array.isArray(args?.filesChanged) ? (args?.filesChanged as string[]) : undefined,
+          tokensUsed: (args?.tokensUsed as number) || undefined,
+          inputTokens: (args?.inputTokens as number) || undefined,
+          outputTokens: (args?.outputTokens as number) || undefined,
+          cacheReadTokens: (args?.cacheReadTokens as number) || undefined,
+          cacheCreationTokens: (args?.cacheCreationTokens as number) || undefined,
+          toolCalls: (args?.toolCalls as number) || undefined,
+          linesAdded: (args?.linesAdded as number) || undefined,
+          linesRemoved: (args?.linesRemoved as number) || undefined,
+          model: (args?.model as string) || undefined,
+          durationMs: (args?.durationMs as number) || undefined,
+          costUsd: (args?.costUsd as number) || undefined,
+          branch: (args?.branch as string) || undefined,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify({ success: true, sessionId }) }] };
       } catch (err: any) {
         return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
       }
@@ -506,7 +571,7 @@ async function main() {
     await loadPolicies();
     console.error(`[origin-mcp] Loaded ${policies.length} policies`);
   } else {
-    console.error('[origin-mcp] No Origin config found. Run: origin login && origin init');
+    console.error('[origin-mcp] No Origin config found. Run: origin login && origin enable');
   }
 
   const transport = new StdioServerTransport();

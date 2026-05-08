@@ -33,7 +33,7 @@ export async function whoamiCommand() {
     console.log(chalk.gray(`  Machine ID: ${agentConfig.machineId}`));
     console.log(chalk.gray(`  Tools: ${agentConfig.detectedTools.length > 0 ? agentConfig.detectedTools.join(', ') : 'none'}`));
   } else {
-    console.log(chalk.gray('\n  Machine: not initialized (run: origin init)'));
+    console.log(chalk.gray('\n  Machine: not initialized (run: origin enable)'));
   }
 
   console.log('');

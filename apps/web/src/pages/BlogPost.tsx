@@ -1184,7 +1184,7 @@ Try:
           </div>
           <div className="p-5 font-mono text-xs leading-relaxed space-y-1">
             <div className="text-gray-500"><span className="text-emerald-400">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</div>
-            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin init</div>
+            <div className="text-gray-500"><span className="text-emerald-400">$</span> origin enable</div>
             <div className="text-emerald-400">  &#10003; Hooks installed. Snapshots are now active.</div>
             <div className="h-2" />
             <div className="text-gray-600"># Code with any AI agent. Snapshots happen automatically.</div>
@@ -1662,7 +1662,7 @@ Try:
       <div className="not-prose my-6">
         <div className="rounded-xl border border-gray-700/50 bg-gray-900/80 overflow-hidden">
           <div className="p-4 font-mono text-sm">
-            <div className="text-gray-300"><span className="text-emerald-400">$</span> origin init</div>
+            <div className="text-gray-300"><span className="text-emerald-400">$</span> origin enable</div>
             <div className="text-gray-500 mt-1">  Auto-detects repos, installs hooks, starts tracking.</div>
           </div>
         </div>
@@ -2753,7 +2753,7 @@ Try:
 
       <h2>What Origin Solo tracks</h2>
       <p>
-        Once you install the CLI and run <code>origin init</code>, every AI coding session is
+        Once you install the CLI and run <code>origin enable</code>, every AI coding session is
         automatically recorded. No workflow changes, no manual logging. It hooks into the tools you
         already use:
       </p>
@@ -3198,9 +3198,9 @@ Try:
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 my-6 space-y-2">
         <code className="text-emerald-400 block">npm i -g origin-cli</code>
         <code className="text-emerald-400 block">origin login</code>
-        <code className="text-emerald-400 block">origin init</code>
+        <code className="text-emerald-400 block">origin enable</code>
         <div className="text-gray-400 text-sm mt-2">
-          That&rsquo;s it. <code>origin init</code> auto-detects your AI tools and configures hooks.
+          That&rsquo;s it. <code>origin enable</code> auto-detects your AI tools and configures hooks.
           Start a coding session with any supported agent and it shows up in your dashboard.
         </div>
       </div>
@@ -3484,7 +3484,7 @@ Try:
           <span className="text-gray-500">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
         </div>
         <div className="font-mono text-sm mb-4">
-          <span className="text-gray-500">$</span> origin init
+          <span className="text-gray-500">$</span> origin enable
         </div>
         <p className="text-sm text-gray-400 mb-4">
           Origin starts recording AI sessions immediately. Connect the dashboard to see activity
@@ -3657,7 +3657,7 @@ Try:
           <span className="text-gray-500">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
         </div>
         <div className="font-mono text-sm mb-4">
-          <span className="text-gray-500">$</span> origin init
+          <span className="text-gray-500">$</span> origin enable
         </div>
         <p className="text-sm text-gray-400 mb-4">
           Handoff and memory kick in automatically after your first completed session.
@@ -3850,7 +3850,7 @@ Try:
       <div className="bg-gray-900 border border-indigo-500/30 rounded-lg p-6 my-6">
         <div className="font-mono text-sm mb-4">
           <div><span className="text-gray-500">$</span> npm i -g origin-cli</div>
-          <div><span className="text-gray-500">$</span> origin init</div>
+          <div><span className="text-gray-500">$</span> origin enable</div>
           <div><span className="text-gray-500">$</span> origin ci session-check <span className="text-gray-600">--warn-only</span></div>
         </div>
         <div className="flex flex-wrap gap-4">
@@ -3956,7 +3956,7 @@ Try:
       <h2>How to measure this yourself</h2>
       <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
         <div className="text-green-400">$ npm i -g origin-cli</div>
-        <div className="text-green-400">$ origin init</div>
+        <div className="text-green-400">$ origin enable</div>
         <div className="text-gray-500 mt-2"># Use your agents normally for a week, then:</div>
         <div className="text-green-400 mt-1">$ origin rework --days 7</div>
       </div>
@@ -4086,7 +4086,7 @@ Try:
       <p>It takes 30 seconds to set up:</p>
       <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm my-6">
         <div><span className="text-gray-500">$</span> npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</div>
-        <div><span className="text-gray-500">$</span> origin init</div>
+        <div><span className="text-gray-500">$</span> origin enable</div>
         <div className="text-green-400 mt-1">Done. Origin is tracking AI sessions in this repo.</div>
       </div>
 

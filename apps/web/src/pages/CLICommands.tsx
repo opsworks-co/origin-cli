@@ -243,11 +243,11 @@ export default function CLICommands() {
           </CommandBlock>
 
           {/* init */}
-          <CommandBlock id="init" name="origin init">
+          <CommandBlock id="init" name="origin enable">
             <p className="text-sm text-gray-400 mb-3">
               Register the current machine with Origin. Auto-detects installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, etc.) via CLI checks, IDE extension scanning, and MCP config inspection. Installs global hooks so all repos are tracked automatically.
             </p>
-            <Code>{`origin init`}</Code>
+            <Code>{`origin enable`}</Code>
             <FlagTable flags={[
               { flag: '--standalone', description: 'Run without the Origin platform. Sessions stay local via git notes and SQLite.' },
               { flag: '--force', description: 'Overwrite existing hooks and re-initialize' },
@@ -258,7 +258,7 @@ export default function CLICommands() {
           {/* enable */}
           <CommandBlock id="enable" name="origin enable">
             <p className="text-sm text-gray-400 mb-3">
-              Install Origin hooks for a specific repo. Optional if you already ran <code className="text-indigo-400">origin init</code> (which installs global hooks). Useful for per-repo overrides or agent-specific configuration.
+              Install Origin hooks for a specific repo. Optional if you already ran <code className="text-indigo-400">origin enable</code> (which installs global hooks). Useful for per-repo overrides or agent-specific configuration.
             </p>
             <Code>{`origin enable                     # all detected agents
 origin enable --agent claude-code  # specific agent

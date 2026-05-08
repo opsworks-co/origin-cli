@@ -195,7 +195,7 @@ const CLI_DEMOS: { cmd: string; desc: string; lines: { text: string; color?: str
     cmd: 'init',
     desc: 'Setup in 30s',
     lines: [
-      { text: '$ origin init', color: 'text-gray-200' },
+      { text: '$ origin enable', color: 'text-gray-200' },
       { text: '  Detecting AI agents...', color: 'text-gray-500', delay: 300 },
       { text: '  \u2713 Claude Code (claude-code)', color: 'text-emerald-400', delay: 600 },
       { text: '  \u2713 Cursor (cursor)', color: 'text-emerald-400', delay: 800 },
@@ -380,7 +380,7 @@ const SOLO_FEATURES: FeatureItem[] = [
   { title: 'Multi-agent, one CLI', desc: 'Tracks Claude Code, Cursor, Gemini, Codex, Aider, Windsurf, Copilot, Continue, Amp, Junie, OpenCode, Rovo Dev, Droid. Auto-detected. Your history never fragments when you switch.', label: '2.3', accent: 'text-cyan-400' },
   { title: 'Personal dashboard', desc: 'Your coding activity at getorigin.io/me. Session replay, cost per model, tokens, streaks, and a searchable prompt history. Free forever.', label: '2.4', accent: 'text-emerald-400' },
   { title: 'Cost tracking', desc: 'Spend per agent, model, repo. See which models deliver the best ROI before the Anthropic bill arrives.', label: '2.5', accent: 'text-amber-400' },
-  { title: 'Zero-config capture', desc: 'One `origin init` wires global git hooks — every repo, every AI session, auto-tracked. No per-project setup.', label: '2.6', accent: 'text-rose-400' },
+  { title: 'Zero-config capture', desc: 'One `origin enable` wires global git hooks — every repo, every AI session, auto-tracked. No per-project setup.', label: '2.6', accent: 'text-rose-400' },
 ];
 
 const TEAM_FEATURES: FeatureItem[] = [
@@ -622,7 +622,7 @@ export default function Landing() {
               title: 'Every agent.',
               accent: 'text-emerald-400',
               desc: 'Origin auto-detects Claude Code, Cursor, Gemini CLI, Codex, Copilot, Windsurf, Aider — no config, no per-tool setup.',
-              code: 'origin init',
+              code: 'origin enable',
               codeNote: 'one command, every agent',
             },
             {
@@ -681,7 +681,7 @@ export default function Landing() {
               <h2 className="text-3xl font-semibold text-gray-100 tracking-[-0.02em]">Five commands,<br />full visibility</h2>
             </div>
             <p className="text-sm text-gray-500 max-w-xs text-right hidden sm:block">
-              Install the CLI and run <code className="text-indigo-400/80">origin init</code>. Everything is tracked from your first commit.
+              Install the CLI and run <code className="text-indigo-400/80">origin enable</code>. Everything is tracked from your first commit.
             </p>
           </div>
           <CliDemo />
@@ -1051,7 +1051,7 @@ export default function Landing() {
               Get started in 30 seconds
             </h2>
             <p className="text-gray-500 mb-10 max-w-md mx-auto text-lg">
-              Install the CLI and run <code className="text-indigo-400/70">origin init</code>. Solo is free forever.
+              Install the CLI and run <code className="text-indigo-400/70">origin enable</code>. Solo is free forever.
             </p>
 
             <InstallCommand />

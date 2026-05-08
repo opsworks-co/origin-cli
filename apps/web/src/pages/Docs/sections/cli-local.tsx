@@ -12,7 +12,7 @@ export default function CliLocalSection() {
 
             <H2>Setup</H2>
             <CodeBlock>{`# Initialize in standalone mode
-origin init --standalone
+origin enable --standalone
 
 # Or switch an existing setup to standalone
 origin config set mode standalone`}</CodeBlock>
@@ -66,7 +66,7 @@ origin config set push-strategy prompt`}</CodeBlock>
 origin login
 
 # Re-initialize
-origin init
+origin enable
 
 # Backfill existing local sessions to platform
 origin sync`}</CodeBlock>

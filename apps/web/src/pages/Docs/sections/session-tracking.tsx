@@ -22,12 +22,12 @@ export default function SessionTrackingSection() {
             <ul className="space-y-1 ml-4 mb-4">
               <Li>Installed the Origin CLI (see CLI Reference for install command)</Li>
               <Li>Logged in: <code className="text-indigo-400">origin login</code></Li>
-              <Li>Initialized: <code className="text-indigo-400">origin init</code> (registers machine, detects tools, installs global hooks)</Li>
+              <Li>Initialized: <code className="text-indigo-400">origin enable</code> (registers machine, detects tools, installs global hooks)</Li>
             </ul>
 
             <H2 id="quick-setup">Quick Setup</H2>
             <P>
-              <code className="text-indigo-400">origin init</code> installs hooks globally, so all git repos are tracked automatically.
+              <code className="text-indigo-400">origin enable</code> installs hooks globally, so all git repos are tracked automatically.
               No per-repo setup is needed. AI tools are auto-detected (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, etc.)
               and re-scanned on every session start.
             </P>
@@ -236,7 +236,7 @@ origin enable --agent gemini`}</CodeBlock>
                 <tbody className="divide-y divide-gray-800">
                   <tr><td className="px-4 py-2 text-gray-300">Agent</td><td className="px-4 py-2 text-gray-400">Which AI tool ran the session (Claude Code, Cursor, Gemini CLI)</td><td className="px-4 py-2 text-gray-500">Hook command slug</td></tr>
                   <tr><td className="px-4 py-2 text-gray-300">User</td><td className="px-4 py-2 text-gray-400">Developer who ran the session (name, email)</td><td className="px-4 py-2 text-gray-500">CLI auth config</td></tr>
-                  <tr><td className="px-4 py-2 text-gray-300">Machine</td><td className="px-4 py-2 text-gray-400">Which machine ran the session (hostname, machine ID)</td><td className="px-4 py-2 text-gray-500">origin init registration</td></tr>
+                  <tr><td className="px-4 py-2 text-gray-300">Machine</td><td className="px-4 py-2 text-gray-400">Which machine ran the session (hostname, machine ID)</td><td className="px-4 py-2 text-gray-500">origin enable registration</td></tr>
                   <tr><td className="px-4 py-2 text-gray-300">Repository</td><td className="px-4 py-2 text-gray-400">Repo path and name where the session occurred</td><td className="px-4 py-2 text-gray-500">git repo detection</td></tr>
                 </tbody>
               </table>

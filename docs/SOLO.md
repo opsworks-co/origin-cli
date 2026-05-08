@@ -37,7 +37,7 @@ origin login
 ### 3. Initialize
 
 ```bash
-origin init
+origin enable
 ```
 
 This detects your AI tools, registers your machine, and installs hooks.

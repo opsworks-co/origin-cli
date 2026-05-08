@@ -1230,6 +1230,23 @@ export interface TokenBreakdownModelRow {
   isOutlier: boolean;
 }
 
+// Cross-tab rollup — one row per (engineer × agent × model) combination so a
+// single table can show "Anakonda used Claude Code with claude-opus-4-7 →
+// 800k tokens". `userId`/`agentId` are the empty string when the field is
+// missing on a session (older sessions had no agent attribution).
+export interface TokenBreakdownComboRow {
+  userId: string;
+  userName: string;
+  agentId: string;
+  agentName: string;
+  agentSlug: string;
+  model: string;
+  generatedTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  sessionCount: number;
+}
+
 export interface RangeMeta { from: string; to: string }
 
 function rangeQuery(params: { from?: Date; to?: Date; range?: string }): string {
@@ -1289,6 +1306,7 @@ export function getTokenBreakdown(p: { from?: Date; to?: Date; range?: string })
     rows: TokenBreakdownRow[];
     byAgent: TokenBreakdownAgentRow[];
     byModel: TokenBreakdownModelRow[];
+    combined: TokenBreakdownComboRow[];
     range: RangeMeta;
   }>('/api/insights/token-breakdown' + rangeQuery(p));
 }

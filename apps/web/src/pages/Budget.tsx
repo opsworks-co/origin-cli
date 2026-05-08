@@ -365,6 +365,7 @@ export default function BudgetPage() {
   const [tokenMix, setTokenMix] = useState<api.TokenBreakdownRow[]>([]);
   const [tokenByAgent, setTokenByAgent] = useState<api.TokenBreakdownAgentRow[]>([]);
   const [tokenByModel, setTokenByModel] = useState<api.TokenBreakdownModelRow[]>([]);
+  const [tokenCombined, setTokenCombined] = useState<api.TokenBreakdownComboRow[]>([]);
   const [loading, setLoading] = useState(true);
   // Multi-tier caps state — daily / weekly / monthly each with their own
   // amount + soft/hard toggle. Empty string `limit` = no cap for that
@@ -512,6 +513,7 @@ export default function BudgetPage() {
         setTokenMix(tokenRes.value.rows);
         setTokenByAgent(tokenRes.value.byAgent || []);
         setTokenByModel(tokenRes.value.byModel || []);
+        setTokenCombined(tokenRes.value.combined || []);
       }
     } catch (err) {
       console.error('Budget fetch error:', err);
@@ -1518,7 +1520,7 @@ export default function BudgetPage() {
           here so admins can review token efficiency next to spend caps
           without leaving the Budget area. ────────────────────────────── */}
       {pageTab === 'tokens' && (
-        <TokensTab tokenMix={tokenMix} byAgent={tokenByAgent} byModel={tokenByModel} />
+        <TokensTab tokenMix={tokenMix} byAgent={tokenByAgent} byModel={tokenByModel} combined={tokenCombined} />
       )}
 
       {/* Recompute diagnostic moved to a header button — see the
@@ -1534,19 +1536,22 @@ export default function BudgetPage() {
 //   3. Per-engineer / per-agent / per-model lists, switched via inner tabs
 // Reuses the data already fetched by the page (no extra API call); this
 // component is dumb and renders whatever the parent passes in.
-function TokensTab({ tokenMix, byAgent, byModel }: {
+function TokensTab({ tokenMix, byAgent, byModel, combined }: {
   tokenMix: api.TokenBreakdownRow[];
   byAgent: api.TokenBreakdownAgentRow[];
   byModel: api.TokenBreakdownModelRow[];
+  combined: api.TokenBreakdownComboRow[];
 }) {
-  // Inner-tab state — Engineers / Agents / Models. Defaults to whichever
-  // breakdown actually has rows; engineers first if all populated. Keeps
-  // this view useful even when one dimension has no data yet.
-  const [view, setView] = useState<'engineers' | 'agents' | 'models'>(() => {
+  // Inner-tab state — Combined / Engineers / Agents / Models. Combined is the
+  // default because it's the most informative single view: every row carries
+  // engineer + agent + model attribution side by side. Falls back to whichever
+  // single-axis breakdown has rows when Combined is empty.
+  const [view, setView] = useState<'combined' | 'engineers' | 'agents' | 'models'>(() => {
+    if (combined.length > 0) return 'combined';
     if (tokenMix.length > 0) return 'engineers';
     if (byAgent.length > 0) return 'agents';
     if (byModel.length > 0) return 'models';
-    return 'engineers';
+    return 'combined';
   });
 
   // Which KPI card was clicked to drill in — drives sort order in the
@@ -1665,6 +1670,7 @@ function TokensTab({ tokenMix, byAgent, byModel }: {
         <div className="border-b border-gray-800 flex items-center justify-between px-2" role="tablist" aria-label="Token breakdown axis">
           <div className="flex items-center gap-1">
             {([
+              ['combined',  'Combined',  combined.length],
               ['engineers', 'Engineers', tokenMix.length],
               ['agents',    'Agents',    byAgent.length],
               ['models',    'Models',    byModel.length],
@@ -1722,6 +1728,182 @@ function TokensTab({ tokenMix, byAgent, byModel }: {
             sortBy={drillMetric}
           />
         )}
+        {view === 'combined' && (
+          <CombinedTokenTable rows={combined} fmt={fmt} sortBy={drillMetric} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Cross-tab table — one row per (engineer × agent × model). Sortable on any
+// column; default sort matches whichever KPI the user drilled in from, falling
+// back to total tokens. Uses a real <table> so column alignment stays tight
+// regardless of name length, and the data is scannable horizontally (which is
+// the point of having all three dimensions in one view).
+function CombinedTokenTable({
+  rows, fmt, sortBy = null,
+}: {
+  rows: api.TokenBreakdownComboRow[];
+  fmt: (n: number) => string;
+  sortBy?: 'gen' | 'read' | 'write' | 'hit' | null;
+}) {
+  type ColKey = 'engineer' | 'agent' | 'model' | 'gen' | 'read' | 'write' | 'hit' | 'total' | 'sessions';
+  type SortEntry = { col: ColKey; dir: 'asc' | 'desc' };
+  // Sort stack — first entry is the primary sort, subsequent are tiebreakers.
+  // Click a header to replace; shift-click (or cmd/ctrl-click) to append a
+  // secondary sort. Same-column click toggles direction; same-column
+  // shift-click while it's already in the stack also toggles its direction
+  // in place.
+  const [sortStack, setSortStack] = useState<SortEntry[]>(() => {
+    if (sortBy === 'gen')   return [{ col: 'gen',   dir: 'desc' }];
+    if (sortBy === 'read')  return [{ col: 'read',  dir: 'desc' }];
+    if (sortBy === 'write') return [{ col: 'write', dir: 'desc' }];
+    if (sortBy === 'hit')   return [{ col: 'hit',   dir: 'desc' }];
+    return [{ col: 'total', dir: 'desc' }];
+  });
+  const [filter, setFilter] = useState('');
+
+  if (rows.length === 0) {
+    return <div className="p-6 text-center text-xs text-gray-500">No combined breakdown yet — once sessions land with engineer + agent + model attribution, they'll appear here.</div>;
+  }
+
+  const hitRate = (r: api.TokenBreakdownComboRow) =>
+    (r.generatedTokens + r.cacheReadTokens) > 0
+      ? r.cacheReadTokens / (r.generatedTokens + r.cacheReadTokens)
+      : 0;
+
+  const f = filter.trim().toLowerCase();
+  const filtered = !f
+    ? rows
+    : rows.filter((r) =>
+        r.userName.toLowerCase().includes(f) ||
+        r.agentName.toLowerCase().includes(f) ||
+        r.agentSlug.toLowerCase().includes(f) ||
+        r.model.toLowerCase().includes(f),
+      );
+
+  const valueFor = (r: api.TokenBreakdownComboRow, col: ColKey): number | string => {
+    switch (col) {
+      case 'engineer': return r.userName;
+      case 'agent':    return r.agentName;
+      case 'model':    return r.model;
+      case 'gen':      return r.generatedTokens;
+      case 'read':     return r.cacheReadTokens;
+      case 'write':    return r.cacheCreationTokens;
+      case 'hit':      return hitRate(r);
+      case 'sessions': return r.sessionCount;
+      case 'total':
+      default:
+        return r.generatedTokens + r.cacheReadTokens + r.cacheCreationTokens;
+    }
+  };
+
+  const sorted = [...filtered].sort((a, b) => {
+    for (const { col, dir } of sortStack) {
+      const av = valueFor(a, col);
+      const bv = valueFor(b, col);
+      const sign = dir === 'asc' ? 1 : -1;
+      let c: number;
+      if (typeof av === 'number' && typeof bv === 'number') c = (av - bv) * sign;
+      else c = String(av).localeCompare(String(bv)) * sign;
+      if (c !== 0) return c;
+    }
+    return 0;
+  });
+
+  // Click → replace the stack with this column. Shift/Cmd/Ctrl-click → append
+  // (or toggle direction if already in stack). Same-column re-click toggles
+  // direction at its current position.
+  const handleHeaderClick = (col: ColKey, e: React.MouseEvent) => {
+    const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+    const defaultDir: 'asc' | 'desc' = (col === 'engineer' || col === 'agent' || col === 'model') ? 'asc' : 'desc';
+    setSortStack((prev) => {
+      const existingIdx = prev.findIndex((s) => s.col === col);
+      if (additive) {
+        if (existingIdx === -1) return [...prev, { col, dir: defaultDir }];
+        return prev.map((s, i) => i === existingIdx ? { ...s, dir: s.dir === 'desc' ? 'asc' : 'desc' } : s);
+      }
+      // Non-additive: reset stack to just this column.
+      if (prev.length === 1 && prev[0].col === col) {
+        return [{ col, dir: prev[0].dir === 'desc' ? 'asc' : 'desc' }];
+      }
+      return [{ col, dir: defaultDir }];
+    });
+  };
+
+  const stackIndex = (col: ColKey) => sortStack.findIndex((s) => s.col === col);
+  const arrow = (col: ColKey) => {
+    const idx = stackIndex(col);
+    if (idx === -1) return '';
+    const dir = sortStack[idx].dir === 'desc' ? '↓' : '↑';
+    // Show the priority number when there's more than one sort key.
+    return sortStack.length > 1 ? ` ${dir}${idx + 1}` : ` ${dir}`;
+  };
+
+  const headerCls = (col: ColKey, align: 'left' | 'right' = 'left') =>
+    `px-3 py-2 text-[10px] uppercase tracking-wider font-medium cursor-pointer select-none hover:text-gray-200 ${
+      align === 'right' ? 'text-right' : 'text-left'
+    } ${stackIndex(col) !== -1 ? 'text-gray-100' : 'text-gray-500'}`;
+
+  const sortHint = sortStack.length > 1
+    ? `${sortStack.length}-key sort · shift-click a column to add another · click to reset`
+    : 'shift-click another column to add a secondary sort';
+
+  return (
+    <div>
+      <div className="px-3 py-2.5 border-b border-gray-800/60 flex items-center gap-2 flex-wrap">
+        <input
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter by engineer, agent or model…"
+          className="flex-1 max-w-sm bg-gray-900/60 border border-gray-800 rounded-md px-2.5 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-gray-700"
+        />
+        <span className="text-[10px] text-gray-600 tabular-nums">
+          {filtered.length === rows.length ? `${rows.length} rows` : `${filtered.length} of ${rows.length}`}
+        </span>
+        <span className="text-[10px] text-gray-600 ml-auto" title={sortHint}>{sortHint}</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-gray-900/30">
+            <tr>
+              <th className={headerCls('engineer')}    onClick={(e) => handleHeaderClick('engineer', e)}>Engineer{arrow('engineer')}</th>
+              <th className={headerCls('agent')}       onClick={(e) => handleHeaderClick('agent', e)}>Agent{arrow('agent')}</th>
+              <th className={headerCls('model')}       onClick={(e) => handleHeaderClick('model', e)}>Model{arrow('model')}</th>
+              <th className={headerCls('gen', 'right')}      onClick={(e) => handleHeaderClick('gen', e)}>Generated{arrow('gen')}</th>
+              <th className={headerCls('read', 'right')}     onClick={(e) => handleHeaderClick('read', e)}>Cache read{arrow('read')}</th>
+              <th className={headerCls('write', 'right')}    onClick={(e) => handleHeaderClick('write', e)}>Cache write{arrow('write')}</th>
+              <th className={headerCls('hit', 'right')}      onClick={(e) => handleHeaderClick('hit', e)}>Hit %{arrow('hit')}</th>
+              <th className={headerCls('total', 'right')}    onClick={(e) => handleHeaderClick('total', e)}>Total{arrow('total')}</th>
+              <th className={headerCls('sessions', 'right')} onClick={(e) => handleHeaderClick('sessions', e)}>Sessions{arrow('sessions')}</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-800/50">
+            {sorted.map((r) => {
+              const total = r.generatedTokens + r.cacheReadTokens + r.cacheCreationTokens;
+              const hit = hitRate(r);
+              const hitClass = hit >= 0.5 ? 'text-emerald-300' : hit >= 0.25 ? 'text-gray-300' : 'text-amber-300';
+              return (
+                <tr key={`${r.userId}|${r.agentId}|${r.model}`} className="hover:bg-gray-900/40">
+                  <td className="px-3 py-2 text-gray-200 whitespace-nowrap">{r.userName}</td>
+                  <td className="px-3 py-2 text-gray-300 whitespace-nowrap">
+                    {r.agentName}
+                    {r.agentSlug && <span className="text-[10px] text-gray-600 ml-1">{r.agentSlug}</span>}
+                  </td>
+                  <td className="px-3 py-2 text-gray-300 font-mono whitespace-nowrap">{r.model}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-gray-100">{fmt(r.generatedTokens)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-cyan-300">{fmt(r.cacheReadTokens)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-amber-300">{fmt(r.cacheCreationTokens)}</td>
+                  <td className={`px-3 py-2 text-right tabular-nums ${hitClass}`}>{(hit * 100).toFixed(0)}%</td>
+                  <td className="px-3 py-2 text-right tabular-nums font-medium text-gray-100">{fmt(total)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-gray-400">{r.sessionCount}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

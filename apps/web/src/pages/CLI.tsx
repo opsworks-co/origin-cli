@@ -147,7 +147,7 @@ function renderSection(section: Section) {
           <h2 className="text-2xl font-bold mb-4">Quick Start</h2>
           <h3 className="text-lg font-semibold text-green-400 mb-2">Standalone (no server needed)</h3>
           <CodeBlock>{`# 1. Initialize (auto-detects installed AI tools)
-origin init
+origin enable
 
 # 2. Enable hooks globally (all repos, all agents)
 origin enable --global
@@ -164,7 +164,7 @@ origin stats --local`}</CodeBlock>
 origin login
 
 # 2. Initialize + register machine
-origin init
+origin enable
 
 # 3. Enable hooks — policies are enforced automatically
 origin enable`}</CodeBlock>
@@ -172,7 +172,7 @@ origin enable`}</CodeBlock>
           <div className="mt-6 card bg-gray-800/30 border-gray-700">
             <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-3">Example output</p>
             <pre className="text-sm font-mono text-gray-300 overflow-x-auto leading-relaxed">
-{`$ origin init
+{`$ origin enable
   ✓ Detected: claude-code, gemini-cli
   ✓ Hooks installed for 2 agents
   ✓ Initialized in standalone mode
@@ -220,7 +220,7 @@ origin enable`}</CodeBlock>
             All local data (sessions, attribution, notes) is preserved and continues to work.
           </p>
           <CodeBlock>{`# Start standalone — no API key needed
-origin init
+origin enable
 origin enable --global
 
 # Later, connect to Origin platform
@@ -228,7 +228,7 @@ origin login
 # All local features keep working + platform features unlock
 
 # Already connected but want standalone mode?
-origin init --standalone
+origin enable --standalone
 # API credentials are kept — switch back anytime:
 origin config set mode auto`}</CodeBlock>
         </div>
@@ -294,7 +294,7 @@ origin config set mode auto`}</CodeBlock>
                   ['PLATFORM', '', '', ''],
                   ['IDE integration', '—', '—', '✓ VS Code gutter'],
                   ['Works offline', '✓', '✓', '✓'],
-                  ['Zero config', '✓ origin init', '✓ entire enable', '✓ Auto'],
+                  ['Zero config', '✓ origin enable', '✓ entire enable', '✓ Auto'],
                   ['Agents supported', '6 agents', '6 agents', '11+ agents'],
                   ['License', 'MIT', 'MIT', 'Apache 2.0'],
                   ['', '', '', ''],
@@ -379,9 +379,9 @@ origin config set mode auto`}</CodeBlock>
 #   API Key (from your Origin dashboard)`}</CodeBlock>
           <p className="text-gray-500 text-xs">Config saved to <code className="text-indigo-400">~/.origin/config.json</code></p>
 
-          <h3 className="text-lg font-semibold text-gray-200 mt-8 mb-2"><code className="text-indigo-400">origin init</code></h3>
+          <h3 className="text-lg font-semibold text-gray-200 mt-8 mb-2"><code className="text-indigo-400">origin enable</code></h3>
           <p className="text-gray-400 text-sm mb-2">Register this machine as an agent host. Auto-detects installed AI tools.</p>
-          <CodeBlock>{`origin init
+          <CodeBlock>{`origin enable
 # Detects: claude, cursor, aider, gemini, windsurf
 # Registers machine with Origin API
 # Saves to ~/.origin/agent.json`}</CodeBlock>

@@ -36,11 +36,11 @@ Origin runs silently alongside any AI coding agent, captures every session (prom
 
 ```bash
 npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
-origin init                      # one-time: installs GLOBAL git hooks
+origin enable                      # one-time: installs GLOBAL git hooks
 origin blame src/auth.ts         # any repo, any time
 ```
 
-**One-time setup.** `origin init` sets `git config --global core.hooksPath` to `~/.origin/git-hooks` — so every repo on the machine (past, present, future) is auto-tracked. No per-repo `origin init` needed. Opt-out per-repo with `origin init --local`.
+**One-time setup.** `origin enable` sets `git config --global core.hooksPath` to `~/.origin/git-hooks` — so every repo on the machine (past, present, future) is auto-tracked. No per-repo `origin enable` needed. Opt-out per-repo with `origin enable --local`.
 
 No server, no login, no API keys required. Session metadata lives in `refs/notes/origin` and the `origin-sessions` branch — both travel with `git clone`.
 
@@ -75,7 +75,7 @@ Attribution survives `rebase`, `amend`, `cherry-pick`, and `stash`.
 
 ### 3. Multi-agent — one CLI, every agent
 
-Claude Code, Cursor, Gemini CLI, Codex, Aider, Windsurf, GitHub Copilot, Continue, Amp, Junie, OpenCode, Rovo Dev, Droid. Auto-detected by `origin init`. Switch between them — your history doesn't fragment.
+Claude Code, Cursor, Gemini CLI, Codex, Aider, Windsurf, GitHub Copilot, Continue, Amp, Junie, OpenCode, Rovo Dev, Droid. Auto-detected by `origin enable`. Switch between them — your history doesn't fragment.
 
 ### 4. Web platform — solo (free) or team
 
@@ -113,7 +113,7 @@ Full command reference: [`docs/CLI.md`](docs/CLI.md).
 | Rovo Dev | Process detection | Preview |
 | Droid | Process detection | Preview |
 
-Auto-detected by `origin init`. One CLI tracks them all.
+Auto-detected by `origin enable`. One CLI tracks them all.
 
 ---
 

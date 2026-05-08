@@ -246,7 +246,7 @@ Delete an API key.
 List registered machines.
 
 ### POST `/machines`
-Register a machine (called by CLI `origin init`).
+Register a machine (called by CLI `origin enable`).
 
 ```json
 {

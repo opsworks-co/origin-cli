@@ -227,10 +227,10 @@ npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 origin login
 
 # Initialize and install hooks (auto-detects all AI agents)
-origin init`}</CodeBlock>
+origin enable`}</CodeBlock>
 
             <P>
-              <code>origin init</code> auto-detects installed AI agents (Claude Code, Cursor, Codex, Gemini, etc.)
+              <code>origin enable</code> auto-detects installed AI agents (Claude Code, Cursor, Codex, Gemini, etc.)
               and installs tracking hooks for each one. After this, every AI coding session in any repo is
               automatically tracked.
             </P>
@@ -243,7 +243,7 @@ origin init`}</CodeBlock>
                 <span className="text-xs text-gray-500 ml-2 font-mono">Terminal</span>
               </div>
               <div className="p-4 font-mono text-sm space-y-1">
-                <div><span className="text-gray-500">$</span> <span className="text-gray-300">origin init</span></div>
+                <div><span className="text-gray-500">$</span> <span className="text-gray-300">origin enable</span></div>
                 <div className="text-gray-500 mt-2">Detecting AI coding agents...</div>
                 <div className="mt-1">
                   <span className="text-green-400">✓</span> <span className="text-gray-300">Claude Code</span> <span className="text-gray-600">— hooks installed</span>
@@ -260,7 +260,7 @@ origin init`}</CodeBlock>
             </div>
 
             <Callout type="info">
-              <strong>Global vs per-repo:</strong> By default, <code className="text-xs">origin init</code> installs hooks globally
+              <strong>Global vs per-repo:</strong> By default, <code className="text-xs">origin enable</code> installs hooks globally
               so ALL repos are tracked. To install per-repo only, run <code className="text-xs">origin enable</code> inside a specific repo.
             </Callout>
 
@@ -372,7 +372,7 @@ origin init`}</CodeBlock>
 
             <Callout type="tip">
               If sessions don&rsquo;t appear, run <code className="text-xs">origin doctor</code> to diagnose issues.
-              Common fixes: re-run <code className="text-xs">origin init</code> or check that hooks are installed with <code className="text-xs">origin verify</code>.
+              Common fixes: re-run <code className="text-xs">origin enable</code> or check that hooks are installed with <code className="text-xs">origin verify</code>.
             </Callout>
 
             {/* ── WHAT'S NEXT ────────────────────────────────────── */}

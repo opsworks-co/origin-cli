@@ -4,7 +4,7 @@ Self-hosting the connected platform.
 
 The Origin CLI works standalone with no server. This document covers running the full platform yourself — dashboard, policy enforcement, PR compliance, team features, MCP server.
 
-If you just want AI attribution in your terminal, you don't need any of this. Read the [main README](../README.md) and run `origin init`.
+If you just want AI attribution in your terminal, you don't need any of this. Read the [main README](../README.md) and run `origin enable`.
 
 ---
 
@@ -63,7 +63,7 @@ Or to connect to your own hosted instance:
 
 ```bash
 origin login --url https://origin.your-company.com
-origin init
+origin enable
 ```
 
 ---

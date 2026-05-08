@@ -22,19 +22,19 @@ origin doctor`}</CodeBlock>
 origin login
 
 # 2. Initialize — detects AI tools, installs hooks
-origin init
+origin enable
 
 # 3. Verify everything is working
 origin status`}</CodeBlock>
 
             <Callout type="info">
-              <code className="text-indigo-400">origin init</code> auto-detects Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, and more.
+              <code className="text-indigo-400">origin enable</code> auto-detects Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, and more.
               It installs global git hooks so all repos are tracked automatically.
             </Callout>
 
             <H2>Standalone Mode</H2>
             <P>Run without the Origin platform — all data stays local:</P>
-            <CodeBlock>{`origin init --standalone`}</CodeBlock>
+            <CodeBlock>{`origin enable --standalone`}</CodeBlock>
             <P>
               In standalone mode, sessions are stored on the <code className="text-indigo-400">origin-sessions</code> git branch
               and in a local SQLite database. No API key or server needed.

@@ -281,7 +281,7 @@ export default function DeveloperDashboardSection() {
             </P>
             <ol className="space-y-2 mb-4 list-decimal list-inside text-sm text-gray-400">
               <li><strong className="text-gray-200">Install the CLI</strong> &mdash; <code className="text-emerald-400">npm i -g https://getorigin.io/cli/origin-cli-latest.tgz</code></li>
-              <li><strong className="text-gray-200">Login &amp; Init</strong> &mdash; <code className="text-emerald-400">origin login</code> then <code className="text-emerald-400">origin init</code> to detect your AI tools and install hooks</li>
+              <li><strong className="text-gray-200">Login &amp; Init</strong> &mdash; <code className="text-emerald-400">origin login</code> then <code className="text-emerald-400">origin enable</code> to detect your AI tools and install hooks</li>
               <li><strong className="text-gray-200">Start Coding</strong> &mdash; Use any AI tool as normal. Sessions appear automatically</li>
             </ol>
 

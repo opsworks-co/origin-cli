@@ -79,7 +79,7 @@ export default function AiBlameSection() {
             </P>
             <Callout type="info">
               Origin only attributes code written <em>after</em> installation. Lines that existed before{' '}
-              <code className="text-indigo-400">origin init</code> will show as <code className="text-indigo-400">[HU]</code> (human),
+              <code className="text-indigo-400">origin enable</code> will show as <code className="text-indigo-400">[HU]</code> (human),
               even if they were originally AI-generated.
             </Callout>
             <P>

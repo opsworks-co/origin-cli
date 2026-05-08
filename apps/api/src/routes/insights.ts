@@ -513,10 +513,12 @@ router.get('/token-breakdown', async (req: AuthRequest, res: Response) => {
       createdAt: { gte: range.from, lte: range.to },
     };
 
-    // Three groupBy queries in parallel — each is a single-column aggregate
+    // Four groupBy queries in parallel — each is a single-column aggregate
     // over the same scoped session set, so SQLite caches the index walk and
     // total time is barely above one query (verified locally on 10k rows).
-    const [byUserGrouped, byAgentGrouped, byModelGrouped] = await Promise.all([
+    // The fourth groups by [userId, agentId, model] together so we can render
+    // a cross-tab table showing tokens per engineer × agent × model.
+    const [byUserGrouped, byAgentGrouped, byModelGrouped, byComboGrouped] = await Promise.all([
       prisma.codingSession.groupBy({
         by: ['userId'],
         where: { ...where, userId: { not: null } },
@@ -531,6 +533,12 @@ router.get('/token-breakdown', async (req: AuthRequest, res: Response) => {
         by: ['model'],
         where,
         _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
+      }),
+      prisma.codingSession.groupBy({
+        by: ['userId', 'agentId', 'model'],
+        where,
+        _sum: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
+        _count: { _all: true },
       }),
     ]);
 
@@ -594,12 +602,33 @@ router.get('/token-breakdown', async (req: AuthRequest, res: Response) => {
     const byModel = classifyTokenUsage(modelRaw).sort((a, b) => b.generatedTokens - a.generatedTokens)
       .map((r) => ({ model: r.userId, ...rest(r, ['userId']) }));
 
+    // Cross-tab rows: one entry per (engineer × agent × model) combination.
+    // Same `gen = input + output` rule as the single-axis rollups so the
+    // numbers reconcile when you sum a column across rows.
+    const combined = byComboGrouped
+      .map((g) => ({
+        userId: g.userId ?? '',
+        userName: g.userId ? (userMap.get(g.userId)?.name || 'Unknown') : 'Unattributed',
+        agentId: g.agentId ?? '',
+        agentName: g.agentId ? (agentMap.get(g.agentId)?.name || 'Unknown') : 'Unattributed',
+        agentSlug: g.agentId ? (agentMap.get(g.agentId)?.slug || '') : '',
+        model: g.model || 'unknown',
+        generatedTokens: (g._sum.inputTokens ?? 0) + (g._sum.outputTokens ?? 0),
+        cacheReadTokens: g._sum.cacheReadTokens ?? 0,
+        cacheCreationTokens: g._sum.cacheCreationTokens ?? 0,
+        sessionCount: g._count._all ?? 0,
+      }))
+      .filter((r) => r.generatedTokens > 0 || r.cacheReadTokens > 0 || r.cacheCreationTokens > 0)
+      .sort((a, b) => (b.generatedTokens + b.cacheReadTokens + b.cacheCreationTokens) -
+                      (a.generatedTokens + a.cacheReadTokens + a.cacheCreationTokens));
+
     res.json({
       // Legacy field — unchanged shape, kept so the existing Spend Quality
       // section 6 component doesn't have to migrate.
       rows: byUser.slice(0, INSIGHTS_CONFIG.maxRowsPerEndpoint),
       byAgent: byAgent.slice(0, INSIGHTS_CONFIG.maxRowsPerEndpoint),
       byModel: byModel.slice(0, INSIGHTS_CONFIG.maxRowsPerEndpoint),
+      combined: combined.slice(0, INSIGHTS_CONFIG.maxRowsPerEndpoint),
       range: { from: range.from.toISOString(), to: range.to.toISOString() },
     });
   } catch (err) {

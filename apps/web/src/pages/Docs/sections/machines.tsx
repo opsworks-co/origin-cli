@@ -44,7 +44,7 @@ export default function MachinesSection() {
 
             <H2>How It Works</H2>
             <P>
-              When a developer runs <code className="text-indigo-400">origin init</code> on their machine,
+              When a developer runs <code className="text-indigo-400">origin enable</code> on their machine,
               the CLI detects installed tools (git, node, python, docker, etc.) and registers the machine
               with Origin. The machine record includes a unique machine ID, hostname, and tool inventory.
               Machines are updated on each CLI interaction and show a &ldquo;last seen&rdquo; timestamp.

@@ -21,9 +21,9 @@ export default function CliSection() {
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
-                <code className="text-indigo-400 font-mono text-sm font-bold">origin init</code>
+                <code className="text-indigo-400 font-mono text-sm font-bold">origin enable</code>
                 <P>Register the current machine with Origin. Auto-detects installed AI tools (Claude Code, Cursor, Copilot, Gemini, Aider, Windsurf, Cody, etc.) via CLI checks, IDE extension scanning, and MCP config inspection. Installs global hooks so all repos are tracked automatically. Tools are re-detected on every session start.</P>
-                <P>Use <code className="text-indigo-400">origin init --standalone</code> to run without the Origin platform. Sessions are tracked locally via git notes and a local database &mdash; no API key or server needed. You can also switch anytime with <code className="text-indigo-400">origin config set mode standalone</code>. To reconnect later, run <code className="text-indigo-400">origin login</code> followed by <code className="text-indigo-400">origin init</code>.</P>
+                <P>Use <code className="text-indigo-400">origin enable --standalone</code> to run without the Origin platform. Sessions are tracked locally via git notes and a local database &mdash; no API key or server needed. You can also switch anytime with <code className="text-indigo-400">origin config set mode standalone</code>. To reconnect later, run <code className="text-indigo-400">origin login</code> followed by <code className="text-indigo-400">origin enable</code>.</P>
               </div>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
@@ -58,7 +58,7 @@ origin sessions end <sessionId>  # end a running session`}</CodeBlock>
 
               <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
                 <code className="text-indigo-400 font-mono text-sm font-bold">origin enable</code>
-                <P>Install Origin hooks for a specific repo (optional &mdash; <code className="text-indigo-400">origin init</code> already installs global hooks). Useful for per-repo overrides or agent-specific configuration.</P>
+                <P>Install Origin hooks for a specific repo (optional &mdash; <code className="text-indigo-400">origin enable</code> already installs global hooks). Useful for per-repo overrides or agent-specific configuration.</P>
                 <CodeBlock>{`origin enable                    # all detected agents
 origin enable --agent claude-code  # specific agent
 origin enable --agent cursor

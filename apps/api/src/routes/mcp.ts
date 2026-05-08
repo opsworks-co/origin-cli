@@ -1742,9 +1742,19 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
 
     const orgId = req.activeOrgId as string;
 
-    // Update the coding session with final data
-    // transcript field: prefer full transcript if provided, fall back to summary
-    const transcriptValue = transcript || summary;
+    // Transcript handling on session/end:
+    //   - If the client sent `transcript`, use it.
+    //   - If not, fall back to `summary` ONLY when the existing session
+    //     has no transcript yet. Previously we ALWAYS fell through to
+    //     summary, which silently overwrote rich transcripts pushed
+    //     mid-session via PATCH (the heartbeat/CLI flow). Every Gemini
+    //     session ended up showing just the prompt because the stop hook
+    //     fires with summary set and no transcript field.
+    // We compute it here and re-check after the existing-session lookup.
+    let transcriptValue: string | undefined;
+    if (typeof transcript === 'string') {
+      transcriptValue = transcript;
+    }
 
     // Check session exists AND belongs to this org. The old findUnique
     // lookup by id alone let any valid API key close (and mutate
@@ -1755,6 +1765,15 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
     });
     if (!existingSession) {
       return res.status(404).json({ error: 'Session not found', sessionId });
+    }
+
+    // Last-resort fallback: if no transcript was sent AND no transcript was
+    // ever PATCHed during the session, use the summary so the dashboard
+    // shows something instead of an empty pane. Skip when there's already a
+    // mid-session transcript (that's the case the previous code regressed).
+    if (transcriptValue === undefined && typeof summary === 'string' && summary &&
+        (!existingSession.transcript || existingSession.transcript.length < 50)) {
+      transcriptValue = summary;
     }
 
     // Same clamping as PATCH /session/:id — keep hostile payloads out of the DB.

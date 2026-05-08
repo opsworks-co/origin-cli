@@ -33,7 +33,7 @@ const STEPS: Step[] = [
   },
   {
     title: 'Initialize Origin (one command, every repo)',
-    command: '$ origin init',
+    command: '$ origin enable',
     caption:
       'Sets git config --global core.hooksPath so every repo on your machine is tracked automatically. No per-repo setup. Auto-detects Claude Code, Cursor, Codex, Gemini — and 9 more agents.',
     output: [

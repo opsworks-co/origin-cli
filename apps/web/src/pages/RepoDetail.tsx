@@ -494,7 +494,7 @@ function statusBadge(status: string | null | undefined) {
   return <span className={map[status] ?? 'badge-gray'}>{status.toLowerCase()}</span>;
 }
 
-type RepoTab = 'commits' | 'sessions';
+type RepoTab = 'commits' | 'files' | 'sessions';
 
 export default function RepoDetail() {
   const { id } = useParams<{ id: string }>();
@@ -519,6 +519,23 @@ export default function RepoDetail() {
   // Sessions tab data — fetched lazily when user opens it.
   const [repoSessions, setRepoSessions] = useState<import('../api').Session[]>([]);
   const [repoSessionsLoading, setRepoSessionsLoading] = useState(false);
+
+  // Files tab data — fetched lazily on first open and refreshed when the
+  // branch filter changes.
+  const [repoFiles, setRepoFiles] = useState<import('../api/repos').RepoFileEntry[]>([]);
+  const [repoFilesLoading, setRepoFilesLoading] = useState(false);
+  const [filesQuery, setFilesQuery] = useState('');
+  // Folders the user has explicitly collapsed. Default = expanded.
+  const [filesCollapsed, setFilesCollapsed] = useState<Set<string>>(new Set());
+  // Selected file → opens the inline viewer with per-line authorship.
+  const [openFilePath, setOpenFilePath] = useState<string | null>(null);
+  // Pin the open file to a known-good SHA so the GitHub Contents fetch
+  // can't 404 on a feature-branch-only file when the user has no branch
+  // filter set (HEAD = default branch, but file lives on a side branch).
+  const [openFileRef, setOpenFileRef] = useState<string | undefined>(undefined);
+  const [openFileBlame, setOpenFileBlame] = useState<import('../api/repos').RepoFileBlame | null>(null);
+  const [openFileLoading, setOpenFileLoading] = useState(false);
+  const [openFileError, setOpenFileError] = useState<string | null>(null);
 
   // Branch filter
   const [branches, setBranches] = useState<string[]>([]);
@@ -709,6 +726,162 @@ export default function RepoDetail() {
       .catch(() => setRepoSessions([]))
       .finally(() => setRepoSessionsLoading(false));
   }, [repoTab, id]);
+
+  // Lazy-load files for this repo when the user opens the Files tab,
+  // then poll every 30s while the tab is active *and* the document is
+  // visible. Polling stops on tab switch or when the user backgrounds
+  // the page so we don't burn GitHub rate limit on idle tabs.
+  // Re-fetches when branchFilter changes — different branch = different
+  // tree.
+  useEffect(() => {
+    if (repoTab !== 'files' || !id) return;
+    let cancelled = false;
+    const fetchFiles = async (showSpinner: boolean) => {
+      if (showSpinner) setRepoFilesLoading(true);
+      try {
+        const { getRepoFiles } = await import('../api/repos');
+        const data = await getRepoFiles(id, branchFilter || undefined);
+        if (!cancelled) setRepoFiles(data?.files || []);
+      } catch {
+        if (!cancelled && showSpinner) setRepoFiles([]);
+        // Background-poll failures stay silent — keep showing the last
+        // good snapshot instead of blanking the tab on a transient blip.
+      } finally {
+        if (!cancelled && showSpinner) setRepoFilesLoading(false);
+      }
+    };
+    fetchFiles(true);
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (interval || cancelled) return;
+      interval = setInterval(() => {
+        if (document.visibilityState === 'visible') fetchFiles(false);
+      }, 30_000);
+    };
+    const stop = () => { if (interval) { clearInterval(interval); interval = null; } };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        fetchFiles(false);
+        start();
+      } else {
+        stop();
+      }
+    };
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      cancelled = true;
+      stop();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [repoTab, id, branchFilter]);
+
+  // Lazy-load file contents + blame when a file is clicked. Closing the
+  // viewer (openFilePath = null) drops the cached blame so a re-open
+  // refetches in case the file changed on disk between visits.
+  useEffect(() => {
+    if (!openFilePath || !id) return;
+    setOpenFileLoading(true);
+    setOpenFileError(null);
+    setOpenFileBlame(null);
+    // Prefer the file's pinned ref (its last-touched SHA from the files
+    // list) over the branch filter. If both are absent, GitHub falls back
+    // to the repo's default branch on the server side.
+    const refToUse = openFileRef || branchFilter || undefined;
+    import('../api/repos').then(({ getRepoFile }) =>
+      getRepoFile(id, openFilePath, refToUse)
+        .then(setOpenFileBlame)
+        .catch((err: any) => setOpenFileError(err?.message || 'Failed to load file'))
+        .finally(() => setOpenFileLoading(false)),
+    );
+  }, [openFilePath, openFileRef, id, branchFilter]);
+
+  // ── Files tree builder ────────────────────────────────────────────────
+  // Group flat path list into a folder tree. Each folder aggregates its
+  // descendants' commit counts so the row still shows useful summary
+  // numbers when collapsed (matches GitHub's "Last commit" column feel).
+  type TreeNode =
+    | { kind: 'file'; name: string; path: string; entry: import('../api/repos').RepoFileEntry }
+    | {
+        kind: 'dir';
+        name: string;
+        path: string;
+        children: TreeNode[];
+        totalCommits: number;
+        aiCommits: number;
+        humanCommits: number;
+        lastCommittedAt: string;
+      };
+  const filesTree = useMemo<TreeNode[]>(() => {
+    const q = filesQuery.trim().toLowerCase();
+    const filtered = q ? repoFiles.filter((f) => f.path.toLowerCase().includes(q)) : repoFiles;
+    if (filtered.length === 0) return [];
+    interface DirAcc {
+      kind: 'dir';
+      name: string;
+      path: string;
+      children: Map<string, DirAcc | { kind: 'file'; name: string; path: string; entry: import('../api/repos').RepoFileEntry }>;
+      totalCommits: number;
+      aiCommits: number;
+      humanCommits: number;
+      lastCommittedAt: string;
+    }
+    const root: DirAcc = { kind: 'dir', name: '', path: '', children: new Map(), totalCommits: 0, aiCommits: 0, humanCommits: 0, lastCommittedAt: '' };
+    for (const entry of filtered) {
+      const parts = entry.path.split('/').filter(Boolean);
+      let cur: DirAcc = root;
+      let prefix = '';
+      for (let i = 0; i < parts.length - 1; i++) {
+        const seg = parts[i];
+        prefix = prefix ? `${prefix}/${seg}` : seg;
+        let next = cur.children.get(seg) as DirAcc | undefined;
+        if (!next || next.kind !== 'dir') {
+          next = { kind: 'dir', name: seg, path: prefix, children: new Map(), totalCommits: 0, aiCommits: 0, humanCommits: 0, lastCommittedAt: '' };
+          cur.children.set(seg, next);
+        }
+        next.totalCommits += entry.totalCommits;
+        next.aiCommits += entry.aiCommits;
+        next.humanCommits += entry.humanCommits;
+        if (entry.lastCommittedAt && (!next.lastCommittedAt || entry.lastCommittedAt > next.lastCommittedAt)) {
+          next.lastCommittedAt = entry.lastCommittedAt;
+        }
+        cur = next;
+      }
+      const fileName = parts[parts.length - 1];
+      cur.children.set(fileName, { kind: 'file', name: fileName, path: entry.path, entry });
+    }
+    const toArray = (d: DirAcc): TreeNode[] => {
+      const arr: TreeNode[] = Array.from(d.children.values()).map((c) => {
+        if (c.kind === 'file') return c;
+        return {
+          kind: 'dir' as const,
+          name: c.name,
+          path: c.path,
+          children: toArray(c),
+          totalCommits: c.totalCommits,
+          aiCommits: c.aiCommits,
+          humanCommits: c.humanCommits,
+          lastCommittedAt: c.lastCommittedAt,
+        };
+      });
+      // Folders first, then files; alphabetical inside each group.
+      arr.sort((a, b) => {
+        if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      return arr;
+    };
+    return toArray(root);
+  }, [repoFiles, filesQuery]);
+
+  const toggleFolder = (folderPath: string) => {
+    setFilesCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderPath)) next.delete(folderPath);
+      else next.add(folderPath);
+      return next;
+    });
+  };
 
   const isAI = (c: any) => c.session !== null || c.aiToolDetected !== null;
 
@@ -919,6 +1092,7 @@ export default function RepoDetail() {
       <div className="flex items-center gap-0 border-b border-gray-800/60">
         {([
           { key: 'commits' as const, label: 'Commits', count: commits.length },
+          { key: 'files' as const, label: 'Files' },
           { key: 'sessions' as const, label: 'Sessions' },
         ] as Array<{ key: RepoTab; label: string; count?: number }>).map((t) => (
           <button
@@ -942,6 +1116,89 @@ export default function RepoDetail() {
           </button>
         ))}
       </div>
+
+      {/* Files tab — directory tree with per-file attribution. */}
+      {repoTab === 'files' && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              type="text"
+              placeholder="Filter by path…"
+              value={filesQuery}
+              onChange={(e) => setFilesQuery(e.target.value)}
+              className="flex-1 min-w-0 max-w-md px-3 py-1.5 rounded-md border border-gray-800/80 bg-gray-950/40 text-[12px] text-gray-100 placeholder-gray-600 focus:outline-none focus:border-indigo-500/40"
+            />
+            <span className="text-[11px] text-gray-500 ml-auto">
+              {repoFiles.length} file{repoFiles.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+
+          <div className="card p-0 overflow-hidden">
+            {repoFilesLoading ? (
+              <div className="p-6 text-center text-gray-500 text-sm">Loading files…</div>
+            ) : repoFiles.length === 0 ? (
+              <FilesEmptyState
+                hasCommits={commits.length > 0}
+                repoId={id || ''}
+                onBackfilled={() => {
+                  // Re-fetch the files list once backfill has populated
+                  // commit.filesChanged on existing rows.
+                  setRepoFilesLoading(true);
+                  import('../api/repos').then(({ getRepoFiles }) =>
+                    getRepoFiles(id || '', branchFilter || undefined)
+                      .then((data) => setRepoFiles(data?.files || []))
+                      .catch(() => setRepoFiles([]))
+                      .finally(() => setRepoFilesLoading(false)),
+                  );
+                }}
+              />
+            ) : filesTree.length === 0 ? (
+              <div className="p-6 text-center text-gray-500 text-sm">No files match "{filesQuery}".</div>
+            ) : (
+              <FilesTreeBody
+                tree={filesTree}
+                collapsed={filesCollapsed}
+                onToggle={toggleFolder}
+                onPickFile={(p, sha) => { setOpenFilePath(p); setOpenFileRef(sha); }}
+                openPath={openFilePath}
+              />
+            )}
+          </div>
+
+          {/* File viewer drawer */}
+          {openFilePath && (
+            <div
+              className="fixed inset-0 bg-black/70 z-40 flex items-stretch justify-end"
+              onClick={() => { setOpenFilePath(null); setOpenFileRef(undefined); }}
+            >
+              <div
+                className="bg-[#0a0b14] border-l border-gray-800/80 w-full max-w-4xl flex flex-col shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-gray-800/80">
+                  <div className="min-w-0">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider">File</p>
+                    <h3 className="text-sm font-mono text-gray-100 truncate">{openFilePath}</h3>
+                  </div>
+                  <button
+                    onClick={() => { setOpenFilePath(null); setOpenFileRef(undefined); }}
+                    className="text-gray-500 hover:text-gray-200 px-3 py-1 rounded-md border border-gray-800 hover:border-gray-700"
+                  >
+                    Close
+                  </button>
+                </div>
+                {openFileLoading ? (
+                  <div className="p-6 text-center text-gray-500 text-sm">Loading…</div>
+                ) : openFileError ? (
+                  <div className="p-6 text-center text-amber-400 text-sm">{openFileError}</div>
+                ) : openFileBlame ? (
+                  <FileBlameView blame={openFileBlame} />
+                ) : null}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Sessions tab — sessions filtered to this repo */}
       {repoTab === 'sessions' && (
@@ -1188,6 +1445,376 @@ export default function RepoDetail() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Files-tab helpers ──────────────────────────────────────────────────
+
+// Empty state for the Files tab. Two flavors:
+//   • No commits yet — pure "nothing to show" copy.
+//   • Commits exist but every commit.filesChanged is empty — that's the
+//     post-import / post-snapshot state for repos whose ingestor didn't
+//     populate the file list. Offer a one-click "Backfill from GitHub"
+//     that hits POST /:id/backfill-files (admin-only on the server; we
+//     surface any 403 inline rather than gating the button up-front, so
+//     non-admins still see the option and learn what they need to ask).
+function FilesEmptyState({
+  hasCommits, repoId, onBackfilled,
+}: {
+  hasCommits: boolean;
+  repoId: string;
+  onBackfilled: () => void;
+}) {
+  const [running, setRunning] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const run = async () => {
+    setRunning(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      const { backfillRepoFiles } = await import('../api/repos');
+      const r = await backfillRepoFiles(repoId);
+      setMsg(`Backfilled ${r.updated} of ${r.scanned} commit${r.scanned === 1 ? '' : 's'}.`);
+      onBackfilled();
+    } catch (e: any) {
+      setErr(e?.message || 'Backfill failed');
+    } finally {
+      setRunning(false);
+    }
+  };
+  if (!hasCommits) {
+    return (
+      <div className="p-6 text-center text-gray-500 text-sm">
+        No commits yet. Files appear here once commits land in this repo.
+      </div>
+    );
+  }
+  return (
+    <div className="p-6 text-center space-y-3">
+      <p className="text-sm text-gray-300">No file metadata yet for this repo's commits.</p>
+      <p className="text-[12px] text-gray-500 max-w-md mx-auto">
+        File paths weren't captured at ingest time (common for repos imported via an older webhook
+        path). Run a one-shot backfill from GitHub to populate them — files appear here as soon as
+        it finishes.
+      </p>
+      <button
+        type="button"
+        onClick={run}
+        disabled={running}
+        className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md border border-indigo-500/40 bg-indigo-500/10 text-[12px] text-indigo-300 hover:bg-indigo-500/15 disabled:opacity-50"
+      >
+        {running ? 'Backfilling…' : 'Backfill from GitHub'}
+      </button>
+      {msg && <p className="text-[11px] text-emerald-400">{msg}</p>}
+      {err && (
+        <p className="text-[11px] text-amber-400 max-w-md mx-auto">
+          {err}
+          {err.toLowerCase().includes('forbidden') && (
+            <> · Backfill is admin-only — ask an org admin to run it.</>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+type RepoFileEntryT = import('../api/repos').RepoFileEntry;
+type RepoFileBlameT = import('../api/repos').RepoFileBlame;
+
+interface TreeFile { kind: 'file'; name: string; path: string; entry: RepoFileEntryT }
+interface TreeDir {
+  kind: 'dir'; name: string; path: string; children: Array<TreeFile | TreeDir>;
+  totalCommits: number; aiCommits: number; humanCommits: number; lastCommittedAt: string;
+}
+type TreeAny = TreeFile | TreeDir;
+
+function FilesTreeBody({
+  tree, collapsed, onToggle, onPickFile, openPath,
+}: {
+  tree: TreeAny[];
+  collapsed: Set<string>;
+  onToggle: (path: string) => void;
+  onPickFile: (path: string, ref?: string) => void;
+  openPath: string | null;
+}) {
+  return (
+    <div className="py-1">
+      {tree.map((node) => (
+        <TreeRow
+          key={node.path}
+          node={node}
+          depth={0}
+          collapsed={collapsed}
+          onToggle={onToggle}
+          onPickFile={onPickFile}
+          openPath={openPath}
+        />
+      ))}
+    </div>
+  );
+}
+
+function TreeRow({
+  node, depth, collapsed, onToggle, onPickFile, openPath,
+}: {
+  node: TreeAny;
+  depth: number;
+  collapsed: Set<string>;
+  onToggle: (path: string) => void;
+  onPickFile: (path: string, ref?: string) => void;
+  openPath: string | null;
+}) {
+  // Sidebar-style indentation: 18px per level. Chevron occupies a fixed
+  // 16px slot so files (no chevron) line up with folder labels above.
+  const indentPx = depth * 18 + 12;
+  if (node.kind === 'dir') {
+    const isCollapsed = collapsed.has(node.path);
+    const aiPct = node.totalCommits > 0 ? Math.round((node.aiCommits / node.totalCommits) * 100) : 0;
+    return (
+      <>
+        <button
+          onClick={() => onToggle(node.path)}
+          className="w-full grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 pr-4 py-1.5 hover:bg-white/[0.03] transition-colors text-left group"
+          style={{ paddingLeft: indentPx }}
+        >
+          <div className="min-w-0 flex items-center gap-2">
+            <span className="text-gray-500 w-4 text-center text-[10px] leading-none inline-block transition-transform group-hover:text-gray-300">
+              {isCollapsed ? '›' : '⌄'}
+            </span>
+            <span className="text-[13px] text-gray-200 truncate">{node.name}</span>
+          </div>
+          <span className="text-[10.5px] text-gray-500 whitespace-nowrap tabular-nums">
+            {node.totalCommits} · {aiPct}% AI
+          </span>
+          <span className="text-[10.5px] text-gray-600 whitespace-nowrap tabular-nums min-w-[80px] text-right">
+            {node.lastCommittedAt ? timeAgo(node.lastCommittedAt) : '—'}
+          </span>
+        </button>
+        {!isCollapsed && node.children.map((c) => (
+          <TreeRow
+            key={c.path}
+            node={c}
+            depth={depth + 1}
+            collapsed={collapsed}
+            onToggle={onToggle}
+            onPickFile={onPickFile}
+            openPath={openPath}
+          />
+        ))}
+      </>
+    );
+  }
+  const f = node.entry;
+  const aiTone = f.aiPct >= 80 ? 'text-indigo-300/90 bg-indigo-500/10 ring-indigo-500/20'
+    : f.aiPct >= 30 ? 'text-amber-300/90 bg-amber-500/10 ring-amber-500/20'
+    : 'text-gray-400 bg-gray-700/25 ring-gray-600/25';
+  const isOpen = openPath === f.path;
+  return (
+    <button
+      onClick={() => onPickFile(f.path, f.lastSha || f.blobSha)}
+      className={`w-full grid grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] items-center gap-3 pr-4 py-1.5 transition-colors text-left ${
+        isOpen ? 'bg-indigo-500/[0.08]' : 'hover:bg-white/[0.03]'
+      }`}
+      // +16 to account for the chevron column folders use, so file
+      // names visually nest under their parent label.
+      style={{ paddingLeft: indentPx + 16 }}
+    >
+      <div className="min-w-0 flex items-center gap-2">
+        <span className={`text-[13px] truncate ${isOpen ? 'text-indigo-300' : 'text-gray-200'}`}>{node.name}</span>
+      </div>
+      <span className={`text-[10px] px-2 py-0.5 rounded-full ring-1 font-medium tabular-nums whitespace-nowrap ${aiTone}`}>
+        {f.aiPct}% AI
+      </span>
+      <span className="text-[10.5px] text-gray-400 whitespace-nowrap min-w-[88px]">
+        {f.topAgent ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400/70" />
+            {f.topAgent.name}
+          </span>
+        ) : (
+          <span className="text-gray-600">—</span>
+        )}
+      </span>
+      <span className="text-[10.5px] text-gray-400 whitespace-nowrap min-w-[110px] truncate">
+        {f.topUser?.name || f.lastAuthor || <span className="text-gray-600">—</span>}
+      </span>
+      <span className="text-[10.5px] text-gray-500 whitespace-nowrap tabular-nums text-right min-w-[110px]">
+        {f.sessionCount > 0 && <>{f.sessionCount}s · </>}
+        {f.lastCommittedAt ? timeAgo(f.lastCommittedAt) : '—'}
+      </span>
+    </button>
+  );
+}
+
+// Canonical agent groups. We deliberately collapse all variants of a
+// vendor (e.g. "claude-code", "claude", "Claude Code", "claude-sonnet")
+// into a single key — the legend used to render "Claude Code" three
+// times when the same vendor leaked in via different slug spellings.
+type AgentKey = 'claude-code' | 'codex' | 'gemini' | 'cursor' | 'copilot' | 'ai' | 'human';
+
+interface AgentVisual {
+  key: AgentKey;
+  label: string;
+  // Solid bar color used in the stacked breakdown + the gutter strip.
+  bar: string;
+  // Background tint applied when a line is hovered or its cohort is
+  // highlighted (subtle; code stays readable).
+  tint: string;
+  // Tailwind text color for the legend label.
+  text: string;
+}
+
+const AGENT_VISUALS: Record<AgentKey, AgentVisual> = {
+  'claude-code': { key: 'claude-code', label: 'Claude Code', bar: 'bg-indigo-500',  tint: 'bg-indigo-500/[0.07]',  text: 'text-indigo-300'  },
+  'codex':       { key: 'codex',       label: 'Codex CLI',   bar: 'bg-emerald-500', tint: 'bg-emerald-500/[0.07]', text: 'text-emerald-300' },
+  'gemini':      { key: 'gemini',      label: 'Gemini CLI',  bar: 'bg-sky-500',     tint: 'bg-sky-500/[0.07]',     text: 'text-sky-300'     },
+  'cursor':      { key: 'cursor',      label: 'Cursor',      bar: 'bg-purple-500',  tint: 'bg-purple-500/[0.07]',  text: 'text-purple-300'  },
+  'copilot':     { key: 'copilot',     label: 'Copilot',     bar: 'bg-cyan-500',    tint: 'bg-cyan-500/[0.07]',    text: 'text-cyan-300'    },
+  'ai':          { key: 'ai',          label: 'AI',          bar: 'bg-fuchsia-500', tint: 'bg-fuchsia-500/[0.07]', text: 'text-fuchsia-300' },
+  'human':       { key: 'human',       label: 'Human',       bar: 'bg-gray-600',    tint: 'bg-gray-500/[0.06]',    text: 'text-gray-300'    },
+};
+
+// Map any incoming slug + AI flag to one of the canonical keys. Keep this
+// in sync with the LLM-provider patterns in agent-catalog.ts.
+function resolveAgentKey(agentSlug: string | null, isAi: boolean): AgentKey {
+  if (!isAi) return 'human';
+  const slug = (agentSlug || 'ai').toLowerCase();
+  if (slug.includes('claude') || slug.includes('sonnet') || slug.includes('opus') || slug.includes('haiku')) return 'claude-code';
+  if (slug.includes('codex') || slug.includes('gpt') || slug.includes('o1-') || slug.includes('o3-') || slug.includes('o4-')) return 'codex';
+  if (slug.includes('gemini')) return 'gemini';
+  if (slug.includes('cursor')) return 'cursor';
+  if (slug.includes('copilot')) return 'copilot';
+  return 'ai';
+}
+
+function FileBlameView({ blame }: { blame: RepoFileBlameT }) {
+  // The cohort the user is currently hovering. When set, we tint every
+  // line authored by that agent so the spread of one vendor's work jumps
+  // out at a glance. Replaces the old "blink and you miss the 2px strip"
+  // experience.
+  const [hoverKey, setHoverKey] = useState<AgentKey | null>(null);
+  // The cohort the user has CLICKED on. Persists across mouse movements so
+  // the highlight doesn't disappear the moment the cursor leaves the legend
+  // chip. Click the chip again (or any other chip) to clear / switch.
+  const [pinKey, setPinKey] = useState<AgentKey | null>(null);
+  // Effective active cohort: a pin always wins over a hover, so hovering a
+  // different chip while one is pinned doesn't yank the highlight away.
+  const activeKey = pinKey ?? hoverKey;
+
+  const breakdown = useMemo(() => {
+    const counts = new Map<AgentKey, number>();
+    for (const ln of blame.lines) {
+      const k = resolveAgentKey(ln.agentSlug, ln.isAi);
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    const total = blame.lines.length || 1;
+    return Array.from(counts.entries())
+      .map(([k, lines]) => ({ ...AGENT_VISUALS[k], lines, pct: (lines / total) * 100 }))
+      .sort((a, b) => b.lines - a.lines);
+  }, [blame.lines]);
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      {/* Stacked breakdown bar — proportional widths show share at a glance. */}
+      <div className="px-5 py-3 border-b border-gray-800/60 space-y-2.5">
+        <div className="flex items-center gap-3 text-[11px]">
+          <span className="text-gray-400 font-medium uppercase tracking-wider">Authorship</span>
+          <span className="text-gray-600 ml-auto">
+            {blame.lineCount} lines · {blame.size.toLocaleString()} bytes · ref {blame.ref}
+          </span>
+        </div>
+        <div className="flex h-1.5 rounded-full overflow-hidden bg-gray-800/40">
+          {breakdown.map((b) => (
+            <div
+              key={b.key}
+              className={`${b.bar} transition-opacity ${activeKey && activeKey !== b.key ? 'opacity-30' : 'opacity-100'}`}
+              style={{ width: `${b.pct}%` }}
+              title={`${b.label} — ${b.lines} line${b.lines !== 1 ? 's' : ''} (${b.pct.toFixed(0)}%)`}
+            />
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px]">
+          {breakdown.map((b) => {
+            const isPinned = pinKey === b.key;
+            return (
+              <button
+                key={b.key}
+                type="button"
+                onMouseEnter={() => setHoverKey(b.key)}
+                onMouseLeave={() => setHoverKey(null)}
+                onClick={() => setPinKey((prev) => (prev === b.key ? null : b.key))}
+                aria-pressed={isPinned}
+                title={isPinned ? 'Click to clear filter' : `Click to pin ${b.label} highlighting`}
+                className={`inline-flex items-center gap-1.5 transition-opacity rounded px-1 -mx-1 ${
+                  activeKey && activeKey !== b.key ? 'opacity-40' : 'opacity-100'
+                } ${
+                  isPinned ? 'ring-1 ring-gray-600 bg-gray-800/40' : 'hover:bg-gray-800/30'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-sm ${b.bar}`} />
+                <span className={b.text}>{b.label}</span>
+                <span className="text-gray-500 tabular-nums">{b.lines}</span>
+                <span className="text-gray-600 tabular-nums">({b.pct.toFixed(0)}%)</span>
+              </button>
+            );
+          })}
+          {pinKey && (
+            <button
+              type="button"
+              onClick={() => setPinKey(null)}
+              className="text-gray-500 hover:text-gray-300 underline-offset-2 hover:underline"
+              title="Clear pinned cohort"
+            >
+              clear
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-auto font-mono text-[12px] leading-[18px] tabular-nums">
+        {blame.lines.map((ln) => {
+          const key = resolveAgentKey(ln.agentSlug, ln.isAi);
+          const v = AGENT_VISUALS[key];
+          const cohorted = activeKey === key;
+          const tooltip = ln.isAi
+            ? `${v.label}${ln.userName ? ' · ' + ln.userName : ''}${ln.sessionId ? ' · session ' + ln.sessionId.slice(0, 8) : ''}`
+            : ln.userName ? `Human · ${ln.userName}` : 'Human';
+          const linkable = ln.isAi && ln.sessionId;
+          const Wrapper: any = linkable ? Link : 'div';
+          const wrapperProps: any = linkable ? { to: `/sessions/${ln.sessionId}` } : {};
+          // Cohort tint dominates over hover tint so highlighting one
+          // agent visually subdues the others.
+          const rowBg = cohorted
+            ? v.tint
+            : activeKey
+              ? '' // explicitly muted — keep neutral
+              : `hover:${v.tint}`;
+          return (
+            <Wrapper
+              key={ln.lineNumber}
+              {...wrapperProps}
+              title={tooltip}
+              // Don't let line-row hovering override a pinned cohort —
+              // otherwise moving the mouse off a pinned chip into the code
+              // area would silently switch the highlight to whatever line
+              // happened to be under the cursor.
+              onMouseEnter={() => { if (!pinKey) setHoverKey(key); }}
+              onMouseLeave={() => { if (!pinKey) setHoverKey(null); }}
+              className={`grid grid-cols-[3px_56px_1fr] items-stretch transition-colors ${rowBg} ${linkable ? 'cursor-pointer' : ''}`}
+            >
+              <span className={`${v.bar} ${activeKey && !cohorted ? 'opacity-25' : 'opacity-80'}`} />
+              <span className="px-2 text-right text-gray-600 select-none border-r border-gray-800/40">
+                {ln.lineNumber}
+              </span>
+              <pre className="px-3 whitespace-pre overflow-x-auto text-gray-200 m-0">
+                {ln.content || ' '}
+              </pre>
+            </Wrapper>
+          );
+        })}
+      </div>
     </div>
   );
 }

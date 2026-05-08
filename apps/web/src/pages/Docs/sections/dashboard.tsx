@@ -105,7 +105,7 @@ export default function DashboardSection() {
 
             <H3>Registered Machines</H3>
             <P>
-              Machines connected via the CLI (<code className="text-indigo-400">origin init</code>).
+              Machines connected via the CLI (<code className="text-indigo-400">origin enable</code>).
               Shows hostname, detected tools, last seen time, and machine ID.
             </P>
           </div>
