@@ -14,5 +14,18 @@
   },
   "devDependencies": {
     "vitest": "^4.0.18"
+  },
+  "pnpm": {
+    "overrides": {
+      "@hono/node-server": ">=1.19.13",
+      "defu": ">=6.1.5",
+      "effect": ">=3.20.0",
+      "fast-uri": ">=3.1.1",
+      "hono": ">=4.12.16",
+      "ip-address": ">=10.1.1",
+      "path-to-regexp": ">=8.4.0",
+      "picomatch": ">=4.0.4",
+      "postcss": ">=8.5.10"
+    }
   }
 }

@@ -25,7 +25,7 @@
     "multer": "^2.1.1",
     "node-cron": "^4.2.1",
     "resend": "^6.9.4",
-    "simple-git": "^3.27.0"
+    "simple-git": "^3.36.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
