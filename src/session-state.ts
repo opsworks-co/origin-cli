@@ -63,6 +63,18 @@ export interface SessionState {
   enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
   trailId?: string;           // Trail ID if session is linked to an active trail
   agentSlug?: string;         // Agent slug (claude-code, cursor, codex, gemini, etc.)
+  // Files the agent loaded into context (deduped, capped). Populated lazily
+  // in pre-tool-use whenever a Read-style tool fires. Persisted into git
+  // notes at session-end as `filesRead` so the next agent can see what the
+  // prior agent looked at — not just what it changed.
+  filesRead?: string[];
+  // Pointer to the previous session in this repo (captured at session-start
+  // from refs/notes/origin-memory). Persisted into git notes so readers can
+  // walk a chain of sessions across commits.
+  previousSessionId?: string;
+  // ISO timestamp the previous session started — used to scope the
+  // acceptance backfill scan to only commits that session could have authored.
+  previousSessionStartedAt?: string;
   status?: string;            // RUNNING | ENDED | COMPLETED
   endedAt?: string;           // ISO timestamp when session ended
   // Multi-repo support: when cwd contains multiple git repos

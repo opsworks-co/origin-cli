@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process';
 import { listActiveSessions } from './session-state.js';
+import { readAcceptanceNote } from './acceptance.js';
 
 // ─── Tool Detection ──────────────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ export interface LineAttribution {
   model?: string;
   author?: string;
   tool?: string;
+  commitSha?: string;
 }
 
 export interface FileAttribution {
@@ -242,6 +244,48 @@ function detectAiFromCommit(repoPath: string, commitSha: string): { isAi: boolea
   }
 }
 
+// Rich session context surfaced from per-commit origin notes — used by
+// `origin blame --json` so consumers can answer "what was the prior agent
+// trying to do here?" without having to parse git notes themselves.
+export interface SessionContext {
+  sessionId: string;
+  model?: string;
+  agent?: string;
+  fullPrompt?: string;
+  promptSummary?: string;
+  previousSessionId?: string;
+  filesRead?: string[];
+  // Fraction (0..1) of this session's added lines still present on HEAD.
+  // Sourced from refs/notes/origin-acceptance, written by the *next* session.
+  acceptanceRate?: number;
+  acceptanceComputedAt?: string;
+  originUrl?: string;
+}
+
+export function getSessionContextForCommit(
+  repoPath: string,
+  commitSha: string,
+): SessionContext | null {
+  const rawNote = readOriginNote(repoPath, commitSha);
+  const note = rawNote?.origin || rawNote;
+  if (!note?.sessionId) return null;
+
+  const acc = readAcceptanceNote(repoPath, commitSha);
+
+  return {
+    sessionId: note.sessionId,
+    model: note.model,
+    agent: note.agent,
+    fullPrompt: note.fullPrompt,
+    promptSummary: note.promptSummary,
+    previousSessionId: note.previousSessionId,
+    filesRead: Array.isArray(note.filesRead) ? note.filesRead : undefined,
+    acceptanceRate: acc?.acceptanceRate,
+    acceptanceComputedAt: acc?.computedAt,
+    originUrl: note.originUrl,
+  };
+}
+
 /**
  * Get line-level AI attribution for a file by cross-referencing git blame with origin notes.
  * Falls back to commit message trailer detection and AI process pattern matching.
@@ -294,6 +338,7 @@ export function getLineBlame(repoPath: string, filePath: string): LineAttributio
         model: model,
         tool: tool,
         author: author,
+        commitSha: commitSha,
       };
     });
   } catch {
