@@ -235,6 +235,9 @@ export default function Onboarding() {
     latestSession: { id: string; model: string; status: string; userId: string | null; createdAt: string } | null;
     latestApiKey: { id: string; name: string; userId: string | null; createdAt: string } | null;
   } | null>(null);
+  const [claiming, setClaiming] = useState(false);
+  const [claimResult, setClaimResult] = useState<{ claimedSessions: number; claimedApiKeys: number } | null>(null);
+  const [claimError, setClaimError] = useState<string | null>(null);
 
   // Poll for first session on the "First Session" step. We hit the
   // diagnostic endpoint instead of /stats/me so the UI can react to
@@ -943,7 +946,7 @@ export default function Onboarding() {
                   } else if (noSession) {
                     hint = { tone: 'amber', line: 'Repos are registered but no sessions yet. Make sure your AI agent is started in a repo where you ran `origin enable`.' };
                   } else if (mismatch) {
-                    hint = { tone: 'red', line: 'A session exists in this org but is attributed to a different user — your CLI is logged in as someone else. Re-run `origin login` with the API key shown earlier.' };
+                    hint = { tone: 'red', line: 'Sessions exist in this workspace but are attributed to a previous user (likely a stale account before delete-cleanup landed). Click "Claim sessions" below to re-attribute them and the CLI key to you.' };
                   } else {
                     hint = { tone: 'emerald', line: 'Session detected — finishing up…' };
                   }
@@ -965,6 +968,39 @@ export default function Onboarding() {
                         <p className="text-[11px] text-gray-500 pt-1 border-t border-white/[0.05]">
                           Last session: {debugSnapshot.latestSession.model} · {debugSnapshot.latestSession.status} · {new Date(debugSnapshot.latestSession.createdAt).toLocaleTimeString()}
                         </p>
+                      )}
+                      {mismatch && (
+                        <div className="pt-2 border-t border-white/[0.05] space-y-2">
+                          {claimResult && (
+                            <p className="text-[11px] text-emerald-300">
+                              Claimed {claimResult.claimedSessions} session{claimResult.claimedSessions === 1 ? '' : 's'} and {claimResult.claimedApiKeys} API key{claimResult.claimedApiKeys === 1 ? '' : 's'}. Refreshing…
+                            </p>
+                          )}
+                          {claimError && (
+                            <p className="text-[11px] text-red-300">{claimError}</p>
+                          )}
+                          <button
+                            onClick={async () => {
+                              setClaimError(null);
+                              setClaiming(true);
+                              try {
+                                const r = await request<{ claimedSessions: number; claimedApiKeys: number }>(
+                                  '/api/stats/onboarding-claim',
+                                  { method: 'POST' },
+                                );
+                                setClaimResult(r);
+                              } catch (err: any) {
+                                setClaimError(err?.message || 'Claim failed');
+                              } finally {
+                                setClaiming(false);
+                              }
+                            }}
+                            disabled={claiming || !!claimResult}
+                            className="text-[11px] px-3 py-1.5 rounded-md bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-200 transition-colors disabled:opacity-50"
+                          >
+                            {claiming ? 'Claiming…' : claimResult ? 'Claimed ✓' : 'Claim sessions for this account'}
+                          </button>
+                        </div>
                       )}
                     </div>
                   );

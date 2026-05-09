@@ -89,6 +89,93 @@ router.get('/onboarding-debug', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// POST /onboarding-claim — re-attribute orphaned sessions/API keys to the
+// signed-in user. Surfaced from the First Session step when the
+// diagnostic above detects an attribution mismatch — i.e. sessions
+// exist in the active org but under a different (or deleted) userId,
+// usually because the previous user's admin-delete partially failed
+// before today's cascade fix and left their CLI still talking under
+// the old userId.
+//
+// Safety bounds:
+//  - Org type must be 'personal' (single-user workspace). We never
+//    silently re-attribute team-org data — that would let any owner
+//    of a shared org steal a teammate's sessions.
+//  - Caller must be an OWNER of that personal org.
+//  - We only claim sessions whose userId is either null OR points to
+//    a user that no longer exists, never sessions belonging to an
+//    active user.
+router.post('/onboarding-claim', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.activeOrgId!;
+
+    const org = await prisma.org.findUnique({
+      where: { id: orgId },
+      select: { type: true, memberships: { where: { userId, role: 'OWNER' }, select: { id: true } } },
+    });
+    if (!org) return res.status(404).json({ error: 'Org not found' });
+    if (org.type !== 'personal') {
+      return res.status(403).json({ error: 'Claim is only available on personal workspaces' });
+    }
+    if (org.memberships.length === 0) {
+      return res.status(403).json({ error: 'Only the workspace owner can claim sessions' });
+    }
+
+    // Find sessions in this org that aren't attributed to a real user
+    // (null userId or userId of a deleted/non-existent user). Sessions
+    // belonging to other live users — there shouldn't be any in a
+    // personal org, but guarding anyway — are left alone.
+    const sessionsInOrg = await prisma.codingSession.findMany({
+      where: { commit: { repo: { orgId } } },
+      select: { id: true, userId: true },
+    });
+    const distinctUserIds = Array.from(
+      new Set(sessionsInOrg.map((s) => s.userId).filter((u): u is string => !!u)),
+    );
+    const liveUsers = distinctUserIds.length
+      ? await prisma.user.findMany({ where: { id: { in: distinctUserIds } }, select: { id: true } })
+      : [];
+    const liveUserSet = new Set(liveUsers.map((u) => u.id));
+    const claimableSessionIds = sessionsInOrg
+      .filter((s) => !s.userId || !liveUserSet.has(s.userId))
+      .map((s) => s.id);
+
+    // Same logic for API keys: only re-attribute keys whose userId is
+    // null or a tombstone, never a key already linked to a live user.
+    const apiKeysInOrg = await prisma.apiKey.findMany({
+      where: { orgId },
+      select: { id: true, userId: true },
+    });
+    const claimableKeyIds = apiKeysInOrg
+      .filter((k) => !k.userId || !liveUserSet.has(k.userId))
+      .map((k) => k.id);
+
+    const [sessionResult, keyResult] = await prisma.$transaction([
+      claimableSessionIds.length
+        ? prisma.codingSession.updateMany({
+            where: { id: { in: claimableSessionIds } },
+            data: { userId },
+          })
+        : prisma.codingSession.updateMany({ where: { id: '__noop__' }, data: { userId } }),
+      claimableKeyIds.length
+        ? prisma.apiKey.updateMany({
+            where: { id: { in: claimableKeyIds } },
+            data: { userId },
+          })
+        : prisma.apiKey.updateMany({ where: { id: '__noop__' }, data: { userId } }),
+    ]);
+
+    res.json({
+      claimedSessions: sessionResult.count,
+      claimedApiKeys: keyResult.count,
+    });
+  } catch (err) {
+    console.error('POST /stats/onboarding-claim error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET / — compute dashboard stats
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
