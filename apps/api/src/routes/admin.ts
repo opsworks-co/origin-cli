@@ -337,21 +337,40 @@ router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
     }
 
     await prisma.$transaction(async (tx) => {
+      // ── User-scoped cleanup (FK references with no onDelete cascade) ──
+      // Order matters: explicitly clear every FK that references this user
+      // before deleting the user row, otherwise SQLite throws an FK
+      // violation and rolls the whole transaction back — leaving the
+      // "deleted" user, their personal org, and all their sessions
+      // intact. (Annotations were the missed FK that made admin
+      // deletes silently fail for any user who'd ever annotated a
+      // session.)
       await tx.notification.deleteMany({ where: { userId: id } });
       await tx.sessionBookmark.deleteMany({ where: { userId: id } });
       await tx.authToken.deleteMany({ where: { userId: id } });
       await tx.sessionReview.deleteMany({ where: { userId: id } });
+      await tx.sessionAnnotation.deleteMany({ where: { authorId: id } });
       await tx.auditLog.deleteMany({ where: { userId: id } });
       await tx.apiKey.deleteMany({ where: { userId: id } });
+      // CodingSession.userId is nullable — null it out instead of
+      // deleting the session, since for solo users the org wipe below
+      // will hard-delete the session anyway, and for shared-org users
+      // we want to preserve the audit trail without the deleted user
+      // being attributable.
       await tx.codingSession.updateMany({ where: { userId: id }, data: { userId: null } });
       await tx.membership.deleteMany({ where: { userId: id } });
 
       await tx.user.delete({ where: { id } });
 
+      // ── Org wipe — only for orgs the deleted user solely owned ──
+      // Cascade order: leaf tables first, then parents. Anything
+      // referencing a session, commit, repo, agent, or policy in the
+      // wiped org has to be cleared before the parent.
       for (const orgId of orgsToWipe) {
         await tx.trailSession.deleteMany({ where: { trail: { orgId } } });
         await tx.trail.deleteMany({ where: { orgId } });
         await tx.sharedSession.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
+        await tx.sessionAnnotation.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
         await tx.promptChange.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
         await tx.sessionDiff.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
         await tx.sessionReview.deleteMany({ where: { session: { commit: { repo: { orgId } } } } });
@@ -362,7 +381,18 @@ router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
         await tx.commit.deleteMany({ where: { repo: { orgId } } });
         await tx.pullRequest.deleteMany({ where: { repo: { orgId } } });
         await tx.webhook.deleteMany({ where: { repo: { orgId } } });
+        // WebhookDelivery has no FK relation field but does reference
+        // repoId by string — orphan rows would otherwise survive a
+        // repo wipe and bloat the deliveries queue.
+        const orgRepoIds = (
+          await tx.repo.findMany({ where: { orgId }, select: { id: true } })
+        ).map((r) => r.id);
+        if (orgRepoIds.length > 0) {
+          await tx.webhookDelivery.deleteMany({ where: { repoId: { in: orgRepoIds } } });
+        }
         await tx.apiKeyRepoScope.deleteMany({ where: { repo: { orgId } } });
+        await tx.repoMember.deleteMany({ where: { repo: { orgId } } });
+        await tx.repoModelLimit.deleteMany({ where: { repo: { orgId } } });
         await tx.issue.deleteMany({ where: { repo: { orgId } } });
         await tx.repo.deleteMany({ where: { orgId } });
         await tx.policyAssignment.deleteMany({ where: { policy: { orgId } } });
@@ -371,6 +401,8 @@ router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
         await tx.policy.deleteMany({ where: { orgId } });
         await tx.apiKeyAgentScope.deleteMany({ where: { agent: { orgId } } });
         await tx.agentVersion.deleteMany({ where: { agent: { orgId } } });
+        await tx.agentMember.deleteMany({ where: { agent: { orgId } } });
+        await tx.agentModel.deleteMany({ where: { agent: { orgId } } });
         await tx.agent.deleteMany({ where: { orgId } });
         await tx.machine.deleteMany({ where: { orgId } });
         await tx.integrationConfig.deleteMany({ where: { orgId } });
