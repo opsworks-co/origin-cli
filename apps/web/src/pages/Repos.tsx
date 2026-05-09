@@ -562,7 +562,7 @@ export default function Repos() {
         title="Repositories"
         subtitle={`${repos.length} ${repos.length === 1 ? 'repo' : 'repos'} \u00B7 ${totalCommits} commits \u00B7 ${totalSessions} sessions`}
         actions={repos.length > 0 ? (
-          <div className="flex items-center gap-2 flex-wrap">
+          <div data-tour="repos-actions" className="flex items-center gap-2 flex-wrap">
             {hasGitHub && !showImport && (
               <button
                 onClick={() => { handleDiscover(); setShowGitLabImport(false); setShowForm(false); }}
@@ -1126,7 +1126,7 @@ export default function Repos() {
         </div>
       ) : (
         <div className="space-y-4">
-          {orgGroups.map((group) => {
+          {orgGroups.map((group, groupIndex) => {
             const collapsed = collapsedGroups.has(group.org);
             return (
             <div key={group.org} className="card p-0 overflow-hidden">
@@ -1135,6 +1135,10 @@ export default function Repos() {
               <div
                 role="button"
                 tabIndex={0}
+                // Anchor only the first group header for the product tour so
+                // the highlight ring lands on a single, predictable element
+                // instead of every header on the page.
+                data-tour={groupIndex === 0 ? 'repo-group-header' : undefined}
                 onClick={() => toggleGroupCollapsed(group.org)}
                 onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroupCollapsed(group.org); } }}
                 className={`px-5 py-3 flex items-center justify-between bg-gray-900/80 cursor-pointer transition-colors hover:bg-gray-900 ${collapsed ? '' : 'border-b border-gray-800'}`}

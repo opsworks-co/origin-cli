@@ -36,26 +36,26 @@ export const DASHBOARD_TOUR: TourStep[] = [
     delay: 200,
   },
 
-  // ── 2. Repositories: starting point, groups, collapse, backfill ──────
+  // ── 2. Repositories: starting point, then collapsible groups ─────────
   {
     target: '[data-tour="nav-repos"]',
     title: '1. Repositories',
-    content: 'The default landing page. Import from GitHub or GitLab, or point at a local checkout — every commit that lands here gets an AI attribution and a pointer to the session that produced it.',
+    content: 'The default landing page. Every commit that lands in a tracked repo gets an AI attribution and a pointer to the session that produced it.',
     placement: 'right',
   },
   {
-    target: 'main',
-    title: 'Groups collapse',
-    content: 'Click any group header (Local, your GitHub org…) to hide its repos. The state sticks across reloads so a noisy "Local" group stays tucked away.',
+    target: '[data-tour="repos-actions"]',
+    title: 'Add your repositories',
+    content: 'Import from GitHub or GitLab, or paste a local checkout path with "Add Repo". Origin only tracks AI work in repos that show up here.',
     placement: 'bottom',
     delay: 200,
   },
   {
-    target: 'main',
-    title: 'Backfill historical files',
-    content: 'On a GitHub/GitLab group, "Backfill files" pulls the changed-file list for any commit that was ingested before Origin captured it. Click once and the commit-detail pages light up.',
+    target: '[data-tour="repo-group-header"]',
+    title: 'Group by provider',
+    content: 'Repos are grouped by GitHub org, GitLab namespace, or "Local". Click a header to collapse the group — the state persists across reloads.',
     placement: 'bottom',
-    action: 'Hover the group header to see it',
+    action: 'Click any header to toggle',
   },
 
   // ── 3. Sessions: list + pretty tool call rendering ───────────────────
