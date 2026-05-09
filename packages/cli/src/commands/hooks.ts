@@ -2220,8 +2220,14 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   }
 
   const rawPrompt = input.prompt || '';
+  // If the raw prompt contains the literal Origin-managed marker, it's our own
+  // AGENTS.md / CLAUDE.md content round-tripping through the agent (Codex
+  // reads AGENTS.md natively and re-emits it as the first user turn). Drop
+  // outright — it is never a real user input.
+  const isOriginManagedEcho = rawPrompt.includes('<!-- origin-managed -->') ||
+    /^#\s+AGENTS\.md instructions for /m.test(rawPrompt);
   // Filter out system/hook messages and internal agent tags that aren't real user prompts
-  const prompt = rawPrompt
+  const prompt = isOriginManagedEcho ? '' : rawPrompt
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
     .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
     .replace(/<task-id>[\s\S]*?<\/task-id>/g, '')
@@ -2233,6 +2239,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     .replace(/<command-message>[\s\S]*?<\/command-message>/g, '')
     .replace(/<command-args>[\s\S]*?<\/command-args>/g, '')
     .replace(/<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g, '')
+    // Codex wraps AGENTS.md context in <INSTRUCTIONS>...</INSTRUCTIONS> on
+    // its first user turn. Strip the envelope so any actual user text that
+    // follows still makes it through.
+    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
     .trim();
   const isSystemMsg = !prompt || /^Stop hook feedback:|^Stop:Callback hook blocking error|^PostToolUse:.*hook|^PreToolUse:.*hook/i.test(prompt);
   if (prompt && !isSystemMsg) {
