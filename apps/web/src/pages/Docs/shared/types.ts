@@ -16,6 +16,7 @@ export type Section =
   | 'cli-sessions'
   | 'cli-config'
   | 'cli-hooks'
+  | 'cli-blame'
   | 'cli-local'
   | 'mcp'
   | 'webhooks'
@@ -87,6 +88,7 @@ export const SECTIONS: { key: Section; label: string; group?: string; tab: DocTa
   { key: 'cli-config', label: 'Configuration', tab: 'cli' },
   { key: 'cli-sessions', label: 'Session Tracking', group: 'Usage', tab: 'cli' },
   { key: 'cli-hooks', label: 'Git Hooks', tab: 'cli' },
+  { key: 'cli-blame', label: 'Blame & Attribution', tab: 'cli' },
   { key: 'cli-local', label: 'Local Mode', tab: 'cli' },
   { key: 'mcp', label: 'MCP Server', group: 'Advanced', tab: 'cli' },
   { key: 'api', label: 'API Reference', tab: 'cli' },

@@ -40,6 +40,7 @@ import CliInstallSection from './sections/cli-install';
 import CliConfigSection from './sections/cli-config';
 import CliSessionsSection from './sections/cli-sessions';
 import CliHooksSection from './sections/cli-hooks';
+import CliBlameSection from './sections/cli-blame';
 import CliLocalSection from './sections/cli-local';
 import McpSection from './sections/mcp';
 import ApiSection from './sections/api';
@@ -214,6 +215,7 @@ export default function Docs() {
         {active === 'cli-config' && <CliConfigSection />}
         {active === 'cli-sessions' && <CliSessionsSection />}
         {active === 'cli-hooks' && <CliHooksSection />}
+        {active === 'cli-blame' && <CliBlameSection />}
         {active === 'cli-local' && <CliLocalSection />}
         {active === 'mcp' && <McpSection />}
         {active === 'api' && <ApiSection />}
