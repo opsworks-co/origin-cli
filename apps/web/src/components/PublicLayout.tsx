@@ -12,17 +12,17 @@ const NAV_LINKS = [
 ];
 
 const USE_CASES_SOLO = [
-  { title: 'Undo a Bad AI Turn', desc: 'Snapshots every prompt. Restore, branch, or rewind without losing work.', hash: 'snapshots' },
-  { title: 'Blame Every Line', desc: "Which agent wrote which line, with the prompt and the model.", hash: 'blame' },
-  { title: 'Track Every Agent', desc: 'Claude, Cursor, Gemini, Codex, Copilot — one CLI, one history.', hash: 'multi-agent' },
-  { title: 'Know Your AI Costs', desc: 'Spend per agent, model, and repo — rolled up across all projects.', hash: 'costs' },
+  { title: 'Undo a Bad AI Turn', desc: 'Snapshots every prompt. Restore, branch, or rewind without losing work.', hash: 'snapshots', icon: '↶' },
+  { title: 'Blame Every Line', desc: 'Which agent wrote which line, with the prompt and the model.', hash: 'blame', icon: '◈' },
+  { title: 'Track Every Agent', desc: 'Claude, Cursor, Gemini, Codex, Copilot — one CLI, one history.', hash: 'multi-agent', icon: '◇' },
+  { title: 'Know Your AI Costs', desc: 'Spend per agent, model, and repo — rolled up across all projects.', hash: 'costs', icon: '$' },
 ];
 
 const USE_CASES_TEAMS = [
-  { title: 'AI Code Governance', desc: 'Policies, cost limits, content filters evaluated before merge.', hash: 'governance' },
-  { title: 'Live Session Feed', desc: "See every developer's agents in real time. Stop runaway spend.", hash: 'visibility' },
-  { title: 'Prove AI ROI', desc: 'Show leadership the business case for AI tooling spend with real numbers.', hash: 'roi' },
-  { title: 'Audit Trail', desc: 'SOC 2 / ISO 27001 evidence: every prompt, diff, and model, forever.', hash: 'audit' },
+  { title: 'AI Code Governance', desc: 'Policies, cost limits, content filters evaluated before merge.', hash: 'governance', icon: '⛨' },
+  { title: 'Live Session Feed', desc: "See every developer's agents in real time. Stop runaway spend.", hash: 'visibility', icon: '◉' },
+  { title: 'Prove AI ROI', desc: 'Show leadership the business case for AI tooling spend with real numbers.', hash: 'roi', icon: '▲' },
+  { title: 'Audit Trail', desc: 'SOC 2 / ISO 27001 evidence: every prompt, diff, and model, forever.', hash: 'audit', icon: '☰' },
 ];
 
 function UseCasesDropdown({ scrollTop }: { scrollTop: () => void }) {
@@ -63,40 +63,72 @@ function UseCasesDropdown({ scrollTop }: { scrollTop: () => void }) {
 
       {open && (
         <div className="absolute top-full left-1/2 -translate-x-1/2 pt-3 z-50">
-          <div className="w-[340px] rounded-xl border border-white/[0.08] bg-gray-900 shadow-2xl shadow-black/40 overflow-hidden">
-            {/* Solo section */}
-            <div className="px-4 pt-4 pb-1">
-              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-2">For Solo Developers</p>
-              {USE_CASES_SOLO.map((item) => (
-                <Link
-                  key={item.title}
-                  to={`/use-cases#${item.hash}`}
-                  onClick={() => { setOpen(false); }}
-                  className="block px-3 py-2.5 -mx-1 rounded-lg hover:bg-white/[0.04] transition-colors group"
-                >
-                  <p className="text-sm font-medium text-gray-200 group-hover:text-white transition-colors">{item.title}</p>
-                  <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{item.desc}</p>
-                </Link>
-              ))}
+          <div className="w-[720px] rounded-2xl border border-white/[0.08] bg-gray-900/95 backdrop-blur-xl shadow-2xl shadow-black/50 overflow-hidden">
+            <div className="grid grid-cols-2 divide-x divide-white/[0.06]">
+              {/* Solo column */}
+              <div className="p-5">
+                <div className="flex items-center justify-between mb-3 px-2">
+                  <p className="text-[10px] font-semibold text-emerald-400 uppercase tracking-widest">For Solo Developers</p>
+                  <span className="text-[10px] text-gray-500">Free forever</span>
+                </div>
+                <div className="space-y-1">
+                  {USE_CASES_SOLO.map((item) => (
+                    <Link
+                      key={item.title}
+                      to={`/use-cases#${item.hash}`}
+                      onClick={() => { setOpen(false); }}
+                      className="flex items-start gap-3 px-2 py-2.5 rounded-lg hover:bg-white/[0.04] transition-colors group"
+                    >
+                      <span className="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-500/10 ring-1 ring-emerald-500/20 flex items-center justify-center text-emerald-400 text-sm group-hover:bg-emerald-500/20 transition-colors">
+                        {item.icon}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-gray-200 group-hover:text-white transition-colors">{item.title}</p>
+                        <p className="text-xs text-gray-500 mt-0.5 leading-snug">{item.desc}</p>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+
+              {/* Teams column */}
+              <div className="p-5 bg-indigo-500/[0.03]">
+                <div className="flex items-center justify-between mb-3 px-2">
+                  <p className="text-[10px] font-semibold text-indigo-400 uppercase tracking-widest">For Teams</p>
+                  <span className="text-[10px] text-gray-500">From $29/user</span>
+                </div>
+                <div className="space-y-1">
+                  {USE_CASES_TEAMS.map((item) => (
+                    <Link
+                      key={item.title}
+                      to={`/use-cases#${item.hash}`}
+                      onClick={() => { setOpen(false); }}
+                      className="flex items-start gap-3 px-2 py-2.5 rounded-lg hover:bg-white/[0.04] transition-colors group"
+                    >
+                      <span className="flex-shrink-0 w-8 h-8 rounded-lg bg-indigo-500/10 ring-1 ring-indigo-500/20 flex items-center justify-center text-indigo-400 text-sm group-hover:bg-indigo-500/20 transition-colors">
+                        {item.icon}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-gray-200 group-hover:text-white transition-colors">{item.title}</p>
+                        <p className="text-xs text-gray-500 mt-0.5 leading-snug">{item.desc}</p>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </div>
             </div>
 
-            {/* Divider */}
-            <div className="mx-4 border-t border-white/[0.06]" />
-
-            {/* Teams section */}
-            <div className="px-4 pt-3 pb-3">
-              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-2">For Teams</p>
-              {USE_CASES_TEAMS.map((item) => (
-                <Link
-                  key={item.title}
-                  to={`/use-cases#${item.hash}`}
-                  onClick={() => { setOpen(false); }}
-                  className="block px-3 py-2.5 -mx-1 rounded-lg hover:bg-white/[0.04] transition-colors group"
-                >
-                  <p className="text-sm font-medium text-gray-200 group-hover:text-white transition-colors">{item.title}</p>
-                  <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{item.desc}</p>
-                </Link>
-              ))}
+            {/* Footer CTA */}
+            <div className="border-t border-white/[0.06] bg-white/[0.02] px-5 py-3 flex items-center justify-between">
+              <p className="text-xs text-gray-500">See every use case with examples</p>
+              <Link
+                to="/use-cases"
+                onClick={() => { setOpen(false); }}
+                className="text-xs font-medium text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1"
+              >
+                View all use cases
+                <span aria-hidden>→</span>
+              </Link>
             </div>
           </div>
         </div>

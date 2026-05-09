@@ -9,16 +9,21 @@ const TIERS = [
     price: '$0',
     period: 'forever',
     description: 'For individual developers tracking their AI coding',
-    features: [
-      'Unlimited repositories',
-      'Unlimited sessions',
-      'All AI agents supported',
-      'Full session replay with prompts',
-      'Per-prompt file change tracking',
-      'Token usage & cost tracking',
-      'Auto-created repos & agents',
-      'Local CLI tools (blame, stats, diff)',
-      'Multi-account support',
+    featureGroups: [
+      {
+        title: '',
+        items: [
+          'Unlimited repositories',
+          'Unlimited sessions',
+          'All AI agents supported',
+          'Full session replay with prompts',
+          'Per-prompt file change tracking',
+          'Token usage & cost tracking',
+          'Auto-created repos & agents',
+          'Local CLI tools (blame, stats, diff)',
+          'Multi-account support',
+        ],
+      },
     ],
     cta: 'Get started free',
     ctaLink: '/register?type=developer',
@@ -29,19 +34,44 @@ const TIERS = [
     price: '$29',
     period: '/user/month',
     description: 'For teams that need visibility and governance over AI coding',
-    features: [
-      'Everything in Solo, plus:',
-      'Centralized team dashboard',
-      'Scoped API keys (per-repo, per-agent)',
-      'Policy enforcement (model allowlists, cost limits, file restrictions)',
-      'AI Auto-Review',
-      'GitHub & GitLab PR checks',
-      'Agent-level configuration & system prompts',
-      'Budget & cost controls',
-      'Audit logs & compliance reports',
-      'Slack notifications',
-      'Up to 25 users',
+    featureGroups: [
+      {
+        title: 'Everything in Solo, plus:',
+        items: [],
+      },
+      {
+        title: 'Visibility',
+        items: [
+          'See every AI session across your team',
+          'Track who shipped what — and why',
+          'Audit logs & compliance-ready reports',
+        ],
+      },
+      {
+        title: 'Governance',
+        items: [
+          'Restrict models, files, and tools by policy',
+          'Scoped API keys per repo and per agent',
+          'Agent-level system prompts & configuration',
+        ],
+      },
+      {
+        title: 'Cost control',
+        items: [
+          'Cap spend per repo, agent, or developer',
+          'Real-time budget alerts before overruns',
+        ],
+      },
+      {
+        title: 'Code quality',
+        items: [
+          'AI Auto-Review on every pull request',
+          'GitHub & GitLab PR status checks',
+          'Slack alerts on risky changes',
+        ],
+      },
     ],
+    footnote: 'Up to 25 developers',
     cta: 'Start free trial',
     ctaLink: '/register?type=org',
     highlighted: true,
@@ -51,15 +81,19 @@ const TIERS = [
     price: 'Custom',
     period: '',
     description: 'For organizations with compliance requirements',
-    features: [
-      'Everything in Team, plus:',
-      'Unlimited users',
-      'SSO / SAML',
-      'Custom policies & workflows',
-      'Dedicated support & SLA',
-      'On-premise / self-hosted deployment',
-      'Custom integrations',
-      'Advanced audit & reporting',
+    featureGroups: [
+      {
+        title: 'Everything in Team, plus:',
+        items: [
+          'Unlimited users',
+          'SSO / SAML',
+          'Custom policies & workflows',
+          'Dedicated support & SLA',
+          'On-premise / self-hosted deployment',
+          'Custom integrations',
+          'Advanced audit & reporting',
+        ],
+      },
     ],
     cta: 'Contact sales',
     ctaLink: 'mailto:sales@getorigin.dev',
@@ -115,66 +149,88 @@ export default function Pricing() {
       </FadeIn>
 
       {/* Pricing Cards */}
-      <StaggerContainer className="grid md:grid-cols-3 gap-8 mb-24" staggerMs={150}>
-        {TIERS.map((tier) => (
-          <div
-            key={tier.name}
-            className={`card flex flex-col hover:shadow-lg hover:shadow-indigo-500/5 hover:-translate-y-1 transition-all duration-300 ${
-              tier.highlighted
-                ? 'border-indigo-500/50 bg-indigo-600/5 ring-1 ring-indigo-500/20'
-                : ''
-            }`}
-          >
-            {tier.highlighted && (
-              <div className="text-center -mt-3 mb-4">
-                <span className="inline-block bg-indigo-600 text-white text-xs font-semibold px-3 py-1 rounded-full">
-                  Most Popular
-                </span>
+      <StaggerContainer className="grid md:grid-cols-3 gap-8 mb-24 md:items-start" staggerMs={150}>
+        {TIERS.map((tier) => {
+          const isLight = tier.highlighted;
+          const cardClass = isLight
+            ? 'relative flex flex-col rounded-2xl p-8 bg-gradient-to-b from-white to-slate-50 ring-1 ring-slate-200 shadow-2xl shadow-indigo-900/40 md:-mt-4 md:mb-4 hover:-translate-y-1 transition-all duration-300'
+            : 'card flex flex-col hover:shadow-lg hover:shadow-indigo-500/5 hover:-translate-y-1 transition-all duration-300';
+          const titleClass = isLight ? 'text-xl font-bold text-slate-900' : 'text-xl font-bold text-gray-100';
+          const descClass = isLight ? 'text-sm text-slate-500 mt-1' : 'text-sm text-gray-400 mt-1';
+          const priceClass = isLight ? 'text-5xl font-bold text-slate-900 tracking-tight' : 'text-4xl font-bold text-gray-100';
+          const periodClass = isLight ? 'text-slate-500 ml-1' : 'text-gray-500 ml-1';
+          const groupTitleClass = isLight
+            ? 'text-[11px] font-semibold uppercase tracking-wider text-indigo-600 mb-2'
+            : 'text-[11px] font-semibold uppercase tracking-wider text-indigo-400 mb-2';
+          const itemClass = isLight
+            ? 'flex items-start gap-2.5 text-sm text-slate-700'
+            : 'flex items-start gap-2 text-sm text-gray-300';
+          const checkClass = isLight
+            ? 'mt-0.5 flex-shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-indigo-600 text-white text-[10px] font-bold leading-none'
+            : 'text-green-400 mt-0.5 flex-shrink-0';
+          const ctaClass = isLight
+            ? 'text-center py-3 px-6 rounded-xl font-semibold text-sm bg-slate-900 text-white hover:bg-slate-800 transition-colors shadow-lg shadow-slate-900/20'
+            : 'text-center py-3 px-6 rounded-xl font-semibold text-sm transition-colors bg-gray-800 text-gray-200 hover:bg-gray-700 border border-gray-700';
+
+          return (
+            <div key={tier.name} className={cardClass}>
+              {tier.highlighted && (
+                <div className="absolute -top-3 left-1/2 -translate-x-1/2">
+                  <span className="inline-block bg-indigo-600 text-white text-[11px] font-semibold tracking-wide px-3 py-1 rounded-full shadow-md shadow-indigo-900/30">
+                    MOST POPULAR
+                  </span>
+                </div>
+              )}
+              <div className="mb-6">
+                <h3 className={titleClass}>{tier.name}</h3>
+                <p className={descClass}>{tier.description}</p>
               </div>
-            )}
-            <div className="mb-6">
-              <h3 className="text-xl font-bold text-gray-100">{tier.name}</h3>
-              <p className="text-sm text-gray-400 mt-1">{tier.description}</p>
-            </div>
-            <div className="mb-6">
-              <span className="text-4xl font-bold text-gray-100">{tier.price}</span>
-              {tier.period && (
-                <span className="text-gray-500 ml-1">{tier.period}</span>
+              <div className="mb-6">
+                <span className={priceClass}>{tier.price}</span>
+                {tier.period && (
+                  <span className={periodClass}>{tier.period}</span>
+                )}
+              </div>
+              <div className="space-y-5 mb-8 flex-1">
+                {tier.featureGroups.map((group, gi) => (
+                  <div key={gi}>
+                    {group.title && (
+                      group.items.length === 0 ? (
+                        <p className={isLight ? 'text-sm font-semibold text-slate-900' : 'text-sm font-semibold text-gray-200'}>
+                          {group.title}
+                        </p>
+                      ) : (
+                        <p className={groupTitleClass}>{group.title}</p>
+                      )
+                    )}
+                    {group.items.length > 0 && (
+                      <ul className="space-y-2.5">
+                        {group.items.map((feature, i) => (
+                          <li key={i} className={itemClass}>
+                            <span className={checkClass}>
+                              {isLight ? <>&#10003;</> : <>&#10003;</>}
+                            </span>
+                            <span>{feature}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+                {tier.footnote && (
+                  <p className={isLight ? 'text-xs text-slate-400 pt-2 border-t border-slate-100' : 'text-xs text-gray-500 pt-2 border-t border-gray-800'}>
+                    {tier.footnote}
+                  </p>
+                )}
+              </div>
+              {tier.ctaLink.startsWith('mailto') ? (
+                <a href={tier.ctaLink} className={ctaClass}>{tier.cta}</a>
+              ) : (
+                <Link to={tier.ctaLink} className={ctaClass}>{tier.cta}</Link>
               )}
             </div>
-            <ul className="space-y-3 mb-8 flex-1">
-              {tier.features.map((feature, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-gray-300">
-                  <span className="text-green-400 mt-0.5 flex-shrink-0">&#10003;</span>
-                  {feature}
-                </li>
-              ))}
-            </ul>
-            {tier.ctaLink.startsWith('mailto') ? (
-              <a
-                href={tier.ctaLink}
-                className={`text-center py-3 px-6 rounded-xl font-semibold text-sm transition-colors ${
-                  tier.highlighted
-                    ? 'btn-primary'
-                    : 'bg-gray-800 text-gray-200 hover:bg-gray-700 border border-gray-700'
-                }`}
-              >
-                {tier.cta}
-              </a>
-            ) : (
-              <Link
-                to={tier.ctaLink}
-                className={`text-center py-3 px-6 rounded-xl font-semibold text-sm transition-colors ${
-                  tier.highlighted
-                    ? 'btn-primary'
-                    : 'bg-gray-800 text-gray-200 hover:bg-gray-700 border border-gray-700'
-                }`}
-              >
-                {tier.cta}
-              </Link>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </StaggerContainer>
 
       {/* Comparison Table */}
