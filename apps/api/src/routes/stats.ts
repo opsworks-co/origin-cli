@@ -22,6 +22,73 @@ function sessionUserScope(req: AuthRequest): { userId?: string } {
   return isAdminUser(req) ? {} : { userId: req.user!.id };
 }
 
+// GET /onboarding-debug — diagnostic snapshot for the "First Session"
+// onboarding step. The plain `/me` endpoint only tells the UI whether the
+// signed-in user has any sessions in their *currently active* org under
+// their *own* userId — three independent filters that all have to line up
+// for "totalSessions > 0" to flip. When it stays at 0, the user has no
+// way to tell which condition failed (CLI never called in vs. session was
+// created under a different user/org vs. repo wasn't auto-registered).
+//
+// This endpoint exposes each of those signals separately so the UI can
+// render concrete guidance instead of a generic "still listening".
+router.get('/onboarding-debug', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const orgId = req.activeOrgId!;
+
+    const [repoCount, apiKeyCount, sessionsForUser, sessionsInOrg, latestSession, latestApiKey] = await Promise.all([
+      prisma.repo.count({ where: { orgId } }),
+      prisma.apiKey.count({ where: { orgId } }),
+      prisma.codingSession.count({ where: { userId, commit: { repo: { orgId } } } }),
+      prisma.codingSession.count({ where: { commit: { repo: { orgId } } } }),
+      prisma.codingSession.findFirst({
+        where: { commit: { repo: { orgId } } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, model: true, createdAt: true, userId: true, status: true },
+      }),
+      prisma.apiKey.findFirst({
+        where: { orgId },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, name: true, userId: true, createdAt: true },
+      }),
+    ]);
+
+    res.json({
+      orgId,
+      userId,
+      repoCount,
+      apiKeyCount,
+      sessionsForUser,
+      sessionsInOrg,
+      // sessionsInOrg > sessionsForUser ⇒ session attribution mismatch
+      // (CLI authenticated as a different user / membership than the one
+      // currently logged into the dashboard).
+      attributionMismatch: sessionsInOrg > sessionsForUser,
+      latestSession: latestSession
+        ? {
+            id: latestSession.id,
+            model: latestSession.model,
+            status: latestSession.status,
+            userId: latestSession.userId,
+            createdAt: latestSession.createdAt,
+          }
+        : null,
+      latestApiKey: latestApiKey
+        ? {
+            id: latestApiKey.id,
+            name: latestApiKey.name,
+            userId: latestApiKey.userId,
+            createdAt: latestApiKey.createdAt,
+          }
+        : null,
+    });
+  } catch (err) {
+    console.error('GET /stats/onboarding-debug error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET / — compute dashboard stats
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
@@ -749,25 +816,56 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
     }));
 
     // ── Most modified files (top 10) ────────────────────────────
+    // Pull repoId alongside filesChanged so the dashboard can deep-link each
+    // row into its repo's file viewer instead of just a sessions filter.
     const recentSessions = await prisma.codingSession.findMany({
       where: baseWhere,
-      select: { filesChanged: true },
+      select: { filesChanged: true, commit: { select: { repoId: true } } },
       orderBy: { createdAt: 'desc' },
       take: 200,
     });
 
-    const fileCounts: Record<string, number> = {};
+    const fileCounts: Record<string, { count: number; repoId: string | null }> = {};
     for (const s of recentSessions) {
       if (!s.filesChanged) continue;
-      const files = s.filesChanged.split(',').map((f) => f.trim()).filter(Boolean);
+      // filesChanged is stored as a JSON-stringified array (e.g.
+      // `["utils.py","test_utils.py"]`). Comma-splitting that produced
+      // fragments like `["utils.py"` and `"test_utils.py"]` that ended up
+      // rendered raw in the dashboard. Try JSON first, fall back to
+      // comma-split for legacy raw-string values, then strip stray
+      // quotes/brackets either way.
+      let files: string[] = [];
+      const raw = s.filesChanged.trim();
+      if (raw.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) files = parsed.filter((x): x is string => typeof x === 'string');
+        } catch {
+          // Malformed JSON — fall through to legacy split.
+        }
+      }
+      if (files.length === 0) {
+        files = raw.split(',').map((f) => f.trim()).filter(Boolean);
+      }
+      const repoId = s.commit?.repoId ?? null;
       for (const f of files) {
-        fileCounts[f] = (fileCounts[f] || 0) + 1;
+        const clean = f.replace(/^["[\]]+|["[\]]+$/g, '').trim();
+        if (!clean) continue;
+        const cur = fileCounts[clean];
+        if (cur) {
+          cur.count++;
+          // Keep the most-recent repoId (recentSessions is desc by createdAt
+          // so the first hit wins; later sessions may belong to other repos).
+          if (!cur.repoId && repoId) cur.repoId = repoId;
+        } else {
+          fileCounts[clean] = { count: 1, repoId };
+        }
       }
     }
     const topFiles = Object.entries(fileCounts)
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1].count - a[1].count)
       .slice(0, 10)
-      .map(([file, count]) => ({ file, count }));
+      .map(([file, { count, repoId }]) => ({ file, count, repoId }));
 
     // ── Activity heatmap (last 365 days) ────────────────────────
     const yearAgo = new Date();

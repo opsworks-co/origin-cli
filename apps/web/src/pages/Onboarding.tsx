@@ -222,18 +222,45 @@ export default function Onboarding() {
     }
   }, [user, navigate, fromInvite, fromTeam]);
 
-  // Poll for first session in step 3
+  // Diagnostic snapshot rendered under "Listening for your first session…"
+  // so the user can see *why* nothing's appearing yet (no API key vs. no
+  // repo vs. session attributed to a different user) instead of just an
+  // unbounded spinner.
+  const [debugSnapshot, setDebugSnapshot] = useState<{
+    repoCount: number;
+    apiKeyCount: number;
+    sessionsForUser: number;
+    sessionsInOrg: number;
+    attributionMismatch: boolean;
+    latestSession: { id: string; model: string; status: string; userId: string | null; createdAt: string } | null;
+    latestApiKey: { id: string; name: string; userId: string | null; createdAt: string } | null;
+  } | null>(null);
+
+  // Poll for first session on the "First Session" step. We hit the
+  // diagnostic endpoint instead of /stats/me so the UI can react to
+  // partial progress (CLI talked to us but session attributed to a
+  // different user, repo registered but no session yet, etc.) on the
+  // same poll cycle that detects success.
   useEffect(() => {
     if (step !== 5 || !polling) return;
     const check = async () => {
       try {
-        const stats = await request<{ totalSessions: number }>('/api/stats/me');
-        if (stats && stats.totalSessions > 0) {
+        const dbg = await request<{
+          repoCount: number;
+          apiKeyCount: number;
+          sessionsForUser: number;
+          sessionsInOrg: number;
+          attributionMismatch: boolean;
+          latestSession: { id: string; model: string; status: string; userId: string | null; createdAt: string } | null;
+          latestApiKey: { id: string; name: string; userId: string | null; createdAt: string } | null;
+        }>('/api/stats/onboarding-debug');
+        setDebugSnapshot(dbg);
+        if (dbg.sessionsForUser > 0) {
           setSessionFound(true);
           setPolling(false);
           try { sessionStorage.removeItem('origin:onboarding-key'); } catch { /* ignore */ }
         }
-      } catch { /* ignore */ }
+      } catch { /* ignore — keep polling */ }
     };
     check();
     pollRef.current = setInterval(check, 3000);
@@ -881,24 +908,68 @@ export default function Onboarding() {
             </div>
 
             {!sessionFound && (
-              <div className="rounded-xl border border-white/[0.08] bg-gray-900/40 p-5 space-y-4">
-                <p className="text-xs text-gray-500 font-semibold uppercase tracking-wider">What to do now</p>
-                <div className="space-y-3">
-                  {[
-                    { n: '1', title: 'Open your project in terminal', sub: 'Make sure you ran origin enable in this project' },
-                    { n: '2', title: 'Start any AI coding agent', sub: 'Claude Code, Cursor, Gemini CLI — any will work' },
-                    { n: '3', title: 'Make a commit', sub: 'Origin hooks fire on git commit, capturing the session' },
-                  ].map(item => (
-                    <div key={item.n} className="flex items-start gap-3">
-                      <span className="text-emerald-400 mt-0.5">{item.n}.</span>
-                      <div>
-                        <p className="text-sm text-gray-200">{item.title}</p>
-                        <p className="text-xs text-gray-500 mt-0.5">{item.sub}</p>
+              <>
+                <div className="rounded-xl border border-white/[0.08] bg-gray-900/40 p-5 space-y-4">
+                  <p className="text-xs text-gray-500 font-semibold uppercase tracking-wider">What to do now</p>
+                  <div className="space-y-3">
+                    {[
+                      { n: '1', title: 'Open your project in terminal', sub: 'Make sure you ran origin enable in this project' },
+                      { n: '2', title: 'Start any AI coding agent', sub: 'Claude Code, Cursor, Gemini CLI, Codex — any will work' },
+                      { n: '3', title: 'Make a commit', sub: 'Origin hooks fire on git commit, capturing the session' },
+                    ].map(item => (
+                      <div key={item.n} className="flex items-start gap-3">
+                        <span className="text-emerald-400 mt-0.5">{item.n}.</span>
+                        <div>
+                          <p className="text-sm text-gray-200">{item.title}</p>
+                          <p className="text-xs text-gray-500 mt-0.5">{item.sub}</p>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
-              </div>
+
+                {/* Diagnostic — show *what we can see* so the user doesn't
+                    stare at a spinner while their CLI is silently 401'ing. */}
+                {debugSnapshot && (() => {
+                  const noKey = debugSnapshot.apiKeyCount === 0;
+                  const noRepo = debugSnapshot.repoCount === 0;
+                  const noSession = debugSnapshot.sessionsInOrg === 0;
+                  const mismatch = debugSnapshot.attributionMismatch;
+                  let hint: { tone: 'amber' | 'red' | 'emerald'; line: string };
+                  if (noKey) {
+                    hint = { tone: 'red', line: 'No API key on this org yet — run `origin login` in your terminal.' };
+                  } else if (noRepo && noSession) {
+                    hint = { tone: 'amber', line: 'API key exists but the CLI hasn\'t hit Origin yet. Run `origin enable` in your project, then start an AI agent.' };
+                  } else if (noSession) {
+                    hint = { tone: 'amber', line: 'Repos are registered but no sessions yet. Make sure your AI agent is started in a repo where you ran `origin enable`.' };
+                  } else if (mismatch) {
+                    hint = { tone: 'red', line: 'A session exists in this org but is attributed to a different user — your CLI is logged in as someone else. Re-run `origin login` with the API key shown earlier.' };
+                  } else {
+                    hint = { tone: 'emerald', line: 'Session detected — finishing up…' };
+                  }
+                  const toneClasses = {
+                    red: 'border-red-500/30 bg-red-500/5 text-red-300',
+                    amber: 'border-amber-500/30 bg-amber-500/5 text-amber-300',
+                    emerald: 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300',
+                  }[hint.tone];
+                  return (
+                    <div className={`rounded-xl border px-4 py-3 text-xs space-y-2 ${toneClasses}`}>
+                      <p className="font-medium">{hint.line}</p>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-gray-400">
+                        <span>API keys</span><span className="text-right tabular-nums text-gray-300">{debugSnapshot.apiKeyCount}</span>
+                        <span>Repos</span><span className="text-right tabular-nums text-gray-300">{debugSnapshot.repoCount}</span>
+                        <span>Sessions (you)</span><span className="text-right tabular-nums text-gray-300">{debugSnapshot.sessionsForUser}</span>
+                        <span>Sessions (org-wide)</span><span className="text-right tabular-nums text-gray-300">{debugSnapshot.sessionsInOrg}</span>
+                      </div>
+                      {debugSnapshot.latestSession && (
+                        <p className="text-[11px] text-gray-500 pt-1 border-t border-white/[0.05]">
+                          Last session: {debugSnapshot.latestSession.model} · {debugSnapshot.latestSession.status} · {new Date(debugSnapshot.latestSession.createdAt).toLocaleTimeString()}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+              </>
             )}
 
             <div className="flex items-center justify-between pt-2">
