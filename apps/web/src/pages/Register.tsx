@@ -19,11 +19,12 @@ export default function Register() {
   const { register, registerDeveloper, error: authError } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  // Initial tab honours `?type=team|developer` so the Login page footer's
-  // "Team" link can land directly on the Team tab. Falls back to developer
-  // so the bare /register URL still defaults to Solo (the higher-volume
-  // signup path historically).
-  const initialAccountType: AccountType = searchParams.get('type') === 'team' ? 'team' : 'developer';
+  // Initial tab honours `?type=team|org|developer`. Both `team` and `org`
+  // are accepted because the marketing pages (Pricing, Landing) settled on
+  // `org` while Login uses `team` — keep both so neither side silently
+  // routes users to the Solo tab.
+  const typeParam = searchParams.get('type');
+  const initialAccountType: AccountType = typeParam === 'team' || typeParam === 'org' ? 'team' : 'developer';
   const [accountType, setAccountType] = useState<AccountType>(initialAccountType);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
