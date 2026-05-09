@@ -235,17 +235,26 @@ export default function Onboarding() {
     latestSession: { id: string; model: string; status: string; userId: string | null; createdAt: string } | null;
     latestApiKey: { id: string; name: string; userId: string | null; createdAt: string } | null;
   } | null>(null);
-  const [claiming, setClaiming] = useState(false);
-  const [claimResult, setClaimResult] = useState<{ claimedSessions: number; claimedApiKeys: number } | null>(null);
-  const [claimError, setClaimError] = useState<string | null>(null);
 
   // Poll for first session on the "First Session" step. We hit the
   // diagnostic endpoint instead of /stats/me so the UI can react to
   // partial progress (CLI talked to us but session attributed to a
   // different user, repo registered but no session yet, etc.) on the
   // same poll cycle that detects success.
+  //
+  // Auto-claim policy: if the diagnostic reports an attribution mismatch
+  // (sessions exist in the org but tied to a deleted/previous user), we
+  // silently POST /onboarding-claim once per onboarding step rather than
+  // surfacing a scary red banner. The endpoint already gates this to
+  // personal workspaces with the caller as OWNER, so it can't leak
+  // teammate data — and on a single-user workspace there's no privacy
+  // boundary to surface anyway. The user just sees the spinner flip to
+  // "First session detected!" once the claim lands and the next poll
+  // tick picks up sessionsForUser > 0.
+  const claimAttemptedRef = useRef(false);
   useEffect(() => {
     if (step !== 5 || !polling) return;
+    claimAttemptedRef.current = false; // reset when re-entering step
     const check = async () => {
       try {
         const dbg = await request<{
@@ -258,6 +267,22 @@ export default function Onboarding() {
           latestApiKey: { id: string; name: string; userId: string | null; createdAt: string } | null;
         }>('/api/stats/onboarding-debug');
         setDebugSnapshot(dbg);
+
+        // Self-heal: auto-claim orphaned sessions on this poll cycle
+        // instead of asking the user to click a button. We only try
+        // once per step entry; if the claim 403s (e.g. team org) we
+        // stop trying and the diagnostic strip falls back to a
+        // neutral hint.
+        if (dbg.attributionMismatch && !claimAttemptedRef.current) {
+          claimAttemptedRef.current = true;
+          try {
+            await request<{ claimedSessions: number; claimedApiKeys: number }>(
+              '/api/stats/onboarding-claim',
+              { method: 'POST' },
+            );
+          } catch { /* claim refused — leave the diagnostic counters as-is */ }
+        }
+
         if (dbg.sessionsForUser > 0) {
           setSessionFound(true);
           setPolling(false);
@@ -931,77 +956,21 @@ export default function Onboarding() {
                   </div>
                 </div>
 
-                {/* Diagnostic — show *what we can see* so the user doesn't
-                    stare at a spinner while their CLI is silently 401'ing. */}
+                {/* Optional soft hint — only when something's clearly
+                    wrong on the user's side (no API key / no repo) and
+                    the auto-claim above can't help. Attribution mismatch
+                    is handled silently by the auto-claim, so we don't
+                    surface a red warning the user has to act on. */}
                 {debugSnapshot && (() => {
                   const noKey = debugSnapshot.apiKeyCount === 0;
-                  const noRepo = debugSnapshot.repoCount === 0;
-                  const noSession = debugSnapshot.sessionsInOrg === 0;
-                  const mismatch = debugSnapshot.attributionMismatch;
-                  let hint: { tone: 'amber' | 'red' | 'emerald'; line: string };
-                  if (noKey) {
-                    hint = { tone: 'red', line: 'No API key on this org yet — run `origin login` in your terminal.' };
-                  } else if (noRepo && noSession) {
-                    hint = { tone: 'amber', line: 'API key exists but the CLI hasn\'t hit Origin yet. Run `origin enable` in your project, then start an AI agent.' };
-                  } else if (noSession) {
-                    hint = { tone: 'amber', line: 'Repos are registered but no sessions yet. Make sure your AI agent is started in a repo where you ran `origin enable`.' };
-                  } else if (mismatch) {
-                    hint = { tone: 'red', line: 'Sessions exist in this workspace but are attributed to a previous user (likely a stale account before delete-cleanup landed). Click "Claim sessions" below to re-attribute them and the CLI key to you.' };
-                  } else {
-                    hint = { tone: 'emerald', line: 'Session detected — finishing up…' };
-                  }
-                  const toneClasses = {
-                    red: 'border-red-500/30 bg-red-500/5 text-red-300',
-                    amber: 'border-amber-500/30 bg-amber-500/5 text-amber-300',
-                    emerald: 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300',
-                  }[hint.tone];
+                  const noRepo = debugSnapshot.repoCount === 0 && debugSnapshot.sessionsInOrg === 0;
+                  if (!noKey && !noRepo) return null;
+                  const line = noKey
+                    ? 'No CLI yet — run `origin login` in your terminal once with the key from earlier.'
+                    : 'CLI is set up, but it hasn\'t talked to Origin yet. Run `origin enable` inside a project, then start any AI agent.';
                   return (
-                    <div className={`rounded-xl border px-4 py-3 text-xs space-y-2 ${toneClasses}`}>
-                      <p className="font-medium">{hint.line}</p>
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-gray-400">
-                        <span>API keys</span><span className="text-right tabular-nums text-gray-300">{debugSnapshot.apiKeyCount}</span>
-                        <span>Repos</span><span className="text-right tabular-nums text-gray-300">{debugSnapshot.repoCount}</span>
-                        <span>Sessions (you)</span><span className="text-right tabular-nums text-gray-300">{debugSnapshot.sessionsForUser}</span>
-                        <span>Sessions (org-wide)</span><span className="text-right tabular-nums text-gray-300">{debugSnapshot.sessionsInOrg}</span>
-                      </div>
-                      {debugSnapshot.latestSession && (
-                        <p className="text-[11px] text-gray-500 pt-1 border-t border-white/[0.05]">
-                          Last session: {debugSnapshot.latestSession.model} · {debugSnapshot.latestSession.status} · {new Date(debugSnapshot.latestSession.createdAt).toLocaleTimeString()}
-                        </p>
-                      )}
-                      {mismatch && (
-                        <div className="pt-2 border-t border-white/[0.05] space-y-2">
-                          {claimResult && (
-                            <p className="text-[11px] text-emerald-300">
-                              Claimed {claimResult.claimedSessions} session{claimResult.claimedSessions === 1 ? '' : 's'} and {claimResult.claimedApiKeys} API key{claimResult.claimedApiKeys === 1 ? '' : 's'}. Refreshing…
-                            </p>
-                          )}
-                          {claimError && (
-                            <p className="text-[11px] text-red-300">{claimError}</p>
-                          )}
-                          <button
-                            onClick={async () => {
-                              setClaimError(null);
-                              setClaiming(true);
-                              try {
-                                const r = await request<{ claimedSessions: number; claimedApiKeys: number }>(
-                                  '/api/stats/onboarding-claim',
-                                  { method: 'POST' },
-                                );
-                                setClaimResult(r);
-                              } catch (err: any) {
-                                setClaimError(err?.message || 'Claim failed');
-                              } finally {
-                                setClaiming(false);
-                              }
-                            }}
-                            disabled={claiming || !!claimResult}
-                            className="text-[11px] px-3 py-1.5 rounded-md bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-200 transition-colors disabled:opacity-50"
-                          >
-                            {claiming ? 'Claiming…' : claimResult ? 'Claimed ✓' : 'Claim sessions for this account'}
-                          </button>
-                        </div>
-                      )}
+                    <div className="rounded-xl border border-white/[0.06] bg-gray-900/40 px-4 py-3 text-xs text-gray-400">
+                      {line}
                     </div>
                   );
                 })()}
