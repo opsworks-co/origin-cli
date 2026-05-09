@@ -306,8 +306,14 @@ function installCodexHooks(gitRoot: string): void {
   const codexLabel = gitRoot === os.homedir() ? `~/.codex/hooks.json` : `.codex/hooks.json`;
   console.log(chalk.green(`  ✓ Hooks installed in ${codexLabel}`));
 
-  // Auto-enable codex_hooks feature flag in ~/.codex/config.toml so the user
-  // doesn't need to pass -c features.codex_hooks=true every time.
+  // Auto-enable the hooks feature flag in ~/.codex/config.toml so the user
+  // doesn't need to pass `-c features.hooks=true` every time.
+  //
+  // Codex renamed this flag from `codex_hooks` to `hooks` and now logs a
+  // deprecation warning on every launch when the old key is present (see
+  // https://developers.openai.com/codex/config-basic#feature-flags). We
+  // write the new canonical key, and if a user's config still has the
+  // legacy `codex_hooks = true` we rewrite it in-place during this run.
   const globalCodexDir = path.join(os.homedir(), '.codex');
   const configTomlPath = path.join(globalCodexDir, 'config.toml');
   try {
@@ -318,24 +324,37 @@ function installCodexHooks(gitRoot: string): void {
     if (fs.existsSync(configTomlPath)) {
       toml = fs.readFileSync(configTomlPath, 'utf-8');
     }
-    // Check if codex_hooks is already set
-    if (/codex_hooks\s*=\s*true/i.test(toml)) {
+    const hasLegacy = /^[ \t]*codex_hooks\s*=\s*true/im.test(toml);
+    const hasCanonical = /^[ \t]*hooks\s*=\s*true/im.test(toml);
+
+    if (hasCanonical && !hasLegacy) {
       console.log(chalk.green(`  ✓ Codex hooks feature flag already enabled in ~/.codex/config.toml`));
     } else {
-      // Add or update the [features] section
-      if (/\[features\]/i.test(toml)) {
-        // Section exists — append the flag after it
-        toml = toml.replace(/(\[features\]\s*\n)/, '$1codex_hooks = true\n');
-      } else {
-        // No [features] section — add it at the end
-        toml = toml.trimEnd() + '\n\n[features]\ncodex_hooks = true\n';
+      let next = toml;
+      if (hasLegacy) {
+        // Rewrite `codex_hooks = true` → `hooks = true` (preserves
+        // surrounding whitespace and any inline comment).
+        next = next.replace(/^([ \t]*)codex_hooks(\s*=\s*true)/gim, '$1hooks$2');
       }
-      fs.writeFileSync(configTomlPath, toml);
-      console.log(chalk.green(`  ✓ Codex hooks feature flag enabled in ~/.codex/config.toml`));
+      if (!hasCanonical && !hasLegacy) {
+        if (/^\[features\]\s*$/im.test(next)) {
+          next = next.replace(/(^\[features\]\s*\n)/im, '$1hooks = true\n');
+        } else {
+          next = next.trimEnd() + (next ? '\n\n' : '') + '[features]\nhooks = true\n';
+        }
+      }
+      fs.writeFileSync(configTomlPath, next);
+      console.log(
+        chalk.green(
+          hasLegacy
+            ? `  ✓ Migrated Codex hooks flag from codex_hooks → hooks in ~/.codex/config.toml`
+            : `  ✓ Codex hooks feature flag enabled in ~/.codex/config.toml`,
+        ),
+      );
     }
   } catch {
     // Non-fatal — user can still enable manually
-    console.log(chalk.yellow('    ⚠ Could not auto-enable codex_hooks. Run: codex -c features.codex_hooks=true'));
+    console.log(chalk.yellow('    ⚠ Could not auto-enable Codex hooks. Run: codex -c features.hooks=true'));
   }
 }
 

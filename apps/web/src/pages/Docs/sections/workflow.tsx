@@ -54,10 +54,10 @@ origin enable          # registers machine, detects tools, installs global hooks
             <P>
               Running <code className="text-indigo-400">origin enable</code> automatically enables the Codex hooks feature flag in <code className="text-indigo-400">~/.codex/config.toml</code> and installs hooks in <code className="text-indigo-400">~/.codex/hooks.json</code>.
             </P>
-            <CodeBlock title="Terminal">{`# Install hooks + enable codex_hooks feature flag (one-time setup)
+            <CodeBlock title="Terminal">{`# Install hooks + enable Codex hooks feature flag (one-time setup)
 origin enable`}</CodeBlock>
             <P>
-              If you previously had to pass <code className="text-indigo-400">-c features.codex_hooks=true</code> each time, re-run <code className="text-indigo-400">origin enable</code> to make it permanent.
+              If you previously had to pass <code className="text-indigo-400">-c features.hooks=true</code> each time (or the legacy <code className="text-indigo-400">features.codex_hooks=true</code> on older Codex versions), re-run <code className="text-indigo-400">origin enable</code> to make it permanent. The CLI will migrate the legacy key for you.
               After setup, all Codex sessions will be tracked with prompts, code changes, and AI Blame attribution.
             </P>
 
