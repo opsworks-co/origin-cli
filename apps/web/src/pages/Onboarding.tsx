@@ -161,6 +161,11 @@ export default function Onboarding() {
   const [importDone, setImportDone] = useState(false);
   const [importedCount, setImportedCount] = useState(0);
   const [repoSearch, setRepoSearch] = useState('');
+  // Per-provider discovery results so failures from one provider don't disappear silently
+  const [providerStatus, setProviderStatus] = useState<{
+    github?: { count: number; error?: string };
+    gitlab?: { count: number; error?: string };
+  }>({});
 
   // Check integrations on mount + handle OAuth return params
   useEffect(() => {
@@ -239,56 +244,91 @@ export default function Onboarding() {
     navigate(fromTeam ? '/dashboard' : '/me', { replace: true });
   };
 
-  // Discover repos from connected providers
+  // Discover repos from connected providers. Errors from each provider are
+  // captured into `providerStatus` so the import UI can surface them
+  // (instead of the previous silent-swallow that made GitLab failures look
+  // identical to GitHub-only success).
   const discoverRepos = async () => {
     setDiscovering(true);
     setDiscoveredRepos([]);
-    try {
-      const all: any[] = [];
-      if (githubConnected) {
-        try {
-          const gh = await api.discoverGitHubRepos();
-          all.push(...(gh.repos || []).map((r: any) => ({ ...r, _provider: 'github', _key: r.fullName })));
-        } catch { /* ignore */ }
+    setProviderStatus({});
+    const all: any[] = [];
+    const status: { github?: { count: number; error?: string }; gitlab?: { count: number; error?: string } } = {};
+
+    if (githubConnected) {
+      try {
+        const gh = await api.discoverGitHubRepos();
+        const repos = (gh.repos || []).map((r: any) => ({ ...r, _provider: 'github', _key: r.fullName }));
+        all.push(...repos);
+        status.github = { count: repos.length };
+      } catch (err: any) {
+        console.error('[onboarding] GitHub discovery failed:', err);
+        status.github = { count: 0, error: err?.message || 'Failed to fetch GitHub repositories' };
       }
-      if (gitlabConnected) {
-        try {
-          const gl = await api.discoverGitLabRepos();
-          all.push(...(gl.repos || []).map((r: any) => ({ ...r, _provider: 'gitlab', _key: r.fullPath })));
-        } catch { /* ignore */ }
+    }
+    if (gitlabConnected) {
+      try {
+        const gl = await api.discoverGitLabRepos();
+        const repos = (gl.repos || []).map((r: any) => ({ ...r, _provider: 'gitlab', _key: r.fullPath }));
+        all.push(...repos);
+        status.gitlab = { count: repos.length };
+      } catch (err: any) {
+        console.error('[onboarding] GitLab discovery failed:', err);
+        status.gitlab = { count: 0, error: err?.message || 'Failed to fetch GitLab repositories' };
       }
-      setDiscoveredRepos(all);
-      // Auto-select repos that aren't already imported
-      const notImported = new Set(all.filter((r: any) => !r.alreadyImported).map((r: any) => r._key));
-      setSelectedRepos(notImported);
-    } catch { /* ignore */ }
+    }
+
+    setDiscoveredRepos(all);
+    setProviderStatus(status);
+    // Auto-select repos that aren't already imported
+    const notImported = new Set(all.filter((r: any) => !r.alreadyImported).map((r: any) => r._key));
+    setSelectedRepos(notImported);
     setDiscovering(false);
   };
 
   const importSelectedRepos = async () => {
     setImporting(true);
     let count = 0;
-    try {
-      const ghRepos = discoveredRepos.filter((r: any) => r._provider === 'github' && selectedRepos.has(r._key) && !r.alreadyImported);
-      const glRepos = discoveredRepos.filter((r: any) => r._provider === 'gitlab' && selectedRepos.has(r._key) && !r.alreadyImported);
+    const importErrors: string[] = [];
+    const ghRepos = discoveredRepos.filter((r: any) => r._provider === 'github' && selectedRepos.has(r._key) && !r.alreadyImported);
+    const glRepos = discoveredRepos.filter((r: any) => r._provider === 'gitlab' && selectedRepos.has(r._key) && !r.alreadyImported);
 
-      if (ghRepos.length > 0) {
+    if (ghRepos.length > 0) {
+      try {
         const res = await api.importGitHubRepos(ghRepos.map((r: any) => ({ fullName: r.fullName, name: r.name })));
         count += (res.results || []).filter((r: any) => r.success).length;
-        // Trigger sync for imported repos (fire and forget)
+        const failed = (res.results || []).filter((r: any) => !r.success);
+        if (failed.length) importErrors.push(`GitHub: ${failed.length} failed (${failed[0]?.error || 'unknown'})`);
         for (const r of (res.results || [])) {
           if (r.success && r.repoId) api.syncRepo(r.repoId).catch(() => {});
         }
+      } catch (err: any) {
+        console.error('[onboarding] GitHub import failed:', err);
+        importErrors.push(`GitHub: ${err?.message || 'import request failed'}`);
       }
-      if (glRepos.length > 0) {
+    }
+    if (glRepos.length > 0) {
+      try {
         const res = await api.importGitLabRepos(glRepos.map((r: any) => ({ fullPath: r.fullPath, name: r.name })));
         count += (res.results || []).filter((r: any) => r.success).length;
+        const failed = (res.results || []).filter((r: any) => !r.success);
+        if (failed.length) importErrors.push(`GitLab: ${failed.length} failed (${failed[0]?.error || 'unknown'})`);
         for (const r of (res.results || [])) {
           if (r.success && r.repoId) api.syncRepo(r.repoId).catch(() => {});
         }
+      } catch (err: any) {
+        console.error('[onboarding] GitLab import failed:', err);
+        importErrors.push(`GitLab: ${err?.message || 'import request failed'}`);
       }
-    } catch { /* ignore */ }
+    }
     setImportedCount(count);
+    if (importErrors.length) {
+      setProviderStatus(prev => ({
+        ...prev,
+        gitlab: prev.gitlab ? { ...prev.gitlab, error: importErrors.find(e => e.startsWith('GitLab')) || prev.gitlab.error } : prev.gitlab,
+        github: prev.github ? { ...prev.github, error: importErrors.find(e => e.startsWith('GitHub')) || prev.github.error } : prev.github,
+      }));
+    }
     setImportDone(true);
     setImporting(false);
   };
@@ -535,6 +575,51 @@ export default function Onboarding() {
                 Select repos to track. Sessions started in these repos will auto-link to them.
               </p>
             </div>
+
+            {/* Per-provider status banners — make GitHub-only / GitLab-only failures
+                visible instead of silently dropping them. */}
+            {!discovering && (providerStatus.github || providerStatus.gitlab) && (
+              <div className="space-y-2">
+                {providerStatus.github && (
+                  <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
+                    providerStatus.github.error
+                      ? 'border-red-500/30 bg-red-500/5 text-red-300'
+                      : providerStatus.github.count === 0
+                        ? 'border-amber-500/30 bg-amber-500/5 text-amber-300'
+                        : 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300'
+                  }`}>
+                    <GitHubIcon className="w-3.5 h-3.5 shrink-0" />
+                    <span className="font-medium">GitHub:</span>
+                    <span>
+                      {providerStatus.github.error
+                        ? providerStatus.github.error
+                        : providerStatus.github.count === 0
+                          ? 'No repositories found for this account'
+                          : `${providerStatus.github.count} repo${providerStatus.github.count === 1 ? '' : 's'}`}
+                    </span>
+                  </div>
+                )}
+                {providerStatus.gitlab && (
+                  <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
+                    providerStatus.gitlab.error
+                      ? 'border-red-500/30 bg-red-500/5 text-red-300'
+                      : providerStatus.gitlab.count === 0
+                        ? 'border-amber-500/30 bg-amber-500/5 text-amber-300'
+                        : 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300'
+                  }`}>
+                    <GitLabIcon className="w-3.5 h-3.5 shrink-0" />
+                    <span className="font-medium">GitLab:</span>
+                    <span>
+                      {providerStatus.gitlab.error
+                        ? providerStatus.gitlab.error
+                        : providerStatus.gitlab.count === 0
+                          ? 'No repositories found for this account'
+                          : `${providerStatus.gitlab.count} repo${providerStatus.gitlab.count === 1 ? '' : 's'}`}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {discovering ? (
               <div className="flex flex-col items-center gap-3 py-12">
