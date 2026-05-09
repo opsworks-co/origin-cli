@@ -412,7 +412,7 @@ export default function Landing() {
     <>
       <Helmet>
         <title>Origin — Snapshots, blame, and governance for AI code</title>
-        <meta name="description" content="The AI-aware layer on top of git: auto-snapshots for every prompt, line-level AI blame, one CLI for every agent (Claude Code, Cursor, Gemini, Codex, Copilot), and a web platform with session replay, live feed, and policy enforcement. Free for solo developers." />
+        <meta name="description" content="Per-prompt rollbacks, line-level AI attribution, and a live sessions dashboard for solo devs. Token &amp; cost tracking, coding sessions, policy enforcement, PR compliance, and audit trails for teams. One CLI for every agent — Claude Code, Cursor, Gemini, Codex, Copilot." />
         <link rel="canonical" href="https://getorigin.io" />
       </Helmet>
 
@@ -514,9 +514,9 @@ export default function Landing() {
 
             <RevealText delay={1400}>
               <p className="mt-6 text-lg text-gray-400 max-w-2xl leading-relaxed">
-                Per-prompt snapshots, line-level attribution, and a live dashboard for{' '}
-                <span className="text-emerald-400/90">solo devs</span>. Policy enforcement,
-                PR compliance, and audit trails for{' '}
+                Per-prompt rollbacks, line-level AI attribution, and a live sessions dashboard for{' '}
+                <span className="text-emerald-400/90">solo devs</span>. Token &amp; cost tracking,
+                coding sessions, policy enforcement, PR compliance, and audit trails for{' '}
                 <span className="text-indigo-400/90">teams</span>.
               </p>
             </RevealText>
