@@ -1,6 +1,6 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260508.1613",
+  "version": "0.20260509.2039",
   "type": "module",
   "bin": {
     "origin": "./dist/index.js"
@@ -23,12 +23,5 @@
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vitest": "^4.0.18"
-  },
-  "pnpm": {
-    "overrides": {
-      "picomatch": ">=4.0.4",
-      "postcss": ">=8.5.10",
-      "vite": ">=8.0.5"
-    }
   }
 }

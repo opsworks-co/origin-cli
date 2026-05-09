@@ -237,6 +237,12 @@ function extractUserPrompt(entry: TranscriptLine): string | null {
 }
 
 function cleanPrompt(text: string): string | null {
+  // Drop entirely if this is our own AGENTS.md / CLAUDE.md echoing back from
+  // the agent (Codex reads AGENTS.md natively and bundles it into the first
+  // user turn — looked like a real prompt in the dashboard).
+  if (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text)) {
+    return null;
+  }
   // Strip IDE-injected context tags (like Entire does)
   let cleaned = text
     .replace(/<ide_opened_file>[\s\S]*?<\/ide_opened_file>/g, '')
@@ -250,6 +256,10 @@ function cleanPrompt(text: string): string | null {
     .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/g, '')
     .replace(/<output-file>[\s\S]*?<\/output-file>/g, '')
     .replace(/<command-name>[\s\S]*?<\/command-name>/g, '')
+    // Codex wraps AGENTS.md context in <INSTRUCTIONS>...</INSTRUCTIONS> on
+    // its first user turn. Strip the envelope so real text that follows
+    // (if any) still makes it through.
+    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
     .trim();
 
   if (!cleaned) return null;
