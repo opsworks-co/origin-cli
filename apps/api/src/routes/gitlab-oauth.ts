@@ -178,6 +178,15 @@ router.get('/install', requireAuth, resolveOrgContext, requireRole('ADMIN'), asy
 
 // ── GET /callback — GitLab redirects here after OAuth authorization ──
 
+// Build an error redirect that lands the user back where they started the
+// OAuth flow (onboarding vs settings) instead of always sending them to
+// /settings, where the message gets lost mid-onboarding.
+function gitlabErrorRedirect(from: string | undefined, msg: string) {
+  const enc = encodeURIComponent(msg);
+  if (from === 'onboarding') return `/onboarding?step=1&gitlab_oauth=error&msg=${enc}`;
+  return `/settings?tab=integrations&gitlab_oauth=error&msg=${enc}`;
+}
+
 router.get('/callback', async (req: Request, res: Response) => {
   try {
     const { code, state, error, error_description } = req.query;
@@ -202,13 +211,13 @@ router.get('/callback', async (req: Request, res: Response) => {
     }
 
     if (!code) {
-      return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=no_code');
+      return res.redirect(gitlabErrorRedirect(statePayload.from, 'GitLab returned no authorization code.'));
     }
 
     // Resolve OAuth config for this org
     const oauthConfig = await getGitLabOAuthConfigForOrg(statePayload.orgId);
     if (!oauthConfig.configured) {
-      return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=oauth_not_configured');
+      return res.redirect(gitlabErrorRedirect(statePayload.from, 'GitLab OAuth is not configured on this Origin instance.'));
     }
 
     // Determine GitLab instance URL
@@ -226,27 +235,52 @@ router.get('/callback', async (req: Request, res: Response) => {
       tokenResult = await exchangeGitLabOAuthCode(code as string, gitlabBaseUrl, oauthConfig);
     } catch (err: any) {
       console.error('[gitlab-oauth] Token exchange failed:', err.message);
-      return res.redirect('/settings?tab=integrations&gitlab_oauth=error&msg=token_exchange_failed');
+      return res.redirect(gitlabErrorRedirect(statePayload.from, `GitLab token exchange failed: ${err?.message || 'unknown'}`));
     }
 
-    // Fetch user info to store username. Guard against SSRF: even though
-    // the baseUrl was written by an admin, we double-check here before
-    // sending the freshly minted OAuth access token over the wire, so a
-    // compromised/malicious baseUrl can't exfiltrate tokens to an
-    // attacker-controlled host.
+    // Verify the freshly minted OAuth token actually works against this
+    // GitLab instance. Previously this check captured the username
+    // best-effort and swallowed errors, so a token that couldn't fetch
+    // /user (wrong scopes, instance mismatch, etc.) still produced a
+    // "Connected" UI even though every downstream call would 401. Now
+    // a failed /user call is fatal — we redirect with a real error
+    // message instead of a misleading success.
     let username = '';
-    try {
+    {
       const apiBase = existingConfig?.baseUrl || 'https://gitlab.com/api/v4';
       const userUrl = `${apiBase}/user`;
-      assertSafeExternalUrl(userUrl, 'gitlab-oauth.callback.user');
-      const userRes = await fetch(userUrl, {
-        headers: { Authorization: `Bearer ${tokenResult.access_token}` },
-      });
-      if (userRes.ok) {
-        const userData = (await userRes.json()) as { username: string };
-        username = userData.username;
+      try {
+        assertSafeExternalUrl(userUrl, 'gitlab-oauth.callback.user');
+      } catch (err: any) {
+        console.error('[gitlab-oauth] Unsafe baseUrl on callback:', err?.message);
+        return res.redirect(gitlabErrorRedirect(statePayload.from, 'GitLab API base URL is not reachable from Origin.'));
       }
-    } catch { /* non-fatal */ }
+      // Note: this file's top-level `Response` import is express's
+      // response type, so we lean on type inference here for the fetch
+      // result rather than annotating with the global Response type.
+      let userFetch: Awaited<ReturnType<typeof fetch>>;
+      try {
+        userFetch = await fetch(userUrl, {
+          headers: { Authorization: `Bearer ${tokenResult.access_token}` },
+        });
+      } catch (err: any) {
+        console.error('[gitlab-oauth] /user fetch failed:', err?.message);
+        return res.redirect(gitlabErrorRedirect(statePayload.from, 'Could not reach GitLab to verify the new token.'));
+      }
+      if (!userFetch.ok) {
+        const detail = await userFetch.text().catch(() => '');
+        console.error(`[gitlab-oauth] /user returned ${userFetch.status}:`, detail.slice(0, 500));
+        const msg =
+          userFetch.status === 401 || userFetch.status === 403
+            ? 'GitLab rejected the new token (insufficient scopes — the OAuth app needs the `api` or `read_api` scope).'
+            : `GitLab returned HTTP ${userFetch.status} when verifying the token. Try connecting again.`;
+        return res.redirect(gitlabErrorRedirect(statePayload.from, msg));
+      }
+      try {
+        const userData = (await userFetch.json()) as { username: string };
+        username = userData.username || '';
+      } catch { /* username is metadata only — don't fail the connect over it */ }
+    }
 
     const tokenExpiresAt = new Date((tokenResult.created_at + tokenResult.expires_in) * 1000).toISOString();
 

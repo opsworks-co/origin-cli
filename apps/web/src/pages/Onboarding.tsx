@@ -188,12 +188,24 @@ export default function Onboarding() {
       setSearchParams(p, { replace: true });
     }
 
-    // Handle GitLab OAuth return
+    // Handle GitLab OAuth return — both success and error. Previously a
+    // failed callback silently dropped the user back on /settings; now
+    // the OAuth handler routes onboarding errors back here, so we have
+    // to actually render the message.
     const glResult = searchParams.get('gitlab_oauth');
     if (glResult === 'success') {
       setGitlabConnected(true);
       const p = new URLSearchParams(searchParams);
       p.delete('gitlab_oauth');
+      p.delete('msg');
+      setSearchParams(p, { replace: true });
+    } else if (glResult === 'error') {
+      const msg = searchParams.get('msg') || 'GitLab connection failed';
+      setConnectError(`GitLab: ${msg}`);
+      setGitlabConnected(false);
+      const p = new URLSearchParams(searchParams);
+      p.delete('gitlab_oauth');
+      p.delete('msg');
       setSearchParams(p, { replace: true });
     }
   }, []);
