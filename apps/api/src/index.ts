@@ -44,6 +44,7 @@ import { startAutoSync } from './services/auto-sync.js';
 import { startScheduler } from './services/scheduler.js';
 import { startWebhookQueue } from './services/webhook-queue.js';
 import authRoutes from './routes/auth.js';
+import cliAuthRoutes from './routes/cli-auth.js';
 import repoRoutes from './routes/repos.js';
 import sessionRoutes from './routes/sessions.js';
 import agentRoutes from './routes/agents.js';
@@ -243,6 +244,7 @@ mountRoute('/budget', budgetRoutes);
 mountRoute('/insights', insightsRoutes);
 mountRoute('/today-brief', todayBriefRoutes);
 mountRoute('/admin', adminRoutes);
+mountRoute('/cli-auth', cliAuthRoutes);
 // Mount the multi-org user-self endpoints (/me/memberships, /me/active-org,
 // /orgs, /orgs/:id/leave) at the root /api so the router's per-route
 // paths resolve directly. They're not org-scoped — each route validates

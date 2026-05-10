@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import { LogoMark } from '../components/Logo';
@@ -7,6 +7,7 @@ import { LogoMark } from '../components/Logo';
 export default function Login() {
   const { user, login, error: authError } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -25,11 +26,19 @@ export default function Login() {
     }
   };
 
+  // Honour ?returnTo= when redirecting on success — used by /cli-link
+  // (and other deep-link entry points) so the user lands back where
+  // they started instead of on the dashboard. Only allow same-origin
+  // path-style returnTos to avoid open-redirect via crafted URL.
   React.useEffect(() => {
-    if (user) {
-      navigate(user.accountType === 'developer' ? '/me' : '/dashboard');
+    if (!user) return;
+    const raw = searchParams.get('returnTo');
+    if (raw && raw.startsWith('/') && !raw.startsWith('//')) {
+      navigate(raw, { replace: true });
+      return;
     }
-  }, [user, navigate]);
+    navigate(user.accountType === 'developer' ? '/me' : '/dashboard');
+  }, [user, navigate, searchParams]);
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4">

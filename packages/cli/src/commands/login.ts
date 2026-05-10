@@ -1,6 +1,84 @@
+import { spawn } from 'child_process';
 import { createInterface } from 'readline/promises';
 import { saveConfig, saveProfile, listProfiles, loadConfig, deleteProfile } from '../config.js';
 import chalk from 'chalk';
+
+// Best-effort: open a URL in the user's default browser. Falls back to
+// printing the URL if the platform-specific opener isn't available.
+function openInBrowser(url: string) {
+  try {
+    const cmd = process.platform === 'darwin'
+      ? 'open'
+      : process.platform === 'win32'
+        ? 'cmd'
+        : 'xdg-open';
+    const args = process.platform === 'win32' ? ['/c', 'start', '""', url] : [url];
+    spawn(cmd, args, { stdio: 'ignore', detached: true }).unref();
+  } catch { /* user can copy the URL manually */ }
+}
+
+// Drive the device-code flow on the server. Returns the minted key +
+// resolved metadata, or throws if the request expires / is denied.
+async function deviceCodeLogin(apiUrl: string): Promise<{
+  apiKey: string;
+  orgId: string;
+  orgName: string;
+  keyType: 'solo' | 'team';
+  accountType: 'developer' | 'org';
+}> {
+  const startRes = await fetch(`${apiUrl}/api/cli-auth/start`, { method: 'POST' });
+  if (!startRes.ok) {
+    throw new Error(`Couldn't start device login (HTTP ${startRes.status}). Falling back: rerun with --key.`);
+  }
+  const start = (await startRes.json()) as {
+    deviceCode: string;
+    userCode: string;
+    verificationUrl: string;
+    expiresIn: number;
+    interval: number;
+  };
+
+  console.log(chalk.gray('  Open this URL in your browser to approve the login:'));
+  console.log('    ' + chalk.cyan(start.verificationUrl));
+  console.log(chalk.gray(`  Code: ${chalk.white(start.userCode)}`));
+  console.log(chalk.gray(`  (waiting up to ${Math.round(start.expiresIn / 60)} min for approval…)\n`));
+  openInBrowser(start.verificationUrl);
+
+  const deadline = Date.now() + start.expiresIn * 1000;
+  const intervalMs = Math.max(1, start.interval) * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const pollRes = await fetch(`${apiUrl}/api/cli-auth/poll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    });
+    if (pollRes.status === 202) continue; // still pending
+    if (pollRes.status === 410) throw new Error('Login request expired. Rerun `origin login`.');
+    if (pollRes.status === 403) throw new Error('Login denied in browser.');
+    if (pollRes.ok) {
+      const body = (await pollRes.json()) as {
+        status: string;
+        apiKey: string;
+        orgId: string;
+        orgName: string;
+        keyType?: 'solo' | 'team';
+        accountType?: 'developer' | 'org';
+      };
+      if (body.status === 'approved' && body.apiKey) {
+        return {
+          apiKey: body.apiKey,
+          orgId: body.orgId,
+          orgName: body.orgName,
+          keyType: body.keyType || 'team',
+          accountType: body.accountType || 'org',
+        };
+      }
+    }
+    // Other statuses fall through and retry until deadline.
+  }
+  throw new Error('Login request timed out. Rerun `origin login`.');
+}
 
 export async function loginCommand(opts: { key?: string; url?: string; profile?: string }) {
   console.log(chalk.bold('\n🔑 Origin Login\n'));
@@ -9,10 +87,64 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
   let key: string;
 
   if (opts.key) {
-    // Non-interactive mode
+    // Non-interactive mode — explicit key supplied.
     url = (opts.url || 'https://getorigin.io').replace(/\/+$/, '');
     key = opts.key.trim();
+  } else if (process.stdin.isTTY) {
+    // Default path: browser-based device-code flow so users don't
+    // have to dig an API key out of Settings and paste it. This is
+    // the common path for re-login after the previous account was
+    // deleted/rotated. Falls back to manual prompts if the server's
+    // /cli-auth endpoints don't respond (older self-hosted versions).
+    url = (opts.url || 'https://getorigin.io').replace(/\/+$/, '');
+    try {
+      const result = await deviceCodeLogin(url);
+      key = result.apiKey;
+      const currentConfig = loadConfig();
+      saveConfig({
+        ...currentConfig,
+        apiUrl: url,
+        apiKey: key,
+        orgId: result.orgId,
+        userId: '',
+        keyType: result.keyType,
+        accountType: result.accountType,
+        orgName: result.orgName,
+      });
+      const isSolo = result.keyType === 'solo' || result.accountType === 'developer';
+      const profileName = opts.profile || (isSolo ? 'dev' : 'team');
+      const existingProfiles = listProfiles();
+      for (const p of existingProfiles) {
+        if (p.apiKey === key && p.name !== profileName) {
+          deleteProfile(p.name);
+        }
+      }
+      saveProfile(profileName, {
+        name: profileName,
+        apiUrl: url,
+        apiKey: key,
+        orgId: result.orgId,
+        orgName: result.orgName,
+        keyType: result.keyType,
+        accountType: result.accountType,
+      });
+      console.log(chalk.green(`\n✓ Connected — ${isSolo ? 'Solo Developer' : `Team Member @ ${result.orgName}`}`));
+      console.log(chalk.gray(`  Workspace: ${result.orgName}`));
+      console.log(chalk.gray(`  Config saved to ~/.origin/config.json`));
+      process.exit(0);
+    } catch (err: any) {
+      console.log(chalk.yellow(`\n⚠ Browser login didn't complete: ${err.message}`));
+      console.log(chalk.gray('  Falling back to manual API key entry.\n'));
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
+      const apiKey = await rl.question(chalk.gray('API Key: '));
+      rl.close();
+      url = (apiUrl.trim() || 'https://getorigin.io').replace(/\/+$/, '');
+      key = apiKey.trim();
+    }
   } else {
+    // No TTY (CI / piped input) — keep the interactive prompts. They
+    // fail noisily in CI rather than hanging on the device-code wait.
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
     const apiKey = await rl.question(chalk.gray('API Key: '));

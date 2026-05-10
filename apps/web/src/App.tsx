@@ -20,6 +20,7 @@ import OAuthCallback from './pages/OAuthCallback';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
 import VerifyEmail from './pages/VerifyEmail';
+import CliLink from './pages/CliLink';
 import PublicPolicies from './pages/PublicPolicies';
 import SharedSession from './pages/SharedSession';
 
@@ -188,6 +189,7 @@ export default function App() {
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/verify-email" element={<VerifyEmail />} />
+      <Route path="/cli-link" element={<CliLink />} />
       <Route path="/register" element={<Register />} />
       <Route path="/register/developer" element={<RegisterDeveloper />} />
       <Route path="/onboarding" element={<ProtectedRoute><Onboarding /></ProtectedRoute>} />
