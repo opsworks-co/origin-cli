@@ -222,6 +222,11 @@ export default function Onboarding() {
     }
   }, [user, navigate, fromInvite, fromTeam]);
 
+  // Recovery — mint a fresh CLI key when the local one's been invalidated.
+  const [freshKey, setFreshKey] = useState<string | null>(null);
+  const [mintingKey, setMintingKey] = useState(false);
+  const [freshKeyError, setFreshKeyError] = useState<string | null>(null);
+
   // Diagnostic snapshot rendered under "Listening for your first session…"
   // so the user can see *why* nothing's appearing yet (no API key vs. no
   // repo vs. session attributed to a different user) instead of just an
@@ -974,6 +979,52 @@ export default function Onboarding() {
                     </div>
                   );
                 })()}
+
+                {/* Recovery — mint a fresh CLI key. Catches the case where
+                    the local CLI is still configured against a deleted /
+                    rotated API key (every hook silently 401's) so the
+                    diagnostic counters stay frozen at "sessions exist but
+                    nothing new is coming in". A single click here gets the
+                    user a new key + the exact `origin login` command, so
+                    they don't have to navigate to Settings. */}
+                <details className="rounded-xl border border-white/[0.06] bg-gray-900/40 group">
+                  <summary className="px-4 py-3 text-xs text-gray-400 cursor-pointer select-none hover:text-gray-200 transition-colors">
+                    Still nothing? Reset the CLI key
+                  </summary>
+                  <div className="px-4 pb-4 pt-1 space-y-3 text-xs text-gray-400">
+                    <p>
+                      If your terminal was logged in to a previous account, your CLI is sending an API key the server no longer recognises and every hook silently fails. Generate a fresh key here and run the command — sessions will start flowing within seconds.
+                    </p>
+                    {freshKey ? (
+                      <>
+                        <CopyBlock text={`origin login --key ${freshKey}`} />
+                        <p className="text-emerald-400">New key created. Paste the command above into your terminal, then start any AI agent — the screen here will flip on its own.</p>
+                      </>
+                    ) : (
+                      <button
+                        onClick={async () => {
+                          setFreshKeyError(null);
+                          setMintingKey(true);
+                          try {
+                            const res = await api.createApiKey({ name: 'CLI (onboarding reset)' });
+                            setFreshKey(res.key);
+                          } catch (err: any) {
+                            setFreshKeyError(err?.message || 'Failed to create key');
+                          } finally {
+                            setMintingKey(false);
+                          }
+                        }}
+                        disabled={mintingKey}
+                        className="px-3 py-1.5 rounded-md bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-200 transition-colors disabled:opacity-50"
+                      >
+                        {mintingKey ? 'Generating…' : 'Generate fresh CLI key'}
+                      </button>
+                    )}
+                    {freshKeyError && (
+                      <p className="text-red-300">{freshKeyError}</p>
+                    )}
+                  </div>
+                </details>
               </>
             )}
 
