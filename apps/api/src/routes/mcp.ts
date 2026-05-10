@@ -132,7 +132,17 @@ async function authByApiKey(req: McpRequest, res: Response, next: NextFunction) 
     req.apiKeyName = found.name;
     req.keyType = (found as any).keyType || 'team';
     req.accountType = (found as any).user?.accountType || 'org';
-    req.mcpUserId = found.userId ?? found.org.memberships[0]?.userId ?? undefined;
+    // Resolve attribution. found.userId can become stale: an admin
+    // delete that succeeds at deleting the user but leaves the key
+    // (older code paths, partial cascade rollback, etc.) leaves a
+    // foreign key pointing at a tombstone, and every session
+    // ingested through that key would carry that ghost id forever.
+    // The Prisma `include: user` above returns null in that case —
+    // use it as a tombstone signal and fall back to the org's first
+    // OWNER, matching the behaviour of a freshly-issued key.
+    const userExists = !!(found as any).user;
+    const resolvedUserId = found.userId && userExists ? found.userId : null;
+    req.mcpUserId = resolvedUserId ?? found.org.memberships[0]?.userId ?? undefined;
 
     const explicitRepoScopes = found.repoScopes.map((s: { repoId: string }) => s.repoId);
     const explicitAgentScopes = found.agentScopes.map((s: { agentId: string }) => s.agentId);
