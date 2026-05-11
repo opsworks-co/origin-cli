@@ -1,7 +1,39 @@
 import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { createInterface } from 'readline/promises';
 import { saveConfig, saveProfile, listProfiles, loadConfig, deleteProfile } from '../config.js';
 import chalk from 'chalk';
+
+// Wipe local session state when the workspace identity changes. Without
+// this, sessions captured under a previous account stay queued in
+// ~/.origin/sessions/ and can leak into the new account through retry/
+// resume paths. The local files were never visible on a server (their
+// sync calls 401'd after the old account was deleted), but they can
+// hydrate stale state into the next `origin enable` if the
+// session-state lookup ever picks them up. Clean slate is safer than
+// trying to be clever about which queue entries belong to whom.
+function clearLocalSessionState(): { sessions: number; heartbeats: number } {
+  const home = os.homedir();
+  let sessions = 0;
+  let heartbeats = 0;
+  for (const sub of ['sessions', 'heartbeats']) {
+    const dir = path.join(home, '.origin', sub);
+    if (!fs.existsSync(dir)) continue;
+    try {
+      for (const entry of fs.readdirSync(dir)) {
+        const p = path.join(dir, entry);
+        try {
+          fs.unlinkSync(p);
+          if (sub === 'sessions') sessions++;
+          else heartbeats++;
+        } catch { /* skip files we can't remove */ }
+      }
+    } catch { /* ignore — directory might be missing */ }
+  }
+  return { sessions, heartbeats };
+}
 
 // Best-effort: open a URL in the user's default browser. Falls back to
 // printing the URL if the platform-specific opener isn't available.
@@ -101,6 +133,17 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
       const result = await deviceCodeLogin(url);
       key = result.apiKey;
       const currentConfig = loadConfig();
+      // Workspace switch detection: if the orgId is changing (or the
+      // previous login was a different account), wipe queued local
+      // session state before saving the new config. Stops old data
+      // from contaminating the new account's view.
+      const switching = !!currentConfig?.orgId && currentConfig.orgId !== result.orgId;
+      if (switching) {
+        const cleared = clearLocalSessionState();
+        if (cleared.sessions || cleared.heartbeats) {
+          console.log(chalk.gray(`  Cleared ${cleared.sessions} stale session record${cleared.sessions === 1 ? '' : 's'} from previous workspace.`));
+        }
+      }
       saveConfig({
         ...currentConfig,
         apiUrl: url,

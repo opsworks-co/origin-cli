@@ -243,23 +243,14 @@ export default function Onboarding() {
 
   // Poll for first session on the "First Session" step. We hit the
   // diagnostic endpoint instead of /stats/me so the UI can react to
-  // partial progress (CLI talked to us but session attributed to a
-  // different user, repo registered but no session yet, etc.) on the
-  // same poll cycle that detects success.
+  // partial progress (no API key yet, no repo registered, etc.).
   //
-  // Auto-claim policy: if the diagnostic reports an attribution mismatch
-  // (sessions exist in the org but tied to a deleted/previous user), we
-  // silently POST /onboarding-claim once per onboarding step rather than
-  // surfacing a scary red banner. The endpoint already gates this to
-  // personal workspaces with the caller as OWNER, so it can't leak
-  // teammate data — and on a single-user workspace there's no privacy
-  // boundary to surface anyway. The user just sees the spinner flip to
-  // "First session detected!" once the claim lands and the next poll
-  // tick picks up sessionsForUser > 0.
-  const claimAttemptedRef = useRef(false);
+  // No auto-claim: cross-account contamination is worse than the user
+  // having to manually re-run `origin login`. If there are orphan
+  // sessions in the org from a previous account, we leave them alone —
+  // the new account should start clean.
   useEffect(() => {
     if (step !== 5 || !polling) return;
-    claimAttemptedRef.current = false; // reset when re-entering step
     const check = async () => {
       try {
         const dbg = await request<{
@@ -272,21 +263,6 @@ export default function Onboarding() {
           latestApiKey: { id: string; name: string; userId: string | null; createdAt: string } | null;
         }>('/api/stats/onboarding-debug');
         setDebugSnapshot(dbg);
-
-        // Self-heal: auto-claim orphaned sessions on this poll cycle
-        // instead of asking the user to click a button. We only try
-        // once per step entry; if the claim 403s (e.g. team org) we
-        // stop trying and the diagnostic strip falls back to a
-        // neutral hint.
-        if (dbg.attributionMismatch && !claimAttemptedRef.current) {
-          claimAttemptedRef.current = true;
-          try {
-            await request<{ claimedSessions: number; claimedApiKeys: number }>(
-              '/api/stats/onboarding-claim',
-              { method: 'POST' },
-            );
-          } catch { /* claim refused — leave the diagnostic counters as-is */ }
-        }
 
         if (dbg.sessionsForUser > 0) {
           setSessionFound(true);
