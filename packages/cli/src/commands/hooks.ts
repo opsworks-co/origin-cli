@@ -1,7 +1,7 @@
 import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
 import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
-import { api } from '../api.js';
+import { api, readAuthStatus } from '../api.js';
 import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, setActivePricing } from '../transcript.js';
 import {
   saveSessionState,
@@ -2482,6 +2482,27 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   // inject it here on every prompt submission.
   try {
     let systemMsg = '';
+
+    // Auth-broken warning. If a recent API call hit 401 the api.ts
+    // layer writes an auth-status.json sentinel; bubble that up as
+    // the first line of the systemMessage so the agent surfaces it
+    // in the user's conversation instead of letting every hook
+    // silently fail in hooks.log forever.
+    try {
+      const authStatus = readAuthStatus();
+      if (authStatus?.state === 'unauthorized') {
+        systemMsg +=
+          '\u26a0 Origin: Your CLI API key is no longer valid (server returned 401). ' +
+          'Run `origin login` in another terminal to re-authenticate \u2014 until then, ' +
+          'Origin is not capturing this session.\n\n';
+      } else if (authStatus?.state === 'unreachable') {
+        systemMsg +=
+          '\u26a0 Origin: Could not reach the API on the last call' +
+          (authStatus.message ? ` (${authStatus.message})` : '') +
+          '. Sessions will resume once the server is reachable again.\n\n';
+      }
+    } catch { /* status read is best-effort */ }
+
     if (state.agentSystemPrompt) {
       systemMsg += state.agentSystemPrompt + '\n\n';
     }

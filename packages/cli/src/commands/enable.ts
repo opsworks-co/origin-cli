@@ -552,6 +552,29 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
     console.log(chalk.bold('\n🔗 Enabling Origin session tracking for this repo\n'));
   }
 
+  // Validate the stored API key before touching hooks. If the key was
+  // rotated/revoked (account deleted, admin reset, etc.) we want to
+  // surface that here loudly — otherwise users install hooks against a
+  // dead key and every later session 401's into hooks.log forever
+  // with no visible feedback.
+  if (isConnectedMode() && config?.apiKey && config?.apiUrl) {
+    try {
+      const probe = await fetch(`${config.apiUrl}/api/mcp/whoami`, {
+        headers: { 'X-API-Key': config.apiKey },
+      });
+      if (probe.status === 401) {
+        console.log(chalk.red('\n✗ Your stored Origin API key is no longer valid.'));
+        console.log(chalk.gray('  The server rejected the key in ~/.origin/config.json (HTTP 401).'));
+        console.log(chalk.gray('  This usually means the account was deleted or the key was rotated.'));
+        console.log(chalk.white('\n  Run `origin login` to re-authenticate.\n'));
+        process.exit(1);
+      }
+    } catch {
+      // Network failure — non-fatal. Hooks will still surface the
+      // problem at run time via the auth-status sentinel.
+    }
+  }
+
   // Register this machine with Origin's API on first run so it appears in
   // the dashboard. Idempotent — re-running just refreshes the heartbeat.
   // Used to be a separate `origin init` step; folding it in here means

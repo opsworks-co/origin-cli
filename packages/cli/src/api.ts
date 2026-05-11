@@ -1,9 +1,45 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { loadConfig } from './config.js';
 
 function getConfig() {
   const config = loadConfig();
   if (!config) throw new Error('Not logged in. Run: origin login');
   return config;
+}
+
+// Auth status file — written on every API result so hooks (and any
+// future surface) can detect a dead key without re-hitting the server.
+// The hooks then inject a visible warning into the agent's
+// systemMessage so the user sees "your CLI is dead" inside Claude
+// Code / Codex / Cursor, instead of staring at a silent dashboard
+// while every request 401s into hooks.log.
+const AUTH_STATUS_PATH = path.join(os.homedir(), '.origin', 'auth-status.json');
+
+interface AuthStatus {
+  state: 'ok' | 'unauthorized' | 'unreachable';
+  lastCheckedAt: string;
+  /** Key prefix (first 14 chars) — never the full key — so the warning
+   *  surface can disambiguate when a user has multiple profiles. */
+  keyPrefix?: string;
+  /** Human-readable error from the server, if any. */
+  message?: string;
+}
+
+export function readAuthStatus(): AuthStatus | null {
+  try {
+    return JSON.parse(fs.readFileSync(AUTH_STATUS_PATH, 'utf-8')) as AuthStatus;
+  } catch {
+    return null;
+  }
+}
+
+function writeAuthStatus(status: AuthStatus): void {
+  try {
+    fs.mkdirSync(path.dirname(AUTH_STATUS_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(AUTH_STATUS_PATH, JSON.stringify(status, null, 2));
+  } catch { /* best-effort — don't blow up a hook over a status file */ }
 }
 
 /** Ensure a parsed API response is a non-null object. */
@@ -25,16 +61,37 @@ function assertFields(res: unknown, label: string, fields: string[]): asserts re
 
 async function request(path: string, opts: RequestInit = {}) {
   const config = getConfig();
-  const res = await fetch(`${config.apiUrl}${path}`, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': config.apiKey,
-      ...opts.headers as Record<string, string>,
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${config.apiUrl}${path}`, {
+      ...opts,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': config.apiKey,
+        ...opts.headers as Record<string, string>,
+      },
+    });
+  } catch (err: any) {
+    writeAuthStatus({
+      state: 'unreachable',
+      lastCheckedAt: new Date().toISOString(),
+      keyPrefix: config.apiKey?.slice(0, 14),
+      message: err?.message || 'network error',
+    });
+    throw err;
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as any;
+    if (res.status === 401) {
+      // Dead key. Snapshot the failure so hooks can warn the user
+      // inside their agent UI instead of swallowing 401s into logs.
+      writeAuthStatus({
+        state: 'unauthorized',
+        lastCheckedAt: new Date().toISOString(),
+        keyPrefix: config.apiKey?.slice(0, 14),
+        message: body?.error || 'Invalid API key',
+      });
+    }
     const err = new Error(body?.message || body?.error || res.statusText) as any;
     err.status = res.status;
     err.serverError = body?.error;
@@ -44,6 +101,15 @@ async function request(path: string, opts: RequestInit = {}) {
     err.code = body?.code;
     err.body = body;
     throw err;
+  }
+  // Successful response — clear any stale unauthorized flag.
+  const prior = readAuthStatus();
+  if (prior && prior.state !== 'ok') {
+    writeAuthStatus({
+      state: 'ok',
+      lastCheckedAt: new Date().toISOString(),
+      keyPrefix: config.apiKey?.slice(0, 14),
+    });
   }
   return res.json();
 }
