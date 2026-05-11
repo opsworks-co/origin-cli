@@ -513,20 +513,15 @@ export default function Landing() {
             </h1>
 
             <RevealText delay={1400}>
-              <div className="mt-6 max-w-2xl space-y-3 text-lg text-gray-400 leading-relaxed">
-                <p>
-                  Per-prompt rollbacks, line-level AI attribution, and a live sessions dashboard for{' '}
-                  <span className="text-emerald-400/90">solo devs</span>.
-                </p>
-                <p>
-                  Token &amp; cost tracking, coding sessions, policy enforcement, PR compliance, and audit trails for{' '}
-                  <span className="text-indigo-400/90">teams</span>.
-                </p>
-              </div>
+              <p className="mt-5 max-w-2xl text-base text-gray-400 leading-snug">
+                Per-prompt rollbacks, line-level AI attribution, and a live sessions dashboard for{' '}
+                <span className="text-emerald-400/90">solo devs</span>. Token &amp; cost tracking, coding sessions, policy enforcement, PR compliance, and audit trails for{' '}
+                <span className="text-indigo-400/90">teams</span>.
+              </p>
             </RevealText>
 
             <RevealText delay={1600}>
-              <p className="mt-5 text-sm text-gray-500 max-w-2xl leading-relaxed">
+              <p className="mt-2 text-sm text-gray-500 max-w-2xl leading-snug">
                 The AI coding history layer for developers and teams.
               </p>
             </RevealText>
