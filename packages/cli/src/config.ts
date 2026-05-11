@@ -25,6 +25,16 @@ export interface OriginConfig {
   mode?: 'standalone' | 'auto'; // Force standalone even when logged in
   snapshotRepo?: string; // External git remote URL for origin-sessions branch
   autoSnapshot?: boolean;  // Auto-save snapshots before agent file edits (default: false)
+  // Sign Origin's own commits (auto-snapshots, origin-sessions branch, shadow
+  // snapshots). Uses git's `commit-tree -S`, which honors the user's existing
+  // signing config (gpg.program / user.signingkey, or gpg.format=ssh). Off by
+  // default — turning it on costs ~50ms per snapshot and requires signing to
+  // already be configured correctly, so opt-in.
+  signSnapshots?: boolean;
+  // Anthropic API key for CLI features that call Claude directly
+  // (`origin pre-review`, `origin chat`, `origin ask`). Env var
+  // ANTHROPIC_API_KEY takes precedence when both are set.
+  anthropicApiKey?: string;
   agentSlugs?: Record<string, string>; // Per-tool agent slug overrides (e.g. { cursor: 'cursor-frontend' })
   keyType?: 'solo' | 'team';       // solo = personal dev key, team = org-managed key
   accountType?: 'developer' | 'org'; // Account type of the key owner

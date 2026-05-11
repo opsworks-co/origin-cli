@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { git, gitDetailed } from '../utils/exec.js';
 import { getGitRoot, getGitDir } from '../session-state.js';
+import { commitTreeMaybeSigned } from '../signing.js';
 import crypto from 'crypto';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
@@ -354,13 +355,14 @@ export function createSnapshot(repoPath: string, opts?: SnapshotOptions): string
     };
 
     // Create commit with parent chain (like Entire's chained shadow commits)
-    const commitArgs = ['commit-tree', treeSha, '-m', JSON.stringify(meta)];
+    const commitArgs = [treeSha, '-m', JSON.stringify(meta)];
     if (parentSha) {
       commitArgs.push('-p', parentSha); // Chain to previous snapshot
     }
-
-    const newCommitSha = git(commitArgs, gitOpts(repoPath)).trim();
-    if (!HEX.test(newCommitSha)) return null;
+    // Signing is opt-in and falls back to unsigned if it fails so auto-
+    // snapshots never block the agent when GPG/SSH isn't configured.
+    const newCommitSha = commitTreeMaybeSigned(commitArgs, gitOpts(repoPath));
+    if (!newCommitSha || !HEX.test(newCommitSha)) return null;
 
     // Update (or create) the shadow branch to point to the new commit
     if (parentSha) {
@@ -556,15 +558,14 @@ export function condenseSnapshot(
     // Create commit on the permanent branch
     const parentRef = gitDetailed(['rev-parse', PERMANENT_BRANCH], gitOpts(repoPath));
     const commitArgs = [
-      'commit-tree', newRootTreeSha,
+      newRootTreeSha,
       '-m', `snapshot: ${snapshotId}\n\nOrigin-Snapshot: ${snapshotId}\nLinked-Commit: ${commitSha.slice(0, 12)}`,
     ];
     if (parentRef.status === 0 && HEX.test(parentRef.stdout.trim())) {
       commitArgs.push('-p', parentRef.stdout.trim());
     }
-
-    const newPermanentCommit = git(commitArgs, gitOpts(repoPath)).trim();
-    if (!HEX.test(newPermanentCommit)) return false;
+    const newPermanentCommit = commitTreeMaybeSigned(commitArgs, gitOpts(repoPath));
+    if (!newPermanentCommit || !HEX.test(newPermanentCommit)) return false;
 
     // Update (or create) the permanent branch
     if (parentRef.status === 0) {
