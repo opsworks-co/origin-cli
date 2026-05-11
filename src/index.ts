@@ -10,6 +10,7 @@ import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanC
 import { reviewCommand } from './commands/review.js';
 import { reviewPRCommand } from './commands/review-pr.js';
 import { intentReviewCommand } from './commands/intent-review.js';
+import { preReviewCommand } from './commands/pre-review.js';
 import { agentsCommand, agentCreateCommand } from './commands/agents.js';
 import { reposCommand, repoAddCommand } from './commands/repos.js';
 import { auditCommand } from './commands/audit.js';
@@ -684,6 +685,15 @@ program.command('intent-review [branch]')
   .option('-f, --format <format>', 'Output format: json, md (default: terminal)')
   .option('-o, --output <file>', 'Write output to file')
   .action(intentReviewCommand);
+
+program.command('pre-review')
+  .description('AI code review of the working diff before you open a PR. Feeds Claude per-line attribution + prior-session prompts + acceptance rates so it can spot intent drift, not just diff-level issues.')
+  .option('-b, --base <ref>', 'Base ref to diff against (default: origin/main, then main, then HEAD~5)')
+  .option('-f, --format <format>', 'Output format: terminal | md | json (default: terminal)')
+  .option('-o, --output <file>', 'Write review to file instead of stdout')
+  .option('-m, --model <model>', 'Override Claude model (default chosen by llm.ts — currently a recent Sonnet)')
+  .option('--max-tokens <n>', 'Max output tokens for the review', (v) => parseInt(v, 10))
+  .action(preReviewCommand);
 
 // ─── Repos ───────────────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { loadConfig } from './config.js';
+import { commitTreeMaybeSigned } from './signing.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -255,15 +256,15 @@ export function writeSessionFiles(repoPath: string, data: SessionWriteData): voi
     const commitMsg = `session ${safeId.slice(0, 8)}: ${data.model} — ${firstPrompt}`;
 
     const parentHash = gitOrNull(['rev-parse', `refs/heads/${BRANCH}`], execOpts);
-    const commitArgs = ['commit-tree', treeHash];
+    const commitArgs = [treeHash];
     if (parentHash && /^[a-fA-F0-9]+$/.test(parentHash)) {
       commitArgs.push('-p', parentHash);
     }
     commitArgs.push('-m', commitMsg);
-    const commitRes = gitDetailed(commitArgs, execOpts);
-    if (commitRes.status !== 0) return;
-    const commitHash = commitRes.stdout.trim();
-    if (!/^[a-fA-F0-9]+$/.test(commitHash)) return;
+    // Signing is opt-in (`origin config set sign-snapshots true`) and falls
+    // back to unsigned if signing fails so session bookkeeping never blocks.
+    const commitHash = commitTreeMaybeSigned(commitArgs, execOpts);
+    if (!commitHash || !/^[a-fA-F0-9]+$/.test(commitHash)) return;
 
     // 5. Update the branch ref
     git(
