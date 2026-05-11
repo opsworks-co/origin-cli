@@ -238,6 +238,9 @@ export default function DeveloperLayout({ children }: { children: React.ReactNod
         steps={DASHBOARD_TOUR}
         tourId="dashboard-v1"
         onComplete={() => setTourComplete(true)}
+        // Solo dev tour ends on /settings — bounce back to the
+        // personal dashboard so the user lands somewhere useful.
+        completeRedirect="/me"
       />
     </div>
   );

@@ -287,6 +287,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           // load sees it via the localStorage check above.
           setTourComplete(true);
         }}
+        // Team tour's last step routes to /dashboard already, so this
+        // is mostly a belt-and-braces guard if the final step ever
+        // changes — the redirect short-circuits when we're already
+        // on the target path.
+        completeRedirect="/dashboard"
       />
     </div>
   );

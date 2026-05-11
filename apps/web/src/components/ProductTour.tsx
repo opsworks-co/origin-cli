@@ -282,9 +282,14 @@ interface ProductTourProps {
   steps: TourStep[];
   tourId: string;
   onComplete?: () => void;
+  /** Where to navigate when the tour ends — Done click, X button, or
+   *  Escape. Without this the user gets stranded on whichever route
+   *  the final step navigated to (the dashboard tour ends on
+   *  /settings, the team tour ends on /dashboard already). */
+  completeRedirect?: string;
 }
 
-export default function ProductTour({ steps, tourId, onComplete }: ProductTourProps) {
+export default function ProductTour({ steps, tourId, onComplete, completeRedirect }: ProductTourProps) {
   // In-progress state has to survive component remounts. Each route in
   // App.tsx wraps its content in <AppLayout>, which means navigating from
   // /dashboard → /repos unmounts the AppLayout that contains ProductTour
@@ -393,7 +398,14 @@ export default function ProductTour({ steps, tourId, onComplete }: ProductTourPr
       sessionStorage.removeItem(sessionKey);
     } catch {}
     onComplete?.();
-  }, [storageKey, sessionKey, onComplete]);
+    // Send the user "home" after the tour. The last step's route
+    // (Settings for solo, Dashboard for team) is rarely where the
+    // user actually wants to land — without this we stranded solo
+    // devs on /settings after the final "Done — let's go!" click.
+    if (completeRedirect && location.pathname !== completeRedirect) {
+      navigate(completeRedirect);
+    }
+  }, [storageKey, sessionKey, onComplete, completeRedirect, navigate, location.pathname]);
 
   // Position the tooltip for the current step
   const positionTooltip = useCallback(() => {
