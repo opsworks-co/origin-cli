@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { createInterface } from 'readline/promises';
 import { saveConfig, saveProfile, listProfiles, loadConfig, deleteProfile } from '../config.js';
+import { clearReloginLock } from '../api.js';
 import chalk from 'chalk';
 
 // Wipe local session state when the workspace identity changes. Without
@@ -154,6 +155,11 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
         accountType: result.accountType,
         orgName: result.orgName,
       });
+      // Clear the auto-relogin lock so a future drift can re-spawn
+      // this flow. (api.ts also clears it on the next successful
+      // request — this is the belt-and-braces path for cases where
+      // login finishes before another hook fires.)
+      clearReloginLock();
       const isSolo = result.keyType === 'solo' || result.accountType === 'developer';
       const profileName = opts.profile || (isSolo ? 'dev' : 'team');
       const existingProfiles = listProfiles();

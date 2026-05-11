@@ -1,3 +1,4 @@
+import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -40,6 +41,61 @@ function writeAuthStatus(status: AuthStatus): void {
     fs.mkdirSync(path.dirname(AUTH_STATUS_PATH), { recursive: true, mode: 0o700 });
     fs.writeFileSync(AUTH_STATUS_PATH, JSON.stringify(status, null, 2));
   } catch { /* best-effort — don't blow up a hook over a status file */ }
+}
+
+// Self-healing re-login. The first time a hook (or any request) sees a
+// 401, we spawn a detached `origin login` process which runs the
+// device-code flow: opens the browser, the user clicks Approve once
+// in the dashboard tab they already have open, and the CLI writes a
+// fresh key to ~/.origin/config.json. Subsequent hooks pick it up
+// transparently. The lock file prevents spawning multiple browser
+// windows when several hooks fire back-to-back during the recovery
+// window.
+const RELOGIN_LOCK_PATH = path.join(os.homedir(), '.origin', 'relogin.lock');
+const RELOGIN_LOCK_TTL_MS = 15 * 60 * 1000; // browser approval window + slack
+
+function shouldSpawnRelogin(): boolean {
+  try {
+    const raw = fs.readFileSync(RELOGIN_LOCK_PATH, 'utf-8');
+    const { spawnedAt } = JSON.parse(raw) as { spawnedAt: number };
+    if (typeof spawnedAt === 'number' && Date.now() - spawnedAt < RELOGIN_LOCK_TTL_MS) {
+      return false; // another relogin is already in flight
+    }
+  } catch { /* no lock or unreadable — proceed */ }
+  return true;
+}
+
+function markReloginSpawned(): void {
+  try {
+    fs.mkdirSync(path.dirname(RELOGIN_LOCK_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(RELOGIN_LOCK_PATH, JSON.stringify({ spawnedAt: Date.now() }));
+  } catch { /* best-effort */ }
+}
+
+export function clearReloginLock(): void {
+  try { fs.unlinkSync(RELOGIN_LOCK_PATH); } catch { /* already gone */ }
+}
+
+function spawnReloginBackground(): void {
+  if (!shouldSpawnRelogin()) return;
+  markReloginSpawned();
+  try {
+    // Resolve the running CLI's argv[1] (the origin binary) so we
+    // invoke the same install the hook itself was spawned from, not
+    // whatever happens to be first on PATH. Falls back to bare
+    // `origin` if argv[1] isn't a usable path (which shouldn't
+    // happen in practice but defends against odd env setups).
+    const node = process.execPath;
+    const originBin = process.argv[1] && fs.existsSync(process.argv[1])
+      ? process.argv[1]
+      : 'origin';
+    const child = spawn(node, [originBin, 'login'], {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    });
+    child.unref();
+  } catch { /* spawn failure is non-fatal — user can run origin login manually */ }
 }
 
 /** Ensure a parsed API response is a non-null object. */
@@ -91,6 +147,14 @@ async function request(path: string, opts: RequestInit = {}) {
         keyPrefix: config.apiKey?.slice(0, 14),
         message: body?.error || 'Invalid API key',
       });
+      // Permanent fix: kick off `origin login` in the background so
+      // the user just clicks Approve in the dashboard tab they
+      // already have open and the CLI self-heals. Lock-gated so a
+      // burst of failing hooks doesn't spawn multiple browser
+      // windows. The current request still fails (we can't pause a
+      // hook on a 5-min device-code wait) but every subsequent
+      // hook will succeed once the user clicks Approve.
+      spawnReloginBackground();
     }
     const err = new Error(body?.message || body?.error || res.statusText) as any;
     err.status = res.status;
@@ -102,7 +166,8 @@ async function request(path: string, opts: RequestInit = {}) {
     err.body = body;
     throw err;
   }
-  // Successful response — clear any stale unauthorized flag.
+  // Successful response — clear any stale unauthorized flag and the
+  // relogin lock so a future drift can spawn the flow again.
   const prior = readAuthStatus();
   if (prior && prior.state !== 'ok') {
     writeAuthStatus({
@@ -110,6 +175,7 @@ async function request(path: string, opts: RequestInit = {}) {
       lastCheckedAt: new Date().toISOString(),
       keyPrefix: config.apiKey?.slice(0, 14),
     });
+    clearReloginLock();
   }
   return res.json();
 }
