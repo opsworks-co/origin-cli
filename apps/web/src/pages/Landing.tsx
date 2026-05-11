@@ -513,23 +513,15 @@ export default function Landing() {
             </h1>
 
             <RevealText delay={1400}>
-              <div className="mt-6 max-w-2xl space-y-3">
-                <div className="flex items-start gap-3">
-                  <span className="flex-shrink-0 mt-1 inline-flex items-center text-[10px] font-semibold tracking-widest uppercase text-emerald-400 bg-emerald-500/10 ring-1 ring-emerald-500/20 rounded-md px-2 py-0.5">
-                    Solo
-                  </span>
-                  <p className="text-lg text-gray-300 leading-relaxed">
-                    Per-prompt rollbacks, line-level AI attribution, and a live sessions dashboard.
-                  </p>
-                </div>
-                <div className="flex items-start gap-3">
-                  <span className="flex-shrink-0 mt-1 inline-flex items-center text-[10px] font-semibold tracking-widest uppercase text-indigo-400 bg-indigo-500/10 ring-1 ring-indigo-500/20 rounded-md px-2 py-0.5">
-                    Teams
-                  </span>
-                  <p className="text-lg text-gray-300 leading-relaxed">
-                    Token &amp; cost tracking, policy enforcement, PR compliance, and audit trails.
-                  </p>
-                </div>
+              <div className="mt-6 max-w-2xl space-y-3 text-lg text-gray-400 leading-relaxed">
+                <p>
+                  Per-prompt rollbacks, line-level AI attribution, and a live sessions dashboard for{' '}
+                  <span className="text-emerald-400/90">solo devs</span>.
+                </p>
+                <p>
+                  Token &amp; cost tracking, coding sessions, policy enforcement, PR compliance, and audit trails for{' '}
+                  <span className="text-indigo-400/90">teams</span>.
+                </p>
               </div>
             </RevealText>
 
