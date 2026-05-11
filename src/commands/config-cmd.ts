@@ -28,16 +28,23 @@ const KEY_ALIASES: Record<string, string> = {
   'user-id': 'userId',
   'machine-id': 'machineId',
   'agent-slugs': 'agentSlugs',
+  'auto-snapshot': 'autoSnapshot',
+  'sign-snapshots': 'signSnapshots',
+  'anthropic-api-key': 'anthropicApiKey',
 };
 
 function resolveKey(key: string): string {
   return KEY_ALIASES[key] || key;
 }
 
-// Valid config keys and their types/allowed values
-const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum' | 'map'; values?: string[]; description: string }> = {
+// Valid config keys and their types/allowed values.
+//
+// `secret: true` keys are masked in any display path (get / list / set echo)
+// — they're stored unmodified on disk but never printed to a terminal where
+// they could leak via screen-share, scrollback, or `| tee log.txt`.
+const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum' | 'map'; values?: string[]; description: string; secret?: boolean }> = {
   apiUrl:          { type: 'string',  description: 'Origin API URL' },
-  apiKey:          { type: 'string',  description: 'API key (use "origin login" instead)' },
+  apiKey:          { type: 'string',  description: 'API key (use "origin login" instead)', secret: true },
   orgId:           { type: 'string',  description: 'Organization ID' },
   userId:          { type: 'string',  description: 'User ID' },
   machineId:       { type: 'string',  description: 'Machine identifier' },
@@ -50,7 +57,21 @@ const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum' | 'map';
   snapshotRepo:  { type: 'string',  description: 'External git remote URL for session data (origin-sessions branch)' },
   mode:            { type: 'enum',    values: ['auto', 'standalone'], description: 'Force standalone mode (skip API even when logged in)' },
   agentSlugs:      { type: 'map',     description: 'Per-tool agent slug overrides (e.g. agentSlugs.cursor = cursor-frontend)' },
+  autoSnapshot:    { type: 'boolean', description: 'Auto-snapshot working tree before agent file edits' },
+  signSnapshots:   { type: 'boolean', description: 'Sign Origin\'s own commits (snapshots, session branch). Honors git signing config; falls back to unsigned if signing fails.' },
+  anthropicApiKey: { type: 'string',  description: 'Anthropic API key for `origin pre-review` / `origin chat` / `origin ask` (overridden by ANTHROPIC_API_KEY env var)', secret: true },
 };
+
+/**
+ * Mask a secret value for terminal display. Keeps just enough characters
+ * for the user to recognize their own key vs. a stale one without exposing
+ * the full credential. Short values are fully masked.
+ */
+function maskSecret(value: string): string {
+  if (!value) return '';
+  if (value.length <= 12) return '*'.repeat(value.length);
+  return value.slice(0, 6) + '…' + '*'.repeat(8) + '…' + value.slice(-4);
+}
 
 // ── Helpers for dotted key access (agentSlugs.cursor) ────────────────────────
 
@@ -110,6 +131,8 @@ export async function configGetCommand(rawKey: string): Promise<void> {
   const value = (config as Record<string, any>)[key];
   if (value === undefined || value === null) {
     console.log(chalk.gray('(not set)'));
+  } else if (CONFIG_KEYS[key]?.secret) {
+    console.log(maskSecret(String(value)));
   } else {
     console.log(String(value));
   }
@@ -175,7 +198,13 @@ export async function configSetCommand(rawKey: string, value: string): Promise<v
 
   (config as Record<string, any>)[key] = parsed;
   saveConfig(config);
-  console.log(chalk.green(`${key} = ${parsed}`));
+  // Don't echo a fresh secret back to the terminal — confirm the change
+  // happened and show the masked value the user could use to verify.
+  if (keySpec.secret) {
+    console.log(chalk.green(`${key} set (${maskSecret(String(parsed))})`));
+  } else {
+    console.log(chalk.green(`${key} = ${parsed}`));
+  }
 }
 
 export async function configListCommand(): Promise<void> {
@@ -201,7 +230,14 @@ export async function configListCommand(): Promise<void> {
     }
 
     const value = config ? (config as Record<string, any>)[key] : undefined;
-    const displayValue = value !== undefined && value !== null ? String(value) : chalk.gray('(not set)');
+    let displayValue: string;
+    if (value === undefined || value === null) {
+      displayValue = chalk.gray('(not set)');
+    } else if (spec.secret) {
+      displayValue = chalk.gray(maskSecret(String(value)));
+    } else {
+      displayValue = String(value);
+    }
     const typeHint = spec.type === 'enum' ? chalk.gray(`[${spec.values!.join('|')}]`) : chalk.gray(`[${spec.type}]`);
     console.log(`  ${chalk.cyan(key.padEnd(18))} ${displayValue.padEnd(30)} ${typeHint}`);
     console.log(chalk.gray(`  ${''.padEnd(18)} ${spec.description}`));
