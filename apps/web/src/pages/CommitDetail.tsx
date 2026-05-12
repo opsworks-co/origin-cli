@@ -238,6 +238,13 @@ export default function CommitDetailPage() {
   const currentPatch = promptPatch || selected?.patch || '';
   const promptStats = promptPatch ? countAddDel(promptPatch) : null;
   const isAI = !!commit.session || !!commit.aiToolDetected;
+  // Merge commits (created by `git merge` / GitHub's "Merge pull request"
+  // button) carry no session of their own — the AI work lives in the
+  // commits they merge in. Labeling them "Human" is technically right
+  // (a person ran `git merge`) but misleads users on AI-heavy repos.
+  // Tag them as "Merge" so the badge tells the truth.
+  const isMergeCommit = !isAI && typeof commit.message === 'string'
+    && /^Merge (pull request|branch|remote-tracking|tag) /m.test(commit.message);
   const activePrompts =
     selected && selected.promptIndexes.length > 0 && selectedPromptIdx === null
       ? commit.promptChanges.filter((pc) => selected.promptIndexes.includes(pc.promptIndex))
@@ -277,6 +284,8 @@ export default function CommitDetailPage() {
                 ) : (
                   <Pill variant="running">{commit.aiToolDetected} <span className="opacity-60">detected</span></Pill>
                 )
+              ) : isMergeCommit ? (
+                <Pill variant="warning">Merge</Pill>
               ) : (
                 <Pill variant="neutral">Human</Pill>
               )}
@@ -520,7 +529,9 @@ export default function CommitDetailPage() {
                 <p className="text-xs text-gray-600">
                   {commit.aiToolDetected
                     ? `Detected as ${commit.aiToolDetected} but no Origin session was captured.`
-                    : 'Committed by a human — no AI prompts.'}
+                    : isMergeCommit
+                      ? 'Merge commit — see the commits being merged for AI attribution.'
+                      : 'Committed by a human — no AI prompts.'}
                 </p>
               </div>
             )}

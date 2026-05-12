@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import * as api from '../api';
 import type { Repo, CommitDiff, RepoHealth } from '../api';
 import WebhookSettings from '../components/WebhookSettings';
@@ -499,6 +499,10 @@ type RepoTab = 'commits' | 'files' | 'sessions';
 export default function RepoDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  // Deep-link param: `/repos/:id?file=<path>` opens that file's blame view
+  // on mount. Used by the dashboard's "Most Modified Files" list and any
+  // other surface that wants to jump straight into a file.
+  const [searchParams, setSearchParams] = useSearchParams();
   const [repo, setRepo] = useState<Repo | null>(null);
   const [commits, setCommits] = useState<Commit[]>([]);
   const [loading, setLoading] = useState(true);
@@ -528,7 +532,12 @@ export default function RepoDetail() {
   // Folders the user has explicitly collapsed. Default = expanded.
   const [filesCollapsed, setFilesCollapsed] = useState<Set<string>>(new Set());
   // Selected file → opens the inline viewer with per-line authorship.
-  const [openFilePath, setOpenFilePath] = useState<string | null>(null);
+  // Initial value comes from the `?file=<path>` query param if present so
+  // deep-links from the dashboard land directly on the file viewer.
+  const [openFilePath, setOpenFilePath] = useState<string | null>(() => {
+    const fromUrl = searchParams.get('file');
+    return fromUrl && fromUrl.length > 0 ? fromUrl : null;
+  });
   // Pin the open file to a known-good SHA so the GitHub Contents fetch
   // can't 404 on a feature-branch-only file when the user has no branch
   // filter set (HEAD = default branch, but file lives on a side branch).
@@ -776,6 +785,21 @@ export default function RepoDetail() {
     };
   }, [repoTab, id, branchFilter]);
 
+  // Mirror openFilePath into the `?file=` URL param so reloads / shares
+  // preserve the open file, and closing the viewer clears it from the URL.
+  useEffect(() => {
+    const current = searchParams.get('file');
+    if (openFilePath === current) return;
+    const next = new URLSearchParams(searchParams);
+    if (openFilePath) next.set('file', openFilePath);
+    else next.delete('file');
+    setSearchParams(next, { replace: true });
+    // Intentionally omit setSearchParams + searchParams from deps so we only
+    // run on openFilePath changes — including them would cause a render loop
+    // when other code mutates searchParams.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openFilePath]);
+
   // Lazy-load file contents + blame when a file is clicked. Closing the
   // viewer (openFilePath = null) drops the cached blame so a re-open
   // refetches in case the file changed on disk between visits.
@@ -884,6 +908,15 @@ export default function RepoDetail() {
   };
 
   const isAI = (c: any) => c.session !== null || c.aiToolDetected !== null;
+  // Merge commits show up in the commit list but the diff they represent
+  // is just the sum of the branch's commits. Calling them "Human"
+  // is technically true (the user ran `git merge`) but misleading on a
+  // repo where the merged work is AI-generated. Label these as Merge
+  // so the counts read cleanly: AI commits + Human commits + Merge
+  // commits, not "AI 23, Human 5" where the 5 are mostly merges of AI
+  // work. Pattern matches GitHub/GitLab default merge subjects.
+  const isMerge = (c: any) =>
+    typeof c.message === 'string' && /^Merge (pull request|branch|remote-tracking|tag) /m.test(c.message);
 
   // Apply free-text search across commit message, sha, and author
   const searchedCommits = useMemo(() => {
@@ -927,7 +960,8 @@ export default function RepoDetail() {
   }, [searchedCommits]);
 
   const aiCount = commits.filter(isAI).length;
-  const humanCount = commits.filter((c) => !isAI(c)).length;
+  const mergeCount = commits.filter((c) => !isAI(c) && isMerge(c)).length;
+  const humanCount = commits.filter((c) => !isAI(c) && !isMerge(c)).length;
 
   if (loading) {
     return (
@@ -1065,9 +1099,15 @@ export default function RepoDetail() {
                 Health {health.healthScore}
               </Pill>
             )}
-            <Pill variant="neutral">Total {commits.length}</Pill>
-            <Pill variant="ai">AI {aiCount} ({aiPct.toFixed(0)}%)</Pill>
-            <Pill variant="neutral">Human {humanCount}</Pill>
+            <Pill variant="neutral" title={`${commits.length} commits scanned`}>Total {commits.length}</Pill>
+            <Pill
+              variant="ai"
+              title={`${aiCount} of ${commits.length} commits attributed to an AI agent (${aiPct.toFixed(1)}%). File-level AI ratios may differ — those are computed from current file content, not commit count.`}
+            >
+              AI {aiCount} ({aiPct.toFixed(0)}%)
+            </Pill>
+            {humanCount > 0 && <Pill variant="neutral" title="Commits without an AI session and not matching a merge pattern">Human {humanCount}</Pill>}
+            {mergeCount > 0 && <Pill variant="neutral" title="Merge commits — the actual changes are attributed to the commits being merged in">Merge {mergeCount}</Pill>}
           </>
         }
         actions={
@@ -1323,6 +1363,7 @@ export default function RepoDetail() {
                     const deletions = commit.deletions ?? commit.session?.linesRemoved ?? null;
                     const firstLine = commit.message.split('\n')[0];
                     const isAiCommit = !!commit.session || !!commit.aiToolDetected;
+                    const isMergeCommit = !isAiCommit && isMerge(commit);
 
                     return (
                       <div
@@ -1340,6 +1381,14 @@ export default function RepoDetail() {
                           <p className="text-sm text-gray-200 truncate group-hover:text-white transition-colors">
                             {firstLine}
                           </p>
+                          {isMergeCommit && (
+                            <span
+                              className="flex-shrink-0 text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-amber-500/10 text-amber-400 border border-amber-500/30"
+                              title="Merge commit — the underlying changes are attributed to the commits being merged"
+                            >
+                              Merge
+                            </span>
+                          )}
                           {isAiCommit && (
                             <span
                               className={`flex-shrink-0 text-[9px] px-1.5 py-0.5 rounded-full font-medium ${
