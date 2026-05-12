@@ -2902,6 +2902,37 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     }
 
     if (connected) {
+      // Recovery: if the session was created in local-only mode (key
+      // was dead at the time → `local-` prefix) and the key has since
+      // recovered, register it server-side now so the rest of the
+      // update lands on a real row instead of a 404. Persist the new
+      // id back to state so future hooks use it directly.
+      if (state.sessionId.startsWith('local-')) {
+        try {
+          const agentConfig = (await import('../config.js')).loadAgentConfig();
+          if (agentConfig?.machineId) {
+            debugLog('stop', 'migrating local session to server', { local: state.sessionId });
+            const startRes = await api.startSession({
+              machineId: agentConfig.machineId,
+              prompt: prompts[0] || '',
+              model: model !== 'unknown' ? model : 'claude',
+              repoPath: state.repoPath || hookCwd,
+              agentSlug,
+              branch: state.branch || undefined,
+              agentSessionId: state.claudeSessionId,
+            } as any);
+            const newId = (startRes as any)?.sessionId;
+            if (typeof newId === 'string' && newId && !newId.startsWith('local-')) {
+              debugLog('stop', 'local session migrated', { from: state.sessionId, to: newId });
+              state.sessionId = newId;
+              try { saveSessionState(state, hookCwd, state.sessionTag); } catch { /* non-fatal */ }
+            }
+          }
+        } catch (err: any) {
+          debugLog('stop', 'local→server migration failed (non-fatal)', { message: err?.message });
+        }
+      }
+
       debugLog('stop', 'calling api.updateSession', {
         sessionId: state.sessionId,
         promptCount: prompts.length,
