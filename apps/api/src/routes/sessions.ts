@@ -330,11 +330,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       };
     }
 
-    // User-level scoping: non-admin users only see their own sessions
-    // Admin/Owner can see all org sessions, or pass ?mine=true to see only theirs
+    // User-level scoping:
+    //   - Non-admin: see only your own sessions.
+    //   - Admin/Owner of a TEAM org: see everyone's sessions in the org.
+    //   - Admin/Owner of a PERSONAL org: still see only your own. A
+    //     personal workspace is logically a single-user surface; seeing
+    //     sessions attributed to a previous-user tombstone (e.g. after
+    //     an account delete+recreate) confuses the dashboard more than
+    //     it helps.
+    //   - ?mine=true on any role forces "only mine".
     const userRole = (req.activeRole! || '').toUpperCase();
     const isAdmin = userRole === 'ADMIN' || userRole === 'OWNER';
-    if (!isAdmin || req.query.mine === 'true') {
+    const orgRow = await prisma.org.findUnique({ where: { id: orgId }, select: { type: true } });
+    const isPersonalOrg = orgRow?.type === 'personal';
+    if (!isAdmin || isPersonalOrg || req.query.mine === 'true') {
       where.userId = req.user!.id;
     }
 
