@@ -113,17 +113,26 @@ async function deviceCodeLogin(apiUrl: string): Promise<{
   throw new Error('Login request timed out. Rerun `origin login`.');
 }
 
-export async function loginCommand(opts: { key?: string; url?: string; profile?: string }) {
+export async function loginCommand(opts: { key?: string; url?: string; profile?: string; browser?: boolean }) {
   console.log(chalk.bold('\n🔑 Origin Login\n'));
 
   let url: string;
   let key: string;
 
+  // Force device-code flow when:
+  //   - --browser flag is passed (explicit), OR
+  //   - ORIGIN_FORCE_DEVICE_CODE=1 env var is set (used by the
+  //     api.ts auto-relogin spawn, where the child has stdio:
+  //     'ignore' so process.stdin.isTTY is false and we'd
+  //     otherwise drop into the manual-prompt branch and die on
+  //     EOF from the closed stdin).
+  const forceDeviceCode = !!opts.browser || process.env.ORIGIN_FORCE_DEVICE_CODE === '1';
+
   if (opts.key) {
     // Non-interactive mode — explicit key supplied.
     url = (opts.url || 'https://getorigin.io').replace(/\/+$/, '');
     key = opts.key.trim();
-  } else if (process.stdin.isTTY) {
+  } else if (process.stdin.isTTY || forceDeviceCode) {
     // Default path: browser-based device-code flow so users don't
     // have to dig an API key out of Settings and paste it. This is
     // the common path for re-login after the previous account was
@@ -183,6 +192,13 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
       process.exit(0);
     } catch (err: any) {
       console.log(chalk.yellow(`\n⚠ Browser login didn't complete: ${err.message}`));
+      // When this is the auto-relogin spawn (no TTY, forceDeviceCode
+      // env), don't fall through to manual stdin prompts — there's
+      // no user typing into us. Exit cleanly so the lock file
+      // expires and a future hook can re-spawn.
+      if (forceDeviceCode && !process.stdin.isTTY) {
+        process.exit(1);
+      }
       console.log(chalk.gray('  Falling back to manual API key entry.\n'));
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));

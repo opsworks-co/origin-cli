@@ -123,6 +123,7 @@ program.command('login')
   .option('--key <apiKey>', 'API key (skip interactive prompt)')
   .option('--url <apiUrl>', 'API URL (default: https://getorigin.io)')
   .option('--profile <name>', 'Save as named profile (default: auto-detect "dev" or "team")')
+  .option('--browser', 'Force browser device-code flow (used by auto-relogin)')
   .action(loginCommand);
 // `init` is now an alias for `enable` — kept for back-compat with anyone
 // who already pasted `origin login && origin init` into their docs/scripts.

@@ -89,10 +89,23 @@ function spawnReloginBackground(): void {
     const originBin = process.argv[1] && fs.existsSync(process.argv[1])
       ? process.argv[1]
       : 'origin';
+    // Capture stdout/stderr to a log file so a silent failure (browser
+    // can't open, network down, etc.) isn't invisible. ORIGIN_FORCE_DEVICE_CODE
+    // forces the device-code path regardless of TTY — without it, the
+    // child's missing TTY drops it into the manual-prompt branch which
+    // immediately exits on closed stdin.
+    let outFd: number | 'ignore' = 'ignore';
+    let errFd: number | 'ignore' = 'ignore';
+    try {
+      const logPath = path.join(os.homedir(), '.origin', 'relogin.log');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 });
+      outFd = fs.openSync(logPath, 'a');
+      errFd = outFd;
+    } catch { /* if we can't open the log, fall through to /dev/null */ }
     const child = spawn(node, [originBin, 'login'], {
       detached: true,
-      stdio: 'ignore',
-      env: process.env,
+      stdio: ['ignore', outFd, errFd],
+      env: { ...process.env, ORIGIN_FORCE_DEVICE_CODE: '1' },
     });
     child.unref();
   } catch { /* spawn failure is non-fatal — user can run origin login manually */ }
