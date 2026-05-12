@@ -804,7 +804,17 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
     const model = parts[1] || 'codex';
     const sqliteTokens = parseInt(parts[2], 10) || 0;
     const rolloutPath = parts[3] || '';
-    const prompt = parts.slice(4).join('|') || '';
+    const rawPrompt = parts.slice(4).join('|') || '';
+    // Codex's `first_user_message` column captures whatever the first
+    // user-role event in the rollout contained — which is Codex's own
+    // AGENTS.md replay, not anything the user typed. Filter the echo
+    // out so it never reaches state.prompts / the dashboard.
+    const looksLikeOriginEcho =
+      rawPrompt.includes('<!-- origin-managed -->') ||
+      /^#\s+AGENTS\.md instructions for /m.test(rawPrompt);
+    const prompt = looksLikeOriginEcho
+      ? ''
+      : rawPrompt.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim();
 
     // ── Step 2: Try to parse the rollout JSONL for real token counts ──
     const rolloutResult = parseCodexRollout(codexDir, rolloutPath, threadId, { verbose: !!opts.verbose });
@@ -934,10 +944,22 @@ function getCodexPromptsTimeline(repoPath: string): PromptTimelineEntry[] {
           ? content_.map((c: any) => c?.text || c?.content || '').join('')
           : '';
       if (!text || !text.trim()) continue;
+      // Drop the AGENTS.md / origin-managed echo: Codex reads AGENTS.md
+      // natively and replays it as the first user-role message in the
+      // rollout. The user-prompt-submit hook already filters this for
+      // the live `prompt` capture path; we apply the same filter here
+      // so the dashboard's session view doesn't show Origin's own
+      // system block as turn 1.
+      if (text.includes('<!-- origin-managed -->')) continue;
+      if (/^#\s+AGENTS\.md instructions for /m.test(text)) continue;
+      // Codex also wraps the AGENTS.md content in <INSTRUCTIONS>...</INSTRUCTIONS>
+      // — if that's everything in the message, drop it.
+      const stripped = text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim();
+      if (!stripped) continue;
       // Codex events carry an ISO-ish timestamp on most variants.
       const tsRaw = event?.timestamp || event?.ts || event?.time || event?.created_at || item?.timestamp;
       const ts = tsRaw ? new Date(tsRaw).getTime() : NaN;
-      out.push({ text, timestamp: Number.isFinite(ts) ? ts : 0 });
+      out.push({ text: stripped, timestamp: Number.isFinite(ts) ? ts : 0 });
     } catch { /* skip */ }
   }
   // If timestamps are missing, preserve insertion order (the JSONL itself is
