@@ -1008,7 +1008,16 @@ export default function RepoDetail() {
       </svg>
     );
 
-  const aiPct = health?.aiPercentage ?? (commits.length > 0 ? (aiCount / commits.length) * 100 : 0);
+  // Compute AI% from the same counts the badges display (aiCount /
+  // humanCount / mergeCount), not from the server's health.aiPercentage.
+  // The server denominator can include git-notes metadata commits the
+  // dashboard hides, which made a repo where every visible commit was
+  // AI display "52% AI" alongside per-file "100% AI" rows. Use the
+  // filtered counts so the headline matches what's on screen.
+  const attributableCommits = aiCount + humanCount; // exclude merge commits
+  const aiPct = attributableCommits > 0
+    ? (aiCount / attributableCommits) * 100
+    : 0;
 
   const handleToggleVerbose = async () => {
     if (!repo) return;

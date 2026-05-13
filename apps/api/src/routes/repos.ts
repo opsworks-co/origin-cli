@@ -2527,19 +2527,39 @@ router.get('/:id/health', async (req: AuthRequest, res: Response) => {
 
     const sessionCount = sessions.length;
 
-    // AI percentage for this repo
-    const totalCommits = await prisma.commit.count({
+    // AI percentage for this repo.
+    //
+    // Match the same filter the per-file `/files` aggregator uses
+    // (isGitNotesMetadataCommit, merge subjects, AND
+    // `files.length === 0` skip) so a repo where every file shows
+    // "100% AI" doesn't display "AI 52%" in the summary just
+    // because the denominator includes auto-generated origin-notes
+    // commits, `Merge pull request` rows, and empty/file-less
+    // commits that the per-file view never counts. Fetch the
+    // messages + filesChanged so we apply exactly the same
+    // predicate.
+    const allCommitMessages = await prisma.commit.findMany({
       where: { repoId: id },
+      select: { message: true, sessionId: true, aiToolDetected: true, filesChanged: true },
     });
-    const aiCommits = await prisma.commit.count({
-      where: {
-        repoId: id,
-        OR: [
-          { session: { isNot: null } },
-          { aiToolDetected: { not: null } },
-        ],
-      },
-    });
+    const isMergeMsg = (msg: string | null | undefined) =>
+      !!msg && /^Merge (pull request|branch|remote-tracking|tag) /m.test(msg);
+    const hasFiles = (raw: string | null | undefined) => {
+      if (!raw) return false;
+      try {
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) && arr.length > 0;
+      } catch { return false; }
+    };
+    const realCommits = allCommitMessages.filter((c) =>
+      !isGitNotesMetadataCommit(c.message) &&
+      !isMergeMsg(c.message) &&
+      hasFiles(c.filesChanged),
+    );
+    const totalCommits = realCommits.length;
+    const aiCommits = realCommits.filter(
+      (c) => c.sessionId !== null || c.aiToolDetected !== null,
+    ).length;
     const aiPercentage = totalCommits > 0
       ? parseFloat(((aiCommits / totalCommits) * 100).toFixed(1))
       : 0;
