@@ -7,6 +7,7 @@ import ScoreGauge from '../components/ScoreGauge';
 import { timeAgo } from '../utils';
 import { safeHref } from '../utils/safe-url';
 import { PageHeader, Pill, PulseDot, ActionButtonGroup } from '../components/ui';
+import { useAuth } from '../context/AuthContext';
 
 interface PromptChangeData {
   promptIndex: number;
@@ -499,6 +500,11 @@ type RepoTab = 'commits' | 'files' | 'sessions';
 export default function RepoDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  // Solo / personal-workspace developers don't share repos with anyone —
+  // there's nobody to grant access to — so we hide the access-management
+  // controls instead of showing them a page that lists only themselves.
+  const { user } = useAuth();
+  const isSoloAccount = user?.accountType === 'developer';
   // Deep-link param: `/repos/:id?file=<path>` opens that file's blame view
   // on mount. Used by the dashboard's "Most Modified Files" list and any
   // other surface that wants to jump straight into a file.
@@ -1123,7 +1129,9 @@ export default function RepoDetail() {
           <ActionButtonGroup
             secondary={[
               { label: 'Issues', onClick: () => navigate(`/repos/${repo.id}/issues`) },
-              { label: 'Manage access', onClick: () => navigate(`/repos/${repo.id}/access`) },
+              ...(isSoloAccount ? [] : [
+                { label: 'Manage access', onClick: () => navigate(`/repos/${repo.id}/access`) },
+              ]),
             ]}
             overflow={overflowItems}
           />
