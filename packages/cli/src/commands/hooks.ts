@@ -2794,6 +2794,21 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       }
     }
 
+    // Gemini stop hook ships the assistant's reply on stdin as
+    // `prompt_response` (Gemini's transcript file is empty / unflushed at
+    // stop time). Capture it onto state so the synthesized transcript
+    // below includes the assistant turn, not just the user prompts.
+    if (typeof input.prompt_response === 'string' && input.prompt_response.trim()) {
+      if (!state.promptResponses) state.promptResponses = [];
+      const currentIdx = Math.max(state.prompts.length - 1, 0);
+      // Replace if we already have one for this index (in case Stop fires
+      // twice for the same turn — rare but observed).
+      state.promptResponses[currentIdx] = input.prompt_response;
+      debugLog('stop', 'captured prompt_response from stdin', {
+        promptIndex: currentIdx, length: input.prompt_response.length,
+      });
+    }
+
     // For Codex (and other agents without transcripts): synthesize displayTranscript from captured prompts
     if (!displayTranscript && state.prompts.length > 0) {
       const turns: Array<{ role: string; content: string }> = [];
@@ -2801,11 +2816,19 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       if (state.agentSystemPrompt) {
         turns.push({ role: 'system', content: state.agentSystemPrompt });
       }
-      for (const p of state.prompts) {
-        turns.push({ role: 'user', content: p });
+      const responses = state.promptResponses || [];
+      for (let i = 0; i < state.prompts.length; i++) {
+        turns.push({ role: 'user', content: state.prompts[i] });
+        // Interleave the assistant reply we captured (Gemini, agents
+        // without transcripts) so the dashboard shows the response.
+        if (responses[i]) {
+          turns.push({ role: 'assistant', content: responses[i] });
+        }
       }
       displayTranscript = JSON.stringify(turns);
-      debugLog('stop', 'synthesized transcript from prompts', { turnCount: turns.length });
+      debugLog('stop', 'synthesized transcript from prompts', {
+        turnCount: turns.length, responseCount: responses.filter(Boolean).length,
+      });
     }
 
     // Estimate tokens from prompt text when no real token data exists (Codex, agents without transcripts)
@@ -3349,17 +3372,25 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
 
     const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
 
-    // For agents without transcripts (Codex, etc.): synthesize displayTranscript from captured prompts
+    // For agents without transcripts (Codex, Gemini, etc.): synthesize
+    // displayTranscript from captured prompts AND any assistant replies
+    // captured at stop-time (Gemini's `prompt_response`).
     if (!displayTranscript && state.prompts.length > 0) {
       const turns: Array<{ role: string; content: string }> = [];
       if (state.agentSystemPrompt) {
         turns.push({ role: 'system', content: state.agentSystemPrompt });
       }
-      for (const p of state.prompts) {
-        turns.push({ role: 'user', content: p });
+      const responses = state.promptResponses || [];
+      for (let i = 0; i < state.prompts.length; i++) {
+        turns.push({ role: 'user', content: state.prompts[i] });
+        if (responses[i]) {
+          turns.push({ role: 'assistant', content: responses[i] });
+        }
       }
       displayTranscript = JSON.stringify(turns);
-      debugLog('session-end', 'synthesized transcript from prompts', { turnCount: turns.length });
+      debugLog('session-end', 'synthesized transcript from prompts', {
+        turnCount: turns.length, responseCount: responses.filter(Boolean).length,
+      });
     }
 
     // F9: Redact secrets before sending to API

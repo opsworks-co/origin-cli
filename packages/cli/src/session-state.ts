@@ -38,6 +38,11 @@ export interface SessionState {
   model: string;
   startedAt: string;          // ISO timestamp
   prompts: string[];          // Accumulated user prompts
+  // Per-prompt assistant responses, captured opportunistically when the
+  // agent ships the reply on stdin (Gemini's `prompt_response`). Indexed
+  // by prompt index so we can interleave them with `prompts` in the
+  // synthesized transcript when no real JSONL is available.
+  promptResponses?: string[];
   repoPath: string;           // Git repo root path OR working directory
   headShaAtStart: string | null; // HEAD commit SHA when session started (null if no git)
   headShaAtLastStop: string | null; // HEAD SHA after last prompt stop (for per-prompt diffs)
