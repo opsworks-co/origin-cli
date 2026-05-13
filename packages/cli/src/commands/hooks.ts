@@ -23,7 +23,7 @@ import {
   type SessionState,
   type ToolCallRecord,
 } from '../session-state.js';
-import { captureGitState, getDirtyFiles } from '../git-capture.js';
+import { captureGitState, getDirtyFiles, createShadowCommit } from '../git-capture.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
@@ -1633,17 +1633,31 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
               mappingCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
               mappingTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
             } catch { /* ignore */ }
+            // Shadow baseline → prefer workingTreeDiff.
+            const reuseDiff = prevCapture.baselineIsShadow && prevCapture.workingTreeDiff
+              ? prevCapture.workingTreeDiff
+              : (((prevCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
             const mapping = {
               promptIndex: prevPromptIdx,
               promptText: (existing.prompts[prevPromptIdx] || '').slice(0, 1000),
               filesChanged: prevFiles,
-              diff: (((prevCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+              diff: reuseDiff.slice(0, 200_000),
               uncommittedDiff: filteredUncommitted.slice(0, 200_000),
               commitSha: mappingCommitSha,
               treeSha: mappingTreeSha,
             };
-            if (existingIdx >= 0) existing.completedPromptMappings[existingIdx] = mapping;
-            else existing.completedPromptMappings.push(mapping);
+            if (existingIdx >= 0) {
+              // Don't clobber a non-empty mapping with an empty diff —
+              // STOP from the previous launch already captured it.
+              const prevExisting = existing.completedPromptMappings[existingIdx];
+              const newHasDiff = !!(mapping.diff || mapping.uncommittedDiff);
+              const existingHasDiff = !!(prevExisting.diff || (prevExisting as any).uncommittedDiff);
+              if (newHasDiff || !existingHasDiff) {
+                existing.completedPromptMappings[existingIdx] = mapping;
+              }
+            } else {
+              existing.completedPromptMappings.push(mapping);
+            }
             debugLog('session-start', 'captured per-prompt diff for previous prompt (reuse)', {
               promptIndex: prevPromptIdx, filesChanged: prevFiles.length,
             });
@@ -2346,26 +2360,49 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             prevCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
             prevTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
           } catch { /* ignore */ }
+          // When the baseline (prePromptSha) is a shadow commit not in
+          // HEAD's ancestry, `committedDiff + uncommittedDiff` produces
+          // self-canceling text. Use the clean working-tree-vs-baseline
+          // diff instead in that case.
+          const diffText = prevGitCapture.baselineIsShadow && prevGitCapture.workingTreeDiff
+            ? prevGitCapture.workingTreeDiff
+            : (((prevGitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
           const prevMapping = {
             promptIndex: prevPromptIdx,
             promptText: (state.prompts[prevPromptIdx] || '').slice(0, 1000),
             filesChanged: prevFilesChanged,
-            diff: (((prevGitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+            diff: diffText.slice(0, 200_000),
             uncommittedDiff: filteredUncommitted.slice(0, 200_000),
             commitSha: prevCommitSha,
             treeSha: prevTreeSha,
           };
           if (!state.completedPromptMappings) state.completedPromptMappings = [];
-          // Replace if same promptIndex exists, else append
+          // Replace if same promptIndex exists, else append.
+          // BUT: don't overwrite a non-empty existing diff with an empty
+          // one — that happens when STOP already captured the previous
+          // prompt's work and then set prePromptDirtyFiles to those files,
+          // which causes filterUncommittedDiff here to strip everything
+          // back out, leaving us with prevMapping.diff="" that would clobber
+          // the good mapping STOP saved a second earlier.
           const existingIdx = state.completedPromptMappings.findIndex(m => m.promptIndex === prevPromptIdx);
           if (existingIdx >= 0) {
-            state.completedPromptMappings[existingIdx] = prevMapping;
+            const existing = state.completedPromptMappings[existingIdx];
+            const newHasDiff = !!(prevMapping.diff || prevMapping.uncommittedDiff);
+            const existingHasDiff = !!(existing.diff || (existing as any).uncommittedDiff);
+            if (newHasDiff || !existingHasDiff) {
+              state.completedPromptMappings[existingIdx] = prevMapping;
+            } else {
+              debugLog('user-prompt-submit', 'kept existing previous-prompt mapping (new diff was empty)', {
+                promptIndex: prevPromptIdx,
+              });
+            }
           } else {
             state.completedPromptMappings.push(prevMapping);
           }
           debugLog('user-prompt-submit', 'captured per-prompt diff for previous prompt', {
             promptIndex: prevPromptIdx, filesChanged: prevFilesChanged.length,
             linesAdded: prevGitCapture.linesAdded, linesRemoved: prevGitCapture.linesRemoved,
+            hadEmptyDiff: !(prevMapping.diff || prevMapping.uncommittedDiff),
           });
         }
       } catch (err: any) {
@@ -2873,12 +2910,26 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             if (m[1]) uncommittedFiles.push(m[1]);
           }
         }
+        // When prePromptSha is a shadow commit, use workingTreeDiff —
+        // committedDiff would be the reverse-direction text against the
+        // shadow's content.
+        const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+        if (useWorkingTreeDiff) {
+          // Pull file list out of the working-tree diff (which is what
+          // we'll actually store) so filesChanged matches the diff.
+          for (const m of gitCapture.workingTreeDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+            if (m[1]) uncommittedFiles.push(m[1]);
+          }
+        }
         const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
+        const synthDiff = useWorkingTreeDiff
+          ? gitCapture.workingTreeDiff
+          : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
         const currentMapping = {
           promptIndex: currentPromptIdx,
           promptText: currentPromptText.slice(0, 1000),
           filesChanged: Array.from(allFiles),
-          diff: (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+          diff: synthDiff.slice(0, 200_000),
           uncommittedDiff: filteredUncommitted.slice(0, 200_000),
         };
         promptMappings = [...previousMappings, currentMapping];
@@ -2903,16 +2954,26 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             if (m[1]) uncommittedFiles.push(m[1]);
           }
         }
+        // Shadow baseline → prefer workingTreeDiff (see note in synthesis branch above).
+        const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+        if (useWorkingTreeDiff) {
+          for (const m of gitCapture.workingTreeDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+            if (m[1]) uncommittedFiles.push(m[1]);
+          }
+        }
         const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
+        const safetyDiff = useWorkingTreeDiff
+          ? gitCapture.workingTreeDiff
+          : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
         promptMappings.push({
           promptIndex: currentPromptIdx,
           promptText: currentPromptText.slice(0, 1000),
           filesChanged: Array.from(allFiles),
-          diff: (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+          diff: safetyDiff.slice(0, 200_000),
           uncommittedDiff: filteredUncommitted.slice(0, 200_000),
         });
         debugLog('stop', 'synthesized current prompt mapping (safety net)', {
-          promptIndex: currentPromptIdx, files: allFiles.size,
+          promptIndex: currentPromptIdx, files: allFiles.size, shadowBaseline: gitCapture.baselineIsShadow,
         });
       }
 
@@ -3081,10 +3142,46 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       debugLog('stop', 'git notes error (non-fatal)', { message: notesErr.message });
     }
 
-    // Update per-prompt baselines so next prompt only sees its own changes
+    // Update per-prompt baselines so next prompt only sees its own changes.
+    //
+    // CRITICAL: if the working tree is dirty at end of this prompt, we
+    // can't just use HEAD as the next prompt's baseline — when the next
+    // prompt commits those still-dirty files, diff(HEAD..nextHEAD) would
+    // include the previous prompt's work, falsely attributing it to the
+    // next prompt.
+    //
+    // Fix: create a shadow commit whose tree = (HEAD's tree + all dirty
+    // files), and use that as prePromptSha. Then diff(shadowSha..nextHEAD)
+    // only includes content the next prompt actually introduced, since
+    // the previous prompt's dirty content is already in the shadow tree.
     state.headShaAtLastStop = gitCapture.headAfter;
-    state.prePromptSha = gitCapture.headAfter;
-    state.prePromptDirtyFiles = getDirtyFiles(state.repoPath);
+    {
+      const dirty = getDirtyFiles(state.repoPath);
+      if (dirty.length > 0) {
+        const shadowTag = state.sessionTag || state.sessionId.slice(0, 12);
+        const shadowSha = createShadowCommit(state.repoPath, shadowTag);
+        if (shadowSha) {
+          state.prePromptSha = shadowSha;
+          // dirty files are now captured in the shadow tree, so the next
+          // prompt's filterUncommittedDiff should treat the tree as clean.
+          state.prePromptDirtyFiles = [];
+          debugLog('stop', 'shadow commit anchored next-prompt baseline', {
+            shadowSha: shadowSha.slice(0, 12), dirtyCount: dirty.length, head: gitCapture.headAfter.slice(0, 12),
+          });
+        } else {
+          // Shadow creation failed — fall back to old behavior (will
+          // potentially double-attribute uncommitted work).
+          state.prePromptSha = gitCapture.headAfter;
+          state.prePromptDirtyFiles = dirty;
+          debugLog('stop', 'shadow commit failed, using HEAD as baseline (next prompt may double-attribute)', {
+            dirtyCount: dirty.length,
+          });
+        }
+      } else {
+        state.prePromptSha = gitCapture.headAfter;
+        state.prePromptDirtyFiles = [];
+      }
+    }
     // Multi-repo: update per-repo baselines
     if (state.repoPaths && state.repoPaths.length > 1 && state.perRepoState) {
       for (const rp of state.repoPaths) {
@@ -3092,8 +3189,21 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         if (!rpState) continue;
         const rpHead = getHeadSha(rp);
         rpState.headShaAtLastStop = rpHead;
-        rpState.prePromptSha = rpHead;
-        rpState.prePromptDirtyFiles = getDirtyFiles(rp);
+        const rpDirty = getDirtyFiles(rp);
+        if (rpDirty.length > 0) {
+          const rpShadowTag = `${state.sessionTag || state.sessionId.slice(0, 12)}-${path.basename(rp)}`;
+          const rpShadow = createShadowCommit(rp, rpShadowTag);
+          if (rpShadow) {
+            rpState.prePromptSha = rpShadow;
+            rpState.prePromptDirtyFiles = [];
+          } else {
+            rpState.prePromptSha = rpHead;
+            rpState.prePromptDirtyFiles = rpDirty;
+          }
+        } else {
+          rpState.prePromptSha = rpHead;
+          rpState.prePromptDirtyFiles = [];
+        }
       }
     }
     // Save accumulated prompt mappings so next stop can include previous prompts' data

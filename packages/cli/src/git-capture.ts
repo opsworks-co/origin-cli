@@ -1,5 +1,8 @@
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { shouldIgnoreFile } from './ignore-patterns.js';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 
 const HEX = /^[a-fA-F0-9]+$/;
 
@@ -23,6 +26,21 @@ export interface GitCaptureResult {
   diffTruncated: boolean;
   linesAdded: number;
   linesRemoved: number;
+  /**
+   * Single unified diff of `working tree vs headBefore's tree`. When
+   * headBefore is a "shadow commit" (created by createShadowCommit and
+   * NOT an ancestor of HEAD), the legacy `committedDiff + uncommittedDiff`
+   * pair produces self-canceling text. Use `workingTreeDiff` instead in
+   * that case — it's always the clean "what changed between baseline
+   * tree and current working tree" view.
+   */
+  workingTreeDiff: string;
+  /**
+   * True when headBefore is not an ancestor of HEAD — i.e. headBefore is
+   * a shadow commit, so callers should prefer `workingTreeDiff` over the
+   * `committedDiff + uncommittedDiff` pair.
+   */
+  baselineIsShadow: boolean;
 }
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -143,10 +161,55 @@ export function captureGitState(repoPath: string, headBefore: string | null, opt
     diff = diff ? diff + '\n' + uncommittedDiff : uncommittedDiff;
   }
 
+  // Single "working tree vs baseline" diff — clean even when baseline is
+  // a shadow commit not in HEAD's ancestry. Use this in callers that
+  // store the diff per-prompt for AI blame.
+  let workingTreeDiff = '';
+  let baselineIsShadow = false;
+  if (safeBefore && safeBefore !== headAfter) {
+    try {
+      // Is baseline an ancestor of HEAD? If not, it's a shadow commit.
+      const ancestorRes = gitDetailed(['merge-base', '--is-ancestor', safeBefore, headAfter], gitOpts);
+      baselineIsShadow = ancestorRes.status !== 0;
+    } catch {
+      baselineIsShadow = false;
+    }
+  }
+  try {
+    if (safeBefore) {
+      // `git diff <commit>` compares working tree to commit's tree.
+      // Includes staged + unstaged. Untracked still needs special handling.
+      workingTreeDiff = git(['diff', safeBefore], gitOpts).trim();
+      // Append untracked file diffs
+      if (!opts?.committedOnly) {
+        try {
+          const untracked = git(['ls-files', '--others', '--exclude-standard'], gitOpts).trim();
+          if (untracked) {
+            for (const file of untracked.split('\n').filter(Boolean)) {
+              const r = gitDetailed(['diff', '--no-index', '/dev/null', file], gitOpts);
+              const out = (r.stdout || '').trim();
+              if (out) workingTreeDiff = workingTreeDiff ? workingTreeDiff + '\n' + out : out;
+            }
+          }
+        } catch { /* skip */ }
+      }
+      if (workingTreeDiff.length > MAX_DIFF_SIZE) {
+        workingTreeDiff = workingTreeDiff.slice(0, MAX_DIFF_SIZE);
+        diffTruncated = true;
+      }
+    }
+  } catch {
+    workingTreeDiff = '';
+  }
+
   // Count lines added/removed
   let linesAdded = 0;
   let linesRemoved = 0;
-  for (const d of [committedDiff, uncommittedDiff]) {
+  // For shadow baseline, use workingTreeDiff (committedDiff would be reverse).
+  const countSrc = baselineIsShadow && workingTreeDiff
+    ? [workingTreeDiff]
+    : [committedDiff, uncommittedDiff];
+  for (const d of countSrc) {
     if (d) {
       for (const line of d.split('\n')) {
         if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
@@ -166,6 +229,8 @@ export function captureGitState(repoPath: string, headBefore: string | null, opt
     diffTruncated,
     linesAdded,
     linesRemoved,
+    workingTreeDiff,
+    baselineIsShadow,
   };
 }
 
@@ -190,6 +255,81 @@ export function getDirtyFiles(repoPath: string): string[] {
   }
 }
 
+/**
+ * Create a "shadow commit" that captures the current working-tree state
+ * (HEAD + staged + unstaged + untracked) as a real commit object.
+ *
+ * Returns the SHA of the new commit, or null on failure.
+ *
+ * This is used to anchor `prePromptSha` at a per-prompt baseline so that
+ * the diff for the NEXT prompt is computed against "the state at end of
+ * the previous prompt" — not against the last real HEAD, which would
+ * incorrectly include any uncommitted-then-later-committed work from the
+ * previous prompt.
+ *
+ * The shadow commit is kept alive via `refs/origin/shadow/<tag>` so git
+ * GC can't prune it before the next STOP.
+ *
+ * NOTE: This does NOT modify the user's working tree, branch, or index.
+ * It writes to a private temp index file, never to .git/index.
+ */
+export function createShadowCommit(repoPath: string, tag: string): string | null {
+  try {
+    const gitOpts = { cwd: repoPath, timeoutMs: 10_000, maxBuffer: 10 * 1024 * 1024 };
+
+    const headSha = gitOrNull(['rev-parse', 'HEAD'], gitOpts);
+    if (!headSha || !HEX.test(headSha)) return null;
+
+    // Use a private index file so we don't touch .git/index.
+    // The temp index starts as a copy of HEAD's tree.
+    const tmpIndex = path.join(os.tmpdir(), `origin-shadow-${process.pid}-${Date.now()}.idx`);
+    const indexOpts = { ...gitOpts, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } };
+
+    try {
+      // 1. Seed the temp index with HEAD's tree
+      git(['read-tree', 'HEAD'], indexOpts);
+
+      // 2. Stage all changes from the working tree (tracked changes +
+      //    deletions) into the temp index.
+      try {
+        git(['add', '-A', '--', '.'], indexOpts);
+      } catch {
+        // best-effort: continue even if some paths fail
+      }
+
+      // 3. write-tree against the temp index
+      const treeSha = git(['write-tree'], indexOpts).trim();
+      if (!HEX.test(treeSha)) return null;
+
+      // 4. Skip if the tree is identical to HEAD's (nothing dirty —
+      //    caller should normally avoid calling us in that case, but
+      //    we double-check so we never create no-op shadow commits)
+      const headTree = gitOrNull(['rev-parse', `${headSha}^{tree}`], gitOpts);
+      if (headTree === treeSha) return null;
+
+      // 5. commit-tree with HEAD as parent
+      const commitRes = gitDetailed(
+        ['commit-tree', treeSha, '-p', headSha, '-m', `origin shadow ${tag} ${new Date().toISOString()}`],
+        gitOpts,
+      );
+      if (commitRes.status !== 0) return null;
+      const shadowSha = (commitRes.stdout || '').trim();
+      if (!HEX.test(shadowSha)) return null;
+
+      // 6. Keep it reachable so git GC doesn't prune it before next STOP
+      try {
+        git(['update-ref', `refs/origin/shadow/${tag}`, shadowSha], gitOpts);
+      } catch { /* non-fatal — commit object still exists in objects/, GC won't run immediately */ }
+
+      return shadowSha;
+    } finally {
+      try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
+    }
+  } catch {
+    return null;
+  }
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function emptyResult(headBefore: string): GitCaptureResult {
@@ -204,5 +344,7 @@ function emptyResult(headBefore: string): GitCaptureResult {
     diffTruncated: false,
     linesAdded: 0,
     linesRemoved: 0,
+    workingTreeDiff: '',
+    baselineIsShadow: false,
   };
 }
