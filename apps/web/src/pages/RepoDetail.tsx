@@ -965,9 +965,17 @@ export default function RepoDetail() {
       .map(([key, value]) => ({ key, ...value }));
   }, [searchedCommits]);
 
-  const aiCount = commits.filter(isAI).length;
+  // Only commits that actually touch files contribute to per-file AI%.
+  // Counting "commits with zero filesChanged" against the repo summary
+  // makes the headline diverge from the per-file rows on repos where
+  // file-less commits exist (no-op merges, .gitignore-only edits whose
+  // patches got stripped, session placeholders that survived sync, etc.).
+  // Match the per-file aggregator: only commits with fileCount > 0 count
+  // toward AI/Human totals. Merges still get their own pill regardless.
+  const touchesFiles = (c: any) => (c.fileCount ?? 0) > 0;
+  const aiCount = commits.filter((c) => isAI(c) && touchesFiles(c)).length;
   const mergeCount = commits.filter((c) => !isAI(c) && isMerge(c)).length;
-  const humanCount = commits.filter((c) => !isAI(c) && !isMerge(c)).length;
+  const humanCount = commits.filter((c) => !isAI(c) && !isMerge(c) && touchesFiles(c)).length;
 
   if (loading) {
     return (
