@@ -122,6 +122,12 @@ jobs:
         # artifact was built from this commit by this workflow" and stores
         # it on the ephemeral sigstore transparency log. Separate from the
         # cosign signature below; defense in depth.
+        #
+        # NOTE: this requires a paid GitHub plan for private repos. We mark
+        # it non-fatal so the release still publishes when the attestation
+        # API returns 403 — cosign + npm provenance below still provide
+        # signed-build guarantees.
+        continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: packages/cli/${{ steps.pack.outputs.tarball_name }}
