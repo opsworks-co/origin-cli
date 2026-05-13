@@ -1170,7 +1170,24 @@ function parseCodexRollout(
         if (payloadType === 'message') {
           const role = payload.role || 'assistant';
           const text = extractMessageText(payload.content);
-          if (text.trim()) turns.push({ role, content: text });
+          if (text.trim()) {
+            // Drop the AGENTS.md / origin-managed echo on user-role
+            // turns. Codex replays AGENTS.md as the first user
+            // message in the rollout; the dashboard renders the
+            // whole transcript so this would otherwise show up as
+            // turn 1 even though state.prompts has filtered it.
+            const isUser = role === 'user' || role === 'human';
+            const isEcho = isUser && (
+              text.includes('<!-- origin-managed -->') ||
+              /^#\s+AGENTS\.md instructions for /m.test(text)
+            );
+            if (!isEcho) {
+              const cleaned = isUser
+                ? text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim()
+                : text;
+              if (cleaned) turns.push({ role, content: cleaned });
+            }
+          }
         } else if (payloadType === 'reasoning') {
           // Chain-of-thought summary — show as assistant reasoning so reviewers
           // can see the agent's plan, not just its actions.
@@ -1213,7 +1230,20 @@ function parseCodexRollout(
           const content_ = item?.content || item?.text || item?.message;
           if (role && content_) {
             const text = extractMessageText(content_);
-            if (text) turns.push({ role, content: text });
+            if (text) {
+              // Same AGENTS.md echo filter as the response_item path.
+              const isUser = role === 'user' || role === 'human';
+              const isEcho = isUser && (
+                text.includes('<!-- origin-managed -->') ||
+                /^#\s+AGENTS\.md instructions for /m.test(text)
+              );
+              if (!isEcho) {
+                const cleaned = isUser
+                  ? text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim()
+                  : text;
+                if (cleaned) turns.push({ role, content: cleaned });
+              }
+            }
           }
         } else if (
           eventType === 'tool_call' || eventType === 'function_call' ||
