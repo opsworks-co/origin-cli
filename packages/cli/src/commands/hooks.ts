@@ -1555,10 +1555,23 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
       // ── Per-prompt diff: capture previous prompt's changes ──
       const currentHead = getHeadSha(repoPath);
-      // Capture when HEAD changed (commits) OR when HEAD is same (uncommitted-only changes)
-      if (existing.prePromptSha && currentHead && existing.prompts.length > 0) {
+      // Capture when HEAD changed (commits) OR when HEAD is same (uncommitted-only changes).
+      //
+      // Cross-launch safety: if the previous prompt already has a
+      // saved mapping (its own Stop hook captured it before the
+      // previous Codex window quit), DON'T re-capture here. The
+      // recovered prePromptSha can be hours old at this point and
+      // any manual commits the user made between launches would
+      // otherwise get attributed to that prompt — which is what
+      // showed up as "diff for create-a-file-shit.txt includes 4
+      // unrelated files" on the dashboard. Skip the retro capture
+      // in that case; prePromptSha gets reset below either way.
+      const prevPromptIdx = existing.prompts.length - 1;
+      const prevAlreadyCaptured = !!(existing.completedPromptMappings || []).find(
+        (m: any) => m.promptIndex === prevPromptIdx && (m.diff || m.uncommittedDiff),
+      );
+      if (existing.prePromptSha && currentHead && existing.prompts.length > 0 && !prevAlreadyCaptured) {
         try {
-          const prevPromptIdx = existing.prompts.length - 1;
           const prevCapture = captureGitState(repoPath, existing.prePromptSha);
           const prevFilesSet = new Set<string>();
           for (const c of prevCapture.commitDetails) {
