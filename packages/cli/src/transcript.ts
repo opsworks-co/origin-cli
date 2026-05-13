@@ -697,8 +697,20 @@ export function formatTranscriptForDisplay(
   const verbose = !!options?.verbose;
   let messages: DisplayMessage[] = [];
 
-  // Detect format: Gemini (single JSON with messages/history) vs Claude JSONL
-  if (trimmed.startsWith('{') && !trimmed.includes('\n')) {
+  // Detect format:
+  //  - Gemini CLI's `~/.gemini/tmp/<proj>/chats/session-*.jsonl` — JSONL
+  //    where each line is `{"type":"user|gemini|info|tool", "content":...}`
+  //    or a `{"$set":...}` metadata update. Detected by sampling for
+  //    `"type":"gemini"` or `"type":"user","content":[{"text"`.
+  //  - Gemini (single JSON with messages/history) — older shape.
+  //  - Claude JSONL — fallback.
+  const firstLines = trimmed.split('\n', 5).join('\n');
+  const looksLikeGeminiChatsJsonl =
+    /\n?\{[^\n]*"type"\s*:\s*"(gemini|user|model|tool)"/.test(firstLines) ||
+    /\{[^\n]*"\$set"\s*:/.test(firstLines);
+  if (looksLikeGeminiChatsJsonl) {
+    messages = formatGeminiChatsJsonl(raw, verbose);
+  } else if (trimmed.startsWith('{') && !trimmed.includes('\n')) {
     messages = formatGeminiMessages(raw, verbose);
   } else if (trimmed.startsWith('{')) {
     try {
@@ -851,6 +863,144 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
           messages.push({ role: 'assistant', content: text });
         }
       }
+    }
+  }
+
+  return messages;
+}
+
+/**
+ * Format Gemini CLI's per-session chats JSONL transcript (the file at
+ * `~/.gemini/tmp/<project-hash>/chats/session-*.jsonl`).
+ *
+ * Each line is a JSON object. We care about:
+ *   {"type":"user","content":[{"text":"..."}]}
+ *   {"type":"gemini","content":"<reply>","thoughts":[...],"toolCalls":[...]}
+ *   {"type":"tool","content":[{"functionResponse":{...}}]}
+ *   {"type":"info","content":"..."}    ← system messages, skip unless verbose
+ *   {"$set":{...}}                      ← metadata, skip
+ *
+ * The same logical assistant turn often appears twice (a "thinking only"
+ * row at id X, then an updated row at the same id with content +
+ * toolCalls). We dedupe by id, keeping the row with the most data.
+ */
+function formatGeminiChatsJsonl(raw: string, verbose: boolean): DisplayMessage[] {
+  const lines = raw.split('\n').filter(l => l.trim());
+  const truncate = makeTruncator(verbose);
+  // Dedupe assistant rows by id, keeping the one with the richest content.
+  const byId = new Map<string, any>();
+  const ordered: Array<{ id?: string; row: any }> = [];
+
+  for (const line of lines) {
+    let obj: any;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (!obj || typeof obj !== 'object') continue;
+    if (obj.$set) continue; // metadata-only
+    const type = obj.type;
+    if (!type) continue;
+    if (type === 'info' && !verbose) continue;
+    const id = typeof obj.id === 'string' ? obj.id : undefined;
+    if (id) {
+      const prev = byId.get(id);
+      const score = (o: any) =>
+        ((o.content && o.content.length > 0) ? 1 : 0) +
+        (Array.isArray(o.toolCalls) ? o.toolCalls.length * 2 : 0) +
+        (Array.isArray(o.thoughts) ? 1 : 0);
+      if (!prev || score(obj) > score(prev)) {
+        byId.set(id, obj);
+      }
+      if (!prev) ordered.push({ id, row: obj });
+    } else {
+      ordered.push({ row: obj });
+    }
+  }
+
+  const messages: DisplayMessage[] = [];
+  for (const { id, row: original } of ordered) {
+    const row = id ? byId.get(id) : original;
+    if (!row) continue;
+    const type = row.type;
+
+    if (type === 'user') {
+      const content = row.content;
+      let text = '';
+      if (Array.isArray(content)) {
+        text = content
+          .map((p: any) => (typeof p === 'string' ? p : (p?.text || '')))
+          .filter(Boolean)
+          .join('\n');
+      } else if (typeof content === 'string') {
+        text = content;
+      }
+      const cleaned = cleanPrompt(text);
+      if (cleaned) messages.push({ role: 'user', content: cleaned });
+      continue;
+    }
+
+    if (type === 'gemini' || type === 'model') {
+      const parts: string[] = [];
+      // Reasoning summaries
+      if (Array.isArray(row.thoughts) && row.thoughts.length > 0) {
+        const thoughtText = row.thoughts
+          .map((t: any) => {
+            if (typeof t === 'string') return t;
+            const subject = typeof t?.subject === 'string' ? t.subject : '';
+            const desc = typeof t?.description === 'string' ? t.description : '';
+            return subject && desc ? `${subject}: ${desc}` : (subject || desc);
+          })
+          .filter(Boolean)
+          .join('\n');
+        if (thoughtText) parts.push(`[Reasoning] ${truncate(thoughtText)}`);
+      }
+      // Main response text
+      if (typeof row.content === 'string' && row.content.trim()) {
+        parts.push(row.content);
+      }
+      // Tool calls
+      if (Array.isArray(row.toolCalls)) {
+        for (const tc of row.toolCalls) {
+          const name = tc?.name || tc?.functionCall?.name || 'tool';
+          const args = tc?.args || tc?.functionCall?.args || {};
+          parts.push(`[Tool: ${name}]`);
+          const argStr = serializeToolInput(args || {});
+          if (argStr) parts.push(truncate(argStr));
+        }
+      }
+      if (parts.length > 0) {
+        messages.push({ role: 'assistant', content: parts.join('\n') });
+      }
+      continue;
+    }
+
+    if (type === 'tool' || type === 'function') {
+      const content = row.content;
+      let outText = '';
+      if (typeof content === 'string') outText = content;
+      else if (Array.isArray(content)) {
+        const buf: string[] = [];
+        for (const p of content) {
+          if (p?.functionResponse) {
+            const resp = p.functionResponse.response ?? p.functionResponse.output ?? p.functionResponse;
+            buf.push(typeof resp === 'string' ? resp : (() => { try { return JSON.stringify(resp, null, 2); } catch { return ''; } })());
+          } else if (typeof p?.text === 'string') {
+            buf.push(p.text);
+          }
+        }
+        outText = buf.join('\n');
+      }
+      if (outText.trim()) {
+        const formatted = `[Output] ${truncate(outText)}`;
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'assistant') last.content += '\n' + formatted;
+        else messages.push({ role: 'assistant', content: formatted });
+      }
+      continue;
+    }
+
+    if (type === 'info' && verbose) {
+      const text = typeof row.content === 'string' ? row.content : '';
+      // DisplayMessage doesn't have a system role; surface as assistant.
+      if (text.trim()) messages.push({ role: 'assistant', content: `[System] ${truncate(text)}` });
     }
   }
 
