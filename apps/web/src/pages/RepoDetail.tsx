@@ -534,6 +534,13 @@ export default function RepoDetail() {
   // branch filter changes.
   const [repoFiles, setRepoFiles] = useState<import('../api/repos').RepoFileEntry[]>([]);
   const [repoFilesLoading, setRepoFilesLoading] = useState(false);
+  // Summary the /files endpoint returns alongside the rows. The
+  // header's AI% pill uses this when available so the headline
+  // matches the per-file rows exactly — commits whose only
+  // filesChanged are deleted from the current snapshot don't
+  // appear in any row, and they shouldn't fatten the denominator
+  // up here either.
+  const [filesSummary, setFilesSummary] = useState<import('../api/repos').RepoFilesSummary | null>(null);
   const [filesQuery, setFilesQuery] = useState('');
   // Folders the user has explicitly collapsed. Default = expanded.
   const [filesCollapsed, setFilesCollapsed] = useState<Set<string>>(new Set());
@@ -748,6 +755,23 @@ export default function RepoDetail() {
   // the page so we don't burn GitHub rate limit on idle tabs.
   // Re-fetches when branchFilter changes — different branch = different
   // tree.
+  // Eagerly fetch the per-file summary on mount (regardless of which
+  // tab is active) so the header's AI% pill matches the per-file rows
+  // immediately — including the case where the user lands on
+  // Commits and never opens the Files tab.
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getRepoFiles } = await import('../api/repos');
+        const data = await getRepoFiles(id, branchFilter || undefined);
+        if (!cancelled && data?.summary) setFilesSummary(data.summary);
+      } catch { /* non-fatal — header falls back to commit-based math */ }
+    })();
+    return () => { cancelled = true; };
+  }, [id, branchFilter]);
+
   useEffect(() => {
     if (repoTab !== 'files' || !id) return;
     let cancelled = false;
@@ -756,7 +780,10 @@ export default function RepoDetail() {
       try {
         const { getRepoFiles } = await import('../api/repos');
         const data = await getRepoFiles(id, branchFilter || undefined);
-        if (!cancelled) setRepoFiles(data?.files || []);
+        if (!cancelled) {
+          setRepoFiles(data?.files || []);
+          if (data?.summary) setFilesSummary(data.summary);
+        }
       } catch {
         if (!cancelled && showSpinner) setRepoFiles([]);
         // Background-poll failures stay silent — keep showing the last
@@ -965,17 +992,23 @@ export default function RepoDetail() {
       .map(([key, value]) => ({ key, ...value }));
   }, [searchedCommits]);
 
-  // Only commits that actually touch files contribute to per-file AI%.
-  // Counting "commits with zero filesChanged" against the repo summary
-  // makes the headline diverge from the per-file rows on repos where
-  // file-less commits exist (no-op merges, .gitignore-only edits whose
-  // patches got stripped, session placeholders that survived sync, etc.).
-  // Match the per-file aggregator: only commits with fileCount > 0 count
-  // toward AI/Human totals. Merges still get their own pill regardless.
+  // Commit-list-derived counts. These power the AI/Human/Merge pills
+  // when no per-file summary is available yet (fresh page load before
+  // /files lands, or for repos without a current snapshot).
+  // touchesFiles guards against file-less commits inflating the
+  // denominator, matching the per-file aggregator's own filter.
   const touchesFiles = (c: any) => (c.fileCount ?? 0) > 0;
-  const aiCount = commits.filter((c) => isAI(c) && touchesFiles(c)).length;
+  const aiCountLocal = commits.filter((c) => isAI(c) && touchesFiles(c)).length;
   const mergeCount = commits.filter((c) => !isAI(c) && isMerge(c)).length;
-  const humanCount = commits.filter((c) => !isAI(c) && !isMerge(c) && touchesFiles(c)).length;
+  const humanCountLocal = commits.filter((c) => !isAI(c) && !isMerge(c) && touchesFiles(c)).length;
+
+  // Prefer the server-computed per-file summary. It already joins
+  // against the current blob tree, so commits whose only filesChanged
+  // were deleted from the repo don't drag the AI% down — which is the
+  // case the original bug fixed. Fall back to commit-list math while
+  // the summary is in flight or absent.
+  const aiCount = filesSummary?.aiCommits ?? aiCountLocal;
+  const humanCount = filesSummary?.humanCommits ?? humanCountLocal;
 
   if (loading) {
     return (

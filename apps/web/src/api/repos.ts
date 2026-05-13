@@ -84,9 +84,16 @@ export interface RepoFileEntry {
   lastAuthor: string;
 }
 
+export interface RepoFilesSummary {
+  aiCommits: number;
+  humanCommits: number;
+  totalCommits: number;
+  aiPct: number;
+}
+
 export function getRepoFiles(id: string, branch?: string) {
   const q = branch ? `?branch=${encodeURIComponent(branch)}` : '';
-  return request<{ files: RepoFileEntry[]; totalFiles: number; ref: string; truncated: boolean }>(
+  return request<{ files: RepoFileEntry[]; totalFiles: number; ref: string; truncated: boolean; summary?: RepoFilesSummary }>(
     `/api/repos/${id}/files${q}`,
   );
 }

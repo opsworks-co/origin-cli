@@ -1605,7 +1605,26 @@ router.get('/:id/files', async (req: AuthRequest, res: Response) => {
       };
     }).sort((a, b) => a.path.localeCompare(b.path));
 
-    res.json({ files, totalFiles: files.length, ref, truncated });
+    // Aggregate summary across the current snapshot's files only. Used
+    // by RepoDetail's header so the AI% pill matches the per-file
+    // rows — historical commits whose only filesChanged are deleted
+    // files (and thus never appear in a row here) are correctly
+    // excluded. Same convention as the per-file aiPct (each commit
+    // counted once per file it touched), so the summary is the
+    // weighted average over visible files.
+    let sumAi = 0;
+    let sumTotal = 0;
+    for (const f of files) {
+      sumAi += f.aiCommits || 0;
+      sumTotal += f.totalCommits || 0;
+    }
+    const summary = {
+      aiCommits: sumAi,
+      totalCommits: sumTotal,
+      humanCommits: sumTotal - sumAi,
+      aiPct: sumTotal > 0 ? Math.round((sumAi / sumTotal) * 100) : 0,
+    };
+    res.json({ files, totalFiles: files.length, ref, truncated, summary });
   } catch (err) {
     console.error('List repo files error:', err);
     res.status(500).json({ error: 'Internal server error' });
