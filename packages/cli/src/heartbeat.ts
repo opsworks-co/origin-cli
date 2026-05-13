@@ -92,6 +92,82 @@ function getCurrentBranch(): string | null {
 }
 
 /**
+ * Compute a live diff for the prompt that's currently in-flight and
+ * push it to the server. Without this, the most-recently-submitted
+ * prompt's diff stays empty on the dashboard until either the NEXT
+ * user-prompt-submit fires (retroactive capture) or the agent's Stop
+ * hook fires (safety-net synthesis). For Codex specifically, Stop
+ * doesn't fire per-turn — only at session end — so the user sees no
+ * diff for the current turn until they submit another prompt. This
+ * function plugs that gap by recomputing prompt-N's diff every
+ * heartbeat tick.
+ */
+async function pushInflightDiff(): Promise<void> {
+  if (!isConnected || !stateFile) return;
+  try {
+    const raw = fs.readFileSync(stateFile, 'utf-8');
+    const state = JSON.parse(raw) as {
+      repoPath?: string;
+      prePromptSha?: string;
+      prompts?: string[];
+      sessionId?: string;
+    };
+    const repoPath = state.repoPath;
+    const prePromptSha = state.prePromptSha;
+    const prompts = state.prompts || [];
+    if (!repoPath || !prePromptSha || prompts.length === 0) return;
+
+    const promptIndex = prompts.length - 1;
+    const promptText = (prompts[promptIndex] || '').slice(0, 1000);
+    const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000 };
+
+    // Three diff slices, same as the user-prompt-submit retroactive
+    // path: committed (prePromptSha → HEAD), uncommitted (working
+    // tree vs HEAD), and the union we send as `diff`.
+    let committedDiff = '';
+    let uncommittedDiff = '';
+    try {
+      committedDiff = execFileSync('git', ['diff', `${prePromptSha}...HEAD`], gitOpts).toString();
+    } catch { /* prePromptSha may be missing on a fresh repo — ignore */ }
+    try {
+      uncommittedDiff = execFileSync('git', ['diff', 'HEAD'], gitOpts).toString();
+    } catch { /* clean tree — no uncommitted */ }
+
+    if (!committedDiff && !uncommittedDiff) return; // nothing to send
+
+    const filesChanged = new Set<string>();
+    for (const blob of [committedDiff, uncommittedDiff]) {
+      for (const m of blob.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+        if (m[1]) filesChanged.add(m[1]);
+      }
+    }
+    const fullDiff = (committedDiff + (uncommittedDiff ? '\n' + uncommittedDiff : '')).trim();
+    const counted = fullDiff.split('\n');
+    const linesAdded = counted.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+    const linesRemoved = counted.filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
+
+    await fetch(`${apiUrl}/api/mcp/session/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify({
+        promptChanges: [
+          {
+            promptIndex,
+            promptText,
+            filesChanged: Array.from(filesChanged),
+            diff: fullDiff.slice(0, 100_000),
+            uncommittedDiff: uncommittedDiff.slice(0, 100_000),
+            linesAdded,
+            linesRemoved,
+            checkpointType: 'auto',
+          },
+        ],
+      }),
+    });
+  } catch { /* best-effort */ }
+}
+
+/**
  * Report command execution result back to the dashboard.
  */
 async function reportResult(type: string, status: 'success' | 'failed', message: string) {
@@ -417,6 +493,12 @@ async function ping() {
         body: JSON.stringify({ branch: getCurrentBranch() }),
       });
       const data = await resp.json() as { ok: boolean; status?: string; command?: any };
+
+      // Push live diff for the in-flight prompt so the dashboard
+      // shows the change as it happens, instead of staying empty
+      // until the next prompt or session end. Fire-and-forget so a
+      // slow git diff doesn't delay the ping cadence.
+      pushInflightDiff().catch(() => { /* non-fatal */ });
 
       // Handle pending commands from the dashboard
       if (data.command && data.command.type === 'restore') {
