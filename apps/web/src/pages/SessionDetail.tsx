@@ -271,6 +271,37 @@ export default function SessionDetail() {
     return [...union];
   }, [session?.filesChanged, session?.promptChanges]);
 
+  // Memoize the transcript array. Previously this was computed via an inline
+  // IIFE in the UnifiedSessionView prop, which produced a fresh array
+  // reference on every SessionDetail render — busting UnifiedSessionView's
+  // useMemo(buildUnifiedTurns) and forcing a full re-parse on every
+  // elapsed-timer tick (every 1s) and poll (every 5s). For a running session
+  // with a sizeable transcript, that JSON.parse + flatten dominated the main
+  // thread and froze the browser when the user tried to expand a turn.
+  const sessionTranscript = useMemo<Array<{ role: string; content: string }>>(() => {
+    if (!session) return [];
+    try {
+      const parsed = JSON.parse(session.transcript || '');
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch { /* fall through */ }
+    // Synthesize from prompts when no real transcript exists (Codex, etc.)
+    const synth: Array<{ role: string; content: string }> = [];
+    if (session.promptChanges) {
+      for (const pc of session.promptChanges) {
+        if (pc.promptText) synth.push({ role: 'user', content: pc.promptText });
+      }
+    }
+    return synth;
+  }, [session?.transcript, session?.promptChanges]);
+
+  // Stable refs for the rest of the UnifiedSessionView props. Each one is a
+  // pass-through of a session field but `session` itself is replaced on every
+  // poll, so passing `session.xxx` directly forced a new identity through.
+  const sessionPromptChanges = useMemo(() => session?.promptChanges || [], [session?.promptChanges]);
+  const sessionDiffRef = session?.sessionDiff;
+  const sessionCommits = session?.commits;
+  const sessionSnapshots = session?.snapshots;
+
   // Review state
   const [reviewNote, setReviewNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -1288,26 +1319,12 @@ export default function SessionDetail() {
           {activeTab === 'session' && (
             <UnifiedSessionView
               defaultNewestFirst={true}
-              transcript={(() => {
-                try {
-                  const parsed = JSON.parse(session.transcript);
-                  if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-                } catch { /* empty */ }
-                // Synthesize transcript from prompt data when no real transcript exists (Codex, etc.)
-                const synth: Array<{ role: string; content: string }> = [];
-                // System prompt not injected into synthesized transcript
-                if (session.promptChanges) {
-                  for (const pc of session.promptChanges) {
-                    if (pc.promptText) synth.push({ role: 'user', content: pc.promptText });
-                  }
-                }
-                return synth;
-              })()}
-              promptChanges={session.promptChanges || []}
-              sessionDiff={session.sessionDiff}
-              commits={session.commits}
+              transcript={sessionTranscript}
+              promptChanges={sessionPromptChanges}
+              sessionDiff={sessionDiffRef}
+              commits={sessionCommits}
               repoId={session.repoId}
-              snapshots={session.snapshots}
+              snapshots={sessionSnapshots}
             />
           )}
           {activeTab === 'blame' && (
