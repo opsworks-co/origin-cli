@@ -2423,7 +2423,16 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             const existing = state.completedPromptMappings[existingIdx];
             const newHasDiff = !!(prevMapping.diff || prevMapping.uncommittedDiff);
             const existingHasDiff = !!(existing.diff || (existing as any).uncommittedDiff);
-            if (newHasDiff || !existingHasDiff) {
+            // Stop already marked this prompt as chat-only (no commits + no
+            // transcript edits). Don't let the retroactive capture re-attribute
+            // pre-existing dirty working-tree state to a turn the agent didn't
+            // actually touch code on.
+            const existingIsChatOnly = (existing as any).chatOnly === true;
+            if (existingIsChatOnly) {
+              debugLog('user-prompt-submit', 'kept existing chat-only mapping', {
+                promptIndex: prevPromptIdx,
+              });
+            } else if (newHasDiff || !existingHasDiff) {
               state.completedPromptMappings[existingIdx] = prevMapping;
             } else {
               debugLog('user-prompt-submit', 'kept existing previous-prompt mapping (new diff was empty)', {
@@ -2992,40 +3001,69 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       const currentPromptText = prompts[currentPromptIdx] || '';
 
       if (promptMappings.length === 0 && prompts.length > 0) {
-        // No transcript-based mappings — synthesize from git for current prompt
-        // Filter uncommitted diff to exclude pre-existing dirty files
+        // No transcript-based mappings — synthesize from git for current prompt.
+        // Filter uncommitted diff to exclude pre-existing dirty files.
         const filteredUncommitted = filterUncommittedDiff(
           gitCapture.uncommittedDiff || '', state.prePromptDirtyFiles || [],
         );
-        const uncommittedFiles: string[] = [];
-        if (filteredUncommitted) {
-          for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
-            if (m[1]) uncommittedFiles.push(m[1]);
+        // Hard gate: if the agent didn't commit anything AND the transcript
+        // shows no Edit/Write tool calls, the user is just chatting and the
+        // dirty working tree existed before this prompt. Attribute an empty
+        // mapping so the dashboard reflects "no code changes" instead of
+        // sweeping in unrelated uncommitted work. filteredUncommitted is the
+        // backstop — when prePromptDirtyFiles missed something (path-format
+        // drift, race after a stop reset, …), the absence of commits +
+        // transcript edits is a stronger signal.
+        const noCommits = (gitCapture.commitDetails?.length ?? 0) === 0;
+        const noTranscriptEdits = parsed.filesChanged.length === 0;
+        if (noCommits && noTranscriptEdits) {
+          const currentMapping = {
+            promptIndex: currentPromptIdx,
+            promptText: currentPromptText.slice(0, 1000),
+            filesChanged: [] as string[],
+            diff: '',
+            uncommittedDiff: '',
+            // Marker so the next user-prompt-submit's retroactive
+            // capture path doesn't overwrite this with whatever dirty
+            // working-tree state still exists.
+            chatOnly: true as const,
+          };
+          promptMappings = [...previousMappings, currentMapping];
+          debugLog('stop', 'chat-only prompt — synthesized empty mapping', {
+            promptIndex: currentPromptIdx,
+            uncommittedAfterFilter: filteredUncommitted.length,
+          });
+        } else {
+          const uncommittedFiles: string[] = [];
+          if (filteredUncommitted) {
+            for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) uncommittedFiles.push(m[1]);
+            }
           }
-        }
-        // When prePromptSha is a shadow commit, use workingTreeDiff —
-        // committedDiff would be the reverse-direction text against the
-        // shadow's content.
-        const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
-        if (useWorkingTreeDiff) {
-          // Pull file list out of the working-tree diff (which is what
-          // we'll actually store) so filesChanged matches the diff.
-          for (const m of gitCapture.workingTreeDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
-            if (m[1]) uncommittedFiles.push(m[1]);
+          // When prePromptSha is a shadow commit, use workingTreeDiff —
+          // committedDiff would be the reverse-direction text against the
+          // shadow's content.
+          const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+          if (useWorkingTreeDiff) {
+            // Pull file list out of the working-tree diff (which is what
+            // we'll actually store) so filesChanged matches the diff.
+            for (const m of gitCapture.workingTreeDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) uncommittedFiles.push(m[1]);
+            }
           }
+          const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
+          const synthDiff = useWorkingTreeDiff
+            ? gitCapture.workingTreeDiff
+            : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
+          const currentMapping = {
+            promptIndex: currentPromptIdx,
+            promptText: currentPromptText.slice(0, 1000),
+            filesChanged: Array.from(allFiles),
+            diff: synthDiff.slice(0, 200_000),
+            uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+          };
+          promptMappings = [...previousMappings, currentMapping];
         }
-        const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
-        const synthDiff = useWorkingTreeDiff
-          ? gitCapture.workingTreeDiff
-          : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
-        const currentMapping = {
-          promptIndex: currentPromptIdx,
-          promptText: currentPromptText.slice(0, 1000),
-          filesChanged: Array.from(allFiles),
-          diff: synthDiff.slice(0, 200_000),
-          uncommittedDiff: filteredUncommitted.slice(0, 200_000),
-        };
-        promptMappings = [...previousMappings, currentMapping];
       } else if (promptMappings.length > 0 && previousMappings.length > 0) {
         // Transcript gave us mappings for current prompt — merge with saved previous ones.
         // Deduplicate by promptIndex (current prompt's data wins over saved).
@@ -3038,36 +3076,53 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       // parsing missed it. Without this, the latest prompt shows empty on the
       // platform until the NEXT prompt fires (when user-prompt-submit captures it).
       if (prompts.length > 0 && !promptMappings.some(pm => pm.promptIndex === currentPromptIdx)) {
-        const filteredUncommitted = filterUncommittedDiff(
-          gitCapture.uncommittedDiff || '', state.prePromptDirtyFiles || [],
-        );
-        const uncommittedFiles: string[] = [];
-        if (filteredUncommitted) {
-          for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
-            if (m[1]) uncommittedFiles.push(m[1]);
+        const noCommits = (gitCapture.commitDetails?.length ?? 0) === 0;
+        const noTranscriptEdits = parsed.filesChanged.length === 0;
+        if (noCommits && noTranscriptEdits) {
+          // Chat-only prompt — same gate as the synthesis branch above.
+          promptMappings.push({
+            promptIndex: currentPromptIdx,
+            promptText: currentPromptText.slice(0, 1000),
+            filesChanged: [] as string[],
+            diff: '',
+            uncommittedDiff: '',
+            chatOnly: true as const,
+          });
+          debugLog('stop', 'safety-net empty mapping (chat-only prompt)', {
+            promptIndex: currentPromptIdx,
+          });
+        } else {
+          const filteredUncommitted = filterUncommittedDiff(
+            gitCapture.uncommittedDiff || '', state.prePromptDirtyFiles || [],
+          );
+          const uncommittedFiles: string[] = [];
+          if (filteredUncommitted) {
+            for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) uncommittedFiles.push(m[1]);
+            }
           }
-        }
-        // Shadow baseline → prefer workingTreeDiff (see note in synthesis branch above).
-        const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
-        if (useWorkingTreeDiff) {
-          for (const m of gitCapture.workingTreeDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
-            if (m[1]) uncommittedFiles.push(m[1]);
+          // Shadow baseline → prefer workingTreeDiff (see note in synthesis branch above).
+          const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+          if (useWorkingTreeDiff) {
+            for (const m of gitCapture.workingTreeDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) uncommittedFiles.push(m[1]);
+            }
           }
+          const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
+          const safetyDiff = useWorkingTreeDiff
+            ? gitCapture.workingTreeDiff
+            : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
+          promptMappings.push({
+            promptIndex: currentPromptIdx,
+            promptText: currentPromptText.slice(0, 1000),
+            filesChanged: Array.from(allFiles),
+            diff: safetyDiff.slice(0, 200_000),
+            uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+          });
+          debugLog('stop', 'synthesized current prompt mapping (safety net)', {
+            promptIndex: currentPromptIdx, files: allFiles.size, shadowBaseline: gitCapture.baselineIsShadow,
+          });
         }
-        const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
-        const safetyDiff = useWorkingTreeDiff
-          ? gitCapture.workingTreeDiff
-          : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
-        promptMappings.push({
-          promptIndex: currentPromptIdx,
-          promptText: currentPromptText.slice(0, 1000),
-          filesChanged: Array.from(allFiles),
-          diff: safetyDiff.slice(0, 200_000),
-          uncommittedDiff: filteredUncommitted.slice(0, 200_000),
-        });
-        debugLog('stop', 'synthesized current prompt mapping (safety net)', {
-          promptIndex: currentPromptIdx, files: allFiles.size, shadowBaseline: gitCapture.baselineIsShadow,
-        });
       }
 
       debugLog('stop', 'prompt mappings (merged)', {

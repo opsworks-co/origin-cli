@@ -53,6 +53,12 @@ export interface SessionState {
     filesChanged: string[];
     diff: string;
     uncommittedDiff?: string;
+    commitSha?: string | null;
+    treeSha?: string | null;
+    // True when Stop decided this prompt didn't touch code (no commits, no
+    // transcript edits). Prevents the next user-prompt-submit retroactive
+    // capture from sweeping in pre-existing dirty changes.
+    chatOnly?: boolean;
   }>;
   branch: string | null;      // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support

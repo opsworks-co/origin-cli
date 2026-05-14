@@ -390,6 +390,12 @@ export interface PromptFileMapping {
   filesChanged: string[];   // Files modified after this prompt
   diff: string;             // Unified diff of committed edits from this prompt
   uncommittedDiff?: string; // Unified diff of uncommitted changes from this prompt
+  commitSha?: string | null;
+  treeSha?: string | null;
+  // True when Stop decided this prompt was chat-only (no commits + no
+  // transcript-level edits). Prevents downstream retroactive capture from
+  // overwriting an intentionally-empty mapping with pre-existing dirty work.
+  chatOnly?: boolean;
 }
 
 /**
