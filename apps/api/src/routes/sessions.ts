@@ -105,6 +105,20 @@ function deriveSessionTitle(s: any): string | null {
   return null;
 }
 
+// Cap diff size returned to clients. A single Gemini prompt that touched
+// many files can produce a 1-5MB pc.diff (full unified diff incl. context
+// for every file). Even though sessionDiff itself was capped at 500KB on
+// the storage path, per-prompt diffs weren't — and rendering a multi-MB
+// diff in DiffHunkRenderer creates tens of thousands of DOM nodes that
+// freeze Chrome for seconds. 200KB per diff is plenty for human review;
+// the rare giant diff gets a "(truncated)" tail so users know there's more.
+const DIFF_RESPONSE_CAP = 200_000;
+function capDiffForResponse(raw: string | null | undefined): string {
+  if (!raw) return raw || '';
+  if (raw.length <= DIFF_RESPONSE_CAP) return raw;
+  return raw.slice(0, DIFF_RESPONSE_CAP) + '\n… (diff truncated — full diff omitted to keep the dashboard responsive)';
+}
+
 // Cap transcript size returned to clients. Multi-MB transcripts (Gemini
 // with verbose tool capture) block Chrome's main thread for seconds on the
 // response's JSON.parse and freeze the session-detail page on every poll.
@@ -251,8 +265,8 @@ function mapSession(s: any, pullRequests?: any[]) {
           headBefore: s.sessionDiff.headBefore,
           headAfter: s.sessionDiff.headAfter,
           commitShas: safeParseArray<string>(s.sessionDiff.commitShas, `session.${s.id}.sessionDiff.commitShas`),
-          diff: s.sessionDiff.diff,
-          diffTruncated: s.sessionDiff.diffTruncated,
+          diff: capDiffForResponse(s.sessionDiff.diff),
+          diffTruncated: s.sessionDiff.diffTruncated || (s.sessionDiff.diff?.length || 0) > DIFF_RESPONSE_CAP,
           linesAdded: s.sessionDiff.linesAdded,
           linesRemoved: s.sessionDiff.linesRemoved,
         }
@@ -266,8 +280,8 @@ function mapSession(s: any, pullRequests?: any[]) {
               promptIndex: pc.promptIndex,
               promptText: pc.promptText,
               filesChanged: safeParseArray<string>(pc.filesChanged, `session.${s.id}.promptChanges.filesChanged`),
-              diff: pc.diff || '',
-              uncommittedDiff: pc.uncommittedDiff || '',
+              diff: capDiffForResponse(pc.diff || ''),
+              uncommittedDiff: capDiffForResponse(pc.uncommittedDiff || ''),
               linesAdded: pc.linesAdded || 0,
               linesRemoved: pc.linesRemoved || 0,
               aiPercentage: pc.aiPercentage ?? 100,
