@@ -145,20 +145,27 @@ function installCursorHooks(gitRoot: string): void {
 
   if (!config.hooks) config.hooks = {};
 
-  // Cursor's hook event schema (v1.7+) uses `agentSessionStart` / `agentSessionEnd`
-  // — earlier `sessionStart` / `sessionEnd` names are NOT fired, which is why
-  // sessions silently never reached the platform. Write under the correct names.
+  // Cursor 2.x reverted to the standard `sessionStart` / `sessionEnd` event
+  // names. Cursor 1.7 briefly used `agentSessionStart` / `agentSessionEnd` but
+  // 2.6+ rejects those as "Unknown hook type" and FAILS THE ENTIRE CONFIG
+  // — no Origin hook fires, no sessions reach the dashboard. Write under the
+  // current names. Valid types per Cursor 2.6's parser: beforeShellExecution,
+  // beforeMCPExecution, afterShellExecution, afterMCPExecution, beforeReadFile,
+  // afterFileEdit, beforeTabFileRead, afterTabFileEdit, stop, beforeSubmitPrompt,
+  // afterAgentResponse, afterAgentThought, sessionStart, sessionEnd, preCompact,
+  // subagentStart, subagentStop, preToolUse, postToolUse, postToolUseFailure.
   const hooks: Record<string, any[]> = {
-    agentSessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
+    sessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
     stop: [{ command: originCmd('origin hooks cursor stop') }],
     beforeSubmitPrompt: [{ command: originCmd('origin hooks cursor user-prompt-submit') }],
-    agentSessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
+    sessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
   };
 
-  // Strip our entries from the deprecated event names too, so an upgrade from
-  // an older CLI doesn't leave stale `sessionStart`/`sessionEnd` keys pointing
-  // at hooks Cursor never fires.
-  for (const legacy of ['sessionStart', 'sessionEnd']) {
+  // Strip our entries from the now-invalid event names so an upgrade from a
+  // CLI that wrote `agentSessionStart` / `agentSessionEnd` doesn't leave the
+  // whole config un-parseable. Cursor 2.6 rejects the entire hooks.json when
+  // ANY hook type is unknown, so this cleanup is required, not optional.
+  for (const legacy of ['agentSessionStart', 'agentSessionEnd']) {
     if (Array.isArray(config.hooks[legacy])) {
       config.hooks[legacy] = config.hooks[legacy].filter(
         (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks cursor'))
