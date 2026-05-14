@@ -861,6 +861,9 @@ router.patch('/bulk/archive', requireRole('ADMIN'), async (req: AuthRequest, res
 
 // GET /:id — single session
 router.get('/:id', async (req: AuthRequest, res: Response) => {
+  const __t0 = Date.now();
+  const __tag = (req.params.id as string).slice(0, 8);
+  console.log(`[session/get] begin ${__tag}`);
   try {
     const id = req.params.id as string;
 
@@ -900,8 +903,14 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     });
 
     if (!session) {
+      console.log(`[session/get] ${__tag} not-found ${Date.now()-__t0}ms`);
       return res.status(404).json({ error: 'Session not found' });
     }
+    const __tDb = Date.now() - __t0;
+    const __transcriptLen = (session.transcript || '').length;
+    const __sessionDiffLen = (session.sessionDiff?.diff || '').length;
+    const __pcCount = session.promptChanges?.length || 0;
+    console.log(`[session/get] ${__tag} db ${__tDb}ms transcript=${__transcriptLen} sessionDiff=${__sessionDiffLen} pcCount=${__pcCount}`);
 
     // Find linked pull requests
     let pullRequests: any[] = [];
@@ -956,6 +965,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     if (modelsUsed.length === 0 && session.model) modelsUsed.push(session.model);
     mapped.modelsUsed = modelsUsed;
 
+    const __tTotal = Date.now() - __t0;
+    const __responseTranscriptLen = (mapped.transcript || '').length;
+    console.log(`[session/get] ${__tag} done ${__tTotal}ms responseTranscript=${__responseTranscriptLen}`);
     res.json(mapped);
   } catch (err) {
     console.error('Get session error:', err);
