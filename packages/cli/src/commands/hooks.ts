@@ -2874,17 +2874,27 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     }
 
     // Gemini stop hook ships the assistant's reply on stdin as
-    // `prompt_response` (Gemini's transcript file is empty / unflushed at
-    // stop time). Capture it onto state so the synthesized transcript
-    // below includes the assistant turn, not just the user prompts.
-    if (typeof input.prompt_response === 'string' && input.prompt_response.trim()) {
+    // `prompt_response`. Claude Code's stop hook uses `last_assistant_message`
+    // for the same purpose. Both agents' transcript files are sometimes empty
+    // / unflushed at stop time (especially Claude Code running inside a
+    // .claude/worktrees/* worktree — the JSONL hasn't been finalized when
+    // the stop hook fires). Capture either onto state.promptResponses so the
+    // synthesized transcript below includes the assistant turn instead of
+    // only the user prompt.
+    const stopHookReply =
+      (typeof input.prompt_response === 'string' && input.prompt_response.trim() && input.prompt_response) ||
+      (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim() && input.last_assistant_message) ||
+      '';
+    if (stopHookReply) {
       if (!state.promptResponses) state.promptResponses = [];
       const currentIdx = Math.max(state.prompts.length - 1, 0);
       // Replace if we already have one for this index (in case Stop fires
       // twice for the same turn — rare but observed).
-      state.promptResponses[currentIdx] = input.prompt_response;
-      debugLog('stop', 'captured prompt_response from stdin', {
-        promptIndex: currentIdx, length: input.prompt_response.length,
+      state.promptResponses[currentIdx] = stopHookReply;
+      debugLog('stop', 'captured stop-hook reply from stdin', {
+        promptIndex: currentIdx,
+        length: stopHookReply.length,
+        source: input.prompt_response ? 'prompt_response' : 'last_assistant_message',
       });
     }
 
