@@ -111,7 +111,33 @@ export function getGitDir(cwd?: string): string | null {
 
 export function getGitRoot(cwd?: string): string | null {
   try {
-    return execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const top = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    if (!top) return null;
+    // Linked git worktrees report their own --show-toplevel — e.g.
+    // ~/.claude/worktrees/claude/quirky-albattani-c9f7c3. The basename then
+    // becomes the "repo name" on the dashboard, which is wrong: the
+    // worktree is just a working copy of the SAME repo. Detect via
+    // --git-common-dir (points at the MAIN repo's .git for linked
+    // worktrees, equals "<top>/.git" otherwise) and walk back to the
+    // actual repo so Origin attributes sessions to the canonical project.
+    try {
+      const commonDirRaw = execSync('git rev-parse --git-common-dir', {
+        encoding: 'utf-8', cwd: top, stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (commonDirRaw) {
+        const absCommonDir = path.isAbsolute(commonDirRaw)
+          ? commonDirRaw
+          : path.resolve(top, commonDirRaw);
+        const mainRepo = path.dirname(absCommonDir);
+        // Sanity: only collapse when the main repo path is a different,
+        // non-empty directory that actually exists. Anything weird → keep
+        // top so we don't accidentally hide the worktree session.
+        if (mainRepo && mainRepo !== top && fs.existsSync(mainRepo)) {
+          return mainRepo;
+        }
+      }
+    } catch { /* fall through */ }
+    return top;
   } catch {
     return null;
   }
