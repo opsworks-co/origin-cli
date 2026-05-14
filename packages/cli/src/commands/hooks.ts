@@ -420,6 +420,14 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
   // ids (Claude Code, Windsurf). If exact match fails for a stable agent, the
   // conversation is genuinely new — DO NOT fall through to "most recent active",
   // which silently merges unrelated Claude Code windows into one platform session.
+  //
+  // Codex 0.130 is special: its stdin `session_id` is the PER-TURN thread id,
+  // which differs between SessionStart and Stop for the same codex launch. So
+  // when codex's stop hook fires with an ID that doesn't match what
+  // SessionStart saved, that's NOT a new conversation — it's the same codex
+  // window's next turn. Fall through to agent-filtered match instead of
+  // dropping the hook (which used to abort handleStop with "no exact match",
+  // leaving the session's tool calls / diffs unattached on the dashboard).
   if (claudeSessionId) {
     const found = findSessionByClaudeId(claudeSessionId, hookCwd)
       || (repoPath !== hookCwd ? findSessionByClaudeId(claudeSessionId, repoPath) : null);
@@ -427,8 +435,15 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
       debugLog('findStateForHook', 'exact match', { claudeSessionId, sessionId: found.sessionId, tag: found.sessionTag });
       return { state: found, saveCwd: found.repoPath || repoPath };
     }
-    debugLog('findStateForHook', 'no exact match for stable claudeSessionId — new session needed', { claudeSessionId, agentSlug });
-    return null;
+    if (agentSlug === 'codex') {
+      debugLog('findStateForHook', 'codex per-turn id mismatch — falling through to agent-filtered match', {
+        claudeSessionId,
+      });
+      // intentionally NOT returning here; let the agent-filtered branch below run
+    } else {
+      debugLog('findStateForHook', 'no exact match for stable claudeSessionId — new session needed', { claudeSessionId, agentSlug });
+      return null;
+    }
   }
 
   // 2. Fall back to active sessions for this repo
@@ -762,6 +777,7 @@ interface CodexSessionData {
   prompt: string;
   prompts?: string[];   // all user prompts from the rollout, in order
   transcript?: string;  // full JSONL conversation for display
+  cwd?: string;         // codex thread's actual cwd — drives repoPath correction
 }
 
 /**
@@ -799,7 +815,10 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
     const repoBasename = path.basename(repoPath);
     if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
     const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const threadQuery = `SELECT id, model, tokens_used, rollout_path, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
+    // Also pull `cwd` so callers can correct a mis-attributed repoPath when
+    // codex was launched from a different directory than where it ended up
+    // working. Columns: id, model, tokens_used, rollout_path, cwd, first_user_message.
+    const threadQuery = `SELECT id, model, tokens_used, rollout_path, cwd, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
     const raw = execFileSync('sqlite3', [dbPath, threadQuery], {
       encoding: 'utf-8' as const,
       timeout: 3000,
@@ -808,13 +827,14 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
 
     if (!raw) return null;
     const parts = raw.split('|');
-    if (parts.length < 5) return null;
+    if (parts.length < 6) return null;
 
     const threadId = parts[0];
     const model = parts[1] || 'codex';
     const sqliteTokens = parseInt(parts[2], 10) || 0;
     const rolloutPath = parts[3] || '';
-    const rawPrompt = parts.slice(4).join('|') || '';
+    const threadCwd = parts[4] || '';
+    const rawPrompt = parts.slice(5).join('|') || '';
     // Codex's `first_user_message` column captures whatever the first
     // user-role event in the rollout contained — which is Codex's own
     // AGENTS.md replay or its environment-context wrapper, not anything
@@ -848,6 +868,7 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
         prompt,
         prompts: rolloutResult.userPrompts,
         transcript: rolloutResult.transcript,
+        cwd: threadCwd || undefined,
       };
     }
 
@@ -860,6 +881,7 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
       outputTokens: Math.round(sqliteTokens * 0.3),
       toolCalls: 0,
       prompt,
+      cwd: threadCwd || undefined,
     };
   } catch (err) {
     debugLog('codex', 'discoverCodexSessionData error', { error: String(err) });
@@ -2826,6 +2848,28 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     if (!state) {
       debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: false });
       return;
+    }
+  }
+
+  // For Codex specifically: the session may have been registered with a
+  // misattributed repoPath when the user launched `codex` from `~` (or any
+  // non-git directory). discoverGitRoot then walks into `.openclaw/workspace`
+  // or whatever sibling git repo it finds first — so the session shows up on
+  // the dashboard against the wrong repo, and the diff capture below runs
+  // against a directory codex never touched (→ 0 files / 0 lines even when
+  // codex committed). Codex itself records the thread's actual cwd in its
+  // SQLite state DB; query for it and override state.repoPath if it differs.
+  if (agentSlug === 'codex') {
+    try {
+      const codexData = discoverCodexSessionData(state.repoPath, { verbose: !!state.verboseCapture });
+      const actualCwd = codexData?.cwd;
+      if (actualCwd && actualCwd !== state.repoPath && fs.existsSync(actualCwd)) {
+        debugLog('stop', 'codex repoPath correction', { from: state.repoPath, to: actualCwd });
+        state.repoPath = actualCwd;
+        saveSessionState(state, found!.saveCwd, state.sessionTag);
+      }
+    } catch (err: any) {
+      debugLog('stop', 'codex cwd lookup failed (non-fatal)', { message: err?.message });
     }
   }
 
