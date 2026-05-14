@@ -271,7 +271,13 @@ function parseCodexRolloutLive(rolloutFile: string): {
             const isUser = role === 'user' || role === 'human';
             const isEcho = isUser && (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text));
             if (!isEcho) {
-              const cleaned = isUser ? text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim() : text;
+              const cleaned = isUser
+                ? text
+                    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+                    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+                    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+                    .trim()
+                : text;
               if (cleaned) turns.push({ role, content: cleaned });
             }
           }

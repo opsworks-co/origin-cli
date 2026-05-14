@@ -808,14 +808,18 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
     const rawPrompt = parts.slice(4).join('|') || '';
     // Codex's `first_user_message` column captures whatever the first
     // user-role event in the rollout contained — which is Codex's own
-    // AGENTS.md replay, not anything the user typed. Filter the echo
-    // out so it never reaches state.prompts / the dashboard.
+    // AGENTS.md replay or its environment-context wrapper, not anything
+    // the user typed. Filter the echo out so it never reaches
+    // state.prompts / the dashboard.
     const looksLikeOriginEcho =
       rawPrompt.includes('<!-- origin-managed -->') ||
       /^#\s+AGENTS\.md instructions for /m.test(rawPrompt);
-    const prompt = looksLikeOriginEcho
-      ? ''
-      : rawPrompt.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim();
+    const stripped = rawPrompt
+      .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+      .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+      .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+      .trim();
+    const prompt = looksLikeOriginEcho ? '' : stripped;
 
     // ── Step 2: Try to parse the rollout JSONL for real token counts ──
     const rolloutResult = parseCodexRollout(codexDir, rolloutPath, threadId, { verbose: !!opts.verbose });
@@ -1173,11 +1177,12 @@ function parseCodexRollout(
           const role = payload.role || 'assistant';
           const text = extractMessageText(payload.content);
           if (text.trim()) {
-            // Drop the AGENTS.md / origin-managed echo on user-role
-            // turns. Codex replays AGENTS.md as the first user
-            // message in the rollout; the dashboard renders the
-            // whole transcript so this would otherwise show up as
-            // turn 1 even though state.prompts has filtered it.
+            // Drop the AGENTS.md / origin-managed echo and Codex's
+            // own <environment_context> session-init wrapper on
+            // user-role turns. Codex replays both as the first user
+            // events in the rollout; the dashboard renders the
+            // whole transcript so without this they show up as
+            // bogus turn 1 / 2 even though state.prompts filters them.
             const isUser = role === 'user' || role === 'human';
             const isEcho = isUser && (
               text.includes('<!-- origin-managed -->') ||
@@ -1185,7 +1190,11 @@ function parseCodexRollout(
             );
             if (!isEcho) {
               const cleaned = isUser
-                ? text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim()
+                ? text
+                    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+                    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+                    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+                    .trim()
                 : text;
               if (cleaned) turns.push({ role, content: cleaned });
             }
@@ -1241,7 +1250,11 @@ function parseCodexRollout(
               );
               if (!isEcho) {
                 const cleaned = isUser
-                  ? text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim()
+                  ? text
+                      .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+                      .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+                      .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+                      .trim()
                   : text;
                 if (cleaned) turns.push({ role, content: cleaned });
               }
@@ -2337,8 +2350,12 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     .replace(/<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g, '')
     // Codex wraps AGENTS.md context in <INSTRUCTIONS>...</INSTRUCTIONS> on
     // its first user turn. Strip the envelope so any actual user text that
-    // follows still makes it through.
+    // follows still makes it through. Same for <environment_context>
+    // (Codex's session-init blob with cwd/shell/date) and
+    // <user_instructions> (Codex's wrapper for AGENTS.md and friends).
     .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
     .trim();
   const isSystemMsg = !prompt || /^Stop hook feedback:|^Stop:Callback hook blocking error|^PostToolUse:.*hook|^PreToolUse:.*hook/i.test(prompt);
   if (prompt && !isSystemMsg) {
