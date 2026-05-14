@@ -7,6 +7,7 @@ import UnifiedSessionView from '../components/UnifiedSessionView';
 import AiBlameView from '../components/AiBlameView';
 import AskAuthorPanel from '../components/AskAuthorPanel';
 import TurnTimeline from '../components/TurnTimeline';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import { formatCost, formatDuration, getStatusBadgeClass, timeAgo, displayAgentName } from '../utils';
 import { ChevronDown, Shield, Target, Sparkles, DollarSign, AlertTriangle, Lightbulb, Check, X as XIcon, Flag } from 'lucide-react';
 import { safeHref } from '../utils/safe-url';
@@ -350,10 +351,18 @@ export default function SessionDetail() {
 
   useEffect(() => {
     if (!id) return;
+    const t0 = performance.now();
+    console.log('[SessionDetail] fetch begin', id);
     api
       .getSession(id)
-      .then(setSession)
-      .catch((err) => setError(err.message))
+      .then((s) => {
+        console.log('[SessionDetail] fetch ok', id, 'ms=' + (performance.now() - t0).toFixed(0), 'transcriptLen=' + (s?.transcript?.length || 0), 'pc=' + (s?.promptChanges?.length || 0));
+        setSession(s);
+      })
+      .catch((err) => {
+        console.error('[SessionDetail] fetch error', id, err);
+        setError(err.message);
+      })
       .finally(() => setLoading(false));
 
     // Load security findings
@@ -1329,15 +1338,17 @@ export default function SessionDetail() {
         <div className="flex-1 min-h-0 flex">
           <div className={`flex-1 overflow-y-auto min-h-0 ${showAskPanel ? 'min-w-0' : ''}`}>
           {activeTab === 'session' && (
-            <UnifiedSessionView
-              defaultNewestFirst={true}
-              transcript={sessionTranscript}
-              promptChanges={sessionPromptChanges}
-              sessionDiff={sessionDiffRef}
-              commits={sessionCommits}
-              repoId={session.repoId}
-              snapshots={sessionSnapshots}
-            />
+            <ErrorBoundary label="Session view">
+              <UnifiedSessionView
+                defaultNewestFirst={true}
+                transcript={sessionTranscript}
+                promptChanges={sessionPromptChanges}
+                sessionDiff={sessionDiffRef}
+                commits={sessionCommits}
+                repoId={session.repoId}
+                snapshots={sessionSnapshots}
+              />
+            </ErrorBoundary>
           )}
           {activeTab === 'blame' && (
             <AiBlameView
