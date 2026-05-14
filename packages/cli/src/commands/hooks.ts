@@ -751,6 +751,7 @@ interface CodexSessionData {
   outputTokens: number;
   toolCalls: number;
   prompt: string;
+  prompts?: string[];   // all user prompts from the rollout, in order
   transcript?: string;  // full JSONL conversation for display
 }
 
@@ -832,6 +833,7 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
         outputTokens: rolloutResult.outputTokens,
         toolCalls: rolloutResult.toolCalls,
         prompt,
+        prompts: rolloutResult.userPrompts,
         transcript: rolloutResult.transcript,
       };
     }
@@ -1047,7 +1049,7 @@ function parseCodexRollout(
   rolloutPath: string,
   threadId: string,
   opts: { verbose?: boolean } = {},
-): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; toolCalls: number; transcript?: string } | null {
+): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[] } | null {
   try {
     // Try to resolve the rollout file
     let rolloutFile = '';
@@ -1272,6 +1274,20 @@ function parseCodexRollout(
     // we parsed and let the next heartbeat / stop event refresh tokens.
     if (maxTotalTokens === 0 && turns.length === 0) return null;
 
+    // Extract every cleaned user prompt in the order they appear. Used by
+    // the Stop hook / heartbeat to grow state.prompts for Codex sessions,
+    // since Codex's UserPromptSubmit hook is unreliable (Codex auto-trust
+    // edge cases) and the singleton SQLite `first_user_message` only
+    // surfaces prompt 0 — so without this every prompt after the first was
+    // missing a per-prompt diff mapping on the dashboard.
+    const userPrompts: string[] = [];
+    for (const t of turns) {
+      if (t.role === 'user' || t.role === 'human') {
+        const cleaned = t.content.trim();
+        if (cleaned) userPrompts.push(cleaned);
+      }
+    }
+
     return {
       tokensUsed: maxTotalTokens,
       inputTokens: maxInputTokens,
@@ -1280,6 +1296,7 @@ function parseCodexRollout(
       turnCount,
       toolCalls,
       transcript: turns.length > 0 ? JSON.stringify(turns) : undefined,
+      userPrompts: userPrompts.length > 0 ? userPrompts : undefined,
     };
   } catch (err) {
     debugLog('codex', 'parseCodexRollout error', { error: String(err) });
@@ -2463,11 +2480,11 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         }
 
         // For Codex: try reading the rollout JSONL for full transcript + token data
-        if (!displayTranscript && (agentSlug === 'codex' || (state as any).agentSlug === 'codex')) {
+        if ((agentSlug === 'codex' || (state as any).agentSlug === 'codex')) {
           try {
             const codexData = discoverCodexSessionData(state.repoPath || hookCwd, { verbose: !!state.verboseCapture });
             if (codexData) {
-              if (codexData.transcript) displayTranscript = codexData.transcript;
+              if (!displayTranscript && codexData.transcript) displayTranscript = codexData.transcript;
               if (!parsed && codexData.tokensUsed > 0) {
                 parsed = {
                   prompts: [], filesChanged: [], summary: '', transcript: '',
@@ -2475,6 +2492,18 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                   inputTokens: codexData.inputTokens, outputTokens: codexData.outputTokens,
                   cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0,
                 };
+              }
+              // Sync state.prompts from the rollout so the dashboard sees
+              // every prompt — not just the ones our hook captured. Codex's
+              // UserPromptSubmit hook is unreliable (auto-trust gating), so
+              // mirroring the rollout is the only way to guarantee the
+              // prompt list grows turn-by-turn.
+              const rolloutPrompts = codexData.prompts || [];
+              if (rolloutPrompts.length > state.prompts.length) {
+                state.prompts = rolloutPrompts;
+                debugLog('user-prompt-submit', 'synced state.prompts from Codex rollout', {
+                  rolloutCount: rolloutPrompts.length,
+                });
               }
             }
           } catch { /* best effort */ }
@@ -2793,7 +2822,21 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       if (codexData.toolCalls > 0 && parsed.toolCalls === 0) {
         parsed.toolCalls = codexData.toolCalls;
       }
-      if (codexData.prompt && state.prompts.length === 0) {
+      // Sync state.prompts with every user prompt the rollout knows about.
+      // Codex's UserPromptSubmit hook is unreliable (auto-trust gating,
+      // config.toml feature-flag drift), so we can't count on state.prompts
+      // growing turn-by-turn from that path. The rollout JSONL is the
+      // authoritative source — pull every cleaned user message in order and
+      // adopt it as state.prompts when the rollout has at least as many
+      // entries as we currently track. Falling back to the singleton SQLite
+      // first_user_message only when no rollout prompts are available.
+      const rolloutPrompts = codexData.prompts || [];
+      if (rolloutPrompts.length > state.prompts.length) {
+        state.prompts = rolloutPrompts;
+        debugLog('stop', 'synced state.prompts from rollout', {
+          rolloutCount: rolloutPrompts.length,
+        });
+      } else if (codexData.prompt && state.prompts.length === 0) {
         state.prompts.push(codexData.prompt);
       }
       // Prefer the rollout-parsed transcript over the synthesized-from-prompts
