@@ -818,12 +818,26 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
     // Also pull `cwd` so callers can correct a mis-attributed repoPath when
     // codex was launched from a different directory than where it ended up
     // working. Columns: id, model, tokens_used, rollout_path, cwd, first_user_message.
-    const threadQuery = `SELECT id, model, tokens_used, rollout_path, cwd, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
-    const raw = execFileSync('sqlite3', [dbPath, threadQuery], {
-      encoding: 'utf-8' as const,
-      timeout: 3000,
+    const sqliteOpts = {
+      encoding: 'utf-8' as const, timeout: 3000,
       stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    };
+    const threadQuery = `SELECT id, model, tokens_used, rollout_path, cwd, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
+    let raw = execFileSync('sqlite3', [dbPath, threadQuery], sqliteOpts).trim();
+
+    // Fallback: when the caller's repoPath is wrong (e.g. session-start
+    // resolved to `.openclaw/workspace` because the user launched codex from
+    // `~`), the basename LIKE filter matches nothing. In that case use the
+    // most recently updated thread overall — codex usually has one active
+    // thread at a time, and the freshest row IS the one this session is for.
+    // The caller (handleStop) compares `cwd` against state.repoPath and only
+    // overrides when they differ, so this won't accidentally pick a stale
+    // thread for an unrelated repo.
+    if (!raw) {
+      const fallbackQuery = `SELECT id, model, tokens_used, rollout_path, cwd, first_user_message FROM threads ORDER BY updated_at DESC LIMIT 1;`;
+      raw = execFileSync('sqlite3', [dbPath, fallbackQuery], sqliteOpts).trim();
+      if (raw) debugLog('codex', 'sqlite basename miss, using latest thread', { repoBasename });
+    }
 
     if (!raw) return null;
     const parts = raw.split('|');
