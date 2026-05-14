@@ -136,7 +136,10 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
       if (Number.isFinite(t) && t < sinceMs) continue;
     }
 
-    const type = entry.type || entry.message?.role;
+    // Cursor's JSONL puts the role at the top level (`{"role":"user", ...}`);
+    // Claude Code uses `{"type":"user", "message":{...}}` and an older shape
+    // nests it as `message.role`. Check all three so one parser handles all.
+    const type = entry.type || (entry as any).role || entry.message?.role;
 
     if (type === 'user') {
       const prompt = extractUserPrompt(entry);
@@ -446,7 +449,10 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
       continue;
     }
 
-    const type = entry.type || entry.message?.role;
+    // Cursor's JSONL puts the role at the top level (`{"role":"user", ...}`);
+    // Claude Code uses `{"type":"user", "message":{...}}` and an older shape
+    // nests it as `message.role`. Check all three so one parser handles all.
+    const type = entry.type || (entry as any).role || entry.message?.role;
 
     if (type === 'user') {
       // In Claude Code JSONL, "user" entries can be:
@@ -819,7 +825,10 @@ function formatJSONLMessages(raw: string, verbose: boolean): DisplayMessage[] {
       continue;
     }
 
-    const type = entry.type || entry.message?.role;
+    // Cursor's JSONL puts the role at the top level (`{"role":"user", ...}`);
+    // Claude Code uses `{"type":"user", "message":{...}}` and an older shape
+    // nests it as `message.role`. Check all three so one parser handles all.
+    const type = entry.type || (entry as any).role || entry.message?.role;
 
     if (type === 'user') {
       const prompt = extractUserPrompt(entry);

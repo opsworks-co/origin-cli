@@ -608,21 +608,30 @@ function discoverCursorTranscript(conversationId?: string, hookCwd?: string, opt
         const jsonlPath = path.join(agentDir, convDir, `${convDir}.jsonl`);
         if (!fs.existsSync(jsonlPath)) continue;
 
-        // Direct match on conversation ID
+        // Direct match on conversation/session ID
         if (conversationId && convDir === conversationId) {
           transcriptFile = jsonlPath;
           break;
         }
 
-        // Otherwise track the newest
-        const stat = fs.statSync(jsonlPath);
-        if (stat.mtimeMs > bestMtime) {
-          bestMtime = stat.mtimeMs;
-          transcriptFile = jsonlPath;
+        // Only track newest when no ID was provided — otherwise a missed ID
+        // match would silently pick a different chat's file (e.g. an earlier
+        // Cursor agent run from another workspace) and the dashboard would
+        // show that conversation's prompts/tools under this session.
+        if (!conversationId) {
+          const stat = fs.statSync(jsonlPath);
+          if (stat.mtimeMs > bestMtime) {
+            bestMtime = stat.mtimeMs;
+            transcriptFile = jsonlPath;
+          }
         }
       }
       if (transcriptFile && conversationId) break;
     }
+
+    // ID was provided but no matching directory found — refuse to fall back
+    // to anything else. Better to return nothing than the wrong chat.
+    if (conversationId && !transcriptFile) return null;
 
     // Only use non-ID-matched files if modified within last 30 minutes
     if (!conversationId && transcriptFile && (Date.now() - bestMtime) > 30 * 60 * 1000) {
@@ -2852,7 +2861,13 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
     // For Cursor: discover agent transcript JSONL for real conversation data + better token estimates
     if (agentSlug === 'cursor' && parsed.tokensUsed === 0) {
-      const cursorData = discoverCursorTranscript(input.conversation_id, state.repoPath, { verbose: !!state.verboseCapture });
+      // Prefer session_id (Cursor 2.x stop hook stdin) over conversation_id
+      // (older shape). The Cursor agent-transcripts directory name IS the
+      // session_id, so this is what lets the discovery find the right chat
+      // instead of falling back to "the most recently modified jsonl".
+      const cursorId = (typeof input.session_id === 'string' ? input.session_id : undefined)
+        || (typeof input.conversation_id === 'string' ? input.conversation_id : undefined);
+      const cursorData = discoverCursorTranscript(cursorId, state.repoPath, { verbose: !!state.verboseCapture });
       if (cursorData) {
         debugLog('stop', 'supplementing with Cursor transcript data', {
           tokens: cursorData.tokensUsed,
