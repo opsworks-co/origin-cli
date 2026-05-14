@@ -910,7 +910,9 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     const __transcriptLen = (session.transcript || '').length;
     const __sessionDiffLen = (session.sessionDiff?.diff || '').length;
     const __pcCount = session.promptChanges?.length || 0;
-    console.log(`[session/get] ${__tag} db ${__tDb}ms transcript=${__transcriptLen} sessionDiff=${__sessionDiffLen} pcCount=${__pcCount}`);
+    const __pcDiffSizes = (session.promptChanges || []).map((pc: any) => (pc.diff || '').length + '+' + (pc.uncommittedDiff || '').length).join(',');
+    const __sysPromptLen = (session.agentSystemPrompt || '').length;
+    console.log(`[session/get] ${__tag} db ${__tDb}ms transcript=${__transcriptLen} sessionDiff=${__sessionDiffLen} sysPrompt=${__sysPromptLen} pcCount=${__pcCount} pcDiffs=[${__pcDiffSizes}]`);
 
     // Find linked pull requests
     let pullRequests: any[] = [];
