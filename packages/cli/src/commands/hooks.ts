@@ -2752,8 +2752,72 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     } catch { /* no archive */ }
   }
   if (!state) {
-    debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
-    return;
+    // Cursor 2.x edge case: if the user was running Cursor while their
+    // hooks.json had the now-invalid `agentSessionStart` name, no session-
+    // start state was created. After upgrading + restarting Cursor, the
+    // first agent reply fires `stop` with valid hook config — but our
+    // handler used to abort here because no in-progress state was on disk,
+    // and the session never reached the dashboard. Auto-create from the
+    // stop-hook payload as a last resort. Mirror the user-prompt-submit
+    // auto-create path; gated on cursor + valid workspace + session_id so
+    // we don't accidentally fabricate sessions for other agents.
+    const canAutoCreate = agentSlug === 'cursor'
+      && connected
+      && typeof input.session_id === 'string'
+      && Array.isArray(input.workspace_roots)
+      && input.workspace_roots.length > 0;
+    if (canAutoCreate) {
+      try {
+        const autoConfig = loadConfig();
+        const autoAgentConfig = loadAgentConfig();
+        if (autoConfig?.apiKey && autoAgentConfig?.machineId) {
+          const wsRoot = input.workspace_roots[0];
+          const repoPath = discoverGitRoot(wsRoot) || wsRoot;
+          const branch = getBranch(repoPath);
+          const startRes = await api.startSession({
+            machineId: autoAgentConfig.machineId,
+            prompt: '',
+            model: (typeof input.model === 'string' && input.model !== 'cursor' && input.model !== 'default' && input.model !== 'unknown') ? input.model : 'cursor',
+            repoPath,
+            agentSlug: 'cursor',
+            branch: branch || undefined,
+            agentSessionId: input.session_id,
+          } as any);
+          const newSessionId = (startRes as any)?.sessionId;
+          if (typeof newSessionId === 'string' && newSessionId) {
+            const autoTag = (input.session_id as string).slice(0, 12);
+            const synthesized: SessionState = {
+              sessionId: newSessionId,
+              claudeSessionId: input.session_id,
+              transcriptPath: input.transcript_path || '',
+              model: typeof input.model === 'string' ? input.model : 'cursor',
+              startedAt: new Date().toISOString(),
+              prompts: [],
+              repoPath,
+              headShaAtStart: getHeadSha(repoPath),
+              headShaAtLastStop: null,
+              prePromptSha: getHeadSha(repoPath),
+              prePromptDirtyFiles: getDirtyFiles(repoPath),
+              branch: branch || null,
+              sessionTag: autoTag,
+              agentSlug: 'cursor',
+            };
+            saveSessionState(synthesized, repoPath, autoTag);
+            state = synthesized;
+            found = { state: synthesized, saveCwd: repoPath };
+            debugLog('stop', 'auto-created cursor session from stop-hook payload', {
+              sessionId: newSessionId, repoPath, agentSessionId: input.session_id,
+            });
+          }
+        }
+      } catch (err: any) {
+        debugLog('stop', 'cursor auto-create failed', { message: err?.message });
+      }
+    }
+    if (!state) {
+      debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: false });
+      return;
+    }
   }
 
   // Update model from stdin if it's a real model name (Cursor sends actual model in stop, not session-start)
