@@ -234,8 +234,21 @@ router.get('/callback', async (req: Request, res: Response) => {
     try {
       tokenResult = await exchangeGitLabOAuthCode(code as string, gitlabBaseUrl, oauthConfig);
     } catch (err: any) {
-      console.error('[gitlab-oauth] Token exchange failed:', err.message);
-      return res.redirect(gitlabErrorRedirect(statePayload.from, `GitLab token exchange failed: ${err?.message || 'unknown'}`));
+      console.error('[gitlab-oauth] Token exchange failed:', err.message, {
+        redirectUri: oauthConfig.redirectUri,
+        clientIdPrefix: oauthConfig.clientId?.slice(0, 12),
+        gitlabBaseUrl,
+      });
+      // GitLab's invalid_grant error is a catch-all (redirect URI mismatch,
+      // code already consumed, wrong client, expired). Surface the redirect
+      // URI we sent so the user can compare it against the one configured in
+      // their GitLab OAuth app — that's the most common cause.
+      const rawMsg = err?.message || 'unknown';
+      const isInvalidGrant = /invalid_grant/i.test(rawMsg);
+      const actionable = isInvalidGrant
+        ? `GitLab rejected the authorization. Most common cause: the Redirect URI on your GitLab OAuth app must match exactly: ${oauthConfig.redirectUri}. If you just retried, the previous one-time code is already used — click Connect to start fresh.`
+        : `GitLab token exchange failed: ${rawMsg}`;
+      return res.redirect(gitlabErrorRedirect(statePayload.from, actionable));
     }
 
     // Verify the freshly minted OAuth token actually works against this
