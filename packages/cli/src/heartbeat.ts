@@ -15,6 +15,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import * as fzstd from 'fzstd';
 
 const args = process.argv.slice(2);
 const sessionId = args[0];
@@ -162,6 +163,215 @@ async function pushInflightDiff(): Promise<void> {
             checkpointType: 'auto',
           },
         ],
+      }),
+    });
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Live Codex rollout poller. Reads ~/.codex/state_*.sqlite to find this
+ * repo's rollout JSONL, decompresses + parses it for user prompts and
+ * assistant text, and pushes the result via api.updateSession so the
+ * dashboard shows Codex's in-flight output without waiting for Stop or
+ * the next UserPromptSubmit. Mirrors the minimal slice of
+ * discoverCodexSessionData / parseCodexRollout from commands/hooks.ts —
+ * we don't share a module because heartbeat.ts is a standalone daemon
+ * with its own dependency surface.
+ */
+function findCodexRollout(repoPath: string): { rolloutPath: string; threadId: string; model: string; firstUserMessage: string } | null {
+  try {
+    const codexDir = path.join(os.homedir(), '.codex');
+    if (!fs.existsSync(codexDir)) return null;
+    const stateFiles = fs.readdirSync(codexDir)
+      .filter(f => f.startsWith('state_') && f.endsWith('.sqlite'))
+      .map(f => ({ path: path.join(codexDir, f), mtime: fs.statSync(path.join(codexDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (stateFiles.length === 0) return null;
+
+    const repoBasename = path.basename(repoPath);
+    if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
+    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const threadQuery = `SELECT id, model, rollout_path, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
+    const raw = execFileSync('sqlite3', [stateFiles[0].path, threadQuery], {
+      encoding: 'utf-8' as const, timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (!raw) return null;
+
+    const parts = raw.split('|');
+    if (parts.length < 4) return null;
+    const threadId = parts[0];
+    const model = parts[1] || 'codex';
+    let rolloutPath = parts[2] || '';
+    const firstUserMessage = parts.slice(3).join('|') || '';
+
+    if (!rolloutPath) return null;
+    if (!fs.existsSync(rolloutPath)) {
+      const abs = path.join(codexDir, rolloutPath);
+      if (fs.existsSync(abs)) rolloutPath = abs;
+      else return null;
+    }
+    return { rolloutPath, threadId, model, firstUserMessage };
+  } catch { return null; }
+}
+
+function parseCodexRolloutLive(rolloutFile: string): {
+  userPrompts: string[];
+  transcript: string;
+  tokensUsed: number;
+  inputTokens: number;
+  outputTokens: number;
+  model?: string;
+  toolCalls: number;
+} | null {
+  try {
+    let content: string;
+    if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
+      const compressed = fs.readFileSync(rolloutFile);
+      const decompressed = fzstd.decompress(new Uint8Array(compressed));
+      content = Buffer.from(decompressed).toString('utf-8');
+    } else {
+      content = fs.readFileSync(rolloutFile, 'utf-8');
+    }
+
+    const lines = content.split('\n').filter(l => l.trim());
+    const turns: Array<{ role: string; content: string }> = [];
+    const pendingTools = new Map<string, number>();
+    let maxInputTokens = 0, maxOutputTokens = 0, maxTotalTokens = 0;
+    let model: string | undefined;
+    let toolCalls = 0;
+    const TRUNC = 2000;
+    const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
+
+    const extractText = (c: any): string => {
+      if (typeof c === 'string') return c;
+      if (!Array.isArray(c)) return '';
+      return c.map((p: any) => p?.text || (typeof p === 'string' ? p : '') || (typeof p?.content === 'string' ? p.content : '')).filter(Boolean).join('');
+    };
+
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        const tokenUsage = event?.total_token_usage || event?.data?.total_token_usage || event?.payload?.info?.total_token_usage || event?.payload?.total_token_usage;
+        if (tokenUsage) {
+          const i = tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0;
+          const o = tokenUsage.output_tokens || tokenUsage.completion_tokens || 0;
+          const t = tokenUsage.total_tokens || (i + o);
+          if (t > maxTotalTokens) { maxInputTokens = i; maxOutputTokens = o; maxTotalTokens = t; }
+        }
+        if (!model && (event?.model || event?.data?.model || event?.payload?.model)) {
+          model = event.model || event.data?.model || event.payload?.model;
+        }
+        const payload = event?.payload;
+        const ptype = payload?.type || '';
+        if (ptype === 'message') {
+          const role = payload.role || 'assistant';
+          const text = extractText(payload.content);
+          if (text.trim()) {
+            const isUser = role === 'user' || role === 'human';
+            const isEcho = isUser && (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text));
+            if (!isEcho) {
+              const cleaned = isUser ? text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim() : text;
+              if (cleaned) turns.push({ role, content: cleaned });
+            }
+          }
+        } else if (ptype === 'reasoning') {
+          const summary = Array.isArray(payload.summary) ? payload.summary : [];
+          const t = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n\n');
+          if (t.trim()) turns.push({ role: 'assistant', content: `[Reasoning] ${t}` });
+        } else if (ptype === 'function_call' || ptype === 'local_shell_call') {
+          toolCalls++;
+          const tool = payload.name || (ptype === 'local_shell_call' ? 'shell' : 'tool');
+          const args = payload.arguments ?? payload.action ?? payload.command ?? '';
+          const argStr = typeof args === 'string' ? args : JSON.stringify(args);
+          const callId = payload.call_id || payload.id || '';
+          const idx = turns.length;
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(argStr)}` });
+          if (callId) pendingTools.set(callId, idx);
+        } else if (ptype === 'function_call_output' || ptype === 'local_shell_call_output') {
+          const callId = payload.call_id || payload.id || '';
+          const out = typeof payload.output === 'string' ? payload.output
+            : (payload.output?.content ? (typeof payload.output.content === 'string' ? payload.output.content : JSON.stringify(payload.output.content))
+            : JSON.stringify(payload.output ?? ''));
+          if (out) {
+            const idx = callId ? pendingTools.get(callId) : undefined;
+            if (idx !== undefined) {
+              turns[idx].content += `\n[Output] ${truncate(out)}`;
+              pendingTools.delete(callId);
+            } else {
+              turns.push({ role: 'assistant', content: `[Output] ${truncate(out)}` });
+            }
+          }
+        }
+      } catch { /* skip malformed lines */ }
+    }
+
+    if (turns.length === 0 && maxTotalTokens === 0) return null;
+    const userPrompts: string[] = [];
+    for (const t of turns) {
+      if (t.role === 'user' || t.role === 'human') {
+        const c = t.content.trim();
+        if (c) userPrompts.push(c);
+      }
+    }
+    return {
+      userPrompts,
+      transcript: JSON.stringify(turns),
+      tokensUsed: maxTotalTokens,
+      inputTokens: maxInputTokens,
+      outputTokens: maxOutputTokens,
+      model,
+      toolCalls,
+    };
+  } catch { return null; }
+}
+
+async function pushInflightCodexState(): Promise<void> {
+  if (!isConnected || !stateFile) return;
+  try {
+    const raw = fs.readFileSync(stateFile, 'utf-8');
+    const state = JSON.parse(raw) as {
+      repoPath?: string;
+      prompts?: string[];
+      agentSlug?: string;
+      sessionId?: string;
+    };
+    if ((state.agentSlug || '').toLowerCase() !== 'codex') return;
+    if (!state.repoPath) return;
+
+    const rollout = findCodexRollout(state.repoPath);
+    if (!rollout) return;
+    const parsed = parseCodexRolloutLive(rollout.rolloutPath);
+    if (!parsed) return;
+
+    const existing = state.prompts || [];
+    const newer = parsed.userPrompts.length > existing.length;
+
+    // Update state file with the latest prompts so user-prompt-submit /
+    // Stop don't lose ground we've already gained.
+    if (newer) {
+      try {
+        const fresh = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        fresh.prompts = parsed.userPrompts;
+        fs.writeFileSync(stateFile, JSON.stringify(fresh), { mode: 0o600 });
+      } catch { /* non-fatal */ }
+    }
+
+    const promptsForPush = parsed.userPrompts.length > 0 ? parsed.userPrompts : existing;
+    const joinedPrompt = promptsForPush.join('\n\n---\n\n');
+
+    await fetch(`${apiUrl}/api/mcp/session/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify({
+        prompt: joinedPrompt || undefined,
+        transcript: parsed.transcript || undefined,
+        model: parsed.model || undefined,
+        tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
+        inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
+        outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+        toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
+        status: 'RUNNING',
       }),
     });
   } catch { /* best-effort */ }
@@ -499,6 +709,11 @@ async function ping() {
       // until the next prompt or session end. Fire-and-forget so a
       // slow git diff doesn't delay the ping cadence.
       pushInflightDiff().catch(() => { /* non-fatal */ });
+      // Codex doesn't surface its assistant output via hooks while a
+      // prompt is in flight — Stop only fires at turn end and there's
+      // no streaming hook. Poll the rollout JSONL on every tick so the
+      // dashboard shows assistant text + tool calls live.
+      pushInflightCodexState().catch(() => { /* non-fatal */ });
 
       // Handle pending commands from the dashboard
       if (data.command && data.command.type === 'restore') {
