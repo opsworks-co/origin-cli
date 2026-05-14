@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { ArrowRight, GitBranch } from 'lucide-react';
 import { Session, agentColor, dayLabel, fmt, fmtCost, fmtDuration } from './utils';
+import { displayAgentName } from '../../utils';
 
 // ── Session Timeline ────────────────────────────────────────────────────────
 
@@ -43,7 +44,7 @@ export function SessionTimeline({ sessions, navigate }: { sessions: Session[]; n
                         <ArrowRight className="w-2 h-2 text-gray-500" />
                       </div>
                       <span className="text-[10px] text-gray-600 italic">
-                        Switched from {prevAgent || 'Unknown'} to {s.agentName || 'Unknown'}
+                        Switched from {displayAgentName(prevAgent) || 'Unknown'} to {displayAgentName(s.agentName) || 'Unknown'}
                       </span>
                     </div>
                   )}
@@ -68,7 +69,7 @@ export function SessionTimeline({ sessions, navigate }: { sessions: Session[]; n
                             className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
                             style={{ backgroundColor: `${color}20`, color }}
                           >
-                            {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-')}
+                            {displayAgentName(s.agentName) || s.model.split('/').pop()?.split('-').slice(0, 2).join('-')}
                           </span>
                           {s.org && (
                             // Federated view chip — only shown when /api/me/sessions

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getSharedSession, getAnnotations, type SessionAnnotation } from '../api';
-import { formatCost, formatDuration, getStatusBadgeClass } from '../utils';
+import { formatCost, formatDuration, getStatusBadgeClass, displayAgentName } from '../utils';
 import { LogoMark } from '../components/Logo';
 
 interface SharedSessionData {
@@ -146,7 +146,7 @@ export default function SharedSession() {
         {/* Metadata grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
           <MetaCard label="Model" value={session.model} />
-          <MetaCard label="Agent" value={session.agentName || 'None'} />
+          <MetaCard label="Agent" value={displayAgentName(session.agentName) || 'None'} />
           <MetaCard label="Duration" value={formatDuration(session.durationMs)} />
           <MetaCard label="Cost" value={formatCost(session.costUsd)} />
           <MetaCard label="Tokens" value={session.tokensUsed.toLocaleString()} />

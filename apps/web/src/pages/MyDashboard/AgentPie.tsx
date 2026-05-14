@@ -1,5 +1,7 @@
 // ── Agent pie chart ─────────────────────────────────────────────────────────
 
+import { displayAgentName } from '../../utils';
+
 const COLORS = ['#6366f1', '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899'];
 
 export function AgentPie({ data }: { data: Array<{ agentName: string; sessions: number }> }) {
@@ -42,7 +44,7 @@ export function AgentPie({ data }: { data: Array<{ agentName: string; sessions: 
         {slices.map((s, i) => (
           <div key={i} className="flex items-center gap-2 text-xs">
             <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: s.color }} />
-            <span className="text-gray-300">{s.agentName}</span>
+            <span className="text-gray-300">{displayAgentName(s.agentName) || s.agentName}</span>
             <span className="text-gray-600">{((s.sessions / total) * 100).toFixed(0)}%</span>
           </div>
         ))}

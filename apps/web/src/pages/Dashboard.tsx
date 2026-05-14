@@ -5,6 +5,7 @@ import * as api from '../api';
 import type { Stats, Session, Policy, IntegrationConfig, TeamPromptEntry, TeamEfficiency, TeamAdoption, TodayBrief } from '../api';
 import { Trend } from './MyDashboard/Trend';
 import { agentColor } from './MyDashboard/utils';
+import { displayAgentName } from '../utils';
 import { PageHeader } from '../components/ui';
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
@@ -1882,7 +1883,7 @@ function PromptsTab({
                       <div className="flex items-center gap-2 text-xs mb-1">
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium"
                           style={{ backgroundColor: `${agentColor(p.agentName)}22`, color: agentColor(p.agentName) }}>
-                          {p.agentName}
+                          {displayAgentName(p.agentName)}
                         </span>
                         <span className="text-gray-300">{p.userName}</span>
                         {p.repoName && <span className="text-gray-600">· {p.repoName}</span>}

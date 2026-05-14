@@ -2501,14 +2501,24 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           } catch { /* best effort */ }
         }
 
-        // Synthesize transcript from captured prompts when no transcript file exists
+        // Synthesize transcript from captured prompts when no transcript file
+        // exists. Interleave any assistant replies recorded on
+        // state.promptResponses by the stop hook — otherwise a heartbeat that
+        // fires after one prompt completes and another starts would push a
+        // prompts-only transcript and clobber the response-rich one the
+        // stop hook just persisted (mainly affects Gemini, whose transcript
+        // file is unflushed mid-session so we depend on stop-hook captures).
         if (!displayTranscript && state.prompts.length > 0) {
           const turns: Array<{ role: string; content: string }> = [];
           if (state.agentSystemPrompt) {
             turns.push({ role: 'system', content: state.agentSystemPrompt });
           }
-          for (const p of state.prompts) {
-            turns.push({ role: 'user', content: p });
+          const responses = state.promptResponses || [];
+          for (let i = 0; i < state.prompts.length; i++) {
+            turns.push({ role: 'user', content: state.prompts[i] });
+            if (responses[i]) {
+              turns.push({ role: 'assistant', content: responses[i] });
+            }
           }
           displayTranscript = JSON.stringify(turns);
         }

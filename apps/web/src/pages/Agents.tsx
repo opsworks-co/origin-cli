@@ -7,6 +7,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
 import { PageHeader } from '../components/ui';
 import AgentIcon, { AGENT_ACCENT } from '../components/AgentIcon';
+import { displayAgentName } from '../utils';
 import { useAuth } from '../context/AuthContext';
 
 // New Agents page: a small catalog of natively-supported agents (Claude
@@ -55,7 +56,7 @@ function CatalogCard({
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{agent.name}</h3>
+            <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">{displayAgentName(agent.name) || agent.name}</h3>
             {agent.isCustom ? (
               <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-700/40 text-gray-400">Custom</span>
             ) : (
@@ -148,7 +149,7 @@ function CustomAgentRow({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <Link to={`/agents/${agent.id}`} className="text-sm font-medium text-gray-800 dark:text-gray-100 hover:text-indigo-300">
-            {agent.name}
+            {displayAgentName(agent.name) || agent.name}
           </Link>
           <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-700/40 text-gray-400">Custom</span>
         </div>

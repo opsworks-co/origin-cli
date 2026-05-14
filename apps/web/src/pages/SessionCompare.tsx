@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { getSession, Session } from '../api';
-import { formatCost, formatDuration } from '../utils';
+import { formatCost, formatDuration, displayAgentName } from '../utils';
 import { ArrowLeft, GitBranch, Clock, DollarSign, Zap, FileCode, MessageSquare, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 
 function fmt(n: number) {
@@ -104,7 +104,7 @@ export default function SessionCompare() {
       <div className="text-center">
         <div className="text-xs text-gray-500 mb-1">{label}</div>
         <Link to={`/sessions/${s.id}`} className="text-indigo-400 hover:underline font-medium">
-          {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
+          {displayAgentName(s.agentName) || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
         </Link>
         <div className="flex items-center justify-center gap-2 mt-1 text-xs text-gray-500">
           {s.repoName && <span>{s.repoName}</span>}

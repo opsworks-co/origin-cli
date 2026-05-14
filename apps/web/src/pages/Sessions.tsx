@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import * as api from '../api';
 import type { Session, Repo, Agent, PRSessionGroup, SessionStreamEvent, TeamMember } from '../api';
-import { timeAgo, formatCost, formatDuration, getStatusBadgeClass } from '../utils';
+import { timeAgo, formatCost, formatDuration, getStatusBadgeClass, displayAgentName } from '../utils';
 import { Archive, ArchiveRestore, GitBranch, GitMerge, Search, Bookmark, Star } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import { useAuth } from '../context/AuthContext';
@@ -820,7 +820,7 @@ export default function Sessions() {
                             color: agentColor(s.agentName),
                           }}
                         >
-                          {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
+                          {displayAgentName(s.agentName) || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
                         </span>
                       </td>
                       {/* Model */}

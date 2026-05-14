@@ -29,6 +29,7 @@ import {
   Archive,
 } from 'lucide-react';
 import { PageHeader } from '../components/ui';
+import { displayAgentName } from '../utils';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -407,7 +408,7 @@ function ActiveSessionCard({
             <div className="w-2.5 h-2.5 rounded-full relative" style={{ backgroundColor: isEnded ? '#6b7280' : isIdle ? '#6b7280' : color }}>
               {isRunning && <div className="absolute inset-0 rounded-full animate-ping opacity-30" style={{ backgroundColor: color }} />}
             </div>
-            <span className={`text-sm font-semibold ${isEnded ? 'text-gray-400' : 'text-gray-200'}`}>{session.agentName || session.model}</span>
+            <span className={`text-sm font-semibold ${isEnded ? 'text-gray-400' : 'text-gray-200'}`}>{displayAgentName(session.agentName) || session.model}</span>
             {isEnded && <span className="text-[10px] text-gray-500 px-1.5 py-0.5 rounded bg-gray-800 font-medium">ENDED</span>}
             {isIdle && <span className="text-[10px] text-gray-500 px-1.5 py-0.5 rounded bg-gray-800 font-medium">IDLE</span>}
             {isRunning && <span className="text-[10px] px-1.5 py-0.5 rounded font-medium" style={{ backgroundColor: `${color}15`, color }}>RUNNING</span>}

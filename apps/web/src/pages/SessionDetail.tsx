@@ -7,7 +7,7 @@ import UnifiedSessionView from '../components/UnifiedSessionView';
 import AiBlameView from '../components/AiBlameView';
 import AskAuthorPanel from '../components/AskAuthorPanel';
 import TurnTimeline from '../components/TurnTimeline';
-import { formatCost, formatDuration, getStatusBadgeClass, timeAgo } from '../utils';
+import { formatCost, formatDuration, getStatusBadgeClass, timeAgo, displayAgentName } from '../utils';
 import { ChevronDown, Shield, Target, Sparkles, DollarSign, AlertTriangle, Lightbulb, Check, X as XIcon, Flag } from 'lucide-react';
 import { safeHref } from '../utils/safe-url';
 import { useToast } from '../components/Toast';
@@ -491,7 +491,7 @@ export default function SessionDetail() {
       '',
       `| Field | Value |`,
       `|-------|-------|`,
-      `| Agent | ${session.agentName || 'Unknown'} |`,
+      `| Agent | ${displayAgentName(session.agentName) || 'Unknown'} |`,
       `| Model | ${session.model} |`,
       `| Duration | ${formatDuration(session.durationMs)} |`,
       `| Cost | ${formatCost(session.costUsd)} |`,
@@ -545,7 +545,7 @@ export default function SessionDetail() {
       `| Files changed | ${(() => { try { return JSON.parse(session.filesChanged).length; } catch { return 0; } })()} |`,
       `| Lines | +${session.linesAdded} / -${session.linesRemoved} |`,
       `| Branch | ${session.branch || '—'} |`,
-      `| Agent | ${session.agentName || 'Unknown'} |`,
+      `| Agent | ${displayAgentName(session.agentName) || 'Unknown'} |`,
       '',
     ];
     if (session.promptChanges?.length) {
@@ -695,7 +695,7 @@ export default function SessionDetail() {
         <div className="flex items-center gap-2 flex-wrap">
           {/* Agent + Model */}
           <div className="flex items-center gap-1.5 bg-gray-800/40 border border-gray-700/40 rounded-lg px-2.5 py-1">
-            <span className="text-[11px] text-gray-300">{session.agentName ?? 'Agent'}</span>
+            <span className="text-[11px] text-gray-300">{displayAgentName(session.agentName) || 'Agent'}</span>
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">{session.model}</span>
           </div>
 
@@ -1512,7 +1512,7 @@ export default function SessionDetail() {
             <div className="flex items-center justify-between px-6 py-3 border-b border-gray-800">
               <div className="flex items-center gap-3">
                 <span className="text-sm font-semibold text-purple-400">Session Replay</span>
-                <span className="text-xs text-gray-500">{session.repoName} &middot; {session.agentName || session.model}</span>
+                <span className="text-xs text-gray-500">{session.repoName} &middot; {displayAgentName(session.agentName) || session.model}</span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-gray-500">Space: play/pause &middot; Arrows: prev/next &middot; Esc: close</span>

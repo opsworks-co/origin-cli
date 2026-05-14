@@ -4,7 +4,7 @@ import * as api from '../api';
 import type { Repo, CommitDiff, RepoHealth } from '../api';
 import WebhookSettings from '../components/WebhookSettings';
 import ScoreGauge from '../components/ScoreGauge';
-import { timeAgo } from '../utils';
+import { timeAgo, displayAgentName } from '../utils';
 import { safeHref } from '../utils/safe-url';
 import { PageHeader, Pill, PulseDot, ActionButtonGroup } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
@@ -247,7 +247,7 @@ function CommitDiffModal({
               </code>
               {commit.session ? (
                 <span className="badge-blue text-xs">
-                  {commit.session.agent?.slug || commit.session.agent?.name || commit.session.model}
+                  {displayAgentName(commit.session.agent?.name) || commit.session.agent?.slug || commit.session.model}
                 </span>
               ) : commit.aiToolDetected ? (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-500/10 text-purple-400 border border-dashed border-purple-500/40">
@@ -1321,7 +1321,7 @@ export default function RepoDetail() {
                     {s.status?.toLowerCase()}
                   </span>
                   <span className="text-[12px] text-gray-300 truncate flex-1">
-                    {s.agentName || s.model}
+                    {displayAgentName(s.agentName) || s.model}
                   </span>
                   {s.branch && (
                     <span className="text-[10px] font-mono text-gray-500 hidden sm:inline">{s.branch}</span>
@@ -1460,7 +1460,7 @@ export default function RepoDetail() {
                                   implementation detail; the agent ("claude-code",
                                   "cursor", etc.) is what the user cares about. */}
                               {commit.session
-                                ? (commit.session.agent?.slug || commit.session.agent?.name || commit.session.model)
+                                ? (displayAgentName(commit.session.agent?.name) || commit.session.agent?.slug || commit.session.model)
                                 : commit.aiToolDetected}
                             </span>
                           )}
@@ -1774,9 +1774,9 @@ interface AgentVisual {
 }
 
 const AGENT_VISUALS: Record<AgentKey, AgentVisual> = {
-  'claude-code': { key: 'claude-code', label: 'Claude Code', bar: 'bg-indigo-500',  tint: 'bg-indigo-500/[0.07]',  text: 'text-indigo-300'  },
-  'codex':       { key: 'codex',       label: 'Codex CLI',   bar: 'bg-emerald-500', tint: 'bg-emerald-500/[0.07]', text: 'text-emerald-300' },
-  'gemini':      { key: 'gemini',      label: 'Gemini CLI',  bar: 'bg-sky-500',     tint: 'bg-sky-500/[0.07]',     text: 'text-sky-300'     },
+  'claude-code': { key: 'claude-code', label: 'Claude',      bar: 'bg-indigo-500',  tint: 'bg-indigo-500/[0.07]',  text: 'text-indigo-300'  },
+  'codex':       { key: 'codex',       label: 'Codex',       bar: 'bg-emerald-500', tint: 'bg-emerald-500/[0.07]', text: 'text-emerald-300' },
+  'gemini':      { key: 'gemini',      label: 'Gemini',      bar: 'bg-sky-500',     tint: 'bg-sky-500/[0.07]',     text: 'text-sky-300'     },
   'cursor':      { key: 'cursor',      label: 'Cursor',      bar: 'bg-purple-500',  tint: 'bg-purple-500/[0.07]',  text: 'text-purple-300'  },
   'copilot':     { key: 'copilot',     label: 'Copilot',     bar: 'bg-cyan-500',    tint: 'bg-cyan-500/[0.07]',    text: 'text-cyan-300'    },
   'ai':          { key: 'ai',          label: 'AI',          bar: 'bg-fuchsia-500', tint: 'bg-fuchsia-500/[0.07]', text: 'text-fuchsia-300' },

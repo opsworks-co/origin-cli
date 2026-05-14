@@ -1,3 +1,5 @@
+import { displayAgentName } from '../../utils';
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface Session {
@@ -38,7 +40,7 @@ export interface MyStats {
   lastWeek: { sessions: number; cost: number; tokens: number };
   agentBreakdown: Array<{ agentId: string | null; agentName: string; sessions: number; cost: number; tokens: number; linesAdded: number; linesRemoved: number }>;
   modelBreakdown: Array<{ model: string; sessions: number; cost: number }>;
-  topFiles: Array<{ file: string; count: number }>;
+  topFiles: Array<{ file: string; count: number; repoId?: string | null }>;
   sessionsByRepo: Array<{ repoId: string; repoName: string; sessions: number }>;
   heatmap: Record<string, number>;
   streak: number;
@@ -164,7 +166,7 @@ export function agentColor(name: string | null) {
 // ── Session summary builder ─────────────────────────────────────────────────
 
 export function buildSessionSummary(s: Session): string {
-  const agent = s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || 'AI';
+  const agent = displayAgentName(s.agentName) || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || 'AI';
   let files: string[] = [];
   try { files = JSON.parse(s.filesChanged); } catch { /* ignore */ }
 

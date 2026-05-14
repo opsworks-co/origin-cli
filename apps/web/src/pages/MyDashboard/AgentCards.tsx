@@ -1,5 +1,6 @@
 import { Bot } from 'lucide-react';
 import { AgentCard, agentColor, fmt, fmtCost, fmtDuration, timeAgo } from './utils';
+import { displayAgentName } from '../../utils';
 
 // ── Agent Cards ─────────────────────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ export function AgentCards({ agents }: { agents: AgentCard[] }) {
                   <Bot className="w-4 h-4" style={{ color }} />
                 </div>
                 <div>
-                  <div className="text-sm font-semibold text-gray-200">{a.agentName}</div>
+                  <div className="text-sm font-semibold text-gray-200">{displayAgentName(a.agentName) || a.agentName}</div>
                   <div className="text-[10px] text-gray-600 font-mono">{a.model}</div>
                 </div>
               </div>

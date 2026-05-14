@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ArrowRight, ChevronDown, ChevronUp } from 'lucide-react';
 import { Session, agentColor, buildSessionSummary, fmtCost, timeAgo } from './utils';
+import { displayAgentName } from '../../utils';
 
 // Build a 2-3 sentence narrative summary of today's activity. No LLM call —
 // just a deterministic roll-up of the session data we already have.
@@ -15,7 +16,7 @@ function buildTodaySummary(sessions: Session[]): { headline: string; details: st
   // Agent share
   const byAgent = new Map<string, number>();
   for (const s of sessions) {
-    const k = s.agentName || s.model || 'AI';
+    const k = displayAgentName(s.agentName) || s.model || 'AI';
     byAgent.set(k, (byAgent.get(k) || 0) + 1);
   }
   const topAgents = Array.from(byAgent.entries())
@@ -100,7 +101,7 @@ export function TodayActivityFeed({
   const summary = useMemo(() => buildTodaySummary(sessions), [sessions]);
 
   function buildLabel(s: Session): string {
-    const agent = s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || 'AI';
+    const agent = displayAgentName(s.agentName) || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || 'AI';
     let files: string[] = [];
     try { files = JSON.parse(s.filesChanged); } catch { /* ignore */ }
 

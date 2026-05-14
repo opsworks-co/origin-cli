@@ -1,14 +1,20 @@
 import { Link } from 'react-router-dom';
 import { MyStats, fmt, fmtCost } from '../utils';
+import { displayAgentName } from '../../../utils';
 import { ActivityHeatmap } from '../ActivityHeatmap';
 import { AgentPie } from '../AgentPie';
 
-// `topFiles[].file` sometimes arrives as a JSON-stringified array (e.g. when
-// a session's `filesChanged` column was aggregated upstream without being
-// flattened). Render each underlying path as its own row instead of dumping
-// the raw JSON string in the UI.
-function expandFileEntries(entries: { file: string; count: number }[]): { file: string; count: number }[] {
-  const out: { file: string; count: number }[] = [];
+// `topFiles[].file` sometimes arrives as a JSON-stringified array (legacy
+// rows where the upstream stored the entire array as the file string). Now
+// the backend parses JSON properly, but we keep this layer as a safety net
+// for legacy data and to strip stray quotes/brackets that survived the
+// pre-fix CSV-style split.
+type TopFile = { file: string; count: number; repoId?: string | null };
+function cleanFilePath(p: string): string {
+  return p.replace(/^["[\]]+|["[\]]+$/g, '').trim();
+}
+function expandFileEntries(entries: TopFile[]): TopFile[] {
+  const out: TopFile[] = [];
   for (const e of entries) {
     const raw = (e.file || '').trim();
     let parsed: string[] | null = null;
@@ -19,22 +25,28 @@ function expandFileEntries(entries: { file: string; count: number }[]): { file: 
       } catch { /* fall through */ }
     }
     if (parsed && parsed.length > 0) {
-      for (const p of parsed) out.push({ file: p, count: e.count });
+      for (const p of parsed) out.push({ file: p, count: e.count, repoId: e.repoId });
     } else if (parsed && parsed.length === 0) {
-      // Empty array — skip ("[]" is noise).
       continue;
     } else {
-      out.push({ file: raw, count: e.count });
+      out.push({ file: raw, count: e.count, repoId: e.repoId });
     }
   }
-  // Re-aggregate by path so duplicates from multiple buckets sum.
-  const agg = new Map<string, number>();
+  // Re-aggregate by cleaned path so duplicates from multiple buckets sum.
+  const agg = new Map<string, { count: number; repoId: string | null | undefined }>();
   for (const e of out) {
-    if (!e.file) continue;
-    agg.set(e.file, (agg.get(e.file) || 0) + e.count);
+    const file = cleanFilePath(e.file);
+    if (!file) continue;
+    const cur = agg.get(file);
+    if (cur) {
+      cur.count += e.count;
+      if (!cur.repoId && e.repoId) cur.repoId = e.repoId;
+    } else {
+      agg.set(file, { count: e.count, repoId: e.repoId });
+    }
   }
   return Array.from(agg.entries())
-    .map(([file, count]) => ({ file, count }))
+    .map(([file, { count, repoId }]) => ({ file, count, repoId }))
     .sort((a, b) => b.count - a.count);
 }
 
@@ -80,7 +92,7 @@ export function StatsTab({
                   <div className="mt-3 space-y-1">
                     {stats.agentBreakdown.map((a, i) => (
                       <div key={i} className="flex items-center justify-between text-xs">
-                        <span className="text-gray-400">{a.agentName}</span>
+                        <span className="text-gray-400">{displayAgentName(a.agentName) || a.agentName}</span>
                         <div className="flex items-center gap-3">
                           <span className="text-gray-500">{a.sessions} sessions</span>
                           <span className="text-gray-300">{fmtCost(a.cost)}</span>
@@ -103,21 +115,27 @@ export function StatsTab({
                       <div className="space-y-2">
                         {expanded.map((f, i) => {
                           const display = shortenFilePath(f.file);
-                          // Link to Sessions filtered to this file. We pass the
-                          // basename — the Sessions search filter matches it
-                          // against the per-session filesChanged list.
-                          // Strip stray quotes/brackets from JSON-stringified
-                          // entries so the URL prefill is just `mcp.ts` not
-                          // `mcp.ts"`.
+                          // Prefer linking into the repo file viewer with the
+                          // exact path so clicking opens the file's blame +
+                          // diff. When repoId isn't known (legacy rows that
+                          // didn't capture it), fall back to a Sessions search
+                          // by basename so the link still goes somewhere
+                          // useful.
                           const basename = (f.file.split('/').pop() || f.file)
                             .replace(/^["[\]]+|["[\]]+$/g, '')
                             .trim();
+                          const linkTo = f.repoId
+                            ? `/repos/${f.repoId}?file=${encodeURIComponent(f.file)}`
+                            : `/sessions?q=${encodeURIComponent(basename)}`;
+                          const linkTitle = f.repoId
+                            ? `Open ${f.file} with authorship + changes`
+                            : `See sessions touching ${f.file}`;
                           return (
                             <Link
                               key={i}
-                              to={`/sessions?q=${encodeURIComponent(basename)}`}
+                              to={linkTo}
                               className="block group"
-                              title={`See sessions touching ${f.file}`}
+                              title={linkTitle}
                             >
                               <div className="flex items-center justify-between text-xs mb-0.5 gap-2">
                                 <span className="text-gray-400 group-hover:text-gray-200 font-mono truncate transition-colors" title={f.file}>

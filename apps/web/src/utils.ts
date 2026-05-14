@@ -58,3 +58,19 @@ export function parseJsonSafe<T>(json: string, fallback: T): T {
     return fallback;
   }
 }
+
+// Normalize agent label to its short form for display: "Claude Code" → "Claude",
+// "Gemini CLI" → "Gemini", "Codex CLI" → "Codex", "Cursor" → "Cursor". Falls
+// back to the raw value when the agent isn't one we recognize.
+export function displayAgentName(name: string | null | undefined): string {
+  if (!name) return '';
+  const lower = name.toLowerCase();
+  if (lower.includes('claude')) return 'Claude';
+  if (lower.includes('gemini')) return 'Gemini';
+  if (lower.includes('codex')) return 'Codex';
+  if (lower.includes('cursor')) return 'Cursor';
+  if (lower.includes('copilot')) return 'Copilot';
+  if (lower.includes('aider')) return 'Aider';
+  if (lower.includes('windsurf')) return 'Windsurf';
+  return name;
+}

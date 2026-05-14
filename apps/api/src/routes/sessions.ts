@@ -1685,11 +1685,30 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Build attribution: walk through each prompt's diff in order
-    // Later prompts override earlier attributions for the same lines
+    // Build attribution by CONTENT, not line number. Some CLI capture paths
+    // (notably Gemini's heartbeat) emit a cumulative diff on a later prompt
+    // that re-adds lines an earlier prompt already wrote. Keying by line
+    // number meant the later prompt clobbered the earlier one, so every line
+    // showed up as belonging to whichever prompt landed last.
+    //
+    // The content-based scheme: for each added-line content, remember the
+    // EARLIEST prompt whose diff produced it. When we render the final file
+    // (from sessionDiff) we look up each line's content and attribute it to
+    // that first prompt. A later prompt only owns a line whose content no
+    // earlier prompt produced.
+    //
+    // Line-number attribution is still built as a fallback for sessions
+    // without a sessionDiff (where we can't render the full file).
     const lineAttributions = new Map<
       number,
       { content: string; promptIndex: number; promptText: string; type: 'added' | 'modified' }
+    >();
+    // Multi-value per content because identical text can appear multiple
+    // times in a file. We pop one per match below so each occurrence is
+    // attributed to the prompt that produced it, in order.
+    const contentAttributions = new Map<
+      string,
+      Array<{ promptIndex: number; promptText: string; type: 'added' | 'modified' }>
     >();
 
     const promptsInfo: BlamePrompt[] = [];
@@ -1717,24 +1736,33 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
         filesChanged,
       });
 
-      // Check if this prompt touched the target file
-      const normalizedTarget = file.replace(/^\//, '');
-      const touchesFile = filesChanged.some((f) => {
-        const nf = f.replace(/^\//, '');
-        return nf === normalizedTarget || nf.endsWith(normalizedTarget) || normalizedTarget.endsWith(nf);
-      });
+      // Parse the diff directly — don't gate on filesChanged. Some capture
+      // paths populate the diff but not the filesChanged list (or vice
+      // versa); parseDiffForFile already filters by the target file path.
+      if (!pc.diff) continue;
 
-      if (!touchesFile || !pc.diff) continue;
-
-      // Parse the diff for this prompt and extract line attributions
       const lineChanges = parseDiffForFile(pc.diff, file);
       for (const change of lineChanges) {
+        // Line-number fallback (used only when sessionDiff is missing). Keep
+        // "later wins" so a true modification on the same line attributes to
+        // the modifying prompt — this branch isn't the source of the bug.
         lineAttributions.set(change.lineNumber, {
           content: change.content,
           promptIndex: pc.promptIndex,
           promptText: pc.promptText,
           type: change.type,
         });
+
+        // Content-based: record every occurrence in prompt order. Earliest
+        // prompt that produced this content owns the first occurrence in the
+        // final file, second prompt owns the second occurrence, etc.
+        const queue = contentAttributions.get(change.content) || [];
+        queue.push({
+          promptIndex: pc.promptIndex,
+          promptText: pc.promptText,
+          type: change.type,
+        });
+        contentAttributions.set(change.content, queue);
       }
     }
 
@@ -1754,8 +1782,19 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
             isGap: true,
           };
         }
-        // Check if this line has per-prompt attribution
-        const attr = lineAttributions.get(line.lineNumber);
+        // Only "added" lines in the final diff can have AI attribution;
+        // unchanged context lines came from before the session.
+        let attr:
+          | { promptIndex: number; promptText: string; type: 'added' | 'modified' }
+          | undefined;
+        if (line.type === 'added') {
+          const queue = contentAttributions.get(line.content);
+          if (queue && queue.length > 0) {
+            // Shift so repeated identical lines attribute to the prompt that
+            // produced each occurrence, in order.
+            attr = queue.shift();
+          }
+        }
         return {
           lineNumber: line.lineNumber,
           content: line.content,

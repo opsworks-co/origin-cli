@@ -6,6 +6,7 @@ import { AlertTriangle, TrendingUp, TrendingDown, Minus, DollarSign, Users, Cpu,
 import { useAuth } from '../context/AuthContext';
 import RecomputeCostsCard from '../components/RecomputeCostsCard';
 import { PageHeader } from '../components/ui';
+import { displayAgentName } from '../utils';
 
 // Gradient stat card — same shape as the Dashboard StatCard so all the
 // admin pages share visual language. Inlined here (not extracted to a
@@ -149,7 +150,7 @@ const KpiDetailPanel = React.forwardRef<HTMLDivElement, {
           {spendTab === 'agents' && (
             <RankedList
               rows={agentBudgets.map((a) => ({
-                key: a.agentId, name: a.agentName, sub: `${a.sessions} session${a.sessions !== 1 ? 's' : ''} · ${a.slug}`, value: a.currentSpend,
+                key: a.agentId, name: displayAgentName(a.agentName) || a.agentName, sub: `${a.sessions} session${a.sessions !== 1 ? 's' : ''} · ${a.slug}`, value: a.currentSpend,
               }))}
               emptyMsg="No agent-attributed sessions yet."
               format={(n) => `$${n.toFixed(2)}`}
@@ -1388,7 +1389,7 @@ export default function BudgetPage() {
                       ? <div className="p-6 text-center text-sm text-gray-500">No agents yet — they'll appear here after their first session.</div>
                       : [...agentBudgets].sort((a, b) => b.currentSpend - a.currentSpend).map((agent) => renderScopeRow({
                           rowKey: `agent-${agent.agentId}`,
-                          name: agent.agentName,
+                          name: displayAgentName(agent.agentName) || agent.agentName,
                           sub: agent.slug,
                           sessions: agent.sessions,
                           currentSpend: agent.currentSpend,
@@ -1889,7 +1890,7 @@ function CombinedTokenTable({
                 <tr key={`${r.userId}|${r.agentId}|${r.model}`} className="hover:bg-gray-900/40">
                   <td className="px-3 py-2 text-gray-200 whitespace-nowrap">{r.userName}</td>
                   <td className="px-3 py-2 text-gray-300 whitespace-nowrap">
-                    {r.agentName}
+                    {displayAgentName(r.agentName) || r.agentName}
                     {r.agentSlug && <span className="text-[10px] text-gray-600 ml-1">{r.agentSlug}</span>}
                   </td>
                   <td className="px-3 py-2 text-gray-300 font-mono whitespace-nowrap">{r.model}</td>

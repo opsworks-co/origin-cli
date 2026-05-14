@@ -1,5 +1,6 @@
 import { Search, MessageSquare, FileText, ArrowRight } from 'lucide-react';
 import { PromptEntry, agentColor, timeAgo } from '../utils';
+import { displayAgentName } from '../../../utils';
 
 export function PromptsTab({
   promptSearch,
@@ -78,7 +79,7 @@ export function PromptsTab({
                               className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
                               style={{ backgroundColor: `${color}20`, color }}
                             >
-                              {p.agentName || 'Unknown'}
+                              {displayAgentName(p.agentName) || 'Unknown'}
                             </span>
                             <span className="text-[10px] text-gray-600">
                               prompt #{p.promptIndex + 1}

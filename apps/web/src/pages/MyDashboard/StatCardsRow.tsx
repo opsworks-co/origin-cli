@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Play, DollarSign, Zap, X, Code2, ChevronDown } from 'lucide-react';
 import { MyStats, agentColor } from './utils';
+import { displayAgentName } from '../../utils';
 import { Trend } from './Trend';
 
 // ── Clickable stat cards with agent breakdown ─────────────────────────────
@@ -141,7 +142,7 @@ export function StatCardsRow({ stats, fmt, fmtCost }: { stats: MyStats; fmt: (n:
             {sorted(expanded).map((a, i) => (
               <div key={i} className="flex items-center gap-3">
                 <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: agentColor(a.agentName) }} />
-                <span className="text-sm text-gray-300 w-28 truncate">{a.agentName}</span>
+                <span className="text-sm text-gray-300 w-28 truncate">{displayAgentName(a.agentName) || a.agentName}</span>
                 <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
                   <div
                     className="h-full rounded-full transition-all duration-500"

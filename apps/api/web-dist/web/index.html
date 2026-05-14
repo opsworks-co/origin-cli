@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en" class="dark" style="color-scheme: dark; background: #0a0b14;">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Dark is BAKED INTO THE HTML above, not applied via script, so stale
+         cached JS bundles can't leave the page in a light-flash state even
+         if they don't know about the new theme logic. The script below
+         only REMOVES the dark class if the user has explicitly chosen
+         light in their dashboard. Result: marketing pages are always dark
+         on first paint, regardless of cache or cold-load. -->
+    <script>
+      (function() {
+        try {
+          if (localStorage.getItem('theme') === 'light') {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.style.colorScheme = 'light';
+            document.documentElement.style.background = '';
+          }
+        } catch { /* private mode */ }
+      })();
+    </script>
+    <title>Origin — Snapshots, blame, and governance for AI code</title>
+    <meta name="description" content="The AI-aware layer on top of git: auto-snapshots for every prompt, line-level AI blame, one CLI for every agent (Claude Code, Cursor, Gemini, Codex, Copilot), plus a web platform with session replay, live feed, and policy enforcement. Free for solo developers." />
+    <meta name="keywords" content="AI code snapshots, AI time travel, AI blame, git blame AI, Claude Code tracking, Cursor tracking, Gemini CLI tracking, multi-agent governance, AI code attribution, AI code audit trail, AI coding agent monitoring" />
+    <link rel="canonical" href="https://getorigin.io" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate" type="application/rss+xml" title="Origin Blog" href="/rss.xml">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="Origin — Snapshots, blame, and governance for AI code" />
+    <meta property="og:description" content="The AI-aware layer on top of git: auto-snapshots for every prompt, line-level AI blame, one CLI for every agent (Claude Code, Cursor, Gemini, Codex, Copilot), plus a web platform with session replay, live feed, and policy enforcement. Free for solo developers." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://getorigin.io" />
+    <meta property="og:image" content="https://getorigin.io/og-image.png" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Origin — Snapshots, blame, and governance for AI code" />
+    <meta name="twitter:description" content="The AI-aware layer on top of git: auto-snapshots for every prompt, line-level AI blame, one CLI for every agent (Claude Code, Cursor, Gemini, Codex, Copilot), plus a web platform with session replay, live feed, and policy enforcement. Free for solo developers." />
+
+    <!-- Google Analytics -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-1GRK1KDD9P"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-1GRK1KDD9P');
+    </script>
+    <script type="module" crossorigin src="/assets/index-3SLi_w5_.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/react-vendor-CC7Ml7aG.js">
+    <link rel="modulepreload" crossorigin href="/assets/chart-vendor-DtRsFzOi.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-E9Orutpp.css">
+  </head>
+  <body class="min-h-screen">
+    <div id="root"></div>
+  </body>
+</html>

@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { Search, Bookmark, Star, BarChart3, GitMerge } from 'lucide-react';
 import { Session, agentColor, fmt, fmtCost, fmtDuration, timeAgo } from '../utils';
+import { displayAgentName } from '../../../utils';
 import { TagEditor } from '../TagEditor';
 
 // ── Chain grouping ─────────────────────────────────────────────────────────
@@ -282,7 +283,7 @@ export function SessionsTab(props: SessionsTabProps) {
                                 color: agentColor(s.agentName),
                               }}
                             >
-                              {s.agentName || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
+                              {displayAgentName(s.agentName) || s.model.split('/').pop()?.split('-').slice(0, 2).join('-') || s.model}
                             </span>
                           </div>
                         </td>

@@ -738,7 +738,7 @@ export default function Snapshots() {
                                       } else if (Date.now() - start > 90_000) {
                                         clearInterval(poll);
                                         setRestoring(null);
-                                        setRestoreMsg({ id: rowId, text: 'Timed out — CLI heartbeat may be offline. Is Claude Code running in this repo?', ok: false });
+                                        setRestoreMsg({ id: rowId, text: 'Timed out — CLI heartbeat may be offline. Is Claude running in this repo?', ok: false });
                                       } else {
                                         const waited = Math.round((Date.now() - start) / 1000);
                                         setRestoreMsg({ id: rowId, text: `Waiting for CLI (${waited}s)...`, ok: true });
