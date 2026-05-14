@@ -394,16 +394,28 @@ export default function SessionDetail() {
     if (Number.isFinite(parsed)) setFocusPromptIndex(parsed);
   }, []);
 
-  // Poll for updates when session is running
+  // Poll for updates when session is running. setTimeout self-chain
+  // (not setInterval) so a slow GET — multi-MB transcript serialization,
+  // sluggish network — can't cause polls to pile up and re-render the page
+  // four times in quick succession when latency catches up.
   useEffect(() => {
     if (!id || !session || session.status !== 'RUNNING') return;
-    const poll = setInterval(() => {
-      api.getSession(id).then((updated) => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      try {
+        const updated = await api.getSession(id);
+        if (cancelled) return;
         setSession(updated);
-        if (updated.status !== 'RUNNING') clearInterval(poll);
-      }).catch(() => {});
-    }, 5000);
-    return () => clearInterval(poll);
+        if (updated.status !== 'RUNNING') return; // stop the chain
+      } catch { /* ignore — retry next tick */ }
+      if (!cancelled) timer = setTimeout(tick, 5000);
+    };
+    timer = setTimeout(tick, 5000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [id, session?.status]);
 
   const handleReview = async (status: string) => {

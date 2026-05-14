@@ -105,6 +105,46 @@ function deriveSessionTitle(s: any): string | null {
   return null;
 }
 
+// Cap transcript size returned to clients. Multi-MB transcripts (Gemini
+// with verbose tool capture) block Chrome's main thread for seconds on the
+// response's JSON.parse and freeze the session-detail page on every poll.
+// Strategy: if the stored transcript parses as a JSON array of messages
+// (the normal Origin shape), drop oldest messages until under the cap. If
+// it doesn't parse, byte-truncate — the client falls back to its synth-
+// from-promptChanges path when JSON.parse fails on the truncated chunk.
+const TRANSCRIPT_RESPONSE_CAP = 500_000;
+function capTranscriptForResponse(raw: string | null | undefined): string {
+  if (!raw) return raw || '';
+  if (raw.length <= TRANSCRIPT_RESPONSE_CAP) return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      // Keep the newest messages, drop oldest until we fit. Newest first
+      // is what the dashboard sorts to by default for RUNNING sessions, so
+      // dropping the oldest preserves the visible/expanded content the
+      // user is currently looking at.
+      const kept: any[] = [];
+      let size = 2; // "[]"
+      for (let i = parsed.length - 1; i >= 0; i--) {
+        const entry = JSON.stringify(parsed[i]);
+        const add = entry.length + (kept.length > 0 ? 1 : 0); // comma between entries
+        if (size + add > TRANSCRIPT_RESPONSE_CAP) break;
+        kept.unshift(parsed[i]);
+        size += add;
+      }
+      if (kept.length === 0) {
+        // Even a single message exceeds the cap — fall back to a stub.
+        return JSON.stringify([{ role: 'system', content: '(transcript truncated — too large to serve inline)' }]);
+      }
+      return JSON.stringify(kept);
+    }
+  } catch { /* fall through to byte-truncate */ }
+  // Non-array transcript (or parse failed): byte-truncate. Client's JSON.parse
+  // will throw on the partial JSON and fall through to synthesizing a
+  // transcript from promptChanges.
+  return raw.slice(0, TRANSCRIPT_RESPONSE_CAP);
+}
+
 function mapSession(s: any, pullRequests?: any[]) {
   return {
     id: s.id,
@@ -131,7 +171,16 @@ function mapSession(s: any, pullRequests?: any[]) {
     model: s.model,
     prompt: s.prompt,
     aiTitle: (s as any).aiTitle || deriveSessionTitle(s),
-    transcript: s.transcript,
+    // Cap transcript at 500KB so the browser doesn't block parsing a
+    // multi-MB blob on every poll. Gemini sessions in particular can
+    // accumulate huge transcripts (full tool outputs interleaved with
+    // assistant text) — at megabyte scale Chrome's main thread blocks
+    // long enough on JSON.parse that the page goes unresponsive. When
+    // truncated we lop off the tail (not the head) since the UI shows
+    // newest-first and a sentinel JSON-array close so the client's
+    // JSON.parse still succeeds.
+    transcript: capTranscriptForResponse(s.transcript),
+    transcriptTruncated: (s.transcript?.length || 0) > 500_000,
     filesChanged: s.filesChanged,
     tokensUsed: s.tokensUsed,
     inputTokens: s.inputTokens,
