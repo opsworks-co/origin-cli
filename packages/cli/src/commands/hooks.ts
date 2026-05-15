@@ -2401,6 +2401,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
     .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+    // Cursor wraps each user message in <user_query>...</user_query>. Keep
+    // the inner text so the dashboard shows "make little change and commit"
+    // instead of "<user_query> make little change and commit </user_query>".
+    .replace(/<user_query>([\s\S]*?)<\/user_query>/g, '$1')
     .trim();
   const isSystemMsg = !prompt || /^Stop hook feedback:|^Stop:Callback hook blocking error|^PostToolUse:.*hook|^PreToolUse:.*hook/i.test(prompt);
   if (prompt && !isSystemMsg) {

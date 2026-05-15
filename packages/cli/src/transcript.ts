@@ -263,6 +263,14 @@ function cleanPrompt(text: string): string | null {
     // its first user turn. Strip the envelope so real text that follows
     // (if any) still makes it through.
     .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+    // Cursor wraps every user prompt in <user_query>...</user_query> in its
+    // agent-transcripts JSONL. Without stripping the envelope the dashboard
+    // shows literal "<user_query> make little change and commit </user_query>"
+    // instead of the user's actual text.
+    .replace(/<user_query>([\s\S]*?)<\/user_query>/g, '$1')
+    // Codex's session-init envelope (kept here too as belt-and-suspenders).
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
     .trim();
 
   if (!cleaned) return null;
