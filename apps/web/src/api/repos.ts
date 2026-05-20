@@ -107,6 +107,14 @@ export interface RepoFileLine {
   agentName: string | null;
   userName: string | null;
   sessionId: string | null;
+  // Prompt-level attribution derived server-side by content-matching
+  // this line against every `+` line in the session's PromptChange diffs.
+  // null when GitHub blame attributed the line to a commit/session whose
+  // per-prompt diffs don't contain the line's exact content (e.g. lines
+  // modified by a later commit/session whose work is now attributed to
+  // a different SHA, or lines from sessions with no captured pc.diff).
+  promptIndex: number | null;
+  promptText: string | null;
 }
 
 export interface RepoFileBlame {

@@ -1971,8 +1971,10 @@ router.get('/:id/file', async (req: AuthRequest, res: Response) => {
       agentName: string | null;
       userName: string | null;
       sessionId: string | null;
+      promptIndex: number | null;
+      promptText: string | null;
     }> = new Array(lines.length).fill(null).map(() => ({
-      sha: null, isAi: false, agentSlug: null, agentName: null, userName: null, sessionId: null,
+      sha: null, isAi: false, agentSlug: null, agentName: null, userName: null, sessionId: null, promptIndex: null, promptText: null,
     }));
     for (const r of ranges) {
       const dbCommit = commitBySha.get(r.sha);
@@ -1996,7 +1998,76 @@ router.get('/:id/file', async (req: AuthRequest, res: Response) => {
           agentName,
           userName,
           sessionId,
+          promptIndex: null,
+          promptText: null,
         };
+      }
+    }
+
+    // ── Prompt-level enrichment ─────────────────────────────────────────
+    // GitHub blame attributes a line to a commit; the Commit row tells us
+    // the SESSION; but a session usually has multiple PROMPTS, and we
+    // already store per-prompt diffs (PromptChange.diff +
+    // PromptChange.uncommittedDiff). Walk each touched session's prompts
+    // in order, build a content→promptIndex map of every `+` line that
+    // appears in any prompt's diff, then for each file line look up its
+    // session's map. Earliest-wins so a later prompt re-adding identical
+    // text doesn't steal the original author. This is the same content-
+    // matching the /sessions/:id/blame endpoint already uses.
+    const touchedSessionIds = Array.from(
+      new Set(lineAttr.map((l) => l.sessionId).filter((s): s is string => !!s)),
+    );
+    if (touchedSessionIds.length > 0) {
+      const pcRows = await prisma.promptChange.findMany({
+        where: { sessionId: { in: touchedSessionIds } },
+        select: { sessionId: true, promptIndex: true, promptText: true, diff: true, uncommittedDiff: true },
+        orderBy: [{ sessionId: 'asc' }, { promptIndex: 'asc' }],
+      });
+      // Per-session content → { promptIndex, promptText } map.
+      const promptBySession = new Map<string, Map<string, { promptIndex: number; promptText: string }>>();
+      const normTarget = filePath.replace(/^\//, '');
+      for (const pc of pcRows) {
+        if (!pc.sessionId) continue;
+        for (const blob of [pc.diff, (pc as any).uncommittedDiff]) {
+          if (typeof blob !== 'string' || !blob) continue;
+          for (const section of blob.split(/^(?=diff --git )/m)) {
+            const headerLine = section.split('\n', 1)[0] || '';
+            const m = headerLine.match(/^diff --git a\/(.+?)\s+b\/(.+)$/);
+            if (!m) continue;
+            const fp = m[2].replace(/^\//, '');
+            // Path-component-boundary match — `utils.py` must not match `test_utils.py`.
+            if (
+              fp !== normTarget &&
+              !fp.endsWith('/' + normTarget) &&
+              !normTarget.endsWith('/' + fp)
+            ) continue;
+            for (const raw of section.split('\n')) {
+              if (!raw.startsWith('+') || raw.startsWith('+++')) continue;
+              const content = raw.slice(1);
+              if (!content.trim()) continue; // skip blank-only added lines (too common to be unique)
+              let map = promptBySession.get(pc.sessionId);
+              if (!map) { map = new Map(); promptBySession.set(pc.sessionId, map); }
+              if (!map.has(content)) {
+                map.set(content, {
+                  promptIndex: pc.promptIndex,
+                  promptText: (pc.promptText || '').slice(0, 200),
+                });
+              }
+            }
+          }
+        }
+      }
+      // Enrich each file line that has a known sessionId.
+      for (let i = 0; i < lines.length; i++) {
+        const attr = lineAttr[i];
+        if (!attr.sessionId) continue;
+        const map = promptBySession.get(attr.sessionId);
+        if (!map) continue;
+        const hit = map.get(lines[i]);
+        if (hit) {
+          attr.promptIndex = hit.promptIndex;
+          attr.promptText = hit.promptText;
+        }
       }
     }
 

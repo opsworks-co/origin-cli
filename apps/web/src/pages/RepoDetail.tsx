@@ -1916,12 +1916,25 @@ function FileBlameView({ blame }: { blame: RepoFileBlameT }) {
           const key = resolveAgentKey(ln.agentSlug, ln.isAi);
           const v = AGENT_VISUALS[key];
           const cohorted = activeKey === key;
+          const promptLabel = ln.isAi && ln.promptIndex !== null
+            ? ` · prompt #${ln.promptIndex + 1}`
+            : '';
+          const promptTextSuffix = ln.isAi && ln.promptText
+            ? `\n"${ln.promptText.slice(0, 120)}${ln.promptText.length > 120 ? '…' : ''}"`
+            : '';
           const tooltip = ln.isAi
-            ? `${v.label}${ln.userName ? ' · ' + ln.userName : ''}${ln.sessionId ? ' · session ' + ln.sessionId.slice(0, 8) : ''}`
+            ? `${v.label}${ln.userName ? ' · ' + ln.userName : ''}${ln.sessionId ? ' · session ' + ln.sessionId.slice(0, 8) : ''}${promptLabel}${promptTextSuffix}`
             : ln.userName ? `Human · ${ln.userName}` : 'Human';
+          // Deep-link to the prompt's AI Blame view when we know which
+          // prompt added this line; otherwise to the session.
           const linkable = ln.isAi && ln.sessionId;
           const Wrapper: any = linkable ? Link : 'div';
-          const wrapperProps: any = linkable ? { to: `/sessions/${ln.sessionId}` } : {};
+          const sessionHref = ln.sessionId
+            ? (ln.promptIndex !== null
+                ? `/sessions/${ln.sessionId}?tab=blame&prompt=${ln.promptIndex}`
+                : `/sessions/${ln.sessionId}`)
+            : '';
+          const wrapperProps: any = linkable ? { to: sessionHref } : {};
           // Cohort tint dominates over hover tint so highlighting one
           // agent visually subdues the others.
           const rowBg = cohorted
