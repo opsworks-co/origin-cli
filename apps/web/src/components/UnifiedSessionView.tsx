@@ -775,6 +775,7 @@ function TurnCard({
   diffCache,
   hideToolCalls,
   snapshots,
+  sessionCommitShas,
 }: {
   turn: TranscriptTurn;
   isExpanded: boolean;
@@ -784,6 +785,12 @@ function TurnCard({
   diffCache: React.MutableRefObject<Map<number, DiffFile[]>>;
   hideToolCalls?: boolean;
   snapshots?: SessionSnapshot[];
+  // The SHAs of commits that actually belong to THIS Origin session.
+  // Used to validate pc.commitSha — older Gemini/Cursor captures
+  // sometimes leak the previous session's commit SHA into a new
+  // prompt's PromptChange row, which would otherwise light up a
+  // false "committed" badge.
+  sessionCommitShas: Set<string>;
 }) {
   const pc = turn.promptChange;
   // `hasChanges` controls the indigo prompt-number badge — should fire
@@ -792,15 +799,28 @@ function TurnCard({
   // diff text is intact.
   const hasDiff = pc && pc.diff && pc.diff.length > 0;
   const hasUncommittedDiff = pc && pc.uncommittedDiff && pc.uncommittedDiff.length > 0;
-  const hasChanges = !!(pc && (pc.filesChanged.length > 0 || hasDiff || hasUncommittedDiff));
+  // Genuinely produced work signal — defends the chat-only-no-data case
+  // (filesChanged populated as leakage from a prior session but neither
+  // diff nor uncommittedDiff present) from showing as "has changes."
+  const hasRealWork = !!(hasDiff || hasUncommittedDiff);
+  const hasChanges = !!(pc && (hasRealWork || pc.filesChanged.length > 0));
   // Summary-level commit status pill. A prompt with a commitSha AND no
   // uncommittedDiff is fully committed; uncommittedDiff present means
   // some/all of its work is still in the working tree. We never show
   // both — the file-level badges inside the expanded view handle the
   // mixed case in detail.
+  //
+  // "committed" is gated on the commit actually being one of THIS
+  // session's commits — pc.commitSha leaks from prior sessions when an
+  // older CLI's capture mis-attributed the head SHA at session-start,
+  // and we shouldn't claim a prompt produced a commit that the session
+  // doesn't actually own. Also gated on `hasRealWork`: a prompt with
+  // no captured diff content didn't really commit anything from this
+  // turn even if a commitSha sneaked in.
+  const commitInSession = !!(pc?.commitSha && sessionCommitShas.has(pc.commitSha));
   const promptCommitStatus: 'committed' | 'uncommitted' | null =
-    pc && (pc.filesChanged.length > 0 || hasDiff || hasUncommittedDiff)
-      ? (hasUncommittedDiff ? 'uncommitted' : (pc.commitSha ? 'committed' : null))
+    pc && hasRealWork
+      ? (hasUncommittedDiff ? 'uncommitted' : (commitInSession ? 'committed' : null))
       : null;
 
   const promptText =
@@ -905,7 +925,7 @@ function TurnCard({
                 {files.length > 0 ? files.length : pc!.filesChanged.length} file{(files.length > 0 ? files.length : pc!.filesChanged.length) !== 1 ? 's' : ''}
               </span>
             )}
-            {promptCommitStatus === 'committed' && (
+            {promptCommitStatus === 'committed' && commitInSession && (
               <span
                 className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400/80 border border-emerald-500/20"
                 title={pc?.commitSha ? `Committed as ${pc.commitSha.slice(0, 8)}` : 'Committed'}
@@ -1199,6 +1219,17 @@ export default function UnifiedSessionView({
   const [newestFirst, setNewestFirst] = useState(defaultNewestFirst);
   const diffCache = useRef<Map<number, DiffFile[]>>(new Map());
 
+  // Memoize the set of commit SHAs this session actually owns so TurnCard
+  // can validate pc.commitSha against it (some pre-fix CLIs leak prior
+  // sessions' SHAs into new PromptChange rows).
+  const sessionCommitShas = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of (commits || [])) {
+      if (c?.sha) set.add(c.sha);
+    }
+    return set;
+  }, [commits]);
+
   const turns = useMemo(
     () => buildUnifiedTurns(transcript, promptChanges),
     [transcript, promptChanges],
@@ -1344,6 +1375,7 @@ export default function UnifiedSessionView({
                     onToggleFile={toggleFile}
                     diffCache={diffCache}
                     snapshots={snapshotsByPromptIndex.get(turn.turnIndex) || []}
+                    sessionCommitShas={sessionCommitShas}
                   />
                 </ErrorBoundary>
                 {turnCommits.map((c) => (
