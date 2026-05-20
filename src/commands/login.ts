@@ -1,18 +1,215 @@
+import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { createInterface } from 'readline/promises';
 import { saveConfig, saveProfile, listProfiles, loadConfig, deleteProfile } from '../config.js';
+import { clearReloginLock } from '../api.js';
 import chalk from 'chalk';
 
-export async function loginCommand(opts: { key?: string; url?: string; profile?: string }) {
+// Wipe local session state when the workspace identity changes. Without
+// this, sessions captured under a previous account stay queued in
+// ~/.origin/sessions/ and can leak into the new account through retry/
+// resume paths. The local files were never visible on a server (their
+// sync calls 401'd after the old account was deleted), but they can
+// hydrate stale state into the next `origin enable` if the
+// session-state lookup ever picks them up. Clean slate is safer than
+// trying to be clever about which queue entries belong to whom.
+function clearLocalSessionState(): { sessions: number; heartbeats: number } {
+  const home = os.homedir();
+  let sessions = 0;
+  let heartbeats = 0;
+  for (const sub of ['sessions', 'heartbeats']) {
+    const dir = path.join(home, '.origin', sub);
+    if (!fs.existsSync(dir)) continue;
+    try {
+      for (const entry of fs.readdirSync(dir)) {
+        const p = path.join(dir, entry);
+        try {
+          fs.unlinkSync(p);
+          if (sub === 'sessions') sessions++;
+          else heartbeats++;
+        } catch { /* skip files we can't remove */ }
+      }
+    } catch { /* ignore — directory might be missing */ }
+  }
+  return { sessions, heartbeats };
+}
+
+// Best-effort: open a URL in the user's default browser. Falls back to
+// printing the URL if the platform-specific opener isn't available.
+function openInBrowser(url: string) {
+  try {
+    const cmd = process.platform === 'darwin'
+      ? 'open'
+      : process.platform === 'win32'
+        ? 'cmd'
+        : 'xdg-open';
+    const args = process.platform === 'win32' ? ['/c', 'start', '""', url] : [url];
+    spawn(cmd, args, { stdio: 'ignore', detached: true }).unref();
+  } catch { /* user can copy the URL manually */ }
+}
+
+// Drive the device-code flow on the server. Returns the minted key +
+// resolved metadata, or throws if the request expires / is denied.
+async function deviceCodeLogin(apiUrl: string): Promise<{
+  apiKey: string;
+  orgId: string;
+  orgName: string;
+  keyType: 'solo' | 'team';
+  accountType: 'developer' | 'org';
+}> {
+  const startRes = await fetch(`${apiUrl}/api/cli-auth/start`, { method: 'POST' });
+  if (!startRes.ok) {
+    throw new Error(`Couldn't start device login (HTTP ${startRes.status}). Falling back: rerun with --key.`);
+  }
+  const start = (await startRes.json()) as {
+    deviceCode: string;
+    userCode: string;
+    verificationUrl: string;
+    expiresIn: number;
+    interval: number;
+  };
+
+  console.log(chalk.gray('  Open this URL in your browser to approve the login:'));
+  console.log('    ' + chalk.cyan(start.verificationUrl));
+  console.log(chalk.gray(`  Code: ${chalk.white(start.userCode)}`));
+  console.log(chalk.gray(`  (waiting up to ${Math.round(start.expiresIn / 60)} min for approval…)\n`));
+  openInBrowser(start.verificationUrl);
+
+  const deadline = Date.now() + start.expiresIn * 1000;
+  const intervalMs = Math.max(1, start.interval) * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const pollRes = await fetch(`${apiUrl}/api/cli-auth/poll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    });
+    if (pollRes.status === 202) continue; // still pending
+    if (pollRes.status === 410) throw new Error('Login request expired. Rerun `origin login`.');
+    if (pollRes.status === 403) throw new Error('Login denied in browser.');
+    if (pollRes.ok) {
+      const body = (await pollRes.json()) as {
+        status: string;
+        apiKey: string;
+        orgId: string;
+        orgName: string;
+        keyType?: 'solo' | 'team';
+        accountType?: 'developer' | 'org';
+      };
+      if (body.status === 'approved' && body.apiKey) {
+        return {
+          apiKey: body.apiKey,
+          orgId: body.orgId,
+          orgName: body.orgName,
+          keyType: body.keyType || 'team',
+          accountType: body.accountType || 'org',
+        };
+      }
+    }
+    // Other statuses fall through and retry until deadline.
+  }
+  throw new Error('Login request timed out. Rerun `origin login`.');
+}
+
+export async function loginCommand(opts: { key?: string; url?: string; profile?: string; browser?: boolean }) {
   console.log(chalk.bold('\n🔑 Origin Login\n'));
 
   let url: string;
   let key: string;
 
+  // Force device-code flow when:
+  //   - --browser flag is passed (explicit), OR
+  //   - ORIGIN_FORCE_DEVICE_CODE=1 env var is set (used by the
+  //     api.ts auto-relogin spawn, where the child has stdio:
+  //     'ignore' so process.stdin.isTTY is false and we'd
+  //     otherwise drop into the manual-prompt branch and die on
+  //     EOF from the closed stdin).
+  const forceDeviceCode = !!opts.browser || process.env.ORIGIN_FORCE_DEVICE_CODE === '1';
+
   if (opts.key) {
-    // Non-interactive mode
+    // Non-interactive mode — explicit key supplied.
     url = (opts.url || 'https://getorigin.io').replace(/\/+$/, '');
     key = opts.key.trim();
+  } else if (process.stdin.isTTY || forceDeviceCode) {
+    // Default path: browser-based device-code flow so users don't
+    // have to dig an API key out of Settings and paste it. This is
+    // the common path for re-login after the previous account was
+    // deleted/rotated. Falls back to manual prompts if the server's
+    // /cli-auth endpoints don't respond (older self-hosted versions).
+    url = (opts.url || 'https://getorigin.io').replace(/\/+$/, '');
+    try {
+      const result = await deviceCodeLogin(url);
+      key = result.apiKey;
+      const currentConfig = loadConfig();
+      // Workspace switch detection: if the orgId is changing (or the
+      // previous login was a different account), wipe queued local
+      // session state before saving the new config. Stops old data
+      // from contaminating the new account's view.
+      const switching = !!currentConfig?.orgId && currentConfig.orgId !== result.orgId;
+      if (switching) {
+        const cleared = clearLocalSessionState();
+        if (cleared.sessions || cleared.heartbeats) {
+          console.log(chalk.gray(`  Cleared ${cleared.sessions} stale session record${cleared.sessions === 1 ? '' : 's'} from previous workspace.`));
+        }
+      }
+      saveConfig({
+        ...currentConfig,
+        apiUrl: url,
+        apiKey: key,
+        orgId: result.orgId,
+        userId: '',
+        keyType: result.keyType,
+        accountType: result.accountType,
+        orgName: result.orgName,
+      });
+      // Clear the auto-relogin lock so a future drift can re-spawn
+      // this flow. (api.ts also clears it on the next successful
+      // request — this is the belt-and-braces path for cases where
+      // login finishes before another hook fires.)
+      clearReloginLock();
+      const isSolo = result.keyType === 'solo' || result.accountType === 'developer';
+      const profileName = opts.profile || (isSolo ? 'dev' : 'team');
+      const existingProfiles = listProfiles();
+      for (const p of existingProfiles) {
+        if (p.apiKey === key && p.name !== profileName) {
+          deleteProfile(p.name);
+        }
+      }
+      saveProfile(profileName, {
+        name: profileName,
+        apiUrl: url,
+        apiKey: key,
+        orgId: result.orgId,
+        orgName: result.orgName,
+        keyType: result.keyType,
+        accountType: result.accountType,
+      });
+      console.log(chalk.green(`\n✓ Connected — ${isSolo ? 'Solo Developer' : `Team Member @ ${result.orgName}`}`));
+      console.log(chalk.gray(`  Workspace: ${result.orgName}`));
+      console.log(chalk.gray(`  Config saved to ~/.origin/config.json`));
+      process.exit(0);
+    } catch (err: any) {
+      console.log(chalk.yellow(`\n⚠ Browser login didn't complete: ${err.message}`));
+      // When this is the auto-relogin spawn (no TTY, forceDeviceCode
+      // env), don't fall through to manual stdin prompts — there's
+      // no user typing into us. Exit cleanly so the lock file
+      // expires and a future hook can re-spawn.
+      if (forceDeviceCode && !process.stdin.isTTY) {
+        process.exit(1);
+      }
+      console.log(chalk.gray('  Falling back to manual API key entry.\n'));
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
+      const apiKey = await rl.question(chalk.gray('API Key: '));
+      rl.close();
+      url = (apiUrl.trim() || 'https://getorigin.io').replace(/\/+$/, '');
+      key = apiKey.trim();
+    }
   } else {
+    // No TTY (CI / piped input) — keep the interactive prompts. They
+    // fail noisily in CI rather than hanging on the device-code wait.
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
     const apiKey = await rl.question(chalk.gray('API Key: '));

@@ -1,9 +1,101 @@
+import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { loadConfig } from './config.js';
 
 function getConfig() {
   const config = loadConfig();
   if (!config) throw new Error('Not logged in. Run: origin login');
   return config;
+}
+
+// Auth status file — written on every API result so hooks (and any
+// future surface) can detect a dead key without re-hitting the server.
+// The hooks then inject a visible warning into the agent's
+// systemMessage so the user sees "your CLI is dead" inside Claude
+// Code / Codex / Cursor, instead of staring at a silent dashboard
+// while every request 401s into hooks.log.
+const AUTH_STATUS_PATH = path.join(os.homedir(), '.origin', 'auth-status.json');
+
+interface AuthStatus {
+  state: 'ok' | 'unauthorized' | 'unreachable';
+  lastCheckedAt: string;
+  /** Key prefix (first 14 chars) — never the full key — so the warning
+   *  surface can disambiguate when a user has multiple profiles. */
+  keyPrefix?: string;
+  /** Human-readable error from the server, if any. */
+  message?: string;
+}
+
+export function readAuthStatus(): AuthStatus | null {
+  try {
+    return JSON.parse(fs.readFileSync(AUTH_STATUS_PATH, 'utf-8')) as AuthStatus;
+  } catch {
+    return null;
+  }
+}
+
+function writeAuthStatus(status: AuthStatus): void {
+  try {
+    fs.mkdirSync(path.dirname(AUTH_STATUS_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(AUTH_STATUS_PATH, JSON.stringify(status, null, 2));
+  } catch { /* best-effort — don't blow up a hook over a status file */ }
+}
+
+// Self-healing re-login. The first time a hook (or any request) sees a
+// 401, we spawn a detached `origin login` process which runs the
+// device-code flow: opens the browser, the user clicks Approve once
+// in the dashboard tab they already have open, and the CLI writes a
+// fresh key to ~/.origin/config.json. Subsequent hooks pick it up
+// transparently. The lock file prevents spawning multiple browser
+// windows when several hooks fire back-to-back during the recovery
+// window.
+const RELOGIN_LOCK_PATH = path.join(os.homedir(), '.origin', 'relogin.lock');
+const RELOGIN_LOCK_TTL_MS = 15 * 60 * 1000; // browser approval window + slack
+
+function shouldSpawnRelogin(): boolean {
+  try {
+    const raw = fs.readFileSync(RELOGIN_LOCK_PATH, 'utf-8');
+    const { spawnedAt } = JSON.parse(raw) as { spawnedAt: number };
+    if (typeof spawnedAt === 'number' && Date.now() - spawnedAt < RELOGIN_LOCK_TTL_MS) {
+      return false; // another relogin is already in flight
+    }
+  } catch { /* no lock or unreadable — proceed */ }
+  return true;
+}
+
+function markReloginSpawned(): void {
+  try {
+    fs.mkdirSync(path.dirname(RELOGIN_LOCK_PATH), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(RELOGIN_LOCK_PATH, JSON.stringify({ spawnedAt: Date.now() }));
+  } catch { /* best-effort */ }
+}
+
+export function clearReloginLock(): void {
+  try { fs.unlinkSync(RELOGIN_LOCK_PATH); } catch { /* already gone */ }
+}
+
+function isHookContext(): boolean {
+  // The CLI is being invoked as an agent hook (e.g. `origin hooks codex
+  // user-prompt-submit`). Hooks run in the background by the agent — the
+  // user isn't watching the terminal and doesn't expect a browser window
+  // to pop up just because a stale API key returned 401. Skip the relogin
+  // spawn in this context and let the user run `origin login` manually
+  // when they're ready (the auth-status file already records the failure).
+  const argv = process.argv.slice(2);
+  return argv.length >= 1 && argv[0] === 'hooks';
+}
+
+function spawnReloginBackground(): void {
+  // Auto-spawning the browser-based device-code login on every 401 popped
+  // unwanted sign-in tabs whenever any hook/heartbeat hit a stale key.
+  // The user has flagged this — they don't want web auth triggered out of
+  // band. Skip the spawn entirely; the auth-status file already records
+  // the failure and the user can run `origin login --key <key>` manually
+  // when they're ready. (Hook context was already excluded; this just
+  // brings the rest of the CLI in line.)
+  return;
 }
 
 /** Ensure a parsed API response is a non-null object. */
@@ -25,16 +117,45 @@ function assertFields(res: unknown, label: string, fields: string[]): asserts re
 
 async function request(path: string, opts: RequestInit = {}) {
   const config = getConfig();
-  const res = await fetch(`${config.apiUrl}${path}`, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': config.apiKey,
-      ...opts.headers as Record<string, string>,
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${config.apiUrl}${path}`, {
+      ...opts,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': config.apiKey,
+        ...opts.headers as Record<string, string>,
+      },
+    });
+  } catch (err: any) {
+    writeAuthStatus({
+      state: 'unreachable',
+      lastCheckedAt: new Date().toISOString(),
+      keyPrefix: config.apiKey?.slice(0, 14),
+      message: err?.message || 'network error',
+    });
+    throw err;
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as any;
+    if (res.status === 401) {
+      // Dead key. Snapshot the failure so hooks can warn the user
+      // inside their agent UI instead of swallowing 401s into logs.
+      writeAuthStatus({
+        state: 'unauthorized',
+        lastCheckedAt: new Date().toISOString(),
+        keyPrefix: config.apiKey?.slice(0, 14),
+        message: body?.error || 'Invalid API key',
+      });
+      // Permanent fix: kick off `origin login` in the background so
+      // the user just clicks Approve in the dashboard tab they
+      // already have open and the CLI self-heals. Lock-gated so a
+      // burst of failing hooks doesn't spawn multiple browser
+      // windows. The current request still fails (we can't pause a
+      // hook on a 5-min device-code wait) but every subsequent
+      // hook will succeed once the user clicks Approve.
+      spawnReloginBackground();
+    }
     const err = new Error(body?.message || body?.error || res.statusText) as any;
     err.status = res.status;
     err.serverError = body?.error;
@@ -44,6 +165,17 @@ async function request(path: string, opts: RequestInit = {}) {
     err.code = body?.code;
     err.body = body;
     throw err;
+  }
+  // Successful response — clear any stale unauthorized flag and the
+  // relogin lock so a future drift can spawn the flow again.
+  const prior = readAuthStatus();
+  if (prior && prior.state !== 'ok') {
+    writeAuthStatus({
+      state: 'ok',
+      lastCheckedAt: new Date().toISOString(),
+      keyPrefix: config.apiKey?.slice(0, 14),
+    });
+    clearReloginLock();
   }
   return res.json();
 }
@@ -115,6 +247,10 @@ export const api = {
       additions?: number;
       deletions?: number;
       committedAt?: string;
+      // Per-commit unified diff (`git diff <sha>~1..<sha>` output).
+      // Stored on Commit.patch so the dashboard can render this commit's
+      // changes instead of the session aggregate.
+      diff?: string;
     }>;
   }) => {
     const res = await request('/api/mcp/commits/ingest', { method: 'POST', body: JSON.stringify(data) });

@@ -33,21 +33,60 @@ export interface TabCompletionStats {
 
 export interface SessionState {
   sessionId: string;          // Origin API session ID
-  claudeSessionId: string;    // Claude Code's session ID
+  // The agent's own session identifier, locked at session-start. Different
+  // agents call it different things — Claude Code: session_id; Cursor:
+  // session_id / conversation_id (matches the agent-transcripts/<id>/ dir);
+  // Codex: thread_id (matches threads.id in ~/.codex/state_*.sqlite and the
+  // rollout-<id>.jsonl filename); Gemini: session_id from stdin.
+  //
+  // Anchors EVERY downstream lookup: transcript discovery, rollout pickup,
+  // and hook routing. We never fall back to "newest by mtime" or
+  // "basename LIKE %x%" anymore — if the ID can't be matched, the hook
+  // captures nothing and logs the miss instead of guessing.
+  agentSessionId?: string;
+  // Backward-compat field name — older state files predate `agentSessionId`
+  // and key off this one. New code prefers `agentSessionId`; old readers
+  // (findSessionByClaudeId, etc.) continue to work because session-start
+  // mirrors the agent's session ID into both fields.
+  claudeSessionId: string;
   transcriptPath: string;     // Path to JSONL transcript file
   model: string;
   startedAt: string;          // ISO timestamp
   prompts: string[];          // Accumulated user prompts
+  // Per-prompt assistant responses, captured opportunistically when the
+  // agent ships the reply on stdin (Gemini's `prompt_response`). Indexed
+  // by prompt index so we can interleave them with `prompts` in the
+  // synthesized transcript when no real JSONL is available.
+  promptResponses?: string[];
   repoPath: string;           // Git repo root path OR working directory
   headShaAtStart: string | null; // HEAD commit SHA when session started (null if no git)
   headShaAtLastStop: string | null; // HEAD SHA after last prompt stop (for per-prompt diffs)
   prePromptSha: string | null;  // HEAD SHA before current prompt (for per-prompt git diffs)
+  // Per-prompt shadow commits captured by the heartbeat daemon when it
+  // detects a new user_message in the rollout (Codex etc. that don't fire
+  // user-prompt-submit reliably). `promptShadows[i]` is the SHA of a
+  // shadow commit reflecting the working tree state at the START of
+  // prompt i. Per-prompt diff for prompt N = `git diff
+  // promptShadows[N] → promptShadows[N+1]` (or → working tree for the
+  // latest prompt). Lets us isolate per-turn work even when no hook fires
+  // at prompt boundaries.
+  promptShadows?: Array<{
+    promptIndex: number;
+    shadowSha: string;
+    capturedAt: string; // ISO timestamp
+  }>;
   completedPromptMappings?: Array<{  // Accumulated per-prompt file change mappings
     promptIndex: number;
     promptText: string;
     filesChanged: string[];
     diff: string;
     uncommittedDiff?: string;
+    commitSha?: string | null;
+    treeSha?: string | null;
+    // True when Stop decided this prompt didn't touch code (no commits, no
+    // transcript edits). Prevents the next user-prompt-submit retroactive
+    // capture from sweeping in pre-existing dirty changes.
+    chatOnly?: boolean;
   }>;
   branch: string | null;      // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support
@@ -60,6 +99,19 @@ export interface SessionState {
   activePolicies?: string[];  // Cached active policies for session resume
   verboseCapture?: boolean;   // Opt-in flag from the repo: capture full tool inputs + tool_result bodies
   prePromptDirtyFiles?: string[]; // Files that were already dirty (uncommitted) before current prompt
+  // Files that were uncommitted at session-start. Captured BEFORE the start-
+  // shadow trick zeros out prePromptDirtyFiles. Persists for the life of the
+  // session so the session-end snapshot can still filter out pre-existing
+  // pollution (e.g. an earlier agent's leftover uncommitted edits) even
+  // though prePromptDirtyFiles has since been rotated to per-prompt state.
+  sessionStartDirtyFiles?: string[];
+  // Commits made BY this session, as recorded by the post-commit hook. Used
+  // to scope `committedDiff` to commits this session actually authored —
+  // crucial when multiple agents run concurrently on the same repo: without
+  // this, a `git diff prePromptSha...HEAD` heartbeat picks up commits made
+  // by the OTHER session (HEAD has moved) and credits them to the wrong
+  // agent in AI Blame.
+  sessionCommitShas?: string[];
   enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
   trailId?: string;           // Trail ID if session is linked to an active trail
   agentSlug?: string;         // Agent slug (claude-code, cursor, codex, gemini, etc.)
@@ -100,7 +152,33 @@ export function getGitDir(cwd?: string): string | null {
 
 export function getGitRoot(cwd?: string): string | null {
   try {
-    return execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const top = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    if (!top) return null;
+    // Linked git worktrees report their own --show-toplevel — e.g.
+    // ~/.claude/worktrees/claude/quirky-albattani-c9f7c3. The basename then
+    // becomes the "repo name" on the dashboard, which is wrong: the
+    // worktree is just a working copy of the SAME repo. Detect via
+    // --git-common-dir (points at the MAIN repo's .git for linked
+    // worktrees, equals "<top>/.git" otherwise) and walk back to the
+    // actual repo so Origin attributes sessions to the canonical project.
+    try {
+      const commonDirRaw = execSync('git rev-parse --git-common-dir', {
+        encoding: 'utf-8', cwd: top, stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (commonDirRaw) {
+        const absCommonDir = path.isAbsolute(commonDirRaw)
+          ? commonDirRaw
+          : path.resolve(top, commonDirRaw);
+        const mainRepo = path.dirname(absCommonDir);
+        // Sanity: only collapse when the main repo path is a different,
+        // non-empty directory that actually exists. Anything weird → keep
+        // top so we don't accidentally hide the worktree session.
+        if (mainRepo && mainRepo !== top && fs.existsSync(mainRepo)) {
+          return mainRepo;
+        }
+      }
+    } catch { /* fall through */ }
+    return top;
   } catch {
     return null;
   }

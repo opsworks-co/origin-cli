@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -144,20 +145,34 @@ function installCursorHooks(gitRoot: string): void {
 
   if (!config.hooks) config.hooks = {};
 
-  // Cursor's hook event schema (v1.7+) uses `agentSessionStart` / `agentSessionEnd`
-  // — earlier `sessionStart` / `sessionEnd` names are NOT fired, which is why
-  // sessions silently never reached the platform. Write under the correct names.
+  // Cursor 2.x reverted to the standard `sessionStart` / `sessionEnd` event
+  // names. Cursor 1.7 briefly used `agentSessionStart` / `agentSessionEnd` but
+  // 2.6+ rejects those as "Unknown hook type" and FAILS THE ENTIRE CONFIG
+  // — no Origin hook fires, no sessions reach the dashboard. Write under the
+  // current names. Valid types per Cursor 2.6's parser: beforeShellExecution,
+  // beforeMCPExecution, afterShellExecution, afterMCPExecution, beforeReadFile,
+  // afterFileEdit, beforeTabFileRead, afterTabFileEdit, stop, beforeSubmitPrompt,
+  // afterAgentResponse, afterAgentThought, sessionStart, sessionEnd, preCompact,
+  // subagentStart, subagentStop, preToolUse, postToolUse, postToolUseFailure.
   const hooks: Record<string, any[]> = {
-    agentSessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
+    sessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
     stop: [{ command: originCmd('origin hooks cursor stop') }],
     beforeSubmitPrompt: [{ command: originCmd('origin hooks cursor user-prompt-submit') }],
-    agentSessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
+    sessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
+    // afterFileEdit captures Cursor's StrReplace / write tool calls as they
+    // happen. Cursor's git commits don't reliably trigger the global
+    // post-commit hook (sandbox / worktree isolation), so AI Blame would
+    // otherwise show empty diffs for Cursor sessions. Each edit-hook fire
+    // re-scans the working tree against the per-prompt shadow and updates
+    // the current prompt's mapping in place.
+    afterFileEdit: [{ command: originCmd('origin hooks cursor after-file-edit') }],
   };
 
-  // Strip our entries from the deprecated event names too, so an upgrade from
-  // an older CLI doesn't leave stale `sessionStart`/`sessionEnd` keys pointing
-  // at hooks Cursor never fires.
-  for (const legacy of ['sessionStart', 'sessionEnd']) {
+  // Strip our entries from the now-invalid event names so an upgrade from a
+  // CLI that wrote `agentSessionStart` / `agentSessionEnd` doesn't leave the
+  // whole config un-parseable. Cursor 2.6 rejects the entire hooks.json when
+  // ANY hook type is unknown, so this cleanup is required, not optional.
+  for (const legacy of ['agentSessionStart', 'agentSessionEnd']) {
     if (Array.isArray(config.hooks[legacy])) {
       config.hooks[legacy] = config.hooks[legacy].filter(
         (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks cursor'))
@@ -306,8 +321,14 @@ function installCodexHooks(gitRoot: string): void {
   const codexLabel = gitRoot === os.homedir() ? `~/.codex/hooks.json` : `.codex/hooks.json`;
   console.log(chalk.green(`  ✓ Hooks installed in ${codexLabel}`));
 
-  // Auto-enable codex_hooks feature flag in ~/.codex/config.toml so the user
-  // doesn't need to pass -c features.codex_hooks=true every time.
+  // Auto-enable the hooks feature flag in ~/.codex/config.toml so the user
+  // doesn't need to pass `-c features.hooks=true` every time.
+  //
+  // Codex renamed this flag from `codex_hooks` to `hooks` and now logs a
+  // deprecation warning on every launch when the old key is present (see
+  // https://developers.openai.com/codex/config-basic#feature-flags). We
+  // write the new canonical key, and if a user's config still has the
+  // legacy `codex_hooks = true` we rewrite it in-place during this run.
   const globalCodexDir = path.join(os.homedir(), '.codex');
   const configTomlPath = path.join(globalCodexDir, 'config.toml');
   try {
@@ -318,25 +339,140 @@ function installCodexHooks(gitRoot: string): void {
     if (fs.existsSync(configTomlPath)) {
       toml = fs.readFileSync(configTomlPath, 'utf-8');
     }
-    // Check if codex_hooks is already set
-    if (/codex_hooks\s*=\s*true/i.test(toml)) {
-      console.log(chalk.green(`  ✓ Codex hooks feature flag already enabled in ~/.codex/config.toml`));
-    } else {
-      // Add or update the [features] section
-      if (/\[features\]/i.test(toml)) {
-        // Section exists — append the flag after it
-        toml = toml.replace(/(\[features\]\s*\n)/, '$1codex_hooks = true\n');
+    const hasLegacy = /^[ \t]*codex_hooks\s*=\s*true/im.test(toml);
+    const hasCanonical = /^[ \t]*hooks\s*=\s*true/im.test(toml);
+
+    let next = toml;
+    if (hasLegacy) {
+      // Rewrite `codex_hooks = true` → `hooks = true` (preserves
+      // surrounding whitespace and any inline comment).
+      next = next.replace(/^([ \t]*)codex_hooks(\s*=\s*true)/gim, '$1hooks$2');
+    }
+    if (!hasCanonical && !hasLegacy) {
+      if (/^\[features\]\s*$/im.test(next)) {
+        next = next.replace(/(^\[features\]\s*\n)/im, '$1hooks = true\n');
       } else {
-        // No [features] section — add it at the end
-        toml = toml.trimEnd() + '\n\n[features]\ncodex_hooks = true\n';
+        next = next.trimEnd() + (next ? '\n\n' : '') + '[features]\nhooks = true\n';
       }
-      fs.writeFileSync(configTomlPath, toml);
-      console.log(chalk.green(`  ✓ Codex hooks feature flag enabled in ~/.codex/config.toml`));
+    }
+
+    // Pre-approve our hooks so Codex 0.130+ doesn't gate them behind the
+    // interactive `/hooks` review prompt. Each entry in hooks.json gets a
+    // `trusted_hash` stored under `[hooks.state."<key>"]` in config.toml.
+    // The hash is sha256 over canonical-JSON of the normalized hook
+    // identity (event_name + matcher + hooks[]). Match Codex's own
+    // normalization so the hash compares equal to what `/hooks` would
+    // compute — otherwise the entry shows up as "Modified" instead of
+    // "Trusted". See codex-rs/hooks/src/engine/discovery.rs.
+    const eventLabelMap: Record<string, string> = {
+      SessionStart: 'session_start',
+      UserPromptSubmit: 'user_prompt_submit',
+      Stop: 'stop',
+      PreToolUse: 'pre_tool_use',
+      PostToolUse: 'post_tool_use',
+      PermissionRequest: 'permission_request',
+      PreCompact: 'pre_compact',
+      PostCompact: 'post_compact',
+    };
+    const trustedHashLines: string[] = [];
+    for (const [pascalEvent, groups] of Object.entries(hooks)) {
+      const eventLabel = eventLabelMap[pascalEvent];
+      if (!eventLabel) continue;
+      groups.forEach((group: any, groupIndex: number) => {
+        (group.hooks || []).forEach((handler: any, handlerIndex: number) => {
+          // Mirror Codex's HookHandlerConfig::Command normalization:
+          //   timeout defaults to 600, capped to at least 1; async defaults
+          //   to false; command_windows + statusMessage stay absent (None)
+          //   when not present in our hooks.json.
+          const timeoutSec = Math.max(1, typeof handler.timeout === 'number' ? handler.timeout : 600);
+          const normalizedHook: Record<string, unknown> = {
+            type: 'command',
+            command: handler.command,
+            timeout: timeoutSec,
+            async: false,
+          };
+          const identity: Record<string, unknown> = {
+            event_name: eventLabel,
+            hooks: [normalizedHook],
+          };
+          if (group.matcher !== undefined && group.matcher !== null) {
+            identity.matcher = group.matcher;
+          }
+          const canonical = sortObjectKeysDeep(identity);
+          const json = JSON.stringify(canonical);
+          const hash = crypto.createHash('sha256').update(json).digest('hex');
+          const key = `${hooksPath}:${eventLabel}:${groupIndex}:${handlerIndex}`;
+          // TOML quoted-key with escaped backslashes/quotes inside.
+          const safeKey = key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          trustedHashLines.push(
+            `\n[hooks.state."${safeKey}"]`,
+            `trusted_hash = "sha256:${hash}"`,
+          );
+        });
+      });
+    }
+    // Strip any prior origin-managed trusted_hash blocks so re-running
+    // origin enable updates the hashes instead of duplicating them.
+    next = next.replace(/\n# origin-trusted-hooks-begin[\s\S]*?# origin-trusted-hooks-end\n?/g, '');
+    // Older CLI versions wrote the [hooks.state."..."] blocks without the
+    // begin/end markers — those won't be caught above. Strip any block whose
+    // TOML key references the hooks.json path we're about to re-trust.
+    // TOML duplicate-key parse failure here would brick `codex` (Error
+    // loading config.toml: duplicate key), so this is fail-closed: if we're
+    // writing trusted_hash entries, we own this slice of the file entirely.
+    const hooksPathEscaped = hooksPath
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const orphanHookStateRe = new RegExp(
+      `\\n\\[hooks\\.state\\."${hooksPathEscaped}:[^"\\n]*"\\]\\s*\\n\\s*trusted_hash\\s*=\\s*"[^"\\n]*"\\s*`,
+      'g',
+    );
+    next = next.replace(orphanHookStateRe, '\n');
+    if (trustedHashLines.length > 0) {
+      next = next.trimEnd()
+        + '\n\n# origin-trusted-hooks-begin\n# Auto-generated by `origin enable`. Trusts the hooks above so'
+        + '\n# Codex 0.130+ doesn\'t block them behind `/hooks` review.'
+        + trustedHashLines.join('\n')
+        + '\n# origin-trusted-hooks-end\n';
+    }
+
+    if (next !== toml) {
+      fs.writeFileSync(configTomlPath, next);
+      if (hasLegacy) {
+        console.log(chalk.green('  ✓ Migrated Codex hooks flag from codex_hooks → hooks in ~/.codex/config.toml'));
+      } else if (!hasCanonical) {
+        console.log(chalk.green('  ✓ Codex hooks feature flag enabled in ~/.codex/config.toml'));
+      } else {
+        console.log(chalk.green('  ✓ Codex hooks feature flag already enabled in ~/.codex/config.toml'));
+      }
+      if (trustedHashLines.length > 0) {
+        console.log(chalk.green('  ✓ Auto-trusted Codex hooks (skips `/hooks` review on next launch)'));
+      }
+    } else {
+      console.log(chalk.green('  ✓ Codex hooks feature flag already enabled in ~/.codex/config.toml'));
     }
   } catch {
     // Non-fatal — user can still enable manually
-    console.log(chalk.yellow('    ⚠ Could not auto-enable codex_hooks. Run: codex -c features.codex_hooks=true'));
+    console.log(chalk.yellow('    ⚠ Could not auto-enable Codex hooks. Run: codex -c features.hooks=true'));
   }
+}
+
+// Recursively sort object keys so JSON.stringify produces canonical output.
+// Matches Codex's `canonical_json` (codex-rs/config/src/fingerprint.rs).
+function sortObjectKeysDeep<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(sortObjectKeysDeep) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    const out: Record<string, unknown> = {};
+    for (const k of keys) {
+      out[k] = sortObjectKeysDeep((value as Record<string, unknown>)[k]);
+    }
+    return out as unknown as T;
+  }
+  return value;
 }
 
 // ── Aider Hooks ───────────────────────────────────────────────────────────
@@ -531,6 +667,29 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
     }
     basePath = gitRoot;
     console.log(chalk.bold('\n🔗 Enabling Origin session tracking for this repo\n'));
+  }
+
+  // Validate the stored API key before touching hooks. If the key was
+  // rotated/revoked (account deleted, admin reset, etc.) we want to
+  // surface that here loudly — otherwise users install hooks against a
+  // dead key and every later session 401's into hooks.log forever
+  // with no visible feedback.
+  if (isConnectedMode() && config?.apiKey && config?.apiUrl) {
+    try {
+      const probe = await fetch(`${config.apiUrl}/api/mcp/whoami`, {
+        headers: { 'X-API-Key': config.apiKey },
+      });
+      if (probe.status === 401) {
+        console.log(chalk.red('\n✗ Your stored Origin API key is no longer valid.'));
+        console.log(chalk.gray('  The server rejected the key in ~/.origin/config.json (HTTP 401).'));
+        console.log(chalk.gray('  This usually means the account was deleted or the key was rotated.'));
+        console.log(chalk.white('\n  Run `origin login` to re-authenticate.\n'));
+        process.exit(1);
+      }
+    } catch {
+      // Network failure — non-fatal. Hooks will still surface the
+      // problem at run time via the auth-status sentinel.
+    }
   }
 
   // Register this machine with Origin's API on first run so it appears in

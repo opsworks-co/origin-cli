@@ -15,6 +15,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import * as fzstd from 'fzstd';
+import { createShadowCommit } from './git-capture.js';
 
 const args = process.argv.slice(2);
 const sessionId = args[0];
@@ -89,6 +91,550 @@ function getCurrentBranch(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Compute a live diff for the prompt that's currently in-flight and
+ * push it to the server. Without this, the most-recently-submitted
+ * prompt's diff stays empty on the dashboard until either the NEXT
+ * user-prompt-submit fires (retroactive capture) or the agent's Stop
+ * hook fires (safety-net synthesis). For Codex specifically, Stop
+ * doesn't fire per-turn — only at session end — so the user sees no
+ * diff for the current turn until they submit another prompt. This
+ * function plugs that gap by recomputing prompt-N's diff every
+ * heartbeat tick.
+ */
+async function pushInflightDiff(): Promise<void> {
+  if (!isConnected || !stateFile) return;
+  try {
+    const raw = fs.readFileSync(stateFile, 'utf-8');
+    const state = JSON.parse(raw) as {
+      repoPath?: string;
+      prePromptSha?: string;
+      prompts?: string[];
+      sessionId?: string;
+      prePromptDirtyFiles?: string[];
+      sessionStartDirtyFiles?: string[];
+      sessionCommitShas?: string[];
+      headShaAtStart?: string;
+      // Shadow commits captured at the START of each Codex prompt by
+      // pushInflightCodexState. Each entry is the baseline SHA for that
+      // prompt's turn — the diff scope for prompt N is shadowSha[N]..HEAD.
+      // The shadow itself can be stale (created at heartbeat tick time,
+      // not at prompt-submit time), so we ALSO read promptStartedAt below
+      // to pick the real baseline from sessionCommitShas.
+      promptShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; promptStartedAt?: number }>;
+      promptStartedAt?: number[];
+    };
+    const repoPath = state.repoPath;
+    const prePromptSha = state.prePromptSha;
+    const prompts = state.prompts || [];
+    if (!repoPath || !prePromptSha || prompts.length === 0) return;
+
+    const promptIndex = prompts.length - 1;
+    const promptText = (prompts[promptIndex] || '').slice(0, 1000);
+    const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000 };
+    const isHex = (s: string) => /^[a-fA-F0-9]{7,40}$/.test(s);
+    const isAncestor = (anc: string, descendant: string): boolean => {
+      if (!isHex(anc) || !isHex(descendant)) return false;
+      try {
+        execFileSync('git', ['merge-base', '--is-ancestor', anc, descendant], gitOpts);
+        return true;
+      } catch { return false; }
+    };
+
+    // Per-prompt baseline. Two-stage resolution:
+    //   1. Prefer timestamp-based: find the LAST session commit whose commit
+    //      time is at-or-before this prompt's rollout timestamp. Codex often
+    //      makes commits inside a prompt BEFORE the heartbeat notices the
+    //      prompt arrival, so a shadow created at detection time captures
+    //      POST-commit state and the diff against it loses the prompt's
+    //      real work. The timestamp approach pegs the baseline to the
+    //      moment the user actually submitted the prompt.
+    //   2. Fall back to the stored shadow SHA, then to session-start.
+    const promptShadows = state.promptShadows || [];
+    const currentShadow = promptShadows.find((s) => s.promptIndex === promptIndex);
+    const promptStartedAt: number =
+      (state.promptStartedAt && state.promptStartedAt[promptIndex]) ||
+      currentShadow?.promptStartedAt ||
+      0;
+    const sessionCommitShas = state.sessionCommitShas || [];
+    let timestampBaseline: string | null = null;
+    if (promptStartedAt > 0 && sessionCommitShas.length > 0) {
+      // git log emits ISO commit time per sha; pick the most recent commit
+      // whose time is BEFORE promptStartedAt. Single git call instead of
+      // one-per-commit so even a 50-commit session stays fast.
+      try {
+        const shaList = sessionCommitShas.filter((s) => isHex(s));
+        if (shaList.length > 0) {
+          const out = execFileSync(
+            'git',
+            ['log', '--no-walk', '--format=%H %ct', ...shaList],
+            gitOpts,
+          ).toString();
+          let latestBefore: { sha: string; ct: number } | null = null;
+          for (const ln of out.split('\n')) {
+            const m = ln.match(/^([0-9a-f]{7,40})\s+(\d+)$/);
+            if (!m) continue;
+            const ctMs = Number(m[2]) * 1000;
+            if (ctMs < promptStartedAt && (!latestBefore || ctMs > latestBefore.ct)) {
+              latestBefore = { sha: m[1], ct: ctMs };
+            }
+          }
+          if (latestBefore) timestampBaseline = latestBefore.sha;
+        }
+      } catch { /* git log can fail on shallow clones — fall back below */ }
+    }
+    const promptBaseline =
+      timestampBaseline || currentShadow?.shadowSha || state.headShaAtStart || prePromptSha;
+
+    // Committed side: only commits this session authored AND made AFTER the
+    // current prompt's baseline. Walking the session's own commit list
+    // keeps concurrent-session commits out; filtering by ancestry of the
+    // prompt baseline keeps EARLIER prompts' commits out.
+    let committedDiff = '';
+    let uncommittedDiff = '';
+    if (sessionCommitShas.length > 0) {
+      const parts: string[] = [];
+      for (const sha of sessionCommitShas) {
+        if (!isHex(sha)) continue;
+        // Skip commits whose ancestry doesn't include the prompt baseline —
+        // those landed BEFORE this prompt started and belong to a sibling.
+        if (isHex(promptBaseline) && !isAncestor(promptBaseline, sha)) continue;
+        try {
+          const out = execFileSync('git', ['show', sha, '--format=', '--no-color'], gitOpts).toString().trim();
+          if (out) parts.push(out);
+        } catch { /* commit may be unreachable after a rebase */ }
+      }
+      committedDiff = parts.join('\n').trim();
+    }
+    try {
+      // Uncommitted = working tree vs HEAD. Diffing against the prompt
+      // baseline conflated committed + uncommitted (since baseline..HEAD is
+      // the committed side and baseline..working-tree adds the uncommitted
+      // part), which made the dashboard render lines as "uncommitted" even
+      // after the agent had committed them. `git diff HEAD` is uncommitted-
+      // only by definition.
+      uncommittedDiff = execFileSync('git', ['diff', 'HEAD'], gitOpts).toString();
+    } catch { /* clean tree — no uncommitted */ }
+
+    if (!committedDiff && !uncommittedDiff) return; // nothing to send
+
+    // Smart strip: drop a session-start-dirty file ONLY when the session
+    // has demonstrably NOT touched it. "Touched" means either:
+    //   1. The file appears in any sessionCommitSha's filesChanged
+    //      (committed work), OR
+    //   2. The file's current content differs from its content in the
+    //      session-start shadow (uncommitted work the session has done so
+    //      far, including the very first prompt before any commits land).
+    // Earlier versions only checked (1), which over-filtered on prompt 0
+    // and the first heartbeat of any prompt that hadn't committed yet —
+    // EVERY dirty file got dropped because sessionCommitShas was empty.
+    const sessionStartDirty = new Set<string>(state.sessionStartDirtyFiles || []);
+    const sessionTouched = new Set<string>();
+    for (const sha of sessionCommitShas) {
+      if (!isHex(sha)) continue;
+      try {
+        const names = execFileSync(
+          'git',
+          ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+          gitOpts,
+        ).toString();
+        for (const ln of names.split('\n')) {
+          const t = ln.trim();
+          if (t) sessionTouched.add(t);
+        }
+      } catch { /* commit may be unreachable after a rebase */ }
+    }
+    // Files modified-from-shadow add the (2) signal — a single `git diff`
+    // gives us all files whose current content differs from the session-
+    // start snapshot, so we can mark them as session work even when no
+    // commit exists yet.
+    const sessionStartShadow = state.headShaAtStart || state.prePromptSha;
+    if (sessionStartDirty.size > 0 && sessionStartShadow && isHex(sessionStartShadow)) {
+      try {
+        const out = execFileSync(
+          'git',
+          ['diff', sessionStartShadow, '--name-only'],
+          gitOpts,
+        ).toString();
+        for (const ln of out.split('\n')) {
+          const t = ln.trim();
+          if (t) sessionTouched.add(t);
+        }
+      } catch { /* shadow gone — fall back to commit-only signal */ }
+    }
+    const excludeSet = new Set<string>();
+    for (const f of sessionStartDirty) {
+      if (!sessionTouched.has(f)) excludeSet.add(f);
+    }
+    // prePromptDirtyFiles applies only within the current prompt's window —
+    // never let prior-prompt dirt leak even if the session has touched it.
+    for (const f of (state.prePromptDirtyFiles || [])) {
+      if (!sessionTouched.has(f)) excludeSet.add(f);
+    }
+    const stripFiles = (text: string): string => {
+      if (!text || excludeSet.size === 0) return text;
+      const parts = text.split(/(?=^diff --git )/m);
+      const kept: string[] = [];
+      for (const part of parts) {
+        const m = part.match(/^diff --git a\/(.*?) b\//);
+        if (m && m[1] && excludeSet.has(m[1])) continue;
+        kept.push(part);
+      }
+      return kept.join('').trim();
+    };
+    committedDiff = stripFiles(committedDiff);
+    uncommittedDiff = stripFiles(uncommittedDiff);
+
+    if (!committedDiff && !uncommittedDiff) return; // pure pre-existing dirt — nothing to publish
+
+    const filesChanged = new Set<string>();
+    for (const blob of [committedDiff, uncommittedDiff]) {
+      for (const m of blob.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+        if (m[1]) filesChanged.add(m[1]);
+      }
+    }
+    const fullDiff = (committedDiff + (uncommittedDiff ? '\n' + uncommittedDiff : '')).trim();
+    const counted = fullDiff.split('\n');
+    const linesAdded = counted.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
+    const linesRemoved = counted.filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
+
+    // Tag the inflight push with the latest session-owned commit SHA so the
+    // commit-detail page can link this prompt → its commit even before the
+    // session ends. Falls back to current HEAD when the session hasn't
+    // committed anything yet (covers the rare case where pushInflightDiff
+    // fires after post-commit but before state has reloaded).
+    let heartbeatCommitSha: string | null = null;
+    let heartbeatTreeSha: string | null = null;
+    const ownCommits = state.sessionCommitShas || [];
+    try {
+      heartbeatCommitSha = ownCommits.length > 0
+        ? ownCommits[ownCommits.length - 1]
+        : execFileSync('git', ['rev-parse', 'HEAD'], gitOpts).toString().trim();
+      heartbeatTreeSha = execFileSync('git', ['rev-parse', `${heartbeatCommitSha}^{tree}`], gitOpts).toString().trim();
+    } catch { /* fresh repo with no HEAD — fine */ }
+
+    await fetch(`${apiUrl}/api/mcp/session/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify({
+        promptChanges: [
+          {
+            promptIndex,
+            promptText,
+            filesChanged: Array.from(filesChanged),
+            diff: fullDiff.slice(0, 100_000),
+            uncommittedDiff: uncommittedDiff.slice(0, 100_000),
+            linesAdded,
+            linesRemoved,
+            checkpointType: 'auto',
+            commitSha: heartbeatCommitSha,
+            treeSha: heartbeatTreeSha,
+          },
+        ],
+      }),
+    });
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Live Codex rollout poller. Reads ~/.codex/state_*.sqlite to find this
+ * repo's rollout JSONL, decompresses + parses it for user prompts and
+ * assistant text, and pushes the result via api.updateSession so the
+ * dashboard shows Codex's in-flight output without waiting for Stop or
+ * the next UserPromptSubmit. Mirrors the minimal slice of
+ * discoverCodexSessionData / parseCodexRollout from commands/hooks.ts —
+ * we don't share a module because heartbeat.ts is a standalone daemon
+ * with its own dependency surface.
+ */
+function findCodexRollout(repoPath: string): { rolloutPath: string; threadId: string; model: string; firstUserMessage: string } | null {
+  try {
+    const codexDir = path.join(os.homedir(), '.codex');
+    if (!fs.existsSync(codexDir)) return null;
+    const stateFiles = fs.readdirSync(codexDir)
+      .filter(f => f.startsWith('state_') && f.endsWith('.sqlite'))
+      .map(f => ({ path: path.join(codexDir, f), mtime: fs.statSync(path.join(codexDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (stateFiles.length === 0) return null;
+
+    const repoBasename = path.basename(repoPath);
+    if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
+    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const threadQuery = `SELECT id, model, rollout_path, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
+    const raw = execFileSync('sqlite3', [stateFiles[0].path, threadQuery], {
+      encoding: 'utf-8' as const, timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (!raw) return null;
+
+    const parts = raw.split('|');
+    if (parts.length < 4) return null;
+    const threadId = parts[0];
+    const model = parts[1] || 'codex';
+    let rolloutPath = parts[2] || '';
+    const firstUserMessage = parts.slice(3).join('|') || '';
+
+    if (!rolloutPath) return null;
+    if (!fs.existsSync(rolloutPath)) {
+      const abs = path.join(codexDir, rolloutPath);
+      if (fs.existsSync(abs)) rolloutPath = abs;
+      else return null;
+    }
+    return { rolloutPath, threadId, model, firstUserMessage };
+  } catch { return null; }
+}
+
+function parseCodexRolloutLive(rolloutFile: string): {
+  userPrompts: string[];
+  // Per-prompt timestamps (ms epoch) parsed from the rollout's user message
+  // events. Used to compute the per-prompt diff baseline at heartbeat time
+  // — the LAST committed sha whose commit time is at-or-before the prompt
+  // start. Without this, baselines fall back to whichever HEAD existed when
+  // the heartbeat happened to notice the prompt, which is usually AFTER
+  // Codex has already made commits inside the prompt (then the diff against
+  // that "baseline" loses the prompt's real work).
+  promptTimestamps: number[];
+  transcript: string;
+  tokensUsed: number;
+  inputTokens: number;
+  outputTokens: number;
+  model?: string;
+  toolCalls: number;
+} | null {
+  try {
+    let content: string;
+    if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
+      const compressed = fs.readFileSync(rolloutFile);
+      const decompressed = fzstd.decompress(new Uint8Array(compressed));
+      content = Buffer.from(decompressed).toString('utf-8');
+    } else {
+      content = fs.readFileSync(rolloutFile, 'utf-8');
+    }
+
+    const lines = content.split('\n').filter(l => l.trim());
+    const turns: Array<{ role: string; content: string }> = [];
+    const promptTimestamps: number[] = [];
+    const pendingTools = new Map<string, number>();
+    let maxInputTokens = 0, maxOutputTokens = 0, maxTotalTokens = 0;
+    let model: string | undefined;
+    let toolCalls = 0;
+    const TRUNC = 2000;
+    const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
+
+    const extractText = (c: any): string => {
+      if (typeof c === 'string') return c;
+      if (!Array.isArray(c)) return '';
+      return c.map((p: any) => p?.text || (typeof p === 'string' ? p : '') || (typeof p?.content === 'string' ? p.content : '')).filter(Boolean).join('');
+    };
+
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        const tokenUsage = event?.total_token_usage || event?.data?.total_token_usage || event?.payload?.info?.total_token_usage || event?.payload?.total_token_usage;
+        if (tokenUsage) {
+          const i = tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0;
+          const o = tokenUsage.output_tokens || tokenUsage.completion_tokens || 0;
+          const t = tokenUsage.total_tokens || (i + o);
+          if (t > maxTotalTokens) { maxInputTokens = i; maxOutputTokens = o; maxTotalTokens = t; }
+        }
+        if (!model && (event?.model || event?.data?.model || event?.payload?.model)) {
+          model = event.model || event.data?.model || event.payload?.model;
+        }
+        const payload = event?.payload;
+        const ptype = payload?.type || '';
+        if (ptype === 'message') {
+          const role = payload.role || 'assistant';
+          const text = extractText(payload.content);
+          if (text.trim()) {
+            const isUser = role === 'user' || role === 'human';
+            const isEcho = isUser && (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text));
+            if (!isEcho) {
+              const cleaned = isUser
+                ? text
+                    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+                    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+                    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+                    .trim()
+                : text;
+              if (cleaned) {
+                turns.push({ role, content: cleaned });
+                // Capture per-user-prompt timestamp from any of Codex's
+                // event-level time fields. Without this the prompt baseline
+                // falls back to "whenever heartbeat noticed", which is
+                // usually AFTER Codex made commits inside the prompt.
+                if (isUser) {
+                  const ts = (() => {
+                    const candidates = [
+                      event?.timestamp,
+                      event?.created_at,
+                      event?.payload?.timestamp,
+                      event?.payload?.created_at,
+                      payload?.timestamp,
+                      payload?.created_at,
+                    ];
+                    for (const c of candidates) {
+                      if (typeof c === 'number' && Number.isFinite(c)) return c > 1e12 ? c : c * 1000;
+                      if (typeof c === 'string') {
+                        const n = Date.parse(c);
+                        if (Number.isFinite(n)) return n;
+                      }
+                    }
+                    return 0;
+                  })();
+                  promptTimestamps.push(ts);
+                }
+              }
+            }
+          }
+        } else if (ptype === 'reasoning') {
+          const summary = Array.isArray(payload.summary) ? payload.summary : [];
+          const t = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n\n');
+          if (t.trim()) turns.push({ role: 'assistant', content: `[Reasoning] ${t}` });
+        } else if (ptype === 'function_call' || ptype === 'local_shell_call') {
+          toolCalls++;
+          const tool = payload.name || (ptype === 'local_shell_call' ? 'shell' : 'tool');
+          const args = payload.arguments ?? payload.action ?? payload.command ?? '';
+          const argStr = typeof args === 'string' ? args : JSON.stringify(args);
+          const callId = payload.call_id || payload.id || '';
+          const idx = turns.length;
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(argStr)}` });
+          if (callId) pendingTools.set(callId, idx);
+        } else if (ptype === 'function_call_output' || ptype === 'local_shell_call_output') {
+          const callId = payload.call_id || payload.id || '';
+          const out = typeof payload.output === 'string' ? payload.output
+            : (payload.output?.content ? (typeof payload.output.content === 'string' ? payload.output.content : JSON.stringify(payload.output.content))
+            : JSON.stringify(payload.output ?? ''));
+          if (out) {
+            const idx = callId ? pendingTools.get(callId) : undefined;
+            if (idx !== undefined) {
+              turns[idx].content += `\n[Output] ${truncate(out)}`;
+              pendingTools.delete(callId);
+            } else {
+              turns.push({ role: 'assistant', content: `[Output] ${truncate(out)}` });
+            }
+          }
+        }
+      } catch { /* skip malformed lines */ }
+    }
+
+    if (turns.length === 0 && maxTotalTokens === 0) return null;
+    const userPrompts: string[] = [];
+    for (const t of turns) {
+      if (t.role === 'user' || t.role === 'human') {
+        const c = t.content.trim();
+        if (c) userPrompts.push(c);
+      }
+    }
+    return {
+      userPrompts,
+      promptTimestamps,
+      transcript: JSON.stringify(turns),
+      tokensUsed: maxTotalTokens,
+      inputTokens: maxInputTokens,
+      outputTokens: maxOutputTokens,
+      model,
+      toolCalls,
+    };
+  } catch { return null; }
+}
+
+async function pushInflightCodexState(): Promise<void> {
+  if (!isConnected || !stateFile) return;
+  try {
+    const raw = fs.readFileSync(stateFile, 'utf-8');
+    const state = JSON.parse(raw) as {
+      repoPath?: string;
+      prompts?: string[];
+      agentSlug?: string;
+      sessionId?: string;
+    };
+    if ((state.agentSlug || '').toLowerCase() !== 'codex') return;
+    if (!state.repoPath) return;
+
+    const rollout = findCodexRollout(state.repoPath);
+    if (!rollout) return;
+    const parsed = parseCodexRolloutLive(rollout.rolloutPath);
+    if (!parsed) return;
+
+    const existing = state.prompts || [];
+    const newer = parsed.userPrompts.length > existing.length;
+
+    // Update state file with the latest prompts so user-prompt-submit /
+    // Stop don't lose ground we've already gained.
+    //
+    // Also create a per-prompt shadow commit for EVERY new prompt detected
+    // since last poll. Codex doesn't fire user-prompt-submit reliably, so
+    // without these shadows we have no per-turn baseline to compute the
+    // diff against — every prompt's work ends up looking like the SAME
+    // cumulative diff. Capturing a shadow at the moment we detect a new
+    // user_message in the rollout gives us a per-prompt boundary that
+    // doesn't depend on hook firing.
+    if (newer) {
+      try {
+        const fresh = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        const existingShadows: Array<{
+          promptIndex: number;
+          shadowSha: string;
+          capturedAt: string;
+          // Rollout's own user_message timestamp (ms epoch) for this prompt.
+          // capturedAt is whenever the heartbeat noticed the prompt — usually
+          // AFTER Codex started doing work — so it's useless as a "what did
+          // this prompt actually start with" anchor. promptStartedAt is the
+          // true prompt-submit time and lets pushInflightDiff pick the LAST
+          // commit that landed before this prompt as the diff baseline.
+          promptStartedAt?: number;
+        }> = Array.isArray(fresh.promptShadows) ? fresh.promptShadows : [];
+        const have = new Set(existingShadows.map((s) => s.promptIndex));
+
+        // For each newly arrived prompt (indices existing.length .. parsed.userPrompts.length - 1),
+        // snapshot the current working tree to a shadow commit so we have a
+        // baseline marker for that prompt's turn. The shadow represents the
+        // state at the START of that prompt (= end of previous prompt's work).
+        const newCount = parsed.userPrompts.length;
+        const prevCount = existing.length;
+        for (let i = prevCount; i < newCount; i++) {
+          if (have.has(i)) continue;
+          const shadowSha = createShadowCommit(fresh.repoPath, `prompt-${i}-${sessionId.slice(0, 8)}`);
+          const ts = parsed.promptTimestamps?.[i] || 0;
+          if (shadowSha) {
+            existingShadows.push({
+              promptIndex: i,
+              shadowSha,
+              capturedAt: new Date().toISOString(),
+              promptStartedAt: ts > 0 ? ts : undefined,
+            });
+          }
+        }
+
+        fresh.prompts = parsed.userPrompts;
+        fresh.promptShadows = existingShadows;
+        // Mirror promptStartedAt timestamps into a parallel array so
+        // pushInflightDiff can pick the right baseline without re-parsing
+        // the rollout each tick.
+        fresh.promptStartedAt = parsed.promptTimestamps?.slice(0, parsed.userPrompts.length) || [];
+        fs.writeFileSync(stateFile, JSON.stringify(fresh), { mode: 0o600 });
+      } catch { /* non-fatal */ }
+    }
+
+    const promptsForPush = parsed.userPrompts.length > 0 ? parsed.userPrompts : existing;
+    const joinedPrompt = promptsForPush.join('\n\n---\n\n');
+
+    await fetch(`${apiUrl}/api/mcp/session/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify({
+        prompt: joinedPrompt || undefined,
+        transcript: parsed.transcript || undefined,
+        model: parsed.model || undefined,
+        tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
+        inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
+        outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+        toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
+        status: 'RUNNING',
+      }),
+    });
+  } catch { /* best-effort */ }
 }
 
 /**
@@ -417,6 +963,17 @@ async function ping() {
         body: JSON.stringify({ branch: getCurrentBranch() }),
       });
       const data = await resp.json() as { ok: boolean; status?: string; command?: any };
+
+      // Push live diff for the in-flight prompt so the dashboard
+      // shows the change as it happens, instead of staying empty
+      // until the next prompt or session end. Fire-and-forget so a
+      // slow git diff doesn't delay the ping cadence.
+      pushInflightDiff().catch(() => { /* non-fatal */ });
+      // Codex doesn't surface its assistant output via hooks while a
+      // prompt is in flight — Stop only fires at turn end and there's
+      // no streaming hook. Poll the rollout JSONL on every tick so the
+      // dashboard shows assistant text + tool calls live.
+      pushInflightCodexState().catch(() => { /* non-fatal */ });
 
       // Handle pending commands from the dashboard
       if (data.command && data.command.type === 'restore') {

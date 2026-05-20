@@ -112,7 +112,11 @@ function getInstalledVersion(): string | null {
 async function getLatestVersion(): Promise<{ version: string; url: string; sha256: string } | null> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    // 5s was too tight on slow / corporate networks — bump to 15s. The
+    // previous behaviour swallowed AbortError and surfaced as the generic
+    // "Could not check for updates. Try again later." message, which gave
+    // the user no actionable signal.
+    const timeoutId = setTimeout(() => controller.abort(), 15_000);
 
     const response = await fetch(VERSION_URL, {
       signal: controller.signal,
@@ -121,10 +125,16 @@ async function getLatestVersion(): Promise<{ version: string; url: string; sha25
 
     clearTimeout(timeoutId);
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.log(chalk.gray(`  (server returned HTTP ${response.status} from ${VERSION_URL})`));
+      return null;
+    }
 
     const data = await response.json() as { version?: string; url?: string; sha256?: string | null };
-    if (!data.version) return null;
+    if (!data.version) {
+      console.log(chalk.gray(`  (server response missing "version" field)`));
+      return null;
+    }
 
     // Fail-closed: sha256 must be present and non-empty
     if (!data.sha256) {
@@ -141,7 +151,16 @@ async function getLatestVersion(): Promise<{ version: string; url: string; sha25
     }
 
     return { version: data.version, url, sha256: data.sha256 };
-  } catch {
+  } catch (err: any) {
+    // Surface the underlying cause so users can diagnose network issues
+    // instead of guessing. AbortError → timeout, ENOTFOUND → DNS, ECONNREFUSED
+    // → host down, anything else prints the raw message.
+    const msg = err?.name === 'AbortError'
+      ? `timed out after 15s`
+      : err?.code
+        ? `${err.code}${err.message ? ' (' + err.message + ')' : ''}`
+        : err?.message || String(err);
+    console.log(chalk.gray(`  (fetch error: ${msg})`));
     return null;
   }
 }

@@ -30,7 +30,15 @@ export interface LineAttribution {
   lineNumber: number;
   authorship: LineAuthorship;
   sessionId?: string;
+  // Model name from the Origin git note, e.g. "gpt-5.5", "claude-opus-4".
   model?: string;
+  // Agent slug from the Origin git note, e.g. "codex", "claude-code",
+  // "cursor", "gemini". Independent of model — answers "which tool", not
+  // "which underlying LLM". Surfaced in `origin blame` output.
+  agent?: string;
+  // Git author of the commit (the human who ran the session). For AI
+  // lines this is the human who launched the agent; for human lines it
+  // IS the author.
   author?: string;
   tool?: string;
   commitSha?: string;
@@ -331,11 +339,16 @@ export function getLineBlame(repoPath: string, filePath: string): LineAttributio
       }
 
       const tool = model ? detectToolFromModel(model, note?.tool) : undefined;
+      // Prefer explicit agent slug from the note; fall back to whatever
+      // `detectToolFromModel` inferred so older notes (no agent field)
+      // still surface a sensible "Agent" column in the blame output.
+      const agent = note?.agent || tool || undefined;
       return {
         lineNumber,
         authorship: isAi ? 'ai' as const : 'human' as const,
         sessionId: note?.sessionId,
         model: model,
+        agent: agent,
         tool: tool,
         author: author,
         commitSha: commitSha,

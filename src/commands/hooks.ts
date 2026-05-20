@@ -1,7 +1,7 @@
 import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
 import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
-import { api } from '../api.js';
+import { api, readAuthStatus } from '../api.js';
 import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, setActivePricing } from '../transcript.js';
 import {
   saveSessionState,
@@ -23,7 +23,8 @@ import {
   type SessionState,
   type ToolCallRecord,
 } from '../session-state.js';
-import { captureGitState, getDirtyFiles } from '../git-capture.js';
+import { captureGitState, getDirtyFiles, createShadowCommit } from '../git-capture.js';
+import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
@@ -33,6 +34,7 @@ import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../h
 import { writeSessionMemory, buildMemoryContext, readRecentMemory } from '../memory.js';
 import { backfillAcceptanceForSession } from '../acceptance.js';
 import { addTodosFromSession } from '../todo.js';
+import { capturePromptEdits } from '../prompt-capture/index.js';
 import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -106,6 +108,70 @@ function filterUncommittedDiff(diffText: string, prePromptDirtyFiles: string[]):
     kept.push(part);
   }
   return kept.join('').trim();
+}
+
+// Files we should NEVER attribute to this session in uncommitted-diff output:
+// the union of (a) what was dirty at THIS prompt's baseline, (b) what was
+// dirty when the session started, and (c) what ANOTHER concurrently-running
+// session has touched (committed or uncommitted) that we have NOT touched
+// ourselves. Per-prompt state (a) gets zeroed by the shadow trick on each
+// prompt boundary; (b) survives the whole session; (c) is the mid-session
+// concurrent-agent isolation — a file Agent B starts editing while Agent A
+// is alive shouldn't leak into A's uncommittedDiff just because both
+// sessions watch the same working tree.
+function uncommittedExcludeUnion(state: SessionState): string[] {
+  const set = new Set<string>();
+  for (const f of state.prePromptDirtyFiles || []) set.add(f);
+  for (const f of state.sessionStartDirtyFiles || []) set.add(f);
+  // (c) Other-session-touched files. Iterate the active session registry on
+  // this repo, gather their filesChanged / commit-derived filename lists,
+  // and add any file we ourselves haven't touched. "Touched by us" is
+  // defined as appearing in one of OUR completedPromptMappings.
+  try {
+    const repoPath = state.repoPath;
+    if (repoPath) {
+      const others = listActiveSessions(repoPath).filter((s) => s.sessionId !== state.sessionId);
+      if (others.length > 0) {
+        const ours = new Set<string>();
+        for (const m of state.completedPromptMappings || []) {
+          for (const f of m.filesChanged || []) ours.add(f);
+        }
+        for (const other of others) {
+          for (const m of other.completedPromptMappings || []) {
+            for (const f of m.filesChanged || []) {
+              if (!ours.has(f)) set.add(f);
+            }
+          }
+        }
+      }
+    }
+  } catch { /* listActiveSessions is best-effort */ }
+  return Array.from(set);
+}
+
+// Compute the committed-side diff scoped to commits THIS session authored.
+// Replaces `git diff prePromptSha...HEAD`, which picks up commits made by
+// concurrently-running sessions once HEAD moves past this session's commits.
+// Returns empty string when the session hasn't committed anything yet.
+function sessionScopedCommittedDiff(
+  repoPath: string,
+  state: SessionState,
+): string {
+  const shas = state.sessionCommitShas || [];
+  if (shas.length === 0) return '';
+  const parts: string[] = [];
+  for (const sha of shas) {
+    if (!/^[a-fA-F0-9]{7,40}$/.test(sha)) continue;
+    try {
+      const out = execFileSync(
+        'git',
+        ['show', sha, '--format=', '--no-color'],
+        { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 },
+      ).toString().trim();
+      if (out) parts.push(out);
+    } catch { /* commit may have been removed by a rebase; skip */ }
+  }
+  return parts.join('\n').trim();
 }
 
 // ─── Cursor Model Detection ──────────────────────────────────────────────
@@ -420,6 +486,14 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
   // ids (Claude Code, Windsurf). If exact match fails for a stable agent, the
   // conversation is genuinely new — DO NOT fall through to "most recent active",
   // which silently merges unrelated Claude Code windows into one platform session.
+  //
+  // Codex 0.130 is special: its stdin `session_id` is the PER-TURN thread id,
+  // which differs between SessionStart and Stop for the same codex launch. So
+  // when codex's stop hook fires with an ID that doesn't match what
+  // SessionStart saved, that's NOT a new conversation — it's the same codex
+  // window's next turn. Fall through to agent-filtered match instead of
+  // dropping the hook (which used to abort handleStop with "no exact match",
+  // leaving the session's tool calls / diffs unattached on the dashboard).
   if (claudeSessionId) {
     const found = findSessionByClaudeId(claudeSessionId, hookCwd)
       || (repoPath !== hookCwd ? findSessionByClaudeId(claudeSessionId, repoPath) : null);
@@ -427,8 +501,15 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
       debugLog('findStateForHook', 'exact match', { claudeSessionId, sessionId: found.sessionId, tag: found.sessionTag });
       return { state: found, saveCwd: found.repoPath || repoPath };
     }
-    debugLog('findStateForHook', 'no exact match for stable claudeSessionId — new session needed', { claudeSessionId, agentSlug });
-    return null;
+    if (agentSlug === 'codex') {
+      debugLog('findStateForHook', 'codex per-turn id mismatch — falling through to agent-filtered match', {
+        claudeSessionId,
+      });
+      // intentionally NOT returning here; let the agent-filtered branch below run
+    } else {
+      debugLog('findStateForHook', 'no exact match for stable claudeSessionId — new session needed', { claudeSessionId, agentSlug });
+      return null;
+    }
   }
 
   // 2. Fall back to active sessions for this repo
@@ -509,10 +590,22 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
  * Walk every plausible location and pick the newest matching JSON. The hook
  * may also receive `transcript_path` via stdin — that wins over discovery.
  */
-function discoverGeminiTranscriptPath(opts: { maxAgeMs?: number } = {}): string | null {
+function discoverGeminiTranscriptPath(opts: { maxAgeMs?: number; sessionId?: string } = {}): string | null {
   // Default: 60-minute window. Mid-session, Gemini may not touch its chat
   // file for many minutes between user prompts (it's only re-written on
   // /chat save or end-of-turn), so a 10-minute gate dropped active sessions.
+  //
+  // STRICT mode: when a sessionId is supplied, we only return a file whose
+  // basename embeds that id. The legacy "newest file across all
+  // .gemini/ dirs" fallback was the smoking gun for cross-conversation
+  // contamination — Gemini happily kept stale chat files around and we'd
+  // pick whichever was last touched, attributing some other chat's
+  // prompts to the current session.
+  //
+  // sessionId-less calls are still supported for the no-stdin-id case
+  // (e.g. plain `gemini` CLI invocations); those keep the legacy newest-
+  // file behaviour but log every time it fires so we can tell when ID
+  // anchoring isn't doing the work.
   const maxAgeMs = opts.maxAgeMs ?? 60 * 60 * 1000;
   try {
     const home = os.homedir();
@@ -523,11 +616,19 @@ function discoverGeminiTranscriptPath(opts: { maxAgeMs?: number } = {}): string 
 
     let newestFile = '';
     let newestMtime = 0;
+    let idMatchedFile = '';
+    let idMatchedMtime = 0;
 
-    const consider = (fp: string) => {
+    const consider = (fp: string, name: string) => {
       try {
         const stat = fs.statSync(fp);
         if (!stat.isFile()) return;
+        if (opts.sessionId && name.includes(opts.sessionId)) {
+          if (stat.mtimeMs > idMatchedMtime) {
+            idMatchedMtime = stat.mtimeMs;
+            idMatchedFile = fp;
+          }
+        }
         if (stat.mtimeMs > newestMtime) {
           newestMtime = stat.mtimeMs;
           newestFile = fp;
@@ -554,13 +655,26 @@ function discoverGeminiTranscriptPath(opts: { maxAgeMs?: number } = {}): string 
           let files: string[] = [];
           try { files = fs.readdirSync(dir); } catch { continue; }
           for (const f of files) {
-            if (isSessionLike(f)) consider(path.join(dir, f));
+            if (isSessionLike(f)) consider(path.join(dir, f), f);
           }
         }
       }
     }
 
+    if (opts.sessionId) {
+      if (idMatchedFile && (Date.now() - idMatchedMtime) < maxAgeMs) {
+        return idMatchedFile;
+      }
+      debugLog('gemini', 'discoverGeminiTranscriptPath: no recent file for sessionId', {
+        sessionId: opts.sessionId,
+      });
+      return null;
+    }
+
     if (newestFile && (Date.now() - newestMtime) < maxAgeMs) {
+      debugLog('gemini', 'discoverGeminiTranscriptPath: no sessionId, returning newest file', {
+        file: newestFile,
+      });
       return newestFile;
     }
     return null;
@@ -593,45 +707,63 @@ function discoverCursorTranscript(conversationId?: string, hookCwd?: string, opt
     const cursorProjectsDir = path.join(os.homedir(), '.cursor', 'projects');
     if (!fs.existsSync(cursorProjectsDir)) return null;
 
-    // Strategy: if we have a conversation_id, search for a matching file.
-    // Otherwise, find the most recently modified transcript.
-    let transcriptFile = '';
-    let bestMtime = 0;
-
-    const workspaces = fs.readdirSync(cursorProjectsDir);
-    for (const ws of workspaces) {
-      const agentDir = path.join(cursorProjectsDir, ws, 'agent-transcripts');
-      if (!fs.existsSync(agentDir)) continue;
-
-      const convDirs = fs.readdirSync(agentDir);
-      for (const convDir of convDirs) {
-        const jsonlPath = path.join(agentDir, convDir, `${convDir}.jsonl`);
-        if (!fs.existsSync(jsonlPath)) continue;
-
-        // Direct match on conversation ID
-        if (conversationId && convDir === conversationId) {
-          transcriptFile = jsonlPath;
-          break;
-        }
-
-        // Otherwise track the newest
-        const stat = fs.statSync(jsonlPath);
-        if (stat.mtimeMs > bestMtime) {
-          bestMtime = stat.mtimeMs;
-          transcriptFile = jsonlPath;
-        }
-      }
-      if (transcriptFile && conversationId) break;
-    }
-
-    // Only use non-ID-matched files if modified within last 30 minutes
-    if (!conversationId && transcriptFile && (Date.now() - bestMtime) > 30 * 60 * 1000) {
+    // STRICT ID-anchored discovery. The mtime-prefer fallback that used
+    // to live here would silently pick up another open chat's transcript
+    // whenever Cursor's stdin sent a stale ID — producing dashboard
+    // sessions captioned with prompts from a different conversation.
+    //
+    // Contract now: caller MUST pass the conversationId recorded at
+    // session-start (state.agentSessionId). We look for ONLY that
+    // directory. If the matching file doesn't exist, return null and
+    // log the miss — the live user-prompt-submit path already has the
+    // authoritative prompt text on stdin; we don't need the JSONL
+    // sidecar for prompt capture, only for token estimation +
+    // transcript display.
+    if (!conversationId) {
+      debugLog('cursor', 'discoverCursorTranscript: no conversationId — refusing to guess');
       return null;
     }
-    if (!transcriptFile) return null;
+
+    // Walk every workspace looking for THIS conversation's directory.
+    // Cursor sometimes records the same chat under a workspace dir whose
+    // dash-encoded path doesn't quite match hookCwd (worktree shenanigans,
+    // case sensitivity), so we trust the conversation_id over the
+    // workspace path. ID collisions across workspaces would be a
+    // Cursor bug we'd want to know about — log if it happens.
+    const matches: string[] = [];
+    const workspaces = fs.readdirSync(cursorProjectsDir);
+    for (const ws of workspaces) {
+      const candidate = path.join(cursorProjectsDir, ws, 'agent-transcripts', conversationId, `${conversationId}.jsonl`);
+      if (fs.existsSync(candidate)) matches.push(candidate);
+    }
+    if (matches.length === 0) {
+      debugLog('cursor', 'discoverCursorTranscript: no JSONL for conversationId', { conversationId });
+      return null;
+    }
+    if (matches.length > 1) {
+      debugLog('cursor', 'discoverCursorTranscript: conversationId resolved in MULTIPLE workspaces — using first', {
+        conversationId, matches,
+      });
+    }
+    const transcriptFileFinal = matches[0];
+    // Sanity: refuse a transcript that hasn't been touched in 30 minutes.
+    // The ID anchor already prevents cross-chat leakage; this guard
+    // only catches "Cursor recreated this chat days ago, the dir still
+    // exists" — rare but worth nothing-vs-stale.
+    try {
+      const stat = fs.statSync(transcriptFileFinal);
+      if (Date.now() - stat.mtimeMs > 30 * 60 * 1000) {
+        debugLog('cursor', 'discoverCursorTranscript: matched file stale, refusing', {
+          conversationId, ageMs: Date.now() - stat.mtimeMs,
+        });
+        return null;
+      }
+    } catch {
+      return null;
+    }
 
     // Parse the JSONL
-    const raw = fs.readFileSync(transcriptFile, 'utf-8');
+    const raw = fs.readFileSync(transcriptFileFinal, 'utf-8');
     const lines = raw.split('\n').filter(l => l.trim());
 
     const TRUNC = opts.verbose ? Number.MAX_SAFE_INTEGER : 2000;
@@ -751,7 +883,11 @@ interface CodexSessionData {
   outputTokens: number;
   toolCalls: number;
   prompt: string;
+  prompts?: string[];   // all user prompts from the rollout, in order
   transcript?: string;  // full JSONL conversation for display
+  cwd?: string;         // codex thread's actual cwd — drives repoPath correction
+  rolloutPath?: string; // absolute path to the rollout JSONL(.zst) — feed to
+                        // the new per-prompt PromptCapture extractor
 }
 
 /**
@@ -771,7 +907,10 @@ interface CodexSessionData {
  * rollout_path, decompress and parse the JSONL for real token counts
  * and transcript. Fall back to SQLite `tokens_used` if rollout parsing fails.
  */
-function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } = {}): CodexSessionData | null {
+function discoverCodexSessionData(
+  repoPath: string,
+  opts: { verbose?: boolean; threadId?: string } = {},
+): CodexSessionData | null {
   try {
     const codexDir = path.join(os.homedir(), '.codex');
     if (!fs.existsSync(codexDir)) return null;
@@ -785,26 +924,80 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
 
     const dbPath = stateFiles[0].path;
 
-    // Validate repoPath basename to prevent SQL/shell injection
-    const repoBasename = path.basename(repoPath);
-    if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
-    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const threadQuery = `SELECT id, model, tokens_used, rollout_path, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
-    const raw = execFileSync('sqlite3', [dbPath, threadQuery], {
-      encoding: 'utf-8' as const,
-      timeout: 3000,
+    // STRICT thread-id matching when the caller has one. session-start
+    // queries SQLite ONCE by EXACT `cwd = repoPath` and stores threads.id
+    // on state.agentSessionId. Every downstream hook passes that id in
+    // here, and we read its row directly — no basename LIKE, no
+    // "newest thread overall" fallback. Both of those used to make Codex
+    // happily attribute work from one repo's thread to another repo's
+    // session whenever the user ran codex against multiple repos in
+    // parallel.
+    //
+    // When threadId is absent (session-start itself, first call before
+    // anything's been stored), we fall back to EXACT cwd equality —
+    // never `LIKE` — and never to "latest thread overall."
+    const sqliteOpts = {
+      encoding: 'utf-8' as const, timeout: 3000,
       stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    };
 
-    if (!raw) return null;
+    let raw = '';
+    if (opts.threadId && /^[A-Za-z0-9_-]+$/.test(opts.threadId)) {
+      const byIdQuery = `SELECT id, model, tokens_used, rollout_path, cwd, first_user_message FROM threads WHERE id = '${opts.threadId}' LIMIT 1;`;
+      raw = execFileSync('sqlite3', [dbPath, byIdQuery], sqliteOpts).trim();
+      if (!raw) {
+        debugLog('codex', 'discoverCodexSessionData: threadId not found in SQLite', { threadId: opts.threadId });
+        return null;
+      }
+    } else {
+      // No locked thread yet — match strictly on `cwd = repoPath`. The
+      // exact match means concurrent codex threads in sibling repos
+      // can't be confused for each other; if no row matches we bail
+      // (callers expect null when nothing fits).
+      const exactCwd = repoPath.replace(/'/g, "''"); // escape single-quote for SQL
+      const byCwdQuery = `SELECT id, model, tokens_used, rollout_path, cwd, first_user_message FROM threads WHERE cwd = '${exactCwd}' ORDER BY updated_at DESC LIMIT 1;`;
+      raw = execFileSync('sqlite3', [dbPath, byCwdQuery], sqliteOpts).trim();
+      if (!raw) {
+        debugLog('codex', 'discoverCodexSessionData: no thread for exact cwd', { repoPath });
+        return null;
+      }
+    }
+
     const parts = raw.split('|');
-    if (parts.length < 5) return null;
+    if (parts.length < 6) return null;
 
     const threadId = parts[0];
     const model = parts[1] || 'codex';
     const sqliteTokens = parseInt(parts[2], 10) || 0;
     const rolloutPath = parts[3] || '';
-    const prompt = parts.slice(4).join('|') || '';
+    const threadCwd = parts[4] || '';
+    const rawPrompt = parts.slice(5).join('|') || '';
+    // Codex's `first_user_message` column captures whatever the first
+    // user-role event in the rollout contained — which is Codex's own
+    // AGENTS.md replay or its environment-context wrapper, not anything
+    // the user typed. Filter the echo out so it never reaches
+    // state.prompts / the dashboard.
+    const looksLikeOriginEcho =
+      rawPrompt.includes('<!-- origin-managed -->') ||
+      /^#\s+AGENTS\.md instructions for /m.test(rawPrompt);
+    const stripped = rawPrompt
+      .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+      .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+      .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+      .trim();
+    const prompt = looksLikeOriginEcho ? '' : stripped;
+
+    // Resolve the rollout file once so we can hand the absolute path to
+    // the new per-prompt PromptCapture extractor (which decompresses .zst
+    // and walks the rollout for [branch sha] markers + commit-walking).
+    const absRolloutPath = (() => {
+      if (rolloutPath && fs.existsSync(rolloutPath)) return rolloutPath;
+      if (rolloutPath) {
+        const abs = path.join(codexDir, rolloutPath);
+        if (fs.existsSync(abs)) return abs;
+      }
+      try { return findCodexRolloutPath(repoPath, threadId); } catch { return null; }
+    })();
 
     // ── Step 2: Try to parse the rollout JSONL for real token counts ──
     const rolloutResult = parseCodexRollout(codexDir, rolloutPath, threadId, { verbose: !!opts.verbose });
@@ -822,7 +1015,10 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
         outputTokens: rolloutResult.outputTokens,
         toolCalls: rolloutResult.toolCalls,
         prompt,
+        prompts: rolloutResult.userPrompts,
         transcript: rolloutResult.transcript,
+        cwd: threadCwd || undefined,
+        rolloutPath: absRolloutPath || undefined,
       };
     }
 
@@ -835,6 +1031,8 @@ function discoverCodexSessionData(repoPath: string, opts: { verbose?: boolean } 
       outputTokens: Math.round(sqliteTokens * 0.3),
       toolCalls: 0,
       prompt,
+      cwd: threadCwd || undefined,
+      rolloutPath: absRolloutPath || undefined,
     };
   } catch (err) {
     debugLog('codex', 'discoverCodexSessionData error', { error: String(err) });
@@ -867,7 +1065,15 @@ interface PromptTimelineEntry {
   timestamp: number;
 }
 
-function readCodexRolloutFile(repoPath: string): string | null {
+// Locate (without reading) the Codex rollout file for the current repo. Used
+// by callers that need the path to hand to another module that does its own
+// file IO (e.g. backfillCodexPromptMappings, which reads + decompresses the
+// rollout inside its own process).
+function findCodexRolloutPath(repoPath: string, threadId?: string): string | null {
+  // STRICT path resolution. When a threadId is passed, only return its
+  // rollout. Otherwise EXACT-cwd match — no basename LIKE, no "latest
+  // overall" fallback. Both of those used to silently attribute a foreign
+  // Codex thread's rollout to this session.
   try {
     const codexDir = path.join(os.homedir(), '.codex');
     if (!fs.existsSync(codexDir)) return null;
@@ -877,30 +1083,50 @@ function readCodexRolloutFile(repoPath: string): string | null {
       .sort((a, b) => b.mtime - a.mtime);
     if (stateFiles.length === 0) return null;
 
-    const repoBasename = path.basename(repoPath);
-    if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
-    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const threadQuery = `SELECT id, rollout_path FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
-    const raw = execFileSync('sqlite3', [stateFiles[0].path, threadQuery], {
-      encoding: 'utf-8' as const,
-      timeout: 3000,
+    const sqliteOpts = {
+      encoding: 'utf-8' as const, timeout: 3000,
       stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    if (!raw) return null;
+    };
+
+    let raw = '';
+    if (threadId && /^[A-Za-z0-9_-]+$/.test(threadId)) {
+      const byIdQuery = `SELECT id, rollout_path FROM threads WHERE id = '${threadId}' LIMIT 1;`;
+      raw = execFileSync('sqlite3', [stateFiles[0].path, byIdQuery], sqliteOpts).trim();
+      if (!raw) {
+        debugLog('codex', 'findCodexRolloutPath: threadId not in SQLite', { threadId });
+        return null;
+      }
+    } else {
+      const exactCwd = repoPath.replace(/'/g, "''");
+      const byCwdQuery = `SELECT id, rollout_path FROM threads WHERE cwd = '${exactCwd}' ORDER BY updated_at DESC LIMIT 1;`;
+      raw = execFileSync('sqlite3', [stateFiles[0].path, byCwdQuery], sqliteOpts).trim();
+      if (!raw) return null;
+    }
     const parts = raw.split('|');
-    const threadId = parts[0];
+    const resolvedThreadId = parts[0];
     const rolloutPath = parts[1] || '';
 
-    let rolloutFile = '';
-    if (rolloutPath && fs.existsSync(rolloutPath)) rolloutFile = rolloutPath;
-    else if (rolloutPath) {
+    if (rolloutPath && fs.existsSync(rolloutPath)) return rolloutPath;
+    if (rolloutPath) {
       const abs = path.join(codexDir, rolloutPath);
-      if (fs.existsSync(abs)) rolloutFile = abs;
+      if (fs.existsSync(abs)) return abs;
     }
-    if (!rolloutFile) {
-      const sessionsDir = path.join(codexDir, 'sessions');
-      if (fs.existsSync(sessionsDir)) rolloutFile = findLatestRollout(sessionsDir, threadId);
+    // Last resort: the rollout file is named rollout-<id>-*.jsonl(.zst) in
+    // ~/.codex/sessions/. Walk it by EXACT thread id only.
+    const sessionsDir = path.join(codexDir, 'sessions');
+    if (fs.existsSync(sessionsDir) && resolvedThreadId) {
+      const latest = findLatestRollout(sessionsDir, resolvedThreadId);
+      if (latest) return latest;
     }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function readCodexRolloutFile(repoPath: string, threadId?: string): string | null {
+  try {
+    const rolloutFile = findCodexRolloutPath(repoPath, threadId);
     if (!rolloutFile) return null;
 
     if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
@@ -914,8 +1140,8 @@ function readCodexRolloutFile(repoPath: string): string | null {
   }
 }
 
-function getCodexPromptsTimeline(repoPath: string): PromptTimelineEntry[] {
-  const content = readCodexRolloutFile(repoPath);
+function getCodexPromptsTimeline(repoPath: string, threadId?: string): PromptTimelineEntry[] {
+  const content = readCodexRolloutFile(repoPath, threadId);
   if (!content) return [];
   const out: PromptTimelineEntry[] = [];
   for (const line of content.split('\n')) {
@@ -934,10 +1160,22 @@ function getCodexPromptsTimeline(repoPath: string): PromptTimelineEntry[] {
           ? content_.map((c: any) => c?.text || c?.content || '').join('')
           : '';
       if (!text || !text.trim()) continue;
+      // Drop the AGENTS.md / origin-managed echo: Codex reads AGENTS.md
+      // natively and replays it as the first user-role message in the
+      // rollout. The user-prompt-submit hook already filters this for
+      // the live `prompt` capture path; we apply the same filter here
+      // so the dashboard's session view doesn't show Origin's own
+      // system block as turn 1.
+      if (text.includes('<!-- origin-managed -->')) continue;
+      if (/^#\s+AGENTS\.md instructions for /m.test(text)) continue;
+      // Codex also wraps the AGENTS.md content in <INSTRUCTIONS>...</INSTRUCTIONS>
+      // — if that's everything in the message, drop it.
+      const stripped = text.replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '').trim();
+      if (!stripped) continue;
       // Codex events carry an ISO-ish timestamp on most variants.
       const tsRaw = event?.timestamp || event?.ts || event?.time || event?.created_at || item?.timestamp;
       const ts = tsRaw ? new Date(tsRaw).getTime() : NaN;
-      out.push({ text, timestamp: Number.isFinite(ts) ? ts : 0 });
+      out.push({ text: stripped, timestamp: Number.isFinite(ts) ? ts : 0 });
     } catch { /* skip */ }
   }
   // If timestamps are missing, preserve insertion order (the JSONL itself is
@@ -991,9 +1229,11 @@ function resolvePromptForCommit(
     return { promptIndex: idx, promptText: fromState[idx], total: fromState.length };
   }
 
-  // Codex
+  // Codex — anchored on the thread_id we locked at session-start so
+  // concurrent codex threads in sibling repos can't pollute this timeline.
   const isCodex = !!state?.model && /gpt|codex|o1-|o3-|o4-/i.test(state.model);
-  let timeline: PromptTimelineEntry[] = isCodex ? getCodexPromptsTimeline(repoPath) : [];
+  const codexThreadId = (state as any)?.agentSessionId || (state as any)?.claudeSessionId || undefined;
+  let timeline: PromptTimelineEntry[] = isCodex ? getCodexPromptsTimeline(repoPath, codexThreadId) : [];
 
   // Gemini fallback
   if (timeline.length === 0 && state?.transcriptPath && fs.existsSync(state.transcriptPath)) {
@@ -1025,7 +1265,7 @@ function parseCodexRollout(
   rolloutPath: string,
   threadId: string,
   opts: { verbose?: boolean } = {},
-): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; toolCalls: number; transcript?: string } | null {
+): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[] } | null {
   try {
     // Try to resolve the rollout file
     let rolloutFile = '';
@@ -1148,7 +1388,29 @@ function parseCodexRollout(
         if (payloadType === 'message') {
           const role = payload.role || 'assistant';
           const text = extractMessageText(payload.content);
-          if (text.trim()) turns.push({ role, content: text });
+          if (text.trim()) {
+            // Drop the AGENTS.md / origin-managed echo and Codex's
+            // own <environment_context> session-init wrapper on
+            // user-role turns. Codex replays both as the first user
+            // events in the rollout; the dashboard renders the
+            // whole transcript so without this they show up as
+            // bogus turn 1 / 2 even though state.prompts filters them.
+            const isUser = role === 'user' || role === 'human';
+            const isEcho = isUser && (
+              text.includes('<!-- origin-managed -->') ||
+              /^#\s+AGENTS\.md instructions for /m.test(text)
+            );
+            if (!isEcho) {
+              const cleaned = isUser
+                ? text
+                    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+                    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+                    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+                    .trim()
+                : text;
+              if (cleaned) turns.push({ role, content: cleaned });
+            }
+          }
         } else if (payloadType === 'reasoning') {
           // Chain-of-thought summary — show as assistant reasoning so reviewers
           // can see the agent's plan, not just its actions.
@@ -1191,7 +1453,24 @@ function parseCodexRollout(
           const content_ = item?.content || item?.text || item?.message;
           if (role && content_) {
             const text = extractMessageText(content_);
-            if (text) turns.push({ role, content: text });
+            if (text) {
+              // Same AGENTS.md echo filter as the response_item path.
+              const isUser = role === 'user' || role === 'human';
+              const isEcho = isUser && (
+                text.includes('<!-- origin-managed -->') ||
+                /^#\s+AGENTS\.md instructions for /m.test(text)
+              );
+              if (!isEcho) {
+                const cleaned = isUser
+                  ? text
+                      .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+                      .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+                      .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+                      .trim()
+                  : text;
+                if (cleaned) turns.push({ role, content: cleaned });
+              }
+            }
           }
         } else if (
           eventType === 'tool_call' || eventType === 'function_call' ||
@@ -1220,6 +1499,20 @@ function parseCodexRollout(
     // we parsed and let the next heartbeat / stop event refresh tokens.
     if (maxTotalTokens === 0 && turns.length === 0) return null;
 
+    // Extract every cleaned user prompt in the order they appear. Used by
+    // the Stop hook / heartbeat to grow state.prompts for Codex sessions,
+    // since Codex's UserPromptSubmit hook is unreliable (Codex auto-trust
+    // edge cases) and the singleton SQLite `first_user_message` only
+    // surfaces prompt 0 — so without this every prompt after the first was
+    // missing a per-prompt diff mapping on the dashboard.
+    const userPrompts: string[] = [];
+    for (const t of turns) {
+      if (t.role === 'user' || t.role === 'human') {
+        const cleaned = t.content.trim();
+        if (cleaned) userPrompts.push(cleaned);
+      }
+    }
+
     return {
       tokensUsed: maxTotalTokens,
       inputTokens: maxInputTokens,
@@ -1228,6 +1521,7 @@ function parseCodexRollout(
       turnCount,
       toolCalls,
       transcript: turns.length > 0 ? JSON.stringify(turns) : undefined,
+      userPrompts: userPrompts.length > 0 ? userPrompts : undefined,
     };
   } catch (err) {
     debugLog('codex', 'parseCodexRollout error', { error: String(err) });
@@ -1386,14 +1680,38 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     final: finalAgentSlug,
   });
 
-  // Cursor sends session_id but it changes per conversation/prompt — not stable.
-  // Only treat session_id as a stable identifier for agents that keep it consistent
-  // (Claude Code, Windsurf). For others (Cursor, Codex, Gemini), ignore it.
-  // Use the original hook command slug (agentSlug) for behavior checks, not the
-  // overridden finalAgentSlug which may be a custom name like "claude-front".
+  // Resolve the agent's session identifier from stdin. Every agent now
+  // gets one — it anchors all downstream discovery (Cursor agent-transcripts
+  // dir name, Gemini file basename, Codex thread_id). Per-agent rules:
+  //   • claude-code / windsurf: input.session_id (stable per session)
+  //   • cursor: input.session_id or input.conversation_id (matches the
+  //     agent-transcripts/<id>/ directory name)
+  //   • gemini: input.session_id (matches the chats/session-<id>.json file)
+  //   • codex: stdin id is unreliable (it's the per-turn thread id, often
+  //     rotates), so we resolve threads.id from SQLite by EXACT cwd at the
+  //     END of this session-start block (after repoPath is final).
   const agentsWithStableSessionId = ['claude-code', 'windsurf'];
   const hasStableSessionId = agentsWithStableSessionId.includes(agentSlug || '');
+  // Cursor prefers `conversation_id` — stable per-chat and matches the
+  // `agent-transcripts/<id>/` directory name. Cursor's `session_id`
+  // rotates per turn, so picking it as the anchor would force a "new
+  // chat" lock on every prompt. Other agents fall through to whichever
+  // id stdin provides first.
+  const stdinSessionId = agentSlug === 'cursor'
+    ? ((typeof input.conversation_id === 'string' && input.conversation_id) ||
+       (typeof input.session_id === 'string' && input.session_id) ||
+       '')
+    : ((typeof input.session_id === 'string' && input.session_id) ||
+       (typeof input.conversation_id === 'string' && input.conversation_id) ||
+       '');
+  // claudeSessionId stays as the legacy field for findSessionByClaudeId
+  // and serialized state compat — only populated for agents with truly
+  // stable IDs that can be safely used for cross-hook state lookup.
   const claudeSessionId = hasStableSessionId ? (input.session_id || '') : '';
+  // agentSessionId is the new authoritative-discovery anchor. Populated
+  // for EVERY agent below. Cursor/Gemini get it from stdin; Codex gets it
+  // from a SQLite exact-cwd query once repoPath is finalized.
+  let agentSessionId: string = claudeSessionId || stdinSessionId || '';
   let transcriptPath = input.transcript_path || '';
 
   // ── Concurrent session support ─────────────────────────────────────────────
@@ -1533,10 +1851,23 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
       // ── Per-prompt diff: capture previous prompt's changes ──
       const currentHead = getHeadSha(repoPath);
-      // Capture when HEAD changed (commits) OR when HEAD is same (uncommitted-only changes)
-      if (existing.prePromptSha && currentHead && existing.prompts.length > 0) {
+      // Capture when HEAD changed (commits) OR when HEAD is same (uncommitted-only changes).
+      //
+      // Cross-launch safety: if the previous prompt already has a
+      // saved mapping (its own Stop hook captured it before the
+      // previous Codex window quit), DON'T re-capture here. The
+      // recovered prePromptSha can be hours old at this point and
+      // any manual commits the user made between launches would
+      // otherwise get attributed to that prompt — which is what
+      // showed up as "diff for create-a-file-shit.txt includes 4
+      // unrelated files" on the dashboard. Skip the retro capture
+      // in that case; prePromptSha gets reset below either way.
+      const prevPromptIdx = existing.prompts.length - 1;
+      const prevAlreadyCaptured = !!(existing.completedPromptMappings || []).find(
+        (m: any) => m.promptIndex === prevPromptIdx && (m.diff || m.uncommittedDiff),
+      );
+      if (existing.prePromptSha && currentHead && existing.prompts.length > 0 && !prevAlreadyCaptured) {
         try {
-          const prevPromptIdx = existing.prompts.length - 1;
           const prevCapture = captureGitState(repoPath, existing.prePromptSha);
           const prevFilesSet = new Set<string>();
           for (const c of prevCapture.commitDetails) {
@@ -1547,9 +1878,10 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
               if (m[1]) prevFilesSet.add(m[1]);
             }
           }
-          // Filter uncommitted diff to exclude pre-existing dirty files
+          // Filter uncommitted diff against the prompt-baseline + session-start
+          // pre-existing dirt union.
           const filteredUncommitted = filterUncommittedDiff(
-            prevCapture.uncommittedDiff || '', existing.prePromptDirtyFiles || [],
+            prevCapture.uncommittedDiff || '', uncommittedExcludeUnion(existing),
           );
           // Also include uncommitted file paths (filtered)
           if (filteredUncommitted) {
@@ -1568,17 +1900,33 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
               mappingCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
               mappingTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
             } catch { /* ignore */ }
+            // Scope committed side to commits this session authored (see
+            // sessionScopedCommittedDiff). Same isolation rule as the
+            // user-prompt-submit path.
+            const reuseSessionCommitted = sessionScopedCommittedDiff(repoPath, existing);
+            const reuseDiff = (reuseSessionCommitted +
+              (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim();
             const mapping = {
               promptIndex: prevPromptIdx,
               promptText: (existing.prompts[prevPromptIdx] || '').slice(0, 1000),
               filesChanged: prevFiles,
-              diff: (((prevCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+              diff: reuseDiff.slice(0, 200_000),
               uncommittedDiff: filteredUncommitted.slice(0, 200_000),
               commitSha: mappingCommitSha,
               treeSha: mappingTreeSha,
             };
-            if (existingIdx >= 0) existing.completedPromptMappings[existingIdx] = mapping;
-            else existing.completedPromptMappings.push(mapping);
+            if (existingIdx >= 0) {
+              // Don't clobber a non-empty mapping with an empty diff —
+              // STOP from the previous launch already captured it.
+              const prevExisting = existing.completedPromptMappings[existingIdx];
+              const newHasDiff = !!(mapping.diff || mapping.uncommittedDiff);
+              const existingHasDiff = !!(prevExisting.diff || (prevExisting as any).uncommittedDiff);
+              if (newHasDiff || !existingHasDiff) {
+                existing.completedPromptMappings[existingIdx] = mapping;
+              }
+            } else {
+              existing.completedPromptMappings.push(mapping);
+            }
             debugLog('session-start', 'captured per-prompt diff for previous prompt (reuse)', {
               promptIndex: prevPromptIdx, filesChanged: prevFiles.length,
             });
@@ -1695,9 +2043,13 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     if (repoPath !== hookCwd) clearSessionState(repoPath);
   }
 
-  // Auto-discover Gemini transcript if not provided via stdin
+  // Auto-discover Gemini transcript if not provided via stdin. Anchor
+  // on stdin session_id when available so we don't pick up a different
+  // open Gemini chat whose file just happens to be newer.
   if (!transcriptPath && agentSlug === 'gemini') {
-    transcriptPath = discoverGeminiTranscriptPath() || '';
+    transcriptPath = discoverGeminiTranscriptPath({
+      sessionId: typeof input.session_id === 'string' ? input.session_id : undefined,
+    }) || '';
     if (transcriptPath) debugLog('session-start', 'auto-discovered transcript path', { transcriptPath });
   }
 
@@ -1710,6 +2062,8 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       if (cursorModel) {
         model = cursorModel;
         debugLog('session-start', 'model from Cursor DB', { model: cursorModel, conversationId: input.conversation_id });
+      } else {
+        debugLog('session-start', 'cursor model fallback (DB lookup failed)', { conversationId: input.conversation_id });
       }
     }
   }
@@ -1842,18 +2196,95 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       }
     } catch { /* non-fatal */ }
 
+    // If the working tree is dirty at session-start, create a shadow commit
+    // capturing that state. Using the shadow as `prePromptSha` (instead of
+    // HEAD) means per-prompt `workingTreeDiff(prePromptSha → working tree)`
+    // correctly EXCLUDES the pre-existing dirty content from prompt 1's
+    // attribution — only edits the agent makes AFTER session-start show up
+    // as added lines for prompt 1. Without this, the user-prompt-submit
+    // retroactive capture for prompt 1 conflates pre-existing dirty edits
+    // with the agent's actual prompt-1 work and attributes them all to P1.
+    const sessionStartHead = getHeadSha(repoPath);
+    const sessionStartDirty = getDirtyFiles(repoPath);
+    let initialPrePromptSha = sessionStartHead;
+    let initialPrePromptDirtyFiles = sessionStartDirty;
+    if (sessionStartDirty.length > 0) {
+      try {
+        const startShadowTag = sessionTag || sessionId.slice(0, 12);
+        const startShadow = createShadowCommit(repoPath, `start-${startShadowTag}`);
+        if (startShadow) {
+          initialPrePromptSha = startShadow;
+          initialPrePromptDirtyFiles = [];
+          debugLog('session-start', 'created session-start shadow', {
+            shadow: startShadow.slice(0, 12),
+            dirtyCount: sessionStartDirty.length,
+          });
+        }
+      } catch (err: unknown) {
+        debugLog('session-start', 'shadow creation failed (non-fatal)', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // For Codex, the stdin session_id is per-turn and rotates — useless as
+    // an anchor. Query SQLite for the thread whose cwd EXACTLY matches the
+    // session repoPath and use that thread.id. If we can't resolve one,
+    // leave agentSessionId empty — downstream discovery will then bail
+    // (returns null) rather than guess across threads.
+    if (agentSlug === 'codex' && !agentSessionId) {
+      try {
+        const codexDir = path.join(os.homedir(), '.codex');
+        const stateFiles = fs.existsSync(codexDir)
+          ? fs.readdirSync(codexDir)
+              .filter(f => f.startsWith('state_') && f.endsWith('.sqlite'))
+              .map(f => ({ path: path.join(codexDir, f), mtime: fs.statSync(path.join(codexDir, f)).mtimeMs }))
+              .sort((a, b) => b.mtime - a.mtime)
+          : [];
+        if (stateFiles.length > 0) {
+          const exactCwd = repoPath.replace(/'/g, "''");
+          const out = execFileSync('sqlite3', [
+            stateFiles[0].path,
+            `SELECT id FROM threads WHERE cwd = '${exactCwd}' ORDER BY updated_at DESC LIMIT 1;`,
+          ], {
+            encoding: 'utf-8' as const, timeout: 3000,
+            stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+          }).trim();
+          if (out) {
+            agentSessionId = out;
+            debugLog('session-start', 'codex thread_id resolved from sqlite', {
+              threadId: out.slice(0, 12), repoPath,
+            });
+          } else {
+            debugLog('session-start', 'codex thread_id not found for repo — will rely on stdin per-hook', { repoPath });
+          }
+        }
+      } catch (codexErr: unknown) {
+        debugLog('session-start', 'codex thread_id resolve failed (non-fatal)', {
+          message: codexErr instanceof Error ? codexErr.message : String(codexErr),
+        });
+      }
+    }
+
     const state: SessionState = {
       sessionId,
       claudeSessionId,
+      agentSessionId: agentSessionId || undefined,
       transcriptPath,
       model,
       startedAt: apiStartedAt || new Date().toISOString(),
       prompts: [],
       repoPath,
-      headShaAtStart: getHeadSha(repoPath),
+      headShaAtStart: sessionStartHead,
       headShaAtLastStop: null,
-      prePromptSha: getHeadSha(repoPath),
-      prePromptDirtyFiles: getDirtyFiles(repoPath),
+      prePromptSha: initialPrePromptSha,
+      prePromptDirtyFiles: initialPrePromptDirtyFiles,
+      // Preserve the original dirty-at-start list separately. The per-prompt
+      // tracking (prePromptDirtyFiles) gets reset on every prompt boundary
+      // and zeroed by shadow creation, but we still need the start-time
+      // snapshot at session-end to keep pre-existing pollution from another
+      // agent's leftover working-tree edits out of THIS session's sessionDiff.
+      sessionStartDirtyFiles: sessionStartDirty,
       branch,
       sessionTag,
       agentSlug: finalAgentSlug || agentSlug,
@@ -2034,8 +2465,51 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       });
       state.claudeSessionId = incomingSessionId;
     }
-    if (input.transcript_path) state.transcriptPath = input.transcript_path;
-    saveSessionState(state, found!.saveCwd, state.sessionTag);
+    // Cursor specifically: `conversation_id` is the stable per-chat id
+    // (matches `agent-transcripts/<id>/` and persists across the
+    // chat's prompts). `session_id` rotates per turn. When the user
+    // opens a NEW chat in the same workspace, the workspace-scoped
+    // findStateForHook would otherwise attach this prompt to the OLD
+    // chat's session — mixing prompts and orphaning the new chat's
+    // capture. Detach when locked agentSessionId disagrees with the
+    // incoming conversation_id, forcing the auto-create branch below
+    // to spin up a fresh Origin session for the new chat.
+    //
+    // Codex / Gemini are NOT detached here — Codex's stdin rotates
+    // per turn and Gemini's anchor is the transcript_path (handled via
+    // the strict-ID discoverGeminiTranscriptPath).
+    if (agentSlug === 'cursor') {
+      const incomingChatId =
+        (typeof input.conversation_id === 'string' && input.conversation_id) ||
+        (typeof input.session_id === 'string' && input.session_id) ||
+        '';
+      if (incomingChatId) {
+        if (!state.agentSessionId) {
+          state.agentSessionId = incomingChatId;
+        } else if (state.agentSessionId !== incomingChatId) {
+          debugLog('user-prompt-submit', 'cursor: new chat id — detaching from prior state', {
+            locked: state.agentSessionId,
+            incoming: incomingChatId,
+            priorOriginSession: state.sessionId,
+          });
+          state = null;
+        }
+      }
+    } else {
+      // Other agents: just record stdin id when state has none (useful
+      // for downstream discovery hooks that anchor on it).
+      const stdinAgentId =
+        (typeof input.session_id === 'string' && input.session_id) ||
+        (typeof input.conversation_id === 'string' && input.conversation_id) ||
+        '';
+      if (state && !state.agentSessionId && stdinAgentId) {
+        state.agentSessionId = stdinAgentId;
+      }
+    }
+    if (state) {
+      if (input.transcript_path) state.transcriptPath = input.transcript_path;
+      saveSessionState(state, found!.saveCwd, state.sessionTag);
+    }
   }
   if (!state) {
     // Before auto-creating, try to recover from archive (session state file may have been
@@ -2148,6 +2622,31 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         }
 
         debugLog('user-prompt-submit', 'auto-created session', { sessionId, sessionTag: autoTag, repoPath, repoUrl });
+        // Same dirty-at-start tracking as the proper session-start path —
+        // without it the heartbeat + session-snapshot filters can't exclude
+        // another agent's leftover working-tree state from this session's
+        // diffs (Codex's SessionStart hook is unreliable, so auto-create
+        // through this path is the common case for Codex sessions).
+        const autoSessionStartDirty = getDirtyFiles(hookCwd);
+        let autoPrePromptSha = getHeadSha(hookCwd);
+        let autoPrePromptDirtyFiles = autoSessionStartDirty;
+        if (autoSessionStartDirty.length > 0) {
+          try {
+            const startShadowTag = autoTag || sessionId.slice(0, 12);
+            const startShadow = createShadowCommit(hookCwd, `start-${startShadowTag}`);
+            if (startShadow) {
+              autoPrePromptSha = startShadow;
+              autoPrePromptDirtyFiles = [];
+              debugLog('user-prompt-submit', 'auto-create created session-start shadow', {
+                shadow: startShadow.slice(0, 12), dirtyCount: autoSessionStartDirty.length,
+              });
+            }
+          } catch (err: unknown) {
+            debugLog('user-prompt-submit', 'auto-create shadow creation failed (non-fatal)', {
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
         state = {
           sessionId,
           claudeSessionId: input.session_id || '',
@@ -2158,8 +2657,9 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           repoPath,
           headShaAtStart: getHeadSha(hookCwd),
           headShaAtLastStop: null,
-          prePromptSha: getHeadSha(hookCwd),
-          prePromptDirtyFiles: getDirtyFiles(hookCwd),
+          prePromptSha: autoPrePromptSha,
+          prePromptDirtyFiles: autoPrePromptDirtyFiles,
+          sessionStartDirtyFiles: autoSessionStartDirty,
           branch,
           sessionTag: autoTag,
           agentSlug: finalAgentSlug || agentSlug,
@@ -2192,6 +2692,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           const fbModel = input.model || agentSlug || 'unknown';
           const fbBranch = getBranch(hookCwd);
           const fbTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
+          const fbSessionStartDirty = getDirtyFiles(hookCwd);
           state = {
             sessionId: fbId,
             claudeSessionId: input.session_id || '',
@@ -2204,6 +2705,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             headShaAtLastStop: null,
             prePromptSha: getHeadSha(hookCwd),
             prePromptDirtyFiles: getDirtyFiles(hookCwd),
+            sessionStartDirtyFiles: fbSessionStartDirty,
             branch: fbBranch,
             sessionTag: fbTag,
           };
@@ -2241,8 +2743,16 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     .replace(/<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g, '')
     // Codex wraps AGENTS.md context in <INSTRUCTIONS>...</INSTRUCTIONS> on
     // its first user turn. Strip the envelope so any actual user text that
-    // follows still makes it through.
+    // follows still makes it through. Same for <environment_context>
+    // (Codex's session-init blob with cwd/shell/date) and
+    // <user_instructions> (Codex's wrapper for AGENTS.md and friends).
     .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+    // Cursor wraps each user message in <user_query>...</user_query>. Keep
+    // the inner text so the dashboard shows "make little change and commit"
+    // instead of "<user_query> make little change and commit </user_query>".
+    .replace(/<user_query>([\s\S]*?)<\/user_query>/g, '$1')
     .trim();
   const isSystemMsg = !prompt || /^Stop hook feedback:|^Stop:Callback hook blocking error|^PostToolUse:.*hook|^PreToolUse:.*hook/i.test(prompt);
   if (prompt && !isSystemMsg) {
@@ -2252,7 +2762,18 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     if (state.prePromptSha && currentHead && state.prompts.length > 0) {
       try {
         const prevPromptIdx = state.prompts.length - 1; // index of the prompt that just finished
-        const prevGitCapture = captureGitState(repoPath, state.prePromptSha);
+        // Prefer the per-prompt shadow recorded by the heartbeat daemon at
+        // the moment this prompt was detected in the rollout. That shadow
+        // represents the working tree state at the START of this prompt
+        // (= end of the previous prompt's work). Using it as the baseline
+        // for `captureGitState` produces a per-prompt diff that contains
+        // ONLY this prompt's work, even when no prompt-submit hook fired
+        // (Codex auto-trust gating, Gemini IDE plug-in, etc.).
+        const promptShadow = (state.promptShadows || []).find(
+          (s) => s.promptIndex === prevPromptIdx,
+        );
+        const captureBaseline = promptShadow?.shadowSha || state.prePromptSha;
+        const prevGitCapture = captureGitState(repoPath, captureBaseline);
         // Extract filesChanged from commit details + diff headers
         const prevFilesSet = new Set<string>();
         for (const c of prevGitCapture.commitDetails) {
@@ -2263,9 +2784,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             if (m[1]) prevFilesSet.add(m[1]);
           }
         }
-        // Filter uncommitted diff to exclude pre-existing dirty files
+        // Filter uncommitted diff against the prompt-baseline + session-start
+        // pre-existing dirt union (see uncommittedExcludeUnion).
         const filteredUncommitted = filterUncommittedDiff(
-          prevGitCapture.uncommittedDiff || '', state.prePromptDirtyFiles || [],
+          prevGitCapture.uncommittedDiff || '', uncommittedExcludeUnion(state),
         );
         if (filteredUncommitted) {
           for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
@@ -2281,35 +2803,102 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             prevCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
             prevTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
           } catch { /* ignore */ }
+          // Scope `committedDiff` to commits THIS session authored. Walking
+          // the session's own commit list keeps concurrent agents isolated:
+          // a heartbeat in this session no longer picks up a foreign agent's
+          // commits even when HEAD has moved past ours.
+          const sessionCommitted = sessionScopedCommittedDiff(repoPath, state);
+          const diffText = (sessionCommitted +
+            (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim();
           const prevMapping = {
             promptIndex: prevPromptIdx,
             promptText: (state.prompts[prevPromptIdx] || '').slice(0, 1000),
             filesChanged: prevFilesChanged,
-            diff: (((prevGitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+            diff: diffText.slice(0, 200_000),
             uncommittedDiff: filteredUncommitted.slice(0, 200_000),
             commitSha: prevCommitSha,
             treeSha: prevTreeSha,
           };
           if (!state.completedPromptMappings) state.completedPromptMappings = [];
-          // Replace if same promptIndex exists, else append
+          // Replace if same promptIndex exists, else append.
+          // BUT: don't overwrite a non-empty existing diff with an empty
+          // one — that happens when STOP already captured the previous
+          // prompt's work and then set prePromptDirtyFiles to those files,
+          // which causes filterUncommittedDiff here to strip everything
+          // back out, leaving us with prevMapping.diff="" that would clobber
+          // the good mapping STOP saved a second earlier.
           const existingIdx = state.completedPromptMappings.findIndex(m => m.promptIndex === prevPromptIdx);
           if (existingIdx >= 0) {
-            state.completedPromptMappings[existingIdx] = prevMapping;
+            const existing = state.completedPromptMappings[existingIdx];
+            const newHasDiff = !!(prevMapping.diff || prevMapping.uncommittedDiff);
+            const existingHasDiff = !!(existing.diff || (existing as any).uncommittedDiff);
+            // Stop already marked this prompt as chat-only (no commits + no
+            // transcript edits). Don't let the retroactive capture re-attribute
+            // pre-existing dirty working-tree state to a turn the agent didn't
+            // actually touch code on.
+            const existingIsChatOnly = (existing as any).chatOnly === true;
+            if (existingIsChatOnly) {
+              debugLog('user-prompt-submit', 'kept existing chat-only mapping', {
+                promptIndex: prevPromptIdx,
+              });
+            } else if (newHasDiff || !existingHasDiff) {
+              state.completedPromptMappings[existingIdx] = prevMapping;
+            } else {
+              debugLog('user-prompt-submit', 'kept existing previous-prompt mapping (new diff was empty)', {
+                promptIndex: prevPromptIdx,
+              });
+            }
           } else {
             state.completedPromptMappings.push(prevMapping);
           }
           debugLog('user-prompt-submit', 'captured per-prompt diff for previous prompt', {
             promptIndex: prevPromptIdx, filesChanged: prevFilesChanged.length,
             linesAdded: prevGitCapture.linesAdded, linesRemoved: prevGitCapture.linesRemoved,
+            hadEmptyDiff: !(prevMapping.diff || prevMapping.uncommittedDiff),
           });
         }
       } catch (err: any) {
         debugLog('user-prompt-submit', 'per-prompt diff capture failed (non-fatal)', { message: err.message });
       }
     }
-    // Record baseline for the new prompt
-    state.prePromptSha = currentHead;
-    state.prePromptDirtyFiles = getDirtyFiles(state.repoPath || hookCwd);
+    // Record baseline for the NEW prompt. If the working tree is dirty at
+    // this point, create a per-prompt shadow commit capturing the current
+    // state. The next prompt's retroactive capture will then compute its
+    // diff against THIS shadow — isolating only the new prompt's work and
+    // excluding everything that was uncommitted before it started.
+    //
+    // Without this, multiple prompts share `prePromptSha = HEAD` while the
+    // working tree accumulates uncommitted edits across prompts; the
+    // resulting per-prompt `uncommittedDiff` for each prompt is cumulative
+    // (= "all changes since HEAD"), which means prompt N's mapping
+    // appears to include prompt N-1's, N-2's, ... work too.
+    {
+      const repo = state.repoPath || hookCwd;
+      const dirty = getDirtyFiles(repo);
+      if (dirty.length > 0) {
+        try {
+          const shadowTag = state.sessionTag || state.sessionId.slice(0, 12);
+          const shadow = createShadowCommit(repo, `prompt-${shadowTag}`);
+          if (shadow) {
+            state.prePromptSha = shadow;
+            state.prePromptDirtyFiles = [];
+            debugLog('user-prompt-submit', 'anchored next-prompt baseline to shadow', {
+              shadow: shadow.slice(0, 12), dirtyCount: dirty.length,
+            });
+          } else {
+            // Shadow creation failed — fall back to HEAD + dirty list.
+            state.prePromptSha = currentHead;
+            state.prePromptDirtyFiles = dirty;
+          }
+        } catch {
+          state.prePromptSha = currentHead;
+          state.prePromptDirtyFiles = dirty;
+        }
+      } else {
+        state.prePromptSha = currentHead;
+        state.prePromptDirtyFiles = [];
+      }
+    }
 
     state.prompts.push(prompt);
 
@@ -2361,11 +2950,14 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         }
 
         // For Codex: try reading the rollout JSONL for full transcript + token data
-        if (!displayTranscript && (agentSlug === 'codex' || (state as any).agentSlug === 'codex')) {
+        if ((agentSlug === 'codex' || (state as any).agentSlug === 'codex')) {
           try {
-            const codexData = discoverCodexSessionData(state.repoPath || hookCwd, { verbose: !!state.verboseCapture });
+            const codexData = discoverCodexSessionData(state.repoPath || hookCwd, {
+              verbose: !!state.verboseCapture,
+              threadId: state.agentSessionId || state.claudeSessionId || undefined,
+            });
             if (codexData) {
-              if (codexData.transcript) displayTranscript = codexData.transcript;
+              if (!displayTranscript && codexData.transcript) displayTranscript = codexData.transcript;
               if (!parsed && codexData.tokensUsed > 0) {
                 parsed = {
                   prompts: [], filesChanged: [], summary: '', transcript: '',
@@ -2373,6 +2965,18 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                   inputTokens: codexData.inputTokens, outputTokens: codexData.outputTokens,
                   cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0,
                 };
+              }
+              // Sync state.prompts from the rollout so the dashboard sees
+              // every prompt — not just the ones our hook captured. Codex's
+              // UserPromptSubmit hook is unreliable (auto-trust gating), so
+              // mirroring the rollout is the only way to guarantee the
+              // prompt list grows turn-by-turn.
+              const rolloutPrompts = codexData.prompts || [];
+              if (rolloutPrompts.length > state.prompts.length) {
+                state.prompts = rolloutPrompts;
+                debugLog('user-prompt-submit', 'synced state.prompts from Codex rollout', {
+                  rolloutCount: rolloutPrompts.length,
+                });
               }
             }
           } catch { /* best effort */ }
@@ -2386,7 +2990,9 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         if (!displayTranscript && agentSlug === 'gemini') {
           try {
             if (!state.transcriptPath) {
-              const discovered = discoverGeminiTranscriptPath();
+              const discovered = discoverGeminiTranscriptPath({
+                sessionId: state.agentSessionId || state.claudeSessionId || undefined,
+              });
               if (discovered) {
                 state.transcriptPath = discovered;
                 debugLog('user-prompt-submit', 'gemini transcript auto-discovered', { discovered });
@@ -2399,14 +3005,24 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           } catch { /* best effort */ }
         }
 
-        // Synthesize transcript from captured prompts when no transcript file exists
+        // Synthesize transcript from captured prompts when no transcript file
+        // exists. Interleave any assistant replies recorded on
+        // state.promptResponses by the stop hook — otherwise a heartbeat that
+        // fires after one prompt completes and another starts would push a
+        // prompts-only transcript and clobber the response-rich one the
+        // stop hook just persisted (mainly affects Gemini, whose transcript
+        // file is unflushed mid-session so we depend on stop-hook captures).
         if (!displayTranscript && state.prompts.length > 0) {
           const turns: Array<{ role: string; content: string }> = [];
           if (state.agentSystemPrompt) {
             turns.push({ role: 'system', content: state.agentSystemPrompt });
           }
-          for (const p of state.prompts) {
-            turns.push({ role: 'user', content: p });
+          const responses = state.promptResponses || [];
+          for (let i = 0; i < state.prompts.length; i++) {
+            turns.push({ role: 'user', content: state.prompts[i] });
+            if (responses[i]) {
+              turns.push({ role: 'assistant', content: responses[i] });
+            }
           }
           displayTranscript = JSON.stringify(turns);
         }
@@ -2433,7 +3049,13 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           : state.prompts;
         const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
 
-        await api.updateSession(state.sessionId, {
+        // Fire-and-forget — Codex's user-prompt-submit hook has a 10s budget,
+        // and awaiting this network call here was making the hook time out
+        // (the heartbeat daemon already re-sends the same payload on its
+        // own tick, so the data isn't lost — just delayed by up to 30s).
+        // Shadow commit + state-file write already happened earlier in this
+        // hook, so the per-prompt baseline is captured before we return.
+        api.updateSession(state.sessionId, {
           prompt: joinedPrompt || undefined,
           transcript: displayTranscript || undefined,
           model: model && model !== 'unknown' && model !== 'default' ? model : undefined,
@@ -2460,8 +3082,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                 };
               })
             : undefined,
+        }).catch((err: any) => {
+          debugLog('user-prompt-submit', 'background updateSession failed (non-fatal)', { message: err?.message });
         });
-        debugLog('user-prompt-submit', 'heartbeat sent', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd, promptChanges: state.completedPromptMappings?.length || 0 });
+        debugLog('user-prompt-submit', 'heartbeat dispatched (fire-and-forget)', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd, promptChanges: state.completedPromptMappings?.length || 0 });
 
         // Restart heartbeat daemon if it died (e.g., Mac sleep killed it)
         if (!isHeartbeatAlive(state.sessionId)) {
@@ -2482,6 +3106,27 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   // inject it here on every prompt submission.
   try {
     let systemMsg = '';
+
+    // Auth-broken warning. If a recent API call hit 401 the api.ts
+    // layer writes an auth-status.json sentinel; bubble that up as
+    // the first line of the systemMessage so the agent surfaces it
+    // in the user's conversation instead of letting every hook
+    // silently fail in hooks.log forever.
+    try {
+      const authStatus = readAuthStatus();
+      if (authStatus?.state === 'unauthorized') {
+        systemMsg +=
+          '\u26a0 Origin: Your CLI API key is no longer valid (server returned 401). ' +
+          'Run `origin login` in another terminal to re-authenticate \u2014 until then, ' +
+          'Origin is not capturing this session.\n\n';
+      } else if (authStatus?.state === 'unreachable') {
+        systemMsg +=
+          '\u26a0 Origin: Could not reach the API on the last call' +
+          (authStatus.message ? ` (${authStatus.message})` : '') +
+          '. Sessions will resume once the server is reachable again.\n\n';
+      }
+    } catch { /* status read is best-effort */ }
+
     if (state.agentSystemPrompt) {
       systemMsg += state.agentSystemPrompt + '\n\n';
     }
@@ -2564,8 +3209,99 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     } catch { /* no archive */ }
   }
   if (!state) {
-    debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
-    return;
+    // Cursor 2.x edge case: if the user was running Cursor while their
+    // hooks.json had the now-invalid `agentSessionStart` name, no session-
+    // start state was created. After upgrading + restarting Cursor, the
+    // first agent reply fires `stop` with valid hook config — but our
+    // handler used to abort here because no in-progress state was on disk,
+    // and the session never reached the dashboard. Auto-create from the
+    // stop-hook payload as a last resort. Mirror the user-prompt-submit
+    // auto-create path; gated on cursor + valid workspace + session_id so
+    // we don't accidentally fabricate sessions for other agents.
+    const canAutoCreate = agentSlug === 'cursor'
+      && connected
+      && typeof input.session_id === 'string'
+      && Array.isArray(input.workspace_roots)
+      && input.workspace_roots.length > 0;
+    if (canAutoCreate) {
+      try {
+        const autoConfig = loadConfig();
+        const autoAgentConfig = loadAgentConfig();
+        if (autoConfig?.apiKey && autoAgentConfig?.machineId) {
+          const wsRoot = input.workspace_roots[0];
+          const repoPath = discoverGitRoot(wsRoot) || wsRoot;
+          const branch = getBranch(repoPath);
+          const startRes = await api.startSession({
+            machineId: autoAgentConfig.machineId,
+            prompt: '',
+            model: (typeof input.model === 'string' && input.model !== 'cursor' && input.model !== 'default' && input.model !== 'unknown') ? input.model : 'cursor',
+            repoPath,
+            agentSlug: 'cursor',
+            branch: branch || undefined,
+            agentSessionId: input.session_id,
+          } as any);
+          const newSessionId = (startRes as any)?.sessionId;
+          if (typeof newSessionId === 'string' && newSessionId) {
+            const autoTag = (input.session_id as string).slice(0, 12);
+            const synthesizedDirty = getDirtyFiles(repoPath);
+            const synthesized: SessionState = {
+              sessionId: newSessionId,
+              claudeSessionId: input.session_id,
+              transcriptPath: input.transcript_path || '',
+              model: typeof input.model === 'string' ? input.model : 'cursor',
+              startedAt: new Date().toISOString(),
+              prompts: [],
+              repoPath,
+              headShaAtStart: getHeadSha(repoPath),
+              headShaAtLastStop: null,
+              prePromptSha: getHeadSha(repoPath),
+              prePromptDirtyFiles: synthesizedDirty,
+              sessionStartDirtyFiles: synthesizedDirty,
+              branch: branch || null,
+              sessionTag: autoTag,
+              agentSlug: 'cursor',
+            };
+            saveSessionState(synthesized, repoPath, autoTag);
+            state = synthesized;
+            found = { state: synthesized, saveCwd: repoPath };
+            debugLog('stop', 'auto-created cursor session from stop-hook payload', {
+              sessionId: newSessionId, repoPath, agentSessionId: input.session_id,
+            });
+          }
+        }
+      } catch (err: any) {
+        debugLog('stop', 'cursor auto-create failed', { message: err?.message });
+      }
+    }
+    if (!state) {
+      debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: false });
+      return;
+    }
+  }
+
+  // For Codex specifically: the session may have been registered with a
+  // misattributed repoPath when the user launched `codex` from `~` (or any
+  // non-git directory). discoverGitRoot then walks into `.openclaw/workspace`
+  // or whatever sibling git repo it finds first — so the session shows up on
+  // the dashboard against the wrong repo, and the diff capture below runs
+  // against a directory codex never touched (→ 0 files / 0 lines even when
+  // codex committed). Codex itself records the thread's actual cwd in its
+  // SQLite state DB; query for it and override state.repoPath if it differs.
+  if (agentSlug === 'codex') {
+    try {
+      const codexData = discoverCodexSessionData(state.repoPath, {
+        verbose: !!state.verboseCapture,
+        threadId: state.agentSessionId || state.claudeSessionId || undefined,
+      });
+      const actualCwd = codexData?.cwd;
+      if (actualCwd && actualCwd !== state.repoPath && fs.existsSync(actualCwd)) {
+        debugLog('stop', 'codex repoPath correction', { from: state.repoPath, to: actualCwd });
+        state.repoPath = actualCwd;
+        saveSessionState(state, found!.saveCwd, state.sessionTag);
+      }
+    } catch (err: any) {
+      debugLog('stop', 'codex cwd lookup failed (non-fatal)', { message: err?.message });
+    }
   }
 
   // Update model from stdin if it's a real model name (Cursor sends actual model in stop, not session-start)
@@ -2582,7 +3318,9 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
   // Auto-discover Gemini transcript path if not already set
   if (!state.transcriptPath) {
-    const discovered = discoverGeminiTranscriptPath();
+    const discovered = discoverGeminiTranscriptPath({
+      sessionId: state.agentSessionId || state.claudeSessionId || undefined,
+    });
     if (discovered) {
       state.transcriptPath = discovered;
       saveSessionState(state, found!.saveCwd, state.sessionTag);
@@ -2600,7 +3338,13 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
     // For Cursor: discover agent transcript JSONL for real conversation data + better token estimates
     if (agentSlug === 'cursor' && parsed.tokensUsed === 0) {
-      const cursorData = discoverCursorTranscript(input.conversation_id, state.repoPath, { verbose: !!state.verboseCapture });
+      // Prefer session_id (Cursor 2.x stop hook stdin) over conversation_id
+      // (older shape). The Cursor agent-transcripts directory name IS the
+      // session_id, so this is what lets the discovery find the right chat
+      // instead of falling back to "the most recently modified jsonl".
+      const cursorId = (typeof input.session_id === 'string' ? input.session_id : undefined)
+        || (typeof input.conversation_id === 'string' ? input.conversation_id : undefined);
+      const cursorData = discoverCursorTranscript(cursorId, state.repoPath, { verbose: !!state.verboseCapture });
       if (cursorData) {
         debugLog('stop', 'supplementing with Cursor transcript data', {
           tokens: cursorData.tokensUsed,
@@ -2642,7 +3386,10 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     // (assistant text, reasoning, tool I/O), so even when we already have
     // tokens we still want the richer transcript.
     const codexData = (agentSlug === 'codex')
-      ? discoverCodexSessionData(state.repoPath, { verbose: !!state.verboseCapture })
+      ? discoverCodexSessionData(state.repoPath, {
+          verbose: !!state.verboseCapture,
+          threadId: state.agentSessionId || state.claudeSessionId || undefined,
+        })
       : null;
     if (codexData) {
       debugLog('stop', 'supplementing with Codex data', {
@@ -2660,7 +3407,21 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       if (codexData.toolCalls > 0 && parsed.toolCalls === 0) {
         parsed.toolCalls = codexData.toolCalls;
       }
-      if (codexData.prompt && state.prompts.length === 0) {
+      // Sync state.prompts with every user prompt the rollout knows about.
+      // Codex's UserPromptSubmit hook is unreliable (auto-trust gating,
+      // config.toml feature-flag drift), so we can't count on state.prompts
+      // growing turn-by-turn from that path. The rollout JSONL is the
+      // authoritative source — pull every cleaned user message in order and
+      // adopt it as state.prompts when the rollout has at least as many
+      // entries as we currently track. Falling back to the singleton SQLite
+      // first_user_message only when no rollout prompts are available.
+      const rolloutPrompts = codexData.prompts || [];
+      if (rolloutPrompts.length > state.prompts.length) {
+        state.prompts = rolloutPrompts;
+        debugLog('stop', 'synced state.prompts from rollout', {
+          rolloutCount: rolloutPrompts.length,
+        });
+      } else if (codexData.prompt && state.prompts.length === 0) {
         state.prompts.push(codexData.prompt);
       }
       // Prefer the rollout-parsed transcript over the synthesized-from-prompts
@@ -2669,6 +3430,153 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         displayTranscript = codexData.transcript;
         debugLog('stop', 'using Codex rollout transcript', { length: displayTranscript.length });
       }
+
+      // Backfill per-prompt diffs from the rollout + git history. Codex's
+      // user-prompt-submit hook is unreliable, so for prompts where it didn't
+      // fire we have no captured diff — only prompts 0-1 typically get
+      // captured. Without this, AI Blame shows only those two prompts.
+      // backfillCodexPromptMappings prefers TURN-SCOPED commit attribution
+      // (walks the rollout's function_call_output events for [branch sha]
+      // markers and pins each commit to the turn that produced it). Falls
+      // back to timestamp-based mapping only when the rollout doesn't
+      // surface a SHA for a given commit. Timestamps alone race against the
+      // user typing the next prompt before the agent's commit lands —
+      // exactly the bug that caused prompt N's work to show up under
+      // prompt N+1 in AI Blame.
+      try {
+        const codexThreadId = state.agentSessionId || state.claudeSessionId || undefined;
+        const timeline = getCodexPromptsTimeline(state.repoPath, codexThreadId);
+        if (timeline.length > 0 && state.headShaAtStart) {
+          const currentHead = getHeadSha(state.repoPath) || state.headShaAtStart;
+          const rolloutFile = findCodexRolloutPath(state.repoPath, codexThreadId) || undefined;
+          const backfilled = backfillCodexPromptMappings({
+            repoPath: state.repoPath,
+            headShaAtStart: state.headShaAtStart,
+            headShaAtEnd: currentHead,
+            prompts: timeline.map(t => ({ text: t.text, timestamp: t.timestamp })),
+            rolloutFile,
+          });
+          if (backfilled.length > 0) {
+            if (!state.completedPromptMappings) state.completedPromptMappings = [];
+            // Merge: turn-scoped backfill always wins. The previous policy
+            // ("existing wins if it has any diff") preserved bad data from
+            // racy user-prompt-submit captures that attributed cross-turn
+            // commits to the wrong prompt — i.e. the very bug this fix is
+            // for. The rollout's per-turn `[branch sha]` mapping is now the
+            // authoritative source of truth; uncommittedDiff data the
+            // backfill can't see is rare for Codex and not worth keeping
+            // wrong attribution to recover.
+            for (const bf of backfilled) {
+              const existingIdx = state.completedPromptMappings.findIndex(
+                m => m.promptIndex === bf.promptIndex,
+              );
+              if (existingIdx >= 0) {
+                state.completedPromptMappings[existingIdx] = bf;
+              } else {
+                state.completedPromptMappings.push(bf);
+              }
+            }
+            state.completedPromptMappings.sort((a, b) => a.promptIndex - b.promptIndex);
+            debugLog('stop', 'codex per-prompt backfill', {
+              timelineCount: timeline.length,
+              backfilledCount: backfilled.length,
+              totalMappings: state.completedPromptMappings.length,
+            });
+          }
+
+          // Clean up two classes of bogus per-prompt mappings that
+          // user-prompt-submit's retroactive capture path produces for
+          // Codex sessions:
+          //
+          //   1. AGENTS.md-only mappings — the agent didn't touch any user
+          //      file in this turn; the diff is just Origin's auto-created
+          //      AGENTS.md being churned by the system. Counting that as
+          //      "this prompt did work" misattributes a real prompt to
+          //      bookkeeping noise.
+          //
+          //   2. Consecutive duplicates — when the user types prompt N+1
+          //      before the agent finishes prompt N's work, the retroactive
+          //      capture snapshots the SAME state for N and N+1, leaving
+          //      pc[N+1] = pc[N]. Show as no-op so the real prompt's work
+          //      doesn't get split across two attribution slots.
+          //
+          // Backfill's own output is unique per prompt (rollout SHAs are
+          // 1:1), so neither pattern can be backfill-produced — safe to
+          // clear without risking authentic data.
+          if (state.completedPromptMappings && state.completedPromptMappings.length > 0) {
+            const sorted = state.completedPromptMappings
+              .slice()
+              .sort((a, b) => a.promptIndex - b.promptIndex);
+            let cleared = 0;
+            const clearTarget = (idx: number) => {
+              const target = state.completedPromptMappings!.find(m => m.promptIndex === idx);
+              if (!target) return false;
+              target.diff = '';
+              (target as { uncommittedDiff?: string }).uncommittedDiff = '';
+              target.filesChanged = [];
+              return true;
+            };
+            // Pass 1 — AGENTS.md-only mappings.
+            for (const m of sorted) {
+              if (!m.diff) continue;
+              const headers: string[] = [];
+              for (const h of m.diff.matchAll(/^diff --git a\/(.+?)\s+b\/(.+)$/gm)) {
+                headers.push(h[2]);
+              }
+              if (headers.length > 0 && headers.every(h => h === 'AGENTS.md')) {
+                if (clearTarget(m.promptIndex)) cleared++;
+              }
+            }
+            // Pass 2 — consecutive duplicates (compare pc.diff alone since
+            // that's what the blame algorithm parses; uncommittedDiff is
+            // metadata only).
+            const sortedAfter = state.completedPromptMappings
+              .slice()
+              .sort((a, b) => a.promptIndex - b.promptIndex);
+            for (let i = 1; i < sortedAfter.length; i++) {
+              const prev = sortedAfter[i - 1];
+              const curr = sortedAfter[i];
+              const prevDiff = prev.diff || '';
+              const currDiff = curr.diff || '';
+              if (currDiff && currDiff === prevDiff) {
+                if (clearTarget(curr.promptIndex)) cleared++;
+              }
+            }
+            if (cleared > 0) {
+              debugLog('stop', 'cleared bogus prompt mappings', { cleared });
+            }
+          }
+        }
+      } catch (err: unknown) {
+        debugLog('stop', 'codex per-prompt backfill failed (non-fatal)', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Gemini stop hook ships the assistant's reply on stdin as
+    // `prompt_response`. Claude Code's stop hook uses `last_assistant_message`
+    // for the same purpose. Both agents' transcript files are sometimes empty
+    // / unflushed at stop time (especially Claude Code running inside a
+    // .claude/worktrees/* worktree — the JSONL hasn't been finalized when
+    // the stop hook fires). Capture either onto state.promptResponses so the
+    // synthesized transcript below includes the assistant turn instead of
+    // only the user prompt.
+    const stopHookReply =
+      (typeof input.prompt_response === 'string' && input.prompt_response.trim() && input.prompt_response) ||
+      (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim() && input.last_assistant_message) ||
+      '';
+    if (stopHookReply) {
+      if (!state.promptResponses) state.promptResponses = [];
+      const currentIdx = Math.max(state.prompts.length - 1, 0);
+      // Replace if we already have one for this index (in case Stop fires
+      // twice for the same turn — rare but observed).
+      state.promptResponses[currentIdx] = stopHookReply;
+      debugLog('stop', 'captured stop-hook reply from stdin', {
+        promptIndex: currentIdx,
+        length: stopHookReply.length,
+        source: input.prompt_response ? 'prompt_response' : 'last_assistant_message',
+      });
     }
 
     // For Codex (and other agents without transcripts): synthesize displayTranscript from captured prompts
@@ -2678,11 +3586,19 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       if (state.agentSystemPrompt) {
         turns.push({ role: 'system', content: state.agentSystemPrompt });
       }
-      for (const p of state.prompts) {
-        turns.push({ role: 'user', content: p });
+      const responses = state.promptResponses || [];
+      for (let i = 0; i < state.prompts.length; i++) {
+        turns.push({ role: 'user', content: state.prompts[i] });
+        // Interleave the assistant reply we captured (Gemini, agents
+        // without transcripts) so the dashboard shows the response.
+        if (responses[i]) {
+          turns.push({ role: 'assistant', content: responses[i] });
+        }
       }
       displayTranscript = JSON.stringify(turns);
-      debugLog('stop', 'synthesized transcript from prompts', { turnCount: turns.length });
+      debugLog('stop', 'synthesized transcript from prompts', {
+        turnCount: turns.length, responseCount: responses.filter(Boolean).length,
+      });
     }
 
     // Estimate tokens from prompt text when no real token data exists (Codex, agents without transcripts)
@@ -2718,6 +3634,14 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       if (cursorDbModel) {
         model = cursorDbModel;
         debugLog('stop', 'model from Cursor DB', { model: cursorDbModel });
+      } else {
+        // DB read failed or returned nothing — we'll bill at sonnet (cursor key) rates
+        // but the real model could be cheaper (gpt-4o-mini) or more expensive. Log it
+        // so we can spot systematic mispricing in aggregate.
+        debugLog('stop', 'cursor model fallback (DB lookup failed)', {
+          conversationId: input.conversation_id,
+          finalModel: model || 'cursor',
+        });
       }
     }
     const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens);
@@ -2776,26 +3700,80 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       const currentPromptText = prompts[currentPromptIdx] || '';
 
       if (promptMappings.length === 0 && prompts.length > 0) {
-        // No transcript-based mappings — synthesize from git for current prompt
-        // Filter uncommitted diff to exclude pre-existing dirty files
+        // No transcript-based mappings — synthesize from git for current prompt.
+        // Filter uncommitted diff against the prompt-baseline + session-start
+        // pre-existing dirt union.
         const filteredUncommitted = filterUncommittedDiff(
-          gitCapture.uncommittedDiff || '', state.prePromptDirtyFiles || [],
+          gitCapture.uncommittedDiff || '', uncommittedExcludeUnion(state),
         );
-        const uncommittedFiles: string[] = [];
-        if (filteredUncommitted) {
-          for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
-            if (m[1]) uncommittedFiles.push(m[1]);
+        // Hard gate: if the agent didn't commit anything AND the transcript
+        // shows no Edit/Write tool calls, the user is just chatting and the
+        // dirty working tree existed before this prompt. Attribute an empty
+        // mapping so the dashboard reflects "no code changes" instead of
+        // sweeping in unrelated uncommitted work. filteredUncommitted is the
+        // backstop — when prePromptDirtyFiles missed something (path-format
+        // drift, race after a stop reset, …), the absence of commits +
+        // transcript edits is a stronger signal.
+        const noCommits = (gitCapture.commitDetails?.length ?? 0) === 0;
+        const noTranscriptEdits = parsed.filesChanged.length === 0;
+        if (noCommits && noTranscriptEdits) {
+          const currentMapping = {
+            promptIndex: currentPromptIdx,
+            promptText: currentPromptText.slice(0, 1000),
+            filesChanged: [] as string[],
+            diff: '',
+            uncommittedDiff: '',
+            // Marker so the next user-prompt-submit's retroactive
+            // capture path doesn't overwrite this with whatever dirty
+            // working-tree state still exists.
+            chatOnly: true as const,
+          };
+          promptMappings = [...previousMappings, currentMapping];
+          debugLog('stop', 'chat-only prompt — synthesized empty mapping', {
+            promptIndex: currentPromptIdx,
+            uncommittedAfterFilter: filteredUncommitted.length,
+          });
+        } else {
+          const uncommittedFiles: string[] = [];
+          if (filteredUncommitted) {
+            for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) uncommittedFiles.push(m[1]);
+            }
           }
+          // When prePromptSha is a shadow commit, use workingTreeDiff —
+          // committedDiff would be the reverse-direction text against the
+          // shadow's content.
+          const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+          if (useWorkingTreeDiff) {
+            // Pull file list out of the working-tree diff (which is what
+            // we'll actually store) so filesChanged matches the diff.
+            for (const m of gitCapture.workingTreeDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) uncommittedFiles.push(m[1]);
+            }
+          }
+          const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
+          const synthDiff = useWorkingTreeDiff
+            ? gitCapture.workingTreeDiff
+            : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
+          // Capture commit/tree SHAs so the commit-detail page can link
+          // this prompt to the commit it produced.
+          let synthCommitSha: string | null = null;
+          let synthTreeSha: string | null = null;
+          try {
+            synthCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            synthTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          } catch { /* ignore */ }
+          const currentMapping = {
+            promptIndex: currentPromptIdx,
+            promptText: currentPromptText.slice(0, 1000),
+            filesChanged: Array.from(allFiles),
+            diff: synthDiff.slice(0, 200_000),
+            uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+            commitSha: synthCommitSha,
+            treeSha: synthTreeSha,
+          };
+          promptMappings = [...previousMappings, currentMapping];
         }
-        const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
-        const currentMapping = {
-          promptIndex: currentPromptIdx,
-          promptText: currentPromptText.slice(0, 1000),
-          filesChanged: Array.from(allFiles),
-          diff: (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
-          uncommittedDiff: filteredUncommitted.slice(0, 200_000),
-        };
-        promptMappings = [...previousMappings, currentMapping];
       } else if (promptMappings.length > 0 && previousMappings.length > 0) {
         // Transcript gave us mappings for current prompt — merge with saved previous ones.
         // Deduplicate by promptIndex (current prompt's data wins over saved).
@@ -2808,26 +3786,92 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       // parsing missed it. Without this, the latest prompt shows empty on the
       // platform until the NEXT prompt fires (when user-prompt-submit captures it).
       if (prompts.length > 0 && !promptMappings.some(pm => pm.promptIndex === currentPromptIdx)) {
-        const filteredUncommitted = filterUncommittedDiff(
-          gitCapture.uncommittedDiff || '', state.prePromptDirtyFiles || [],
-        );
-        const uncommittedFiles: string[] = [];
-        if (filteredUncommitted) {
-          for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
-            if (m[1]) uncommittedFiles.push(m[1]);
+        const noCommits = (gitCapture.commitDetails?.length ?? 0) === 0;
+        const noTranscriptEdits = parsed.filesChanged.length === 0;
+        if (noCommits && noTranscriptEdits) {
+          // Chat-only prompt — same gate as the synthesis branch above.
+          promptMappings.push({
+            promptIndex: currentPromptIdx,
+            promptText: currentPromptText.slice(0, 1000),
+            filesChanged: [] as string[],
+            diff: '',
+            uncommittedDiff: '',
+            chatOnly: true as const,
+          });
+          debugLog('stop', 'safety-net empty mapping (chat-only prompt)', {
+            promptIndex: currentPromptIdx,
+          });
+        } else {
+          const filteredUncommitted = filterUncommittedDiff(
+            gitCapture.uncommittedDiff || '', uncommittedExcludeUnion(state),
+          );
+          const uncommittedFiles: string[] = [];
+          if (filteredUncommitted) {
+            for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) uncommittedFiles.push(m[1]);
+            }
           }
+          // Shadow baseline → prefer workingTreeDiff (see note in synthesis branch above).
+          const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+          if (useWorkingTreeDiff) {
+            for (const m of gitCapture.workingTreeDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) uncommittedFiles.push(m[1]);
+            }
+          }
+          const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
+          const safetyDiff = useWorkingTreeDiff
+            ? gitCapture.workingTreeDiff
+            : (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim());
+          // Capture commitSha + treeSha so the dashboard can link this prompt
+          // to its commit on the commit-detail page. Without these the
+          // "Prompts in this commit" panel says "No linked prompts" even
+          // when the per-prompt mapping was captured correctly.
+          let synthCommitSha: string | null = null;
+          let synthTreeSha: string | null = null;
+          try {
+            synthCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            synthTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          } catch { /* ignore */ }
+          promptMappings.push({
+            promptIndex: currentPromptIdx,
+            promptText: currentPromptText.slice(0, 1000),
+            filesChanged: Array.from(allFiles),
+            diff: safetyDiff.slice(0, 200_000),
+            uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+            commitSha: synthCommitSha,
+            treeSha: synthTreeSha,
+          } as any);
+          debugLog('stop', 'synthesized current prompt mapping (safety net)', {
+            promptIndex: currentPromptIdx, files: allFiles.size, shadowBaseline: gitCapture.baselineIsShadow,
+            commitSha: synthCommitSha?.slice(0, 8) || null,
+          });
         }
-        const allFiles = new Set([...filesChanged, ...uncommittedFiles]);
-        promptMappings.push({
-          promptIndex: currentPromptIdx,
-          promptText: currentPromptText.slice(0, 1000),
-          filesChanged: Array.from(allFiles),
-          diff: (((gitCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
-          uncommittedDiff: filteredUncommitted.slice(0, 200_000),
-        });
-        debugLog('stop', 'synthesized current prompt mapping (safety net)', {
-          promptIndex: currentPromptIdx, files: allFiles.size,
-        });
+      }
+
+      // Safety net for OLDER prompts (not just current). Codex doesn't
+      // fire user-prompt-submit reliably; a rollout-sync can pop several
+      // new entries into state.prompts at once (e.g. user typed 3 prompts
+      // before any hook fired). Without this, state.completedPromptMappings
+      // ends up with fewer entries than state.prompts and the dashboard
+      // shows "3 prompts" but only N pcs. Fill every gap with a chatOnly
+      // placeholder so prompt count matches mapping count — honest UI
+      // ("no work captured for this turn") instead of phantom missing
+      // entries that confuse the blame view.
+      if (prompts.length > 0) {
+        const haveIdx = new Set(promptMappings.map(pm => pm.promptIndex));
+        for (let i = 0; i < prompts.length; i++) {
+          if (haveIdx.has(i)) continue;
+          promptMappings.push({
+            promptIndex: i,
+            promptText: (prompts[i] || '').slice(0, 1000),
+            filesChanged: [] as string[],
+            diff: '',
+            uncommittedDiff: '',
+            chatOnly: true as const,
+          });
+        }
+        // Keep ordering stable for downstream consumers.
+        promptMappings.sort((a, b) => a.promptIndex - b.promptIndex);
       }
 
       debugLog('stop', 'prompt mappings (merged)', {
@@ -2881,6 +3925,37 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     }
 
     if (connected) {
+      // Recovery: if the session was created in local-only mode (key
+      // was dead at the time → `local-` prefix) and the key has since
+      // recovered, register it server-side now so the rest of the
+      // update lands on a real row instead of a 404. Persist the new
+      // id back to state so future hooks use it directly.
+      if (state.sessionId.startsWith('local-')) {
+        try {
+          const agentConfig = (await import('../config.js')).loadAgentConfig();
+          if (agentConfig?.machineId) {
+            debugLog('stop', 'migrating local session to server', { local: state.sessionId });
+            const startRes = await api.startSession({
+              machineId: agentConfig.machineId,
+              prompt: prompts[0] || '',
+              model: model !== 'unknown' ? model : 'claude',
+              repoPath: state.repoPath || hookCwd,
+              agentSlug,
+              branch: state.branch || undefined,
+              agentSessionId: state.claudeSessionId,
+            } as any);
+            const newId = (startRes as any)?.sessionId;
+            if (typeof newId === 'string' && newId && !newId.startsWith('local-')) {
+              debugLog('stop', 'local session migrated', { from: state.sessionId, to: newId });
+              state.sessionId = newId;
+              try { saveSessionState(state, hookCwd, state.sessionTag); } catch { /* non-fatal */ }
+            }
+          }
+        } catch (err: any) {
+          debugLog('stop', 'local→server migration failed (non-fatal)', { message: err?.message });
+        }
+      }
+
       debugLog('stop', 'calling api.updateSession', {
         sessionId: state.sessionId,
         promptCount: prompts.length,
@@ -2893,6 +3968,144 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         costUsd,
         promptMappings: promptMappings.length,
       });
+      // Build a session-level gitCapture snapshot for agents whose .git
+      // hooks don't fire reliably (Codex). Without this, sessionDiff is
+      // never created, the blame endpoint falls back to line-number Map
+      // attribution where later prompts overwrite earlier ones, and AI
+      // Blame shows prompt 1's lines as belonging to prompt 2 for any
+      // file both prompts touched. headBefore = session start so the API
+      // can recognise this as a SNAPSHOT and replace (not append) the
+      // existing sessionDiff.
+      let sessionGitCapture: {
+        headBefore: string; headAfter: string; commitShas: string[];
+        diff: string; linesAdded: number; linesRemoved: number;
+        commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }>;
+        snapshot: true;
+      } | undefined;
+      const codexLikeAgents = new Set(['codex', 'gemini']);
+      if (codexLikeAgents.has((agentSlug || state.agentSlug || '').toLowerCase()) && state.headShaAtStart) {
+        try {
+          // fullContext: AI Blame renders the entire file from this diff —
+          // unlimited unified context means every line ships as context or
+          // added, eliminating "N lines hidden" gaps in the view.
+          const snap = captureGitState(state.repoPath, state.headShaAtStart, { fullContext: true });
+          if (snap.committedDiff || snap.uncommittedDiff) {
+            // Scope the committed side to commits THIS session authored.
+            // `git diff session-start..HEAD` (used by captureGitState) picks
+            // up commits made by a concurrent session once HEAD has moved
+            // past ours — sessionScopedCommittedDiff walks the post-commit-
+            // recorded list and rebuilds the diff from this session's own
+            // commits only, which is the right unit of "what this session
+            // did" for a Full Session Diff display.
+            const filteredUncommitted = filterUncommittedDiff(
+              snap.uncommittedDiff || '',
+              uncommittedExcludeUnion(state),
+            );
+            // Codex bypasses .git/hooks/post-commit on some installs, so
+            // sessionCommitShas can be empty even when the session produced
+            // real commits — sessionScopedCommittedDiff then returns "" and
+            // fullDiff collapses to just the uncommitted slice, dropping every
+            // committed prompt from sessionDiff (and the AI Blame view). Fall
+            // back to snap.committedDiff (= git diff session-start..HEAD)
+            // when the session-scoped walk produces nothing.
+            let sessionCommitted = sessionScopedCommittedDiff(state.repoPath, state);
+            if (!sessionCommitted && snap.committedDiff) {
+              sessionCommitted = snap.committedDiff;
+            }
+            const fullDiff = (sessionCommitted +
+              (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim();
+            sessionGitCapture = {
+              headBefore: state.headShaAtStart,
+              headAfter: snap.headAfter || state.headShaAtStart,
+              commitShas: (snap.commitDetails || []).map(c => c.sha),
+              diff: fullDiff.slice(0, 500_000),
+              linesAdded: snap.linesAdded || 0,
+              linesRemoved: snap.linesRemoved || 0,
+              commitDetails: snap.commitDetails || [],
+              snapshot: true,
+            };
+            debugLog('stop', 'session-level gitCapture snapshot built', {
+              diffLen: sessionGitCapture.diff.length,
+              commitCount: sessionGitCapture.commitShas.length,
+              linesAdded: sessionGitCapture.linesAdded,
+              linesRemoved: sessionGitCapture.linesRemoved,
+              filteredOutFiles: (state.sessionStartDirtyFiles || []).length,
+            });
+          }
+        } catch (snapErr: unknown) {
+          debugLog('stop', 'session-level gitCapture failed (non-fatal)', {
+            message: snapErr instanceof Error ? snapErr.message : String(snapErr),
+          });
+        }
+      }
+
+      // ─── New per-prompt PromptCapture pipeline ────────────────────────
+      // Run the agent-specific extractor and produce an authoritative
+      // PromptEdit[] per prompt. The server stores this JSON on
+      // PromptChange.editsJson and computes the displayed per-prompt diff
+      // + AI Blame attribution from it via LCS, bypassing the legacy
+      // block-matching heuristics that conflate cross-prompt changes.
+      let promptEditsByIndex: Map<number, string> | null = null;
+      try {
+        const slug = (agentSlug || state.agentSlug || '').toLowerCase();
+        const captureAgent =
+          slug === 'codex' ? 'codex' :
+          slug === 'cursor' ? 'cursor' :
+          slug === 'gemini' ? 'gemini' :
+          'claude';
+        const capTranscript =
+          captureAgent === 'codex' ? (codexData?.rolloutPath || state.transcriptPath)
+            : state.transcriptPath;
+        // For Codex, hand the extractor the pre-resolved per-prompt
+        // timeline (text + ms timestamp) from the same rollout walker
+        // already used elsewhere for commit attribution. Without this,
+        // the extractor re-reads the rollout and falls back to "all
+        // commits go to the last prompt" whenever a timestamp couldn't
+        // be parsed — exactly the bug that left prompt N+1's diff
+        // showing up under prompt N.
+        let codexPromptsForCapture: Array<{ text: string; timestamp: number }> | undefined;
+        if (captureAgent === 'codex') {
+          try {
+            const codexThreadId = state.agentSessionId || state.claudeSessionId || undefined;
+            const timeline = getCodexPromptsTimeline(state.repoPath, codexThreadId);
+            if (timeline.length > 0) {
+              codexPromptsForCapture = timeline.map((t) => ({
+                text: t.text || '',
+                timestamp: t.timestamp || 0,
+              }));
+            }
+          } catch (tlErr: unknown) {
+            debugLog('stop', 'codex timeline fetch for capturePromptEdits failed', {
+              message: tlErr instanceof Error ? tlErr.message : String(tlErr),
+            });
+          }
+        }
+        const captures = capturePromptEdits({
+          agent: captureAgent,
+          repoPath: state.repoPath,
+          transcriptPath: capTranscript,
+          codexPrompts: codexPromptsForCapture,
+          sessionCommitShas: state.sessionCommitShas || [],
+          headShaAtStart: state.headShaAtStart || undefined,
+          headShaAtEnd: gitCapture.headAfter || undefined,
+        });
+        if (captures.length > 0) {
+          promptEditsByIndex = new Map();
+          for (const cap of captures) {
+            promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
+          }
+          debugLog('stop', 'capturePromptEdits ok', {
+            agent: captureAgent,
+            captured: captures.length,
+            totalEdits: captures.reduce((n, c) => n + c.edits.length, 0),
+          });
+        }
+      } catch (capErr: unknown) {
+        debugLog('stop', 'capturePromptEdits failed (non-fatal)', {
+          message: capErr instanceof Error ? capErr.message : String(capErr),
+        });
+      }
+
       await api.updateSession(state.sessionId, {
         prompt: joinedPrompt || undefined,
         transcript: displayTranscript || undefined,
@@ -2906,11 +4119,13 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
+        gitCapture: sessionGitCapture,
         promptChanges: promptMappings.length > 0
           ? promptMappings.map(pm => ({
               ...pm,
               promptText: (pm.promptText || '').slice(0, 1000),
               diff: (pm.diff || '').slice(0, 100_000),
+              editsJson: promptEditsByIndex?.get(pm.promptIndex) || undefined,
             }))
           : undefined,
       });
@@ -2964,10 +4179,46 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       debugLog('stop', 'git notes error (non-fatal)', { message: notesErr.message });
     }
 
-    // Update per-prompt baselines so next prompt only sees its own changes
+    // Update per-prompt baselines so next prompt only sees its own changes.
+    //
+    // CRITICAL: if the working tree is dirty at end of this prompt, we
+    // can't just use HEAD as the next prompt's baseline — when the next
+    // prompt commits those still-dirty files, diff(HEAD..nextHEAD) would
+    // include the previous prompt's work, falsely attributing it to the
+    // next prompt.
+    //
+    // Fix: create a shadow commit whose tree = (HEAD's tree + all dirty
+    // files), and use that as prePromptSha. Then diff(shadowSha..nextHEAD)
+    // only includes content the next prompt actually introduced, since
+    // the previous prompt's dirty content is already in the shadow tree.
     state.headShaAtLastStop = gitCapture.headAfter;
-    state.prePromptSha = gitCapture.headAfter;
-    state.prePromptDirtyFiles = getDirtyFiles(state.repoPath);
+    {
+      const dirty = getDirtyFiles(state.repoPath);
+      if (dirty.length > 0) {
+        const shadowTag = state.sessionTag || state.sessionId.slice(0, 12);
+        const shadowSha = createShadowCommit(state.repoPath, shadowTag);
+        if (shadowSha) {
+          state.prePromptSha = shadowSha;
+          // dirty files are now captured in the shadow tree, so the next
+          // prompt's filterUncommittedDiff should treat the tree as clean.
+          state.prePromptDirtyFiles = [];
+          debugLog('stop', 'shadow commit anchored next-prompt baseline', {
+            shadowSha: shadowSha.slice(0, 12), dirtyCount: dirty.length, head: gitCapture.headAfter.slice(0, 12),
+          });
+        } else {
+          // Shadow creation failed — fall back to old behavior (will
+          // potentially double-attribute uncommitted work).
+          state.prePromptSha = gitCapture.headAfter;
+          state.prePromptDirtyFiles = dirty;
+          debugLog('stop', 'shadow commit failed, using HEAD as baseline (next prompt may double-attribute)', {
+            dirtyCount: dirty.length,
+          });
+        }
+      } else {
+        state.prePromptSha = gitCapture.headAfter;
+        state.prePromptDirtyFiles = [];
+      }
+    }
     // Multi-repo: update per-repo baselines
     if (state.repoPaths && state.repoPaths.length > 1 && state.perRepoState) {
       for (const rp of state.repoPaths) {
@@ -2975,8 +4226,21 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         if (!rpState) continue;
         const rpHead = getHeadSha(rp);
         rpState.headShaAtLastStop = rpHead;
-        rpState.prePromptSha = rpHead;
-        rpState.prePromptDirtyFiles = getDirtyFiles(rp);
+        const rpDirty = getDirtyFiles(rp);
+        if (rpDirty.length > 0) {
+          const rpShadowTag = `${state.sessionTag || state.sessionId.slice(0, 12)}-${path.basename(rp)}`;
+          const rpShadow = createShadowCommit(rp, rpShadowTag);
+          if (rpShadow) {
+            rpState.prePromptSha = rpShadow;
+            rpState.prePromptDirtyFiles = [];
+          } else {
+            rpState.prePromptSha = rpHead;
+            rpState.prePromptDirtyFiles = rpDirty;
+          }
+        } else {
+          rpState.prePromptSha = rpHead;
+          rpState.prePromptDirtyFiles = [];
+        }
       }
     }
     // Save accumulated prompt mappings so next stop can include previous prompts' data
@@ -3106,7 +4370,9 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
 
   // Auto-discover Gemini transcript path if not already set
   if (!state.transcriptPath) {
-    const discovered = discoverGeminiTranscriptPath();
+    const discovered = discoverGeminiTranscriptPath({
+      sessionId: state.agentSessionId || state.claudeSessionId || undefined,
+    });
     if (discovered) {
       state.transcriptPath = discovered;
       debugLog('session-end', 'auto-discovered transcript path', { discovered });
@@ -3122,17 +4388,25 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
 
     const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
 
-    // For agents without transcripts (Codex, etc.): synthesize displayTranscript from captured prompts
+    // For agents without transcripts (Codex, Gemini, etc.): synthesize
+    // displayTranscript from captured prompts AND any assistant replies
+    // captured at stop-time (Gemini's `prompt_response`).
     if (!displayTranscript && state.prompts.length > 0) {
       const turns: Array<{ role: string; content: string }> = [];
       if (state.agentSystemPrompt) {
         turns.push({ role: 'system', content: state.agentSystemPrompt });
       }
-      for (const p of state.prompts) {
-        turns.push({ role: 'user', content: p });
+      const responses = state.promptResponses || [];
+      for (let i = 0; i < state.prompts.length; i++) {
+        turns.push({ role: 'user', content: state.prompts[i] });
+        if (responses[i]) {
+          turns.push({ role: 'assistant', content: responses[i] });
+        }
       }
       displayTranscript = JSON.stringify(turns);
-      debugLog('session-end', 'synthesized transcript from prompts', { turnCount: turns.length });
+      debugLog('session-end', 'synthesized transcript from prompts', {
+        turnCount: turns.length, responseCount: responses.filter(Boolean).length,
+      });
     }
 
     // F9: Redact secrets before sending to API
@@ -3149,8 +4423,11 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     const model = stdinModel2 || parsed.model || state.model;
     const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens);
 
-    // Capture real git state: HEAD SHA, new commits, unified diff
-    const gitCapture = captureGitState(state.repoPath, state.headShaAtStart);
+    // Capture real git state: HEAD SHA, new commits, unified diff. The
+    // session-end snapshot powers AI Blame's full-file render, so capture
+    // with unlimited unified context — every unchanged line ships as
+    // context so the UI never has to fall back to "N lines hidden".
+    const gitCapture = captureGitState(state.repoPath, state.headShaAtStart, { fullContext: true });
 
     // Extract prompt → file change mappings from transcript
     let promptMappings = extractPromptFileMappings(state.transcriptPath);
@@ -3204,9 +4481,10 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
           if (m[1]) lastFilesSet.add(m[1]);
         }
       }
-      // Filter uncommitted diff to exclude pre-existing dirty files
+      // Filter uncommitted diff against the prompt-baseline + session-start
+      // pre-existing dirt union.
       const filteredUncommitted = filterUncommittedDiff(
-        lastPromptCapture.uncommittedDiff || '', state.prePromptDirtyFiles || [],
+        lastPromptCapture.uncommittedDiff || '', uncommittedExcludeUnion(state),
       );
       if (filteredUncommitted) {
         for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
@@ -3215,12 +4493,25 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
       if (lastPromptCapture.diff || filteredUncommitted || lastFilesSet.size > 0) {
         if (!state.completedPromptMappings) state.completedPromptMappings = [];
+        // Scope committed side to commits this session authored (see
+        // sessionScopedCommittedDiff).
+        const sessionCommitted = sessionScopedCommittedDiff(state.repoPath, state);
+        // Capture commit/tree SHAs so the commit-detail page can link the
+        // last prompt to the commit it produced.
+        let lastCommitSha: string | null = null;
+        let lastTreeSha: string | null = null;
+        try {
+          lastCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          lastTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        } catch { /* ignore */ }
         const lastMapping = {
           promptIndex: lastPromptIdx,
           promptText: (prompts[lastPromptIdx] || '').slice(0, 1000),
           filesChanged: Array.from(lastFilesSet),
-          diff: (((lastPromptCapture.committedDiff || '') + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
+          diff: ((sessionCommitted + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim()).slice(0, 200_000),
           uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+          commitSha: lastCommitSha,
+          treeSha: lastTreeSha,
         };
         const existingIdx = state.completedPromptMappings.findIndex(m => m.promptIndex === lastPromptIdx);
         if (existingIdx >= 0) {
@@ -3265,6 +4556,62 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         promptMappings: promptMappings.length,
       });
 
+      // ─── New per-prompt PromptCapture pipeline ────────────────────────
+      // Gemini (and any other agent that hits handleSessionEnd directly)
+      // runs the agent-specific extractor here so each PromptChange row
+      // carries editsJson — the server-side blame computes the displayed
+      // diff and attribution from this directly.
+      let promptEditsByIndex: Map<number, string> | null = null;
+      try {
+        const slug = (agentSlug || state.agentSlug || '').toLowerCase();
+        const captureAgent =
+          slug === 'codex' ? 'codex' :
+          slug === 'cursor' ? 'cursor' :
+          slug === 'gemini' ? 'gemini' :
+          'claude';
+        // Mirror the Codex codexPrompts wiring from handleStop so this
+        // entry point (Gemini-shaped session end, occasionally Codex
+        // when fakeSessionEnd kicks in) also feeds the extractor a
+        // reliable per-prompt timeline.
+        let codexPromptsForCapture: Array<{ text: string; timestamp: number }> | undefined;
+        if (captureAgent === 'codex') {
+          try {
+            const codexThreadId = state.agentSessionId || state.claudeSessionId || undefined;
+            const timeline = getCodexPromptsTimeline(state.repoPath, codexThreadId);
+            if (timeline.length > 0) {
+              codexPromptsForCapture = timeline.map((t) => ({
+                text: t.text || '',
+                timestamp: t.timestamp || 0,
+              }));
+            }
+          } catch { /* non-fatal */ }
+        }
+        const captures = capturePromptEdits({
+          agent: captureAgent,
+          repoPath: state.repoPath,
+          transcriptPath: state.transcriptPath,
+          codexPrompts: codexPromptsForCapture,
+          sessionCommitShas: state.sessionCommitShas || [],
+          headShaAtStart: state.headShaAtStart || undefined,
+          headShaAtEnd: gitCapture.headAfter || undefined,
+        });
+        if (captures.length > 0) {
+          promptEditsByIndex = new Map();
+          for (const cap of captures) {
+            promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
+          }
+          debugLog('session-end', 'capturePromptEdits ok', {
+            agent: captureAgent,
+            captured: captures.length,
+            totalEdits: captures.reduce((n, c) => n + c.edits.length, 0),
+          });
+        }
+      } catch (capErr: unknown) {
+        debugLog('session-end', 'capturePromptEdits failed (non-fatal)', {
+          message: capErr instanceof Error ? capErr.message : String(capErr),
+        });
+      }
+
       await api.endSession({
         sessionId: state.sessionId,
         prompt: joinedPrompt || undefined,
@@ -3285,6 +4632,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
               ...pm,
               promptText: (pm.promptText || '').slice(0, 1000),
               diff: (pm.diff || '').slice(0, 100_000),
+              editsJson: promptEditsByIndex?.get(pm.promptIndex) || undefined,
             }))
           : undefined,
         branch: getBranch(hookCwd) || undefined,
@@ -3522,15 +4870,32 @@ export async function handlePostCommit(): Promise<void> {
     filesChanged = raw ? raw.split('\n').filter(Boolean) : [];
   } catch { /* ignore */ }
 
-  // Get diff for this single commit
+  // Get diff for this single commit. Try three strategies in order:
+  //   1. `git diff <sha>~1..<sha>` — fast, works for non-root commits.
+  //   2. `git diff-tree -p --root <sha>` — uses the commit's own parent
+  //      pointers (no `~1` lookup), so survives detached HEAD / shallow
+  //      / weird-ref scenarios where (1) errors silently with empty stdout.
+  //   3. `git show <sha> --format=` — last-resort, handles merge commits.
+  // The CLI used to give up after (1) and (3) when (1) returned empty
+  // stdout without throwing (some Codex worktrees do this on freshly
+  // created branches), so commit.patch stayed NULL and the dashboard
+  // had to fall back to the session-level aggregate.
   let diff = '';
   try {
     diff = execFileSync('git', ['diff', `${commitSha}~1..${commitSha}`], execOpts).trim();
-  } catch {
+  } catch { /* try fallback below */ }
+  if (!diff) {
     try {
-      // First commit in repo — no parent
+      diff = execFileSync('git', ['diff-tree', '-p', '--root', '--no-color', commitSha], execOpts).trim();
+    } catch { /* try fallback below */ }
+  }
+  if (!diff) {
+    try {
       diff = execFileSync('git', ['show', commitSha, '--format=', '--diff-merges=first-parent'], execOpts).trim();
-    } catch { /* ignore */ }
+    } catch { /* give up — commit.patch stays null and the dashboard falls back */ }
+  }
+  if (!diff) {
+    debugLog('post-commit', 'WARN: empty per-commit diff after all three strategies', { commitSha });
   }
 
   // Count lines
@@ -3578,6 +4943,10 @@ export async function handlePostCommit(): Promise<void> {
           additions: linesAdded,
           deletions: linesRemoved,
           committedAt: committedAtIso,
+          // Per-commit unified diff so commit-detail can show what THIS
+          // commit changed instead of the session aggregate. Capped at
+          // 500KB to stay sane on accidental large commits.
+          diff: diff ? diff.slice(0, 500_000) : undefined,
         }],
       })
         .then((r) => debugLog('post-commit', 'shadow ingest ok', { ingested: r?.ingested, repoId: r?.repoId }))
@@ -3673,6 +5042,27 @@ export async function handlePostCommit(): Promise<void> {
         model: detectedModel,
         startedAt: new Date().toISOString(),
       } as any;
+    }
+  }
+
+  // Attribute this commit to the picked session so future diff computations
+  // can scope `committedDiff` to commits this session actually authored.
+  // Without this, a heartbeat in session A computes `git diff prePromptSha
+  // ...HEAD` and picks up commits made by concurrently-running session B
+  // (HEAD has moved past A's commits), then credits B's work to A in AI
+  // Blame. Persisted to state file so heartbeat / user-prompt-submit /
+  // session-end snapshots can all read it.
+  if (state && state.sessionTag) {
+    if (!state.sessionCommitShas) state.sessionCommitShas = [];
+    if (!state.sessionCommitShas.includes(commitSha)) {
+      state.sessionCommitShas.push(commitSha);
+      try {
+        saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
+      } catch { /* non-fatal */ }
+      debugLog('post-commit', 'recorded commit on session', {
+        sessionId: state.sessionId, commitSha: commitSha.slice(0, 8),
+        totalForSession: state.sessionCommitShas.length,
+      });
     }
   }
 
@@ -3776,18 +5166,57 @@ export async function handlePostCommit(): Promise<void> {
     debugLog('post-commit', 'git notes error (non-fatal)', { message: err.message });
   }
 
-  // Send incremental update to ALL active sessions (concurrent support)
+  // Send incremental update to ALL active sessions (concurrent support).
+  //
+  // For the SessionDiff (what powers AI Blame "By File"), recapture the
+  // session-to-date diff with full file context so the dashboard renders
+  // whole files instead of "N lines hidden" gaps. Sent as snapshot:true so
+  // the server REPLACES sessionDiff with this canonical state — matches what
+  // the session-end stop hook already does (see line ~3808 / ~4167), just
+  // refreshed every commit instead of only at session end.
   if (activeSessions.length > 0) {
-    const gitCapture = {
-      headBefore: (state?.headShaAtStart) || commitSha,
-      headAfter: commitSha,
-      commitShas: [commitSha],
-      commitDetails: [{ sha: commitSha, message: commitMessage, author: commitAuthor, filesChanged }],
-      diff: diff.length > 500_000 ? diff.slice(0, 500_000) : diff,
-      diffTruncated: diff.length > 500_000,
-      linesAdded,
-      linesRemoved,
-    };
+    let sessionToDateDiff = '';
+    let sessionLinesAdded = linesAdded;
+    let sessionLinesRemoved = linesRemoved;
+    if (state?.headShaAtStart && state.headShaAtStart !== commitSha) {
+      try {
+        const snap = captureGitState(repoPath, state.headShaAtStart, { fullContext: true });
+        if (snap.committedDiff) {
+          sessionToDateDiff = snap.committedDiff;
+          sessionLinesAdded = snap.linesAdded || linesAdded;
+          sessionLinesRemoved = snap.linesRemoved || linesRemoved;
+        }
+      } catch (err: any) {
+        debugLog('post-commit', 'fullContext snapshot failed (non-fatal)', { message: err?.message });
+      }
+    }
+    const gitCapture: {
+      headBefore: string; headAfter: string; commitShas: string[];
+      commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }>;
+      diff: string; diffTruncated: boolean; linesAdded: number; linesRemoved: number;
+      snapshot?: boolean;
+    } = sessionToDateDiff
+      ? {
+          headBefore: state?.headShaAtStart || commitSha,
+          headAfter: commitSha,
+          commitShas: [commitSha],
+          commitDetails: [{ sha: commitSha, message: commitMessage, author: commitAuthor, filesChanged }],
+          diff: sessionToDateDiff.length > 500_000 ? sessionToDateDiff.slice(0, 500_000) : sessionToDateDiff,
+          diffTruncated: sessionToDateDiff.length > 500_000,
+          linesAdded: sessionLinesAdded,
+          linesRemoved: sessionLinesRemoved,
+          snapshot: true,
+        }
+      : {
+          headBefore: (state?.headShaAtStart) || commitSha,
+          headAfter: commitSha,
+          commitShas: [commitSha],
+          commitDetails: [{ sha: commitSha, message: commitMessage, author: commitAuthor, filesChanged }],
+          diff: diff.length > 500_000 ? diff.slice(0, 500_000) : diff,
+          diffTruncated: diff.length > 500_000,
+          linesAdded,
+          linesRemoved,
+        };
 
     // Resolve the commit's timestamp once, outside the per-session loop.
     // resolvePromptForCommit() uses it to match the commit to the prompt
@@ -4209,6 +5638,120 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
     }
   } catch {
     // non-fatal
+  }
+}
+
+// ─── Cursor: afterFileEdit ───────────────────────────────────────────────
+//
+// Fires after every Cursor edit (StrReplace / Write / etc.). Cursor's git
+// commits don't reliably trigger the global post-commit hook (sandbox /
+// worktree isolation), so user-prompt-submit's retroactive capture path
+// runs against an empty working tree at next-prompt time and the dashboard
+// shows "0 files" for the prompt. We work around that by capturing the
+// working tree against the per-prompt shadow on every file edit — same
+// content as the heartbeat's pushInflightDiff, but triggered by the edit
+// event so it fires even when no shell commands have run.
+async function handleAfterFileEdit(input: Record<string, any>, agentSlug?: string): Promise<void> {
+  debugLog('after-file-edit', 'begin', { cwd: input.cwd, file: input.file_path || input.path });
+
+  const hookCwd = input.cwd || process.cwd();
+  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
+  if (!found) {
+    debugLog('after-file-edit', 'ABORT: no session state');
+    return;
+  }
+  const { state, saveCwd } = found;
+  if (!state.repoPath || !state.prePromptSha) {
+    debugLog('after-file-edit', 'ABORT: missing repoPath or prePromptSha');
+    return;
+  }
+  const promptIdx = (state.prompts?.length || 0) - 1;
+  if (promptIdx < 0) {
+    debugLog('after-file-edit', 'ABORT: no current prompt');
+    return;
+  }
+
+  try {
+    // Re-capture working tree against the per-prompt shadow so the current
+    // prompt's mapping reflects whatever Cursor just wrote to disk.
+    const promptShadow = (state.promptShadows || []).find((s) => s.promptIndex === promptIdx);
+    const captureBaseline = promptShadow?.shadowSha || state.prePromptSha;
+    const capture = captureGitState(state.repoPath, captureBaseline);
+
+    const filteredUncommitted = filterUncommittedDiff(
+      capture.uncommittedDiff || '', uncommittedExcludeUnion(state),
+    );
+    const sessionCommitted = sessionScopedCommittedDiff(state.repoPath, state);
+    const fullDiff = (sessionCommitted + (filteredUncommitted ? '\n' + filteredUncommitted : '')).trim();
+    if (!fullDiff) {
+      debugLog('after-file-edit', 'no diff against shadow, skipping');
+      return;
+    }
+
+    const filesChanged = new Set<string>();
+    for (const m of fullDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+      if (m[1]) filesChanged.add(m[1]);
+    }
+    // Filesystem path the hook reported, if any — useful when the diff lags.
+    if (typeof input.file_path === 'string') filesChanged.add(input.file_path);
+    if (typeof input.path === 'string') filesChanged.add(input.path);
+
+    let commitSha: string | null = null;
+    let treeSha: string | null = null;
+    try {
+      commitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      treeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    } catch { /* ignore */ }
+
+    if (!state.completedPromptMappings) state.completedPromptMappings = [];
+    const promptText = (state.prompts?.[promptIdx] || '').slice(0, 1000);
+    const mapping = {
+      promptIndex: promptIdx,
+      promptText,
+      filesChanged: Array.from(filesChanged),
+      diff: fullDiff.slice(0, 200_000),
+      uncommittedDiff: filteredUncommitted.slice(0, 200_000),
+      commitSha,
+      treeSha,
+    };
+    const existingIdx = state.completedPromptMappings.findIndex((m) => m.promptIndex === promptIdx);
+    if (existingIdx >= 0) {
+      state.completedPromptMappings[existingIdx] = mapping;
+    } else {
+      state.completedPromptMappings.push(mapping);
+    }
+    saveSessionState(state, saveCwd, state.sessionTag);
+    debugLog('after-file-edit', 'updated mapping', {
+      promptIndex: promptIdx,
+      filesChanged: filesChanged.size,
+      diffLen: fullDiff.length,
+    });
+
+    // Push to API immediately so the dashboard reflects the edit without
+    // waiting for the next heartbeat tick.
+    if (isConnectedMode() && state.sessionId) {
+      try {
+        const dl = fullDiff.split('\n');
+        await api.updateSession(state.sessionId, {
+          promptChanges: state.completedPromptMappings.map((pm) => ({
+            ...pm,
+            promptText: (pm.promptText || '').slice(0, 1000),
+            diff: (pm.diff || '').slice(0, 100_000),
+            uncommittedDiff: (pm.uncommittedDiff || '').slice(0, 100_000),
+            linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
+            linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
+            aiPercentage: 100,
+            checkpointType: 'auto',
+          })),
+          status: 'RUNNING',
+        });
+        debugLog('after-file-edit', 'api updated');
+      } catch (apiErr: any) {
+        debugLog('after-file-edit', 'api update failed (non-fatal)', { message: apiErr?.message });
+      }
+    }
+  } catch (err: any) {
+    debugLog('after-file-edit', 'capture failed (non-fatal)', { message: err?.message });
   }
 }
 
@@ -4974,6 +6517,9 @@ export async function hooksCommand(event: string, agentSlug?: string): Promise<v
       break;
     case 'post-tool-use':
       await handlePostToolUse(input, agentSlug);
+      break;
+    case 'after-file-edit':
+      await handleAfterFileEdit(input, agentSlug);
       break;
     default:
       debugLog(event, 'unknown event');

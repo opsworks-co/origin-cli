@@ -85,3 +85,78 @@ describe('default pricing table snapshot', () => {
     expect(pricing['haiku']).toEqual({ input: 0.80, output: 4 });
   });
 });
+
+describe('Google Gemini pricing', () => {
+  it('Gemini 2.5 Pro charges $1.25 input / $10 output per 1M', () => {
+    expect(estimateCost('gemini-2.5-pro', ONE_MILLION, 0)).toBeCloseTo(1.25, 4);
+    expect(estimateCost('gemini-2.5-pro', 0, ONE_MILLION)).toBeCloseTo(10, 4);
+  });
+
+  it('Gemini 2.5 Flash charges $0.30 input / $2.50 output per 1M', () => {
+    expect(estimateCost('gemini-2.5-flash', ONE_MILLION, 0)).toBeCloseTo(0.30, 4);
+    expect(estimateCost('gemini-2.5-flash', 0, ONE_MILLION)).toBeCloseTo(2.50, 4);
+  });
+
+  it('Gemini 2.5 Flash Lite is cheaper than Flash (not the same)', () => {
+    const flash = estimateCost('gemini-2.5-flash', ONE_MILLION, 0);
+    const lite = estimateCost('gemini-2.5-flash-lite', ONE_MILLION, 0);
+    expect(lite).toBeLessThan(flash);
+    expect(lite).toBeCloseTo(0.10, 4);
+  });
+
+  it('uses Gemini cache discount (0.25×) not Anthropic (0.10×)', () => {
+    // 1M cache-read on Gemini 2.5 Pro → 0.25 × $1.25 = $0.3125
+    expect(estimateCost('gemini-2.5-pro', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.3125, 4);
+  });
+
+  it('does NOT surcharge cache writes on Gemini', () => {
+    // Gemini has no cache-creation premium — multiplier is 1.0×, not 1.25×
+    expect(estimateCost('gemini-2.5-pro', 0, 0, 0, ONE_MILLION)).toBeCloseTo(1.25, 4);
+  });
+});
+
+describe('OpenAI GPT-5 / Codex pricing', () => {
+  it('GPT-5 charges $2 input / $8 output per 1M', () => {
+    expect(estimateCost('gpt-5', ONE_MILLION, 0)).toBeCloseTo(2, 4);
+    expect(estimateCost('gpt-5', 0, ONE_MILLION)).toBeCloseTo(8, 4);
+  });
+
+  it('GPT-5.4 charges $3 input / $12 output per 1M', () => {
+    expect(estimateCost('gpt-5.4', ONE_MILLION, 0)).toBeCloseTo(3, 4);
+    expect(estimateCost('gpt-5.4', 0, ONE_MILLION)).toBeCloseTo(12, 4);
+  });
+
+  it('Codex prices identically to GPT-5', () => {
+    expect(estimateCost('codex', ONE_MILLION, 0)).toBeCloseTo(2, 4);
+    expect(estimateCost('codex', 0, ONE_MILLION)).toBeCloseTo(8, 4);
+  });
+
+  it('GPT-4o-mini matches longer key before GPT-4o', () => {
+    // Substring matching could mis-route gpt-4o-mini → gpt-4o ($2.50). Longest-key
+    // sort prevents that; this test pins the contract.
+    expect(estimateCost('gpt-4o-mini', ONE_MILLION, 0)).toBeCloseTo(0.15, 4);
+  });
+
+  it('strips ISO date suffixes: gpt-4o-2024-08-06 prices as gpt-4o', () => {
+    expect(estimateCost('gpt-4o-2024-08-06', ONE_MILLION, 0)).toBeCloseTo(2.50, 4);
+  });
+
+  it('uses OpenAI cache discount (0.50×) not Anthropic (0.10×)', () => {
+    // 1M cache-read on GPT-5 → 0.50 × $2 = $1.00 (not $0.20 if Anthropic rate)
+    expect(estimateCost('gpt-5', 0, 0, ONE_MILLION, 0)).toBeCloseTo(1.0, 4);
+  });
+});
+
+describe('model name normalization', () => {
+  it('strips Anthropic date suffix: claude-sonnet-4-5-20250929 → sonnet pricing', () => {
+    expect(estimateCost('claude-sonnet-4-5-20250929', ONE_MILLION, 0)).toBeCloseTo(3, 4);
+  });
+
+  it('unknown model defaults to sonnet pricing, not zero', () => {
+    expect(estimateCost('unknown-model-xyz', ONE_MILLION, 0)).toBeCloseTo(3, 4);
+  });
+
+  it('empty model string defaults to sonnet pricing', () => {
+    expect(estimateCost('', ONE_MILLION, 0)).toBeCloseTo(3, 4);
+  });
+});
