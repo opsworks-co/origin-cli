@@ -286,27 +286,6 @@ export default function CommitDetailPage() {
         </div>
       )}
 
-      {/* commit.patch is null on commits ingested before the post-commit hook
-          was wired up (or when the hook failed silently). Falling back to the
-          session-level aggregate makes every sibling commit show identical
-          content — warn the user so they don't read this as the commit's
-          actual changes. */}
-      {!commit.isPlaceholder && commit.diffSource && commit.diffSource !== 'commit.patch' && commit.diffSource !== 'remote' && commit.diffSource !== 'none' && (
-        <div className="card border-amber-500/40 bg-amber-500/5">
-          <div className="flex items-start gap-3">
-            <span className="text-amber-400 text-lg leading-none">⚠</span>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-amber-200 font-medium">
-                Showing session-level diff — not just this commit's changes
-              </p>
-              <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                The CLI didn't upload a per-commit patch for this SHA, so the file diffs below aggregate every commit in the same session and may include lines that landed in sibling commits. Update the Origin CLI and make a new commit to capture per-commit patches going forward.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       <div className="card">
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div className="min-w-0 flex-1">
