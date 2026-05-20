@@ -590,7 +590,7 @@ export default function RepoDetail() {
     try {
       const [repos, commitData, branchData] = await Promise.all([
         api.getRepos(),
-        api.getRepoCommits(id, branchFilter || undefined),
+        api.getRepoCommits(id, (branchFilter && branchFilter !== '__all__') ? branchFilter : undefined),
         api.getRepoBranches(id),
       ]);
       const found = repos.find((r) => r.id === id) || null;
@@ -846,9 +846,12 @@ export default function RepoDetail() {
     setOpenFileError(null);
     setOpenFileBlame(null);
     // Prefer the file's pinned ref (its last-touched SHA from the files
-    // list) over the branch filter. If both are absent, GitHub falls back
-    // to the repo's default branch on the server side.
-    const refToUse = openFileRef || branchFilter || undefined;
+    // list) over the branch filter. The `__all__` sentinel only makes
+    // sense for the file LIST (union of branches) — for a specific file
+    // we need a real ref, so fall through to undefined and let the
+    // server pick the repo's default branch.
+    const filterIsSpecific = branchFilter && branchFilter !== '__all__';
+    const refToUse = openFileRef || (filterIsSpecific ? branchFilter : undefined) || undefined;
     import('../api/repos').then(({ getRepoFile }) =>
       getRepoFile(id, openFilePath, refToUse)
         .then(setOpenFileBlame)
@@ -1377,7 +1380,7 @@ export default function RepoDetail() {
             className="px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-900/50 text-gray-300 border border-gray-800 hover:text-gray-200 transition-colors appearance-none cursor-pointer pr-7"
             style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
           >
-            <option value="">All branches</option>
+            <option value="__all__">All branches</option>
             {branches.map((b) => (
               <option key={b} value={b}>{b}</option>
             ))}
