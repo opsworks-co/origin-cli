@@ -2475,9 +2475,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     // incoming conversation_id, forcing the auto-create branch below
     // to spin up a fresh Origin session for the new chat.
     //
-    // Codex / Gemini are NOT detached here — Codex's stdin rotates
-    // per turn and Gemini's anchor is the transcript_path (handled via
-    // the strict-ID discoverGeminiTranscriptPath).
+    // Codex is NOT detached here — its stdin rotates per turn.
     if (agentSlug === 'cursor') {
       const incomingChatId =
         (typeof input.conversation_id === 'string' && input.conversation_id) ||
@@ -2490,6 +2488,32 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           debugLog('user-prompt-submit', 'cursor: new chat id — detaching from prior state', {
             locked: state.agentSessionId,
             incoming: incomingChatId,
+            priorOriginSession: state.sessionId,
+          });
+          state = null;
+        }
+      }
+    } else if (agentSlug === 'gemini') {
+      // Gemini: each chat has its own transcript JSON at
+      // `~/.gemini/...chats/session-<id>.json` and Gemini's stdin
+      // sends transcript_path on every hook. When the user opens a
+      // NEW chat in the same workspace, the workspace-scoped
+      // findStateForHook returns the OLD Gemini session's state and
+      // we'd silently append the new chat's prompt to it.
+      // Detach when stdin's transcript_path doesn't match state's,
+      // forcing the auto-create branch to start a fresh Origin
+      // session for the new chat. transcript_path is the most
+      // reliable signal here — Gemini's session_id field is
+      // inconsistent across CLI versions but the transcript file
+      // is always per-chat.
+      const incomingTranscriptPath = typeof input.transcript_path === 'string' ? input.transcript_path : '';
+      if (incomingTranscriptPath) {
+        if (!state.transcriptPath) {
+          state.transcriptPath = incomingTranscriptPath;
+        } else if (state.transcriptPath !== incomingTranscriptPath) {
+          debugLog('user-prompt-submit', 'gemini: new transcript_path — detaching from prior state', {
+            locked: state.transcriptPath,
+            incoming: incomingTranscriptPath,
             priorOriginSession: state.sessionId,
           });
           state = null;
