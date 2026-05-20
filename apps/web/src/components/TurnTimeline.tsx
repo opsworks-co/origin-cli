@@ -100,7 +100,24 @@ export default function TurnTimeline({
     );
   }
 
-  const sorted = [...promptChanges].sort((a, b) => a.promptIndex - b.promptIndex);
+  // Snapshot timeline only shows turns that actually changed code.
+  // A chat-only turn (agent responded with text but didn't edit files)
+  // already gets blanked by the session-detail mapper's dedup pre-pass:
+  // its filesChanged is empty and both diff and uncommittedDiff are ''.
+  // Rendering those rows produces noise like "Turn 3 · 0 files +10 -2"
+  // where the line counts are stale leftovers from the original capture.
+  const hasRealChange = (pc: PromptChange): boolean => {
+    let files: string[] = [];
+    try {
+      files = Array.isArray(pc.filesChanged) ? pc.filesChanged : JSON.parse(pc.filesChanged || '[]');
+    } catch { /* malformed — treat as no files */ }
+    if (files.length > 0) return true;
+    if ((pc.diff || '').trim().length > 0) return true;
+    return false;
+  };
+  const sorted = [...promptChanges]
+    .filter(hasRealChange)
+    .sort((a, b) => a.promptIndex - b.promptIndex);
 
   // Compute cumulative stats
   let cumulativeAdded = 0;
