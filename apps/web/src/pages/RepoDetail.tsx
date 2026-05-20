@@ -559,9 +559,13 @@ export default function RepoDetail() {
   const [openFileLoading, setOpenFileLoading] = useState(false);
   const [openFileError, setOpenFileError] = useState<string | null>(null);
 
-  // Branch filter
+  // Branch filter — Files tab defaults to "__all__" (union of file
+  // trees across every branch) so a fresh repo whose default branch is
+  // a README seed but whose real work lives on feature branches shows
+  // every file out of the box. The Commits tab keeps a separate filter
+  // (defaults to default branch) so they don't share state.
   const [branches, setBranches] = useState<string[]>([]);
-  const [branchFilter, setBranchFilter] = useState<string>('');
+  const [branchFilter, setBranchFilter] = useState<string>('__all__');
 
   // Sync & rescan states
   const [syncing, setSyncing] = useState(false);
@@ -1232,6 +1236,7 @@ export default function RepoDetail() {
                 className="px-2.5 py-1.5 rounded-md text-[12px] font-medium bg-gray-900/50 text-gray-300 border border-gray-800/80 hover:text-gray-200 transition-colors appearance-none cursor-pointer pr-7"
                 style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
               >
+                <option value="__all__">All branches</option>
                 <option value="">Default branch</option>
                 {branches.map((b) => (
                   <option key={b} value={b}>{b}</option>

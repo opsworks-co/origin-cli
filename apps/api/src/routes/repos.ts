@@ -1410,10 +1410,17 @@ router.get('/:id/files', async (req: AuthRequest, res: Response) => {
     };
 
     // Resolve which ref to walk:
-    //   • explicit ?branch — use that
+    //   • ?branch=__all__ — union of file trees across every known branch
+    //     (each branch's tree, deduped by path). For repos where feature
+    //     branches hold the real work and the default branch is just a
+    //     README seed, this is what users intuitively expect from "Files".
+    //   • explicit ?branch=<name> — use that specific ref
     //   • else — repo's default branch (GET /repos/{owner}/{repo})
-    let ref: string = ((req.query.branch as string | undefined)?.trim() || '');
-    if (!ref) {
+    interface TreeEntry { path: string; type: 'blob' | 'tree' | 'commit'; sha: string; size?: number }
+    const rawBranch = ((req.query.branch as string | undefined)?.trim() || '');
+    const wantAllBranches = rawBranch === '__all__';
+    let ref: string = wantAllBranches ? '' : rawBranch;
+    if (!ref && !wantAllBranches) {
       const repoResp = await fetch(`${apiBase}/repos/${parsed.owner}/${parsed.repo}`, { headers: ghHeaders });
       if (!repoResp.ok) {
         const t = await repoResp.text();
@@ -1427,20 +1434,59 @@ router.get('/:id/files', async (req: AuthRequest, res: Response) => {
     // Fetch the recursive tree. GitHub returns up to ~100k entries per
     // call; on monorepos that exceed this, the response is flagged with
     // `truncated: true` and we surface the warning to the client.
-    const treeResp = await fetch(`${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`, { headers: ghHeaders });
-    if (!treeResp.ok) {
-      const t = await treeResp.text();
-      console.error('[files] tree fetch failed', treeResp.status, t.slice(0, 200));
-      return res.status(502).json({ error: `GitHub tree fetch failed (${treeResp.status})` });
+    let blobs: TreeEntry[] = [];
+    let truncated = false;
+    if (wantAllBranches) {
+      // Enumerate branches via GitHub's list-branches API (first page —
+      // 100 branches is plenty for most repos; truncated flag set if
+      // there are more). Fetch each branch's tree and union by path.
+      const branchesResp = await fetch(
+        `${apiBase}/repos/${parsed.owner}/${parsed.repo}/branches?per_page=100`,
+        { headers: ghHeaders },
+      );
+      if (!branchesResp.ok) {
+        const t = await branchesResp.text();
+        console.error('[files] branches lookup failed', branchesResp.status, t.slice(0, 200));
+        return res.status(502).json({ error: `GitHub branches lookup failed (${branchesResp.status})` });
+      }
+      const branchesJson = await branchesResp.json();
+      const branchNames: string[] = (Array.isArray(branchesJson) ? branchesJson : [])
+        .map((b: any) => b?.name)
+        .filter((n: any) => typeof n === 'string');
+      // Cap to 20 branches per page-load to avoid GitHub rate-limit churn.
+      const MAX_BRANCHES = 20;
+      const branchesToWalk = branchNames.slice(0, MAX_BRANCHES);
+      truncated = branchNames.length > MAX_BRANCHES;
+      const seen = new Map<string, TreeEntry>();
+      for (const b of branchesToWalk) {
+        const r = await fetch(
+          `${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/trees/${encodeURIComponent(b)}?recursive=1`,
+          { headers: ghHeaders },
+        );
+        if (!r.ok) continue; // skip dead branches
+        const j = await r.json();
+        if (j?.truncated) truncated = true;
+        for (const e of (j?.tree || [])) {
+          if (e?.type !== 'blob' || typeof e?.path !== 'string') continue;
+          if (!seen.has(e.path)) seen.set(e.path, e as TreeEntry);
+        }
+      }
+      blobs = Array.from(seen.values());
+    } else {
+      const treeResp = await fetch(`${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`, { headers: ghHeaders });
+      if (!treeResp.ok) {
+        const t = await treeResp.text();
+        console.error('[files] tree fetch failed', treeResp.status, t.slice(0, 200));
+        return res.status(502).json({ error: `GitHub tree fetch failed (${treeResp.status})` });
+      }
+      const treeJson = await treeResp.json();
+      blobs = (treeJson?.tree || []).filter((e: any) => e?.type === 'blob' && typeof e?.path === 'string');
+      truncated = !!treeJson?.truncated;
     }
-    const treeJson = await treeResp.json();
-    interface TreeEntry { path: string; type: 'blob' | 'tree' | 'commit'; sha: string; size?: number }
-    const blobs: TreeEntry[] = (treeJson?.tree || []).filter((e: any) => e?.type === 'blob' && typeof e?.path === 'string');
-    const truncated = !!treeJson?.truncated;
 
     // ── Local attribution ────────────────────────────────────────────────
     const where: any = { repoId: id };
-    if (req.query.branch) where.branch = req.query.branch as string;
+    if (req.query.branch && !wantAllBranches) where.branch = req.query.branch as string;
     const commitSelect = {
       id: true,
       sha: true,
@@ -2150,21 +2196,24 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
         } catch {/* ignore */}
       }
 
-      // Show prompts whose commitSha matches this commit. If no prompts have
-      // been attributed to a SHA yet (Codex/Gemini sessions populate prompts
-      // at session-end, not on per-prompt-submit) AND this commit is the
-      // session's primary commit, show all prompts — better than the empty
-      // "no per-prompt diffs captured yet" placeholder for sessions where
-      // per-prompt attribution is structurally unavailable.
+      // Show prompts whose commitSha matches this commit. When no prompt is
+      // attributed to THIS exact SHA but the commit belongs to the session
+      // (either as primary or in sessionCommits), fall back to showing all
+      // the session's prompts — even when other prompts have OTHER commit
+      // SHAs. Sessions that produce multiple commits often have all
+      // PromptChange rows pointing at the FIRST commit (the stop-hook fires
+      // before the second commit lands), which would otherwise leave every
+      // sibling commit showing the empty "no per-prompt diffs captured yet"
+      // placeholder even though the session's prompts are the work behind
+      // this commit.
       const exactMatch = promptChanges.filter((pc: any) => pc.commitSha === sha);
-      const anyAttributed = promptChanges.some((pc: any) => pc.commitSha);
+      const commitIsInSession = sess.commitId === commit.id || (commit as any).sessionId === sess.id;
       if (exactMatch.length > 0) {
         promptChanges = exactMatch;
-      } else if (!anyAttributed && sess.commitId === commit.id) {
-        // No per-prompt attribution exists for this session — surface all
-        // session prompts under this commit. promptText comes from the
-        // transcript fallback above so users see what was asked.
-        // Leave promptChanges as-is.
+      } else if (commitIsInSession) {
+        // Keep all session prompts under this commit (transcript fallback
+        // above already supplied promptText if PromptChange rows were
+        // empty). Better than a confusing empty state.
       } else {
         promptChanges = exactMatch; // empty
       }
