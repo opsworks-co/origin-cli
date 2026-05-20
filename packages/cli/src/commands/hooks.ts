@@ -1692,10 +1692,18 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   //     END of this session-start block (after repoPath is final).
   const agentsWithStableSessionId = ['claude-code', 'windsurf'];
   const hasStableSessionId = agentsWithStableSessionId.includes(agentSlug || '');
-  const stdinSessionId =
-    (typeof input.session_id === 'string' && input.session_id) ||
-    (typeof input.conversation_id === 'string' && input.conversation_id) ||
-    '';
+  // Cursor prefers `conversation_id` — stable per-chat and matches the
+  // `agent-transcripts/<id>/` directory name. Cursor's `session_id`
+  // rotates per turn, so picking it as the anchor would force a "new
+  // chat" lock on every prompt. Other agents fall through to whichever
+  // id stdin provides first.
+  const stdinSessionId = agentSlug === 'cursor'
+    ? ((typeof input.conversation_id === 'string' && input.conversation_id) ||
+       (typeof input.session_id === 'string' && input.session_id) ||
+       '')
+    : ((typeof input.session_id === 'string' && input.session_id) ||
+       (typeof input.conversation_id === 'string' && input.conversation_id) ||
+       '');
   // claudeSessionId stays as the legacy field for findSessionByClaudeId
   // and serialized state compat — only populated for agents with truly
   // stable IDs that can be safely used for cross-hook state lookup.
@@ -2457,24 +2465,51 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       });
       state.claudeSessionId = incomingSessionId;
     }
-    // Record the agent's stdin session identifier when state doesn't
-    // already have one — useful for Gemini's transcript discovery and
-    // for tooling that wants to correlate the dashboard session with
-    // the agent's own conversation id. We never DETACH on mismatch:
-    // Cursor + Codex rotate stdin session_id per-prompt (see existing
-    // session-start comment "Cursor sends session_id but it changes per
-    // conversation/prompt — not stable"), so a mismatch is the norm,
-    // not a "different chat" signal. Cross-chat protection comes from
-    // the ID-strict transcript discovery functions, not here.
-    const stdinAgentId =
-      (typeof input.session_id === 'string' && input.session_id) ||
-      (typeof input.conversation_id === 'string' && input.conversation_id) ||
-      '';
-    if (!state.agentSessionId && stdinAgentId) {
-      state.agentSessionId = stdinAgentId;
+    // Cursor specifically: `conversation_id` is the stable per-chat id
+    // (matches `agent-transcripts/<id>/` and persists across the
+    // chat's prompts). `session_id` rotates per turn. When the user
+    // opens a NEW chat in the same workspace, the workspace-scoped
+    // findStateForHook would otherwise attach this prompt to the OLD
+    // chat's session — mixing prompts and orphaning the new chat's
+    // capture. Detach when locked agentSessionId disagrees with the
+    // incoming conversation_id, forcing the auto-create branch below
+    // to spin up a fresh Origin session for the new chat.
+    //
+    // Codex / Gemini are NOT detached here — Codex's stdin rotates
+    // per turn and Gemini's anchor is the transcript_path (handled via
+    // the strict-ID discoverGeminiTranscriptPath).
+    if (agentSlug === 'cursor') {
+      const incomingChatId =
+        (typeof input.conversation_id === 'string' && input.conversation_id) ||
+        (typeof input.session_id === 'string' && input.session_id) ||
+        '';
+      if (incomingChatId) {
+        if (!state.agentSessionId) {
+          state.agentSessionId = incomingChatId;
+        } else if (state.agentSessionId !== incomingChatId) {
+          debugLog('user-prompt-submit', 'cursor: new chat id — detaching from prior state', {
+            locked: state.agentSessionId,
+            incoming: incomingChatId,
+            priorOriginSession: state.sessionId,
+          });
+          state = null;
+        }
+      }
+    } else {
+      // Other agents: just record stdin id when state has none (useful
+      // for downstream discovery hooks that anchor on it).
+      const stdinAgentId =
+        (typeof input.session_id === 'string' && input.session_id) ||
+        (typeof input.conversation_id === 'string' && input.conversation_id) ||
+        '';
+      if (state && !state.agentSessionId && stdinAgentId) {
+        state.agentSessionId = stdinAgentId;
+      }
     }
-    if (input.transcript_path) state.transcriptPath = input.transcript_path;
-    saveSessionState(state, found!.saveCwd, state.sessionTag);
+    if (state) {
+      if (input.transcript_path) state.transcriptPath = input.transcript_path;
+      saveSessionState(state, found!.saveCwd, state.sessionTag);
+    }
   }
   if (!state) {
     // Before auto-creating, try to recover from archive (session state file may have been
