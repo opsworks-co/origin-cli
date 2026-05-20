@@ -5,21 +5,49 @@ import * as api from '../api';
 // Types
 // ---------------------------------------------------------------------------
 
+interface BlameAttributionLite {
+  promptIndex: number;
+  promptText: string;
+  type: 'added' | 'modified';
+  // PRIMARY attribution always names a session. When `isCurrentSession` is
+  // true, the promptIndex refers to this session's own prompt list. When
+  // false, the line was first written in another session — render the
+  // agent/session label instead of looking the promptIndex up in `prompts[]`.
+  sessionId?: string;
+  isCurrentSession?: boolean;
+  sessionAiTitle?: string;
+  sessionModel?: string;
+  agentName?: string;
+  authorName?: string;
+  authorEmail?: string;
+}
+
 interface BlameLine {
   lineNumber: number;
   content: string;
-  attribution: {
-    promptIndex: number;
-    promptText: string;
-    type: 'added' | 'modified';
-  } | null;
+  attribution: (BlameAttributionLite & {
+    // Secondary annotation: the prior agent who first wrote this line
+    // content, when the current session merely modified or re-added it.
+    originalAuthor?: BlameAttributionLite;
+  }) | null;
   isGap?: boolean;
+  // True when the attributing prompt's uncommittedDiff still covers this
+  // file — the change hasn't been committed to the repo yet.
+  isUncommitted?: boolean;
 }
 
 interface BlamePrompt {
   promptIndex: number;
   promptText: string;
   filesChanged: string[];
+}
+
+interface CrossSessionPrompt extends BlamePrompt {
+  sessionId: string;
+  sessionAiTitle?: string;
+  sessionModel?: string;
+  agentName?: string;
+  createdAt: string;
 }
 
 interface BlameResult {
@@ -29,6 +57,7 @@ interface BlameResult {
   totalAttributedLines: number;
   lines: BlameLine[];
   prompts: BlamePrompt[];
+  crossSessionPrompts?: CrossSessionPrompt[];
 }
 
 // ---------------------------------------------------------------------------
@@ -504,10 +533,26 @@ function ByFileView({
   const [blameData, setBlameData] = useState<BlameResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Legend state is keyed by this session's numeric promptIndex. Cross-session
+  // prompts never enter the legend, so there is no need for a composite key.
   const [hoveredPrompt, setHoveredPrompt] = useState<number | null>(null);
   const [expandedPrompt, setExpandedPrompt] = useState<number | null>(null);
+  // Tracks which unattributed (context / human) runs the user has expanded.
+  // Keyed by the run's starting index in blameData.lines — stable per file.
+  // Cleared when the selected file changes so each file opens collapsed.
+  const [expandedRuns, setExpandedRuns] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    setExpandedRuns(new Set());
+  }, [selectedFile]);
 
   const promptRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  // Per-line refs keyed by `${lineNumber}-${idx}` so we can scroll a
+  // prompt's first attributed line into view when the user clicks the
+  // legend. Cleared on file change so refs don't leak across files.
+  const lineRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  useEffect(() => {
+    lineRefs.current.clear();
+  }, [selectedFile]);
 
   // Honor a one-shot file selection passed from the prompt view, then clear it.
   // onConsumed is intentionally excluded from deps — it would re-fire this effect
@@ -555,28 +600,53 @@ function ByFileView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusPromptIndex, blameData]);
 
+  // Legend = THIS session's prompts only. Cross-session attribution surfaces
+  // per-line via `originalAuthor` and never enters the legend — otherwise a
+  // Gemini-session view would show Codex prompts in its prompt list (the bug
+  // the user hit before this refactor).
   const activePrompts = useMemo(() => {
-    if (!blameData) return [];
-    const promptIndices = new Set(
-      blameData.lines
-        .filter((l) => l.attribution)
-        .map((l) => l.attribution!.promptIndex),
-    );
-    return blameData.prompts.filter((p) => promptIndices.has(p.promptIndex));
+    if (!blameData) return [] as BlamePrompt[];
+    const activeIndices = new Set<number>();
+    for (const l of blameData.lines) {
+      if (l.attribution?.isCurrentSession !== false) {
+        // null sessionId or explicit isCurrentSession === true → this session.
+        // Treat undefined (legacy) as current too so backward-compat works.
+        if (l.attribution) activeIndices.add(l.attribution.promptIndex);
+      }
+    }
+    return blameData.prompts.filter((p) => activeIndices.has(p.promptIndex));
   }, [blameData]);
 
   const linesPerPrompt = useMemo(() => {
     if (!blameData) return new Map<number, number>();
     const counts = new Map<number, number>();
     for (const line of blameData.lines) {
-      if (line.attribution) {
-        counts.set(
-          line.attribution.promptIndex,
-          (counts.get(line.attribution.promptIndex) || 0) + 1,
-        );
+      const attr = line.attribution;
+      if (attr && attr.isCurrentSession !== false) {
+        counts.set(attr.promptIndex, (counts.get(attr.promptIndex) || 0) + 1);
       }
     }
     return counts;
+  }, [blameData]);
+
+  // Pull agent + author from the first line attributed to each prompt. The
+  // session has one agent + one user, so any line's attribution carries the
+  // same metadata as the prompt — read it once and surface in the legend
+  // instead of repeating it on every per-line row.
+  const promptAuthor = useMemo(() => {
+    if (!blameData) return new Map<number, { agentName?: string; authorName?: string; authorEmail?: string }>();
+    const m = new Map<number, { agentName?: string; authorName?: string; authorEmail?: string }>();
+    for (const line of blameData.lines) {
+      const attr = line.attribution;
+      if (attr && attr.isCurrentSession !== false && !m.has(attr.promptIndex)) {
+        m.set(attr.promptIndex, {
+          agentName: attr.agentName,
+          authorName: attr.authorName,
+          authorEmail: attr.authorEmail,
+        });
+      }
+    }
+    return m;
   }, [blameData]);
 
   const lineCounts = useMemo(() => {
@@ -585,6 +655,11 @@ function ByFileView({
     let ai = 0;
     for (const line of blameData.lines) {
       if (line.isGap) continue;
+      // Empty / whitespace-only lines aren't authorship — they're structural
+      // padding. Counting them as "human" inflates the human side whenever
+      // a prompt added a `key:` line followed by a blank line, dropping the
+      // file's AI% below 100% for files that ARE 100% AI.
+      if (line.content.trim().length === 0) continue;
       if (line.attribution) ai++;
       else human++;
     }
@@ -653,6 +728,15 @@ function ByFileView({
                 <span className="w-2 h-2 rounded-full bg-gray-600 inline-block" />
                 {lineCounts.human} human
               </span>
+              {(() => {
+                const u = blameData.lines.filter((l) => (l as any).isUncommitted).length;
+                return u > 0 ? (
+                  <span className="flex items-center gap-1" title="Lines added by a prompt whose change is still in the working tree (not yet committed)">
+                    <span className="w-2 h-2 rounded-full bg-violet-400 inline-block" />
+                    {u} uncommitted
+                  </span>
+                ) : null;
+              })()}
               <span className="text-gray-600">
                 {activePrompts.length} prompt{activePrompts.length !== 1 ? 's' : ''}
               </span>
@@ -660,42 +744,98 @@ function ByFileView({
           </div>
         )}
 
-        {/* Prompt legend */}
+        {/* Prompt legend — this session's prompts only. */}
         {activePrompts.length > 0 && (
           <div className="border-b border-gray-800 flex-shrink-0 max-h-[30vh] overflow-y-auto">
             {activePrompts.map((p) => {
               const color = getPromptColor(p.promptIndex);
               const lineCount = linesPerPrompt.get(p.promptIndex) || 0;
               const isHovered = hoveredPrompt === p.promptIndex;
-              const isExpanded = expandedPrompt === p.promptIndex;
+              // Click toggles a "pinned" prompt that keeps its lines
+              // highlighted even after the cursor moves away. Same visual
+              // state as hover, but persistent until clicked again.
+              const isPinned = expandedPrompt === p.promptIndex;
               const promptPreview = p.promptText.length > 120 ? p.promptText.slice(0, 120) + '...' : p.promptText;
+              const author = promptAuthor.get(p.promptIndex);
+              const authorLabel = author?.authorName || author?.authorEmail;
 
               return (
                 <div
                   key={p.promptIndex}
                   ref={(el) => { if (el) promptRefs.current.set(p.promptIndex, el); }}
                   className={`px-4 py-2 border-b border-gray-800/40 last:border-b-0 transition-all cursor-pointer ${
-                    isHovered ? `${color.bg}` : 'hover:bg-gray-800/30'
+                    isPinned || isHovered ? `${color.bg}` : 'hover:bg-gray-800/30'
                   }`}
                   onMouseEnter={() => setHoveredPrompt(p.promptIndex)}
                   onMouseLeave={() => setHoveredPrompt(null)}
-                  onClick={() =>
-                    setExpandedPrompt(isExpanded ? null : p.promptIndex)
-                  }
+                  onClick={() => {
+                    const nextPinned = isPinned ? null : p.promptIndex;
+                    setExpandedPrompt(nextPinned);
+                    // Scroll the file body to the first line attributed to
+                    // this prompt. Without this, large files made it
+                    // tedious to find which lines a prompt actually touched —
+                    // the legend lights up rows in place but the user had
+                    // to manually hunt for them.
+                    if (nextPinned !== null && blameData) {
+                      const firstAttributedIdx = blameData.lines.findIndex(
+                        (l) =>
+                          !l.isGap &&
+                          l.attribution &&
+                          l.attribution.isCurrentSession !== false &&
+                          l.attribution.promptIndex === nextPinned,
+                      );
+                      if (firstAttributedIdx >= 0) {
+                        // Open any collapsed run that contains the target,
+                        // otherwise the row exists in the DOM only when its
+                        // hidden parent run is expanded.
+                        setExpandedRuns((prev) => {
+                          const next = new Set(prev);
+                          next.add(firstAttributedIdx);
+                          return next;
+                        });
+                        const target = blameData.lines[firstAttributedIdx];
+                        // Defer the scroll one tick so the newly-expanded
+                        // run has rendered and the ref is attached.
+                        setTimeout(() => {
+                          const key = `${target.lineNumber}-${firstAttributedIdx}`;
+                          const el = lineRefs.current.get(key);
+                          if (el) {
+                            el.scrollIntoView({
+                              behavior: 'smooth',
+                              block: 'center',
+                            });
+                          }
+                        }, 0);
+                      }
+                    }
+                  }}
                 >
                   <div className="flex items-start gap-2.5">
                     <span className={`${color.dot} w-2 h-2 rounded-full mt-1.5 shrink-0`} />
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className={`${color.text} text-xs font-semibold`}>
                           Prompt #{p.promptIndex + 1}
                         </span>
+                        {author?.agentName && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-300">
+                            {author.agentName}
+                          </span>
+                        )}
+                        {authorLabel && (
+                          <span
+                            className="text-[10px] text-gray-500"
+                            title={author?.authorEmail || ''}
+                          >
+                            {authorLabel}
+                          </span>
+                        )}
                         <span className="text-[10px] text-gray-600">
                           {lineCount} line{lineCount !== 1 ? 's' : ''}
                         </span>
                       </div>
                       <p className="text-[12px] text-gray-300 mt-0.5 leading-relaxed">
-                        {isExpanded ? p.promptText : promptPreview}
+                        {isPinned ? p.promptText : promptPreview}
                       </p>
                     </div>
                   </div>
@@ -732,44 +872,161 @@ function ByFileView({
 
           {!loading && !error && blameData && blameData.lines.length > 0 && (
             <div className="font-mono text-xs">
-              {blameData.lines.map((line, idx) => {
-                if (line.isGap) {
-                  return (
-                    <div
-                      key={`gap-${idx}`}
-                      className="flex items-center border-l-2 border-l-transparent bg-gray-900/50 text-gray-600"
-                    >
-                      <span className="w-12 px-2 py-1 shrink-0 border-r border-gray-800/50 text-center">⋯</span>
-                      <span className="w-20 px-2 py-1 shrink-0 text-right text-[10px]" />
-                      <span className="flex-1 px-3 py-1 text-[10px] italic">{line.content}</span>
-                    </div>
-                  );
+              {(() => {
+                const data = blameData!;
+                // GitHub-style condensed view: each attributed cluster gets a
+                // few lines of unattributed context above and below so the AI
+                // change reads in situ. Larger gaps between clusters collapse
+                // to a slim "expand" marker (a couple of arrows + line count),
+                // not the full-width banner the previous design used.
+                const CONTEXT_LINES = 3;
+                const dataLines = data.lines;
+                // Pass 1: mark which non-gap indices are attributed.
+                const attrIdxSet = new Set<number>();
+                dataLines.forEach((l, i) => {
+                  if (!l.isGap && l.attribution) attrIdxSet.add(i);
+                });
+                // Pass 2: expand the attributed set with N lines of context on
+                // each side. Indices inside the expanded set are "kept visible
+                // by default"; gaps between expanded ranges become collapsible.
+                const visibleByDefault = new Set<number>();
+                for (const i of attrIdxSet) {
+                  for (let j = Math.max(0, i - CONTEXT_LINES); j <= Math.min(dataLines.length - 1, i + CONTEXT_LINES); j++) {
+                    if (!dataLines[j]?.isGap) visibleByDefault.add(j);
+                  }
                 }
+                // Pass 3: walk lines and assemble render units. A "hidden run"
+                // is a stretch of non-attributed, non-context lines (and
+                // non-gap) — those collapse. Diff isGap rows render as-is.
+                type Unit =
+                  | { kind: 'line'; line: typeof data.lines[number]; idx: number }
+                  | { kind: 'hidden'; startIdx: number; endIdx: number; lines: typeof data.lines }
+                  | { kind: 'gap'; line: typeof data.lines[number]; idx: number };
+                const units: Unit[] = [];
+                let hiddenBuf: typeof data.lines = [];
+                let hiddenStart = -1;
+                const flushHidden = (endIdx: number) => {
+                  if (hiddenBuf.length === 0) return;
+                  units.push({ kind: 'hidden', startIdx: hiddenStart, endIdx, lines: hiddenBuf });
+                  hiddenBuf = [];
+                  hiddenStart = -1;
+                };
+                dataLines.forEach((line, idx) => {
+                  if (line.isGap) {
+                    if (hiddenBuf.length > 0) flushHidden(idx - 1);
+                    units.push({ kind: 'gap', line, idx });
+                    return;
+                  }
+                  if (visibleByDefault.has(idx) || expandedRuns.has(idx)) {
+                    if (hiddenBuf.length > 0) flushHidden(idx - 1);
+                    units.push({ kind: 'line', line, idx });
+                  } else {
+                    if (hiddenBuf.length === 0) hiddenStart = idx;
+                    hiddenBuf.push(line);
+                  }
+                });
+                if (hiddenBuf.length > 0) flushHidden(dataLines.length - 1);
 
-                const attr = line.attribution;
-                const color = attr ? getPromptColor(attr.promptIndex) : null;
+                // For each hidden run, render a thin centered "expand" strip.
+                // For each line unit, render the existing line. The expand
+                // marker just resolves to "show all lines in this hidden
+                // range" by adding them to expandedRuns (keyed by run start).
+                return units.flatMap((u) => {
+                  if (u.kind === 'gap') {
+                    const line = u.line;
+                    return [(
+                      <div
+                        key={`gap-${u.idx}`}
+                        className="flex items-center border-l-2 border-l-transparent bg-gray-900/40 text-gray-600"
+                      >
+                        <span className="w-12 px-2 py-1 shrink-0 border-r border-gray-800/50 text-center">⋯</span>
+                        <span className="w-20 px-2 py-1 shrink-0 text-right text-[10px]" />
+                        <span className="flex-1 px-3 py-1 text-[10px] italic">{line.content}</span>
+                      </div>
+                    )];
+                  }
+                  if (u.kind === 'line') return [renderBlameLine(u.line, u.idx)];
+                  // Hidden run — render a slim expand strip.
+                  const N = u.lines.length;
+                  const firstLn = u.lines[0]?.lineNumber;
+                  const lastLn = u.lines[N - 1]?.lineNumber;
+                  const range = firstLn === lastLn ? `${firstLn}` : `${firstLn}–${lastLn}`;
+                  return [(
+                    <button
+                      key={`hidden-${u.startIdx}`}
+                      className="w-full flex items-center text-gray-600 hover:text-indigo-300 transition-colors group py-0.5"
+                      onClick={() => {
+                        setExpandedRuns((prev) => {
+                          const next = new Set(prev);
+                          for (let k = u.startIdx; k <= u.endIdx; k++) next.add(k);
+                          return next;
+                        });
+                      }}
+                      title={`Expand ${N} line${N === 1 ? '' : 's'} (${range})`}
+                    >
+                      <span className="w-12 shrink-0 text-center text-gray-700 group-hover:text-indigo-400 select-none text-[11px]">↕</span>
+                      <span className="w-20 shrink-0" />
+                      <span className="flex-1 flex items-center gap-2 text-[10px]">
+                        <span className="flex-1 border-t border-dashed border-gray-800/80 group-hover:border-indigo-500/40" />
+                        <span className="text-gray-600 group-hover:text-indigo-300 italic">
+                          {N} line{N === 1 ? '' : 's'}
+                        </span>
+                        <span className="flex-1 border-t border-dashed border-gray-800/80 group-hover:border-indigo-500/40" />
+                      </span>
+                    </button>
+                  )];
+                });
+
+                function renderBlameLine(line: typeof data.lines[number], idx: number) {
+                  const attr = line.attribution;
+                const primaryIsCurrentSession =
+                  attr && (attr.isCurrentSession ?? true);
+                const color = primaryIsCurrentSession
+                  ? getPromptColor(attr!.promptIndex)
+                  : null;
+                // Highlight matches the legend: lines belonging to the
+                // hovered prompt OR the pinned (clicked) prompt light up.
+                const focusPromptIdx = hoveredPrompt ?? expandedPrompt;
                 const isHighlighted =
-                  hoveredPrompt !== null && attr?.promptIndex === hoveredPrompt;
+                  primaryIsCurrentSession &&
+                  focusPromptIdx !== null &&
+                  attr!.promptIndex === focusPromptIdx;
                 const isHumanLine = !attr;
+                const isUncommittedLine = !!(line as any).isUncommitted;
 
+                const refKey = `${line.lineNumber}-${idx}`;
                 return (
                   <div
-                    key={`${line.lineNumber}-${idx}`}
+                    key={refKey}
+                    ref={(el) => {
+                      if (el) lineRefs.current.set(refKey, el);
+                      else lineRefs.current.delete(refKey);
+                    }}
                     className={`flex items-stretch border-l-2 ${
-                      color ? color.border : 'border-l-gray-800/30'
+                      isUncommittedLine
+                        ? 'border-l-violet-500/70'
+                        : color
+                          ? color.border
+                          : 'border-l-gray-800/30'
                     } ${
                       isHighlighted
                         ? 'bg-gray-800/80'
-                        : isHumanLine
-                          ? 'bg-transparent'
-                          : 'hover:bg-gray-800/30'
+                        : isUncommittedLine
+                          ? 'bg-violet-950/15 hover:bg-violet-950/30'
+                          : isHumanLine
+                            ? 'bg-transparent'
+                            : 'hover:bg-gray-800/30'
                     } transition-colors group ${attr ? 'cursor-pointer' : ''}`}
-                    onMouseEnter={() => attr && setHoveredPrompt(attr.promptIndex)}
+                    onMouseEnter={() =>
+                      primaryIsCurrentSession && setHoveredPrompt(attr!.promptIndex)
+                    }
                     onMouseLeave={() => setHoveredPrompt(null)}
                     onClick={() => {
-                      if (attr) {
-                        setExpandedPrompt(expandedPrompt === attr.promptIndex ? null : attr.promptIndex);
-                        const el = promptRefs.current.get(attr.promptIndex);
+                      if (primaryIsCurrentSession) {
+                        setExpandedPrompt(
+                          expandedPrompt === attr!.promptIndex ? null : attr!.promptIndex,
+                        );
+                        const el = promptRefs.current.get(attr!.promptIndex);
                         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                       }
                     }}
@@ -783,26 +1040,34 @@ function ByFileView({
                     </span>
 
                     <button
-                      className={`w-20 text-right px-2 py-0.5 shrink-0 truncate ${
-                        attr
+                      className={`w-12 text-right px-2 py-0.5 shrink-0 truncate ${
+                        primaryIsCurrentSession
                           ? `${color!.text} ${color!.bg} hover:brightness-125 cursor-pointer`
-                          : 'text-gray-700 cursor-default'
+                          : attr
+                            ? 'text-amber-300/70 cursor-default'
+                            : 'text-gray-700 cursor-default'
                       }`}
                       title={
                         attr
-                          ? `Prompt #${attr.promptIndex + 1}: ${attr.promptText}`
+                          ? primaryIsCurrentSession
+                            ? `Prompt #${attr.promptIndex + 1}${isUncommittedLine ? ' (uncommitted)' : ''}: ${attr.promptText}`
+                            : `From prior session (${attr.agentName || attr.sessionModel || 'agent'}${attr.authorName ? ' · ' + attr.authorName : ''}): ${attr.promptText}`
                           : 'Human-written / unchanged'
                       }
                       onClick={(e) => {
-                        if (attr) {
+                        if (primaryIsCurrentSession) {
                           e.stopPropagation();
                           setExpandedPrompt(
-                            expandedPrompt === attr.promptIndex ? null : attr.promptIndex,
+                            expandedPrompt === attr!.promptIndex ? null : attr!.promptIndex,
                           );
                         }
                       }}
                     >
-                      {attr ? `P${attr.promptIndex + 1}` : ''}
+                      {attr
+                        ? primaryIsCurrentSession
+                          ? `P${attr.promptIndex + 1}`
+                          : '·'
+                        : ''}
                     </button>
 
                     <pre
@@ -817,7 +1082,7 @@ function ByFileView({
                       <button
                         className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-indigo-400 px-2 py-0.5 text-[10px] transition-opacity shrink-0"
                         onClick={() =>
-                          onAskAboutLine(blameData.file, line.lineNumber, line.content)
+                          onAskAboutLine(data.file, line.lineNumber, line.content)
                         }
                         title="Ask about this line"
                       >
@@ -826,7 +1091,8 @@ function ByFileView({
                     )}
                   </div>
                 );
-              })}
+                }
+              })()}
             </div>
           )}
         </div>

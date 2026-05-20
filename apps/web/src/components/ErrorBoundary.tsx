@@ -71,6 +71,7 @@ interface ErrorBoundaryProps {
 
 interface ErrorBoundaryState {
   error: Error | null;
+  componentStack: string | null;
 }
 
 /**
@@ -82,15 +83,21 @@ interface ErrorBoundaryState {
  *   <ErrorBoundary label="Dashboard"><Dashboard /></ErrorBoundary>
  */
 export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  state: ErrorBoundaryState = { error: null };
+  state: ErrorBoundaryState = { error: null, componentStack: null };
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { error };
+    return { error, componentStack: null };
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     // eslint-disable-next-line no-console
     console.error('[ErrorBoundary]', this.props.label ?? '', error, info.componentStack);
+
+    // Stash the component stack so the fallback UI can surface it. This is
+    // what lets us pin down React minified errors like #310 — the message
+    // itself is generic, but the component stack tells us exactly which
+    // subtree was rendering when hooks went out of order.
+    this.setState({ componentStack: info.componentStack ?? null });
 
     // Auto-reload on stale chunk errors (happens after deploys when the
     // browser has cached HTML referencing old JS filenames that no longer
@@ -104,7 +111,29 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
     }
   }
 
-  reset = () => this.setState({ error: null });
+  reset = () => this.setState({ error: null, componentStack: null });
+
+  copyDiagnostics = () => {
+    if (!this.state.error) return;
+    const payload = [
+      `Label: ${this.props.label ?? '(unlabeled)'}`,
+      `URL: ${typeof window !== 'undefined' ? window.location.href : ''}`,
+      `Message: ${this.state.error.message}`,
+      this.state.error.stack ? `\nStack:\n${this.state.error.stack}` : '',
+      this.state.componentStack ? `\nComponent stack:${this.state.componentStack}` : '',
+    ].join('\n');
+    try {
+      navigator.clipboard.writeText(payload);
+    } catch {
+      // older browsers — fall back to a textarea hack
+      const ta = document.createElement('textarea');
+      ta.value = payload;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch { /* ignore */ }
+      ta.remove();
+    }
+  };
 
   render() {
     if (this.state.error) {
@@ -126,7 +155,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
                 ? 'Your browser has an older version cached. Reloading will pick up the latest build.'
                 : this.state.error.message || 'An unexpected error occurred.'}
             </p>
-            <div className="flex gap-2 justify-center">
+            <div className="flex gap-2 justify-center flex-wrap">
               {!isStale && (
                 <button
                   type="button"
@@ -143,7 +172,27 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
               >
                 Reload
               </button>
+              {!isStale && (
+                <button
+                  type="button"
+                  onClick={this.copyDiagnostics}
+                  className="px-3 py-1.5 text-xs rounded-md bg-gray-800 hover:bg-gray-700 text-gray-100 border border-gray-700"
+                  title="Copy URL + error message + component stack to clipboard"
+                >
+                  Copy details
+                </button>
+              )}
             </div>
+            {!isStale && this.state.componentStack && (
+              <details className="mt-3 text-left">
+                <summary className="text-[11px] text-gray-500 cursor-pointer hover:text-gray-400">
+                  Component stack
+                </summary>
+                <pre className="mt-2 text-[10px] text-gray-500 whitespace-pre-wrap break-words bg-black/30 rounded p-2 max-h-48 overflow-auto">
+                  {this.state.componentStack.trim()}
+                </pre>
+              </details>
+            )}
           </div>
         </div>
       );

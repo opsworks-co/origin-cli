@@ -21,10 +21,11 @@ import {
 } from '../services/gitlab-integration.js';
 import { detectAITool } from '../services/ai-commit-detector.js';
 import { safeParseArray } from '../utils/safe-json.js';
+import { stripAutoManagedSections, isAutoManagedPath } from '../utils/auto-managed-files.js';
 import { validateFieldLengths, COMMON_LIMITS } from '../utils/validate.js';
 import { isGitNotesMetadataCommit } from '../utils/commit-filter.js';
 import { parseGitHubUrl } from '../services/github.js';
-import { importOriginSessionsFromGit } from '../services/origin-sessions-import.js';
+import { importOriginSessionsFromGit, fetchAndSynthesizeCommitNote } from '../services/origin-sessions-import.js';
 import { readableRepoIds, type RepoLevel } from '../services/access.js';
 import { requireRepoAccess } from '../middleware/auth.js';
 
@@ -1206,7 +1207,7 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Repo not found' });
     }
 
-    const commitWhere: any = { repoId: id };
+    const commitWhere: any = { repoId: id, isPlaceholder: false };
     if (req.query.branch) {
       commitWhere.branch = req.query.branch as string;
     }
@@ -1214,6 +1215,11 @@ router.get('/:id/commits', async (req: AuthRequest, res: Response) => {
     // Hard cap: /:id/commits returns the 1k most recent commits. The
     // UI paginates via its own cursor; this ceiling exists to stop a
     // single request from loading a monorepo's entire history (OOM).
+    // `isPlaceholder: false` strips unreplaced session anchors — random-
+    // SHA rows created by session-start so a CodingSession has something
+    // to link to before the agent commits. Surfacing those in listings
+    // produces "0 file" phantom commits (Cursor turns that never actually
+    // committed are the common case).
     const rawCommits = await prisma.commit.findMany({
       where: commitWhere,
       include: {
@@ -2078,16 +2084,52 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Final fallback: if STILL no session and there's a chance this commit
+    // has a git note we haven't synced yet (e.g. the push webhook didn't
+    // finish, or the org connected the repo after the commit landed), pull
+    // the note from GitHub right now, synthesise a virtual session, and
+    // re-load the commit row. Capped — does at most one extra GitHub round
+    // trip per commit-detail page load.
+    if (!sess) {
+      try {
+        const created = await fetchAndSynthesizeCommitNote(id, sha);
+        if (created) {
+          const refreshed = await prisma.commit.findFirst({
+            where: { repoId: id, sha },
+            include: {
+              session: {
+                include: {
+                  promptChanges: { orderBy: { promptIndex: 'asc' } },
+                  review: true,
+                  sessionDiff: true,
+                  user: { select: { id: true, name: true, email: true } },
+                },
+              },
+            },
+          });
+          if (refreshed?.session) sess = refreshed.session as any;
+        }
+      } catch (e) {
+        console.error('Git-note live-read failed:', e);
+      }
+    }
+
     // Build promptChanges list (like the list endpoint)
     let promptChanges: any[] = [];
     if (sess) {
-      promptChanges = (sess.promptChanges || []).map((pc: any) => ({
-        promptIndex: pc.promptIndex,
-        promptText: pc.promptText,
-        filesChanged: (() => { try { return JSON.parse(pc.filesChanged || '[]'); } catch { return []; } })(),
-        diff: pc.diff || '',
-        commitSha: pc.commitSha || null,
-      }));
+      promptChanges = (sess.promptChanges || []).map((pc: any) => {
+        const rawFiles = (() => { try { return JSON.parse(pc.filesChanged || '[]'); } catch { return []; } })() as string[];
+        return {
+          promptIndex: pc.promptIndex,
+          promptText: pc.promptText,
+          // Strip Origin's auto-managed files from both the diff body and
+          // the filesChanged list — these are noise the user did not
+          // author. See utils/auto-managed-files.ts and the memory note.
+          filesChanged: rawFiles.filter((f) => !isAutoManagedPath(f)),
+          diff: stripAutoManagedSections(pc.diff || ''),
+          commitSha: pc.commitSha || null,
+        };
+      });
 
       // Fallback: extract from transcript if no promptChanges
       if (promptChanges.length === 0 && sess.transcript) {
@@ -2128,15 +2170,36 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Build per-file diff (reuse sessionDiff / prompt diff parsing)
-    let rawDiff = sess?.sessionDiff?.diff || '';
+    // Build per-file diff. Preference order:
+    //   1. commit.patch — per-commit diff uploaded by post-commit hook.
+    //      This is what "what did THIS commit change" actually means and
+    //      keeps siblings in the same session showing distinct content.
+    //   2. session.sessionDiff.diff — session aggregate fallback. Older
+    //      commits captured before commit.patch was wired up land here.
+    //      Loses per-commit scope (every sibling shows the same content).
+    //   3. Sum of PromptChange.diff — last resort for sessions with no
+    //      sessionDiff (e.g. cross-launch reuse before stop fired).
+    let rawDiff = (commit as { patch?: string | null }).patch || '';
+    let diffSource: 'commit.patch' | 'sessionDiff' | 'promptChanges' | 'remote' | 'none' = rawDiff ? 'commit.patch' : 'none';
+    if (!rawDiff) {
+      rawDiff = sess?.sessionDiff?.diff || '';
+      if (rawDiff) diffSource = 'sessionDiff';
+    }
     if (!rawDiff && sess) {
       const pcs = await prisma.promptChange.findMany({
         where: { sessionId: sess.id },
         orderBy: { promptIndex: 'asc' },
       });
       rawDiff = pcs.map((pc: any) => pc.diff || '').filter(Boolean).join('\n');
+      if (rawDiff) diffSource = 'promptChanges';
     }
+    console.log('[commit/detail]', JSON.stringify({
+      sha: sha.slice(0, 8),
+      diffSource,
+      rawDiffLen: rawDiff.length,
+      hasCommitPatch: !!(commit as { patch?: string | null }).patch,
+      hasSessionDiff: !!sess?.sessionDiff?.diff,
+    }));
 
     const files: any[] = [];
     if (rawDiff) {
@@ -2340,6 +2403,29 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
       };
     })() : null;
 
+    // Sibling commits in the same session — surfaced so the commit-detail
+    // page can show "N more commits in this session" instead of leaving
+    // the user guessing whether the session did anything else. Excludes
+    // placeholders (those are session anchors, not real commits) and the
+    // current commit itself.
+    let sessionCommits: Array<{ sha: string; message: string; committedAt: string; additions: number | null; deletions: number | null; fileCount: number | null }> = [];
+    if (sess?.id) {
+      const siblings = await prisma.commit.findMany({
+        where: { sessionId: sess.id, id: { not: commit.id }, isPlaceholder: false },
+        select: { sha: true, message: true, committedAt: true, additions: true, deletions: true, fileCount: true },
+        orderBy: { committedAt: 'asc' },
+        take: 50,
+      });
+      sessionCommits = siblings.map((c) => ({
+        sha: c.sha,
+        message: c.message,
+        committedAt: c.committedAt?.toISOString() || '',
+        additions: c.additions ?? null,
+        deletions: c.deletions ?? null,
+        fileCount: c.fileCount ?? null,
+      }));
+    }
+
     return res.json({
       sha: commit.sha,
       message: commit.message,
@@ -2348,13 +2434,24 @@ router.get('/:id/commit/:sha', async (req: AuthRequest, res: Response) => {
       committedAt: commit.committedAt?.toISOString() || '',
       aiToolDetected: commit.aiToolDetected,
       aiDetectionMethod: commit.aiDetectionMethod,
+      // Session anchor that never got replaced with a real git SHA — the
+      // UI renders a banner instead of an empty "No files in this commit"
+      // panel so users know the data isn't missing, it just isn't a real
+      // commit (yet).
+      isPlaceholder: (commit as { isPlaceholder?: boolean }).isPlaceholder === true,
       stats: {
         additions: totalAdditions,
         deletions: totalDeletions,
         total: totalAdditions + totalDeletions,
       },
       files: filesWithPromptIdx,
+      // Tells the UI which source the per-file patches came from. "commit.patch"
+      // is the only per-commit-scoped source; "sessionDiff" and "promptChanges"
+      // aggregate across the whole session, so the UI warns the user that the
+      // patches may include changes that landed in sibling commits.
+      diffSource,
       session: sessionPayload,
+      sessionCommits,
       promptChanges,
       repo: { id: repo.id, name: repo.name, provider: repo.provider, path: repo.path },
     });

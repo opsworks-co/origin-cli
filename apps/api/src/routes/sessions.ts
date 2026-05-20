@@ -5,6 +5,11 @@ import { AuthRequest, requireAuth, resolveOrgContext, requireRole } from '../mid
 import { expensiveLimiter } from '../middleware/rate-limit.js';
 import { notifyOrgAdmins, notifyOrgMembers } from '../services/notifications.js';
 import { safeParseArray, safeParseObject } from '../utils/safe-json.js';
+import {
+  ORIGIN_AUTO_MANAGED_FILES,
+  stripAutoManagedSections,
+  isDiffEntirelyOriginManaged,
+} from '../utils/auto-managed-files.js';
 import { generateSessionTitle } from '../services/ai-summarize.js';
 
 /** Check if user has admin/owner role */
@@ -259,13 +264,17 @@ function mapSession(s: any, pullRequests?: any[]) {
           headBranch: pr.headBranch,
         }))
       : undefined,
-    // Git capture data (only included on detail endpoint)
+    // Git capture data (only included on detail endpoint). Strip Origin-
+    // auto-managed files (AGENTS.md, GEMINI.md, .windsurfrules, fully-managed
+    // CLAUDE.md) at read time so they never reach the per-prompt diff /
+    // session diff UIs. The CLI strips at capture time too, but legacy
+    // sessions captured before that landing need the read-time pass.
     sessionDiff: s.sessionDiff
       ? {
           headBefore: s.sessionDiff.headBefore,
           headAfter: s.sessionDiff.headAfter,
           commitShas: safeParseArray<string>(s.sessionDiff.commitShas, `session.${s.id}.sessionDiff.commitShas`),
-          diff: capDiffForResponse(s.sessionDiff.diff),
+          diff: capDiffForResponse(stripAutoManagedSections(s.sessionDiff.diff || '')),
           diffTruncated: s.sessionDiff.diffTruncated || (s.sessionDiff.diff?.length || 0) > DIFF_RESPONSE_CAP,
           linesAdded: s.sessionDiff.linesAdded,
           linesRemoved: s.sessionDiff.linesRemoved,
@@ -275,21 +284,191 @@ function mapSession(s: any, pullRequests?: any[]) {
       ? (() => {
           // Deduplicate by promptIndex (race condition can create duplicates)
           const seen = new Set<number>();
+          const isAutoManagedFile = (f: string): boolean => {
+            const basename = (f || '').split('/').pop() || '';
+            return (
+              ORIGIN_AUTO_MANAGED_FILES.has(f) ||
+              ORIGIN_AUTO_MANAGED_FILES.has(basename) ||
+              basename === 'CLAUDE.md'
+            );
+          };
+          // Strip diff sections whose file isn't in a known set. Reused
+          // below to enforce editsJson as the authoritative file set when
+          // the new pipeline populated it.
+          const stripDiffToFiles = (diffText: string, allowed: Set<string>): string => {
+            if (!diffText || allowed.size === 0) return diffText;
+            const parts = diffText.split(/^(?=diff --git )/m);
+            const kept: string[] = [];
+            for (const part of parts) {
+              const header = part.split('\n', 1)[0] || '';
+              const m = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
+              if (!m) continue;
+              const fp = m[2].replace(/^\//, '');
+              const basename = fp.split('/').pop() || '';
+              if (allowed.has(fp) || allowed.has(basename)) kept.push(part);
+            }
+            return kept.join('').trim();
+          };
+          // Dedup pre-pass: when a prompt's uncommittedDiff is
+          // byte-identical to the previous prompt's, this prompt didn't
+          // introduce any new working-tree change — the heartbeat just
+          // re-captured prompt N-1's still-pending edits. Carrying it
+          // forward makes prompts 2+ look like they touched files they
+          // never edited. Clear those (and the matching filesChanged /
+          // diff if THEY also clone the previous turn). Same logic for
+          // pc.diff: the post-commit hook sometimes echoes the same
+          // commit diff across consecutive prompts when the user
+          // committed once and then kept chatting.
+          const orderedPcs = Array.from(s.promptChanges as any[]).sort(
+            (a, b) => (a.promptIndex || 0) - (b.promptIndex || 0),
+          );
+          const blankByIndex = new Map<number, { diff: boolean; uncommitted: boolean; files: boolean }>();
+          for (let i = 1; i < orderedPcs.length; i++) {
+            const cur = orderedPcs[i];
+            const prev = orderedPcs[i - 1];
+            // Build the "effective" prev for comparison — when prev was
+            // itself blanked, the carry-over chain continues against the
+            // ORIGINAL signal (the prompt that first introduced this diff).
+            // Without this, only consecutive prompts get deduped and the
+            // 3rd/4th in a row would still echo the same content.
+            let basePrev = prev;
+            for (let k = i - 1; k >= 0; k--) {
+              const candidate = orderedPcs[k];
+              const blanked = blankByIndex.get(candidate.promptIndex);
+              if (!blanked || !(blanked.diff && blanked.uncommitted)) {
+                basePrev = candidate;
+                break;
+              }
+            }
+            const sameDiff = (cur.diff || '') === (basePrev.diff || '') && (cur.diff || '').length > 0;
+            const sameUncommitted = (cur.uncommittedDiff || '') === (basePrev.uncommittedDiff || '') && (cur.uncommittedDiff || '').length > 0;
+            const noNewWork = sameDiff && sameUncommitted;
+            blankByIndex.set(cur.promptIndex, {
+              diff: sameDiff,
+              uncommitted: sameUncommitted,
+              // When neither diff nor uncommittedDiff brought new
+              // content vs the previous prompt, this prompt was
+              // chat-only — also blank filesChanged AND skip the
+              // commit-patch fallback below. Otherwise prompt N's UI
+              // panel would still show files inherited from N-1.
+              files: noNewWork,
+            });
+          }
           return s.promptChanges
-            .map((pc: any) => ({
-              promptIndex: pc.promptIndex,
-              promptText: pc.promptText,
-              filesChanged: safeParseArray<string>(pc.filesChanged, `session.${s.id}.promptChanges.filesChanged`),
-              diff: capDiffForResponse(pc.diff || ''),
-              uncommittedDiff: capDiffForResponse(pc.uncommittedDiff || ''),
-              linesAdded: pc.linesAdded || 0,
-              linesRemoved: pc.linesRemoved || 0,
-              aiPercentage: pc.aiPercentage ?? 100,
-              checkpointType: pc.checkpointType || null,
-              commitSha: pc.commitSha || null,
-              treeSha: pc.treeSha || null,
-              createdAt: pc.createdAt,
-            }))
+            .map((pc: any) => {
+              const blanks = blankByIndex.get(pc.promptIndex) || { diff: false, uncommitted: false, files: false };
+              const rawFiles = blanks.files
+                ? []
+                : safeParseArray<string>(pc.filesChanged, `session.${s.id}.promptChanges.filesChanged`);
+
+              // Authoritative editsJson takes over filesChanged + diff +
+              // uncommittedDiff when present AND non-empty. An editsJson
+              // with `edits: []` is NOT authoritative — Codex's extractor
+              // returns an empty edits list whenever it can't attribute
+              // commits to that prompt (rollout missing markers, last
+              // prompt before stop hook, etc.). Treating an empty list as
+              // "this prompt touched nothing" would strip the legacy
+              // pc.diff/pc.uncommittedDiff data that actually came from
+              // git capture. So we only apply the filter when editsJson
+              // carries real edits — otherwise fall through to legacy
+              // (which already filters auto-managed files + dedupes).
+              let pcEditsFiles: Set<string> | null = null;
+              if (typeof pc.editsJson === 'string' && pc.editsJson.length > 0) {
+                try {
+                  const cap = JSON.parse(pc.editsJson);
+                  if (cap && Array.isArray(cap.edits) && cap.edits.length > 0) {
+                    pcEditsFiles = new Set<string>();
+                    for (const e of cap.edits) {
+                      if (e && typeof e.file === 'string') {
+                        pcEditsFiles.add(e.file);
+                      }
+                    }
+                    if (pcEditsFiles.size === 0) pcEditsFiles = null;
+                  }
+                } catch { /* malformed — fall back to legacy */ }
+              }
+
+              let cleanFiles = rawFiles.filter((f) => !isAutoManagedFile(f));
+              // Apply the dedup-pre-pass result: blank out diff /
+              // uncommitted when this prompt's text is byte-identical to
+              // the previous prompt's (carry-over of unchanged
+              // working-tree state, not a new edit).
+              let cleanDiff = blanks.diff
+                ? ''
+                : capDiffForResponse(stripAutoManagedSections(pc.diff || ''));
+              let cleanUncommitted = blanks.uncommitted
+                ? ''
+                : capDiffForResponse(stripAutoManagedSections(pc.uncommittedDiff || ''));
+
+              // Commit-patch fallback: when pc.diff is empty (the
+              // per-prompt git-diff capture missed it — common when the
+              // user-prompt-submit hook didn't fire before the agent's
+              // commit) but pc.commitSha matches one of the session's
+              // commits, use that Commit.patch as the displayed diff.
+              // Same for filesChanged from Commit.filesChanged. Without
+              // this, the prompt panel shows an empty card for any
+              // prompt whose only data lives on its commit row.
+              //
+              // Skipped when this prompt is a chat-only carry-over of
+              // the previous prompt's state (see blankByIndex above) —
+              // otherwise the fallback would refill a deliberately
+              // blanked prompt with prompt N-1's commit content.
+              const isChatOnlyCarryOver = blanks.diff && blanks.uncommitted;
+              if (
+                !isChatOnlyCarryOver &&
+                (!cleanFiles.length || !cleanDiff.trim()) &&
+                pc.commitSha &&
+                Array.isArray((s as any).commits)
+              ) {
+                const c: any = (s as any).commits.find((cc: any) => cc.sha === pc.commitSha);
+                if (c) {
+                  if (!cleanDiff.trim() && c.patch) {
+                    cleanDiff = capDiffForResponse(stripAutoManagedSections(c.patch));
+                  }
+                  if (!cleanFiles.length && c.filesChanged) {
+                    try {
+                      const cf: string[] = JSON.parse(c.filesChanged || '[]');
+                      cleanFiles = (Array.isArray(cf) ? cf : []).filter((f) => !isAutoManagedFile(f));
+                    } catch { /* ignore malformed */ }
+                  }
+                }
+              }
+
+              // When pc.commitSha points at a real session commit, the
+              // commit is the ground truth — editsJson does NOT get to
+              // override. Without this gate, a Codex prompt whose
+              // editsJson was wrongly assembled by the pre-fix extractor
+              // would wipe out the (correct) pc.diff / commit content.
+              const hasMatchingCommit = !!(
+                pc.commitSha &&
+                Array.isArray((s as any).commits) &&
+                (s as any).commits.some((cc: any) => cc.sha === pc.commitSha)
+              );
+              if (pcEditsFiles && !hasMatchingCommit) {
+                // editsJson is authoritative — drop anything outside it.
+                cleanFiles = cleanFiles.filter((f) => {
+                  const basename = f.split('/').pop() || '';
+                  return pcEditsFiles!.has(f) || pcEditsFiles!.has(basename);
+                });
+                cleanDiff = stripDiffToFiles(cleanDiff, pcEditsFiles);
+                cleanUncommitted = stripDiffToFiles(cleanUncommitted, pcEditsFiles);
+              }
+
+              return {
+                promptIndex: pc.promptIndex,
+                promptText: pc.promptText,
+                filesChanged: cleanFiles,
+                diff: cleanDiff,
+                uncommittedDiff: cleanUncommitted,
+                linesAdded: pc.linesAdded || 0,
+                linesRemoved: pc.linesRemoved || 0,
+                aiPercentage: pc.aiPercentage ?? 100,
+                checkpointType: pc.checkpointType || null,
+                commitSha: pc.commitSha || null,
+                treeSha: pc.treeSha || null,
+                createdAt: pc.createdAt,
+              };
+            })
             .filter((pc: any) => {
               if (seen.has(pc.promptIndex)) return false;
               seen.add(pc.promptIndex);
@@ -1569,21 +1748,65 @@ router.delete('/:id', requireRole('ADMIN'), async (req: AuthRequest, res: Respon
 // GET /:id/blame — Line-level AI attribution for a file in a session
 // ---------------------------------------------------------------------------
 
+// ORIGIN_AUTO_MANAGED_FILES + stripAutoManagedSections + isDiffEntirelyOriginManaged
+// now live in utils/auto-managed-files.ts (imported at the top of this file)
+// so the commit-detail endpoint and any other route can apply the identical
+// strip without duplicating the regex. See memory feedback_strip_auto_managed.md
+// for the user-facing requirement.
+
+interface BlameAttribution {
+  promptIndex: number;
+  promptText: string;
+  type: 'added' | 'modified';
+  // Source session of the PRIMARY attribution. Equal to the viewed session
+  // when this session added the line; otherwise it's the prior session that
+  // first wrote this line content.
+  sessionId: string;
+  isCurrentSession: boolean;
+  sessionAiTitle?: string;
+  sessionModel?: string;
+  agentName?: string;
+  // The human who ran the session — surfaced in the UI as the line's author
+  // so reviewers can see who drove the change, not just which agent emitted
+  // it. May be undefined for legacy sessions without a user link.
+  authorName?: string;
+  authorEmail?: string;
+  // Secondary annotation: if a prior session FIRST wrote this line content
+  // (and the current session subsequently added or modified an identical
+  // line), `originalAuthor` carries the prior agent's attribution. UI shows
+  // this as "originally added by <agent> in <session>".
+  originalAuthor?: Omit<BlameAttribution, 'originalAuthor'>;
+}
+
 interface BlameLine {
   lineNumber: number;
   content: string;
-  attribution: {
-    promptIndex: number;
-    promptText: string;
-    type: 'added' | 'modified';
-  } | null;
+  attribution: BlameAttribution | null;
   isGap?: boolean;
+  // True when the line was added by a prompt whose pc.uncommittedDiff still
+  // covers this file at session-read time — i.e. the change hasn't landed
+  // in a commit yet. The UI uses this to mark uncommitted edits visually
+  // alongside the attribution chip.
+  isUncommitted?: boolean;
 }
 
 interface BlamePrompt {
   promptIndex: number;
   promptText: string;
   filesChanged: string[];
+}
+
+interface CrossSessionPrompt {
+  sessionId: string;
+  sessionAiTitle?: string;
+  sessionModel?: string;
+  agentName?: string;
+  authorName?: string;
+  authorEmail?: string;
+  promptIndex: number;
+  promptText: string;
+  filesChanged: string[];
+  createdAt: string;
 }
 
 /**
@@ -1593,10 +1816,25 @@ interface BlamePrompt {
 function parseDiffForFile(
   diffText: string,
   targetFile: string,
-): Array<{ lineNumber: number; content: string; type: 'added' | 'modified' }> {
+): Array<{
+  lineNumber: number;
+  content: string;
+  type: 'added' | 'modified';
+  // When this `+` line directly follows a `-` block, the `-` block's
+  // i-th line is paired with this `+` block's i-th line as a modification.
+  // `precedingDeletedContent` is the content of the line this one replaces
+  // (if any) — lets the blame algorithm inherit attribution when a later
+  // prompt modifies a line a previous prompt added.
+  precedingDeletedContent?: string;
+}> {
   if (!diffText) return [];
 
-  const results: Array<{ lineNumber: number; content: string; type: 'added' | 'modified' }> = [];
+  const results: Array<{
+    lineNumber: number;
+    content: string;
+    type: 'added' | 'modified';
+    precedingDeletedContent?: string;
+  }> = [];
 
   // Split by file sections (diff --git or --- a/)
   const fileSections = diffText.split(/^diff --git /m).filter(Boolean);
@@ -1606,23 +1844,34 @@ function parseDiffForFile(
     const headerMatch = lines[0]?.match(/a\/(.+?)\s+b\/(.+)/);
     const filePath = headerMatch ? headerMatch[2] : '';
 
-    // Check if this section is for our target file (flexible matching)
+    // Check if this section is for our target file. Match boundaries are
+    // critical: a naked `endsWith("utils.py")` test wrongly matches
+    // `test_utils.py` and the blame for utils.py would merge in test_utils.py's
+    // diff. Require either exact equality or a `/<target>` (or `<file>/`)
+    // suffix so the match lands on a path-component boundary.
     const normalizedTarget = targetFile.replace(/^\//, '');
     const normalizedFile = filePath.replace(/^\//, '');
     if (
       normalizedFile !== normalizedTarget &&
-      !normalizedFile.endsWith(normalizedTarget) &&
-      !normalizedTarget.endsWith(normalizedFile)
+      !normalizedFile.endsWith('/' + normalizedTarget) &&
+      !normalizedTarget.endsWith('/' + normalizedFile)
     ) {
       continue;
     }
 
-    // Parse hunks
+    // Parse hunks. Track a "pending deletes" buffer so we can pair
+    // consecutive `-` lines with the following `+` lines (a modification
+    // block in unified-diff format). The i-th deleted line is paired with
+    // the i-th added line; surplus deletes are pure removals (no pairing),
+    // surplus adds are pure additions (no `precedingDeletedContent`).
     let newLineNum = 0;
+    let pendingDeletes: string[] = [];
+    let pendingAddIdx = 0;
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
       if (line.startsWith('@@')) {
-        // Parse hunk header: @@ -old,count +new,count @@
+        pendingDeletes = [];
+        pendingAddIdx = 0;
         const hunkMatch = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
         if (hunkMatch) {
           newLineNum = parseInt(hunkMatch[1], 10);
@@ -1633,17 +1882,28 @@ function parseDiffForFile(
       if (line.startsWith('+++') || line.startsWith('---')) continue;
 
       if (line.startsWith('+')) {
+        const precedingDeletedContent =
+          pendingAddIdx < pendingDeletes.length ? pendingDeletes[pendingAddIdx] : undefined;
         results.push({
           lineNumber: newLineNum,
           content: line.slice(1),
-          type: 'added',
+          type: precedingDeletedContent != null ? 'modified' : 'added',
+          ...(precedingDeletedContent != null ? { precedingDeletedContent } : {}),
         });
         newLineNum++;
+        pendingAddIdx++;
       } else if (line.startsWith('-')) {
-        // Removed lines don't increment new line number
-        // They indicate modification context
+        // Stash for pairing with a following `+`. Reset the add-cursor only
+        // when we transition from add→delete, not on every `-`.
+        if (pendingAddIdx > 0) {
+          pendingDeletes = [];
+          pendingAddIdx = 0;
+        }
+        pendingDeletes.push(line.slice(1));
       } else {
-        // Context line
+        // Context line — closes any open delete-block.
+        pendingDeletes = [];
+        pendingAddIdx = 0;
         newLineNum++;
       }
     }
@@ -1674,10 +1934,12 @@ function parseFullDiffForFile(
 
     const normalizedTarget = targetFile.replace(/^\//, '');
     const normalizedFile = filePath.replace(/^\//, '');
+    // Path-component-boundary match: `utils.py` must not match
+    // `test_utils.py`. See parseDiffForFile above for the same fix.
     if (
       normalizedFile !== normalizedTarget &&
-      !normalizedFile.endsWith(normalizedTarget) &&
-      !normalizedTarget.endsWith(normalizedFile)
+      !normalizedFile.endsWith('/' + normalizedTarget) &&
+      !normalizedTarget.endsWith('/' + normalizedFile)
     ) continue;
 
     let newLineNum = 0;
@@ -1738,11 +2000,154 @@ function parseFullDiffForFile(
   return results;
 }
 
-router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
-  try {
-    const id = req.params.id as string;
-    const file = req.query.file as string;
+// ─── Authoritative editsJson → line attribution ─────────────────────────
+//
+// New per-prompt pipeline (see packages/cli/src/prompt-capture) populates
+// `PromptChange.editsJson` with an authoritative list of file operations
+// the agent performed. Each PromptEdit carries the file path and the
+// before/after content of the affected region. When present, blame
+// derives attribution by running a line-level LCS over (oldContent,
+// newContent) per edit instead of parsing the legacy `pc.diff` text —
+// which conflated cross-prompt cumulative captures and inflated the
+// "added by this prompt" set with content owned by other prompts.
 
+interface PromptEditFromJson {
+  file: string;
+  op?: string;
+  oldContent?: string;
+  newContent?: string;
+  oldPath?: string;
+  source?: string;
+  commitSha?: string;
+}
+interface PromptCaptureFromJson {
+  promptIndex: number;
+  promptText: string;
+  agent: string;
+  edits: PromptEditFromJson[];
+  commits: string[];
+}
+
+// Hirschberg-friendly line LCS. Returns indices in the new array that
+// are NEW (i.e. not in the LCS) — those are the lines added by this
+// edit relative to its prior state. n*m table is fine here because
+// per-edit content rarely exceeds a few thousand lines.
+function addedLineIndicesViaLcs(oldLines: string[], newLines: string[]): number[] {
+  const n = oldLines.length, m = newLines.length;
+  if (n === 0) return Array.from({ length: m }, (_, i) => i);
+  if (m === 0) return [];
+  // Cap to avoid pathological allocations on huge files; full-file LCS at
+  // 50k * 50k would blow heap. Beyond cap, treat the entire new content
+  // as added.
+  if (n * m > 4_000_000) return Array.from({ length: m }, (_, i) => i);
+
+  const prev = new Int32Array(m + 1);
+  const curr = new Int32Array(m + 1);
+  // Track parent direction in a compact byte matrix.
+  // 0 = match (came from i-1,j-1), 1 = up (i-1,j), 2 = left (i,j-1)
+  const parent = new Uint8Array((n + 1) * (m + 1));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (oldLines[i - 1] === newLines[j - 1]) {
+        curr[j] = prev[j - 1] + 1;
+        parent[i * (m + 1) + j] = 0;
+      } else if (prev[j] >= curr[j - 1]) {
+        curr[j] = prev[j];
+        parent[i * (m + 1) + j] = 1;
+      } else {
+        curr[j] = curr[j - 1];
+        parent[i * (m + 1) + j] = 2;
+      }
+    }
+    prev.set(curr);
+  }
+  const added: number[] = [];
+  let i = n, j = m;
+  while (i > 0 && j > 0) {
+    const p = parent[i * (m + 1) + j];
+    if (p === 0) { i--; j--; }
+    else if (p === 1) { i--; }
+    else { added.push(j - 1); j--; }
+  }
+  while (j > 0) { added.push(j - 1); j--; }
+  added.reverse();
+  return added;
+}
+
+// True when an edit's recorded file path is the target file we're
+// blaming (matches under either full path or trailing-path equivalence).
+function editMatchesFile(editFile: string, targetFile: string): boolean {
+  if (!editFile || !targetFile) return false;
+  const a = editFile.replace(/^\//, '');
+  const b = targetFile.replace(/^\//, '');
+  // Match on full equality or path-component boundary. A naked
+  // `endsWith(b)` matches `test_utils.py` against target `utils.py`,
+  // collapsing two distinct files into one view.
+  return a === b || a.endsWith('/' + b) || b.endsWith('/' + a);
+}
+
+// Parse the encrypted/plain editsJson string and return null on any
+// parsing failure so the caller can fall back to the legacy path.
+function parseEditsJson(raw: string | null | undefined): PromptCaptureFromJson | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!Array.isArray(parsed.edits)) return null;
+    return parsed as PromptCaptureFromJson;
+  } catch { return null; }
+}
+
+// Compute per-prompt added lines for a single target file from the
+// authoritative editsJson. Returns one entry per added line in the
+// SAME shape parseDiffForFile produces, so the caller can drop this
+// into the existing attribution loop with no further changes.
+function lineChangesFromEdits(
+  cap: PromptCaptureFromJson,
+  targetFile: string,
+): Array<{ lineNumber: number; content: string; type: 'added' | 'modified'; precedingDeletedContent?: string }> {
+  const out: Array<{ lineNumber: number; content: string; type: 'added' | 'modified'; precedingDeletedContent?: string }> = [];
+  // Synthetic line counter — sessionDiff-driven rendering keys off line
+  // CONTENT for attribution; the line number only matters for the
+  // no-sessionDiff fallback, where we want monotonically increasing
+  // numbers per prompt.
+  let cursor = 1;
+  for (const edit of cap.edits) {
+    if (!editMatchesFile(edit.file || '', targetFile)) continue;
+    const oldText = edit.oldContent ?? '';
+    const newText = edit.newContent ?? '';
+    if (!newText && edit.op === 'delete') continue; // pure deletion
+    const oldLines = oldText.length === 0 ? [] : oldText.split('\n');
+    const newLines = newText.length === 0 ? [] : newText.split('\n');
+    const addedIdxs = addedLineIndicesViaLcs(oldLines, newLines);
+    // For a 'write' / 'create' op with empty oldContent we treat every
+    // new line as added; addedLineIndicesViaLcs already returns that.
+    for (const idx of addedIdxs) {
+      const content = newLines[idx];
+      // Pair each added line with its preceding deleted line (when the
+      // edit replaces a contiguous region) so the within-session
+      // modification-inheritance rule in the legacy loop still fires.
+      // We look at the old line at the same relative position — close
+      // enough for the inheritance heuristic, which only needs to find
+      // SOME prior-prompt content the modifying prompt is replacing.
+      const replaced = oldLines[idx];
+      out.push({
+        lineNumber: cursor++,
+        content,
+        type: replaced && replaced !== content ? 'modified' : 'added',
+        ...(replaced && replaced !== content ? { precedingDeletedContent: replaced } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
+  const dbgT0 = Date.now();
+  const id = req.params.id as string;
+  const file = req.query.file as string;
+  console.log('[blame] enter', JSON.stringify({ id: id.slice(0, 8), file }));
+  try {
     if (!file) {
       return res.status(400).json({ error: 'file query parameter is required' });
     }
@@ -1753,8 +2158,18 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
         commit: { repo: { orgId: req.activeOrgId! } },
       }),
       include: {
+        commit: { select: { repoId: true } },
         promptChanges: { orderBy: { promptIndex: 'asc' } },
         sessionDiff: true,
+        agent: { select: { name: true, slug: true } },
+        user: { select: { id: true, name: true, email: true } },
+        // Every commit this session authored. `filesChanged` builds the
+        // knownFiles strip set (historical pollution cleanup). `sha` +
+        // `patch` are the per-commit unified diff — used as a fallback
+        // when pc.diff is empty for a prompt but pc.commitSha is set
+        // (Claude/Cursor sessions where the per-prompt diff capture
+        // missed the file but the post-commit hook landed the patch).
+        commits: { select: { sha: true, filesChanged: true, patch: true } },
       },
     });
 
@@ -1762,50 +2177,281 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Build attribution by CONTENT, not line number. Some CLI capture paths
-    // (notably Gemini's heartbeat) emit a cumulative diff on a later prompt
-    // that re-adds lines an earlier prompt already wrote. Keying by line
-    // number meant the later prompt clobbered the earlier one, so every line
-    // showed up as belonging to whichever prompt landed last.
-    //
-    // The content-based scheme: for each added-line content, remember the
-    // EARLIEST prompt whose diff produced it. When we render the final file
-    // (from sessionDiff) we look up each line's content and attribute it to
-    // that first prompt. A later prompt only owns a line whose content no
-    // earlier prompt produced.
-    //
-    // Line-number attribution is still built as a fallback for sessions
-    // without a sessionDiff (where we can't render the full file).
-    const lineAttributions = new Map<
-      number,
-      { content: string; promptIndex: number; promptText: string; type: 'added' | 'modified' }
-    >();
-    // Multi-value per content because identical text can appear multiple
-    // times in a file. We pop one per match below so each occurrence is
-    // attributed to the prompt that produced it, in order.
-    const contentAttributions = new Map<
-      string,
-      Array<{ promptIndex: number; promptText: string; type: 'added' | 'modified' }>
-    >();
+    // Build the session's "known touched files" set from commit metadata +
+    // session.filesChanged + every per-prompt diff/uncommittedDiff. If
+    // non-empty, we'll drop pc.diff file sections whose path falls outside
+    // this set (historical pollution cleanup). Pulling per-prompt diff
+    // file headers in too is essential — without it, the set is just
+    // committed files, which silently strips uncommitted edits (e.g.
+    // main.py + notes-from-codex.txt edits that Codex hasn't committed
+    // yet) from the "By Prompt" file list.
+    const knownFiles = new Set<string>();
+    for (const c of ((session as any).commits || []) as Array<{ filesChanged: string | null }>) {
+      try {
+        const arr = JSON.parse(c.filesChanged || '[]');
+        if (Array.isArray(arr)) for (const f of arr) if (typeof f === 'string') knownFiles.add(f);
+      } catch { /* ignore */ }
+    }
+    try {
+      const sessFiles = JSON.parse(session.filesChanged || '[]');
+      if (Array.isArray(sessFiles)) for (const f of sessFiles) if (typeof f === 'string') knownFiles.add(f);
+    } catch { /* ignore */ }
+    for (const pc of (session.promptChanges || []) as Array<{ diff: string | null; uncommittedDiff: string | null }>) {
+      for (const blob of [pc.diff, pc.uncommittedDiff]) {
+        if (!blob) continue;
+        for (const m of blob.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
+          const fp = m[2].replace(/^\//, '');
+          if (fp) knownFiles.add(fp);
+        }
+      }
+    }
+    const stripUnknownFileSections = (diffText: string): string => {
+      if (!diffText || knownFiles.size === 0) return diffText;
+      const parts = diffText.split(/^(?=diff --git )/m);
+      const kept: string[] = [];
+      for (const part of parts) {
+        const header = part.split('\n', 1)[0] || '';
+        const m = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
+        const filePath = m ? m[2] : '';
+        const basename = filePath.split('/').pop() || '';
+        // Keep if either the full path or the basename matches a known file.
+        if (filePath && (knownFiles.has(filePath) || knownFiles.has(basename))) {
+          kept.push(part);
+        } else if (!filePath) {
+          // Couldn't parse header — keep to be safe.
+          kept.push(part);
+        }
+        // else: file not in knownFiles → drop (pollution).
+      }
+      return kept.join('').trim();
+    };
 
-    const promptsInfo: BlamePrompt[] = [];
+    // Cross-session attribution: pull every PromptChange in this repo that
+    // touched the target file, replay chronologically, earliest-prompt-wins.
+    // Without this, a later agent (Gemini) that rewrites lines an earlier
+    // agent (Codex) added would silently strip Codex's attribution from the
+    // file. The user's "inter-agent memory" requirement is satisfied by
+    // letting the attribution queue extend back across session boundaries.
+    const repoId = (session as { commit?: { repoId: string } }).commit?.repoId;
+    const orgId = req.activeOrgId!;
+    const adminUser = isAdminUser(req);
+    const userClause = adminUser ? {} : { userId: req.user!.id };
+    // filesChanged is a JSON string array; `contains` on the basename
+    // catches both absolute and relative path encodings.
+    const fileBasename = (file || '').split('/').pop() || file;
+    const allRepoChanges = repoId
+      ? await prisma.promptChange.findMany({
+          where: {
+            session: {
+              ...userClause,
+              commit: {
+                repoId,
+                repo: { orgId },
+              },
+            },
+            filesChanged: { contains: fileBasename },
+          },
+          include: {
+            session: {
+              select: {
+                id: true,
+                model: true,
+                aiTitle: true,
+                createdAt: true,
+                agent: { select: { name: true, slug: true } },
+                user: { select: { id: true, name: true, email: true } },
+              },
+            },
+          },
+        })
+      : [];
 
-    // Deduplicate promptChanges by promptIndex (race condition can create duplicates)
-    const seenIdx = new Set<number>();
-    const dedupedChanges = session.promptChanges.filter((pc: any) => {
-      if (seenIdx.has(pc.promptIndex)) return false;
-      seenIdx.add(pc.promptIndex);
-      return true;
+    // Sort: session.createdAt asc, then promptIndex asc. Earliest prompt across
+    // the repo wins the line content it first established.
+    allRepoChanges.sort((a, b) => {
+      const at = (a as any).session.createdAt.getTime();
+      const bt = (b as any).session.createdAt.getTime();
+      if (at !== bt) return at - bt;
+      return a.promptIndex - b.promptIndex;
     });
 
+    // Two attribution layers:
+    //   - PRIMARY (`contentAttributions`, `lineAttributions`): built ONLY from
+    //     this session's prompts. Drives the legend, the "Prompt #N" badge,
+    //     and the in-session blame. Keeps each session's view scoped to its
+    //     own work — a Gemini session never claims a Codex prompt added one
+    //     of its lines.
+    //   - ORIGINAL AUTHOR (`priorContentAttributions`): built from prompts in
+    //     OTHER sessions on the same repo+file. Surfaces as a secondary
+    //     "originally added by …" annotation so the viewer can see who first
+    //     wrote a context line, without polluting the primary attribution.
+    type AttrEntry = {
+      sessionId: string;
+      isCurrentSession: boolean;
+      sessionAiTitle?: string;
+      sessionModel?: string;
+      agentName?: string;
+      authorName?: string;
+      authorEmail?: string;
+      promptIndex: number;
+      promptText: string;
+      type: 'added' | 'modified';
+    };
+    const lineAttributions = new Map<number, AttrEntry & { content: string }>();
+    const contentAttributions = new Map<string, AttrEntry[]>();
+    const priorContentAttributions = new Map<string, AttrEntry[]>();
+
+    const promptsInfo: BlamePrompt[] = [];
+    const crossSessionPrompts: CrossSessionPrompt[] = [];
+
+    // Primary pass = this session's prompts only. Dedup by promptIndex.
+    // Drop PromptChange rows that are entirely empty — empty diff, empty
+    // uncommittedDiff, empty filesChanged. Those are phantom mappings that
+    // Cursor's flaky transcript pickup can persist (a leftover promptText
+    // from a prior chat with no actual code work attached). Without this
+    // filter, the legend shows "Prompt #2 — make some small change..." for
+    // a turn the agent never actually ran in this session.
+    const sessionSeenIdx = new Set<number>();
+    const sessionDedupedChanges = (session.promptChanges as any[])
+      .filter((pc: any) => {
+        const hasDiff = !!(pc.diff && pc.diff.trim());
+        const hasUncommitted = !!(pc.uncommittedDiff && pc.uncommittedDiff.trim());
+        let hasFiles = false;
+        try {
+          hasFiles = Array.isArray(JSON.parse(pc.filesChanged || '[]')) &&
+            JSON.parse(pc.filesChanged || '[]').length > 0;
+        } catch { /* ignore */ }
+        return hasDiff || hasUncommitted || hasFiles;
+      })
+      .map((pc) => ({
+        ...pc,
+        sessionId: session.id,
+        session: {
+          id: session.id,
+          model: session.model,
+          aiTitle: (session as any).aiTitle,
+          createdAt: session.createdAt,
+          agent: (session as any).agent,
+        },
+      }))
+      .filter((pc: any) => {
+        if (sessionSeenIdx.has(pc.promptIndex)) return false;
+        sessionSeenIdx.add(pc.promptIndex);
+        return true;
+      });
+
+    // Prior pass = only sessions that STARTED before this one. A session
+    // that started AFTER the current one can't be the "original author" of
+    // anything in the current session — it ran later. Without this filter,
+    // viewing Codex's earlier session would surface Gemini (which ran after)
+    // as the original author of Codex's own lines, because Gemini's cumulative
+    // capture re-added Codex's content as `+` lines.
+    const currentSessionStart = (session as { createdAt: Date }).createdAt.getTime();
+    const priorSeenKey = new Set<string>();
+    const priorChanges = allRepoChanges
+      .filter((pc: any) => pc.sessionId !== session.id)
+      .filter((pc: any) => {
+        const otherStart = (pc.session.createdAt as Date).getTime();
+        return otherStart < currentSessionStart;
+      })
+      .filter((pc: any) => {
+        const k = `${pc.sessionId}:${pc.promptIndex}`;
+        if (priorSeenKey.has(k)) return false;
+        priorSeenKey.add(k);
+        return true;
+      });
+
+    // Iteration uses this session's prompts for PRIMARY accounting; the prior
+    // list is processed separately further below.
+    const dedupedChanges = sessionDedupedChanges;
+
+    // Telemetry for the "0% AI" diagnosis: track per-prompt diff state so we
+    // can tell from logs whether prompts are coming through with empty diffs,
+    // whether parseDiffForFile is matching the target path, and what file
+    // headers appear in the diff text. Aggregated and logged once below.
+    const blameDebug = {
+      totalPrompts: dedupedChanges.length,
+      promptsWithDiff: 0,
+      promptsWithMatchedLines: 0,
+      diffFileHeaderSamples: new Set<string>(),
+      // Per-prompt match counts so we can see which prompts contributed
+      // attribution and which had a diff but matched zero lines (i.e. the
+      // file appeared in the diff under a different path, or the prompt
+      // only touched other files).
+      perPromptMatches: [] as Array<{
+        promptIndex: number;
+        diffLen: number;
+        fileHeadersInDiff: string[];
+        matchedLines: number;
+        sampleAddedContent: string[];
+        diffSnippetForTarget: string;
+      }>,
+    };
+
+    // ----- PRIMARY pass: only THIS session's prompts -----
     for (const pc of dedupedChanges) {
-      const filesChanged: string[] = (() => {
+      const rawFiles: string[] = (() => {
         try {
           return JSON.parse(pc.filesChanged || '[]');
         } catch {
           return [];
         }
       })();
+      // Build the per-prompt file list. Three signals, used in order:
+      //   1. Files mentioned as `diff --git a/<x> b/<x>` headers in pc.diff /
+      //      pc.uncommittedDiff. This IS the per-prompt git diff text — every
+      //      file the prompt actually touched in this turn. Most accurate.
+      //   2. `pc.filesChanged` from the CLI capture (a JSON array string).
+      //      Used as a fallback when pc.diff is empty.
+      //   3. The linked `Commit.filesChanged` via pc.commitSha. Last-resort
+      //      fallback when pc.diff is also empty — restores cases where the
+      //      pre-commit working-tree diff missed everything but the
+      //      post-commit hook wrote the canonical patch.
+      // The old "always prefer commit.filesChanged when a commit exists"
+      // rule was wrong for Gemini, whose pc.diff contained 4 files but the
+      // commit recorded only 2 (the other 2 landed in a later commit).
+      const headersFromDiff: string[] = [];
+      for (const blob of [pc.diff, (pc as any).uncommittedDiff]) {
+        if (typeof blob !== 'string' || !blob) continue;
+        for (const m of blob.matchAll(/^diff --git a\/(.+?)\s+b\/(.+)$/gm)) {
+          const fp = m[2].replace(/^\//, '');
+          if (!headersFromDiff.includes(fp)) headersFromDiff.push(fp);
+        }
+      }
+      const commitForPc: any = (pc as any).commitSha
+        ? ((session as any).commits || []).find(
+            (cc: any) => cc.sha === (pc as any).commitSha,
+          )
+        : null;
+      const commitFiles: string[] = commitForPc
+        ? (() => {
+            try {
+              return JSON.parse(commitForPc.filesChanged || '[]');
+            } catch { return []; }
+          })()
+        : [];
+      const filesSource = headersFromDiff.length > 0
+        ? headersFromDiff
+        : (rawFiles.length > 0 ? rawFiles : commitFiles);
+      const filesChanged = filesSource.filter((f) => {
+        const basename = (f || '').split('/').pop() || '';
+        // Drop Origin-managed files unconditionally — AGENTS.md / GEMINI.md /
+        // .windsurfrules are always Origin's. CLAUDE.md is always Origin's
+        // by convention here (the content-aware filter in
+        // stripAutoManagedSections is for diff text; for the file LIST we
+        // hide it unconditionally to match the user's "don't show
+        // auto-managed files anywhere" rule).
+        if (
+          ORIGIN_AUTO_MANAGED_FILES.has(f) ||
+          ORIGIN_AUTO_MANAGED_FILES.has(basename) ||
+          basename === 'CLAUDE.md'
+        ) return false;
+        // Historical pollution cleanup: when we have a known-files set,
+        // drop entries the session didn't actually touch. No-op when the
+        // known set is empty (chat-only sessions, missing commit metadata).
+        if (knownFiles.size > 0 && !knownFiles.has(f) && !knownFiles.has(basename)) return false;
+        return true;
+      });
 
       promptsInfo.push({
         promptIndex: pc.promptIndex,
@@ -1813,44 +2459,456 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
         filesChanged,
       });
 
-      // Parse the diff directly — don't gate on filesChanged. Some capture
-      // paths populate the diff but not the filesChanged list (or vice
-      // versa); parseDiffForFile already filters by the target file path.
-      if (!pc.diff) continue;
+      const attrMeta: Omit<AttrEntry, 'promptIndex' | 'promptText' | 'type'> = {
+        sessionId: session.id,
+        isCurrentSession: true,
+        sessionAiTitle: (session as any).aiTitle || undefined,
+        sessionModel: session.model || undefined,
+        agentName: (session as any).agent?.name || undefined,
+        authorName: (session as any).user?.name || undefined,
+        authorEmail: (session as any).user?.email || undefined,
+      };
 
-      const lineChanges = parseDiffForFile(pc.diff, file);
+      // ── Authoritative editsJson path ─────────────────────────────
+      // When this PromptChange carries an authoritative edit list, use
+      // LCS over (oldContent, newContent) to derive added/modified lines
+      // for THIS prompt on THIS file. Skip pc.diff entirely for this
+      // prompt — that text is the legacy cumulative blob and conflates
+      // cross-prompt work. Other prompts in the same session can still
+      // be on the legacy path; the queues merge cleanly.
+      // pc.diff IS the ground truth for blame attribution — it's the raw
+      // `git diff` text captured at the moment this prompt was recorded.
+      // editsJson was an attempted improvement but its commit-walking
+      // attribution misfires on Codex sessions captured before
+      // 0.20260520.2250 (e.g. all timestamps land at the LAST prompt,
+      // so prompt 1's lineChanges end up containing prompt 0's added
+      // line). We use pc.diff exclusively here and treat editsJson only
+      // as a hint about files touched (it's already consumed for that
+      // in the session-detail mapper).
+      //
+      // Three-tier source resolution per (prompt, file):
+      //   1. pc.diff — the per-prompt git diff the CLI captured at recording
+      //      time. Correct for sessions where the user-prompt-submit hook
+      //      fired before each turn (typical case).
+      //   2. Commit.patch via pc.commitSha — the post-commit hook always
+      //      writes the canonical per-commit unified diff to `Commit.patch`,
+      //      even when pc.diff was empty or recorded against the wrong
+      //      working-tree state (e.g. pre-existing dirty files leaked in).
+      //   3. editsJson (Claude/Cursor/Gemini only) — the tool-call edit
+      //      list, converted to per-file added lines via LCS. Used when
+      //      neither pc.diff nor Commit.patch contains the target file.
+      //
+      // We pick whichever has the target file's `diff --git a/<file>`
+      // header. This means each prompt can resolve to a different source
+      // depending on which one has data for the file being blamed.
+      const targetFileNorm = file.replace(/^\//, '');
+      const sourceHasFile = (diffText: string): boolean => {
+        if (!diffText) return false;
+        const re = /^diff --git a\/(.+?)\s+b\/(.+)$/gm;
+        for (const m of diffText.matchAll(re)) {
+          const fp = m[2].replace(/^\//, '');
+          if (
+            fp === targetFileNorm ||
+            fp.endsWith('/' + targetFileNorm) ||
+            targetFileNorm.endsWith('/' + fp)
+          ) return true;
+        }
+        return false;
+      };
+
+      let pcDiff = stripUnknownFileSections(stripAutoManagedSections(pc.diff));
+      if (!sourceHasFile(pcDiff) && (pc as any).commitSha) {
+        const c = ((session as any).commits || []).find(
+          (cc: any) => cc.sha === (pc as any).commitSha,
+        );
+        if (c?.patch) {
+          const patchClean = stripUnknownFileSections(stripAutoManagedSections(c.patch));
+          if (sourceHasFile(patchClean)) pcDiff = patchClean;
+        }
+      }
+      // editsJson lineChanges (Claude/Cursor/Gemini tool calls) as a
+      // last-resort source. Skipped for Codex sessions captured before
+      // 0.20260520.2250 where the extractor's commit-walking misattributed
+      // commits to the last prompt — same misfire we saw earlier with
+      // "Thirty-fifth" landing under prompt 1's edits.
+      let editsBasedLineChanges: ReturnType<typeof parseDiffForFile> = [];
+      const agentSlug = (session as any).agent?.slug || '';
+      const trustEditsJson = agentSlug !== 'codex';
+      if (!sourceHasFile(pcDiff) && trustEditsJson) {
+        const editsCapture = parseEditsJson((pc as any).editsJson);
+        if (editsCapture && Array.isArray(editsCapture.edits) && editsCapture.edits.length > 0) {
+          editsBasedLineChanges = lineChangesFromEdits(editsCapture, file);
+        }
+      }
+
+      if (!pcDiff && editsBasedLineChanges.length === 0) continue;
+      blameDebug.promptsWithDiff++;
+
+      const headersInThisDiff: string[] = [];
+      for (const m of pcDiff.matchAll(/^diff --git a\/(.+?)\s+b\/(.+)$/gm)) {
+        headersInThisDiff.push(m[2]);
+        if (blameDebug.diffFileHeaderSamples.size < 10) blameDebug.diffFileHeaderSamples.add(m[2]);
+      }
+
+      const lineChanges = editsBasedLineChanges.length > 0
+        ? editsBasedLineChanges
+        : parseDiffForFile(pcDiff, file);
+      if (lineChanges.length > 0) blameDebug.promptsWithMatchedLines++;
+
+      let diffSnippetForTarget = '';
+      {
+        const sections = pcDiff.split(/^diff --git /m).filter(Boolean);
+        for (const section of sections) {
+          const head = section.split('\n')[0] || '';
+          const m = head.match(/a\/(.+?)\s+b\/(.+)/);
+          const filePath = m ? m[2] : '';
+          const norm = (s: string) => s.replace(/^\//, '');
+          const tgt = norm(file);
+          const fp = norm(filePath);
+          if (fp === tgt || fp.endsWith('/' + tgt) || tgt.endsWith('/' + fp)) {
+            diffSnippetForTarget = section.slice(0, 300);
+            break;
+          }
+        }
+      }
+      blameDebug.perPromptMatches.push({
+        promptIndex: pc.promptIndex,
+        diffLen: pc.diff.length,
+        fileHeadersInDiff: headersInThisDiff.slice(0, 5),
+        matchedLines: lineChanges.length,
+        sampleAddedContent: lineChanges.slice(0, 3).map(c => c.content.slice(0, 80)),
+        diffSnippetForTarget,
+      });
       for (const change of lineChanges) {
-        // Line-number fallback (used only when sessionDiff is missing). Keep
-        // "later wins" so a true modification on the same line attributes to
-        // the modifying prompt — this branch isn't the source of the bug.
-        lineAttributions.set(change.lineNumber, {
-          content: change.content,
-          promptIndex: pc.promptIndex,
-          promptText: pc.promptText,
-          type: change.type,
-        });
+        if (!lineAttributions.has(change.lineNumber)) {
+          lineAttributions.set(change.lineNumber, {
+            ...attrMeta,
+            content: change.content,
+            promptIndex: pc.promptIndex,
+            promptText: pc.promptText,
+            type: change.type,
+          });
+        }
 
-        // Content-based: record every occurrence in prompt order. Earliest
-        // prompt that produced this content owns the first occurrence in the
-        // final file, second prompt owns the second occurrence, etc.
         const queue = contentAttributions.get(change.content) || [];
+        // Blame answers "who wrote THIS line." When prompt N replaces
+        // prompt M's line with new text, the new text belongs to N, not
+        // M. The previous "modification inheritance" copied M's entry
+        // into the new content's queue — combined with the .shift()
+        // earliest-wins rule below, that caused queries for prompt N's
+        // visible content to surface as prompt M instead.
+        // Cross-session original-author credit is handled separately
+        // via priorContentAttributions and surfaces as a SECONDARY
+        // `originalAuthor` annotation, not as the primary attribution.
         queue.push({
+          ...attrMeta,
           promptIndex: pc.promptIndex,
           promptText: pc.promptText,
           type: change.type,
         });
+        queue.sort((a, b) => a.promptIndex - b.promptIndex);
         contentAttributions.set(change.content, queue);
       }
     }
+
+    // ----- ORIGINAL-AUTHOR pass: OTHER sessions' prompts on this file -----
+    // These produce a secondary annotation only — they never appear in the
+    // legend or in `prompts[]`, and they don't drive the "P#" badge for this
+    // session's own lines. They surface as "originally added by <agent> in
+    // <session>" for context lines (and for added lines whose content was
+    // first written by an earlier agent on this file).
+    for (const pc of priorChanges) {
+      const rawFiles: string[] = (() => {
+        try {
+          return JSON.parse(pc.filesChanged || '[]');
+        } catch {
+          return [];
+        }
+      })();
+      const filesChanged = rawFiles.filter((f) => {
+        const basename = (f || '').split('/').pop() || '';
+        if (ORIGIN_AUTO_MANAGED_FILES.has(f) || ORIGIN_AUTO_MANAGED_FILES.has(basename)) return false;
+        // Historical pollution cleanup: when we have a known-files set,
+        // drop entries the session didn't actually touch. No-op when the
+        // known set is empty (chat-only sessions, missing commit metadata).
+        if (knownFiles.size > 0 && !knownFiles.has(f) && !knownFiles.has(basename)) return false;
+        return true;
+      });
+
+      const pcSessionMeta = (pc as any).session || {};
+      crossSessionPrompts.push({
+        sessionId: (pc as any).sessionId,
+        sessionAiTitle: pcSessionMeta.aiTitle || undefined,
+        sessionModel: pcSessionMeta.model || undefined,
+        agentName: pcSessionMeta.agent?.name || undefined,
+        authorName: pcSessionMeta.user?.name || undefined,
+        authorEmail: pcSessionMeta.user?.email || undefined,
+        promptIndex: pc.promptIndex,
+        promptText: pc.promptText,
+        filesChanged,
+        createdAt: pcSessionMeta.createdAt
+          ? new Date(pcSessionMeta.createdAt).toISOString()
+          : new Date().toISOString(),
+      });
+
+      const priorAttrMeta: Omit<AttrEntry, 'promptIndex' | 'promptText' | 'type'> = {
+        sessionId: (pc as any).sessionId,
+        isCurrentSession: false,
+        sessionAiTitle: pcSessionMeta.aiTitle || undefined,
+        sessionModel: pcSessionMeta.model || undefined,
+        agentName: pcSessionMeta.agent?.name || undefined,
+        authorName: pcSessionMeta.user?.name || undefined,
+        authorEmail: pcSessionMeta.user?.email || undefined,
+      };
+
+      const pcDiff = stripAutoManagedSections(pc.diff);
+      if (!pcDiff) continue;
+      const lineChanges = parseDiffForFile(pcDiff, file);
+      for (const change of lineChanges) {
+        const queue = priorContentAttributions.get(change.content) || [];
+        queue.push({
+          ...priorAttrMeta,
+          promptIndex: pc.promptIndex,
+          promptText: pc.promptText,
+          type: change.type,
+        });
+        priorContentAttributions.set(change.content, queue);
+      }
+    }
+
+    // Per-prompt "files with uncommitted edits" map. A blame line attributed
+    // to prompt N is flagged uncommitted when N's stored uncommittedDiff still
+    // contains the target file — Codex's heartbeat captures uncommittedDiff
+    // alongside pc.diff, so this tells us at read time whether that prompt's
+    // change is sitting in the working tree or already landed in a commit.
+    const promptUncommittedFiles = new Map<number, Set<string>>();
+    const normalizedFile = (file || '').replace(/^\//, '');
+    for (const pc of sessionDedupedChanges) {
+      const set = new Set<string>();
+      const ud: string | null = (pc as any).uncommittedDiff || null;
+      if (ud) {
+        for (const m of ud.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
+          const fp = m[2].replace(/^\//, '');
+          set.add(fp);
+        }
+      }
+      promptUncommittedFiles.set((pc as any).promptIndex, set);
+    }
+    const isPromptUncommittedForFile = (promptIdx: number): boolean => {
+      const set = promptUncommittedFiles.get(promptIdx);
+      if (!set || set.size === 0) return false;
+      if (set.has(normalizedFile)) return true;
+      for (const fp of set) {
+        if (fp.endsWith(normalizedFile) || normalizedFile.endsWith(fp)) return true;
+      }
+      return false;
+    };
 
     // Build the blame result
     // If sessionDiff exists, show full file context (human + AI lines + gaps)
     // Otherwise, fall back to only attributed lines
     let blameLines: BlameLine[] = [];
 
+    const truncatePromptText = (t: string): string =>
+      t.length > 200 ? t.slice(0, 200) + '...' : t;
+    const toAttribution = (attr: AttrEntry): BlameAttribution => ({
+      promptIndex: attr.promptIndex,
+      promptText: truncatePromptText(attr.promptText),
+      type: attr.type,
+      sessionId: attr.sessionId,
+      isCurrentSession: attr.isCurrentSession,
+      sessionAiTitle: attr.sessionAiTitle,
+      sessionModel: attr.sessionModel,
+      agentName: attr.agentName,
+      authorName: attr.authorName,
+      authorEmail: attr.authorEmail,
+    });
+
+    // Block-attribution map: maps a fullView index → the prompt that
+    // contributed that line's content as part of a contiguous hunk. Built
+    // below from per-prompt diff hunks so prior-prompt committed additions
+    // (which sessionDiff renders as plain context when its baseline is HEAD,
+    // not session-start) still get attributed instead of looking like
+    // un-tracked human work. Falls back to the existing per-line FIFO queue
+    // for any lines a block didn't claim.
+    const blockAttribution = new Map<number, AttrEntry>();
+
     if (session.sessionDiff?.diff) {
-      const fullView = parseFullDiffForFile(session.sessionDiff.diff, file);
-      blameLines = fullView.map((line) => {
+      const sessionDiffText = stripUnknownFileSections(stripAutoManagedSections(session.sessionDiff.diff));
+      let fullView = parseFullDiffForFile(sessionDiffText, file);
+      // SessionDiff is rebuilt at session end (or on commit, post-CLI update),
+      // so during a running session it can miss files the agent edited but
+      // hasn't committed yet — README.md is the typical case. When that
+      // happens, splice the per-prompt diff/uncommittedDiff entries for this
+      // file into the fullView so the user sees their actual changes instead
+      // of an empty blame body.
+      if (fullView.length === 0) {
+        const fallbackChunks: string[] = [];
+        for (const pc of sessionDedupedChanges) {
+          for (const blob of [pc.diff, pc.uncommittedDiff]) {
+            if (typeof blob !== 'string' || !blob) continue;
+            for (const part of blob.split(/^(?=diff --git )/m)) {
+              const header = part.split('\n', 1)[0] || '';
+              const m = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
+              if (!m) continue;
+              const filePath = m[2].replace(/^\//, '');
+              const target = file.replace(/^\//, '');
+              if (
+                filePath === target ||
+                filePath.endsWith(target) ||
+                target.endsWith(filePath)
+              ) {
+                fallbackChunks.push(part);
+              }
+            }
+          }
+        }
+        if (fallbackChunks.length > 0) {
+          fullView = parseFullDiffForFile(fallbackChunks.join(''), file);
+        }
+      }
+
+      // Block-attribution pre-pass. For each pc.diff hunk's contiguous `+`
+      // block (≥ 3 lines), find the matching consecutive sequence in fullView
+      // and tag those positions with the prompt that added them. Sequences
+      // shorter than 3 lines aren't matched here — they're left to the
+      // per-line content queue below, which handles common single lines
+      // (empty, brace-only) correctly. Each fullView position is claimed at
+      // most once, and pc rows are scanned in promptIndex order so the
+      // earliest matching prompt wins.
+      {
+        const normFile = (file || '').replace(/^\//, '');
+        const sortedPCs = [...sessionDedupedChanges].sort(
+          (a: any, b: any) => (a.promptIndex || 0) - (b.promptIndex || 0),
+        );
+        type AddedBlock = { lines: string[]; promptIndex: number; pc: any };
+        const blocks: AddedBlock[] = [];
+        for (const pc of sortedPCs) {
+          for (const blob of [pc.diff, pc.uncommittedDiff]) {
+            if (typeof blob !== 'string' || !blob) continue;
+            const sections = blob.split(/^(?=diff --git )/m);
+            for (const section of sections) {
+              const headerLine = section.split('\n', 1)[0] || '';
+              const m = headerLine.match(/^diff --git a\/(.+?) b\/(.+)$/);
+              if (!m) continue;
+              const fp = m[2].replace(/^\//, '');
+              if (
+                fp !== normFile &&
+                !fp.endsWith(normFile) &&
+                !normFile.endsWith(fp)
+              ) continue;
+              // Extract contiguous + line runs, then split each run into
+              // sub-blocks at section-header boundaries. A "header" is a
+              // capitalized line ending with `:` (e.g. "Nasty example:") or
+              // a markdown heading (starts with `#`). Without this split,
+              // when a single hunk in the cumulative pc.diff lumps multiple
+              // prompts' additions into one big run, the earlier prompts'
+              // anchors are already claimed and the run as a whole fails to
+              // match — losing attribution for the later sub-section.
+              const splitIntoSubBlocks = (run: string[]): string[][] => {
+                if (run.length < 3) return [];
+                const out: string[][] = [];
+                let buf: string[] = [];
+                for (let i = 0; i < run.length; i++) {
+                  const ln = run[i];
+                  const prev = i > 0 ? run[i - 1] : null;
+                  const isHeader =
+                    /^[A-Z][^:]*:\s*$/.test(ln) || /^#{1,6}\s+\S/.test(ln);
+                  // Section boundaries: prose headers (capital + colon),
+                  // markdown headings, OR a non-blank line that follows a
+                  // blank line (typical logical break in code — e.g.
+                  // `if "--title" ...\n    ...\n    ...\n\nif "--nasty" ...`).
+                  const startsAfterBlank = prev === '' && ln !== '';
+                  if ((isHeader || startsAfterBlank) && buf.length >= 3) {
+                    out.push(buf);
+                    buf = [];
+                  }
+                  buf.push(ln);
+                }
+                if (buf.length >= 3) out.push(buf);
+                // Always include the whole run too — fuzzy match prefers the
+                // longest match, and a sub-block split that's wrong shouldn't
+                // strand the original block from being tried.
+                if (out.length > 1) out.push(run);
+                if (out.length === 0 && run.length >= 3) out.push(run);
+                return out;
+              };
+              let current: string[] = [];
+              const flush = () => {
+                for (const sub of splitIntoSubBlocks(current)) {
+                  blocks.push({ lines: sub, promptIndex: pc.promptIndex, pc });
+                }
+                current = [];
+              };
+              for (const raw of section.split('\n').slice(1)) {
+                if (raw.startsWith('+++') || raw.startsWith('---')) continue;
+                if (raw.startsWith('+')) {
+                  current.push(raw.slice(1));
+                } else {
+                  flush();
+                }
+              }
+              flush();
+            }
+          }
+        }
+        // Fuzzy block search. A pc.diff block of size N is matched against
+        // fullView starting at any position whose first line equals the
+        // block's first line — at that anchor we count how many of the
+        // block's next lines match in sequence. If the match score is
+        // ≥ 60 % of the block size (and ≥ 3 absolute matches), we attribute
+        // the matching positions to that prompt. Mismatched positions
+        // (e.g. a line a later prompt mutated) stay unattributed and fall
+        // through to the per-line content queue below.
+        for (const block of blocks) {
+          const N = block.lines.length;
+          const minMatches = Math.max(3, Math.ceil(N * 0.6));
+          let bestIdx = -1;
+          let bestMatches: number[] = [];
+          for (let i = 0; i + N <= fullView.length; i++) {
+            if (blockAttribution.has(i)) continue;
+            const fv0 = fullView[i];
+            if (!fv0 || fv0.isGap) continue;
+            if (fv0.content !== block.lines[0]) continue;
+            const matchedIdxs: number[] = [];
+            for (let j = 0; j < N; j++) {
+              const fv = fullView[i + j];
+              if (!fv || fv.isGap) break;
+              if (blockAttribution.has(i + j)) continue;
+              if (fv.content === block.lines[j]) matchedIdxs.push(i + j);
+            }
+            if (matchedIdxs.length >= minMatches && matchedIdxs.length > bestMatches.length) {
+              bestIdx = i;
+              bestMatches = matchedIdxs;
+              if (bestMatches.length === N) break;
+            }
+          }
+          if (bestIdx >= 0 && bestMatches.length > 0) {
+            const attrMeta = sessionDedupedChanges.find(
+              (x: any) => x.promptIndex === block.promptIndex,
+            );
+            if (attrMeta) {
+              const entry: AttrEntry = {
+                promptIndex: block.promptIndex,
+                promptText: (attrMeta as any).promptText || '',
+                type: 'added',
+                sessionId: session.id,
+                isCurrentSession: true,
+                sessionAiTitle: (session as any).aiTitle || undefined,
+                sessionModel: session.model,
+                agentName: (session as any).agent?.name || undefined,
+                authorName: (session as any).user?.name || undefined,
+                authorEmail: (session as any).user?.email || undefined,
+              };
+              for (const idx of bestMatches) {
+                blockAttribution.set(idx, entry);
+              }
+            }
+          }
+        }
+      }
+
+      blameLines = fullView.map((line, idx) => {
         if (line.isGap) {
           return {
             lineNumber: -1,
@@ -1859,52 +2917,80 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
             isGap: true,
           };
         }
-        // Only "added" lines in the final diff can have AI attribution;
-        // unchanged context lines came from before the session.
-        let attr:
-          | { promptIndex: number; promptText: string; type: 'added' | 'modified' }
-          | undefined;
-        if (line.type === 'added') {
+        // PRIMARY: block match first (catches committed prior-prompt content
+        // that surfaces as context in sessionDiff), then per-line content
+        // queue for shorter or singleton additions, then unique-content
+        // attribution for context lines whose content was added by exactly
+        // one prompt in this session (catches single-line additions like
+        // "Twenty-fifth small Codex change." that fall under the block
+        // matcher's 3-line minimum and never appear as `+` in sessionDiff
+        // because they're already committed and part of HEAD).
+        let primary: AttrEntry | undefined = blockAttribution.get(idx);
+        if (!primary && line.type === 'added') {
           const queue = contentAttributions.get(line.content);
-          if (queue && queue.length > 0) {
-            // Shift so repeated identical lines attribute to the prompt that
-            // produced each occurrence, in order.
-            attr = queue.shift();
+          if (queue && queue.length > 0) primary = queue.shift();
+        }
+        if (!primary && line.type === 'context' && line.content.trim().length > 0) {
+          // Only attribute non-blank context lines — blank lines are too
+          // common to risk false positives. Require the content to be
+          // unique within this session's added-line pool (queue.length === 1)
+          // so we never steal a multi-prompt-shared line.
+          const queue = contentAttributions.get(line.content);
+          if (queue && queue.length === 1) {
+            primary = queue.shift();
           }
         }
+        // ORIGINAL = the earliest prior session that wrote this content.
+        // Surfaces as a secondary annotation so context lines also carry
+        // attribution (e.g. "originally Codex P2") and added lines that
+        // re-add prior content credit the original author too.
+        let original: AttrEntry | undefined;
+        const priorQueue = priorContentAttributions.get(line.content);
+        if (priorQueue && priorQueue.length > 0) original = priorQueue.shift();
+
+        // Display rule:
+        //   - If this session added the line → primary wins (its own promptIndex).
+        //     originalAuthor is attached only if a prior session also wrote
+        //     identical content earlier.
+        //   - If only a prior session wrote it → primary stays null;
+        //     originalAuthor surfaces the cross-session author directly.
+        const primaryAttribution = primary
+          ? toAttribution(primary)
+          : original
+            ? toAttribution(original)
+            : null;
+        const originalAuthor =
+          primary && original ? toAttribution(original) : undefined;
+
+        const isUncommitted = !!(
+          primaryAttribution &&
+          primaryAttribution.isCurrentSession !== false &&
+          isPromptUncommittedForFile(primaryAttribution.promptIndex)
+        );
         return {
           lineNumber: line.lineNumber,
           content: line.content,
-          attribution: attr
-            ? {
-                promptIndex: attr.promptIndex,
-                promptText:
-                  attr.promptText.length > 200
-                    ? attr.promptText.slice(0, 200) + '...'
-                    : attr.promptText,
-                type: attr.type,
-              }
+          attribution: primaryAttribution
+            ? { ...primaryAttribution, ...(originalAuthor ? { originalAuthor } : {}) }
             : null,
+          ...(isUncommitted ? { isUncommitted: true } : {}),
         };
       });
     } else {
-      // Fallback: only attributed lines (no session diff available)
+      // Fallback path — no sessionDiff. Render only this session's own
+      // attributed lines by line number. Cross-session originalAuthor isn't
+      // surfaced here because we have no full file view.
       const allLineNumbers = Array.from(lineAttributions.keys()).sort(
         (a, b) => a - b,
       );
       blameLines = allLineNumbers.map((ln) => {
         const attr = lineAttributions.get(ln)!;
+        const isUncommitted = isPromptUncommittedForFile(attr.promptIndex);
         return {
           lineNumber: ln,
           content: attr.content,
-          attribution: {
-            promptIndex: attr.promptIndex,
-            promptText:
-              attr.promptText.length > 200
-                ? attr.promptText.slice(0, 200) + '...'
-                : attr.promptText,
-            type: attr.type,
-          },
+          attribution: toAttribution(attr),
+          ...(isUncommitted ? { isUncommitted: true } : {}),
         };
       });
     }
@@ -1912,6 +2998,26 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
     const totalAttributedLines = blameLines.filter(
       (l) => l.attribution !== null && !l.isGap,
     ).length;
+
+    // Diagnose attribution. Unconditional while we trace remaining
+    // misattribution issues in the rollout-walk path.
+    console.log('[blame] diag', JSON.stringify({
+      sessionId: id,
+      model: session.model,
+      targetFile: file,
+      totalAttributedLines,
+      totalPrompts: blameDebug.totalPrompts,
+      promptsWithDiff: blameDebug.promptsWithDiff,
+      promptsWithMatchedLines: blameDebug.promptsWithMatchedLines,
+      diffFileHeaderSamples: [...blameDebug.diffFileHeaderSamples],
+      perPromptMatches: blameDebug.perPromptMatches,
+      promptTexts: dedupedChanges.map((pc: { promptIndex: number; promptText: string }) => ({
+        idx: pc.promptIndex,
+        text: pc.promptText.slice(0, 80),
+      })),
+      hasSessionDiff: !!session.sessionDiff?.diff,
+      sessionDiffLen: session.sessionDiff?.diff?.length ?? 0,
+    }));
 
     // Distinct list of models used across this session's prompts. Falls back
     // to [session.model] when no per-prompt model field is populated.
@@ -1931,6 +3037,14 @@ router.get('/:id/blame', async (req: AuthRequest, res: Response) => {
       totalAttributedLines,
       lines: blameLines,
       prompts: promptsInfo.map((p) => ({
+        ...p,
+        promptText:
+          p.promptText.length > 200 ? p.promptText.slice(0, 200) + '...' : p.promptText,
+      })),
+      // Every prompt across all sessions in this repo that touched this file,
+      // chronologically. Lets the UI annotate lines whose attribution comes
+      // from a different session ("added by Codex in or-test-1 P2").
+      crossSessionPrompts: crossSessionPrompts.map((p) => ({
         ...p,
         promptText:
           p.promptText.length > 200 ? p.promptText.slice(0, 200) + '...' : p.promptText,

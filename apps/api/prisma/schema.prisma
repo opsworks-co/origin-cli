@@ -218,11 +218,23 @@ model Commit {
   session           CodingSession? @relation("primaryCommit")
   sessionId         String?
   codingSession     CodingSession? @relation("sessionCommits", fields: [sessionId], references: [id])
+  // True when this row was synthesized as a session anchor (random SHA, no
+  // real git commit yet). Flipped to false when the placeholder is replaced
+  // with the real commit SHA (see mcp.ts session update flow). Listings hide
+  // these so users don't see phantom "0 file" commits in the dashboard.
+  isPlaceholder     Boolean        @default(false)
+  // Unified diff for THIS specific commit (output of
+  // `git diff <sha>~1..<sha>`), uploaded by the CLI's post-commit hook.
+  // Lets the commit-detail page render per-commit changes instead of
+  // falling back to the session-level aggregate, which used to make
+  // every commit in a session show the same content.
+  patch             String?
 
   @@unique([repoId, sha])
   @@index([repoId, committedAt])
   @@index([sha])
   @@index([sessionId])
+  @@index([isPlaceholder])
 }
 
 model CodingSession {
@@ -333,6 +345,14 @@ model PromptChange {
   cacheReadTokens     Int   @default(0)
   cacheCreationTokens Int   @default(0)
   costUsd             Float @default(0)
+  // Authoritative per-prompt edit list — JSON-encoded PromptEdit[] (see
+  // packages/cli/src/prompt-capture/types.ts). When non-null, the blame
+  // API derives the per-prompt diff + attribution directly from this
+  // array instead of running the legacy block-matching heuristics on
+  // `diff` / `uncommittedDiff`. Each entry carries the file, old/new
+  // content, and the commit SHA (if any) that landed it. New sessions
+  // populate this; old sessions fall back to the legacy path.
+  editsJson           String?
   createdAt       DateTime      @default(now())
 
   @@unique([sessionId, promptIndex])

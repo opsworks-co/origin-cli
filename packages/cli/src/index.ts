@@ -33,6 +33,7 @@ import { configGetCommand, configSetCommand, configListCommand } from './command
 import { resumeCommand } from './commands/resume.js';
 import { shareCommand } from './commands/share.js';
 import { blameCommand } from './commands/blame.js';
+import { commitCommand } from './commands/commit.js';
 import { diffCommand } from './commands/diff.js';
 import { searchCommand } from './commands/search.js';
 import { rewindCommand } from './commands/rewind.js';
@@ -352,6 +353,11 @@ program.command('blame <file>')
   .option('-l, --line <range>', 'Show specific line range (e.g., 10-20)')
   .option('--json', 'Output as JSON')
   .action(blameCommand);
+
+program.command('commit [sha]')
+  .description("Show the prompt + Origin metadata stored in the commit's git note (works offline; reads refs/notes/origin)")
+  .option('--json', 'Output the raw note payload as JSON')
+  .action(commitCommand);
 
 program.command('diff [range]')
   .description('Show diff with AI/human attribution annotations')

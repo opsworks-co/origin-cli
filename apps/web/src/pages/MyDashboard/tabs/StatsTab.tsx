@@ -58,6 +58,26 @@ function shortenFilePath(p: string): string {
   return p.replace(/^["']|["']$/g, '');
 }
 
+function KpiTile({
+  label,
+  value,
+  sub,
+  accent,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  accent?: string;
+}) {
+  return (
+    <div className="card !p-4">
+      <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">{label}</div>
+      <div className={`text-xl font-semibold ${accent || 'text-gray-100'}`}>{value}</div>
+      {sub && <div className="text-[11px] text-gray-500 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
 export function StatsTab({
   statsLoading,
   stats,
@@ -78,9 +98,39 @@ export function StatsTab({
             </div>
           ) : stats ? (
             <>
-              {/* Activity heatmap */}
+              {/* Top-level KPI strip — gives the Stats view a sturdy
+                  visual anchor instead of a hollow heatmap card. */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <KpiTile label="Total Sessions" value={fmt(stats.totalSessions)} />
+                <KpiTile
+                  label="This Week"
+                  value={`${fmt(stats.thisWeek.sessions)} sessions`}
+                  sub={fmtCost(stats.thisWeek.cost)}
+                />
+                <KpiTile
+                  label="Streak"
+                  value={`${stats.streak} day${stats.streak === 1 ? '' : 's'}`}
+                  sub={stats.streak > 0 ? 'keep it up' : 'start today'}
+                  accent={stats.streak > 0 ? 'text-amber-300' : undefined}
+                />
+                <KpiTile
+                  label="Total Spend"
+                  value={fmtCost(stats.totalCost)}
+                  sub={`${fmt(stats.totalTokens)} tokens`}
+                />
+              </div>
+
+              {/* Activity heatmap + inline mini-summary so the wide card
+                  no longer renders with a dead empty band below. */}
               <div className="card" data-tour="activity-heatmap">
-                <h3 className="text-sm font-semibold text-gray-300 mb-3">Activity</h3>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-gray-300">Activity</h3>
+                  <div className="flex items-center gap-4 text-[11px] text-gray-500">
+                    <span><span className="text-gray-300 font-medium">{fmt(stats.thisWeek.sessions)}</span> this week</span>
+                    <span><span className="text-gray-300 font-medium">{fmt(stats.lastWeek.sessions)}</span> last week</span>
+                    <span><span className="text-gray-300 font-medium">{stats.streak}</span>-day streak</span>
+                  </div>
+                </div>
                 <ActivityHeatmap data={stats.heatmap} />
               </div>
 

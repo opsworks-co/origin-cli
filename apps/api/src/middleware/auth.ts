@@ -53,17 +53,22 @@ function readCookie(req: Request, name: string): string | null {
 
 /**
  * Set the session cookie. httpOnly blocks XSS from reading the token,
- * SameSite=Strict blocks CSRF (the browser won't attach it on cross-site nav
- * or subrequests), Secure forces HTTPS in production.
+ * SameSite=Lax allows the cookie on top-level navigation (so clicking a
+ * link to getorigin.io from Slack / email / a bookmark on another domain
+ * still authenticates the first request — Strict would drop the cookie
+ * and bounce the user to /login, presenting as a random logout). Lax
+ * still withholds the cookie on cross-site POSTs, and the API runs its
+ * own CSRF middleware on top, so we don't lose protection. Secure forces
+ * HTTPS in production.
  */
 export function setAuthCookie(res: Response, token: string) {
   const isProd = process.env.NODE_ENV === 'production';
-  const maxAge = 7 * 24 * 60 * 60; // 7 days, must match JWT exp
+  const maxAge = 30 * 24 * 60 * 60; // 30 days, must match JWT exp
   const parts = [
     `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
     'HttpOnly',
     'Path=/',
-    'SameSite=Strict',
+    'SameSite=Lax',
     `Max-Age=${maxAge}`,
   ];
   if (isProd) parts.push('Secure');
@@ -103,7 +108,7 @@ export function clearAuthCookie(res: Response) {
     `${AUTH_COOKIE_NAME}=`,
     'HttpOnly',
     'Path=/',
-    'SameSite=Strict',
+    'SameSite=Lax',
     'Max-Age=0',
   ];
   if (isProd) parts.push('Secure');

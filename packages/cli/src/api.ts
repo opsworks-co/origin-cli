@@ -76,39 +76,26 @@ export function clearReloginLock(): void {
   try { fs.unlinkSync(RELOGIN_LOCK_PATH); } catch { /* already gone */ }
 }
 
+function isHookContext(): boolean {
+  // The CLI is being invoked as an agent hook (e.g. `origin hooks codex
+  // user-prompt-submit`). Hooks run in the background by the agent — the
+  // user isn't watching the terminal and doesn't expect a browser window
+  // to pop up just because a stale API key returned 401. Skip the relogin
+  // spawn in this context and let the user run `origin login` manually
+  // when they're ready (the auth-status file already records the failure).
+  const argv = process.argv.slice(2);
+  return argv.length >= 1 && argv[0] === 'hooks';
+}
+
 function spawnReloginBackground(): void {
-  if (!shouldSpawnRelogin()) return;
-  markReloginSpawned();
-  try {
-    // Resolve the running CLI's argv[1] (the origin binary) so we
-    // invoke the same install the hook itself was spawned from, not
-    // whatever happens to be first on PATH. Falls back to bare
-    // `origin` if argv[1] isn't a usable path (which shouldn't
-    // happen in practice but defends against odd env setups).
-    const node = process.execPath;
-    const originBin = process.argv[1] && fs.existsSync(process.argv[1])
-      ? process.argv[1]
-      : 'origin';
-    // Capture stdout/stderr to a log file so a silent failure (browser
-    // can't open, network down, etc.) isn't invisible. ORIGIN_FORCE_DEVICE_CODE
-    // forces the device-code path regardless of TTY — without it, the
-    // child's missing TTY drops it into the manual-prompt branch which
-    // immediately exits on closed stdin.
-    let outFd: number | 'ignore' = 'ignore';
-    let errFd: number | 'ignore' = 'ignore';
-    try {
-      const logPath = path.join(os.homedir(), '.origin', 'relogin.log');
-      fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 });
-      outFd = fs.openSync(logPath, 'a');
-      errFd = outFd;
-    } catch { /* if we can't open the log, fall through to /dev/null */ }
-    const child = spawn(node, [originBin, 'login'], {
-      detached: true,
-      stdio: ['ignore', outFd, errFd],
-      env: { ...process.env, ORIGIN_FORCE_DEVICE_CODE: '1' },
-    });
-    child.unref();
-  } catch { /* spawn failure is non-fatal — user can run origin login manually */ }
+  // Auto-spawning the browser-based device-code login on every 401 popped
+  // unwanted sign-in tabs whenever any hook/heartbeat hit a stale key.
+  // The user has flagged this — they don't want web auth triggered out of
+  // band. Skip the spawn entirely; the auth-status file already records
+  // the failure and the user can run `origin login --key <key>` manually
+  // when they're ready. (Hook context was already excluded; this just
+  // brings the rest of the CLI in line.)
+  return;
 }
 
 /** Ensure a parsed API response is a non-null object. */
@@ -260,6 +247,10 @@ export const api = {
       additions?: number;
       deletions?: number;
       committedAt?: string;
+      // Per-commit unified diff (`git diff <sha>~1..<sha>` output).
+      // Stored on Commit.patch so the dashboard can render this commit's
+      // changes instead of the session aggregate.
+      diff?: string;
     }>;
   }) => {
     const res = await request('/api/mcp/commits/ingest', { method: 'POST', body: JSON.stringify(data) });

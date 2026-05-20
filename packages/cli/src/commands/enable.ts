@@ -159,6 +159,13 @@ function installCursorHooks(gitRoot: string): void {
     stop: [{ command: originCmd('origin hooks cursor stop') }],
     beforeSubmitPrompt: [{ command: originCmd('origin hooks cursor user-prompt-submit') }],
     sessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
+    // afterFileEdit captures Cursor's StrReplace / write tool calls as they
+    // happen. Cursor's git commits don't reliably trigger the global
+    // post-commit hook (sandbox / worktree isolation), so AI Blame would
+    // otherwise show empty diffs for Cursor sessions. Each edit-hook fire
+    // re-scans the working tree against the per-prompt shadow and updates
+    // the current prompt's mapping in place.
+    afterFileEdit: [{ command: originCmd('origin hooks cursor after-file-edit') }],
   };
 
   // Strip our entries from the now-invalid event names so an upgrade from a

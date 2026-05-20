@@ -11,7 +11,29 @@ interface BlameOutputLine {
   authorship: 'ai' | 'human' | 'mixed';
   sessionId?: string;
   model?: string;
+  agent?: string;
+  author?: string;
   content: string;
+}
+
+// Friendly short label for the Agent column. Mirrors the dashboard's
+// displayAgentName so "claude-code" → "claude", "gemini-cli" → "gemini".
+function shortAgent(agent: string | undefined): string {
+  if (!agent) return '';
+  const a = agent.toLowerCase();
+  if (a.startsWith('claude')) return 'claude';
+  if (a.startsWith('codex')) return 'codex';
+  if (a.startsWith('gemini')) return 'gemini';
+  if (a.startsWith('cursor')) return 'cursor';
+  if (a.startsWith('windsurf')) return 'windsurf';
+  return agent;
+}
+
+// Trim a git author down to the part before any email/`<`.
+function shortAuthor(author: string | undefined): string {
+  if (!author) return '';
+  const m = author.match(/^([^<]+?)\s*(?:<.*)?$/);
+  return (m ? m[1] : author).trim();
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -94,6 +116,8 @@ export async function blameCommand(
       authorship: attr.authorship,
       sessionId: attr.sessionId,
       model: attr.model,
+      agent: attr.agent,
+      author: attr.author,
       content,
     };
   });
@@ -130,13 +154,23 @@ export async function blameCommand(
   const maxLineNum = Math.max(...filtered.map(l => l.lineNumber));
   const lineNumWidth = String(maxLineNum).length;
 
+  // Column widths sized to the actual data so the table stays compact
+  // even when this file has no agent/author info recorded.
+  const AGENT_W = 8;
+  const MODEL_W = 14;
+  // Author width adapts to the longest name in the slice (capped at 22)
+  // so a short common author (e.g. "Artem") doesn't burn 22 chars.
+  const AUTHOR_W = Math.min(
+    22,
+    Math.max(8, ...filtered.map(l => shortAuthor(l.author).length)),
+  );
+
   // Header
   console.log(chalk.bold(`\n  ${file}\n`));
-  console.log(
-    chalk.gray(
-      `  ${'Line'.padStart(lineNumWidth)}  Tag   ${opts?.line ? '' : 'Model'.padEnd(16)}  Content`,
-    ),
-  );
+  const header = opts?.line
+    ? `  ${'Line'.padStart(lineNumWidth)}  Tag   Content`
+    : `  ${'Line'.padStart(lineNumWidth)}  Tag   ${'Agent'.padEnd(AGENT_W)}  ${'Model'.padEnd(MODEL_W)}  ${'Author'.padEnd(AUTHOR_W)}  Content`;
+  console.log(chalk.gray(header));
   console.log(chalk.gray('  ' + '─'.repeat(lineNumWidth + 60)));
 
   // Summary counters
@@ -148,7 +182,11 @@ export async function blameCommand(
     const lineNum = String(line.lineNumber).padStart(lineNumWidth);
     const tag = authorshipTag(line.authorship);
     const coloredTag = colorTag(line.authorship, tag);
-    const model = line.model ? line.model.slice(0, 15).padEnd(16) : ''.padEnd(16);
+    // For human-authored lines the agent/model columns stay blank — only
+    // the Author chip is meaningful. AI lines show all three.
+    const agentLabel = line.authorship === 'ai' ? shortAgent(line.agent).slice(0, AGENT_W) : '';
+    const modelLabel = line.authorship === 'ai' && line.model ? line.model.slice(0, MODEL_W) : '';
+    const authorLabel = shortAuthor(line.author).slice(0, AUTHOR_W);
     const content = line.content.slice(0, 120);
 
     // Count authorship
@@ -159,7 +197,13 @@ export async function blameCommand(
     if (opts?.line) {
       console.log(`  ${chalk.gray(lineNum)}  ${coloredTag}  ${colorTag(line.authorship, content)}`);
     } else {
-      console.log(`  ${chalk.gray(lineNum)}  ${coloredTag}  ${chalk.gray(model)}  ${colorTag(line.authorship, content)}`);
+      console.log(
+        `  ${chalk.gray(lineNum)}  ${coloredTag}  ` +
+        `${chalk.cyan(agentLabel.padEnd(AGENT_W))}  ` +
+        `${chalk.gray(modelLabel.padEnd(MODEL_W))}  ` +
+        `${chalk.magenta(authorLabel.padEnd(AUTHOR_W))}  ` +
+        `${colorTag(line.authorship, content)}`,
+      );
     }
   }
 

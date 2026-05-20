@@ -108,6 +108,10 @@ export function getOAuthUrl(provider: 'github' | 'gitlab' | 'google') {
   return request<{ url: string }>(`/api/auth/oauth/${provider}`);
 }
 
+export function getOAuthProviders() {
+  return request<{ providers: Record<string, boolean> }>('/api/auth/oauth-providers');
+}
+
 export function oauthCallback(provider: string, code: string, state: string, accountType?: string) {
   return request<AuthResponse>(`/api/auth/oauth/${provider}/callback`, {
     method: 'POST',

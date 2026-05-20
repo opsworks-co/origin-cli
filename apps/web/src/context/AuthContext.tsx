@@ -69,16 +69,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // header (set by _client.ts from localStorage) tells the server which
   // org we want active for this session. Server reconciles + returns the
   // membership list.
+  //
+  // Silent retry: a single transient 401 from /me (deploy window, network
+  // blip, request raced ahead of the cookie roundtrip after redirect) used
+  // to bounce the user to /login even though their cookie was still valid.
+  // We now retry once after a small delay before treating the failure as
+  // "not authenticated". Permanent failures still fall through to logout.
   useEffect(() => {
-    api
-      .getMe()
-      .then((r) => applyAuth(r))
-      .catch(() => {
-        // Not authenticated — clear any stale legacy token + active-org pin.
-        safeRemoveItem('origin_token');
-        persistActiveOrg(null);
-      })
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    const attempt = (retriesLeft: number) =>
+      api
+        .getMe()
+        .then((r) => {
+          if (!cancelled) applyAuth(r);
+        })
+        .catch((err: { status?: number } & Error) => {
+          if (cancelled) return;
+          const isAuthFailure = err?.status === 401 || /401|unauthor/i.test(err?.message || '');
+          if (isAuthFailure && retriesLeft > 0) {
+            return new Promise<void>((resolve) => {
+              setTimeout(() => {
+                attempt(retriesLeft - 1).finally(resolve);
+              }, 800);
+            });
+          }
+          // Permanent failure — clear stale legacy token + org pin.
+          safeRemoveItem('origin_token');
+          persistActiveOrg(null);
+        })
+        .finally(() => {
+          if (!cancelled && retriesLeft === 0) setLoading(false);
+        });
+    attempt(1).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
   }, [applyAuth]);
 
   const login = useCallback(async (email: string, password: string) => {

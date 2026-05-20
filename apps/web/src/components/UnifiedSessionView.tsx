@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { ErrorBoundary } from './ErrorBoundary';
 import hljs from 'highlight.js/lib/core';
 import javascript from 'highlight.js/lib/languages/javascript';
 import typescript from 'highlight.js/lib/languages/typescript';
@@ -132,30 +133,41 @@ interface TranscriptTurn {
 
 function parseDiff(raw: string): DiffFile[] {
   if (!raw) return [];
-  const files: DiffFile[] = [];
-  const fileSections = raw.split(/^diff --git /m).filter(Boolean);
-  for (const section of fileSections) {
-    const lines = section.split('\n');
-    const headerMatch = lines[0]?.match(/a\/(.+?)\s+b\/(.+)/);
-    const path = headerMatch ? headerMatch[2] : lines[0] || 'unknown';
-    let linesAdded = 0;
-    let linesRemoved = 0;
-    const hunkLines: string[] = [];
-    let inHunk = false;
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i];
-      if (line.startsWith('@@')) {
-        inHunk = true;
-        hunkLines.push(line);
-      } else if (inHunk) {
-        hunkLines.push(line);
-        if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
-        if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+  // Try/catch the whole walk — a single malformed section (e.g. a diff
+  // truncated mid-hunk by MAX_DIFF_SIZE) used to throw and the surrounding
+  // TurnCard's `useMemo` would surface that as a hung expansion. Now the
+  // parser fails gracefully and the turn shows whatever section it
+  // managed to read.
+  try {
+    const files: DiffFile[] = [];
+    const fileSections = raw.split(/^diff --git /m).filter(Boolean);
+    for (const section of fileSections) {
+      const lines = section.split('\n');
+      const headerMatch = lines[0]?.match(/a\/(.+?)\s+b\/(.+)/);
+      const path = headerMatch ? headerMatch[2] : lines[0] || 'unknown';
+      let linesAdded = 0;
+      let linesRemoved = 0;
+      const hunkLines: string[] = [];
+      let inHunk = false;
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.startsWith('@@')) {
+          inHunk = true;
+          hunkLines.push(line);
+        } else if (inHunk) {
+          hunkLines.push(line);
+          if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
+          if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+        }
       }
+      files.push({ path, linesAdded, linesRemoved, hunks: hunkLines });
     }
-    files.push({ path, linesAdded, linesRemoved, hunks: hunkLines });
+    return files;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[parseDiff] failed', err);
+    return [];
   }
-  return files;
 }
 
 function shortenPath(path: string): string {
@@ -774,9 +786,22 @@ function TurnCard({
   snapshots?: SessionSnapshot[];
 }) {
   const pc = turn.promptChange;
-  const hasChanges = pc && pc.filesChanged.length > 0;
+  // `hasChanges` controls the indigo prompt-number badge — should fire
+  // whenever the prompt produced ANY observable code change, including
+  // sessions where capture filtering left filesChanged empty but the
+  // diff text is intact.
   const hasDiff = pc && pc.diff && pc.diff.length > 0;
   const hasUncommittedDiff = pc && pc.uncommittedDiff && pc.uncommittedDiff.length > 0;
+  const hasChanges = !!(pc && (pc.filesChanged.length > 0 || hasDiff || hasUncommittedDiff));
+  // Summary-level commit status pill. A prompt with a commitSha AND no
+  // uncommittedDiff is fully committed; uncommittedDiff present means
+  // some/all of its work is still in the working tree. We never show
+  // both — the file-level badges inside the expanded view handle the
+  // mixed case in detail.
+  const promptCommitStatus: 'committed' | 'uncommitted' | null =
+    pc && (pc.filesChanged.length > 0 || hasDiff || hasUncommittedDiff)
+      ? (hasUncommittedDiff ? 'uncommitted' : (pc.commitSha ? 'committed' : null))
+      : null;
 
   const promptText =
     turn.humanMessage?.content || pc?.promptText || '(empty prompt)';
@@ -878,6 +903,22 @@ function TurnCard({
             {(hasChanges || files.length > 0) && (
               <span className="text-[11px] text-gray-500 bg-gray-800/60 px-1.5 py-0.5 rounded">
                 {files.length > 0 ? files.length : pc!.filesChanged.length} file{(files.length > 0 ? files.length : pc!.filesChanged.length) !== 1 ? 's' : ''}
+              </span>
+            )}
+            {promptCommitStatus === 'committed' && (
+              <span
+                className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400/80 border border-emerald-500/20"
+                title={pc?.commitSha ? `Committed as ${pc.commitSha.slice(0, 8)}` : 'Committed'}
+              >
+                committed
+              </span>
+            )}
+            {promptCommitStatus === 'uncommitted' && (
+              <span
+                className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400/80 border border-violet-500/20"
+                title="Changes are still in the working tree"
+              >
+                uncommitted
               </span>
             )}
             {hasDiff && (
@@ -1289,15 +1330,22 @@ export default function UnifiedSessionView({
             const turnCommits = commitsByPromptIndex.get(turn.turnIndex) || [];
             return (
               <div key={turn.turnIndex}>
-                <TurnCard
-                  turn={turn}
-                  isExpanded={expandedTurns.has(turn.turnIndex)}
-                  onToggle={() => toggleTurn(turn.turnIndex)}
-                  expandedFiles={expandedFiles}
-                  onToggleFile={toggleFile}
-                  diffCache={diffCache}
-                  snapshots={snapshotsByPromptIndex.get(turn.turnIndex) || []}
-                />
+                {/* Per-turn error boundary so one broken turn (malformed
+                    transcript, bad diff, hook-ordering bug in a nested
+                    component) only takes itself out, not the whole
+                    session view. Without this, an exception during
+                    expansion presented as a hang. */}
+                <ErrorBoundary label={`Turn #${turn.turnIndex + 1}`}>
+                  <TurnCard
+                    turn={turn}
+                    isExpanded={expandedTurns.has(turn.turnIndex)}
+                    onToggle={() => toggleTurn(turn.turnIndex)}
+                    expandedFiles={expandedFiles}
+                    onToggleFile={toggleFile}
+                    diffCache={diffCache}
+                    snapshots={snapshotsByPromptIndex.get(turn.turnIndex) || []}
+                  />
+                </ErrorBoundary>
                 {turnCommits.map((c) => (
                   <CommitRow key={c.sha} commit={c} repoId={repoId} />
                 ))}

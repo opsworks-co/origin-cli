@@ -873,6 +873,10 @@ router.post('/session/start', async (req: McpRequest, res: Response) => {
         aiToolDetected: model,
         aiDetectionMethod: 'session',
         committedAt: new Date(),
+        // Anchor row for the session — flipped to false in the session
+        // update path once a real git SHA replaces this random one.
+        // Listings filter on this so unreplaced placeholders never surface.
+        isPlaceholder: true,
       },
     });
 
@@ -1411,9 +1415,14 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
               }
             }
 
-            // Upsert SessionDiff — merge with existing if present
+            // Upsert SessionDiff — append for per-commit deltas, REPLACE for
+            // session-level snapshots. Codex bypasses .git/hooks/post-commit,
+            // so its stop hook ships a `snapshot: true` gitCapture covering
+            // the whole session; appending that on top of any partial diff
+            // would double-count lines and corrupt the blame view.
+            const isSnapshot = (gitCapture as { snapshot?: boolean }).snapshot === true;
             const existingDiff = await tx.sessionDiff.findUnique({ where: { sessionId: id } });
-            if (existingDiff) {
+            if (existingDiff && !isSnapshot) {
               // Merge: append new diff, update headAfter, merge commitShas.
               // Guard the JSON.parse — a corrupt commitShas payload should
               // not take down the whole session update; fall back to an
@@ -1440,6 +1449,22 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
                   linesRemoved: (existingDiff.linesRemoved || 0) + patchLinesRemoved,
                 },
               });
+            } else if (existingDiff && isSnapshot) {
+              // Snapshot path: replace contents wholesale. The CLI re-ran
+              // captureGitState(repoPath, headShaAtStart), so its diff is
+              // the canonical session-to-date state.
+              await tx.sessionDiff.update({
+                where: { sessionId: id },
+                data: {
+                  headBefore: gitCapture.headBefore || existingDiff.headBefore,
+                  headAfter: gitCapture.headAfter || existingDiff.headAfter,
+                  commitShas: JSON.stringify(gitCapture.commitShas || []),
+                  diff: gitCapture.diff || '',
+                  diffTruncated: gitCapture.diffTruncated || false,
+                  linesAdded: patchLinesAdded,
+                  linesRemoved: patchLinesRemoved,
+                },
+              });
             } else {
               await tx.sessionDiff.create({
                 data: {
@@ -1455,14 +1480,14 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
               });
             }
 
-            // Update session line counts
+            // Update session line counts. Snapshots SET; incremental
+            // (per-commit) updates INCREMENT.
             if (patchLinesAdded || patchLinesRemoved) {
               await tx.codingSession.update({
                 where: { id },
-                data: {
-                  linesAdded: { increment: patchLinesAdded },
-                  linesRemoved: { increment: patchLinesRemoved },
-                },
+                data: isSnapshot
+                  ? { linesAdded: patchLinesAdded, linesRemoved: patchLinesRemoved }
+                  : { linesAdded: { increment: patchLinesAdded }, linesRemoved: { increment: patchLinesRemoved } },
               });
             }
           },
@@ -1497,12 +1522,28 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         );
         const diff = (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000);
         const uncommittedDiff = (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000);
+        // Distinguish "field present (even if empty)" from "field absent".
+        // The heartbeat sends `uncommittedDiff: ''` once the user commits and
+        // the working tree is clean — without this distinction, the default
+        // "preserve existing on empty" rule keeps stale pre-commit data and
+        // the UI keeps marking already-committed lines as uncommitted.
+        const uncommittedDiffPresent =
+          pc != null && typeof pc === 'object' && 'uncommittedDiff' in pc;
 
         // Never overwrite non-empty data with empty data (prevents heartbeats from clearing diffs)
         const existing = await prisma.promptChange.findUnique({
           where: { sessionId_promptIndex: { sessionId: id, promptIndex } },
-          select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true },
+          select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true, editsJson: true },
         });
+
+        // Authoritative per-prompt edit list. When the CLI captures this
+        // (new pipeline only — old clients send undefined), it replaces
+        // any existing value wholesale: it IS the ground truth for the
+        // prompt. We only validate it's a non-empty string under the
+        // size cap; the blame endpoint will JSON-parse it lazily.
+        const pcEditsJson = typeof pc?.editsJson === 'string' && pc.editsJson.length > 0 && pc.editsJson.length <= 500_000
+          ? pc.editsJson
+          : null;
 
         // Snapshot metadata fields
         const pcLinesAdded = Number.isFinite(Number(pc?.linesAdded)) ? Number(pc.linesAdded) : 0;
@@ -1530,11 +1571,24 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
         const pcCacheCreationTokens = safePosInt(pc?.cacheCreationTokens);
         const pcCostUsd = safePosFloat(pc?.costUsd);
 
+        // Authoritative mappings (from the Codex rollout's per-turn [branch sha]
+        // backfill) replace prior data wholesale — they're the ground truth for
+        // the prompt. Without this, racy user-prompt-submit captures that wrote
+        // wrong uncommittedDiff or filesChanged stick in the DB forever because
+        // the default "preserve existing if new is empty" policy keeps them.
+        const isAuthoritative = pc?.authoritative === true;
+
         const updateData = {
           promptText: promptText || existing?.promptText || '',
-          filesChanged: (filesChanged && filesChanged !== '[]') ? filesChanged : (existing?.filesChanged || '[]'),
-          diff: diff || existing?.diff || '',
-          uncommittedDiff: uncommittedDiff || existing?.uncommittedDiff || '',
+          filesChanged: isAuthoritative
+            ? filesChanged
+            : ((filesChanged && filesChanged !== '[]') ? filesChanged : (existing?.filesChanged || '[]')),
+          diff: isAuthoritative ? diff : (diff || existing?.diff || ''),
+          uncommittedDiff: isAuthoritative
+            ? uncommittedDiff
+            : uncommittedDiffPresent
+              ? uncommittedDiff
+              : (existing?.uncommittedDiff || ''),
           ...(pcLinesAdded > 0 && { linesAdded: pcLinesAdded }),
           ...(pcLinesRemoved > 0 && { linesRemoved: pcLinesRemoved }),
           ...(pcAiPercentage !== 100 && { aiPercentage: pcAiPercentage }),
@@ -1547,6 +1601,10 @@ router.patch('/session/:id', async (req: McpRequest, res: Response) => {
           ...(pcCacheReadTokens > 0 && { cacheReadTokens: pcCacheReadTokens }),
           ...(pcCacheCreationTokens > 0 && { cacheCreationTokens: pcCacheCreationTokens }),
           ...(pcCostUsd > 0 && { costUsd: pcCostUsd }),
+          // editsJson is authoritative — overwrite when present; preserve
+          // existing when this PATCH didn't carry it (old client, or a
+          // heartbeat-style update).
+          ...(pcEditsJson !== null && { editsJson: pcEditsJson }),
         };
 
         // Auto-detect any new model that surfaced mid-session. Cheap upsert
@@ -1904,24 +1962,47 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         });
 
         if (existingReal && existingReal.id !== codingSession.commitId) {
-          // A webhook-created commit exists — link it to this session and delete the placeholder
+          // A real commit exists (post-commit ingest / webhook) — link it
+          // to this session, repoint the session's primary commit, and try
+          // to delete the placeholder. Wrapped in a try because failure
+          // here would leave both rows in the listing — the placeholder
+          // gets force-flagged as isPlaceholder regardless so the listing
+          // hides it even when delete fails (e.g. unexpected FK).
           await prisma.commit.update({
             where: { id: existingReal.id },
             data: {
               sessionId: sessionId,
               aiToolDetected: existingReal.aiToolDetected || codingSession.model || 'unknown',
               aiDetectionMethod: existingReal.aiDetectionMethod || 'session',
+              isPlaceholder: false,
             },
           });
-          // Move the session's primary commit to the real one
           await prisma.codingSession.update({
             where: { id: sessionId },
             data: { commitId: existingReal.id },
           });
-          // Delete the placeholder commit
-          await prisma.commit.delete({ where: { id: codingSession.commitId } });
+          // Always flag the placeholder first so the listing hides it,
+          // then attempt delete. If delete fails, the flag still prevents
+          // the duplicate from appearing in the user's repo history.
+          try {
+            await prisma.commit.update({
+              where: { id: codingSession.commitId },
+              data: { isPlaceholder: true },
+            });
+          } catch { /* non-fatal — flag is a defense in depth */ }
+          try {
+            await prisma.commit.delete({ where: { id: codingSession.commitId } });
+          } catch (delErr: any) {
+            console.error('[mcp] placeholder delete failed (keeping flag)', {
+              placeholderId: codingSession.commitId,
+              realSha,
+              error: delErr?.message,
+            });
+          }
         } else {
-          // No duplicate — update the placeholder with real SHA
+          // No duplicate — update the placeholder with real SHA and
+          // clear the placeholder flag so this commit now surfaces in
+          // commit listings.
           const firstDetail = commitDetails.find(d => d.sha.startsWith(realSha) || realSha.startsWith(d.sha));
           await prisma.commit.update({
             where: { id: codingSession.commitId },
@@ -1930,6 +2011,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
               message: firstDetail?.message || messageSource || '',
               author: firstDetail?.author || updatedAuthor || 'ai-agent',
               filesChanged: firstDetail ? JSON.stringify(firstDetail.filesChanged) : '[]',
+              isPlaceholder: false,
             },
           });
         }
@@ -2082,12 +2164,27 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         );
         const diff = (typeof pc?.diff === 'string' ? pc.diff : '').slice(0, 200_000);
         const uncommittedDiff = (typeof pc?.uncommittedDiff === 'string' ? pc.uncommittedDiff : '').slice(0, 200_000);
+        // Distinguish "field present (even if empty)" from "field absent".
+        // The heartbeat sends `uncommittedDiff: ''` once the user commits and
+        // the working tree is clean — without this distinction, the default
+        // "preserve existing on empty" rule keeps stale pre-commit data and
+        // the UI keeps marking already-committed lines as uncommitted.
+        const uncommittedDiffPresent =
+          pc != null && typeof pc === 'object' && 'uncommittedDiff' in pc;
 
         // Never overwrite non-empty data with empty data
         const existing = await prisma.promptChange.findUnique({
           where: { sessionId_promptIndex: { sessionId, promptIndex } },
-          select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true },
+          select: { promptText: true, filesChanged: true, diff: true, uncommittedDiff: true, editsJson: true },
         });
+
+        // Authoritative per-prompt edit list (see PATCH handler above for
+        // semantics). When the CLI sends editsJson, the blame endpoint
+        // skips the legacy block-matcher and computes attribution from
+        // the JSON directly.
+        const pcEditsJson = typeof pc?.editsJson === 'string' && pc.editsJson.length > 0 && pc.editsJson.length <= 500_000
+          ? pc.editsJson
+          : null;
 
         // Snapshot metadata fields
         const pcLinesAdded = Number.isFinite(Number(pc?.linesAdded)) ? Number(pc.linesAdded) : 0;
@@ -2112,11 +2209,24 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
         const pcCacheCreationTokens = safePosInt(pc?.cacheCreationTokens);
         const pcCostUsd = safePosFloat(pc?.costUsd);
 
+        // Authoritative mappings (from the Codex rollout's per-turn [branch sha]
+        // backfill) replace prior data wholesale — they're the ground truth for
+        // the prompt. Without this, racy user-prompt-submit captures that wrote
+        // wrong uncommittedDiff or filesChanged stick in the DB forever because
+        // the default "preserve existing if new is empty" policy keeps them.
+        const isAuthoritative = pc?.authoritative === true;
+
         const updateData = {
           promptText: promptText || existing?.promptText || '',
-          filesChanged: (filesChanged && filesChanged !== '[]') ? filesChanged : (existing?.filesChanged || '[]'),
-          diff: diff || existing?.diff || '',
-          uncommittedDiff: uncommittedDiff || existing?.uncommittedDiff || '',
+          filesChanged: isAuthoritative
+            ? filesChanged
+            : ((filesChanged && filesChanged !== '[]') ? filesChanged : (existing?.filesChanged || '[]')),
+          diff: isAuthoritative ? diff : (diff || existing?.diff || ''),
+          uncommittedDiff: isAuthoritative
+            ? uncommittedDiff
+            : uncommittedDiffPresent
+              ? uncommittedDiff
+              : (existing?.uncommittedDiff || ''),
           ...(pcLinesAdded > 0 && { linesAdded: pcLinesAdded }),
           ...(pcLinesRemoved > 0 && { linesRemoved: pcLinesRemoved }),
           ...(pcAiPercentage !== 100 && { aiPercentage: pcAiPercentage }),
@@ -2129,6 +2239,7 @@ router.post('/session/end', async (req: McpRequest, res: Response) => {
           ...(pcCacheReadTokens > 0 && { cacheReadTokens: pcCacheReadTokens }),
           ...(pcCacheCreationTokens > 0 && { cacheCreationTokens: pcCacheCreationTokens }),
           ...(pcCostUsd > 0 && { costUsd: pcCostUsd }),
+          ...(pcEditsJson !== null && { editsJson: pcEditsJson }),
         };
 
         return prisma.promptChange.upsert({
@@ -2328,6 +2439,7 @@ router.post('/commits/ingest', async (req: McpRequest, res: Response) => {
         additions?: number;
         deletions?: number;
         committedAt?: string;
+        diff?: string;
       }>;
     };
 
@@ -2399,6 +2511,12 @@ router.post('/commits/ingest', async (req: McpRequest, res: Response) => {
       const filesArr = Array.isArray(c.filesChanged) ? c.filesChanged.filter((f) => typeof f === 'string').slice(0, 1000) : [];
       const committedAt = c.committedAt ? new Date(c.committedAt) : new Date();
 
+      // Cap patches at 500K chars per commit — large enough for typical
+      // monorepo commits, small enough to keep SQLite happy on bulk ingest.
+      const incomingPatch = typeof c.diff === 'string' && c.diff.length > 0
+        ? c.diff.slice(0, 500_000)
+        : null;
+
       try {
         await prisma.commit.upsert({
           where: { repoId_sha: { repoId: repo.id, sha: c.sha } },
@@ -2415,12 +2533,14 @@ router.post('/commits/ingest', async (req: McpRequest, res: Response) => {
             fileCount: filesArr.length || null,
             additions: typeof c.additions === 'number' ? c.additions : null,
             deletions: typeof c.deletions === 'number' ? c.deletions : null,
+            ...(incomingPatch && { patch: incomingPatch }),
           },
           update: {
             // Backfill fields that were unknown at first-ingest. Don't
             // overwrite values populated by a later session-update path.
             ...(c.branch && { branch: c.branch }),
             ...(filesArr.length > 0 && { filesChanged: JSON.stringify(filesArr), fileCount: filesArr.length }),
+            ...(incomingPatch && { patch: incomingPatch }),
           },
         });
         ingested++;

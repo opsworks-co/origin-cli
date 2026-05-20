@@ -10,6 +10,10 @@ apps/api/public/favicon.svg
 apps/api/public/robots.txt
 apps/api/public/sitemap.xml
 apps/api/public/web/
+apps/api/public/build-info.json
+apps/api/public/cli/
+apps/web/public/web/
+apps/web/tsconfig.tsbuildinfo
 
 # Workspace uses pnpm — npm lockfiles are stale and confuse Dependabot
 package-lock.json

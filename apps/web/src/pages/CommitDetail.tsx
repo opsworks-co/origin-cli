@@ -262,10 +262,55 @@ export default function CommitDetailPage() {
       />
 
       {/* Commit header card */}
+      {commit.isPlaceholder && (
+        <div className="card border-amber-500/40 bg-amber-500/5">
+          <div className="flex items-start gap-3">
+            <span className="text-amber-400 text-lg leading-none">⚠</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-amber-200 font-medium">
+                This is a session anchor, not a real commit
+              </p>
+              <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                The session reserved this slot when it started but never produced a real git commit on this branch — either nothing got committed, the agent reset its work, or the agent's commit happened in a worktree the dashboard can't see. Open the session for the actual changes.
+              </p>
+              {commit.session && (
+                <Link
+                  to={`/sessions/${commit.session.id}`}
+                  className="inline-block mt-2 text-xs text-indigo-400 hover:text-indigo-300"
+                >
+                  View full session &rarr;
+                </Link>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* commit.patch is null on commits ingested before the post-commit hook
+          was wired up (or when the hook failed silently). Falling back to the
+          session-level aggregate makes every sibling commit show identical
+          content — warn the user so they don't read this as the commit's
+          actual changes. */}
+      {!commit.isPlaceholder && commit.diffSource && commit.diffSource !== 'commit.patch' && commit.diffSource !== 'remote' && commit.diffSource !== 'none' && (
+        <div className="card border-amber-500/40 bg-amber-500/5">
+          <div className="flex items-start gap-3">
+            <span className="text-amber-400 text-lg leading-none">⚠</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-amber-200 font-medium">
+                Showing session-level diff — not just this commit's changes
+              </p>
+              <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                The CLI didn't upload a per-commit patch for this SHA, so the file diffs below aggregate every commit in the same session and may include lines that landed in sibling commits. Update the Origin CLI and make a new commit to capture per-commit patches going forward.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div className="min-w-0 flex-1">
-            <h1 className="text-xl font-bold text-gray-100 mb-2">{commit.message.split('\n')[0]}</h1>
+            <h1 className="text-xl font-bold text-gray-100 mb-2">{commit.message.split('\n')[0] || '(no commit message yet)'}</h1>
             <div className="flex items-center gap-3 flex-wrap text-xs text-gray-500">
               <code className="text-indigo-400 bg-indigo-950/30 px-2 py-0.5 rounded font-mono">
                 {commit.sha.slice(0, 9)}
@@ -544,6 +589,33 @@ export default function CommitDetailPage() {
               >
                 Full session details &rarr;
               </Link>
+            </div>
+          )}
+          {commit.sessionCommits && commit.sessionCommits.length > 0 && (
+            <div className="border-t border-gray-800">
+              <div className="px-4 py-3 text-[10px] text-gray-500 uppercase tracking-widest font-medium">
+                {commit.sessionCommits.length} more commit{commit.sessionCommits.length === 1 ? '' : 's'} in this session
+              </div>
+              <div className="divide-y divide-gray-800/70 max-h-[40vh] overflow-y-auto">
+                {commit.sessionCommits.map((c) => (
+                  <Link
+                    key={c.sha}
+                    to={`/repos/${commit.repo.id}/commits/${c.sha}`}
+                    className="block px-4 py-2 hover:bg-gray-900/40 transition-colors"
+                  >
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <code className="text-indigo-400 font-mono">{c.sha.slice(0, 7)}</code>
+                      <span className="text-gray-200 truncate flex-1">{c.message.split('\n')[0] || '(no message)'}</span>
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-gray-600 flex items-center gap-2">
+                      {c.fileCount != null && <span>{c.fileCount} file{c.fileCount === 1 ? '' : 's'}</span>}
+                      {(c.additions ?? 0) > 0 && <span className="text-emerald-400">+{c.additions}</span>}
+                      {(c.deletions ?? 0) > 0 && <span className="text-red-400">−{c.deletions}</span>}
+                      <span className="text-gray-700">{timeAgo(c.committedAt)}</span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
             </div>
           )}
         </div>

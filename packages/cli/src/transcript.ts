@@ -536,6 +536,61 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
  * For Write calls: shows file as created/rewritten (first 20 lines).
  * Truncates to 100KB max to keep database size reasonable.
  */
+// Line-level LCS diff between two strings. Returns a sequence of ops the
+// caller emits as ` `/`+`/`-` lines. Without this, buildDiffFromEdits dumped
+// the WHOLE old_string as `-` lines and the WHOLE new_string as `+` lines,
+// so a 2-line insertion inside a 3-line function got rendered as `-3 +5`
+// (the surrounding lines re-appeared on both sides even though they didn't
+// change). The dashboard then displayed the wrong line counts and rewrote
+// the whole hunk in the per-prompt diff view.
+//
+// Bounded at 4000 lines per side — DP is O(m*n), and edit blocks past
+// that size are usually file rewrites where the previous "dump both"
+// representation is more useful than a multi-megabyte DP table.
+function lineLevelDiff(
+  oldLines: string[],
+  newLines: string[],
+): Array<{ type: 'context' | 'add' | 'remove'; line: string }> {
+  const MAX = 4_000;
+  if (oldLines.length > MAX || newLines.length > MAX) {
+    return [
+      ...oldLines.map((l) => ({ type: 'remove' as const, line: l })),
+      ...newLines.map((l) => ({ type: 'add' as const, line: l })),
+    ];
+  }
+  const m = oldLines.length;
+  const n = newLines.length;
+  // dp[i][j] = LCS length of oldLines[i..] and newLines[j..]
+  const dp: number[][] = Array.from({ length: m + 1 }, () =>
+    new Array(n + 1).fill(0),
+  );
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (oldLines[i] === newLines[j]) dp[i][j] = dp[i + 1][j + 1] + 1;
+      else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops: Array<{ type: 'context' | 'add' | 'remove'; line: string }> = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (oldLines[i] === newLines[j]) {
+      ops.push({ type: 'context', line: oldLines[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: 'remove', line: oldLines[i] });
+      i++;
+    } else {
+      ops.push({ type: 'add', line: newLines[j] });
+      j++;
+    }
+  }
+  while (i < m) ops.push({ type: 'remove', line: oldLines[i++] });
+  while (j < n) ops.push({ type: 'add', line: newLines[j++] });
+  return ops;
+}
+
 function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input: Record<string, any> }>): string {
   if (edits.length === 0) return '';
 
@@ -562,13 +617,12 @@ function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input
           parts.push(`--- a/${shortPath}`);
           parts.push(`+++ b/${shortPath}`);
           parts.push('@@ @@');
-          // Show old lines with - prefix
-          for (const line of oldStr.split('\n')) {
-            parts.push(`-${line}`);
-          }
-          // Show new lines with + prefix
-          for (const line of newStr.split('\n')) {
-            parts.push(`+${line}`);
+          // LCS-based line diff so unchanged lines surrounding the actual
+          // edit emit as ` ` context, not `-`/`+`. Matches what `git diff`
+          // would have produced on the file pair.
+          for (const op of lineLevelDiff(oldStr.split('\n'), newStr.split('\n'))) {
+            const prefix = op.type === 'add' ? '+' : op.type === 'remove' ? '-' : ' ';
+            parts.push(`${prefix}${op.line}`);
           }
         }
       } else if (edit.toolName === 'Write' || edit.toolName === 'mcp__acp__Write' || edit.toolName === 'write_file' || edit.toolName === 'WriteFile' || edit.toolName === 'write' || edit.toolName === 'create') {
@@ -1194,6 +1248,46 @@ export function getDefaultPricing(): ModelPricing {
   return { ...DEFAULT_MODEL_PRICING };
 }
 
+// Strip date/version suffixes so "claude-sonnet-4-5-20250929" → "claude-sonnet-4-5"
+// and "gpt-4o-mini-2024-07-18" → "gpt-4o-mini". Keeps lookups deterministic.
+function normalizeModelKey(model: string): string {
+  return (model || '')
+    .toLowerCase()
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')   // OpenAI: gpt-4o-mini-2024-07-18
+    .replace(/-\d{8}$/, '');               // Anthropic: claude-sonnet-4-5-20250929
+}
+
+// Pick the pricing row + matched key for a model. Strategy:
+//   1. Exact match on normalized model key
+//   2. Longest pricing key that is a substring of the normalized model
+//   3. Sonnet default
+export function resolveModelPricing(
+  model: string,
+  pricing: ModelPricing = activePricing,
+): { input: number; output: number; key: string } {
+  const normalized = normalizeModelKey(model);
+  if (pricing[normalized]) return { ...pricing[normalized], key: normalized };
+
+  const sortedKeys = Object.keys(pricing).sort((a, b) => b.length - a.length);
+  for (const key of sortedKeys) {
+    if (normalized.includes(key)) return { ...pricing[key], key };
+  }
+  return { ...(pricing['sonnet'] ?? DEFAULT_MODEL_PRICING['sonnet']), key: 'sonnet' };
+}
+
+// Cache discount/premium varies by provider:
+//   • Anthropic   — read 0.10×, write 1.25× (cache writes are billed)
+//   • Google      — read 0.25×, no write surcharge
+//   • OpenAI      — read 0.50×, no write surcharge
+// Mirrors cacheMultipliersFor() in apps/api/src/utils/pricing.ts.
+function cacheMultipliersFor(modelKey: string): { read: number; write: number } {
+  if (modelKey.startsWith('gemini')) return { read: 0.25, write: 1.00 };
+  if (modelKey.startsWith('gpt-') || modelKey.startsWith('o1') ||
+      modelKey.startsWith('o3') || modelKey.startsWith('o4') ||
+      modelKey === 'codex' || modelKey === 'composer') return { read: 0.50, write: 1.00 };
+  return { read: 0.10, write: 1.25 };
+}
+
 export function estimateCost(
   model: string,
   inputTokens: number,
@@ -1201,23 +1295,12 @@ export function estimateCost(
   cacheReadTokens: number = 0,
   cacheCreationTokens: number = 0,
 ): number {
-  const modelLower = model.toLowerCase();
-
-  let pricing = activePricing['sonnet'] ?? DEFAULT_MODEL_PRICING['sonnet']; // default to sonnet pricing
-  // Sort keys by length descending so "gemini-2.5-flash" matches before "gemini-2.0",
-  // and "gpt-4o-mini" matches before "gpt-4o". Longest match wins.
-  const sortedKeys = Object.keys(activePricing).sort((a, b) => b.length - a.length);
-  for (const key of sortedKeys) {
-    if (modelLower.includes(key)) {
-      pricing = activePricing[key];
-      break;
-    }
-  }
-
-  const inputCost = (inputTokens / 1_000_000) * pricing.input;
-  const cacheReadCost = (cacheReadTokens / 1_000_000) * (pricing.input * 0.1);
-  const cacheCreationCost = (cacheCreationTokens / 1_000_000) * (pricing.input * 1.25);
-  const outputCost = (outputTokens / 1_000_000) * pricing.output;
+  const { input, output, key } = resolveModelPricing(model);
+  const m = cacheMultipliersFor(key);
+  const inputCost = (inputTokens / 1_000_000) * input;
+  const cacheReadCost = (cacheReadTokens / 1_000_000) * (input * m.read);
+  const cacheCreationCost = (cacheCreationTokens / 1_000_000) * (input * m.write);
+  const outputCost = (outputTokens / 1_000_000) * output;
 
   return parseFloat((inputCost + cacheReadCost + cacheCreationCost + outputCost).toFixed(4));
 }

@@ -10,6 +10,8 @@ function AuroraBackground() {
       <div className="aurora-blob aurora-1" />
       <div className="aurora-blob aurora-2" />
       <div className="aurora-blob aurora-3" />
+      <div className="aurora-blob aurora-4" />
+      <div className="aurora-blob aurora-5" />
       {/* Noise overlay */}
       <div className="absolute inset-0 opacity-[0.015]"
         style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg viewBox=\'0 0 256 256\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cfilter id=\'n\'%3E%3CfeTurbulence type=\'fractalNoise\' baseFrequency=\'0.9\' numOctaves=\'4\' stitchTiles=\'stitch\'/%3E%3C/filter%3E%3Crect width=\'100%25\' height=\'100%25\' filter=\'url(%23n)\'/%3E%3C/svg%3E")' }} />
@@ -437,10 +439,37 @@ export default function Landing() {
           animation: drift2 25s ease-in-out infinite;
         }
         .aurora-3 {
-          width: 400px; height: 400px;
+          width: 460px; height: 460px;
           background: linear-gradient(135deg, #10b981, #38bdf8);
-          bottom: -150px; left: 30%;
+          bottom: -50px; left: 28%;
           animation: drift3 22s ease-in-out infinite;
+        }
+        /* Bottom-center blob — fills the empty band between the agent pills
+           and the next section so the hero "carries" the aurora theme all
+           the way down instead of fading into a flat dark band. */
+        .aurora-4 {
+          width: 560px; height: 560px;
+          background: linear-gradient(135deg, #a855f7, #6366f1);
+          bottom: -180px; left: 45%;
+          opacity: 0.05;
+          animation: drift4 28s ease-in-out infinite;
+        }
+        .aurora-5 {
+          width: 420px; height: 420px;
+          background: linear-gradient(135deg, #6366f1, #38bdf8);
+          bottom: -120px; right: 8%;
+          opacity: 0.06;
+          animation: drift5 26s ease-in-out infinite;
+        }
+        @keyframes drift4 {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          33% { transform: translate(40px, -30px) scale(1.05); }
+          66% { transform: translate(-50px, 20px) scale(0.95); }
+        }
+        @keyframes drift5 {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          33% { transform: translate(-30px, -40px) scale(0.95); }
+          66% { transform: translate(50px, 30px) scale(1.08); }
         }
         @keyframes drift1 {
           0%, 100% { transform: translate(0, 0) scale(1); }

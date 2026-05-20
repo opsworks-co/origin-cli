@@ -259,13 +259,20 @@ export default function SessionDetail() {
   // produced a new array reference on every render, which busted the useMemo
   // and useEffect deps inside AiBlameView and caused an infinite re-fetch loop
   // (the spinner never resolved).
+  //
+  // Always UNION session-level + per-prompt files: session.filesChanged is
+  // stamped at session end (or lazily during runs) and can lag behind the
+  // per-prompt mappings. If we early-returned on a non-empty session list, a
+  // running Codex session with README.md at the session level but AGENTS.md,
+  // GEMINI.md, etc. captured per-prompt would show the per-prompt files
+  // mislabeled as "build artifacts" in the AI Blame view.
   const blameFilesChanged = useMemo<string[]>(() => {
     if (!session) return [];
+    const union = new Set<string>();
     try {
       const top = JSON.parse(session.filesChanged || '[]');
-      if (Array.isArray(top) && top.length > 0) return top as string[];
+      if (Array.isArray(top)) for (const f of top) union.add(f);
     } catch { /* fall through */ }
-    const union = new Set<string>();
     for (const pc of session.promptChanges || []) {
       for (const f of (pc.filesChanged || [])) union.add(f);
     }

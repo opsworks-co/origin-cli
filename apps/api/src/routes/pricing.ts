@@ -1,36 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { DEFAULT_MODEL_PRICING, ModelPricing } from '../utils/pricing.js';
 
 const router = Router();
 
 interface AuthRequest extends Request {
   user?: { id: string; orgId: string; role: string };
 }
-
-type ModelPricing = Record<string, { input: number; output: number }>;
-
-// Default pricing (per 1M tokens) — used as fallback and for seeding.
-// Anthropic cache: read = 0.1 × input, create = 1.25 × input (handled by caller).
-const DEFAULT_MODEL_PRICING: ModelPricing = {
-  // Anthropic — real public rates
-  'sonnet': { input: 3, output: 15 },
-  'opus': { input: 15, output: 75 },
-  'haiku': { input: 0.80, output: 4 },
-  // Google
-  'gemini-2.5-pro': { input: 1.25, output: 10 },
-  'gemini-2.5-flash': { input: 0.30, output: 2.50 },
-  'gemini-3-pro': { input: 1.25, output: 10 },
-  'gemini-3-flash': { input: 0.15, output: 0.60 },
-  'gemini-2.0': { input: 0.10, output: 0.40 },
-  // OpenAI
-  'gpt-4o': { input: 2.50, output: 10 },
-  'gpt-4o-mini': { input: 0.15, output: 0.60 },
-  'o1': { input: 15, output: 60 },
-  'o3': { input: 10, output: 40 },
-  'o3-mini': { input: 1.10, output: 4.40 },
-  'o4-mini': { input: 1.10, output: 4.40 },
-};
 
 const PRICING_PROVIDER = 'model-pricing';
 const GLOBAL_ORG_ID = '__global__';
@@ -47,18 +24,28 @@ async function getPricingFromDb(): Promise<ModelPricing | null> {
   }
 }
 
+// Merge admin-supplied overrides over the defaults. Always returning a
+// table that contains every default key guarantees the CLI (which calls
+// setActivePricing() to *replace* its in-memory table) never silently
+// falls back to sonnet pricing because an admin forgot a key.
+function mergeWithDefaults(overrides: ModelPricing | null): ModelPricing {
+  return { ...DEFAULT_MODEL_PRICING, ...(overrides ?? {}) };
+}
+
 // GET /api/pricing — public endpoint, no auth required (CLI calls this)
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const pricing = await getPricingFromDb();
-    res.json({ pricing: pricing ?? DEFAULT_MODEL_PRICING });
+    res.json({ pricing: mergeWithDefaults(pricing) });
   } catch (err) {
     console.error('Get pricing error:', err);
     res.json({ pricing: DEFAULT_MODEL_PRICING });
   }
 });
 
-// PUT /api/pricing — admin-only, update model pricing
+// PUT /api/pricing — admin-only, update model pricing.
+// Accepts a *partial* override map; merged onto the defaults at read time
+// so missing keys can't silently mis-price GPT-5/Codex/etc.
 router.put('/', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const { pricing } = req.body as { pricing: ModelPricing };
@@ -74,6 +61,11 @@ router.put('/', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res:
       }
       if (value.input < 0 || value.output < 0) {
         return res.status(400).json({ error: `Invalid pricing for model "${key}": values must be non-negative` });
+      }
+      // Sanity bound: nothing public charges > $1000 / 1M tokens today.
+      // Catches the "admin pasted a yearly figure" mistake.
+      if (value.input > 1000 || value.output > 1000) {
+        return res.status(400).json({ error: `Invalid pricing for model "${key}": values must be ≤ 1000 per 1M tokens` });
       }
     }
 
@@ -109,7 +101,9 @@ router.put('/', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res:
       },
     });
 
-    res.json({ pricing });
+    // Return the effective (merged) table so the admin UI shows the full
+    // active state, not just their overrides.
+    res.json({ pricing: mergeWithDefaults(pricing) });
   } catch (err) {
     console.error('Update pricing error:', err);
     res.status(500).json({ error: 'Internal server error' });

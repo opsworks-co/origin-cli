@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Helmet } from 'react-helmet-async';
 import { useParams } from 'react-router-dom';
-import ChatWidget from '../../components/ChatWidget';
+// ChatWidget disabled site-wide on user request — leaving the import path
+// intact (commented out) so we can re-enable later by uncommenting both.
+// import ChatWidget from '../../components/ChatWidget';
 import { Section, DocTab, TABS, SECTIONS } from './shared/types';
 
 import OverviewSection from './sections/overview';
@@ -222,12 +224,7 @@ export default function Docs() {
       </div>
     </div>
     </div>
-    <ChatWidget
-      endpoint="/api/chat/docs"
-      title="Docs Assistant"
-      placeholder="Ask about Origin setup, policies, CLI..."
-      welcomeMessage="Hi! I can help answer questions about the Origin platform. What would you like to know?"
-    />
+    {/* ChatWidget disabled — see import note above. */}
     </>
   );
 }

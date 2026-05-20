@@ -1,5 +1,5 @@
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
-import { shouldIgnoreFile } from './ignore-patterns.js';
+import { shouldIgnoreFile, stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -55,12 +55,32 @@ const MAX_DIFF_SIZE = 500_000; // 500KB max diff size
  * - New commits created since headBefore
  * - Full unified diff (committed + uncommitted changes)
  */
-export function captureGitState(repoPath: string, headBefore: string | null, opts?: { committedOnly?: boolean }): GitCaptureResult {
+export function captureGitState(
+  repoPath: string,
+  headBefore: string | null,
+  opts?: {
+    committedOnly?: boolean;
+    // When true, run git diff with `--unified=99999` so the produced diff
+    // contains the entire file as context — gives AI Blame the full file
+    // to render with line-level attribution instead of "N lines hidden"
+    // gaps between hunks. Bigger payload (capped by MAX_DIFF_SIZE), so
+    // callers should only opt in for session-level snapshots, not the
+    // per-prompt deltas that fire on every heartbeat.
+    fullContext?: boolean;
+  },
+): GitCaptureResult {
   const gitOpts = {
     cwd: repoPath,
     timeoutMs: 15_000,
     maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large diffs
   };
+  // Bounded "large context" instead of unlimited. 2000 lines covers a
+  // typical full source file but caps the worst case so a giant generated
+  // file (lock file, fixture, build artifact) doesn't blow up
+  // MAX_DIFF_SIZE and truncate mid-hunk into a malformed diff that the
+  // UI parser then chokes on. AI Blame still gets full-file rendering
+  // for all reasonable source files.
+  const unifiedFlag = opts?.fullContext ? ['--unified=2000'] : [];
 
   // 1. Get current HEAD
   const headAfter = gitOrNull(['rev-parse', 'HEAD'], gitOpts);
@@ -113,12 +133,12 @@ export function captureGitState(repoPath: string, headBefore: string | null, opt
   try {
     // Committed changes since session start
     if (safeBefore !== headAfter) {
-      committedDiff = git(['diff', `${safeBefore}..${headAfter}`], gitOpts).trim();
+      committedDiff = git(['diff', ...unifiedFlag, `${safeBefore}..${headAfter}`], gitOpts).trim();
     }
 
     // Capture uncommitted changes (staged + unstaged + untracked)
     if (!opts?.committedOnly) {
-      uncommittedDiff = git(['diff', 'HEAD'], gitOpts).trim();
+      uncommittedDiff = git(['diff', ...unifiedFlag, 'HEAD'], gitOpts).trim();
       // Also capture new untracked files as diff
       try {
         const untracked = git(
@@ -179,7 +199,7 @@ export function captureGitState(repoPath: string, headBefore: string | null, opt
     if (safeBefore) {
       // `git diff <commit>` compares working tree to commit's tree.
       // Includes staged + unstaged. Untracked still needs special handling.
-      workingTreeDiff = git(['diff', safeBefore], gitOpts).trim();
+      workingTreeDiff = git(['diff', ...unifiedFlag, safeBefore], gitOpts).trim();
       // Append untracked file diffs
       if (!opts?.committedOnly) {
         try {
@@ -201,6 +221,16 @@ export function captureGitState(repoPath: string, headBefore: string | null, opt
   } catch {
     workingTreeDiff = '';
   }
+
+  // Strip diff sections targeting ignored files (lock files, generated
+  // dirs, Origin's own AGENTS.md / GEMINI.md / .windsurfrules). These
+  // contribute noise to the per-prompt blame view — AGENTS.md alone shows
+  // up as 13+ "AI-attributed" lines on every Codex turn because Origin
+  // rewrites it as bookkeeping, not agent output.
+  diff = stripIgnoredSectionsFromDiff(diff);
+  committedDiff = stripIgnoredSectionsFromDiff(committedDiff);
+  uncommittedDiff = stripIgnoredSectionsFromDiff(uncommittedDiff);
+  workingTreeDiff = stripIgnoredSectionsFromDiff(workingTreeDiff);
 
   // Count lines added/removed
   let linesAdded = 0;

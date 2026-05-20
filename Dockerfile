@@ -42,7 +42,9 @@ WORKDIR /app
 
 # sqlite CLI is used by docker-start.sh for pre-migration dedup of rows that
 # would otherwise break a newly-introduced unique index (e.g. Commit.repoId+sha).
-RUN apk add --no-cache sqlite
+# git is used by apps/api/src/services/gitlab-notes.ts to shallow-fetch
+# refs/notes/origin from GitLab repos (their REST API doesn't expose notes).
+RUN apk add --no-cache sqlite git
 
 # Copy everything from api builder including root node_modules (has prisma binary)
 COPY --from=api-builder /app/node_modules ./node_modules

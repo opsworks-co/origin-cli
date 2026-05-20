@@ -33,12 +33,8 @@ const TIERS = [
     name: 'Team',
     price: '$29',
     period: '/user/month',
-    description: 'For teams that need visibility and governance over AI coding',
+    description: 'Everything in Solo, plus visibility and governance over AI coding',
     featureGroups: [
-      {
-        title: 'Everything in Solo, plus:',
-        items: [],
-      },
       {
         title: 'Visibility',
         items: [
@@ -130,7 +126,7 @@ const FAQ = [
 
 export default function Pricing() {
   return (
-    <div className="max-w-6xl mx-auto px-6 py-16">
+    <div className="max-w-6xl mx-auto px-6 py-10">
       <Helmet>
         <title>Pricing — Origin | Free for Solo Developers, Team Plans for Governance</title>
         <meta name="description" content="Origin Solo is free forever for individual developers. Team plans start at $29/user/month for AI code governance with policy enforcement, PR checks, and audit trails." />
@@ -138,30 +134,33 @@ export default function Pricing() {
       </Helmet>
       {/* Header */}
       <FadeIn>
-        <div className="text-center mb-16">
+        <div className="text-center mb-10">
           <h1 className="text-4xl sm:text-5xl font-bold text-gray-100">
             Free for developers. Built for teams.
           </h1>
-          <p className="mt-4 text-lg text-gray-400 max-w-xl mx-auto">
+          <p className="mt-3 text-lg text-gray-400 max-w-xl mx-auto">
             Solo is free forever. Add governance when your team needs it.
           </p>
         </div>
       </FadeIn>
 
-      {/* Pricing Cards */}
-      <StaggerContainer className="grid md:grid-cols-3 gap-8 mb-24 md:items-start" staggerMs={150}>
+      {/* Pricing Cards. pt-4 reserves room for the "MOST POPULAR" badge
+          that the highlighted card hangs above its own border — without
+          this padding the badge gets clipped by the sticky navbar / out
+          of the viewport when the section scrolls into view. */}
+      <StaggerContainer className="grid md:grid-cols-3 gap-6 mb-20 pt-4 md:items-stretch" staggerMs={150}>
         {TIERS.map((tier) => {
           const isLight = tier.highlighted;
           const cardClass = isLight
-            ? 'relative flex flex-col rounded-2xl p-8 bg-gradient-to-b from-white to-slate-50 ring-1 ring-slate-200 shadow-2xl shadow-indigo-900/40 md:-mt-4 md:mb-4 hover:-translate-y-1 transition-all duration-300'
-            : 'card flex flex-col hover:shadow-lg hover:shadow-indigo-500/5 hover:-translate-y-1 transition-all duration-300';
+            ? 'relative flex flex-col h-full rounded-2xl p-6 bg-gradient-to-b from-white to-slate-50 ring-1 ring-slate-200 shadow-2xl shadow-indigo-900/40 hover:-translate-y-1 transition-all duration-300'
+            : 'card flex flex-col h-full hover:shadow-lg hover:shadow-indigo-500/5 hover:-translate-y-1 transition-all duration-300';
           const titleClass = isLight ? 'text-xl font-bold text-slate-900' : 'text-xl font-bold text-gray-100';
           const descClass = isLight ? 'text-sm text-slate-500 mt-1' : 'text-sm text-gray-400 mt-1';
-          const priceClass = isLight ? 'text-5xl font-bold text-slate-900 tracking-tight' : 'text-4xl font-bold text-gray-100';
+          const priceClass = isLight ? 'text-4xl font-bold text-slate-900 tracking-tight' : 'text-4xl font-bold text-gray-100';
           const periodClass = isLight ? 'text-slate-500 ml-1' : 'text-gray-500 ml-1';
           const groupTitleClass = isLight
-            ? 'text-[11px] font-semibold uppercase tracking-wider text-indigo-600 mb-2'
-            : 'text-[11px] font-semibold uppercase tracking-wider text-indigo-400 mb-2';
+            ? 'text-[11px] font-semibold uppercase tracking-wider text-indigo-600 mb-1.5'
+            : 'text-[11px] font-semibold uppercase tracking-wider text-indigo-400 mb-1.5';
           const itemClass = isLight
             ? 'flex items-start gap-2.5 text-sm text-slate-700'
             : 'flex items-start gap-2 text-sm text-gray-300';
@@ -181,17 +180,17 @@ export default function Pricing() {
                   </span>
                 </div>
               )}
-              <div className="mb-6">
+              <div className="mb-4">
                 <h3 className={titleClass}>{tier.name}</h3>
                 <p className={descClass}>{tier.description}</p>
               </div>
-              <div className="mb-6">
+              <div className="mb-4">
                 <span className={priceClass}>{tier.price}</span>
                 {tier.period && (
                   <span className={periodClass}>{tier.period}</span>
                 )}
               </div>
-              <div className="space-y-5 mb-8 flex-1">
+              <div className="space-y-3 mb-5 flex-1">
                 {tier.featureGroups.map((group, gi) => (
                   <div key={gi}>
                     {group.title && (
@@ -204,7 +203,7 @@ export default function Pricing() {
                       )
                     )}
                     {group.items.length > 0 && (
-                      <ul className="space-y-2.5">
+                      <ul className="space-y-2">
                         {group.items.map((feature, i) => (
                           <li key={i} className={itemClass}>
                             <span className={checkClass}>

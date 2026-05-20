@@ -1,6 +1,7 @@
 import { prisma } from '../db.js';
 import { getIntegrationConfig, parseRepoFullName } from './github-integration.js';
 import { getGitLabIntegrationConfig, parseGitLabProjectPath, getValidGitLabToken } from './gitlab-integration.js';
+import { fetchGitLabNote } from './gitlab-notes.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,7 @@ interface ImportResult {
   total: number;
   message?: string;
   notesImported?: number;
+  virtualSessionsCreated?: number;
 }
 
 // ── Provider abstraction ───────────────────────────────────────────────────
@@ -228,17 +230,12 @@ async function buildGitLabApi(repoPath: string, orgId: string): Promise<RepoApi 
       }
     },
     async fetchNote(commitSha: string) {
-      // GitLab does not expose refs/notes/* via its REST API the same way
-      // GitHub does. We attempt to read it as a raw file from the notes
-      // ref using the "files" API; if unavailable, return null and rely on
-      // the origin-sessions branch as the source of truth.
-      try {
-        // Try fanned path on a hypothetical notes-tree branch (best-effort).
-        // Real GitLab git-notes access requires a clone, which we avoid here.
-        return null;
-      } catch {
-        return null;
-      }
+      // GitLab doesn't expose `refs/notes/*` via REST. Fall back to a
+      // shallow `git fetch refs/notes/origin` into a per-project bare repo
+      // on local disk, then read the note via `git notes show`. The bare
+      // repo is reused across calls; concurrent requests coalesce on a
+      // single fetch via an in-flight Promise map in gitlab-notes.ts.
+      return fetchGitLabNote(repoPath, orgId, commitSha);
     },
   };
 }
@@ -476,34 +473,80 @@ export async function importOriginSessionsFromGit(
 
   // Best-effort: fetch git notes for imported commits and use them to fill
   // aiToolDetected on commits that the session import didn't touch (e.g.
-  // legacy commits from before sessions were captured). GitHub only for
-  // now — GitLab's REST API doesn't surface refs/notes/origin without a
-  // clone.
+  // legacy commits from before sessions were captured).
+  //
+  // Also synthesize a virtual CodingSession from each note's prompt
+  // payload so cross-org commits surface prompts in AI Blame / Ask /
+  // commit-detail even when Origin wasn't recording the original session.
+  // Marked with `apiKeyName = GIT_NOTE_VIRTUAL_MARKER` so analytics
+  // aggregators can exclude them from spend/session counts.
+  //
+  // GitLab path uses gitlab-notes.ts (shallow `git fetch refs/notes/origin`
+  // into a per-project bare repo) since GitLab's REST API doesn't surface
+  // `refs/notes/*` directly.
   let notesImported = 0;
-  if (provider === 'github') {
-    const repoCommits = await prisma.commit.findMany({
+  let virtualSessionsCreated = 0;
+  if (provider === 'github' || provider === 'gitlab') {
+    const repo = await prisma.repo.findUnique({
+      where: { id: repoId },
+      select: { orgId: true },
+    });
+    if (!repo) {
+      return { imported, skipped, total: metadataEntries.length, notesImported };
+    }
+
+    // Two queries — commits that need aiToolDetected, and commits that have
+    // it but no linked session. Unioned so we fetch each note at most once.
+    const needsDetection = await prisma.commit.findMany({
       where: { repoId, OR: [{ aiToolDetected: null }, { aiToolDetected: '' }] },
-      select: { id: true, sha: true },
+      select: { id: true, sha: true, filesChanged: true, additions: true, deletions: true, committedAt: true, session: { select: { id: true } } },
       take: 500,
       orderBy: { committedAt: 'desc' },
     });
-    for (const c of repoCommits) {
+    const needsSession = await prisma.commit.findMany({
+      where: {
+        repoId,
+        aiToolDetected: { not: null },
+        session: null,
+      },
+      select: { id: true, sha: true, filesChanged: true, additions: true, deletions: true, committedAt: true, session: { select: { id: true } } },
+      take: 500,
+      orderBy: { committedAt: 'desc' },
+    });
+    const byId = new Map<string, typeof needsDetection[number]>();
+    for (const c of [...needsDetection, ...needsSession]) byId.set(c.id, c);
+
+    for (const c of byId.values()) {
       try {
         const noteText = await api.fetchNote(c.sha);
         if (!noteText) continue;
-        let parsed: any = null;
+        let parsed: { origin?: NoteOrigin } | null = null;
         try { parsed = JSON.parse(noteText); } catch { continue; }
         const o = parsed?.origin;
         if (!o) continue;
-        await prisma.commit.update({
-          where: { id: c.id },
-          data: {
-            aiToolDetected: o.model || 'claude-code',
-            aiDetectionMethod: 'git-notes',
-          },
+
+        const detected = await ensureAiToolDetected(c.id, o);
+        if (detected) notesImported++;
+
+        if (!c.session) {
+          const created = await synthesizeSessionFromNote({
+            commitId: c.id,
+            commitSha: c.sha,
+            commitFilesChanged: c.filesChanged,
+            commitAdditions: c.additions ?? 0,
+            commitDeletions: c.deletions ?? 0,
+            commitTime: c.committedAt,
+            orgId: repo.orgId,
+            note: o,
+          });
+          if (created) virtualSessionsCreated++;
+        }
+      } catch (err) {
+        console.error('[git-notes] virtual session sync failed', {
+          sha: c.sha,
+          error: err instanceof Error ? err.message : String(err),
         });
-        notesImported++;
-      } catch { /* best-effort */ }
+      }
     }
   }
 
@@ -512,5 +555,209 @@ export async function importOriginSessionsFromGit(
     skipped,
     total: metadataEntries.length,
     notesImported,
+    virtualSessionsCreated,
   };
+}
+
+// ─── Virtual session synthesis from git note ───────────────────────────────
+//
+// Each `refs/notes/origin` blob carries the originating prompt + session
+// metadata (sessionId, model, agent, cost, tokens, …). When a commit lands
+// in an org whose users weren't running Origin at the time — or whose org's
+// CLI didn't push notes — the prompt content still arrives via GitHub, but
+// nothing in the API turns it into a queryable session. This helper does.
+
+const GIT_NOTE_VIRTUAL_MARKER = '__git-note__';
+
+interface NoteOrigin {
+  version?: number;
+  sessionId?: string;
+  model?: string;
+  agent?: string;
+  promptCount?: number;
+  promptSummary?: string;
+  fullPrompt?: string;
+  previousSessionId?: string;
+  filesRead?: string[];
+  tokensUsed?: number;
+  costUsd?: number;
+  durationMs?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  originUrl?: string;
+  timestamp?: string;
+}
+
+// Map a free-form model name onto one of the four catalog agent slugs.
+// Returns null when the model doesn't clearly belong to a known agent —
+// the synthesized session will then have no agentId (still useful for
+// blame; just won't show up in per-agent rollups).
+function inferAgentSlugFromModel(model: string | undefined): string | null {
+  if (!model) return null;
+  const m = model.toLowerCase();
+  if (m.startsWith('gpt-') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4') || m === 'codex') return 'codex';
+  if (m.startsWith('claude')) return 'claude-code';
+  if (m.startsWith('gemini')) return 'gemini';
+  return null;
+}
+
+async function ensureAiToolDetected(commitId: string, o: NoteOrigin): Promise<boolean> {
+  try {
+    const updated = await prisma.commit.updateMany({
+      where: { id: commitId, OR: [{ aiToolDetected: null }, { aiToolDetected: '' }] },
+      data: {
+        aiToolDetected: o.model || 'claude-code',
+        aiDetectionMethod: 'git-notes',
+      },
+    });
+    return updated.count > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function synthesizeSessionFromNote(opts: {
+  commitId: string;
+  commitSha: string;
+  commitFilesChanged: string;
+  commitAdditions: number;
+  commitDeletions: number;
+  commitTime: Date;
+  orgId: string;
+  note: NoteOrigin;
+}): Promise<boolean> {
+  const { note: o } = opts;
+  const promptText = (o.fullPrompt || o.promptSummary || '').trim();
+  if (!promptText) return false; // nothing useful to show
+
+  let agentId: string | null = null;
+  const slug = o.agent || inferAgentSlugFromModel(o.model);
+  if (slug) {
+    try {
+      const agent = await prisma.agent.findUnique({
+        where: { orgId_slug: { orgId: opts.orgId, slug } },
+        select: { id: true },
+      });
+      agentId = agent?.id ?? null;
+    } catch { /* agent table not in scope here */ }
+  }
+
+  const noteTime = o.timestamp ? new Date(o.timestamp) : opts.commitTime;
+  try {
+    await prisma.$transaction(async (tx) => {
+      const session = await tx.codingSession.create({
+        data: {
+          commitId: opts.commitId,
+          agentId,
+          model: o.model || 'unknown',
+          prompt: promptText.slice(0, 50_000),
+          transcript: '[]',
+          filesChanged: opts.commitFilesChanged || '[]',
+          tokensUsed: Math.max(0, Math.floor(o.tokensUsed ?? 0)),
+          costUsd: Math.max(0, o.costUsd ?? 0),
+          durationMs: Math.max(0, Math.floor(o.durationMs ?? 0)),
+          linesAdded: o.linesAdded ?? opts.commitAdditions ?? 0,
+          linesRemoved: o.linesRemoved ?? opts.commitDeletions ?? 0,
+          status: 'COMPLETED',
+          startedAt: noteTime,
+          endedAt: noteTime,
+          apiKeyName: GIT_NOTE_VIRTUAL_MARKER,
+        },
+      });
+      await tx.promptChange.create({
+        data: {
+          sessionId: session.id,
+          promptIndex: 0,
+          promptText: promptText.slice(0, 1000),
+          filesChanged: opts.commitFilesChanged || '[]',
+          diff: '',
+          // Pin to this commit's SHA so commit-detail's per-SHA filter
+          // surfaces the prompt when the user opens that commit.
+          commitSha: opts.commitSha,
+        },
+      });
+    });
+    return true;
+  } catch (err) {
+    // Most likely a unique-violation if a real session was created between
+    // our null-check and the insert. Safe to swallow — that's the better
+    // outcome anyway.
+    if (err instanceof Error && /Unique constraint/i.test(err.message)) return false;
+    console.error('[git-notes] synthesize session failed', {
+      sha: opts.commitSha,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+export { GIT_NOTE_VIRTUAL_MARKER };
+
+/**
+ * Live-read fallback: fetch a single commit's note from GitHub and
+ * synthesise a virtual CodingSession for it. Called by commit-detail when
+ * the user opens a commit whose note hasn't been imported yet (push webhook
+ * may not have fired, or the org came onto a repo after the commit landed).
+ *
+ * Returns true when a new virtual session was created. Idempotent — if a
+ * session already exists for the commit, this is a no-op. GitHub only.
+ */
+export async function fetchAndSynthesizeCommitNote(
+  repoId: string,
+  commitSha: string,
+): Promise<boolean> {
+  try {
+    const commit = await prisma.commit.findFirst({
+      where: { repoId, sha: commitSha },
+      select: {
+        id: true,
+        sha: true,
+        filesChanged: true,
+        additions: true,
+        deletions: true,
+        committedAt: true,
+        session: { select: { id: true } },
+        repo: { select: { orgId: true, provider: true, path: true } },
+      },
+    });
+    if (!commit) return false;
+    if (commit.session) return false; // already have a session
+
+    const path = commit.repo.path || '';
+    const isGitHub =
+      commit.repo.provider === 'github' || /github\.com\//.test(path);
+    const isGitLab =
+      commit.repo.provider === 'gitlab' || /gitlab\.com\/|gitlab\./.test(path);
+    if (!isGitHub && !isGitLab) return false;
+
+    const api = isGitHub
+      ? await buildGitHubApi(path, commit.repo.orgId)
+      : await buildGitLabApi(path, commit.repo.orgId);
+    if (!api) return false;
+
+    const noteText = await api.fetchNote(commit.sha);
+    if (!noteText) return false;
+    let parsed: { origin?: NoteOrigin } | null = null;
+    try { parsed = JSON.parse(noteText); } catch { return false; }
+    const o = parsed?.origin;
+    if (!o) return false;
+
+    await ensureAiToolDetected(commit.id, o);
+    return await synthesizeSessionFromNote({
+      commitId: commit.id,
+      commitSha: commit.sha,
+      commitFilesChanged: commit.filesChanged,
+      commitAdditions: commit.additions ?? 0,
+      commitDeletions: commit.deletions ?? 0,
+      commitTime: commit.committedAt,
+      orgId: commit.repo.orgId,
+      note: o,
+    });
+  } catch (err) {
+    console.error('[git-notes] live-read failed', {
+      sha: commitSha,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
 }

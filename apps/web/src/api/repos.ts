@@ -157,6 +157,11 @@ export interface CommitDetail {
   committedAt: string;
   aiToolDetected: string | null;
   aiDetectionMethod: string | null;
+  // Session-anchor row that never got replaced with a real commit. The UI
+  // renders a banner explaining this so users don't see "No files in this
+  // commit" with no context (common when Cursor turns edit files without
+  // committing).
+  isPlaceholder?: boolean;
   stats: { additions: number; deletions: number; total: number };
   files: Array<{
     filename: string;
@@ -188,11 +193,28 @@ export interface CommitDetail {
     filesChanged: string[];
     review?: { status: string } | null;
   };
+  // Where the per-file `patch` strings came from. "commit.patch" is the only
+  // per-commit-scoped source; other values mean the patches aggregate across
+  // multiple commits in the same session, so siblings will all look identical
+  // and may include lines that landed elsewhere.
+  diffSource?: 'commit.patch' | 'sessionDiff' | 'promptChanges' | 'remote' | 'none';
   promptChanges: Array<{
     promptIndex: number;
     promptText: string;
     filesChanged: string[];
     diff: string;
+  }>;
+  // Other commits in the same session (excluding this one and placeholders).
+  // Lets the commit-detail page show "N more commits in this session" so
+  // users see related work without guessing — the session/commit data
+  // model is many-to-one and this is the easy escape hatch.
+  sessionCommits?: Array<{
+    sha: string;
+    message: string;
+    committedAt: string;
+    additions: number | null;
+    deletions: number | null;
+    fileCount: number | null;
   }>;
   repo: { id: string; name: string; provider: string; path: string };
 }

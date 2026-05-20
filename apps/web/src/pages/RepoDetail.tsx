@@ -1219,6 +1219,25 @@ export default function RepoDetail() {
       {repoTab === 'files' && (
         <div className="space-y-3">
           <div className="flex items-center gap-2 flex-wrap">
+            {/* Branch selector — Files tab always fetched the default branch
+                before, which hid every file that lived only on a feature
+                branch (the typical case for in-flight Codex sessions
+                working on origin-restore-…). Drop the filter dropdown here
+                so the user can switch to whatever branch they've actually
+                been pushing to. */}
+            {branches.length > 0 && (
+              <select
+                value={branchFilter}
+                onChange={(e) => setBranchFilter(e.target.value)}
+                className="px-2.5 py-1.5 rounded-md text-[12px] font-medium bg-gray-900/50 text-gray-300 border border-gray-800/80 hover:text-gray-200 transition-colors appearance-none cursor-pointer pr-7"
+                style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
+              >
+                <option value="">Default branch</option>
+                {branches.map((b) => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+            )}
             <input
               type="text"
               placeholder="Filter by path…"
@@ -1812,11 +1831,18 @@ function FileBlameView({ blame }: { blame: RepoFileBlameT }) {
 
   const breakdown = useMemo(() => {
     const counts = new Map<AgentKey, number>();
+    let countedTotal = 0;
     for (const ln of blame.lines) {
+      // Skip whitespace-only lines — they're structural padding and
+      // shouldn't tilt the AI/Human split. A file where every code line
+      // was AI-authored but every other line is a blank separator was
+      // showing ~50% AI before this filter.
+      if (!ln.content || ln.content.trim().length === 0) continue;
       const k = resolveAgentKey(ln.agentSlug, ln.isAi);
       counts.set(k, (counts.get(k) || 0) + 1);
+      countedTotal++;
     }
-    const total = blame.lines.length || 1;
+    const total = countedTotal || 1;
     return Array.from(counts.entries())
       .map(([k, lines]) => ({ ...AGENT_VISUALS[k], lines, pct: (lines / total) * 100 }))
       .sort((a, b) => b.lines - a.lines);

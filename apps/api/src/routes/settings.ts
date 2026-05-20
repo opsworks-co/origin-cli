@@ -809,6 +809,54 @@ router.post('/recompute-costs', requireRole('ADMIN'), async (req: AuthRequest, r
   }
 });
 
+// GET /api/settings/cursor-fallback-rate — count recent Cursor sessions where
+// the SQLite-DB model lookup failed and we fell back to the bare 'cursor' tag.
+// Surfaces silent mispricing: those sessions get sonnet rates regardless of
+// the user's actual Cursor model selection.
+router.get('/cursor-fallback-rate', requireRole('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const days = Math.min(Math.max(parseInt(String(req.query.days || '7'), 10), 1), 90);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const cursorAgent = await prisma.agent.findFirst({
+      where: { orgId: req.activeOrgId!, slug: 'cursor' },
+      select: { id: true },
+    });
+
+    if (!cursorAgent) {
+      return res.json({ windowDays: days, totalCursorSessions: 0, fallbackSessions: 0, fallbackRate: 0 });
+    }
+
+    const [fallback, total] = await Promise.all([
+      prisma.codingSession.count({
+        where: {
+          commit: { repo: { orgId: req.activeOrgId! } },
+          createdAt: { gte: since },
+          agentId: cursorAgent.id,
+          model: { in: ['cursor', 'default', 'unknown'] },
+        },
+      }),
+      prisma.codingSession.count({
+        where: {
+          commit: { repo: { orgId: req.activeOrgId! } },
+          createdAt: { gte: since },
+          agentId: cursorAgent.id,
+        },
+      }),
+    ]);
+
+    res.json({
+      windowDays: days,
+      totalCursorSessions: total,
+      fallbackSessions: fallback,
+      fallbackRate: total > 0 ? parseFloat((fallback / total).toFixed(3)) : 0,
+    });
+  } catch (err) {
+    console.error('Cursor fallback rate error:', err);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
 // POST /api/settings/fix-orphaned-keys — assign unlinked keys to current user
 router.post('/fix-orphaned-keys', async (req: AuthRequest, res: Response) => {
   try {

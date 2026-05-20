@@ -110,7 +110,10 @@ export function decryptField(value: string | null | undefined): string | null | 
  */
 export const ENCRYPTED_FIELDS: Record<string, string[]> = {
   CodingSession: ['prompt', 'transcript'],
-  PromptChange: ['promptText', 'diff', 'uncommittedDiff'],
+  // editsJson is JSON-encoded PromptEdit[] carrying oldContent / newContent
+  // snapshots of source files. It IS code, so it gets the same envelope
+  // encryption as diff / promptText.
+  PromptChange: ['promptText', 'diff', 'uncommittedDiff', 'editsJson'],
   SessionDiff: ['diff'],
   // Secrets used to verify inbound webhooks (HMAC key).
   Webhook: ['secret'],

@@ -3,63 +3,9 @@
 // stale or buggy cost (e.g. before the Opus pricing fix that brought
 // $5/$25 → $15/$75 per 1M tokens). Idempotent: a session whose stored
 // cost already matches the recompute is skipped.
-//
-// Mirrors packages/cli/src/transcript.ts estimateCost(). When that table
-// changes, update both — there is no shared module yet.
 
 import { prisma } from '../db.js';
-
-type ModelPricing = Record<string, { input: number; output: number }>;
-
-const DEFAULT_MODEL_PRICING: ModelPricing = {
-  'sonnet': { input: 3,    output: 15 },
-  'opus':   { input: 15,   output: 75 },
-  'haiku':  { input: 0.80, output: 4  },
-  'gemini-2.5-pro':        { input: 1.25, output: 10 },
-  'gemini-2.5-flash':      { input: 0.30, output: 2.50 },
-  'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
-  'gemini-3-pro':          { input: 1.25, output: 10 },
-  'gemini-3-flash':        { input: 0.15, output: 0.60 },
-  'gemini-2.0-flash':      { input: 0.10, output: 0.40 },
-  'gemini-2.0':            { input: 0.10, output: 0.40 },
-  'gpt-4o':         { input: 2.50, output: 10 },
-  'gpt-4o-mini':    { input: 0.15, output: 0.60 },
-  'o1':       { input: 15,   output: 60 },
-  'o3':       { input: 10,   output: 40 },
-  'o3-mini':  { input: 1.10, output: 4.40 },
-  'o4-mini':  { input: 1.10, output: 4.40 },
-  'gpt-5':    { input: 2.00, output: 8.00 },
-  'gpt-5.3':  { input: 2.00, output: 8.00 },
-  'gpt-5.4':  { input: 3.00, output: 12.00 },
-  'codex':    { input: 2.00, output: 8.00 },
-  'cursor':   { input: 3,    output: 15 },
-  'composer': { input: 2.50, output: 10.00 },
-};
-
-const SORTED_KEYS = Object.keys(DEFAULT_MODEL_PRICING).sort((a, b) => b.length - a.length);
-
-function priceFor(model: string): { input: number; output: number } {
-  const lower = (model || '').toLowerCase();
-  for (const key of SORTED_KEYS) {
-    if (lower.includes(key)) return DEFAULT_MODEL_PRICING[key];
-  }
-  return DEFAULT_MODEL_PRICING['sonnet']; // safe default — Claude Sonnet
-}
-
-function estimateCost(
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-  cacheReadTokens: number,
-  cacheCreationTokens: number,
-): number {
-  const p = priceFor(model);
-  const inputCost = (inputTokens / 1_000_000) * p.input;
-  const cacheReadCost = (cacheReadTokens / 1_000_000) * (p.input * 0.1);
-  const cacheCreationCost = (cacheCreationTokens / 1_000_000) * (p.input * 1.25);
-  const outputCost = (outputTokens / 1_000_000) * p.output;
-  return parseFloat((inputCost + cacheReadCost + cacheCreationCost + outputCost).toFixed(4));
-}
+import { estimateCost } from '../utils/pricing.js';
 
 export interface RecomputeResult {
   scanned: number;

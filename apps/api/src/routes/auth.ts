@@ -49,7 +49,7 @@ const BCRYPT_COST = 12;
 // request from the X-Origin-Org header → User.lastOrgId → first membership.
 function signToken(userId: string): string {
   prisma.user.update({ where: { id: userId }, data: { lastLoginAt: new Date() } }).catch(() => {});
-  return jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '30d' });
 }
 
 // Build the membership list + chosen active org for the response shape used
@@ -890,6 +890,7 @@ const OAUTH_PROVIDERS: Record<string, {
   userUrl: string;
   scopes: string;
   clientIdEnv: string;
+  clientIdEnvFallback?: string;
   clientSecretEnv: string;
 }> = {
   github: {
@@ -905,7 +906,11 @@ const OAUTH_PROVIDERS: Record<string, {
     tokenUrl: 'https://gitlab.com/oauth/token',
     userUrl: 'https://gitlab.com/api/v4/user',
     scopes: 'read_user',
+    // GitLab calls it "Application ID" in the OAuth-app UI; some deployments
+    // shipped that secret as GITLAB_APP_ID. Honour either name so we don't
+    // require an environment-variable rename for existing setups.
     clientIdEnv: 'GITLAB_CLIENT_ID',
+    clientIdEnvFallback: 'GITLAB_APP_ID',
     clientSecretEnv: 'GITLAB_CLIENT_SECRET',
   },
   google: {
@@ -923,11 +928,30 @@ function getOAuthRedirectUri(provider: string) {
   return `${base}/auth/${provider}/callback`;
 }
 
+// GET /api/auth/oauth-providers — returns which OAuth providers are
+// configured on the server. The Login/Register pages call this to decide
+// which buttons to show; without it, users see buttons for providers we
+// can't actually use (Google missing both client id and secret → "Google
+// OAuth not available" alert on click).
+router.get('/oauth-providers', (_req: Request, res: Response) => {
+  const out: Record<string, boolean> = {};
+  for (const [name, cfg] of Object.entries(OAUTH_PROVIDERS)) {
+    const clientId =
+      process.env[cfg.clientIdEnv] ||
+      (cfg.clientIdEnvFallback ? process.env[cfg.clientIdEnvFallback] : undefined);
+    const clientSecret = process.env[cfg.clientSecretEnv];
+    out[name] = !!(clientId && clientSecret);
+  }
+  res.json({ providers: out });
+});
+
 router.get('/oauth/:provider', (req: Request, res: Response) => {
   const provider = req.params.provider as string;
   const config = OAUTH_PROVIDERS[provider];
   if (!config) return res.status(400).json({ error: 'Unknown provider' });
-  const clientId = process.env[config.clientIdEnv];
+  const clientId =
+    process.env[config.clientIdEnv] ||
+    (config.clientIdEnvFallback ? process.env[config.clientIdEnvFallback] : undefined);
   if (!clientId) return res.status(500).json({ error: `${provider} OAuth not configured` });
 
   const state = crypto.randomUUID();
@@ -963,7 +987,9 @@ router.post('/oauth/:provider/callback', async (req: Request, res: Response) => 
   res.clearCookie('oauth_state', { path: '/' });
   if (!code) return res.status(400).json({ error: 'Authorization code required' });
 
-  const clientId = process.env[config.clientIdEnv];
+  const clientId =
+    process.env[config.clientIdEnv] ||
+    (config.clientIdEnvFallback ? process.env[config.clientIdEnvFallback] : undefined);
   const clientSecret = process.env[config.clientSecretEnv];
   if (!clientId || !clientSecret) return res.status(500).json({ error: `${provider} OAuth not configured` });
 
