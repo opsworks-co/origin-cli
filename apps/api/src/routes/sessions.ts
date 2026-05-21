@@ -354,6 +354,186 @@ function mapSession(s: any, pullRequests?: any[]) {
               files: noNewWork,
             });
           }
+
+          // Per-prompt content subtraction: pc.diff and pc.uncommittedDiff
+          // can be CUMULATIVE — captures sometimes include `+` and `-`
+          // lines from prior prompts (especially when the agent left
+          // uncommitted changes that the next prompt's snapshot picked
+          // up again). We compute, per prompt, the set of `+`/`-` lines
+          // that are NEW vs the union of all prior prompts' lines, keyed
+          // by `${file}:${content}` to avoid cross-file false positives.
+          // The render loop uses these to derive accurate
+          // linesAdded/linesRemoved, filter filesChanged to files with
+          // unique work, and strip file sections from the displayed diff
+          // when every `+`/`-` line in that section is a duplicate of a
+          // prior prompt.
+          const extractByFile = (diffText: string): { added: Map<string, Set<string>>; removed: Map<string, Set<string>> } => {
+            const added = new Map<string, Set<string>>();
+            const removed = new Map<string, Set<string>>();
+            if (!diffText) return { added, removed };
+            const parts = diffText.split(/^(?=diff --git )/m);
+            for (const part of parts) {
+              const header = part.split('\n', 1)[0] || '';
+              const m = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
+              if (!m) continue;
+              const fp = m[2].replace(/^\//, '');
+              if (!added.has(fp)) added.set(fp, new Set());
+              if (!removed.has(fp)) removed.set(fp, new Set());
+              const a = added.get(fp)!;
+              const r = removed.get(fp)!;
+              for (const line of part.split('\n')) {
+                if (line.startsWith('+') && !line.startsWith('+++')) a.add(line.slice(1));
+                else if (line.startsWith('-') && !line.startsWith('---')) r.add(line.slice(1));
+              }
+            }
+            return { added, removed };
+          };
+          // Strip `+`/`-` content lines that already appeared in any
+          // prior prompt's diff for the same file. Drops entire file
+          // sections that end up with no remaining `+`/`-` lines (an
+          // all-context section would be misleading). Per-file content
+          // sets are passed in priorAdded / priorRemoved.
+          const filterDiffByPriorContent = (
+            diffText: string,
+            priorAdded: Map<string, Set<string>>,
+            priorRemoved: Map<string, Set<string>>,
+          ): string => {
+            if (!diffText) return diffText;
+            const parts = diffText.split(/^(?=diff --git )/m);
+            const kept: string[] = [];
+            for (const part of parts) {
+              const header = part.split('\n', 1)[0] || '';
+              const m = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
+              if (!m) continue;
+              const fp = m[2].replace(/^\//, '');
+              const priorA = priorAdded.get(fp) || new Set<string>();
+              const priorR = priorRemoved.get(fp) || new Set<string>();
+              const lines = part.split('\n');
+              const keptLines: string[] = [];
+              let hasUnique = false;
+              for (const line of lines) {
+                if (line.startsWith('+') && !line.startsWith('+++')) {
+                  const content = line.slice(1);
+                  if (priorA.has(content)) continue;
+                  keptLines.push(line);
+                  hasUnique = true;
+                } else if (line.startsWith('-') && !line.startsWith('---')) {
+                  const content = line.slice(1);
+                  if (priorR.has(content)) continue;
+                  keptLines.push(line);
+                  hasUnique = true;
+                } else {
+                  keptLines.push(line);
+                }
+              }
+              if (hasUnique) kept.push(keptLines.join('\n'));
+            }
+            return kept.join('').trim();
+          };
+
+          const priorAddedUnion = new Map<string, Set<string>>();
+          const priorRemovedUnion = new Map<string, Set<string>>();
+          const uniqueByIndex = new Map<number, {
+            uniqueAddedCount: number;
+            uniqueRemovedCount: number;
+            uniqueFiles: Set<string>;
+            filteredDiff: string;
+            filteredUncommitted: string;
+          }>();
+          // Extract `editsJson`-derived file set per prompt. When the
+          // per-agent extractor produced a non-empty edit list, that
+          // list is AUTHORITATIVE for which files the agent actually
+          // touched — strips pre-existing working-tree dirt that the
+          // CLI's smart filter wrongly carried into pc.diff /
+          // pc.uncommittedDiff. Returns null when editsJson is missing
+          // or empty (then we fall back to whatever git capture gave
+          // us).
+          const editsFilesByIndex = new Map<number, Set<string> | null>();
+          for (const pc of orderedPcs) {
+            let editsFiles: Set<string> | null = null;
+            if (typeof pc.editsJson === 'string' && pc.editsJson.length > 0) {
+              try {
+                const cap = JSON.parse(pc.editsJson);
+                if (cap && Array.isArray(cap.edits) && cap.edits.length > 0) {
+                  editsFiles = new Set<string>();
+                  for (const e of cap.edits) {
+                    if (e && typeof e.file === 'string') editsFiles.add(e.file);
+                  }
+                  if (editsFiles.size === 0) editsFiles = null;
+                }
+              } catch { /* malformed — leave null */ }
+            }
+            editsFilesByIndex.set(pc.promptIndex, editsFiles);
+          }
+          for (const pc of orderedPcs) {
+            const blanks = blankByIndex.get(pc.promptIndex) || { diff: false, uncommitted: false, files: false };
+            const editsFiles = editsFilesByIndex.get(pc.promptIndex) ?? null;
+            // Use stripped text so auto-managed files (CLAUDE.md etc) are
+            // excluded from the per-prompt content sets. Also strip to
+            // editsJson's file list when populated, so files the agent
+            // didn't actually touch (pre-existing dirt or smart-filter
+            // false positives) don't pollute priorUnion OR the
+            // displayed diff.
+            let myDiff = blanks.diff ? '' : stripAutoManagedSections(pc.diff || '');
+            let myUnc = blanks.uncommitted ? '' : stripAutoManagedSections(pc.uncommittedDiff || '');
+            if (editsFiles) {
+              myDiff = stripDiffToFiles(myDiff, editsFiles);
+              myUnc = stripDiffToFiles(myUnc, editsFiles);
+            }
+            const sameContent = myDiff && myDiff === myUnc;
+            const combined = sameContent ? myDiff : myDiff + '\n' + myUnc;
+            const { added: myAddedByFile, removed: myRemovedByFile } = extractByFile(combined);
+            // Snapshot priorUnion BEFORE folding this prompt in, then
+            // use it to filter the displayed diff text at the LINE
+            // level — preserves multi-file prompts where one file has
+            // unique work but another file's `+`/`-` are all carry-over
+            // from prior prompts (file-only filtering would still
+            // include the carry-over file).
+            const filteredDiff = filterDiffByPriorContent(myDiff, priorAddedUnion, priorRemovedUnion);
+            const filteredUncommitted = filterDiffByPriorContent(myUnc, priorAddedUnion, priorRemovedUnion);
+            let uniqueAddedCount = 0;
+            let uniqueRemovedCount = 0;
+            const uniqueFiles = new Set<string>();
+            for (const [fp, contents] of myAddedByFile) {
+              const prior = priorAddedUnion.get(fp) || new Set<string>();
+              let unique = 0;
+              for (const c of contents) {
+                if (!prior.has(c)) unique++;
+              }
+              if (unique > 0) uniqueFiles.add(fp);
+              uniqueAddedCount += unique;
+            }
+            for (const [fp, contents] of myRemovedByFile) {
+              const prior = priorRemovedUnion.get(fp) || new Set<string>();
+              let unique = 0;
+              for (const c of contents) {
+                if (!prior.has(c)) unique++;
+              }
+              if (unique > 0) uniqueFiles.add(fp);
+              uniqueRemovedCount += unique;
+            }
+            uniqueByIndex.set(pc.promptIndex, {
+              uniqueAddedCount,
+              uniqueRemovedCount,
+              uniqueFiles,
+              filteredDiff,
+              filteredUncommitted,
+            });
+            // Fold this prompt's content into the running union AFTER
+            // computing its unique set — so prompt N's measurement is
+            // against {N-1, N-2, ...} and prompt N+1's is against
+            // {N, N-1, N-2, ...}.
+            for (const [fp, contents] of myAddedByFile) {
+              if (!priorAddedUnion.has(fp)) priorAddedUnion.set(fp, new Set());
+              const s = priorAddedUnion.get(fp)!;
+              for (const c of contents) s.add(c);
+            }
+            for (const [fp, contents] of myRemovedByFile) {
+              if (!priorRemovedUnion.has(fp)) priorRemovedUnion.set(fp, new Set());
+              const s = priorRemovedUnion.get(fp)!;
+              for (const c of contents) s.add(c);
+            }
+          }
           return s.promptChanges
             .map((pc: any) => {
               const blanks = blankByIndex.get(pc.promptIndex) || { diff: false, uncommitted: false, files: false };
@@ -454,34 +634,33 @@ function mapSession(s: any, pullRequests?: any[]) {
                 cleanUncommitted = stripDiffToFiles(cleanUncommitted, pcEditsFiles);
               }
 
-              // Always derive linesAdded / linesRemoved from the
-              // CURRENT diff text we're returning — never trust the
-              // CLI-stored pc.linesAdded / pc.linesRemoved. Mid-prompt
-              // heartbeats sometimes wrote the WORKING-TREE totals to
-              // those fields (which included pre-existing dirt from
-              // prior sessions) and never updated them after the
-              // post-commit hook trimmed pc.diff to just this prompt's
-              // actual changes. The diff is the source of truth; the
-              // numeric fields are advisory and now derived from it.
-              const countLinesInDiff = (txt: string): { added: number; removed: number } => {
-                if (!txt) return { added: 0, removed: 0 };
-                let added = 0; let removed = 0;
-                for (const line of txt.split('\n')) {
-                  if (line.startsWith('+') && !line.startsWith('+++')) added++;
-                  else if (line.startsWith('-') && !line.startsWith('---')) removed++;
-                }
-                return { added, removed };
-              };
-              const diffCounts = countLinesInDiff(cleanDiff);
-              const uncCounts = countLinesInDiff(cleanUncommitted);
-              // Some CLI capture paths (Gemini in particular) store the
-              // SAME content in pc.diff and pc.uncommittedDiff. Summing
-              // would double-count. When the two strings match exactly,
-              // count once; otherwise treat them as disjoint
-              // (committed + still-pending sets) and sum.
-              const sameContent = cleanDiff && cleanDiff === cleanUncommitted;
-              const totalAdded = sameContent ? diffCounts.added : diffCounts.added + uncCounts.added;
-              const totalRemoved = sameContent ? diffCounts.removed : diffCounts.removed + uncCounts.removed;
+              // Use the line-level-filtered diff produced by the
+              // pre-pass: every `+`/`-` line that already appeared in a
+              // prior prompt's diff has been stripped, and any file
+              // section that ended up with no remaining `+`/`-` lines
+              // was dropped entirely. This fixes the cumulative-capture
+              // bug where prompt N's pc.diff / pc.uncommittedDiff
+              // includes carry-over content from prior uncommitted
+              // edits.
+              const uniq = uniqueByIndex.get(pc.promptIndex);
+              if (uniq && uniq.uniqueFiles.size > 0) {
+                cleanDiff = capDiffForResponse(uniq.filteredDiff);
+                cleanUncommitted = capDiffForResponse(uniq.filteredUncommitted);
+                cleanFiles = cleanFiles.filter((f) => {
+                  const basename = f.split('/').pop() || '';
+                  return uniq.uniqueFiles.has(f) || uniq.uniqueFiles.has(basename);
+                });
+              } else if (uniq) {
+                // Prompt had ZERO unique work — every `+`/`-` line was a
+                // duplicate of prior prompts'. Treat as chat-only: blank
+                // diff, blank files. Without this the prompt panel would
+                // still render the carry-over diff text.
+                cleanDiff = '';
+                cleanUncommitted = '';
+                cleanFiles = [];
+              }
+              const totalAdded = uniq?.uniqueAddedCount ?? 0;
+              const totalRemoved = uniq?.uniqueRemovedCount ?? 0;
               return {
                 promptIndex: pc.promptIndex,
                 promptText: pc.promptText,
