@@ -454,14 +454,42 @@ function mapSession(s: any, pullRequests?: any[]) {
                 cleanUncommitted = stripDiffToFiles(cleanUncommitted, pcEditsFiles);
               }
 
+              // Always derive linesAdded / linesRemoved from the
+              // CURRENT diff text we're returning — never trust the
+              // CLI-stored pc.linesAdded / pc.linesRemoved. Mid-prompt
+              // heartbeats sometimes wrote the WORKING-TREE totals to
+              // those fields (which included pre-existing dirt from
+              // prior sessions) and never updated them after the
+              // post-commit hook trimmed pc.diff to just this prompt's
+              // actual changes. The diff is the source of truth; the
+              // numeric fields are advisory and now derived from it.
+              const countLinesInDiff = (txt: string): { added: number; removed: number } => {
+                if (!txt) return { added: 0, removed: 0 };
+                let added = 0; let removed = 0;
+                for (const line of txt.split('\n')) {
+                  if (line.startsWith('+') && !line.startsWith('+++')) added++;
+                  else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+                }
+                return { added, removed };
+              };
+              const diffCounts = countLinesInDiff(cleanDiff);
+              const uncCounts = countLinesInDiff(cleanUncommitted);
+              // Some CLI capture paths (Gemini in particular) store the
+              // SAME content in pc.diff and pc.uncommittedDiff. Summing
+              // would double-count. When the two strings match exactly,
+              // count once; otherwise treat them as disjoint
+              // (committed + still-pending sets) and sum.
+              const sameContent = cleanDiff && cleanDiff === cleanUncommitted;
+              const totalAdded = sameContent ? diffCounts.added : diffCounts.added + uncCounts.added;
+              const totalRemoved = sameContent ? diffCounts.removed : diffCounts.removed + uncCounts.removed;
               return {
                 promptIndex: pc.promptIndex,
                 promptText: pc.promptText,
                 filesChanged: cleanFiles,
                 diff: cleanDiff,
                 uncommittedDiff: cleanUncommitted,
-                linesAdded: pc.linesAdded || 0,
-                linesRemoved: pc.linesRemoved || 0,
+                linesAdded: totalAdded,
+                linesRemoved: totalRemoved,
                 aiPercentage: pc.aiPercentage ?? 100,
                 checkpointType: pc.checkpointType || null,
                 commitSha: pc.commitSha || null,
