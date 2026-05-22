@@ -2618,6 +2618,13 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         let enforcementRules: any[] | undefined;
         if (isConnectedMode() && autoConfig) {
           try {
+            // Pass the stable conversation id for agents that have one so the
+            // server's session dedup can match this auto-create against the
+            // session-start row instead of minting a duplicate that later
+            // collides with an unrelated conversation on the same repo+agent.
+            const autoAgentSessionId = stableAgents.includes(agentSlug || '')
+              ? (input.session_id || undefined)
+              : undefined;
             const result = await api.startSession({
               machineId: autoAgentConfig.machineId,
               prompt: input.prompt || '',
@@ -2626,6 +2633,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
               repoUrl: repoUrl || undefined,
               agentSlug: finalAgentSlug,
               branch: branch || undefined,
+              agentSessionId: autoAgentSessionId,
             });
             sessionId = result.sessionId as string;
             agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;

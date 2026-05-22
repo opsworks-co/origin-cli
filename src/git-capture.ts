@@ -1,5 +1,5 @@
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
-import { shouldIgnoreFile, stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
+import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -116,7 +116,14 @@ export function captureGitState(
         ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
         gitOpts,
       ).trim();
-      const filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean).filter(f => !shouldIgnoreFile(f)) : [];
+      // Don't filter filesChanged through shouldIgnoreFile — this list is the
+      // commit's metadata answer to "which files did this commit touch" and
+      // drives Commit.fileCount on the dashboard. Hiding lock files / dist /
+      // generated entries here makes the UI report fewer files than git
+      // actually shows. Diff-content filtering still happens at the patch
+      // layer (stripIgnoredSectionsFromDiff), which is the right place to
+      // hide bookkeeping changes without lying about file counts.
+      const filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean) : [];
       commitDetails.push({ sha, message, author, filesChanged });
     } catch {
       // If we can't get details for a commit, include it with minimal info

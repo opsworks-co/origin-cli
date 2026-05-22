@@ -994,24 +994,37 @@ async function ping() {
         handleBranch(data.command);
       }
 
-      // If server says session is ended/completed, self-terminate
-      if (data.status && data.status !== 'RUNNING') {
-        // Clean up PID and state files
-        try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
-        if (stateFile) {
-          try {
-            const raw = fs.readFileSync(stateFile, 'utf-8');
-            const state = JSON.parse(raw);
-            state.status = 'ENDED';
-            state.endedAt = new Date().toISOString();
-            const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
-            const archiveDir = `${homeDir}/.origin/sessions`;
-            fs.mkdirSync(archiveDir, { recursive: true });
-            fs.writeFileSync(`${archiveDir}/${(state.sessionId || sessionId).slice(0, 12)}.json`, JSON.stringify(state), { mode: 0o600 });
-          } catch { /* best effort */ }
-          try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
+      // If server says session is ended/completed, self-terminate — BUT only
+      // when the agent process is genuinely gone. The server occasionally
+      // marks a session COMPLETED while the agent is still alive (a sibling
+      // conversation got collapsed onto the same row, an admin ended it,
+      // server-side auto-end fired prematurely, etc.). If we tore the local
+      // state down in that case the live agent's next prompt would orphan,
+      // and the dashboard would never get to render the session as IDLE.
+      // While the parent is alive we keep pinging — the server can recompute
+      // RUNNING/IDLE from lastActivityAt on subsequent pings.
+      if (data.status && data.status !== 'RUNNING' && data.status !== 'IDLE') {
+        const parentDead = parentPid > 0 && !isProcessAlive(parentPid);
+        const noParent = parentPid <= 0;
+        if (parentDead || (noParent && isStateFileStale())) {
+          try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+          if (stateFile) {
+            try {
+              const raw = fs.readFileSync(stateFile, 'utf-8');
+              const state = JSON.parse(raw);
+              state.status = 'ENDED';
+              state.endedAt = new Date().toISOString();
+              const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+              const archiveDir = `${homeDir}/.origin/sessions`;
+              fs.mkdirSync(archiveDir, { recursive: true });
+              fs.writeFileSync(`${archiveDir}/${(state.sessionId || sessionId).slice(0, 12)}.json`, JSON.stringify(state), { mode: 0o600 });
+            } catch { /* best effort */ }
+            try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
+          }
+          process.exit(0);
         }
-        process.exit(0);
+        // Parent still alive: don't tear down. Continue pinging so the server
+        // can re-derive RUNNING/IDLE from lastActivityAt on the next tick.
       }
     }
   } catch {
