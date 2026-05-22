@@ -202,7 +202,15 @@ async function pushInflightDiff(): Promise<void> {
         // those landed BEFORE this prompt started and belong to a sibling.
         if (isHex(promptBaseline) && !isAncestor(promptBaseline, sha)) continue;
         try {
-          const out = execFileSync('git', ['show', sha, '--format=', '--no-color'], gitOpts).toString().trim();
+          // --unified=2000 = full-file context for any reasonable source file.
+          // The blame route reconstructs per-line attribution by replaying
+          // each prompt's apply_patch / Edit onto a baseline buffer built
+          // from this diff. With only the default 3-line context, the
+          // buffer is full of small holes and replay's findSubsequence
+          // misses, forcing attribution into content-keyed guessing.
+          // Full-file context lets every edit anchor to a real position
+          // and removes the guesswork. Capped by MAX_DIFF_SIZE below.
+          const out = execFileSync('git', ['show', sha, '--format=', '--no-color', '--unified=2000'], gitOpts).toString().trim();
           if (out) parts.push(out);
         } catch { /* commit may be unreachable after a rebase */ }
       }
@@ -215,7 +223,10 @@ async function pushInflightDiff(): Promise<void> {
       // part), which made the dashboard render lines as "uncommitted" even
       // after the agent had committed them. `git diff HEAD` is uncommitted-
       // only by definition.
-      uncommittedDiff = execFileSync('git', ['diff', 'HEAD'], gitOpts).toString();
+      // --unified=2000: see comment above on committed diff. Per-prompt
+      // diff feeds the blame fallback when sessionDiff doesn't cover the
+      // file — and that path needs full-file context to anchor edits.
+      uncommittedDiff = execFileSync('git', ['diff', '--unified=2000', 'HEAD'], gitOpts).toString();
     } catch { /* clean tree — no uncommitted */ }
 
     if (!committedDiff && !uncommittedDiff) return; // nothing to send

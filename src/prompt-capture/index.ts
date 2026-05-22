@@ -73,22 +73,94 @@ export function capturePromptEdits(opts: CaptureInputs): PromptCapture[] {
 //   • replace            → { op: 'edit',  old_string, new_string }
 //   • NotebookEdit       → cells become edits keyed by source
 
-const CLAUDE_EDIT_TOOLS = new Set([
+// Default tool-name allow-lists, mergeable with user config at
+// ~/.origin/tool-aliases.json:
+//   { "edit": ["NewToolName"], "write": [...], "applyPatch": [...], "multiEdit": [...] }
+// User entries are UNION-ed with the defaults — config can only EXTEND
+// recognition, never REMOVE built-in names, so an unparseable config
+// can't accidentally disable existing capture. See loadToolAliases.
+const DEFAULT_EDIT_TOOLS = [
   'Edit',
   'mcp__acp__Edit',
   'replace',
   'edit',
   'apply_diff',
-]);
-const CLAUDE_WRITE_TOOLS = new Set([
+  // Cursor's tool name for old_string → new_string edits. Shape
+  // matches Claude's Edit exactly (path / old_string / new_string).
+  'StrReplace',
+];
+const DEFAULT_WRITE_TOOLS = [
   'Write',
   'mcp__acp__Write',
   'write_file',
   'WriteFile',
   'write',
   'create',
-]);
-const CLAUDE_MULTI_EDIT_TOOLS = new Set(['MultiEdit', 'mcp__acp__MultiEdit']);
+];
+// Tools that pass a multi-file apply_patch payload in `input` (string)
+// or `args.command[1]`. Shared by Cursor and any other agent that
+// exposes Codex-style apply_patch.
+const DEFAULT_APPLY_PATCH_TOOLS = ['ApplyPatch', 'apply_patch'];
+const DEFAULT_MULTI_EDIT_TOOLS = ['MultiEdit', 'mcp__acp__MultiEdit'];
+
+// Read-only knobs derived once at module load. If the user wants to
+// teach the extractor about a tool a new agent version shipped, they
+// drop a name into ~/.origin/tool-aliases.json without waiting for a
+// CLI release.
+const { CLAUDE_EDIT_TOOLS, CLAUDE_WRITE_TOOLS, APPLY_PATCH_TOOLS, CLAUDE_MULTI_EDIT_TOOLS } = loadToolAliases();
+
+function loadToolAliases(): {
+  CLAUDE_EDIT_TOOLS: Set<string>;
+  CLAUDE_WRITE_TOOLS: Set<string>;
+  APPLY_PATCH_TOOLS: Set<string>;
+  CLAUDE_MULTI_EDIT_TOOLS: Set<string>;
+} {
+  const make = (defaults: string[], extras?: unknown): Set<string> => {
+    const out = new Set(defaults);
+    if (Array.isArray(extras)) {
+      for (const v of extras) if (typeof v === 'string' && v.length > 0) out.add(v);
+    }
+    return out;
+  };
+  let cfg: any = null;
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || '';
+    if (home) {
+      const p = `${home}/.origin/tool-aliases.json`;
+      if (fs.existsSync(p)) {
+        cfg = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      }
+    }
+  } catch { /* malformed config — fall back to defaults silently */ }
+  return {
+    CLAUDE_EDIT_TOOLS: make(DEFAULT_EDIT_TOOLS, cfg?.edit),
+    CLAUDE_WRITE_TOOLS: make(DEFAULT_WRITE_TOOLS, cfg?.write),
+    APPLY_PATCH_TOOLS: make(DEFAULT_APPLY_PATCH_TOOLS, cfg?.applyPatch),
+    CLAUDE_MULTI_EDIT_TOOLS: make(DEFAULT_MULTI_EDIT_TOOLS, cfg?.multiEdit),
+  };
+}
+
+// Tool names we've already warned about in this process — dedupes
+// warnings so a session with 50 calls to an unknown tool only logs
+// once. Cleared per-process; warnings re-emit on next session.
+const warnedUnknownTools = new Set<string>();
+
+// Log when an extractor sees a tool with a file-shaped input but the
+// tool name doesn't match any recognized set. This is the early-warning
+// signal for "an agent renamed something and we'd otherwise miss every
+// edit silently." Writes to stderr so the CLI's debug log captures it
+// without polluting stdout (which carries hook protocol JSON).
+function noteUnknownTool(agent: string, toolName: string, argsPreview: string): void {
+  if (!toolName || warnedUnknownTools.has(toolName)) return;
+  warnedUnknownTools.add(toolName);
+  try {
+    process.stderr.write(
+      `[origin] prompt-capture: ${agent} used unknown tool "${toolName}" (file-arg). ` +
+        `If this is a file edit, add it to ~/.origin/tool-aliases.json under "edit"/"write"/"applyPatch". ` +
+        `args=${argsPreview.slice(0, 120)}\n`,
+    );
+  } catch { /* stderr might be closed in some shells — ignore */ }
+}
 
 function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
   if (!opts.transcriptPath || !fs.existsSync(opts.transcriptPath)) return [];
@@ -138,6 +210,23 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
       if (block?.type !== 'tool_use') continue;
       const name = String(block.name || '');
       const input = block.input || {};
+
+      // ApplyPatch handed in `input` as a raw apply_patch string (Cursor)
+      // or in `input.command[1]` (Codex shell wrapper). Parse before the
+      // pickFilePath bail-out — the patch carries its own file paths
+      // inside `*** Update File:` markers, not in input.path.
+      if (APPLY_PATCH_TOOLS.has(name)) {
+        const patchText = typeof input === 'string'
+          ? input
+          : typeof input.input === 'string' ? input.input
+            : Array.isArray(input.command) && typeof input.command[1] === 'string' ? input.command[1]
+              : '';
+        for (const e of parseApplyPatch(patchText, opts.repoPath)) {
+          current.edits.push(e);
+        }
+        continue;
+      }
+
       const file = pickFilePath(input);
       if (!file) continue;
       const repoRelative = makeRepoRelative(file, opts.repoPath);
@@ -173,6 +262,10 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
             source: 'tool_call',
           });
         }
+      } else {
+        // Tool we don't recognize but its input carries a file path —
+        // possibly a renamed edit tool we should know about. Log once.
+        noteUnknownTool(opts.agent, name, JSON.stringify(input));
       }
     }
   }
@@ -235,16 +328,21 @@ function makeRepoRelative(filePath: string, repoPath: string): string {
 // edit, write. Args carry { file_path | path, old_string, new_string,
 // content }.
 
+// Gemini's chat transcript is a JSONL stream (NOT a single JSON object
+// with `messages` / `history` like older Gemini CLI versions wrote).
+// Line 1 is a metadata header with `sessionId`/`kind`; subsequent lines
+// are turn events:
+//   user:   {"type":"user",   "content":[{"text":"..."}]}
+//   model:  {"type":"gemini", "toolCalls":[{"name":"replace", "args":{
+//             file_path, old_string, new_string }}, ...]}
+//
+// Tool names: `replace` (Edit-equivalent), `write_file`, plus non-edit
+// tools like `run_shell_command`, `update_topic`, `update_plan`. We
+// walk tool calls and emit a PromptEdit for the file-touching ones.
 function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
   if (!opts.transcriptPath || !fs.existsSync(opts.transcriptPath)) return [];
-  let parsed: any;
-  try {
-    parsed = JSON.parse(fs.readFileSync(opts.transcriptPath, 'utf-8'));
-  } catch {
-    return [];
-  }
-  const messages: any[] = parsed?.messages || parsed?.history || [];
-  if (!Array.isArray(messages)) return [];
+  let raw: string;
+  try { raw = fs.readFileSync(opts.transcriptPath, 'utf-8'); } catch { return []; }
 
   const turns: PromptCapture[] = [];
   const startTurn = (text: string): PromptCapture => ({
@@ -256,25 +354,32 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
   });
   let current: PromptCapture | null = null;
 
-  for (const msg of messages) {
-    const role = msg?.role || '';
-    if (role === 'user' || role === 'human') {
-      const parts = Array.isArray(msg?.parts) ? msg.parts : [];
+  // Trim the metadata-header line up front so we don't misclassify it.
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let evt: any;
+    try { evt = JSON.parse(line); } catch { continue; }
+    const t = evt?.type || '';
+
+    if (t === 'user' || t === 'human') {
+      const parts = Array.isArray(evt?.content) ? evt.content : [];
       const text = parts.map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('').trim();
-      if (text) {
-        if (current) turns.push(current);
-        current = startTurn(text);
-      }
+      if (!text) continue;
+      if (current) turns.push(current);
+      current = startTurn(text);
       continue;
     }
-    if (role !== 'model' && role !== 'assistant') continue;
+
+    // Treat anything else as model output (Gemini's events use
+    // type='gemini'; future variants may use 'model'/'assistant').
+    if (t !== 'gemini' && t !== 'model' && t !== 'assistant') continue;
     if (!current) current = startTurn('');
-    const parts = Array.isArray(msg?.parts) ? msg.parts : [];
-    for (const part of parts) {
-      const fc = part?.functionCall;
-      if (!fc || typeof fc !== 'object') continue;
-      const name = String(fc.name || '');
-      const args = fc.args || {};
+
+    const toolCalls = Array.isArray(evt?.toolCalls) ? evt.toolCalls : [];
+    for (const tc of toolCalls) {
+      if (!tc || typeof tc !== 'object') continue;
+      const name = String(tc.name || '');
+      const args = tc.args || {};
       const file = pickFilePath(args);
       if (!file) continue;
       const repoRelative = makeRepoRelative(file, opts.repoPath);
@@ -296,9 +401,23 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
           newContent: content,
           source: 'tool_call',
         });
+      } else if (CLAUDE_MULTI_EDIT_TOOLS.has(name) && Array.isArray(args.edits)) {
+        for (const e of args.edits) {
+          if (!e || typeof e !== 'object') continue;
+          current.edits.push({
+            file: repoRelative,
+            op: 'edit',
+            oldContent: typeof e.old_string === 'string' ? e.old_string : '',
+            newContent: typeof e.new_string === 'string' ? e.new_string : '',
+            source: 'tool_call',
+          });
+        }
+      } else {
+        noteUnknownTool(opts.agent, name, JSON.stringify(args));
       }
     }
   }
+
   if (current) turns.push(current);
   attributeCommitsToPrompts(turns, opts);
   return turns;
@@ -318,107 +437,280 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
 
 function extractFromCodexRollout(opts: CaptureInputs): PromptCapture[] {
   if (!opts.repoPath) return [];
-  const prompts = readCodexPrompts(opts);
-  if (prompts.length === 0) return [];
+  const rolloutText = readCodexRolloutText(opts);
+  if (!rolloutText) return [];
   const gitOpts = { cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
 
-  // Get commits made during the session window with timestamps.
-  const commits: Array<{ sha: string; ts: number }> = [];
-  if (opts.headShaAtStart && opts.headShaAtEnd && HEX.test(opts.headShaAtStart) && HEX.test(opts.headShaAtEnd)) {
-    try {
-      const log = execFileSync(
-        'git',
-        ['log', '--format=%H %ct', `${opts.headShaAtStart}..${opts.headShaAtEnd}`],
-        gitOpts,
-      ).trim();
-      for (const ln of log.split('\n')) {
-        const m = ln.match(/^([0-9a-f]{7,40})\s+(\d+)$/);
-        if (m) commits.push({ sha: m[1], ts: Number(m[2]) * 1000 });
-      }
-    } catch { /* shallow clone or bad refs — bail out gracefully */ }
-  }
-  // Constrain to commits the session actually authored (post-commit hook)
-  // when that list exists. Otherwise trust the time-window result.
-  const ownShas = new Set((opts.sessionCommitShas || []).filter((s) => HEX.test(s)));
-  const eligibleCommits = ownShas.size > 0
-    ? commits.filter((c) => ownShas.has(c.sha))
-    : commits;
+  // Walk the rollout chronologically. Each real user-role `message` event
+  // advances the current prompt index. Each `custom_tool_call` named
+  // `apply_patch` is parsed and attributed to the CURRENT prompt — its
+  // patch text is the ground truth for which files Codex actually
+  // modified, so pre-existing working-tree dirt (other agents' leftover
+  // edits, manual user changes, etc.) is automatically excluded.
+  // function_call_output events with git commit SHAs flag commits to the
+  // current prompt; we then read each commit via `git show` to add
+  // commit-derived edits.
+  const turns: PromptCapture[] = [];
+  let currentPromptIdx = -1;
+  const seenShas = new Set<string>();
 
-  // Assign each commit to the LATEST prompt whose timestamp <= commit time.
-  // Falls back to the most recent prompt when timestamps are missing.
-  const turns: PromptCapture[] = prompts.map((p, i) => ({
-    promptIndex: i,
-    promptText: (p.text || '').slice(0, 1000),
-    agent: 'codex',
-    edits: [],
-    commits: [],
-  }));
-  for (const c of eligibleCommits) {
-    let pickIdx = -1;
-    for (let i = 0; i < prompts.length; i++) {
-      const pt = prompts[i].timestamp;
-      if (pt > 0 && c.ts > 0 && pt <= c.ts) pickIdx = i;
-    }
-    if (pickIdx < 0) pickIdx = prompts.length - 1;
-    turns[pickIdx].commits.push(c.sha);
-    appendCommitEdits(turns[pickIdx], c.sha, opts.repoPath, gitOpts);
-  }
+  const startTurn = (text: string, timestamp: number): void => {
+    const idx = turns.length;
+    turns.push({
+      promptIndex: idx,
+      promptText: (text || '').slice(0, 1000),
+      agent: 'codex',
+      edits: [],
+      commits: [],
+    });
+    currentPromptIdx = idx;
+    // Avoid unused-var TS warning; timestamps may be read later by
+    // attributors that haven't been wired yet.
+    void timestamp;
+  };
 
-  // Fold uncommitted Codex edits (working tree vs HEAD) into the last
-  // commit-producing prompt — Codex's stop hook doesn't commit pending
-  // work, so without this any "edit but don't commit yet" turn is
-  // captured as zero edits.
-  try {
-    const uncommitted = execFileSync('git', ['diff', '--unified=2000', 'HEAD'], gitOpts).trim();
-    if (uncommitted) {
-      const target = lastCommitProducingPrompt(turns);
-      if (target) appendUncommittedEditsFromDiff(target, uncommitted);
-    }
-  } catch { /* clean tree — nothing to fold */ }
-
-  return turns;
-}
-
-function readCodexPrompts(opts: CaptureInputs): Array<{ text: string; timestamp: number }> {
-  if (opts.codexPrompts && opts.codexPrompts.length > 0) return opts.codexPrompts;
-  if (!opts.transcriptPath || !fs.existsSync(opts.transcriptPath)) return [];
-  let text: string;
-  try {
-    if (opts.transcriptPath.endsWith('.zst') || opts.transcriptPath.endsWith('.zstd')) {
-      const compressed = fs.readFileSync(opts.transcriptPath);
-      const decompressed = fzstd.decompress(new Uint8Array(compressed));
-      text = Buffer.from(decompressed).toString('utf-8');
-    } else {
-      text = fs.readFileSync(opts.transcriptPath, 'utf-8');
-    }
-  } catch {
-    return [];
-  }
-  const out: Array<{ text: string; timestamp: number }> = [];
-  for (const line of text.split('\n')) {
+  for (const line of rolloutText.split('\n')) {
     if (!line.trim()) continue;
     let event: any;
     try { event = JSON.parse(line); } catch { continue; }
     const payload = event?.payload;
-    if (payload?.type !== 'message') continue;
-    const role = payload.role || '';
-    if (role !== 'user' && role !== 'human') continue;
-    const body = extractCodexMessageText(payload);
-    if (!body) continue;
-    const ts = (() => {
-      const candidates = [event?.timestamp, event?.created_at, payload?.timestamp, payload?.created_at];
-      for (const c of candidates) {
-        if (typeof c === 'number' && Number.isFinite(c)) return c > 1e12 ? c : c * 1000;
-        if (typeof c === 'string') {
-          const n = Date.parse(c);
-          if (Number.isFinite(n)) return n;
-        }
+    const payloadType = payload?.type || '';
+
+    if (payloadType === 'message' && (payload.role === 'user' || payload.role === 'human')) {
+      const text = extractCodexMessageText(payload);
+      if (!isRealCodexUserPrompt(text)) continue;
+      const ts = readCodexEventTimestamp(event, payload);
+      startTurn(text, ts);
+      continue;
+    }
+
+    if (currentPromptIdx < 0) continue;
+
+    // apply_patch is Codex's primary edit tool. The rollout records it
+    // as a `custom_tool_call` with name="apply_patch" and the patch text
+    // in `input`. Parsing this gives us the EXACT files and lines Codex
+    // changed — independent of whatever junk the working tree carries.
+    if (
+      (payloadType === 'custom_tool_call' || payloadType === 'function_call') &&
+      payload?.name === 'apply_patch'
+    ) {
+      const patchText = typeof payload.input === 'string'
+        ? payload.input
+        : typeof payload.arguments === 'string' ? payload.arguments : '';
+      const edits = parseApplyPatch(patchText, opts.repoPath);
+      for (const e of edits) turns[currentPromptIdx].edits.push(e);
+      continue;
+    }
+
+    // function_call_output / local_shell_call_output may contain git
+    // commit SHAs in their stdout — attribute those commits to the
+    // current prompt and pull their per-file edits from `git show`.
+    if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output') {
+      const out = stringifyCodexOutput(payload?.output);
+      if (!out) continue;
+      for (const sha of extractGitShasFromOutput(out)) {
+        if (seenShas.has(sha)) continue;
+        // Constrain to commits this session authored when the post-commit
+        // hook gave us that list; otherwise trust the output marker.
+        const ownShas = new Set((opts.sessionCommitShas || []).filter((s) => HEX.test(s)));
+        if (ownShas.size > 0 && !ownShas.has(sha)) continue;
+        seenShas.add(sha);
+        turns[currentPromptIdx].commits.push(sha);
+        appendCommitEdits(turns[currentPromptIdx], sha, opts.repoPath, gitOpts);
       }
-      return 0;
-    })();
-    out.push({ text: body, timestamp: ts });
+    }
   }
-  return out;
+
+  return turns;
+}
+
+// Read a Codex rollout file (handles both `.jsonl` and `.jsonl.zst`).
+function readCodexRolloutText(opts: CaptureInputs): string {
+  if (!opts.transcriptPath || !fs.existsSync(opts.transcriptPath)) return '';
+  try {
+    if (opts.transcriptPath.endsWith('.zst') || opts.transcriptPath.endsWith('.zstd')) {
+      const compressed = fs.readFileSync(opts.transcriptPath);
+      const decompressed = fzstd.decompress(new Uint8Array(compressed));
+      return Buffer.from(decompressed).toString('utf-8');
+    }
+    return fs.readFileSync(opts.transcriptPath, 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+// True only for messages that represent the human user typing in the
+// chat box. Codex replays AGENTS.md, <INSTRUCTIONS>, and
+// <environment_context> blocks as the FIRST user-role event in every
+// rollout — without this filter those wrappers become bogus prompt 0
+// and shift every real prompt's index by one.
+function isRealCodexUserPrompt(text: string): boolean {
+  if (!text || !text.trim()) return false;
+  if (text.includes('<!-- origin-managed -->')) return false;
+  if (/^#\s+AGENTS\.md instructions for /m.test(text)) return false;
+  const stripped = text
+    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+    .trim();
+  return stripped.length > 0;
+}
+
+function readCodexEventTimestamp(event: any, payload: any): number {
+  const candidates = [event?.timestamp, event?.created_at, payload?.timestamp, payload?.created_at];
+  for (const c of candidates) {
+    if (typeof c === 'number' && Number.isFinite(c)) return c > 1e12 ? c : c * 1000;
+    if (typeof c === 'string') {
+      const n = Date.parse(c);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return 0;
+}
+
+function stringifyCodexOutput(out: any): string {
+  if (out == null) return '';
+  if (typeof out === 'string') return out;
+  if (typeof out === 'object') {
+    if (typeof out.content === 'string') return out.content;
+    if (typeof out.stdout === 'string') return out.stdout;
+    try { return JSON.stringify(out); } catch { return ''; }
+  }
+  return String(out);
+}
+
+function extractGitShasFromOutput(out: string): string[] {
+  const shas: string[] = [];
+  // `[branch <short-sha>] message` is git commit's canonical stdout line.
+  for (const m of out.matchAll(/\[\S+\s+([0-9a-f]{7,40})\]/gi)) {
+    shas.push(m[1]);
+  }
+  // `commit <sha>` from `git show`-style output.
+  for (const m of out.matchAll(/^commit\s+([0-9a-f]{7,40})/gim)) {
+    shas.push(m[1]);
+  }
+  return shas;
+}
+
+// Parse Codex's apply_patch format and emit ONE PromptEdit per hunk
+// inside each file section (not per file). A hunk is a contiguous
+// run of context + `+`/`-` lines bounded by `@@` markers or file
+// boundaries. The format is:
+//
+//   *** Begin Patch
+//   *** Update File: path/to/file
+//   @@ optional anchor
+//    unchanged line
+//   -removed line
+//   +added line
+//   @@ next hunk
+//    other context
+//   +another added line
+//   *** End Patch
+//
+// Why per-hunk: the server's git-style position-replay anchor needs
+// `oldContent` to be a CONTIGUOUS slice of the source file. When a
+// single `*** Update File:` describes multiple non-adjacent hunks,
+// merging them into one oldContent string yields a fragmented
+// "before image" whose lines are NOT contiguous in the file — the
+// replay's findSubsequence then never matches. Per-hunk emission
+// keeps each oldContent a real contiguous excerpt.
+//
+// `*** Add File:` and `*** Delete File:` are file-level ops (whole
+// file create/delete) — emit ONE edit each, as before.
+function parseApplyPatch(patchText: string, repoPath: string): PromptEdit[] {
+  if (!patchText) return [];
+  const edits: PromptEdit[] = [];
+  const lines = patchText.split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const updateMatch = line.match(/^\*\*\* (Update|Add|Delete) File: (.+)$/);
+    if (!updateMatch) { i++; continue; }
+    const op: PromptEditOp =
+      updateMatch[1] === 'Add' ? 'create'
+      : updateMatch[1] === 'Delete' ? 'delete'
+      : 'edit';
+    const filePath = updateMatch[2].trim();
+    const repoRelative = makeRepoRelative(filePath, repoPath);
+    i++;
+    // Add/Delete are whole-file ops — collect the full body without
+    // splitting on `@@`. There aren't real hunks within these.
+    if (op === 'create' || op === 'delete') {
+      const oldParts: string[] = [];
+      const newParts: string[] = [];
+      while (i < lines.length) {
+        const ln = lines[i];
+        if (/^\*\*\* (Update|Add|Delete) File: /.test(ln)) break;
+        if (/^\*\*\* End Patch/.test(ln)) break;
+        if (/^\*\*\* End of File$/.test(ln)) { i++; continue; }
+        if (ln.startsWith('@@')) { i++; continue; }
+        if (ln.startsWith('+')) newParts.push(ln.slice(1));
+        else if (ln.startsWith('-')) oldParts.push(ln.slice(1));
+        else if (ln.startsWith(' ') || ln === '') {
+          const ctx = ln.startsWith(' ') ? ln.slice(1) : ln;
+          oldParts.push(ctx);
+          newParts.push(ctx);
+        }
+        i++;
+      }
+      edits.push({
+        file: repoRelative,
+        op,
+        oldContent: op === 'create' ? '' : oldParts.join('\n'),
+        newContent: op === 'delete' ? '' : newParts.join('\n'),
+        source: 'tool_call',
+      });
+      continue;
+    }
+    // Update file: split into hunks. A new hunk starts at each `@@`
+    // marker or at the first content line if no `@@` precedes it.
+    // Flush the current hunk's accumulated old/new content when we
+    // hit a new `@@`, a file boundary, or end-of-patch.
+    let oldParts: string[] = [];
+    let newParts: string[] = [];
+    const flushHunk = (): void => {
+      if (oldParts.length === 0 && newParts.length === 0) return;
+      // Skip pure-context hunks (no `+`/`-`) — they're noise.
+      const hasChange =
+        oldParts.length !== newParts.length ||
+        oldParts.some((s, idx) => s !== newParts[idx]);
+      if (!hasChange) {
+        oldParts = [];
+        newParts = [];
+        return;
+      }
+      edits.push({
+        file: repoRelative,
+        op: 'edit',
+        oldContent: oldParts.join('\n'),
+        newContent: newParts.join('\n'),
+        source: 'tool_call',
+      });
+      oldParts = [];
+      newParts = [];
+    };
+    while (i < lines.length) {
+      const ln = lines[i];
+      if (/^\*\*\* (Update|Add|Delete) File: /.test(ln)) { flushHunk(); break; }
+      if (/^\*\*\* End Patch/.test(ln)) { flushHunk(); break; }
+      if (/^\*\*\* End of File$/.test(ln)) { i++; continue; }
+      if (ln.startsWith('@@')) {
+        flushHunk();
+        i++;
+        continue;
+      }
+      if (ln.startsWith('+')) newParts.push(ln.slice(1));
+      else if (ln.startsWith('-')) oldParts.push(ln.slice(1));
+      else if (ln.startsWith(' ') || ln === '') {
+        const ctx = ln.startsWith(' ') ? ln.slice(1) : ln;
+        oldParts.push(ctx);
+        newParts.push(ctx);
+      }
+      i++;
+    }
+  }
+  return edits;
 }
 
 function extractCodexMessageText(payload: any): string {
@@ -479,63 +771,6 @@ function appendCommitEdits(
       commitSha: sha,
     });
   }
-}
-
-function lastCommitProducingPrompt(turns: PromptCapture[]): PromptCapture | null {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].commits.length > 0) return turns[i];
-  }
-  return turns.length > 0 ? turns[turns.length - 1] : null;
-}
-
-function appendUncommittedEditsFromDiff(turn: PromptCapture, diff: string): void {
-  // Parse the unified diff once and emit a PromptEdit per file section.
-  // We don't have pre/post blobs here (working tree only), so the server
-  // gets the raw diff stored alongside as a hint via `newContent` set to
-  // the post-image and `oldContent` set to the pre-image — both derived
-  // from the diff hunks for a faithful LCS at render time.
-  const sections = diff.split(/^(?=diff --git )/m);
-  for (const section of sections) {
-    const header = section.split('\n', 1)[0] || '';
-    const m = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
-    if (!m) continue;
-    const file = m[2];
-    const { oldText, newText } = reconstructPrePostFromHunks(section);
-    if (oldText === null && newText === null) continue;
-    turn.edits.push({
-      file,
-      op: 'edit',
-      oldContent: oldText ?? '',
-      newContent: newText ?? '',
-      source: 'uncommitted',
-    });
-  }
-}
-
-// Walk a unified diff file-section, accumulating the pre-image (context
-// + removed lines) and post-image (context + added lines). The two
-// pre/post strings are the inputs the server LCS-diffs at render time.
-function reconstructPrePostFromHunks(section: string): { oldText: string | null; newText: string | null } {
-  const oldParts: string[] = [];
-  const newParts: string[] = [];
-  let inHunk = false;
-  for (const line of section.split('\n')) {
-    if (line.startsWith('@@')) { inHunk = true; continue; }
-    if (!inHunk) continue;
-    if (line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('\\ ')) continue;
-    if (line.startsWith('+')) newParts.push(line.slice(1));
-    else if (line.startsWith('-')) oldParts.push(line.slice(1));
-    else if (line.startsWith(' ') || line === '') {
-      const c = line.startsWith(' ') ? line.slice(1) : line;
-      oldParts.push(c);
-      newParts.push(c);
-    }
-  }
-  if (oldParts.length === 0 && newParts.length === 0) {
-    return { oldText: null, newText: null };
-  }
-  return { oldText: oldParts.join('\n'), newText: newParts.join('\n') };
 }
 
 // ─── Shared post-processing ───────────────────────────────────────────────

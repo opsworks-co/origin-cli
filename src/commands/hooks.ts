@@ -1868,7 +1868,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       );
       if (existing.prePromptSha && currentHead && existing.prompts.length > 0 && !prevAlreadyCaptured) {
         try {
-          const prevCapture = captureGitState(repoPath, existing.prePromptSha);
+          const prevCapture = captureGitState(repoPath, existing.prePromptSha, { fullContext: true });
           const prevFilesSet = new Set<string>();
           for (const c of prevCapture.commitDetails) {
             for (const f of c.filesChanged) prevFilesSet.add(f);
@@ -2797,7 +2797,12 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           (s) => s.promptIndex === prevPromptIdx,
         );
         const captureBaseline = promptShadow?.shadowSha || state.prePromptSha;
-        const prevGitCapture = captureGitState(repoPath, captureBaseline);
+        // fullContext: per-prompt pc.diff feeds the blame route's
+        // fallback path when sessionDiff doesn't cover the file (typical
+        // for uncommitted work). Full-file context lets the replay
+        // anchor every editsJson edit at an exact position instead of
+        // falling through to content-keyed guessing.
+        const prevGitCapture = captureGitState(repoPath, captureBaseline, { fullContext: true });
         // Extract filesChanged from commit details + diff headers
         const prevFilesSet = new Set<string>();
         for (const c of prevGitCapture.commitDetails) {
@@ -3677,7 +3682,9 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     // Fall back to git-captured files if transcript parsing didn't find any
     // Use per-prompt baseline: prePromptSha (set at prompt start) > headShaAtLastStop > headShaAtStart
     const promptBaseline = state.prePromptSha || state.headShaAtLastStop || state.headShaAtStart;
-    const gitCapture = captureGitState(state.repoPath, promptBaseline);
+    // fullContext: per-prompt diff feeds AI Blame's replay. Full-file
+    // context lets every editsJson edit anchor at an exact position.
+    const gitCapture = captureGitState(state.repoPath, promptBaseline, { fullContext: true });
     let filesChanged = parsed.filesChanged;
     if (filesChanged.length === 0 && gitCapture.commitDetails.length > 0) {
       const gitFiles = new Set<string>();
@@ -3695,7 +3702,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         const rpState = state.perRepoState[rp];
         if (!rpState) continue;
         const rpBaseline = rpState.prePromptSha || rpState.headShaAtLastStop || rpState.headShaAtStart;
-        const rpCapture = captureGitState(rp, rpBaseline);
+        const rpCapture = captureGitState(rp, rpBaseline, { fullContext: true });
         const repoDir = path.basename(rp);
         for (const c of rpCapture.commitDetails) {
           for (const f of c.filesChanged) multiRepoFiles.add(`${repoDir}/${f}`);
@@ -4474,7 +4481,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         const rpState = state.perRepoState[rp];
         if (!rpState?.headShaAtStart) continue;
         try {
-          const rpCapture = captureGitState(rp, rpState.headShaAtStart);
+          const rpCapture = captureGitState(rp, rpState.headShaAtStart, { fullContext: true });
           const repoDir = path.basename(rp);
           for (const c of rpCapture.commitDetails) {
             for (const f of c.filesChanged) multiRepoFiles.add(`${repoDir}/${f}`);
@@ -4495,7 +4502,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     // Capture diff for the last prompt if prePromptSha exists
     if (state.prePromptSha && prompts.length > 0) {
       const lastPromptIdx = prompts.length - 1;
-      const lastPromptCapture = captureGitState(state.repoPath, state.prePromptSha);
+      const lastPromptCapture = captureGitState(state.repoPath, state.prePromptSha, { fullContext: true });
       const lastFilesSet = new Set<string>();
       for (const c of lastPromptCapture.commitDetails) {
         for (const f of c.filesChanged) lastFilesSet.add(f);
@@ -5700,7 +5707,7 @@ async function handleAfterFileEdit(input: Record<string, any>, agentSlug?: strin
     // prompt's mapping reflects whatever Cursor just wrote to disk.
     const promptShadow = (state.promptShadows || []).find((s) => s.promptIndex === promptIdx);
     const captureBaseline = promptShadow?.shadowSha || state.prePromptSha;
-    const capture = captureGitState(state.repoPath, captureBaseline);
+    const capture = captureGitState(state.repoPath, captureBaseline, { fullContext: true });
 
     const filteredUncommitted = filterUncommittedDiff(
       capture.uncommittedDiff || '', uncommittedExcludeUnion(state),

@@ -160,6 +160,17 @@ export { DEFAULT_IGNORE_PATTERNS };
  * GEMINI.md, etc.) — that churn would otherwise show up as
  * AI-attributed lines in the blame view.
  */
+// Files Origin writes to on every session start. These are agent-context
+// files (the agent reads them at runtime) but they're pure bookkeeping in
+// the per-prompt diff / blame view — drop them at capture time so the
+// platform never receives a "filesChanged" entry for them.
+const ORIGIN_AUTO_MANAGED_BASENAMES = new Set<string>([
+  'CLAUDE.md',
+  'AGENTS.md',
+  'GEMINI.md',
+  '.windsurfrules',
+]);
+
 export function stripIgnoredSectionsFromDiff(
   diffText: string,
   customPatterns?: string[],
@@ -173,53 +184,9 @@ export function stripIgnoredSectionsFromDiff(
     const m = header.match(/^diff --git a\/(.+?) b\/(.+)$/);
     const filePath = m ? m[2] : '';
     if (filePath && shouldIgnoreFile(filePath, customPatterns)) continue;
-    // CLAUDE.md is special — many projects hand-edit it, so we DON'T blanket
-    // ignore. But Origin's hooks write a `<!-- origin-managed -->` block into
-    // it on every session, and when the entire diff for CLAUDE.md is inside
-    // that block (e.g. a freshly-created file with only Origin's content),
-    // it's pure bookkeeping noise that pollutes the per-prompt blame view.
-    // Drop the section only in that case; if the diff has any non-managed
-    // `+`/`-` line, keep it.
     const basename = filePath.split('/').pop() || '';
-    if (basename === 'CLAUDE.md' && isDiffEntirelyOriginManaged(part)) continue;
+    if (ORIGIN_AUTO_MANAGED_BASENAMES.has(basename)) continue;
     kept.push(part);
   }
   return kept.join('').trim();
-}
-
-// True iff every `+` / `-` line in the section is either a paired
-// `<!-- origin-managed -->` marker line or sits between such markers.
-function isDiffEntirelyOriginManaged(fileSection: string): boolean {
-  let inBlock = false;
-  let hasChanges = false;
-  let hasNonManagedChange = false;
-  const MARKER = '<!-- origin-managed -->';
-  for (const raw of fileSection.split('\n')) {
-    if (
-      raw.startsWith('diff --git ') ||
-      raw.startsWith('index ') ||
-      raw.startsWith('new file') ||
-      raw.startsWith('deleted file') ||
-      raw.startsWith('old mode') ||
-      raw.startsWith('new mode') ||
-      raw.startsWith('similarity') ||
-      raw.startsWith('rename ') ||
-      raw.startsWith('Binary ') ||
-      raw.startsWith('--- ') ||
-      raw.startsWith('+++ ') ||
-      raw.startsWith('@@') ||
-      raw.startsWith('\\ ')
-    ) continue;
-    if (!raw.startsWith('+') && !raw.startsWith('-')) continue;
-    hasChanges = true;
-    const content = raw.slice(1);
-    if (content.includes(MARKER)) {
-      // The marker line itself toggles block membership AFTER it's read;
-      // either way it's pure Origin content so don't flag it.
-      inBlock = !inBlock;
-      continue;
-    }
-    if (!inBlock) hasNonManagedChange = true;
-  }
-  return hasChanges && !hasNonManagedChange;
 }
