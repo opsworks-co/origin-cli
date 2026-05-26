@@ -54,12 +54,19 @@ export interface GitNoteData {
   // capped). Helps the next agent understand what the prior agent saw —
   // not just what it changed.
   filesRead?: string[];
+  // Per-prompt attribution that travels with the repo. Each entry records
+  // who/what wrote a prompt's work — anyone who clones the repo and fetches
+  // refs/notes/origin can see this without an Origin DB account. Capped
+  // per-prompt to keep notes under push-friendly size limits.
+  prompts?: PromptNoteEntry[];
+  // Origin web URL where the full session can be inspected (for users in
+  // the same org).
+  originUrl: string;
   tokensUsed: number;
   costUsd: number;
   durationMs: number;
   linesAdded: number;
   linesRemoved: number;
-  originUrl: string;
   aiPercentage?: number;
   humanPercentage?: number;
   mixedPercentage?: number;
@@ -67,6 +74,22 @@ export interface GitNoteData {
   snapshotAt?: string;
   filesChanged?: string[];
 }
+
+// Per-prompt attribution row stored inside the commit note. Optional fields
+// are dropped when empty to keep the serialized JSON compact.
+export interface PromptNoteEntry {
+  index: number;
+  text: string;                     // post-redaction, capped per PROMPT_TEXT_MAX_BYTES
+  agent?: string;                   // codex, claude, cursor, gemini
+  model?: string;                   // gpt-5.5, claude-opus, ...
+  authorName?: string;
+  authorEmail?: string;
+  timestamp?: string;               // ISO 8601
+  files?: string[];                 // files this prompt edited
+}
+
+const PROMPT_TEXT_MAX_BYTES = 1024;
+const PROMPTS_MAX = 50;
 
 export function writeGitNotes(
   repoPath: string,
@@ -89,13 +112,30 @@ export function writeGitNotes(
   const filesRead = data.filesRead && data.filesRead.length > 0
     ? Array.from(new Set(data.filesRead)).slice(0, FILES_READ_MAX)
     : undefined;
+  // Sanitize per-prompt entries: redact text, cap length, drop empty
+  // fields. Cap the array itself so a 500-prompt session doesn't bloat
+  // the note past push-friendly size.
+  const prompts = data.prompts && data.prompts.length > 0
+    ? data.prompts.slice(0, PROMPTS_MAX).map((p) => {
+        const out: Record<string, unknown> = { index: p.index };
+        if (p.text) out.text = redactAndCap(p.text, PROMPT_TEXT_MAX_BYTES);
+        if (p.agent) out.agent = p.agent;
+        if (p.model) out.model = p.model;
+        if (p.authorName) out.authorName = p.authorName;
+        if (p.authorEmail) out.authorEmail = p.authorEmail;
+        if (p.timestamp) out.timestamp = p.timestamp;
+        if (p.files && p.files.length > 0) out.files = p.files;
+        return out;
+      })
+    : undefined;
 
   const notePayload = JSON.stringify(
     {
       origin: {
         // Stays at 1 — the new fields (fullPrompt, previousSessionId,
-        // filesRead) are purely additive. Existing readers look up keys
-        // by name and ignore unknowns, so no version bump is needed.
+        // filesRead, prompts) are purely additive. Existing readers
+        // look up keys by name and ignore unknowns, so no version bump
+        // is needed.
         version: 1,
         sessionId: data.sessionId,
         model: data.model,
@@ -105,6 +145,7 @@ export function writeGitNotes(
         fullPrompt,
         previousSessionId: data.previousSessionId || undefined,
         filesRead,
+        prompts,
         tokensUsed: data.tokensUsed,
         costUsd: parseFloat(data.costUsd.toFixed(4)),
         durationMs: data.durationMs,
@@ -130,6 +171,35 @@ export function writeGitNotes(
       // Never fail session-end because of a notes error
       // Notes are a nice-to-have, not critical
     }
+  }
+
+  // Auto-push notes to the configured remote so other developers see
+  // them on fetch. Best-effort: silent on failure (no remote, no
+  // network, permission denied, etc.). Single push for the whole notes
+  // ref — git de-dupes per-commit additions. Push to refs/notes/origin
+  // explicitly so we don't surprise the user with their own refs/notes.
+  try {
+    // Detect a remote. Prefer "origin" (the git default), fall back to
+    // the first remote listed if "origin" isn't configured.
+    let remote = '';
+    try {
+      execFileSync('git', ['remote', 'get-url', 'origin'], execOpts);
+      remote = 'origin';
+    } catch {
+      try {
+        const list = execFileSync('git', ['remote'], execOpts).trim();
+        if (list) remote = list.split('\n')[0];
+      } catch { /* no remotes */ }
+    }
+    if (remote) {
+      execFileSync(
+        'git',
+        ['push', remote, 'refs/notes/origin:refs/notes/origin'],
+        { ...execOpts, timeout: 30_000 },
+      );
+    }
+  } catch {
+    // Push can fail for any number of reasons — never block session-end.
   }
 }
 

@@ -26,7 +26,7 @@ import {
 import { captureGitState, getDirtyFiles, createShadowCommit } from '../git-capture.js';
 import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
-import { writeGitNotes } from '../git-notes.js';
+import { writeGitNotes, type PromptNoteEntry } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
 import { findTrailByBranch, addSessionToTrail } from '../trail-state.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
@@ -119,6 +119,51 @@ function filterUncommittedDiff(diffText: string, prePromptDirtyFiles: string[]):
 // concurrent-agent isolation — a file Agent B starts editing while Agent A
 // is alive shouldn't leak into A's uncommittedDiff just because both
 // sessions watch the same working tree.
+// Build the per-prompt attribution rows that go inside the git note.
+// One entry per prompt that produced ANY captured work this session.
+// Pulls text from state.prompts, files/timestamp from
+// state.completedPromptMappings (set by the stop hook for each turn),
+// and agent/model from the session-level state — these don't change
+// per prompt. Capped + redacted inside writeGitNotes; here we just
+// build the raw shape.
+function buildPromptNoteEntries(
+  state: SessionState,
+  agentSlug: string | undefined,
+  model: string | undefined,
+): PromptNoteEntry[] {
+  const out: PromptNoteEntry[] = [];
+  const mappings = state.completedPromptMappings || [];
+  const prompts = state.prompts || [];
+  const seen = new Set<number>();
+  // Walk completedPromptMappings first (has files for each prompt that
+  // actually touched the working tree), then add chat-only prompts from
+  // state.prompts so the note records every turn. Author info is at
+  // session level (already in commit's Co-Authored-By trailer) so we
+  // don't repeat it per-entry.
+  for (const m of mappings) {
+    if (seen.has(m.promptIndex)) continue;
+    seen.add(m.promptIndex);
+    out.push({
+      index: m.promptIndex,
+      text: m.promptText || prompts[m.promptIndex] || '',
+      agent: agentSlug || state.agentSlug,
+      model,
+      files: m.filesChanged && m.filesChanged.length > 0 ? m.filesChanged : undefined,
+    });
+  }
+  for (let i = 0; i < prompts.length; i++) {
+    if (seen.has(i)) continue;
+    if (!prompts[i]) continue;
+    out.push({
+      index: i,
+      text: prompts[i],
+      agent: agentSlug || state.agentSlug,
+      model,
+    });
+  }
+  return out.sort((a, b) => a.index - b.index);
+}
+
 function uncommittedExcludeUnion(state: SessionState): string[] {
   const set = new Set<string>();
   for (const f of state.prePromptDirtyFiles || []) set.add(f);
@@ -4204,6 +4249,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             fullPrompt: prompts[prompts.length - 1] || undefined,
             previousSessionId: state.previousSessionId,
             filesRead: state.filesRead,
+            prompts: buildPromptNoteEntries(state, agentSlug || state.agentSlug, model || state.model),
             tokensUsed: parsed.tokensUsed,
             costUsd,
             durationMs: durationMs > 0 ? durationMs : 0,
@@ -4717,6 +4763,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
           fullPrompt: prompts[prompts.length - 1] || prompts[0] || undefined,
           previousSessionId: state.previousSessionId,
           filesRead: state.filesRead,
+          prompts: buildPromptNoteEntries(state, agentSlug || state.agentSlug, model),
           tokensUsed: parsed.tokensUsed,
           costUsd,
           durationMs,
@@ -5190,6 +5237,7 @@ export async function handlePostCommit(): Promise<void> {
       fullPrompt: state?.prompts?.[state.prompts.length - 1] || undefined,
       previousSessionId: state?.previousSessionId,
       filesRead: state?.filesRead,
+      prompts: state ? buildPromptNoteEntries(state, state.agentSlug, noteModel || state.model) : undefined,
       tokensUsed: 0,
       costUsd: 0,
       durationMs: 0,
