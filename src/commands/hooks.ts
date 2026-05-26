@@ -498,6 +498,33 @@ function writeAgentRulesFile(agentSlug: string, systemMsg: string, repoPath: str
   }
 }
 
+// ─── Origin authoring framework guidance ──────────────────────────────────
+//
+// Short instruction block appended to every agent's system prompt
+// (and to AGENTS.md / GEMINI.md / .windsurfrules for file-driven
+// agents) telling the model to emit structured [Origin: …] markers
+// as it works. Path A of "GitHub for agents" — agents EMIT the
+// reviewer-facing structure inline; the server-side synthesis
+// (pr-reviewer-brief.ts) remains as a fallback for sessions whose
+// agents didn't comply.
+//
+// Kept terse on purpose. Verbose instructions get diluted in long
+// contexts; this fits in ~150 tokens. The marker names match the
+// section headers on the reviewer's brief UI so the agent's mental
+// model maps 1:1 to what the reviewer will see.
+function buildOriginFrameworkGuidance(): string {
+  return [
+    'Origin authoring framework — emit these markers inline in your responses when there is real signal worth surfacing to the human reviewer. Don\'t force one per turn.',
+    '',
+    '  [Origin: Intent] <one sentence on WHY you\'re making this change>',
+    '  [Origin: Decision] <choice you made> — <why>',
+    '  [Origin: Open] <something you didn\'t finish, or aren\'t sure about>',
+    '  [Origin: Verify] <something a human reviewer should check>',
+    '',
+    'Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn\'t do. These appear on the PR review surface alongside Origin\'s server-synthesized summary; agent-emitted markers take precedence.',
+  ].join('\n');
+}
+
 // ─── Concurrent Session State Lookup ──────────────────────────────────────
 
 /**
@@ -2048,6 +2075,11 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         const attributionCtx = buildAttributionContext(repoPath);
         if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
       } catch {}
+      // Framework guidance — same as the fresh-session path. Resumed
+      // sessions still benefit from the [Origin: …] marker convention,
+      // and re-emitting on resume is harmless (the model will see the
+      // same guidance whether or not it saw it earlier).
+      systemMsg += '\n\n' + buildOriginFrameworkGuidance();
       const isCursorReuse = agentSlug === 'cursor';
       const isCodexReuse = agentSlug === 'codex';
       const outputKeyReuse = isCursorReuse ? 'additional_context' : 'systemMessage';
@@ -2439,6 +2471,17 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     } catch {
       // Non-fatal
     }
+
+    // Inject the Origin authoring framework — short prompt telling the
+    // agent to emit structured `[Origin: …]` markers as it works so the
+    // post-PR reviewer can scan intent / decisions / open questions /
+    // verification steps without round-tripping through synthesis. Path
+    // A of "GitHub for agents" (server-side synthesis is the Path B
+    // fallback on existing PR detail; agent-emitted text takes
+    // precedence when present). Goes LAST so it's the most recent
+    // thing the agent reads — models tend to weight tail context more.
+    systemMsg += '\n\n' + buildOriginFrameworkGuidance();
+    debugLog('session-start', 'framework guidance injected');
 
     // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
     // Codex displays hook stdout as warnings — skip (reads from rules files instead)
