@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process';
 import { redactSecrets } from './redaction.js';
+import { api } from './api.js';
 
 function redact(text: string): string {
   return redactSecrets(text || '').redacted;
@@ -170,6 +171,17 @@ export function writeGitNotes(
     } catch {
       // Never fail session-end because of a notes error
       // Notes are a nice-to-have, not critical
+    }
+    // Mirror the note up to Origin so local-only repos (no GitHub/GitLab
+    // remote where the API could fetch refs/notes/origin from) still
+    // surface attribution on the commit detail / per-file blame views.
+    // Fire-and-forget: any failure (no auth, server down, repo not
+    // synced yet) is silent. The note already lives in git either way.
+    if (data.sessionId) {
+      try {
+        const parsed = JSON.parse(notePayload) as Record<string, unknown>;
+        api.importGitNote(data.sessionId, sha, parsed).catch(() => { /* silent */ });
+      } catch { /* notePayload always parses; defensive */ }
     }
   }
 

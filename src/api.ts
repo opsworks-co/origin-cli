@@ -369,4 +369,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  // Mirror a locally-written git note up to Origin so commits in local-
+  // only repos (where the API can't pull refs/notes/origin from any
+  // remote) still surface agent/model attribution on the commit detail
+  // and per-file blame pages. Session-scoped: server resolves repo via
+  // the session row. Fire-and-forget: never blocks session-end.
+  importGitNote: (sessionId: string, sha: string, note: Record<string, unknown>) =>
+    request(`/api/sessions/${sessionId}/import-note`, {
+      method: 'POST',
+      body: JSON.stringify({ sha, note }),
+    }),
 };
