@@ -1,6 +1,6 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260527.2217",
+  "version": "0.20260608.1815",
   "type": "module",
   "bin": {
     "origin": "./dist/index.js"
@@ -22,6 +22,6 @@
     "@types/node": "^22.14.1",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.0"
   }
 }

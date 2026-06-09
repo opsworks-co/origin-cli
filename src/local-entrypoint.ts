@@ -36,18 +36,67 @@ export interface PromptEntry {
   filesChanged: string[];
 }
 
-/** Per-prompt change record → sessions/{sessionId}/changes.json */
+/** Per-prompt change record → sessions/{sessionId}/changes.json
+ *
+ * v2 adds editsJson + uncommittedDiff + commitSha + treeSha so a different
+ * Origin org importing the repo can drive AI Blame from the authoritative
+ * apply_patch / Edit payload (LCS replay) instead of falling back to weaker
+ * block-matching against pc.diff alone. v1 consumers (older importers) ignore
+ * the new fields silently — schema is purely additive. */
 export interface PromptChange {
   promptIndex: number;    // 1-based, matches ## Prompt N in prompts.md
   promptText: string;     // first 200 chars
   filesChanged: string[];
-  diff: string;           // unified diff
+  diff: string;           // unified diff (committed + uncommitted, scoped)
+  /** JSON-encoded PromptCapture (see packages/cli/src/prompt-capture/types.ts).
+   *  Capped at EDITS_JSON_MAX_BYTES; truncated entries get a marker. Omit
+   *  when missing rather than ship an empty string so v1 readers still parse. */
+  editsJson?: string | null;
+  /** Working-tree-side diff at session-end. Lets blame ByFile prefer the
+   *  freshest snapshot when it exists. */
+  uncommittedDiff?: string | null;
+  /** HEAD at the prompt's stop. Travels so Org B's `committed` pill / commit
+   *  attribution checks work without re-deriving from local git state. */
+  commitSha?: string | null;
+  /** Working-tree SHA at the prompt's stop. Powers soft restore on Org B. */
+  treeSha?: string | null;
+  // Following are populated by hooks.ts but not currently serialized to
+  // changes.json (they're session-level signals, not per-prompt portability
+  // data). Kept as optional so the interface still matches existing callers
+  // without forcing them through a separate type.
+  linesAdded?: number;
+  linesRemoved?: number;
+  aiPercentage?: number;
+  checkpointType?: string;
 }
 
+/** Bump to 2 when shipping editsJson / commit refs; importers gate richer
+ *  hydration on `version >= 2` so they don't try to read missing fields off
+ *  legacy payloads. */
 export interface SessionChanges {
-  version: 1;
+  version: 2;
   sessionId: string;
   changes: PromptChange[];
+}
+
+/** Max bytes for editsJson per prompt before truncation. 16 KB covers ~99%
+ *  of real prompts; bigger refactors get a TRUNCATED marker appended so the
+ *  consumer can detect and degrade gracefully. Sized to keep the orphan
+ *  branch push-friendly: 50 prompts × 16KB = 800KB worst case per session. */
+const EDITS_JSON_MAX_BYTES = 16 * 1024;
+const TRUNCATED_MARKER = '\n/* [origin: editsJson truncated for branch portability] */';
+
+function capEditsJson(raw: string | null | undefined): string | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  if (Buffer.byteLength(raw, 'utf-8') <= EDITS_JSON_MAX_BYTES) return raw;
+  // Slice on character boundary; the marker isn't valid JSON itself but
+  // consumers parse the JSON prefix first (failure = treat as missing).
+  const slice = raw.slice(0, EDITS_JSON_MAX_BYTES - TRUNCATED_MARKER.length);
+  return slice + TRUNCATED_MARKER;
+}
+
+function dropEmpty(s: string | null | undefined): string | undefined {
+  return typeof s === 'string' && s.length > 0 ? s : undefined;
 }
 
 /** Unified input — callers assemble this, we derive all 3 files from it */
@@ -159,10 +208,32 @@ function buildPromptsMd(data: SessionWriteData): string {
 }
 
 function buildChangesJson(data: SessionWriteData): string {
+  // Apply caps + drop empties at serialization time so callers don't have
+  // to know about EDITS_JSON_MAX_BYTES. Empty optional fields stay
+  // `undefined` (not "" or null) so JSON.stringify omits them entirely —
+  // keeps the payload compact AND keeps v1 importers from tripping on
+  // unexpected empties.
+  const capped: PromptChange[] = data.changes.map((c) => {
+    const out: PromptChange = {
+      promptIndex: c.promptIndex,
+      promptText: c.promptText,
+      filesChanged: c.filesChanged,
+      diff: c.diff,
+    };
+    const editsJson = capEditsJson(c.editsJson);
+    if (editsJson) out.editsJson = editsJson;
+    const uncommitted = dropEmpty(c.uncommittedDiff);
+    if (uncommitted) out.uncommittedDiff = uncommitted;
+    const commitSha = dropEmpty(c.commitSha);
+    if (commitSha) out.commitSha = commitSha;
+    const treeSha = dropEmpty(c.treeSha);
+    if (treeSha) out.treeSha = treeSha;
+    return out;
+  });
   const changes: SessionChanges = {
-    version: 1,
+    version: 2,
     sessionId: data.sessionId,
-    changes: data.changes,
+    changes: capped,
   };
   return JSON.stringify(changes, null, 2) + '\n';
 }

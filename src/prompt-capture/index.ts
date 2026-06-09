@@ -272,6 +272,11 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
 
   if (current) turns.push(current);
   attributeCommitsToPrompts(turns, opts);
+  // Transcript agents also edit files via shell (Gemini run_shell_command,
+  // Claude/Cursor Bash with `cat >`/`>` redirects); those writes aren't
+  // captured as tool_call edits. Backfill them from the commits each turn
+  // produced so editsJson reflects what actually landed in git (see fn doc).
+  supplementUncoveredCommittedFiles(turns, opts);
   return turns;
 }
 
@@ -420,6 +425,11 @@ function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
 
   if (current) turns.push(current);
   attributeCommitsToPrompts(turns, opts);
+  // Transcript agents also edit files via shell (Gemini run_shell_command,
+  // Claude/Cursor Bash with `cat >`/`>` redirects); those writes aren't
+  // captured as tool_call edits. Backfill them from the commits each turn
+  // produced so editsJson reflects what actually landed in git (see fn doc).
+  supplementUncoveredCommittedFiles(turns, opts);
   return turns;
 }
 
@@ -773,6 +783,85 @@ function appendCommitEdits(
   }
 }
 
+// Supplement transcript-derived edits with commit-derived edits for files a
+// turn COMMITTED but whose change was never recorded as a tool_call edit.
+//
+// Transcript agents (Gemini) only emit a PromptEdit for recognized edit
+// tools (replace / write_file / edit). When the agent modifies a file via
+// `run_shell_command` (e.g. `cat > scripts/git-info.sh <<'EOF' … EOF`), the
+// change lands in git but the extractor never sees it — editsJson is missing
+// the file entirely, so the platform's blame / commit-detail can't attribute
+// those lines to any prompt (they render as "human"). Observed on Gemini
+// session f2c2e40d: git-info.sh was elaborated via shell, committed, and only
+// the initial simple `write_file` was captured.
+//
+// Mirror the Codex rollout walker (appendCommitEdits): for each commit a turn
+// owns, add a `source: 'commit'` edit for every changed file the turn's
+// tool_call edits don't already cover. Attribute each commit to the
+// highest-promptIndex turn that claims it — the committing prompt is the last
+// to touch the working tree, so it's the most defensible owner of otherwise
+// untraced committed changes. Dedup per (sha, file) so a commit claimed by
+// several turns only supplements once.
+function supplementUncoveredCommittedFiles(turns: PromptCapture[], opts: CaptureInputs): void {
+  const shas = (opts.sessionCommitShas || []).filter((s) => HEX.test(s));
+  if (shas.length === 0 || !opts.repoPath) return;
+  const gitOpts = { cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
+
+  // Owner = highest-promptIndex turn that claims each sha (the committer).
+  const ownerForSha = new Map<string, PromptCapture>();
+  for (const turn of turns) {
+    for (const sha of turn.commits) {
+      const cur = ownerForSha.get(sha);
+      if (!cur || turn.promptIndex > cur.promptIndex) ownerForSha.set(sha, turn);
+    }
+  }
+
+  for (const [sha, turn] of ownerForSha) {
+    // Files this turn already recorded via a real tool call — never override
+    // those (the agent's own edit log is more precise than the commit blob).
+    const covered = new Set(
+      turn.edits
+        .filter((e) => !e.source || e.source === 'tool_call' || e.source === 'uncommitted')
+        .map((e) => e.file),
+    );
+    let names: string;
+    try {
+      // --root so a repo's very first commit (no parent) still reports its
+      // files as additions instead of producing empty output.
+      names = execFileSync('git', ['diff-tree', '--root', '--no-commit-id', '--name-status', '-r', sha], gitOpts);
+    } catch { continue; }
+    for (const line of names.split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 2) continue;
+      const status = parts[0];
+      const fileRaw = parts.slice(1).join(' ');
+      const repoRelative = makeRepoRelative(fileRaw, opts.repoPath);
+      if (covered.has(repoRelative)) continue;
+      if (turn.edits.some((e) => e.file === repoRelative && e.commitSha === sha)) continue;
+      let oldContent: string | undefined;
+      let newContent: string | undefined;
+      if (status !== 'A' && status !== 'D') {
+        try { oldContent = execFileSync('git', ['show', `${sha}^:${fileRaw}`], gitOpts); } catch { /* parent lacked file */ }
+      }
+      if (status !== 'D') {
+        try { newContent = execFileSync('git', ['show', `${sha}:${fileRaw}`], gitOpts); } catch { /* binary/missing */ }
+      }
+      const op: PromptEditOp = status === 'A' ? 'create'
+        : status === 'D' ? 'delete'
+        : status.startsWith('R') ? 'rename'
+        : 'edit';
+      turn.edits.push({
+        file: repoRelative,
+        op,
+        oldContent: op === 'create' ? '' : oldContent,
+        newContent: op === 'delete' ? '' : newContent,
+        source: 'commit',
+        commitSha: sha,
+      });
+    }
+  }
+}
+
 // ─── Shared post-processing ───────────────────────────────────────────────
 
 function attributeCommitsToPrompts(turns: PromptCapture[], opts: CaptureInputs): void {
@@ -790,7 +879,10 @@ function attributeCommitsToPrompts(turns: PromptCapture[], opts: CaptureInputs):
     try {
       const names = execFileSync(
         'git',
-        ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+        // --root so a repo's first commit (no parent) reports its files
+        // instead of empty output — otherwise that commit is never claimed
+        // by any turn and its work goes unattributed.
+        ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', sha],
         gitOpts,
       ).split('\n').map((s) => s.trim()).filter(Boolean);
       filesByCommit.set(sha, new Set(names));

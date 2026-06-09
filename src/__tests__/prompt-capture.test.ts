@@ -9,6 +9,9 @@
 
 import { describe, expect, it } from 'vitest';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+import { execFileSync } from 'child_process';
 import { capturePromptEdits } from '../prompt-capture/index.js';
 
 const FIXTURE_DIR = path.join(__dirname, 'fixtures');
@@ -138,5 +141,64 @@ describe('Cursor JSONL extractor', () => {
       (e) => (e.oldContent || '').includes('rhombus') || (e.newContent || '').includes('rhombus'),
     ).length;
     expect(rhombusCount).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('Commit-derived supplementation for shell-written files', () => {
+  // Regression for Gemini session f2c2e40d: the agent elaborated
+  // scripts/git-info.sh via run_shell_command and committed it, but the
+  // transcript only captured an initial write_file. The committed change
+  // had no editsJson record, so blame/commit-detail couldn't attribute it.
+  // supplementUncoveredCommittedFiles backfills such files from the commit.
+  it('backfills a committed file the transcript never recorded as a tool call', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-suppl-'));
+    try {
+      const git = (args: string[]) =>
+        execFileSync('git', args, { cwd: tmp, encoding: 'utf-8' });
+      git(['init', '-q']);
+      git(['config', 'user.email', 't@t.co']);
+      git(['config', 'user.name', 'T']);
+      // `covered.txt` is what the transcript's tool call records; `shell.sh`
+      // is the file the agent wrote via shell (not in the transcript).
+      fs.writeFileSync(path.join(tmp, 'covered.txt'), 'hello\n');
+      fs.writeFileSync(path.join(tmp, 'shell.sh'), '#!/bin/sh\necho elaborate\n');
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'make changes and commit']);
+      const sha = git(['rev-parse', 'HEAD']).trim();
+
+      // Minimal Gemini transcript: one prompt, one write_file for covered.txt.
+      const transcript = path.join(tmp, 'transcript.jsonl');
+      fs.writeFileSync(
+        transcript,
+        [
+          JSON.stringify({ sessionId: 's', kind: 'main' }),
+          JSON.stringify({ type: 'user', content: [{ text: 'make changes and commit' }] }),
+          JSON.stringify({
+            type: 'gemini',
+            toolCalls: [{ name: 'write_file', args: { file_path: 'covered.txt', content: 'hello\n' } }],
+          }),
+        ].join('\n'),
+      );
+
+      const turns = capturePromptEdits({
+        agent: 'gemini',
+        repoPath: tmp,
+        transcriptPath: transcript,
+        sessionCommitShas: [sha],
+      });
+
+      expect(turns.length).toBe(1);
+      const byFile = new Map(turns[0].edits.map((e) => [e.file, e]));
+      // The tool-call file keeps its tool_call source untouched.
+      expect(byFile.get('covered.txt')?.source).toBe('tool_call');
+      // The shell-written committed file is backfilled as a commit-source edit.
+      const shell = byFile.get('shell.sh');
+      expect(shell).toBeTruthy();
+      expect(shell?.source).toBe('commit');
+      expect(shell?.commitSha).toBe(sha);
+      expect(shell?.newContent).toContain('echo elaborate');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

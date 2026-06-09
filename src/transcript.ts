@@ -121,6 +121,12 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
 
   // Track seen message IDs to deduplicate token usage (streaming can produce duplicates)
   const seenMessageIds = new Map<string, MessageUsage>();
+  // Separate dedupe map for Gemini-shape JSONL entries. Gemini CLI
+  // writes assistant turns twice with the same `id` and identical
+  // `tokens` (stream-finalize double-flush). Without this, tokens
+  // & cost double-count.
+  type GeminiTokens = { input?: number; output?: number; cached?: number; thoughts?: number };
+  const seenGeminiIds = new Map<string, GeminiTokens>();
   const filesSet = new Set<string>();
 
   for (const line of lines) {
@@ -142,9 +148,82 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     const type = entry.type || (entry as any).role || entry.message?.role;
 
     if (type === 'user') {
-      const prompt = extractUserPrompt(entry);
+      let prompt = extractUserPrompt(entry);
+      // Gemini JSONL puts content at the TOP level (`entry.content`)
+      // not under `message`. extractUserPrompt only reads
+      // `message?.content` — without this fallback every Gemini
+      // prompt was dropped from the dashboard.
+      if (!prompt && Array.isArray((entry as any).content)) {
+        const texts = (entry as any).content
+          .filter((b: any) => b && typeof b.text === 'string' && b.text)
+          .map((b: any) => b.text)
+          .join('\n');
+        if (texts) prompt = cleanPrompt(texts);
+      } else if (!prompt && typeof (entry as any).content === 'string') {
+        prompt = cleanPrompt((entry as any).content);
+      }
       if (prompt) {
         result.prompts.push(prompt);
+      }
+    }
+
+    // Gemini JSONL — `type: "gemini"` (CLI format) or `type: "model"`
+    // (Google AI API shape). Tokens + content live at the TOP level,
+    // not nested under `message`, so the Anthropic branch above
+    // doesn't see them. Cast through string for the comparison
+    // because TranscriptLine.type is narrowed to 'user' | 'assistant'.
+    const typeAny = type as string;
+    if (typeAny === 'gemini' || typeAny === 'model') {
+      const e = entry as any;
+      const id: string = e.id || '';
+      // Gemini CLI versions differ on where they put usage. Two known
+      // shapes — accept either:
+      //   • Legacy CLI: `tokens: { input, output, cached, thoughts }`
+      //   • Newer CLI / Google AI SDK: `usageMetadata: {
+      //       promptTokenCount, candidatesTokenCount,
+      //       cachedContentTokenCount, thoughtsTokenCount }`
+      // Without the SDK fallback every session on a recent Gemini CLI
+      // reported absurdly low totals (user-observed: 24h / 8 prompts
+      // → 352 total tokens, all from a single legacy-shape entry).
+      let tokensAny: GeminiTokens | null = e.tokens || null;
+      if (!tokensAny && e.usageMetadata && typeof e.usageMetadata === 'object') {
+        const u = e.usageMetadata as Record<string, unknown>;
+        const n = (k: string) => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+        tokensAny = {
+          input: n('promptTokenCount'),
+          output: n('candidatesTokenCount'),
+          cached: n('cachedContentTokenCount'),
+          thoughts: n('thoughtsTokenCount'),
+        };
+      }
+      if (tokensAny && (!id || !seenGeminiIds.has(id))) {
+        if (id) seenGeminiIds.set(id, tokensAny);
+        else {
+          // No id — use a synthetic key so the post-loop sum picks
+          // it up. Collisions theoretically lose entries but Gemini
+          // CLI always emits ids in practice.
+          seenGeminiIds.set(`__noid__${seenGeminiIds.size}`, tokensAny);
+        }
+      }
+      // Model name (first one wins, mirroring the Anthropic path)
+      if (e.model && !result.model) result.model = e.model;
+      // Surface the last assistant text as the session summary so
+      // /sessions/:id headers don't render an empty subtitle.
+      const c = e.content;
+      if (typeof c === 'string' && c) {
+        result.summary = c;
+      } else if (Array.isArray(c)) {
+        for (const part of c) {
+          if (part?.text) result.summary = part.text;
+          if (part?.functionCall) {
+            result.toolCalls++;
+            const name = part.functionCall.name || '';
+            if (FILE_MODIFICATION_TOOLS.has(name) && part.functionCall.args) {
+              const fp = part.functionCall.args.file_path || part.functionCall.args.path;
+              if (fp && typeof fp === 'string') filesSet.add(fp);
+            }
+          }
+        }
       }
     }
 
@@ -198,6 +277,15 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     result.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
     result.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
     result.outputTokens += usage.output_tokens ?? 0;
+  }
+  // Same for Gemini JSONL entries — id-deduped, then summed.
+  // `thoughts` is billed at the output rate so it folds into
+  // outputTokens. `cached` maps to cacheReadTokens (Gemini's
+  // implicit cache, 25% of input cost).
+  for (const t of seenGeminiIds.values()) {
+    result.inputTokens += t.input ?? 0;
+    result.outputTokens += (t.output ?? 0) + (t.thoughts ?? 0);
+    result.cacheReadTokens += t.cached ?? 0;
   }
   // `tokensUsed` is the "real" fresh-tokens total. Cache reads/creations are
   // tracked on their own fields so they can be reported without inflating the
@@ -268,6 +356,11 @@ function cleanPrompt(text: string): string | null {
     // shows literal "<user_query> make little change and commit </user_query>"
     // instead of the user's actual text.
     .replace(/<user_query>([\s\S]*?)<\/user_query>/g, '$1')
+    // Cursor prepends a <timestamp>...</timestamp> tag with the local time
+    // to every user prompt in its agent-transcripts JSONL. Drop it — the
+    // dashboard already shows the prompt's createdAt next to the turn
+    // header, surfacing it again inside the prompt body is noise.
+    .replace(/<timestamp>[\s\S]*?<\/timestamp>/g, '')
     // Codex's session-init envelope (kept here too as belt-and-suspenders).
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
     .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
@@ -306,6 +399,7 @@ function isSystemMessage(text: string): boolean {
 // - Gemini messages: type: "gemini", content: "string", tokens: { input, output, cached, thoughts, tool, total }, model: "gemini-..."
 
 interface GeminiMessage {
+  id?: string;       // present on every entry — used to dedupe re-writes
   type?: string;     // "user" | "gemini" (actual Gemini CLI format)
   role?: string;     // "user" | "model" (Google AI API format — fallback)
   content?: string | Array<{ text?: string; functionCall?: { name: string; args?: Record<string, any> }; functionResponse?: any }>;
@@ -319,6 +413,13 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
     const data = JSON.parse(raw);
     const messages: GeminiMessage[] = data.messages || data.history || [];
     const filesSet = new Set<string>();
+    // Gemini CLI writes some assistant turns twice with the same `id`
+    // and identical `tokens` (looks like a stream-finalize double-flush
+    // on its end). Without dedupe we summed both rows and reported
+    // ~1.5–2× the real tokens / cost depending on how many turns the
+    // session had streaming-then-finalize doubles. Same convention as
+    // the Claude path (transcript.ts:123 `seenMessageIds`).
+    const seenIds = new Set<string>();
 
     for (const msg of messages) {
       const msgType = msg.type || msg.role || '';
@@ -365,13 +466,33 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
           result.model = msg.model;
         }
 
-        // Token counts per message
-        if (msg.tokens) {
-          result.inputTokens += msg.tokens.input ?? 0;
-          result.cacheReadTokens += msg.tokens.cached ?? 0;
+        // Token counts per message — guarded by `seenIds` so a
+        // duplicate write of the same `id` doesn't double-count.
+        // Accepts either the legacy `tokens.{input,output,cached,
+        // thoughts}` shape OR the newer Google AI SDK
+        // `usageMetadata.{promptTokenCount,candidatesTokenCount,
+        // cachedContentTokenCount,thoughtsTokenCount}` shape — see
+        // the JSONL path above for why this fallback exists.
+        const msgAny = msg as any;
+        let t: { input?: number; output?: number; cached?: number; thoughts?: number } | null =
+          msgAny.tokens || null;
+        if (!t && msgAny.usageMetadata && typeof msgAny.usageMetadata === 'object') {
+          const u = msgAny.usageMetadata as Record<string, unknown>;
+          const n = (k: string) => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+          t = {
+            input: n('promptTokenCount'),
+            output: n('candidatesTokenCount'),
+            cached: n('cachedContentTokenCount'),
+            thoughts: n('thoughtsTokenCount'),
+          };
+        }
+        if (t && (!msg.id || !seenIds.has(msg.id))) {
+          if (msg.id) seenIds.add(msg.id);
+          result.inputTokens += t.input ?? 0;
+          result.cacheReadTokens += t.cached ?? 0;
           // Gemini 2.5 thinking models report reasoning in `thoughts` — count
           // those as output tokens since they're billed at the output rate.
-          result.outputTokens += (msg.tokens.output ?? 0) + (msg.tokens.thoughts ?? 0);
+          result.outputTokens += (t.output ?? 0) + (t.thoughts ?? 0);
         }
       }
     }
@@ -1195,7 +1316,15 @@ function formatGeminiMessages(raw: string, verbose: boolean): DisplayMessage[] {
 
 // Pricing per 1M tokens (input, output)
 // Cache read = input × 0.1 (90% discount), cache creation = input × 1.25 (25% premium)
-export type ModelPricing = Record<string, { input: number; output: number }>;
+// Optional `cachedInput` overrides the provider's default cache-read
+// multiplier when a model uses a non-standard discount (e.g. gpt-5.5's
+// 90% cache discount vs the rest of OpenAI's 50%). Mirrors
+// apps/api/src/utils/pricing.ts.
+export type ModelPricing = Record<string, {
+  input: number;
+  output: number;
+  cachedInput?: number;
+}>;
 
 const DEFAULT_MODEL_PRICING: ModelPricing = {
   // Anthropic — verified against https://www.anthropic.com/pricing on 2026-04-24.
@@ -1203,6 +1332,10 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   // estimateCost below). Per-1M-token rates in USD.
   // NOTE: keep this table in sync with packages/cli/src/commands/prompt-status.ts
   // until both are consolidated into a single pricing module.
+  // bare "claude" brand (CLI fallback when real model unknown) → Opus default.
+  // Claude Code defaults to Opus and sessions were billed at Opus rates via
+  // the API — using Sonnet here slashed recomputed costs by 5×.
+  'claude': { input: 15,   output: 75 },
   'sonnet': { input: 3,    output: 15 },
   'opus':   { input: 15,   output: 75 },  // was 5/25 — undercounted Opus cost by 3×
   'haiku':  { input: 0.80, output: 4  },  // matches Haiku 3.5 / 4 public rates
@@ -1221,11 +1354,15 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'o3': { input: 10, output: 40 },
   'o3-mini': { input: 1.10, output: 4.40 },
   'o4-mini': { input: 1.10, output: 4.40 },
-  // OpenAI GPT-5 / Codex models
-  'gpt-5': { input: 2.00, output: 8.00 },
-  'gpt-5.3': { input: 2.00, output: 8.00 },
-  'gpt-5.4': { input: 3.00, output: 12.00 },
-  'codex': { input: 2.00, output: 8.00 },
+  // OpenAI GPT-5 / Codex. gpt-5.5 has an explicit cachedInput rate
+  // because its 90% cache discount doesn't match the OpenAI family
+  // default of 50% (see estimateCost). Mirrors apps/api/src/utils/pricing.ts.
+  'gpt-5':       { input: 2.00,  output: 8.00 },
+  'gpt-5.3':     { input: 2.00,  output: 8.00 },
+  'gpt-5.4':     { input: 3.00,  output: 12.00 },
+  'gpt-5.5':     { input: 5.00,  output: 30.00, cachedInput: 0.50 },
+  'gpt-5.5-pro': { input: 30.00, output: 180.00 },
+  'codex':       { input: 2.00,  output: 8.00 },
   // Cursor — default to sonnet pricing since most Cursor users are on claude-sonnet-4.
   // If getCursorModelFromDb resolves the real model, estimateCost will match a more
   // specific key (e.g. "gpt-4o") instead.
@@ -1257,20 +1394,28 @@ function normalizeModelKey(model: string): string {
     .replace(/-\d{8}$/, '');               // Anthropic: claude-sonnet-4-5-20250929
 }
 
+// Bare-brand keys lose to specific family keys during substring search so
+// "claude-sonnet-4-5" resolves to "sonnet" not "claude". Two-pass search.
+const BARE_BRAND_KEYS = new Set(['claude', 'gemini', 'cursor', 'codex', 'composer']);
+
 // Pick the pricing row + matched key for a model. Strategy:
-//   1. Exact match on normalized model key
-//   2. Longest pricing key that is a substring of the normalized model
-//   3. Sonnet default
+//   1. Exact match (e.g. bare "claude" → Opus default)
+//   2. Longest specific (non-bare-brand) key that is a substring
+//   3. Longest bare-brand key that is a substring (e.g. "composer-2.5" → "composer")
+//   4. Sonnet default
 export function resolveModelPricing(
   model: string,
   pricing: ModelPricing = activePricing,
-): { input: number; output: number; key: string } {
+): { input: number; output: number; cachedInput?: number; key: string } {
   const normalized = normalizeModelKey(model);
   if (pricing[normalized]) return { ...pricing[normalized], key: normalized };
 
-  const sortedKeys = Object.keys(pricing).sort((a, b) => b.length - a.length);
-  for (const key of sortedKeys) {
-    if (normalized.includes(key)) return { ...pricing[key], key };
+  const allKeys = Object.keys(pricing).sort((a, b) => b.length - a.length);
+  for (const key of allKeys) {
+    if (!BARE_BRAND_KEYS.has(key) && normalized.includes(key)) return { ...pricing[key], key };
+  }
+  for (const key of allKeys) {
+    if (BARE_BRAND_KEYS.has(key) && normalized.includes(key)) return { ...pricing[key], key };
   }
   return { ...(pricing['sonnet'] ?? DEFAULT_MODEL_PRICING['sonnet']), key: 'sonnet' };
 }
@@ -1295,12 +1440,370 @@ export function estimateCost(
   cacheReadTokens: number = 0,
   cacheCreationTokens: number = 0,
 ): number {
-  const { input, output, key } = resolveModelPricing(model);
+  const { input, output, cachedInput, key } = resolveModelPricing(model);
   const m = cacheMultipliersFor(key);
+  // Prefer an explicit cached-input rate when the model row declares
+  // one — gpt-5.5's 90% discount doesn't match the OpenAI family
+  // default of 50% the multiplier would give.
+  const effectiveCacheReadRate = cachedInput ?? input * m.read;
   const inputCost = (inputTokens / 1_000_000) * input;
-  const cacheReadCost = (cacheReadTokens / 1_000_000) * (input * m.read);
+  const cacheReadCost = (cacheReadTokens / 1_000_000) * effectiveCacheReadRate;
   const cacheCreationCost = (cacheCreationTokens / 1_000_000) * (input * m.write);
   const outputCost = (outputTokens / 1_000_000) * output;
 
   return parseFloat((inputCost + cacheReadCost + cacheCreationCost + outputCost).toFixed(4));
 }
+
+// ─── Image attachment extraction ─────────────────────────────────────────
+//
+// Walks a Claude/Cursor JSONL transcript and returns the inline image
+// parts per prompt. Claude Code's user-message format puts image content
+// in the same `content` array as text blocks, shape:
+//
+//   {type: 'image', source: {type: 'base64', media_type: 'image/png',
+//                            data: '<base64>'}}
+//
+// Cursor's format is similar when it writes through the Claude Code
+// transcript path. (For Cursor sessions that capture through Cursor's
+// own SQLite, image extraction lives in a separate code path — Phase 2.)
+//
+// Returns `{promptIndex, mediaType, base64}` entries in order. The
+// caller uploads each to the Origin API, gets back a stable id, and
+// splices `[image:<id>]` into the prompt text at the right spot.
+
+export interface ExtractedImage {
+  promptIndex: number;
+  /** Order of this image within its prompt (0-based). Lets the splicer
+   *  put placeholders in the right spot when multiple images share one
+   *  prompt. */
+  imageIndex: number;
+  mediaType: string;
+  base64: string;
+  /** Raw byte size after base64 decode — pre-checked so the caller
+   *  doesn't waste a roundtrip on an over-cap image. */
+  sizeBytes: number;
+}
+
+export function extractPromptImages(transcriptPath: string): ExtractedImage[] {
+  if (!fs.existsSync(transcriptPath)) return [];
+  let raw: string;
+  try {
+    raw = fs.readFileSync(transcriptPath, 'utf-8');
+  } catch {
+    return [];
+  }
+  const trimmed = raw.trim();
+
+  // Format dispatch. Mirrors extractPromptFileMappings so the same
+  // promptIndex assignments line up across both passes — file
+  // attribution + image attribution must reach the same prompt index
+  // for the splice step to put placeholders in the right spot.
+  //
+  //   Gemini  → single JSON object with `messages`/`history`
+  //   Codex   → JSONL where each line wraps a `response_item` payload
+  //   Cursor  → JSONL with `<image_files>` text markers (paths-on-disk)
+  //   Claude  → JSONL with Anthropic-style content blocks (base64 inline)
+
+  // Gemini detector: parses cleanly as ONE JSON object AND that object
+  // has a `messages` / `history` array. We can't rely on the
+  // "no newlines" shortcut — Codex rollouts are also single-line on
+  // short conversations and would get misrouted otherwise.
+  if (trimmed.startsWith('{')) {
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && (obj.messages || obj.history)) {
+        return extractGeminiImages(raw);
+      }
+      // Parses as JSON but isn't a Gemini doc — fall through to JSONL
+      // detection (the "doc" was probably a single Codex rollout
+      // line).
+    } catch {
+      // Parse failed → multi-line JSONL; fall through.
+    }
+  }
+
+  const lines = raw.split('\n').filter((line) => line.trim());
+
+  // Sniff for Codex: first few non-empty lines wrap a response_item
+  // payload. Codex rollouts are JSONL too, but the prompt content
+  // lives at `payload.content[]` not `message.content[]` — the legacy
+  // Claude/Cursor extractor would have walked past every user prompt.
+  let looksLikeCodex = false;
+  for (let i = 0; i < Math.min(8, lines.length); i++) {
+    try {
+      const e = JSON.parse(lines[i]);
+      if (e?.payload && (e?.type === 'response_item' || e?.payload?.type === 'message')) {
+        looksLikeCodex = true;
+        break;
+      }
+    } catch { /* skip */ }
+  }
+  if (looksLikeCodex) return extractCodexImages(lines);
+
+  // Default: Claude/Cursor JSONL (content blocks + Cursor's
+  // <image_files> markers handled in the same pass).
+  return extractClaudeCursorImages(lines);
+}
+
+// ─── Claude + Cursor JSONL extractor ────────────────────────────────────────
+//
+// Claude Code embeds base64 inline as Anthropic content blocks
+// (`{type:'image', source:{media_type, data}}`). Cursor occasionally
+// uses the same shape but more often saves the image to disk and
+// injects a `<image_files>…/abs/path.png…</image_files>` text marker
+// into the user prompt — same prompt, different storage. Both shapes
+// are handled here so a single pass over the JSONL covers all
+// Anthropic-style transcripts.
+
+function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
+  const out: ExtractedImage[] = [];
+  let promptIndex = -1;
+  let imageIndex = 0;
+
+  for (const line of lines) {
+    let entry: any;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const type = entry.type || entry.role || entry.message?.role;
+    if (type !== 'user') continue;
+
+    const content = entry.message?.content ?? entry.content;
+    // String content can still carry a Cursor <image_files> marker.
+    let textParts: string[] = [];
+    let blocks: any[] = [];
+    if (typeof content === 'string') {
+      textParts = [content];
+    } else if (Array.isArray(content)) {
+      blocks = content;
+      for (const b of content) {
+        if (b && (b.type === 'text' || typeof b.text === 'string')) {
+          textParts.push(typeof b.text === 'string' ? b.text : '');
+        }
+      }
+    } else {
+      continue;
+    }
+
+    // Bump the prompt index whenever this is a real user turn —
+    // either text OR an image block. Image-only prompts (drag-and-
+    // drop a screenshot with no caption) are common and must not be
+    // silently dropped just because the text gate was too strict.
+    const hasText = textParts.some((t) => t && t.trim().length > 0);
+    const hasImageBlock = blocks.some((b: any) => b && b.type === 'image');
+    const hasMarker = textParts.some((t) => t && /<image_files>[\s\S]*?<\/image_files>/.test(t));
+    if (!hasText && !hasImageBlock && !hasMarker) continue;
+
+    promptIndex++;
+    imageIndex = 0;
+
+    // (1) Anthropic-style base64 image blocks (Claude Code, sometimes
+    //     Cursor) — already-decoded payloads.
+    for (const block of blocks) {
+      if (!block || block.type !== 'image') continue;
+      const source = block.source || {};
+      const mediaType = typeof source.media_type === 'string' ? source.media_type : 'image/png';
+      const data = typeof source.data === 'string' ? source.data : '';
+      if (!data) continue;
+      const sizeBytes = Math.floor((data.length * 3) / 4);
+      out.push({
+        promptIndex,
+        imageIndex: imageIndex++,
+        mediaType,
+        base64: data,
+        sizeBytes,
+      });
+    }
+
+    // (2) Cursor <image_files> markers — absolute paths to image
+    //     files saved under `~/.cursor/projects/<ws>/assets/`. Read,
+    //     base64-encode, and emit as if it were an inline block.
+    //     Caps mirror the inline path: 5 MB per image (server cap)
+    //     so we don't waste an upload on something the API will
+    //     reject.
+    const MAX_BYTES_PER_IMAGE = 5 * 1024 * 1024;
+    for (const text of textParts) {
+      if (!text) continue;
+      const markers = text.match(/<image_files>[\s\S]*?<\/image_files>/g);
+      if (!markers) continue;
+      for (const marker of markers) {
+        // Pull every absolute path with an image extension out of the
+        // marker block. Cursor numbers them ("1. /Users/...png");
+        // accept any token ending in a known extension so subtle
+        // format changes (e.g. dashes, no trailing space) don't
+        // silently drop captures.
+        const paths = marker.match(/\/[^\s<>"]+\.(?:png|jpe?g|gif|webp|bmp|svg)/gi) || [];
+        for (const p of paths) {
+          try {
+            const st = fs.statSync(p);
+            if (!st.isFile()) continue;
+            if (st.size > MAX_BYTES_PER_IMAGE) continue;
+            const buf = fs.readFileSync(p);
+            const ext = (p.split('.').pop() || 'png').toLowerCase();
+            const mediaType =
+              ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' :
+              ext === 'gif' ? 'image/gif' :
+              ext === 'webp' ? 'image/webp' :
+              ext === 'bmp' ? 'image/bmp' :
+              ext === 'svg' ? 'image/svg+xml' :
+              'image/png';
+            const base64 = buf.toString('base64');
+            out.push({
+              promptIndex,
+              imageIndex: imageIndex++,
+              mediaType,
+              base64,
+              sizeBytes: st.size,
+            });
+          } catch {
+            // Path missing / unreadable — drop silently. Cursor sometimes
+            // cleans up old assets; not worth a hard error.
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// ─── Codex rollout extractor ────────────────────────────────────────────────
+//
+// Codex (~/.codex/sessions/.../rollout-*.jsonl) wraps every event as
+// `{type: "response_item", payload: {type, role, content[]}}`. User
+// prompts arrive as `payload.type === "message"` with `role === "user"`
+// and content blocks like `{type: "input_image", image_url: "data:..."}`.
+// The image_url is either a data URL string or an object with `url`.
+
+function extractCodexImages(lines: string[]): ExtractedImage[] {
+  const out: ExtractedImage[] = [];
+  let promptIndex = -1;
+  let imageIndex = 0;
+
+  for (const line of lines) {
+    let entry: any;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = entry?.payload;
+    if (!payload || payload.type !== 'message') continue;
+    if (payload.role !== 'user' && payload.role !== 'human') continue;
+    const content = payload.content;
+    if (!Array.isArray(content)) continue;
+
+    // Treat this as a real prompt if it carries text OR an image
+    // block — same logic as the Claude/Cursor extractor. Skipping
+    // on text-only would silently drop "drag a screenshot, hit
+    // enter" prompts (no caption) that the user clearly meant as a
+    // turn.
+    const hasText = content.some(
+      (b: any) =>
+        b &&
+        (b.type === 'text' || b.type === 'input_text' || b.type === 'output_text') &&
+        typeof b.text === 'string' && b.text.trim().length > 0,
+    );
+    const hasImageBlock = content.some(
+      (b: any) => b && (b.type === 'input_image' || b.type === 'image'),
+    );
+    if (!hasText && !hasImageBlock) continue;
+
+    promptIndex++;
+    imageIndex = 0;
+
+    for (const block of content) {
+      if (!block || (block.type !== 'input_image' && block.type !== 'image')) continue;
+      // image_url can be either a string ("data:image/png;base64,…")
+      // or an object `{url: "data:…"}`. Codex versions disagree.
+      const url: string | undefined =
+        typeof block.image_url === 'string'
+          ? block.image_url
+          : typeof block.image_url?.url === 'string'
+            ? block.image_url.url
+            : undefined;
+      if (!url) continue;
+      // We only support data URLs — Codex always emits them for pasted
+      // images. Remote URLs would require a network fetch we don't
+      // want from a stop hook.
+      const m = url.match(/^data:([^;]+);base64,(.+)$/);
+      if (!m) continue;
+      const mediaType = m[1] || 'image/png';
+      const data = m[2] || '';
+      if (!data) continue;
+      const sizeBytes = Math.floor((data.length * 3) / 4);
+      out.push({
+        promptIndex,
+        imageIndex: imageIndex++,
+        mediaType,
+        base64: data,
+        sizeBytes,
+      });
+    }
+  }
+  return out;
+}
+
+// ─── Gemini transcript extractor ────────────────────────────────────────────
+//
+// Gemini CLI stores a single JSON object with `messages` (or `history`)
+// where each message has `parts: [{text}, {inlineData: {mimeType, data}}]`
+// (the Google AI API shape). We follow the same convention as
+// parseGeminiTranscript: walk user-role messages, count each as one
+// prompt, then pull inline_data / inlineData blocks out.
+
+function extractGeminiImages(raw: string): ExtractedImage[] {
+  let data: any;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const messages: any[] = data?.messages || data?.history || [];
+  const out: ExtractedImage[] = [];
+  let promptIndex = -1;
+  let imageIndex = 0;
+
+  for (const msg of messages) {
+    const role = msg?.type || msg?.role;
+    if (role !== 'user') continue;
+    const parts: any[] = Array.isArray(msg?.parts)
+      ? msg.parts
+      : Array.isArray(msg?.content)
+        ? msg.content
+        : [];
+    // Count this as a prompt if it carries text OR an inline image
+    // part — Gemini supports image-only turns (drag a screenshot in
+    // with no caption) and we shouldn't silently drop them.
+    const hasText = parts.some(
+      (p: any) => typeof p?.text === 'string' && p.text.trim().length > 0,
+    ) || typeof msg?.content === 'string';
+    const hasInline = parts.some((p: any) => p && (p.inlineData || p.inline_data));
+    if (!hasText && !hasInline) continue;
+
+    promptIndex++;
+    imageIndex = 0;
+
+    for (const part of parts) {
+      // Google AI API: `inlineData` (camelCase) or `inline_data`
+      // (snake) depending on language binding. Both ship the base64
+      // straight in the JSON.
+      const inline = part?.inlineData || part?.inline_data;
+      if (!inline) continue;
+      const mediaType = inline.mimeType || inline.mime_type || 'image/png';
+      const b64 = typeof inline.data === 'string' ? inline.data : '';
+      if (!b64) continue;
+      const sizeBytes = Math.floor((b64.length * 3) / 4);
+      out.push({
+        promptIndex,
+        imageIndex: imageIndex++,
+        mediaType,
+        base64: b64,
+        sizeBytes,
+      });
+    }
+  }
+  return out;
+}
+

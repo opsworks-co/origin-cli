@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
+import { execSync } from 'child_process';
 import { run, runDetailed } from '../utils/exec.js';
 import { loadConfig, saveConfig, saveRepoConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
@@ -125,6 +126,89 @@ function installClaudeHooks(gitRoot: string): void {
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
   const claudeLabel = gitRoot === os.homedir() ? `~/.claude/settings.json` : `.claude/settings.json`;
   console.log(chalk.green(`  ✓ Hooks installed in ${claudeLabel}`));
+
+  // Sweep the OPPOSITE settings layer(s) so we don't end up registered at
+  // multiple levels — Claude Code merges all of them and the hook would fire
+  // once per registration. Symptom: every API call doubled, every state-file
+  // write doubled, two heartbeats per session. The runtime hook handler also
+  // self-heals (see dedupeOriginHookLayers in commands/hooks.ts), but doing
+  // it here on the install path means users who actively re-ran `enable`
+  // get cleaned synchronously without waiting for the next prompt to fire.
+  try {
+    cleanupOriginClaudeHooksOutsideOf(settingsPath);
+  } catch (err: any) {
+    console.log(chalk.gray(`  (couldn't sweep cross-layer hook duplicates: ${err?.message || err})`));
+  }
+}
+
+/**
+ * Strip Origin's claude-code hook entries from every .claude/settings.json
+ * EXCEPT the canonical one we just wrote. Walks ~/.claude/, the current
+ * project root, and any worktrees nested under the project. Idempotent —
+ * no-ops when nothing matches.
+ */
+function cleanupOriginClaudeHooksOutsideOf(canonicalPath: string): void {
+  const candidates = new Set<string>();
+  // User-level
+  candidates.add(path.join(os.homedir(), '.claude', 'settings.json'));
+  // Project root + worktrees. cwd is reliable here because `enable` already
+  // resolved gitRoot from cwd; if user passed --global we still want to
+  // sweep the local project they're standing in.
+  const cwdRoot = getGitRoot() || process.cwd();
+  candidates.add(path.join(cwdRoot, '.claude', 'settings.json'));
+  const worktreesDir = path.join(cwdRoot, '.claude', 'worktrees');
+  try {
+    for (const entry of fs.readdirSync(worktreesDir)) {
+      candidates.add(path.join(worktreesDir, entry, '.claude', 'settings.json'));
+    }
+  } catch { /* no worktrees dir — fine */ }
+
+  for (const p of candidates) {
+    if (p === canonicalPath) continue;
+    if (!fs.existsSync(p)) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      if (!hasOriginClaudeHooksInSettings(parsed)) continue;
+      stripOriginClaudeHooksFromParsedSettings(parsed);
+      fs.writeFileSync(p, JSON.stringify(parsed, null, 2) + '\n');
+      const rel = p.startsWith(os.homedir() + '/') ? '~' + p.slice(os.homedir().length) : p;
+      console.log(chalk.gray(`    • Removed duplicate Origin hooks from ${rel}`));
+    } catch { /* unreadable or write-blocked — skip */ }
+  }
+}
+
+function hasOriginClaudeHooksInSettings(parsed: any): boolean {
+  if (!parsed?.hooks) return false;
+  for (const event of Object.keys(parsed.hooks)) {
+    const entries = parsed.hooks[event];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!entry?.hooks || !Array.isArray(entry.hooks)) continue;
+      for (const h of entry.hooks) {
+        if (typeof h?.command === 'string' && h.command.includes('origin hooks claude-code')) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function stripOriginClaudeHooksFromParsedSettings(parsed: any): void {
+  if (!parsed?.hooks) return;
+  for (const event of Object.keys(parsed.hooks)) {
+    const entries = parsed.hooks[event];
+    if (!Array.isArray(entries)) continue;
+    parsed.hooks[event] = entries.filter((entry: any) => {
+      if (!entry?.hooks || !Array.isArray(entry.hooks)) return true;
+      return !entry.hooks.some((h: any) =>
+        typeof h?.command === 'string' && h.command.includes('origin hooks claude-code')
+      );
+    });
+    if (parsed.hooks[event].length === 0) {
+      delete parsed.hooks[event];
+    }
+  }
 }
 
 // ── Cursor Hooks ───────────────────────────────────────────────────────────
@@ -1053,6 +1137,90 @@ fi
     console.log(chalk.gray('    Attribution preserved through rebase/amend/cherry-pick'));
   } catch (err: any) {
     console.log(chalk.yellow(`\n  ⚠ Could not set global git hooks: ${err.message}`));
+  }
+}
+
+// ─── Auto-install at session start ────────────────────────────────────
+//
+// Idempotent, quiet check that the repo has Origin's pre-commit hook
+// installed — the gate that actually enforces CONTENT_FILTER policies
+// and the built-in secret scanner. Called from handleSessionStart so
+// any repo an AI session touches gets enforcement, not just the one
+// where the user ran `origin enable`.
+//
+// User-reported problem (PR #156): a CONTENT_FILTER policy was
+// configured in the dashboard, scoped to Codex/Claude/Gemini/Cursor.
+// User ran Codex in a repo where `origin enable` had never been run.
+// Codex's agent-level hooks (SessionStart/UserPromptSubmit/Stop) fire
+// because they live in `~/.codex/hooks.json` (global), but the
+// per-repo `.git/hooks/pre-commit` — which is what blocks the commit
+// — was never installed. Commit sailed through.
+//
+// This ensures the repo gets the hook the first time ANY agent
+// session starts in it, agent-agnostic. Skips silently when:
+//   - Not a git repo (gitRoot lookup failed at the caller)
+//   - `core.hooksPath` is set to an Origin-managed dir (global hooks
+//     already cover this repo)
+//   - The marker line is already present in `.git/hooks/pre-commit`
+//
+// We don't touch `core.hooksPath` if the user has set it to something
+// else (a custom team-wide hooks dir, husky, lefthook, …) — clobbering
+// that would be invasive and unexpected. In that case the user has to
+// run `origin enable` explicitly so we can write into THEIR hooks dir.
+export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean; reason: string } {
+  try {
+    // 1. If global core.hooksPath is set to Origin's managed dir, the
+    //    global pre-commit fires here too. Nothing to do.
+    try {
+      const globalHooksPath = execSync('git config --global --get core.hooksPath', {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).trim();
+      if (globalHooksPath && globalHooksPath.includes(path.join('.origin', 'git-hooks'))) {
+        return { installed: false, reason: 'global-origin-hooks-active' };
+      }
+      if (globalHooksPath) {
+        // User has their own custom hooksPath. Don't clobber it.
+        return { installed: false, reason: 'custom-hooks-path-set' };
+      }
+    } catch { /* no global setting — fall through */ }
+
+    // 2. Repo-local check.
+    const hooksDir = path.join(gitRoot, '.git', 'hooks');
+    const hookPath = path.join(hooksDir, 'pre-commit');
+    const ORIGIN_MARKER = '# origin-pre-commit';
+
+    if (fs.existsSync(hookPath)) {
+      try {
+        const existing = fs.readFileSync(hookPath, 'utf-8');
+        if (existing.includes(ORIGIN_MARKER)) {
+          return { installed: false, reason: 'already-installed' };
+        }
+      } catch { /* unreadable — fall through and try to install */ }
+    }
+
+    // 3. Install silently. Mirror `installGitPreCommitHook` semantics
+    //    but without the console.log so we don't spam users' hook
+    //    output on every session start.
+    if (!fs.existsSync(hooksDir)) {
+      fs.mkdirSync(hooksDir, { recursive: true });
+    }
+    const hookScript = originCmd('origin hooks git-pre-commit');
+    if (fs.existsSync(hookPath)) {
+      backupExistingHooks(hookPath);
+      const append = `\n${ORIGIN_MARKER}\n${hookScript}\n`;
+      fs.appendFileSync(hookPath, append);
+    } else {
+      const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript}\n`;
+      fs.writeFileSync(hookPath, content);
+    }
+    fs.chmodSync(hookPath, '755');
+    return { installed: true, reason: 'fresh-install' };
+  } catch (err: any) {
+    // Non-fatal — if we can't install, the session continues. Worst
+    // case the user has unenforced policies in this repo until they
+    // run `origin enable` manually; better than crashing the session.
+    return { installed: false, reason: `error:${err?.message || 'unknown'}` };
   }
 }
 

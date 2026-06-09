@@ -169,6 +169,11 @@ const ORIGIN_AUTO_MANAGED_BASENAMES = new Set<string>([
   'AGENTS.md',
   'GEMINI.md',
   '.windsurfrules',
+  // Not Origin-managed, but repo bookkeeping the agent shouldn't be blamed
+  // for. Like CLAUDE.md it's often hand-edited, so it stays out of
+  // DEFAULT_IGNORE_PATTERNS (path filtering) — we only drop it from the
+  // per-prompt diff shipped to the platform, matching the read-time strip.
+  '.gitignore',
 ]);
 
 export function stripIgnoredSectionsFromDiff(

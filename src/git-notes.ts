@@ -87,10 +87,34 @@ export interface PromptNoteEntry {
   authorEmail?: string;
   timestamp?: string;               // ISO 8601
   files?: string[];                 // files this prompt edited
+  /** JSON-encoded PromptCapture (see prompt-capture/types.ts). Lets a
+   *  different Origin org importing this repo run AI Blame from the
+   *  authoritative LCS-replay path. Capped at EDITS_JSON_MAX_BYTES per
+   *  entry so notes stay push-friendly even on big sessions. */
+  editsJson?: string;
+  /** Working-tree SHA at the prompt's stop (powers soft restore). */
+  treeSha?: string;
+  /** HEAD at the prompt's stop. */
+  commitSha?: string;
 }
 
 const PROMPT_TEXT_MAX_BYTES = 1024;
 const PROMPTS_MAX = 50;
+// Per-prompt editsJson budget inside a git note. Same 16 KB cap used by
+// the origin-sessions branch (`local-entrypoint.ts:EDITS_JSON_MAX_BYTES`)
+// so behavior is consistent across both portability surfaces. Truncated
+// entries get a marker; consumers parse the JSON prefix and fall back to
+// pc.diff when parsing fails.
+const EDITS_JSON_MAX_BYTES = 16 * 1024;
+const EDITS_TRUNCATED_MARKER =
+  '\n/* [origin: editsJson truncated for note portability] */';
+
+function capEditsJsonForNote(raw: string | null | undefined): string | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  if (Buffer.byteLength(raw, 'utf-8') <= EDITS_JSON_MAX_BYTES) return raw;
+  const slice = raw.slice(0, EDITS_JSON_MAX_BYTES - EDITS_TRUNCATED_MARKER.length);
+  return slice + EDITS_TRUNCATED_MARKER;
+}
 
 export function writeGitNotes(
   repoPath: string,
@@ -126,6 +150,13 @@ export function writeGitNotes(
         if (p.authorEmail) out.authorEmail = p.authorEmail;
         if (p.timestamp) out.timestamp = p.timestamp;
         if (p.files && p.files.length > 0) out.files = p.files;
+        // editsJson + tree/commit refs travel so a different Origin org
+        // pulling this repo's notes can drive AI Blame from the LCS-replay
+        // path. Skipped when missing so older readers stay forward-compatible.
+        const editsJson = capEditsJsonForNote(p.editsJson);
+        if (editsJson) out.editsJson = editsJson;
+        if (p.treeSha) out.treeSha = p.treeSha;
+        if (p.commitSha) out.commitSha = p.commitSha;
         return out;
       })
     : undefined;

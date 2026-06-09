@@ -578,6 +578,24 @@ function getHeartbeatPidFile(sessionId: string): string {
  * Used to find the actual agent process (e.g. Codex, Gemini) since hooks are
  * spawned via shell wrappers that die immediately after the hook exits.
  */
+// Heuristic to recognize Origin's own hook subprocesses so we DON'T
+// pick them as the "agent" PID. The command line of a hook invocation
+// is something like
+//   node /path/to/origin/dist/index.js hooks claude-code stop
+// which contains "claude-code" and would happily satisfy a
+// /claude/i ancestor search — but the hook subprocess dies seconds
+// after it returns. Heartbeat would then think Claude exited and
+// end the session ~30s into the user's first real prompt.
+//
+// Recognized markers (in priority order):
+//   - "origin hooks" / "origin-cli" command path → almost certainly
+//     us. The CLI's binary directory tends to contain "origin" too.
+//   - "origin-cli" anywhere in the argv (npm install paths, dev
+//     symlinks).
+// Conservative — we'd rather walk past one of our own subprocesses
+// and find the real agent than match the wrong PID.
+const ORIGIN_HOOK_MARKER = /origin[-/](?:cli|hooks?)|origin\s+hooks?\b|@origin\/cli/i;
+
 function findAncestorPid(pattern: RegExp, maxDepth = 10): number {
   try {
     let pid = process.ppid || 0;
@@ -587,7 +605,16 @@ function findAncestorPid(pattern: RegExp, maxDepth = 10): number {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
       }).trim();
-      if (pattern.test(info)) return pid;
+      // Pull ppid off the front BEFORE testing the rest against
+      // the pattern so the "match" is on the actual command line,
+      // not "<ppid> <command>".
+      const firstSpace = info.indexOf(' ');
+      const commandPart = firstSpace >= 0 ? info.slice(firstSpace + 1) : info;
+      // Skip Origin's own hook subprocesses — they match every
+      // agent pattern via their argv but die after the hook
+      // returns. Walking past them gets us to the real agent.
+      const isOriginSelf = ORIGIN_HOOK_MARKER.test(commandPart);
+      if (!isOriginSelf && pattern.test(commandPart)) return pid;
       // Move to parent
       const ppid = parseInt(info.trim().split(/\s+/)[0], 10);
       if (isNaN(ppid) || ppid <= 1 || ppid === pid) break;
@@ -620,26 +647,40 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
       return;
     }
 
-    // For long-running agents (Claude Code, Windsurf), process.ppid IS the agent.
-    // For IDE/fire-and-forget agents (Cursor, Codex, Gemini, Aider), hooks are
-    // spawned via shell wrappers — process.ppid dies immediately. Walk up the
-    // process tree to find the actual agent process so the heartbeat can detect
-    // when it exits and end the session.
-    // Long-running agents: process.ppid IS the agent (Claude Code, Windsurf)
-    // IDE agents (Cursor, Codex): hooks are short-lived subprocesses — the parent
-    // PID found by walking the tree is often an intermediate process that dies after
-    // the hook exits. Passing it to the heartbeat causes the heartbeat to kill the
-    // session after 30 seconds. For these agents, pass parentPid=0 so the heartbeat
-    // relies on state file staleness (15 min) instead.
-    // Claude Code hooks run via MCP subprocesses — process.ppid points to
-    // a short-lived handler that dies after the hook returns, causing the
-    // heartbeat to think the agent exited. Use pattern-based PID detection instead.
+    // Agent → liveness-detection strategy.
+    //
+    // LONG_RUNNING_AGENTS: process.ppid IS the agent (heartbeat watches
+    //   that single PID). Only works when the agent runs the hook in its
+    //   own process and stays alive between hook fires.
+    // STALE_FILE_ONLY_AGENTS: parent PID is unreliable, so the heartbeat
+    //   relies on state-file mtime instead. Used for IDE/Electron agents
+    //   whose process tree is full of short-lived helpers.
+    // AGENT_PROCESS_PATTERNS: walk up the tree and match by command
+    //   substring. Last-resort — fragile against OS wrappers.
+    //
+    // Why Claude Code is now stale-file-only:
+    // On macOS the Claude Desktop app launches the real `claude` CLI via
+    // `/Applications/Claude.app/Contents/Helpers/disclaimer`, which
+    // exec-launches the binary and exits shortly after. When the hook
+    // fires from a descendant of `claude`, walking up matches the
+    // `disclaimer` wrapper first (its argv contains the absolute path
+    // `.../claude.app/Contents/MacOS/claude`, satisfying /claude/i). The
+    // wrapper then dies, the heartbeat sees the captured PID gone, and
+    // ends the session at ~19 minutes while the Claude tab is still
+    // open. The same trap exists for Squirrel's `ShipIt` auto-updater,
+    // which also matches /claude/i but is transient. Per-OS wrapper
+    // carve-outs are an endless game of whack-a-mole; the only durable
+    // signal we have is "did any Claude hook fire recently" — that
+    // updates the state file via saveSessionState on every
+    // UserPromptSubmit / PreToolUse / Stop / etc., so a fresh file mtime
+    // means Claude is alive. Staleness threshold is raised to 90 min in
+    // heartbeat.ts so a long read of a single response doesn't false-end.
     const LONG_RUNNING_AGENTS = ['windsurf'];
-    // Cursor is an Electron app — its process tree has short-lived helpers that
-    // die immediately, causing false parent-death detection. Use stale file only.
-    const STALE_FILE_ONLY_AGENTS = ['cursor'];
+    // Cursor: Electron helpers die immediately, can't track parent PID.
+    // Claude Code: macOS wrapper trap (see above). Treat both as
+    // stale-file-only.
+    const STALE_FILE_ONLY_AGENTS = ['cursor', 'claude-code'];
     const AGENT_PROCESS_PATTERNS: Record<string, RegExp> = {
-      'claude-code': /claude/i,
       'gemini': /gemini/i,
       'aider': /aider/i,
       'codex': /codex/i,

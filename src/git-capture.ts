@@ -47,6 +47,24 @@ export interface GitCaptureResult {
 
 const MAX_DIFF_SIZE = 500_000; // 500KB max diff size
 
+/**
+ * Maximum byte length for a single per-prompt diff in payloads sent to the
+ * API (PATCH /api/mcp/session/:id `promptChanges[].diff` /
+ * `.uncommittedDiff`, plus the equivalent endpoints under /session/end and
+ * /commits/ingest's per-prompt blocks).
+ *
+ * MUST match the API's per-prompt cap in apps/api/src/routes/mcp.ts:~1540
+ * (`.slice(0, 200_000)` on each incoming `pc.diff` / `pc.uncommittedDiff`).
+ * If the CLI sends a SMALLER slice than the API would store we silently
+ * drop bytes the API would have happily accepted — a hard-to-spot
+ * truncation that was capping every per-prompt diff at 100KB across nine
+ * call sites before this constant existed.
+ *
+ * Bumping requires a coordinated update on the API side first; bumping
+ * down here is safe (API just stores less).
+ */
+export const MAX_PROMPT_DIFF_LEN = 200_000;
+
 // ─── Main Function ─────────────────────────────────────────────────────────
 
 /**

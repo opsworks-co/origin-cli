@@ -380,4 +380,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ sha, note }),
     }),
+
+  // Upload a single image attachment for a prompt. Server caps at 5 MB
+  // per image / 50 MB per session and gates on the user's
+  // `captureImages` opt-in flag — a 403 means "user has image capture
+  // disabled," and we should stop trying for the rest of the session.
+  // Returns the stable attachment id which the caller splices into the
+  // prompt text as `[image:<id>]`.
+  uploadAttachment: (
+    sessionId: string,
+    payload: { promptIndex: number; mediaType: string; base64: string },
+  ): Promise<{ id: string; deduped?: boolean }> =>
+    request(`/api/sessions/${sessionId}/attachments`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };

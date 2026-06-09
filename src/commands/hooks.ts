@@ -2,7 +2,7 @@ import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnect
 import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
 import { api, readAuthStatus } from '../api.js';
-import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, setActivePricing } from '../transcript.js';
+import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, extractPromptImages, setActivePricing } from '../transcript.js';
 import {
   saveSessionState,
   loadSessionState,
@@ -23,7 +23,7 @@ import {
   type SessionState,
   type ToolCallRecord,
 } from '../session-state.js';
-import { captureGitState, getDirtyFiles, createShadowCommit } from '../git-capture.js';
+import { captureGitState, getDirtyFiles, createShadowCommit, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes, type PromptNoteEntry } from '../git-notes.js';
@@ -41,6 +41,43 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import * as fzstd from 'fzstd';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Returns the tree SHA that represents the WORKING TREE state right now,
+ * not just HEAD's committed tree. For Cursor mid-turn prompts the agent
+ * edits files in the IDE without committing — `HEAD^{tree}` then points
+ * at the pre-edit state, and the Restore button in the UI ends up with
+ * no usable tree ref.
+ *
+ * `git stash create` writes the working tree to the object store as a
+ * commit (without touching the stash list or the working tree itself).
+ * Its tree IS the dirty working-tree state. Returns null when the tree
+ * is clean (stash create returns empty) and we fall back to HEAD's
+ * tree — same SHA the legacy code path would have used.
+ */
+function getWorkingTreeSha(repoPath: string): string | null {
+  const HEX = /^[a-f0-9]{40}$/;
+  try {
+    const stashSha = execFileSync('git', ['stash', 'create'], {
+      cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (stashSha && HEX.test(stashSha)) {
+      const treeSha = execFileSync('git', ['rev-parse', `${stashSha}^{tree}`], {
+        cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (HEX.test(treeSha)) return treeSha;
+    }
+  } catch { /* fall through to HEAD's tree */ }
+  try {
+    const headTree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], {
+      cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (HEX.test(headTree)) return headTree;
+  } catch { /* ignore */ }
+  return null;
+}
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
 
@@ -130,6 +167,7 @@ function buildPromptNoteEntries(
   state: SessionState,
   agentSlug: string | undefined,
   model: string | undefined,
+  editsByIndex?: Map<number, string> | null,
 ): PromptNoteEntry[] {
   const out: PromptNoteEntry[] = [];
   const mappings = state.completedPromptMappings || [];
@@ -139,7 +177,10 @@ function buildPromptNoteEntries(
   // actually touched the working tree), then add chat-only prompts from
   // state.prompts so the note records every turn. Author info is at
   // session level (already in commit's Co-Authored-By trailer) so we
-  // don't repeat it per-entry.
+  // don't repeat it per-entry. editsJson + tree/commit refs are pulled
+  // from the same maps the stop hook populates; lets a different Origin
+  // org pulling notes drive AI Blame via LCS replay instead of having
+  // to fall back to block-matching pc.diff.
   for (const m of mappings) {
     if (seen.has(m.promptIndex)) continue;
     seen.add(m.promptIndex);
@@ -149,6 +190,9 @@ function buildPromptNoteEntries(
       agent: agentSlug || state.agentSlug,
       model,
       files: m.filesChanged && m.filesChanged.length > 0 ? m.filesChanged : undefined,
+      editsJson: editsByIndex?.get(m.promptIndex) || undefined,
+      treeSha: (m as any).treeSha || undefined,
+      commitSha: (m as any).commitSha || undefined,
     });
   }
   for (let i = 0; i < prompts.length; i++) {
@@ -159,6 +203,7 @@ function buildPromptNoteEntries(
       text: prompts[i],
       agent: agentSlug || state.agentSlug,
       model,
+      editsJson: editsByIndex?.get(i) || undefined,
     });
   }
   return out.sort((a, b) => a.index - b.index);
@@ -194,14 +239,94 @@ function uncommittedExcludeUnion(state: SessionState): string[] {
   return Array.from(set);
 }
 
+// Session-aware amend rescue. For each SHA already in
+// state.sessionCommitShas (post-commit hook recorded these — so they
+// genuinely belong to THIS session), check if it's still reachable
+// from HEAD. If NOT — typical signal of `git commit --amend`, which
+// orphans the pre-amend SHA and creates a new commit with the same
+// parent — find the replacement (same parent, reachable from HEAD)
+// and substitute it in place.
+//
+// Critically: this NEVER adds a SHA we didn't already own. The
+// previous helper walked `git log session-start..HEAD` and added
+// every reachable commit, which silently picked up concurrent
+// sessions' work and polluted pc.diff. This version only ever
+// MUTATES entries; it never inflates the list.
+function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
+  if (!state.sessionCommitShas || state.sessionCommitShas.length === 0) return;
+  const gitOpts = {
+    cwd: repoPath,
+    encoding: 'utf-8' as const,
+    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    timeout: 5000,
+  };
+  const replacements = new Map<string, string>();
+  for (const sha of state.sessionCommitShas) {
+    if (!/^[a-fA-F0-9]{7,40}$/.test(sha)) continue;
+    // Is the recorded sha still reachable from HEAD? merge-base
+    // --is-ancestor exits 0 = ancestor, 1 = not ancestor, 2+ = error.
+    let reachable = true;
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], gitOpts);
+    } catch (err: any) {
+      // execFileSync throws on non-zero exit. Status 1 = not reachable
+      // (likely amended/rebased). Any other status (commit missing
+      // from object DB, repo corrupt) — skip; we have nothing to do.
+      reachable = false;
+      if (err?.status !== undefined && err.status !== 1) continue;
+    }
+    if (reachable) continue;
+    // Orphaned commit. Look for the amend replacement: same parent,
+    // reachable from HEAD. We can still read the orphan's parent from
+    // the object DB until git gc prunes it.
+    let parent = '';
+    try {
+      parent = execFileSync('git', ['rev-parse', `${sha}^`], gitOpts).toString().trim();
+    } catch { continue; }
+    if (!parent || !/^[a-fA-F0-9]{7,40}$/.test(parent)) continue;
+    // Walk first-parent history from parent..HEAD and take the first
+    // commit whose parent matches `parent`. `--first-parent` keeps us
+    // on the main line (avoids picking up merge-side commits as
+    // amend candidates). If multiple amends stacked, the rescue
+    // walks one step; subsequent calls would walk further if state
+    // is persisted between captures.
+    try {
+      const out = execFileSync(
+        'git',
+        ['log', `${parent}..HEAD`, '--first-parent', '--format=%H %P'],
+        gitOpts,
+      ).toString().trim();
+      for (const line of out.split('\n')) {
+        const [candidate, ...parents] = line.split(' ');
+        if (!/^[a-fA-F0-9]{7,40}$/.test(candidate || '')) continue;
+        if (parents[0] === parent) {
+          replacements.set(sha, candidate);
+          break;
+        }
+      }
+    } catch { /* parent unreachable — orphan irrecoverable */ }
+  }
+  if (replacements.size === 0) return;
+  state.sessionCommitShas = state.sessionCommitShas.map((s) => replacements.get(s) ?? s);
+  try {
+    saveSessionState(state, state.repoPath || '', state.sessionTag);
+  } catch { /* best-effort persistence */ }
+}
+
 // Compute the committed-side diff scoped to commits THIS session authored.
 // Replaces `git diff prePromptSha...HEAD`, which picks up commits made by
 // concurrently-running sessions once HEAD moves past this session's commits.
 // Returns empty string when the session hasn't committed anything yet.
+//
+// rescueAmendedCommitShas runs FIRST so `git commit --amend` doesn't
+// silently drop the session's committed work from blame. It only mutates
+// SHAs we already owned; it never adds unrelated commits (that was the
+// 3153d3b pollution mistake that broke every multi-session repo).
 function sessionScopedCommittedDiff(
   repoPath: string,
   state: SessionState,
 ): string {
+  rescueAmendedCommitShas(repoPath, state);
   const shas = state.sessionCommitShas || [];
   if (shas.length === 0) return '';
   const parts: string[] = [];
@@ -291,8 +416,13 @@ function buildSessionWriteData(opts: {
   status: 'running' | 'ended';
   apiUrl: string;
   extraFiles?: string[];
+  // Per-prompt PromptCapture JSON (apply_patch / Edit / replace payload),
+  // keyed by promptIndex. Travels into changes.json so a different Origin
+  // org importing this repo can drive AI Blame from the authoritative
+  // edits instead of falling back to block-matching against pc.diff.
+  promptEditsByIndex?: Map<number, string>;
 }): SessionWriteData {
-  const { state, parsed, promptMappings, gitCapture, status, apiUrl, extraFiles } = opts;
+  const { state, parsed, promptMappings, gitCapture, status, apiUrl, extraFiles, promptEditsByIndex } = opts;
 
   const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
   const model = parsed.model || state.model;
@@ -328,7 +458,12 @@ function buildSessionWriteData(opts: {
     };
   });
 
-  // Build PromptChange[] from mappings with snapshot metadata
+  // Build PromptChange[] from mappings with snapshot metadata. Pulls the
+  // per-prompt commit/tree/uncommitted refs straight off the mapping when
+  // the stop hook attached them (typical for Claude/Cursor/Gemini); falls
+  // back to gitCapture.headAfter for legacy synth paths. editsJson comes
+  // from the parallel `promptEditsByIndex` map populated by
+  // capturePromptEdits — same shape that ships to the API.
   const changes: PromptChange[] = promptMappings.map(m => {
     // Compute per-prompt line counts from diff
     const diffLines = (m.diff || '').split('\n');
@@ -343,7 +478,10 @@ function buildSessionWriteData(opts: {
       linesRemoved: removed,
       aiPercentage: 100, // All auto-captured prompts are AI-generated changes
       checkpointType: 'auto',
-      commitSha: gitCapture.headAfter || null,
+      commitSha: m.commitSha ?? gitCapture.headAfter ?? null,
+      treeSha: m.treeSha ?? null,
+      uncommittedDiff: m.uncommittedDiff ?? null,
+      editsJson: promptEditsByIndex?.get(m.promptIndex) ?? null,
     };
   });
 
@@ -407,6 +545,29 @@ async function readStdin(): Promise<Record<string, any>> {
 // escapeShellArg removed — execFileSync handles argument escaping safely
 
 // ─── Agent-Model Mapping ──────────────────────────────────────────────────
+
+/**
+ * Bare agent-brand strings we stamp on a session at session-start when the
+ * real model isn't known yet (e.g. claude-code's hook stdin has no `model`
+ * field, so we fall back to "claude"). These are NOT real model identifiers.
+ */
+const BARE_BRAND_MODELS = new Set([
+  'claude', 'gemini', 'cursor', 'codex', 'windsurf', 'aider',
+  'copilot', 'amp', 'opencode', 'continue', 'junie', 'rovo', 'droid',
+  'ai', 'unknown', 'default', '',
+]);
+
+/**
+ * A "specific" model is a real provider model identifier
+ * ("claude-opus-4-8", "gemini-2.5-pro", "gpt-5-codex") — i.e. not the bare
+ * agent-brand fallback. Used to decide whether a value is worth persisting
+ * onto the session record, so we never downgrade a captured real model back
+ * to the brand.
+ */
+function isSpecificModel(model: string | undefined | null): boolean {
+  if (!model) return false;
+  return !BARE_BRAND_MODELS.has(model.trim().toLowerCase());
+}
 
 /**
  * Maps agent slugs to regex patterns that match their model strings.
@@ -540,6 +701,26 @@ function buildOriginFrameworkGuidance(): string {
  *
  * Returns the state and the resolved cwd to use for saving.
  */
+
+// Agents whose stdin `session_id` is STABLE for the whole conversation
+// (Claude Code, Windsurf). For every other agent the id is per-turn (Codex)
+// or changes when the conversation is RESUMED in a new launch (Gemini), so
+// passing it to findStateForHook forces an exact match that fails on resume.
+// For those agents we pass `undefined`, which makes findStateForHook resolve
+// via the agent-filtered fallback (the still-active same-agent session) instead
+// of aborting.
+//
+// Bug this fixes: a resumed Gemini session stopped capturing per-prompt diffs.
+// UserPromptSubmit already gated the id this way, but Stop / SessionEnd /
+// PreToolUse passed the raw id — so after resume (new Gemini id) Stop hit
+// "no exact match for stable claudeSessionId — new session needed" and
+// ABORTed, never writing completedPromptMappings / advancing prePromptSha.
+// Prompts kept growing (UserPromptSubmit worked) while diffs froze.
+const STABLE_SESSION_ID_AGENTS = ['claude-code', 'windsurf'];
+export function hookLookupSessionId(sessionId: string | undefined, agentSlug?: string): string | undefined {
+  return STABLE_SESSION_ID_AGENTS.includes(agentSlug || '') ? sessionId : undefined;
+}
+
 function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?: string): { state: SessionState; saveCwd: string } | null {
   const repoPath = discoverGitRoot(hookCwd) || hookCwd;
 
@@ -662,6 +843,48 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
  * Walk every plausible location and pick the newest matching JSON. The hook
  * may also receive `transcript_path` via stdin — that wins over discovery.
  */
+/**
+ * Read the actual model identifier from a Gemini transcript file.
+ *
+ * Gemini CLI's hook stdin doesn't include `model`, so without this
+ * the dashboard falls back to the bare brand string "gemini" and every
+ * commit row reads "Gemini" instead of e.g. "Gemini 2.5 Pro".
+ *
+ * Gemini writes its session metadata in the FIRST JSONL line of the
+ * chat file (header with model/projectId/created) and includes a
+ * `model` field on each model-response event. We scan the file for
+ * either signal — the LATEST event with a model field wins (mid-
+ * session model switches via /chat command are then reflected).
+ *
+ * Returns null when no model is found OR when the file isn't a Gemini
+ * chat (e.g. stale path). Caller falls back to the bare "gemini".
+ */
+function readGeminiModel(transcriptPath: string): string | null {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
+  let raw: string;
+  try { raw = fs.readFileSync(transcriptPath, 'utf-8'); } catch { return null; }
+  let latestModel: string | null = null;
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let evt: any;
+    try { evt = JSON.parse(line); } catch { continue; }
+    // Header line at top of file usually has shape
+    // { sessionId, model, projectId, created, ... }. The exact key
+    // varies (`model`, `modelName`, `metadata.model`); accept any.
+    const candidate =
+      (typeof evt?.model === 'string' && evt.model) ||
+      (typeof evt?.modelName === 'string' && evt.modelName) ||
+      (typeof evt?.metadata?.model === 'string' && evt.metadata.model) ||
+      (typeof evt?.payload?.model === 'string' && evt.payload.model) ||
+      (typeof evt?.config?.model === 'string' && evt.config.model) ||
+      null;
+    if (candidate && candidate !== 'gemini' && candidate !== 'unknown') {
+      latestModel = candidate;
+    }
+  }
+  return latestModel;
+}
+
 function discoverGeminiTranscriptPath(opts: { maxAgeMs?: number; sessionId?: string } = {}): string | null {
   // Default: 60-minute window. Mid-session, Gemini may not touch its chat
   // file for many minutes between user prompts (it's only re-written on
@@ -951,8 +1174,9 @@ function discoverCursorTranscript(conversationId?: string, hookCwd?: string, opt
 interface CodexSessionData {
   model: string;
   tokensUsed: number;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens: number;     // NON-cached prompt tokens
+  outputTokens: number;    // visible output + reasoning (both billed at output rate)
+  cacheReadTokens?: number; // cached prompt portion — billed at the model's cached rate
   toolCalls: number;
   prompt: string;
   prompts?: string[];   // all user prompts from the rollout, in order
@@ -1085,6 +1309,7 @@ function discoverCodexSessionData(
         tokensUsed: rolloutResult.tokensUsed,
         inputTokens: rolloutResult.inputTokens,
         outputTokens: rolloutResult.outputTokens,
+        cacheReadTokens: rolloutResult.cacheReadTokens,
         toolCalls: rolloutResult.toolCalls,
         prompt,
         prompts: rolloutResult.userPrompts,
@@ -1332,12 +1557,17 @@ function resolvePromptForCommit(
   };
 }
 
-function parseCodexRollout(
+// Exported for the pricing-regression test suite — it asserts that
+// a real rollout fixture parses into the documented token/cost shape
+// (non-cached input, cached reads, reasoning folded into output).
+// This is the only public consumer; production callers go through
+// `discoverCodexSessionData` above.
+export function parseCodexRollout(
   codexDir: string,
   rolloutPath: string,
   threadId: string,
   opts: { verbose?: boolean } = {},
-): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[] } | null {
+): { tokensUsed: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; model?: string; turnCount: number; toolCalls: number; transcript?: string; userPrompts?: string[] } | null {
   try {
     // Try to resolve the rollout file
     let rolloutFile = '';
@@ -1383,6 +1613,15 @@ function parseCodexRollout(
     const lines = content.split('\n').filter(l => l.trim());
     let maxInputTokens = 0;
     let maxOutputTokens = 0;
+    // OpenAI's `input_tokens` includes the cached portion as a subset,
+    // so we track `cached_input_tokens` separately and subtract on
+    // the way out — the cost path needs them split (cached is billed
+    // at $0.50/M for gpt-5.5, regular is $5/M).
+    let maxCachedInputTokens = 0;
+    // Codex/gpt-5 reasoning tokens land in a separate field but are
+    // billed at the output rate. Add to outputTokens on the way out
+    // so neither the cost nor the tokensUsed total under-reports.
+    let maxReasoningOutputTokens = 0;
     let maxTotalTokens = 0;
     let model: string | undefined;
     let turnCount = 0;
@@ -1436,10 +1675,25 @@ function parseCodexRollout(
         if (tokenUsage) {
           const input = tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0;
           const output = tokenUsage.output_tokens || tokenUsage.completion_tokens || 0;
+          // Codex (responses-API) emits these on every TokenCountEvent.
+          // OpenAI's older Chat Completions shape nests cache under
+          // `prompt_tokens_details.cached_tokens`; cover both so we
+          // don't silently drop cache info on legacy rollouts.
+          const cached =
+            tokenUsage.cached_input_tokens ||
+            tokenUsage.prompt_tokens_details?.cached_tokens ||
+            0;
+          const reasoning =
+            tokenUsage.reasoning_output_tokens ||
+            tokenUsage.completion_tokens_details?.reasoning_tokens ||
+            tokenUsage.reasoning_tokens ||
+            0;
           const total = tokenUsage.total_tokens || (input + output);
           if (total > maxTotalTokens) {
             maxInputTokens = input;
             maxOutputTokens = output;
+            maxCachedInputTokens = cached;
+            maxReasoningOutputTokens = reasoning;
             maxTotalTokens = total;
           }
         }
@@ -1585,10 +1839,26 @@ function parseCodexRollout(
       }
     }
 
+    // Split cached out of input, fold reasoning into output. This is
+    // the contract the rest of the pipeline expects:
+    //   inputTokens     — NON-cached prompt tokens (billed at full
+    //                     model input rate)
+    //   cacheReadTokens — cached subset (billed at the cached rate,
+    //                     e.g. $0.50/M for gpt-5.5)
+    //   outputTokens    — visible output + reasoning, both billed at
+    //                     the output rate
+    //   tokensUsed      — grand total including reasoning, so the
+    //                     dashboard token column doesn't under-report
+    //                     deep-thinking sessions
+    const nonCachedInputTokens = Math.max(0, maxInputTokens - maxCachedInputTokens);
+    const billableOutputTokens = maxOutputTokens + maxReasoningOutputTokens;
+    const grandTotalTokens = nonCachedInputTokens + maxCachedInputTokens + billableOutputTokens;
+
     return {
-      tokensUsed: maxTotalTokens,
-      inputTokens: maxInputTokens,
-      outputTokens: maxOutputTokens,
+      tokensUsed: grandTotalTokens,
+      inputTokens: nonCachedInputTokens,
+      outputTokens: billableOutputTokens,
+      cacheReadTokens: maxCachedInputTokens,
       model,
       turnCount,
       toolCalls,
@@ -1733,6 +2003,50 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     }
   }
   debugLog('session-start', 'repo path resolved', { repoPath, hookCwd, discovered: repoPath !== getGitRoot(hookCwd), multiRepo: !!allRepoPaths });
+
+  // Ensure the git pre-commit hook is installed in this repo so
+  // CONTENT_FILTER / secret-scan policies actually block commits.
+  // User-reported (PR #156): a CONTENT_FILTER policy was configured
+  // in the dashboard but Codex committed forbidden content because
+  // the repo had never been `origin enable`'d — the per-repo
+  // `.git/hooks/pre-commit` was missing, so the policy evaluator
+  // never ran. The agent-level hooks (which DO fire because they
+  // live in `~/.codex/hooks.json` or `~/.claude/settings.json`)
+  // handle attribution but not enforcement. Auto-installing here
+  // closes the gap for any agent the first time a session touches
+  // a repo. Idempotent + silent — skips when already installed or
+  // when `core.hooksPath` already routes through Origin's global
+  // dir.
+  if (!isNonGitProject && repoPath && !allRepoPaths) {
+    try {
+      const { ensurePolicyHookInstalled } = await import('./enable.js');
+      const result = ensurePolicyHookInstalled(repoPath);
+      if (result.installed) {
+        debugLog('session-start', 'auto-installed policy pre-commit hook', { repoPath, reason: result.reason });
+      } else {
+        debugLog('session-start', 'policy hook not auto-installed', { repoPath, reason: result.reason });
+      }
+    } catch (err: any) {
+      debugLog('session-start', 'policy hook auto-install failed (non-fatal)', { message: err?.message });
+    }
+  } else if (allRepoPaths) {
+    // Multi-repo workspace — install in each discovered repo so
+    // policies enforce on every commit regardless of which sub-repo
+    // the agent edits.
+    try {
+      const { ensurePolicyHookInstalled } = await import('./enable.js');
+      for (const r of allRepoPaths) {
+        try {
+          const result = ensurePolicyHookInstalled(r);
+          if (result.installed) {
+            debugLog('session-start', 'auto-installed policy pre-commit hook (multi-repo)', { repoPath: r, reason: result.reason });
+          }
+        } catch { /* per-repo failure non-fatal */ }
+      }
+    } catch (err: any) {
+      debugLog('session-start', 'multi-repo policy hook auto-install failed (non-fatal)', { message: err?.message });
+    }
+  }
 
   // Resolve agent slug: .origin.json → agentSlugs override → hook command slug → saved default → undefined
   const repoConfig = loadRepoConfig(repoPath);
@@ -1965,13 +2279,15 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           if (prevCapture.diff || filteredUncommitted || prevFiles.length > 0) {
             if (!existing.completedPromptMappings) existing.completedPromptMappings = [];
             const existingIdx = existing.completedPromptMappings.findIndex(m => m.promptIndex === prevPromptIdx);
-            // Get current HEAD and tree SHA for restore support
+            // Get current HEAD + working-tree SHA for restore support.
+            // getWorkingTreeSha() returns the dirty working-tree's tree
+            // when present (Cursor mid-turn case), HEAD's tree otherwise.
             let mappingCommitSha: string | null = null;
             let mappingTreeSha: string | null = null;
             try {
               mappingCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-              mappingTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
             } catch { /* ignore */ }
+            mappingTreeSha = getWorkingTreeSha(repoPath);
             // Scope committed side to commits this session authored (see
             // sessionScopedCommittedDiff). Same isolation rule as the
             // user-prompt-submit path.
@@ -2029,8 +2345,8 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
               return {
                 ...pm,
                 promptText: (pm.promptText || '').slice(0, 1000),
-                diff: (pm.diff || '').slice(0, 100_000),
-                uncommittedDiff: (pm.uncommittedDiff || '').slice(0, 100_000),
+                diff: (pm.diff || '').slice(0, MAX_PROMPT_DIFF_LEN),
+                uncommittedDiff: (pm.uncommittedDiff || '').slice(0, MAX_PROMPT_DIFF_LEN),
                 linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
                 linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
                 aiPercentage: 100,
@@ -2143,6 +2459,20 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         debugLog('session-start', 'cursor model fallback (DB lookup failed)', { conversationId: input.conversation_id });
       }
     }
+    // Gemini's hook stdin never includes `model` (Gemini CLI doesn't
+    // expose it), so we'd fall back to the bare "gemini" string and
+    // every commit row would display "Gemini" instead of the real
+    // model (e.g. "Gemini 2.5 Pro"). Scan the transcript file for the
+    // actual model identifier — Gemini writes it on the session
+    // metadata line at the top of the chat file and/or on each
+    // model-response event.
+    if (agentSlug === 'gemini' && transcriptPath) {
+      const geminiModel = readGeminiModel(transcriptPath);
+      if (geminiModel) {
+        model = geminiModel;
+        debugLog('session-start', 'model from Gemini transcript', { model: geminiModel, transcriptPath });
+      }
+    }
   }
   if (!model || model === 'unknown' || model === 'default') {
     const AGENT_DEFAULT_MODELS: Record<string, string> = {
@@ -2223,7 +2553,15 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           branch: branch || undefined,
           hostname: agentConfig.hostname || undefined,
           additionalRepoPaths: allRepoPaths ? allRepoPaths.filter(p => p !== repoPath) : undefined,
-          agentSessionId: claudeSessionId || undefined,
+          // Use the unified `agentSessionId` (= claudeSessionId || stdinSessionId
+          // || cursor conversation_id) rather than `claudeSessionId` alone.
+          // For Cursor this is the conversation_id captured from
+          // input.conversation_id earlier; without it every new Cursor
+          // thread on the same machine+repo collided into whatever prior
+          // Cursor session was still RUNNING (user-reported May 27: new
+          // Cursor thread reused session 5bd449fb, accumulating 7 prompts
+          // across two distinct conversations on the same row).
+          agentSessionId: agentSessionId || undefined,
         });
         sessionId = result.sessionId as string;
         agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
@@ -2535,8 +2873,8 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
 
   // ── Find session state using concurrent-aware lookup ────────────────────────
   // For agents with unstable session_id (Cursor, Codex), don't use it for lookup
-  const stableAgents = ['claude-code', 'windsurf'];
-  const lookupSessionId = stableAgents.includes(agentSlug || '') ? input.session_id : undefined;
+  const stableAgents = STABLE_SESSION_ID_AGENTS;
+  const lookupSessionId = hookLookupSessionId(input.session_id, agentSlug);
   const found = findStateForHook(hookCwd, lookupSessionId, agentSlug);
   let state = found?.state || null;
 
@@ -2691,7 +3029,23 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         const slugOverride = (agentSlug && autoSlugs[agentSlug]) || (baseSlug && autoSlugs[baseSlug]) || undefined;
         const finalAgentSlug = slugOverride || baseSlug;
         const branch = getBranch(hookCwd);
-        const model = input.model || (agentSlug === 'gemini' ? 'gemini' : agentSlug === 'codex' ? 'codex' : 'claude');
+        let model = input.model || (agentSlug === 'gemini' ? 'gemini' : agentSlug === 'codex' ? 'codex' : 'claude');
+        // Override bare "gemini" with the real model identifier from
+        // the transcript metadata when available (Gemini CLI doesn't
+        // include `model` in hook stdin, so the fallback above lands
+        // on the brand name instead of e.g. "gemini-2.5-pro").
+        if ((model === 'gemini' || !model) && agentSlug === 'gemini') {
+          const tp =
+            (typeof input.transcript_path === 'string' && input.transcript_path) ||
+            discoverGeminiTranscriptPath({
+              sessionId: typeof input.session_id === 'string' ? input.session_id : undefined,
+            }) ||
+            '';
+          if (tp) {
+            const gm = readGeminiModel(tp);
+            if (gm) model = gm;
+          }
+        }
         const autoTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
 
         // Get git remote URL for better repo matching on the server
@@ -2921,13 +3275,13 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         }
         const prevFilesChanged = Array.from(prevFilesSet);
         if (prevGitCapture.diff || filteredUncommitted || prevFilesChanged.length > 0) {
-          // Get current HEAD and tree SHA for restore support
+          // Get current HEAD + working-tree SHA for restore support.
           let prevCommitSha: string | null = null;
           let prevTreeSha: string | null = null;
           try {
             prevCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-            prevTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath || hookCwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
           } catch { /* ignore */ }
+          prevTreeSha = getWorkingTreeSha(state.repoPath || hookCwd);
           // Scope `committedDiff` to commits THIS session authored. Walking
           // the session's own commit list keeps concurrent agents isolated:
           // a heartbeat in this session no longer picks up a foreign agent's
@@ -3088,7 +3442,12 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                   prompts: [], filesChanged: [], summary: '', transcript: '',
                   model: codexData.model, tokensUsed: codexData.tokensUsed,
                   inputTokens: codexData.inputTokens, outputTokens: codexData.outputTokens,
-                  cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0,
+                  // Codex now splits cached prompt tokens out of input.
+                  // Carry through so estimateCost can bill them at the
+                  // model's cached rate ($0.50/M on gpt-5.5).
+                  cacheReadTokens: codexData.cacheReadTokens ?? 0,
+                  cacheCreationTokens: 0,
+                  toolCalls: 0,
                 };
               }
               // Sync state.prompts from the rollout so the dashboard sees
@@ -3199,7 +3558,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                 return {
                   ...pm,
                   promptText: (pm.promptText || '').slice(0, 1000),
-                  diff: (pm.diff || '').slice(0, 100_000),
+                  diff: (pm.diff || '').slice(0, MAX_PROMPT_DIFF_LEN),
                   linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
                   linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
                   aiPercentage: 100,
@@ -3303,7 +3662,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       hookCwd = wsRoot;
     }
   }
-  let found = findStateForHook(hookCwd, input.session_id, agentSlug);
+  let found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
   let state = found?.state || null;
   // Recover from archive if .git state file is missing (Cursor/Codex sessions)
   if (!state) {
@@ -3528,6 +3887,11 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         parsed.tokensUsed = codexData.tokensUsed;
         parsed.inputTokens = codexData.inputTokens;
         parsed.outputTokens = codexData.outputTokens;
+        // Carry through the cached portion so estimateCost picks
+        // up the cached-input rate (gpt-5.5: $0.50/M vs $5/M).
+        if (codexData.cacheReadTokens !== undefined) {
+          parsed.cacheReadTokens = codexData.cacheReadTokens;
+        }
       }
       if (codexData.toolCalls > 0 && parsed.toolCalls === 0) {
         parsed.toolCalls = codexData.toolCalls;
@@ -3843,7 +4207,15 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         // transcript edits is a stronger signal.
         const noCommits = (gitCapture.commitDetails?.length ?? 0) === 0;
         const noTranscriptEdits = parsed.filesChanged.length === 0;
-        if (noCommits && noTranscriptEdits) {
+        // Cursor mid-turn defense (mirrors the safety-net guard below):
+        // working-tree edits without commits/transcript signal still
+        // count as a code turn. filteredUncommitted is what's actually
+        // attributable to THIS turn after the per-prompt exclude list
+        // strips prior-turn carryover.
+        const noUncommittedChanges =
+          !filteredUncommitted &&
+          !((gitCapture.workingTreeDiff || '').length > 0);
+        if (noCommits && noTranscriptEdits && noUncommittedChanges) {
           const currentMapping = {
             promptIndex: currentPromptIdx,
             promptText: currentPromptText.slice(0, 1000),
@@ -3888,7 +4260,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
           let synthTreeSha: string | null = null;
           try {
             synthCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-            synthTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            synthTreeSha = getWorkingTreeSha(state.repoPath);
           } catch { /* ignore */ }
           const currentMapping = {
             promptIndex: currentPromptIdx,
@@ -3915,7 +4287,17 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       if (prompts.length > 0 && !promptMappings.some(pm => pm.promptIndex === currentPromptIdx)) {
         const noCommits = (gitCapture.commitDetails?.length ?? 0) === 0;
         const noTranscriptEdits = parsed.filesChanged.length === 0;
-        if (noCommits && noTranscriptEdits) {
+        // A turn is only truly chat-only when NOTHING happened: no commits,
+        // no transcript-reported edits, AND no working-tree changes the
+        // CLI captured. Cursor mid-turn prompts pass `noCommits` and
+        // `noTranscriptEdits` (Cursor's transcript doesn't expose
+        // filesChanged), but the working tree IS dirty from its IDE
+        // edits — without checking uncommittedDiff the turn falls into
+        // the chat-only branch below and ends up with treeSha=null,
+        // un-restorable in the UI.
+        const noUncommittedChanges = !((gitCapture.uncommittedDiff || '').length > 0)
+          && !((gitCapture.workingTreeDiff || '').length > 0);
+        if (noCommits && noTranscriptEdits && noUncommittedChanges) {
           // Chat-only prompt — same gate as the synthesis branch above.
           promptMappings.push({
             promptIndex: currentPromptIdx,
@@ -3957,7 +4339,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
           let synthTreeSha: string | null = null;
           try {
             synthCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-            synthTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            synthTreeSha = getWorkingTreeSha(state.repoPath);
           } catch { /* ignore */ }
           promptMappings.push({
             promptIndex: currentPromptIdx,
@@ -4051,6 +4433,12 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       }
     }
 
+    // Hoisted out of `if (connected)` so writeSessionFiles below (which
+    // runs in both connected + disconnected modes) can pass editsJson
+    // through to changes.json. Populated inside the connected block;
+    // stays null when offline or when capture fails.
+    let promptEditsByIndex: Map<number, string> | null = null;
+
     if (connected) {
       // Recovery: if the session was created in local-only mode (key
       // was dead at the time → `local-` prefix) and the key has since
@@ -4069,7 +4457,11 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
               repoPath: state.repoPath || hookCwd,
               agentSlug,
               branch: state.branch || undefined,
-              agentSessionId: state.claudeSessionId,
+              // Prefer the unified agentSessionId on state (set at
+              // session-start to claudeSessionId || cursor conversation_id
+              // etc); fall back to claudeSessionId for back-compat with
+              // older state files written before that field was added.
+              agentSessionId: (state as any).agentSessionId || state.claudeSessionId,
             } as any);
             const newId = (startRes as any)?.sessionId;
             if (typeof newId === 'string' && newId && !newId.startsWith('local-')) {
@@ -4109,7 +4501,18 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         commitDetails: Array<{ sha: string; message: string; author: string; filesChanged: string[] }>;
         snapshot: true;
       } | undefined;
-      const codexLikeAgents = new Set(['codex', 'gemini']);
+      // Cursor's git commits don't reliably fire .git/hooks/post-commit
+      // (sandbox / worktree isolation — same comment as in enable.ts). On
+      // top of that, `git commit --amend` orphans the pre-amend SHA so the
+      // post-commit ingest for the original commit goes stale anyway. Both
+      // failure modes leave sessionCommits empty even though the user
+      // committed, which surfaces every committed Cursor prompt as
+      // "uncommitted" on the dashboard (user-reported May 28, or-test-2
+      // "make little change and commit"). Treat Cursor like Codex/Gemini
+      // and ship a session-level gitCapture snapshot at session-end —
+      // walking git log from session start lifts every reachable commit
+      // (including post-amend SHAs) into the MCP ingest path.
+      const codexLikeAgents = new Set(['codex', 'gemini', 'cursor']);
       if (codexLikeAgents.has((agentSlug || state.agentSlug || '').toLowerCase()) && state.headShaAtStart) {
         try {
           // fullContext: AI Blame renders the entire file from this diff —
@@ -4172,7 +4575,8 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       // PromptChange.editsJson and computes the displayed per-prompt diff
       // + AI Blame attribution from it via LCS, bypassing the legacy
       // block-matching heuristics that conflate cross-prompt changes.
-      let promptEditsByIndex: Map<number, string> | null = null;
+      // `promptEditsByIndex` is declared at function scope above so the
+      // writeSessionFiles call below `if (connected)` can also pick it up.
       try {
         const slug = (agentSlug || state.agentSlug || '').toLowerCase();
         const captureAgent =
@@ -4251,7 +4655,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
           ? promptMappings.map(pm => ({
               ...pm,
               promptText: (pm.promptText || '').slice(0, 1000),
-              diff: (pm.diff || '').slice(0, 100_000),
+              diff: (pm.diff || '').slice(0, MAX_PROMPT_DIFF_LEN),
               editsJson: promptEditsByIndex?.get(pm.promptIndex) || undefined,
             }))
           : undefined,
@@ -4263,6 +4667,52 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       try {
         await api.pingSession(state.sessionId);
       } catch { /* non-fatal */ }
+
+      // Image attachments (Phase 1 — Claude / Cursor pastes).
+      //
+      // The server gates uploads on the user's `captureImages` opt-in
+      // flag (default false). We always try here and stop on the first
+      // 403 — that keeps the CLI simple (no need to fetch the user's
+      // preference) and means flipping the toggle in Settings takes
+      // effect on the next prompt without a CLI restart.
+      //
+      // Caps: 5 MB per image, 50 MB per session enforced server-side.
+      // We also skip locally if a base64 payload would exceed 5 MB
+      // after decode, to save the roundtrip.
+      try {
+        const images = extractPromptImages(state.transcriptPath);
+        if (images.length > 0) {
+          debugLog('stop', 'image upload begin', { count: images.length });
+          let optedOut = false;
+          for (const img of images) {
+            if (optedOut) break;
+            if (img.sizeBytes > 5 * 1024 * 1024) {
+              debugLog('stop', 'image too large, skip', { promptIndex: img.promptIndex, sizeBytes: img.sizeBytes });
+              continue;
+            }
+            try {
+              await api.uploadAttachment(state.sessionId, {
+                promptIndex: img.promptIndex,
+                mediaType: img.mediaType,
+                base64: img.base64,
+              });
+            } catch (uploadErr: any) {
+              const status = uploadErr?.status || uploadErr?.code;
+              if (status === 403 || /disabled/i.test(uploadErr?.message || '')) {
+                debugLog('stop', 'image capture disabled for user — stopping', {});
+                optedOut = true;
+              } else {
+                debugLog('stop', 'image upload failed (non-fatal)', {
+                  promptIndex: img.promptIndex,
+                  message: uploadErr?.message || String(uploadErr),
+                });
+              }
+            }
+          }
+        }
+      } catch (imgErr: any) {
+        debugLog('stop', 'image extraction failed (non-fatal)', { message: imgErr?.message });
+      }
     }
 
     // Write git notes on any commits that don't have them yet
@@ -4292,7 +4742,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             fullPrompt: prompts[prompts.length - 1] || undefined,
             previousSessionId: state.previousSessionId,
             filesRead: state.filesRead,
-            prompts: buildPromptNoteEntries(state, agentSlug || state.agentSlug, model || state.model),
+            prompts: buildPromptNoteEntries(state, agentSlug || state.agentSlug, model || state.model, promptEditsByIndex),
             tokensUsed: parsed.tokensUsed,
             costUsd,
             durationMs: durationMs > 0 ? durationMs : 0,
@@ -4381,49 +4831,69 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         uncommittedDiff: pm.uncommittedDiff,
       }));
     }
-    // Auto-snapshot: save working tree state after each AI turn — but only
-    // when the turn actually produced code changes. Empty turns (the user
-    // asked a question, the agent answered with no edits) used to leave a
-    // "Snapshot" entry with "No diff captured for this snapshot", which
-    // bloated the snapshots list with un-restorable rows. The post-commit
-    // hook later promotes the latest auto-snapshot for each commit, so
-    // anything that doesn't get committed will fall off when the shadow
-    // branch is cleaned at session-end.
-    const turnLines = (gitCapture.linesAdded || 0) + (gitCapture.linesRemoved || 0);
-    if (turnLines > 0) {
-      try {
-        const cpId = createSnapshot(state.repoPath, {
-          sessionTag: state.sessionTag,
-          prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
-          model: model || state.model,
-          tokensUsed: parsed.tokensUsed || 0,
-          costUsd: costUsd || 0,
+    // Auto-snapshot: save working tree state after each AI turn.
+    //
+    // createSnapshot() is already idempotent: it does `git stash create`
+    // to capture the working tree, and returns null when the tree is
+    // clean (nothing to snapshot) OR when the resulting tree SHA matches
+    // the last snapshot on the session's shadow branch (no change since
+    // last turn). That's the authoritative "did anything change?" test.
+    //
+    // We used to gate on `gitCapture.linesAdded + linesRemoved > 0` to
+    // suppress chat-only turns. But that gate locks out Cursor mid-turn
+    // prompts: the agent edits files in the IDE, the working tree is
+    // dirty, but `linesAdded` derives from a baseline-vs-HEAD diff that
+    // doesn't see uncommitted edits the same way Claude's hook does.
+    // Result: every prompt after Cursor's session-start landed with
+    // `treeSha: null` and "No snapshot" disabled on the Restore button.
+    //
+    // Removing the outer gate and trusting createSnapshot's dedup gives
+    // every code-changing prompt a tree ref — for every agent — without
+    // re-introducing the empty-snapshot rows the gate was meant to
+    // suppress.
+    try {
+      const cpId = createSnapshot(state.repoPath, {
+        sessionTag: state.sessionTag,
+        prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
+        model: model || state.model,
+        tokensUsed: parsed.tokensUsed || 0,
+        costUsd: costUsd || 0,
+        promptIndex: prompts.length,
+        type: 'auto',
+        linesAdded: gitCapture.linesAdded || 0,
+        linesRemoved: gitCapture.linesRemoved || 0,
+        transcriptPath: state.transcriptPath,
+      });
+      if (cpId) {
+        debugLog('stop', 'auto-snapshot created', {
+          snapshotId: cpId,
           promptIndex: prompts.length,
-          type: 'auto',
-          linesAdded: gitCapture.linesAdded || 0,
-          linesRemoved: gitCapture.linesRemoved || 0,
-          transcriptPath: state.transcriptPath,
+          lines: (gitCapture.linesAdded || 0) + (gitCapture.linesRemoved || 0),
         });
-        if (cpId) {
-          debugLog('stop', 'auto-snapshot created', { snapshotId: cpId, promptIndex: prompts.length, lines: turnLines });
-        }
-      } catch (cpErr: any) {
-        debugLog('stop', 'auto-snapshot failed (non-fatal)', { message: cpErr.message });
+      } else {
+        debugLog('stop', 'auto-snapshot skipped by createSnapshot dedup (clean tree or unchanged from last)', {
+          promptIndex: prompts.length,
+        });
       }
-    } else {
-      debugLog('stop', 'auto-snapshot skipped (no code changes this turn)', { promptIndex: prompts.length });
+    } catch (cpErr: any) {
+      debugLog('stop', 'auto-snapshot failed (non-fatal)', { message: cpErr.message });
     }
 
     // Re-save state with RUNNING status FIRST so it survives any errors below
     state.status = 'RUNNING';
     saveSessionState(state, found!.saveCwd, state.sessionTag);
 
-    // Write session files to origin-sessions branch + push on every Stop
+    // Write session files to origin-sessions branch + push on every Stop.
+    // Pass promptEditsByIndex through so changes.json carries the
+    // authoritative editsJson for each prompt — lets a different Origin
+    // org importing this repo run AI Blame against the LCS-replay path
+    // instead of falling back to block-matching pc.diff.
     try {
       const apiUrl = config?.apiUrl || 'https://getorigin.io';
       const writeData = buildSessionWriteData({
         state, parsed, promptMappings, gitCapture,
         status: 'running', apiUrl,
+        promptEditsByIndex: promptEditsByIndex ?? undefined,
       });
       writeSessionFiles(state.repoPath, writeData);
       pushSessionBranch(state.repoPath);
@@ -4482,7 +4952,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       hookCwd = wsRoot;
     }
   }
-  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
+  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
   const state = found?.state || null;
   if (!state) {
     debugLog('session-end', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
@@ -4630,8 +5100,8 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         let lastTreeSha: string | null = null;
         try {
           lastCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-          lastTreeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
         } catch { /* ignore */ }
+        lastTreeSha = getWorkingTreeSha(state.repoPath);
         const lastMapping = {
           promptIndex: lastPromptIdx,
           promptText: (prompts[lastPromptIdx] || '').slice(0, 1000),
@@ -4670,6 +5140,10 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       });
     }
 
+    // Hoisted so writeSessionFiles below the `if (connected)` block can
+    // pass editsJson into changes.json (mirrors the stop-hook hoist).
+    let promptEditsByIndex: Map<number, string> | null = null;
+
     if (connected) {
       debugLog('session-end', 'calling api.endSession', {
         sessionId: state.sessionId,
@@ -4689,7 +5163,8 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       // runs the agent-specific extractor here so each PromptChange row
       // carries editsJson — the server-side blame computes the displayed
       // diff and attribution from this directly.
-      let promptEditsByIndex: Map<number, string> | null = null;
+      // `promptEditsByIndex` is declared at function scope above so the
+      // writeSessionFiles call below `if (connected)` can also pick it up.
       try {
         const slug = (agentSlug || state.agentSlug || '').toLowerCase();
         const captureAgent =
@@ -4745,6 +5220,12 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         prompt: joinedPrompt || undefined,
         summary: parsed.summary || undefined,
         transcript: displayTranscript || undefined,
+        // Upgrade the session's model to the real identifier resolved from
+        // the transcript (e.g. "claude-opus-4-8"). session/start often only
+        // had the bare brand ("claude"), so without this the commit list
+        // shows "Claude · Claude" instead of "Claude · Opus 4.8". Only send
+        // a specific model so we never downgrade a real value to the brand.
+        model: isSpecificModel(model) ? model : undefined,
         filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
         tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
         inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
@@ -4759,7 +5240,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
           ? promptMappings.map(pm => ({
               ...pm,
               promptText: (pm.promptText || '').slice(0, 1000),
-              diff: (pm.diff || '').slice(0, 100_000),
+              diff: (pm.diff || '').slice(0, MAX_PROMPT_DIFF_LEN),
               editsJson: promptEditsByIndex?.get(pm.promptIndex) || undefined,
             }))
           : undefined,
@@ -4784,11 +5265,14 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
     }
 
-    // Write session files to origin-sessions branch (directory per session)
+    // Write session files to origin-sessions branch (directory per session).
+    // Pass promptEditsByIndex so changes.json ships the authoritative
+    // per-prompt edits — see the equivalent stop-hook block for rationale.
     const apiUrl = config?.apiUrl || 'https://getorigin.io';
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings, gitCapture,
       status: 'ended', apiUrl,
+      promptEditsByIndex: promptEditsByIndex ?? undefined,
     });
     writeSessionFiles(state.repoPath, writeData);
     pushSessionBranch(state.repoPath);
@@ -4806,7 +5290,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
           fullPrompt: prompts[prompts.length - 1] || prompts[0] || undefined,
           previousSessionId: state.previousSessionId,
           filesRead: state.filesRead,
-          prompts: buildPromptNoteEntries(state, agentSlug || state.agentSlug, model),
+          prompts: buildPromptNoteEntries(state, agentSlug || state.agentSlug, model, promptEditsByIndex),
           tokensUsed: parsed.tokensUsed,
           costUsd,
           durationMs,
@@ -4953,6 +5437,39 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
 }
 
 // ─── Git Hook: Post-Commit ────────────────────────────────────────────────
+
+/**
+ * Pick, among several concurrently-active sessions the post-commit hook
+ * couldn't tell apart by agent process, the one whose recorded edits best
+ * overlap the committed files. Recency-weighted: the latest prompt's files
+ * count ×3, the last three ×2, older ×1 — so the session that JUST edited
+ * what landed in the commit wins, even if an older session touched the same
+ * files earlier. Returns null when no session's edits overlap (caller then
+ * declines to guess). Matches on basename so repo-relative vs absolute paths
+ * in the two sources still line up.
+ */
+export function pickSessionByFileOverlap<
+  T extends { completedPromptMappings?: Array<{ filesChanged?: string[] }> },
+>(candidates: T[], commitFiles: string[]): T | null {
+  if (candidates.length === 0 || commitFiles.length === 0) return null;
+  const baseOf = (f: string): string => f.split('/').pop() || f;
+  const commitBasenames = new Set(commitFiles.map(baseOf));
+  let best: T | null = null;
+  let bestScore = 0;
+  for (const s of candidates) {
+    const mappings = s.completedPromptMappings || [];
+    let score = 0;
+    for (let i = 0; i < mappings.length; i++) {
+      const fromEnd = mappings.length - 1 - i;
+      const weight = fromEnd === 0 ? 3 : fromEnd < 3 ? 2 : 1;
+      for (const f of (mappings[i].filesChanged || [])) {
+        if (commitBasenames.has(baseOf(f))) score += weight;
+      }
+    }
+    if (score > bestScore) { bestScore = score; best = s; }
+  }
+  return bestScore > 0 ? best : null;
+}
 
 /**
  * Called by .git/hooks/post-commit after every commit.
@@ -5119,15 +5636,36 @@ export async function handlePostCommit(): Promise<void> {
       } catch { /* no match */ }
     }
 
+    // Narrow to the agent that made this commit. When process detection
+    // matches exactly one session, that's our answer. When it matches
+    // several (e.g. two concurrent Gemini sessions in the same repo) — or
+    // doesn't fire at all — fall through to the file-overlap tiebreak below
+    // rather than blindly taking the first.
+    let candidates = activeSessions;
     if (detectedSlug) {
-      const match = activeSessions.find(s => sessionMatchesAgent(s, detectedSlug!));
-      if (match) {
-        state = match;
-        debugLog('post-commit', 'matched session via process detection', { detectedSlug, sessionId: match.sessionId, model: match.model });
+      const matched = activeSessions.filter(s => sessionMatchesAgent(s, detectedSlug!));
+      if (matched.length > 0) candidates = matched;
+    }
+    if (candidates.length === 1) {
+      state = candidates[0];
+      debugLog('post-commit', 'matched single candidate session', { detectedSlug, sessionId: state.sessionId, model: state.model });
+    } else if (candidates.length > 1 && filesChanged.length > 0) {
+      // Multiple same-agent sessions are active and process detection can't
+      // tell them apart. Attribute the commit to the session whose RECENT
+      // edits overlap the committed files — the committing session is the
+      // one that just edited what landed in the commit. Without this we'd
+      // take an arbitrary (newest-started) session and credit the commit to
+      // the wrong agent, surfacing as a false "uncommitted" badge on the
+      // session that actually did the work (user-reported: a Gemini commit
+      // attributed to a sibling Gemini session running in the same repo).
+      const best = pickSessionByFileOverlap(candidates, filesChanged);
+      if (best) {
+        state = best;
+        debugLog('post-commit', 'disambiguated by file overlap', { sessionId: best.sessionId, model: best.model });
       }
     }
 
-    // If process detection didn't narrow it down, don't guess
+    // If neither process detection nor file overlap narrowed it down, don't guess.
     if (!state) {
       debugLog('post-commit', 'multiple sessions active, could not disambiguate', {
         totalSessions: activeSessions.length,
@@ -5373,7 +5911,7 @@ export async function handlePostCommit(): Promise<void> {
           promptIndex: latestPromptIdx,
           promptText: latestPromptText.slice(0, 1000),
           filesChanged,
-          diff: diff.length > 100_000 ? diff.slice(0, 100_000) : diff,
+          diff: diff.length > MAX_PROMPT_DIFF_LEN ? diff.slice(0, MAX_PROMPT_DIFF_LEN) : diff,
           linesAdded,
           linesRemoved,
           commitSha,
@@ -5584,7 +6122,7 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
   debugLog('pre-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
+  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
   if (!found) {
     debugLog('pre-tool-use', 'ABORT: no session state');
     return;
@@ -5718,7 +6256,7 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
   debugLog('post-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
+  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
   if (!found) {
     debugLog('post-tool-use', 'ABORT: no session state');
     return;
@@ -5785,7 +6323,7 @@ async function handleAfterFileEdit(input: Record<string, any>, agentSlug?: strin
   debugLog('after-file-edit', 'begin', { cwd: input.cwd, file: input.file_path || input.path });
 
   const hookCwd = input.cwd || process.cwd();
-  const found = findStateForHook(hookCwd, input.session_id, agentSlug);
+  const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
   if (!found) {
     debugLog('after-file-edit', 'ABORT: no session state');
     return;
@@ -5866,8 +6404,8 @@ async function handleAfterFileEdit(input: Record<string, any>, agentSlug?: strin
           promptChanges: state.completedPromptMappings.map((pm) => ({
             ...pm,
             promptText: (pm.promptText || '').slice(0, 1000),
-            diff: (pm.diff || '').slice(0, 100_000),
-            uncommittedDiff: (pm.uncommittedDiff || '').slice(0, 100_000),
+            diff: (pm.diff || '').slice(0, MAX_PROMPT_DIFF_LEN),
+            uncommittedDiff: (pm.uncommittedDiff || '').slice(0, MAX_PROMPT_DIFF_LEN),
             linesAdded: dl.filter((l: string) => l.startsWith('+') && !l.startsWith('+++')).length,
             linesRemoved: dl.filter((l: string) => l.startsWith('-') && !l.startsWith('---')).length,
             aiPercentage: 100,
@@ -6624,8 +7162,195 @@ export async function handlePrePush(): Promise<void> {
 
 // ─── Main Entry Point ──────────────────────────────────────────────────────
 
+/**
+ * Self-heal duplicate Origin hook registrations across settings layers.
+ *
+ * Claude Code merges hooks from ~/.claude/settings.json (user) with
+ * <cwd>/.claude/settings.json and ancestor directories. When `origin enable`
+ * was run at multiple layers, the same `origin hooks claude-code <event>`
+ * command ended up registered in both — and Claude fired the hook once per
+ * registration. Every API call doubled, every state-file write doubled,
+ * every heartbeat doubled. We saw the symptom as consecutive-PID twin
+ * invocations on every event in ~/.origin/hooks.log.
+ *
+ * Resolution: user-level wins (broader scope, what `origin enable` defaults
+ * to). If the local layer also has Origin hooks, strip them and write the
+ * file back. Idempotent — once cleaned, subsequent invocations skip the
+ * write. Claude won't re-read settings.json mid-session, so the current
+ * conversation still doubles; the next session-start picks up the cleaned
+ * config.
+ */
+function dedupeOriginHookLayers(event: string): void {
+  const userSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+  // Read user-level. Bail unless it has Origin hooks — without a user-level
+  // registration there's nothing to dedupe against.
+  let userHasOrigin = false;
+  try {
+    const raw = fs.readFileSync(userSettingsPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    userHasOrigin = settingsHaveOriginClaudeHooks(parsed);
+  } catch { /* user file missing or unreadable — skip dedupe */ }
+  if (!userHasOrigin) return;
+
+  // Walk up from cwd looking for .claude/settings.json files at the project
+  // root and any intermediate worktree. Cap at 8 levels — repos don't nest
+  // deeper than that in practice and infinite-loop protection is cheap.
+  const visited = new Set<string>();
+  let dir = process.cwd();
+  for (let i = 0; i < 8; i++) {
+    if (visited.has(dir)) break;
+    visited.add(dir);
+    const localSettingsPath = path.join(dir, '.claude', 'settings.json');
+    if (localSettingsPath !== userSettingsPath && fs.existsSync(localSettingsPath)) {
+      try {
+        const raw = fs.readFileSync(localSettingsPath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (settingsHaveOriginClaudeHooks(parsed)) {
+          stripOriginClaudeHooksFromSettings(parsed);
+          fs.writeFileSync(localSettingsPath, JSON.stringify(parsed, null, 2) + '\n');
+          debugLog(event, 'AUTO-DEDUPED Origin hooks from local settings (user-level kept)', {
+            removedFrom: localSettingsPath,
+          });
+        }
+      } catch { /* unreadable — leave alone, user can fix manually */ }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+}
+
+function settingsHaveOriginClaudeHooks(parsed: any): boolean {
+  if (!parsed || typeof parsed !== 'object' || !parsed.hooks) return false;
+  for (const event of Object.keys(parsed.hooks)) {
+    const entries = parsed.hooks[event];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!entry?.hooks || !Array.isArray(entry.hooks)) continue;
+      for (const h of entry.hooks) {
+        if (typeof h?.command === 'string' && h.command.includes('origin hooks claude-code')) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function stripOriginClaudeHooksFromSettings(parsed: any): void {
+  if (!parsed?.hooks) return;
+  for (const event of Object.keys(parsed.hooks)) {
+    const entries = parsed.hooks[event];
+    if (!Array.isArray(entries)) continue;
+    parsed.hooks[event] = entries.filter((entry: any) => {
+      if (!entry?.hooks || !Array.isArray(entry.hooks)) return true;
+      return !entry.hooks.some((h: any) =>
+        typeof h?.command === 'string' && h.command.includes('origin hooks claude-code')
+      );
+    });
+    // Drop the event key entirely when nothing else lives there — keeps
+    // settings.json clean rather than leaving { "SessionStart": [] }.
+    if (parsed.hooks[event].length === 0) {
+      delete parsed.hooks[event];
+    }
+  }
+}
+
+/**
+ * Self-heal for agents whose hook config is a flat JSON file at a known path.
+ * Cursor / Windsurf use .cursor/hooks.json and .windsurf/hooks.json respectively.
+ * Both files use the same schema: { version, hooks: { eventName: [{command}] } }
+ * The dedup logic is simpler than Claude's layered settings: we check if BOTH the
+ * user-level file (~/<dir>/hooks.json) AND a project-level file (./<dir>/hooks.json)
+ * contain Origin commands for the same agent. If so, strip the project-level copy
+ * (user-level wins, same rationale as the Claude dedupe).
+ */
+function dedupeAgentFlatHooks(event: string, agentDir: string, agentSlug: string): void {
+  const userHooksPath = path.join(os.homedir(), agentDir, 'hooks.json');
+  const originCmdSubstring = `origin hooks ${agentSlug}`;
+
+  let userHasOrigin = false;
+  try {
+    const raw = fs.readFileSync(userHooksPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    userHasOrigin = flatHooksHaveOriginCommand(parsed, originCmdSubstring);
+  } catch { return; }
+  if (!userHasOrigin) return;
+
+  // Walk cwd → root looking for project-level copies.
+  const visited = new Set<string>();
+  let dir = process.cwd();
+  for (let i = 0; i < 8; i++) {
+    if (visited.has(dir)) break;
+    visited.add(dir);
+    const localPath = path.join(dir, agentDir, 'hooks.json');
+    if (localPath !== userHooksPath && fs.existsSync(localPath)) {
+      try {
+        const raw = fs.readFileSync(localPath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (flatHooksHaveOriginCommand(parsed, originCmdSubstring)) {
+          stripFlatHooksOriginCommand(parsed, originCmdSubstring);
+          fs.writeFileSync(localPath, JSON.stringify(parsed, null, 2) + '\n');
+          debugLog(event, `AUTO-DEDUPED ${agentSlug} hooks from local file (user-level kept)`, {
+            removedFrom: localPath,
+          });
+        }
+      } catch { /* unreadable — skip */ }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+}
+
+function flatHooksHaveOriginCommand(parsed: any, substring: string): boolean {
+  if (!parsed?.hooks || typeof parsed.hooks !== 'object') return false;
+  for (const entries of Object.values(parsed.hooks)) {
+    if (!Array.isArray(entries)) continue;
+    for (const h of entries) {
+      if (typeof h?.command === 'string' && h.command.includes(substring)) return true;
+    }
+  }
+  return false;
+}
+
+function stripFlatHooksOriginCommand(parsed: any, substring: string): void {
+  if (!parsed?.hooks) return;
+  for (const eventName of Object.keys(parsed.hooks)) {
+    const entries = parsed.hooks[eventName];
+    if (!Array.isArray(entries)) continue;
+    parsed.hooks[eventName] = entries.filter(
+      (h: any) => !(typeof h?.command === 'string' && h.command.includes(substring))
+    );
+    if (parsed.hooks[eventName].length === 0) delete parsed.hooks[eventName];
+  }
+}
+
 export async function hooksCommand(event: string, agentSlug?: string): Promise<void> {
   debugLog(event, '=== HOOK INVOKED ===', { pid: process.pid, argv: process.argv, cwd: process.cwd() });
+
+  // Self-heal duplicate registrations. Each agent has its own dedupe strategy:
+  //   claude-code  — layered .claude/settings.json across user / project /
+  //                  worktree layers (Claude merges all of them)
+  //   cursor       — flat .cursor/hooks.json at user vs project level
+  //   windsurf     — flat .windsurf/hooks.json at user vs project level
+  //   gemini/codex — their settings files don't layer the same way; the
+  //                  installer already dedupes on write, so skip here.
+  // All paths are cheap (2-3 stat calls + maybe one read) and only write
+  // when a duplicate actually exists.
+  if (agentSlug === 'claude-code') {
+    try { dedupeOriginHookLayers(event); } catch (err: any) {
+      debugLog(event, 'dedupe check failed (non-fatal)', { message: err?.message });
+    }
+  } else if (agentSlug === 'cursor') {
+    try { dedupeAgentFlatHooks(event, '.cursor', 'cursor'); } catch (err: any) {
+      debugLog(event, 'cursor dedupe check failed (non-fatal)', { message: err?.message });
+    }
+  } else if (agentSlug === 'windsurf') {
+    try { dedupeAgentFlatHooks(event, '.windsurf', 'windsurf'); } catch (err: any) {
+      debugLog(event, 'windsurf dedupe check failed (non-fatal)', { message: err?.message });
+    }
+  }
 
   const input = await readStdin();
 

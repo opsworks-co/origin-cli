@@ -16,7 +16,7 @@ import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import * as fzstd from 'fzstd';
-import { createShadowCommit } from './git-capture.js';
+import { createShadowCommit, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 
 const args = process.argv.slice(2);
 const sessionId = args[0];
@@ -35,11 +35,49 @@ const isConnected = !!(apiUrl && apiKey);
 fs.writeFileSync(pidFile, String(process.pid), { mode: 0o600 });
 
 const PING_INTERVAL_MS = 30_000; // 30 seconds
-// For agents where we can't detect parent PID (Cursor, Codex), we fall back to
-// state file freshness. Use a long threshold — the heartbeat should keep running
-// as long as the editor/terminal is open. Sessions stay IDLE on the dashboard
-// until the heartbeat dies (app closed) or the agent explicitly ends the session.
-const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours — safety net only
+// Confirm parent-death over N consecutive ticks before we actually
+// call /session/end. A single "parent gone" check is too trigger-
+// happy — kernel race conditions during agent reload, transient
+// `ps` failures, or pattern-matched PIDs that were short-lived
+// subprocesses (an Origin hook, an aux launcher) all fire false
+// positives. 3 ticks × 30s = 90s confirmation window. Real agent
+// deaths persist for hours; this only delays the COMPLETED stamp.
+const PARENT_DEAD_TICKS_BEFORE_END = 3;
+let parentDeadTickCount = 0;
+// For agents where we can't detect parent PID (Cursor, Claude Code —
+// they're standalone Electron apps with messy process trees), the
+// heartbeat falls back to state-file freshness. The state file's mtime
+// gets bumped on every Claude hook (UserPromptSubmit, PreToolUse, Stop,
+// SessionEnd, …) via saveSessionState in commands/hooks.ts, so a fresh
+// mtime means the editor is alive and the user is interacting with it.
+//
+// History of this number:
+//   - 2h originally — sessions stayed RUNNING for hours after the tab
+//     closed.
+//   - 30 min — overcorrected. Users reported sessions going COMPLETED
+//     at ~19 min while the Claude tab was still open. The trigger was
+//     macOS Claude Desktop's `disclaimer` wrapper getting picked as the
+//     "agent" PID and dying early; moving Claude Code to stale-file-
+//     only fixes the wrong-PID problem but the 30-min window is still
+//     tight (a user reading a long Claude response for half an hour
+//     would false-end).
+//   - 90 min (now) — comfortable headroom over IDLE_THRESHOLD (1h).
+//     Sequence for an actually idle session:
+//       T+0      → user walks away
+//       T+1h     → server's computeStatus() shows IDLE label
+//                  (lastActivityAt > IDLE_THRESHOLD_MS)
+//       T+1.5h   → state file age > STALE_THRESHOLD_MS
+//                  → heartbeat starts 3-tick parent-dead confirmation
+//       T+1.5h + 90s → /session/end → row flips to COMPLETED
+//     IDLE is visible for ~30 min before the row completes — what the
+//     user expected. Sessions actively in use (Claude hook firing at
+//     least every 90 min) never trip this.
+//
+// If the user comes back later and types a new prompt after a
+// false-end, the existing session/start resume path (routes/mcp.ts)
+// finds the COMPLETED row via agentSessionId and re-opens it — the
+// row recovers automatically.
+const STALE_THRESHOLD_MS = 90 * 60 * 1000; // 90 minutes
 
 /**
  * Check if a process is still alive (signal 0 = existence check).
@@ -311,19 +349,35 @@ async function pushInflightDiff(): Promise<void> {
     const linesAdded = counted.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
     const linesRemoved = counted.filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
 
-    // Tag the inflight push with the latest session-owned commit SHA so the
-    // commit-detail page can link this prompt → its commit even before the
-    // session ends. Falls back to current HEAD when the session hasn't
-    // committed anything yet (covers the rare case where pushInflightDiff
-    // fires after post-commit but before state has reloaded).
+    // Tag the inflight push with the commit that landed THIS prompt's
+    // edits — NOT the session's latest commit. Previously this used
+    // ownCommits[last], which overwrote pc.commitSha on every heartbeat
+    // so all of a session's prompts ended up tagged with the FINAL
+    // commit and the commit-detail filter showed all prompts on every
+    // commit page (or none, depending on which way we filtered).
+    //
+    // Correct rule: a heartbeat firing during prompt N attributes to
+    // the FIRST commit that landed AFTER this prompt's prePromptSha
+    // (the HEAD recorded when the prompt was submitted). If no new
+    // commit has happened yet, leave commitSha null — the server's
+    // content-overlap pass will pick the right one at read time
+    // (or a later heartbeat fills it in once the commit lands).
     let heartbeatCommitSha: string | null = null;
     let heartbeatTreeSha: string | null = null;
     const ownCommits = state.sessionCommitShas || [];
     try {
-      heartbeatCommitSha = ownCommits.length > 0
-        ? ownCommits[ownCommits.length - 1]
-        : execFileSync('git', ['rev-parse', 'HEAD'], gitOpts).toString().trim();
-      heartbeatTreeSha = execFileSync('git', ['rev-parse', `${heartbeatCommitSha}^{tree}`], gitOpts).toString().trim();
+      if (prePromptSha && ownCommits.length > 0) {
+        // First own commit AFTER prePromptSha — i.e., a commit this
+        // prompt caused. Falls back to null if none yet.
+        const prePromptIdx = ownCommits.indexOf(prePromptSha);
+        const candidates = prePromptIdx >= 0
+          ? ownCommits.slice(prePromptIdx + 1)
+          : ownCommits;
+        heartbeatCommitSha = candidates[0] || null;
+      }
+      if (heartbeatCommitSha) {
+        heartbeatTreeSha = execFileSync('git', ['rev-parse', `${heartbeatCommitSha}^{tree}`], gitOpts).toString().trim();
+      }
     } catch { /* fresh repo with no HEAD — fine */ }
 
     await fetch(`${apiUrl}/api/mcp/session/${sessionId}`, {
@@ -335,8 +389,8 @@ async function pushInflightDiff(): Promise<void> {
             promptIndex,
             promptText,
             filesChanged: Array.from(filesChanged),
-            diff: fullDiff.slice(0, 100_000),
-            uncommittedDiff: uncommittedDiff.slice(0, 100_000),
+            diff: fullDiff.slice(0, MAX_PROMPT_DIFF_LEN),
+            uncommittedDiff: uncommittedDiff.slice(0, MAX_PROMPT_DIFF_LEN),
             linesAdded,
             linesRemoved,
             checkpointType: 'auto',
@@ -740,7 +794,17 @@ async function handleBranch(command: { commitSha?: string; branchName?: string; 
  * Creates a new branch at the snapshot's commit so HEAD moves cleanly
  * and the user's current branch is preserved.
  */
-async function handleRestore(command: { treeSha?: string; commitSha?: string }) {
+async function handleRestore(command: {
+  treeSha?: string;
+  commitSha?: string;
+  // 'soft' (default): write files to working tree, leave HEAD alone.
+  //                   Non-destructive — `git stash pop` recovers
+  //                   pre-restore work; `git checkout .` discards.
+  // 'hard'         : `git reset --hard <commitSha>`. Moves HEAD too,
+  //                   discards commits between HEAD and the target
+  //                   on the current branch.
+  mode?: 'soft' | 'hard';
+}) {
   // Get repo path from state file
   let repoPath = '';
   if (stateFile) {
@@ -754,9 +818,14 @@ async function handleRestore(command: { treeSha?: string; commitSha?: string }) 
     return;
   }
 
+  const restoreMode: 'soft' | 'hard' = command.mode === 'hard' ? 'hard' : 'soft';
   const sha = command.commitSha || command.treeSha;
   if (!sha || !/^[a-fA-F0-9]+$/.test(sha)) {
     await reportResult('restore', 'failed', 'Invalid or missing SHA');
+    return;
+  }
+  if (restoreMode === 'hard' && !command.commitSha) {
+    await reportResult('restore', 'failed', 'hard mode requires commitSha');
     return;
   }
 
@@ -769,64 +838,119 @@ async function handleRestore(command: { treeSha?: string; commitSha?: string }) 
       originalBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], gitOpts).trim();
     } catch { /* ignore */ }
 
-    // Stash any uncommitted work so we don't lose it
+    // Capture pre-restore HEAD so the post-restore panel can show the
+    // "commits ahead" count and offer to roll HEAD back too.
+    let headBeforeRestore = '';
+    try {
+      headBeforeRestore = execFileSync('git', ['rev-parse', 'HEAD'], gitOpts).trim();
+    } catch { /* ignore */ }
+
+    // Stash any uncommitted work so we don't lose it. Stash name is
+    // searchable so the post-restore panel can point the user at it.
     let stashed = false;
+    const stashName = `origin-restore-autostash-${Date.now()}`;
     try {
       const dirty = execFileSync('git', ['status', '--porcelain'], gitOpts).trim();
       if (dirty) {
-        execFileSync('git', ['stash', 'push', '-u', '-m', `origin-restore-autostash-${Date.now()}`], gitOpts);
+        execFileSync('git', ['stash', 'push', '-u', '-m', stashName], gitOpts);
         stashed = true;
       }
     } catch { /* ignore */ }
 
-    // If we have a commit SHA, branch off of it. Otherwise use tree SHA (still does soft restore).
-    if (command.commitSha) {
-      const branchName = `origin-restore-${command.commitSha.slice(0, 7)}-${Date.now().toString(36)}`;
+    if (restoreMode === 'hard') {
+      // Destructive: move HEAD to commitSha and reset working tree to
+      // its content in one shot. Commits between original HEAD and the
+      // target become unreachable from this branch (still in the reflog
+      // for ~30 days). The pre-restore stash is the recovery escape.
       try {
-        execFileSync('git', ['checkout', '-b', branchName, command.commitSha], gitOpts);
+        execFileSync('git', ['reset', '--hard', command.commitSha!], gitOpts);
       } catch (err: any) {
-        // Restore stash if checkout failed
         if (stashed) {
           try { execFileSync('git', ['stash', 'pop'], gitOpts); } catch { /* ignore */ }
         }
         throw err;
       }
-
-      // Write marker file
       const markerPath = path.join(repoPath, '.git', 'origin-restore-marker');
       fs.writeFileSync(markerPath, JSON.stringify({
         restoredAt: new Date().toISOString(),
         commitSha: command.commitSha,
-        branch: branchName,
+        mode: 'hard',
+        headBeforeRestore,
         originalBranch,
         stashed,
+        stashName: stashed ? stashName : null,
         sessionId,
       }), { mode: 0o600 });
-
-      const msg = `Checked out branch "${branchName}" at commit ${command.commitSha.slice(0, 7)}. ` +
-        (originalBranch ? `Original branch "${originalBranch}" preserved. ` : '') +
-        (stashed ? 'Uncommitted changes stashed. ' : '') +
-        `Run "git checkout ${originalBranch || 'main'}" to return.`;
+      const msg = `Hard-restored: HEAD moved to ${command.commitSha!.slice(0, 7)} on ${originalBranch || 'detached HEAD'}. ` +
+        `Working tree matches. ` +
+        (stashed ? `Pre-restore changes stashed as "${stashName}" — recover with "git stash pop". ` : '') +
+        `Commits between ${headBeforeRestore.slice(0, 7) || 'HEAD'} and ${command.commitSha!.slice(0, 7)} are unreachable from this branch (still in the reflog for ~30 days).`;
       await reportResult('restore', 'success', msg);
       return;
     }
 
-    // Fallback: no commitSha, only treeSha — do soft restore (working tree only)
-    const treeSha = command.treeSha!;
-    execFileSync('git', ['read-tree', treeSha], gitOpts);
+    // Soft restore: write file content, leave HEAD alone. Works with
+    // either commitSha (resolve to commit's tree) or a bare treeSha.
+    const targetTree = command.treeSha
+      ? command.treeSha
+      : (() => {
+          // Resolve commit → tree SHA.
+          try {
+            return execFileSync('git', ['rev-parse', `${command.commitSha}^{tree}`], gitOpts).trim();
+          } catch { return ''; }
+        })();
+    if (!/^[a-fA-F0-9]{40}$/.test(targetTree)) {
+      if (stashed) {
+        try { execFileSync('git', ['stash', 'pop'], gitOpts); } catch { /* ignore */ }
+      }
+      await reportResult('restore', 'failed', 'Could not resolve target tree SHA');
+      return;
+    }
+    execFileSync('git', ['read-tree', targetTree], gitOpts);
     execFileSync('git', ['checkout-index', '-a', '-f'], gitOpts);
+    // Restore the index to match HEAD so `git status` only shows the
+    // working-tree-vs-HEAD diff (the restored content) instead of also
+    // flagging every file as staged-vs-HEAD.
     execFileSync('git', ['read-tree', 'HEAD'], gitOpts);
+
+    // Count commits between the restored snapshot's commit and current
+    // HEAD so the dialog can show "X commits ahead of restored snapshot."
+    // Only meaningful when we know the target's commit SHA; tree-only
+    // restores don't have a commit lineage to compare against.
+    let commitsAhead: number | null = null;
+    if (command.commitSha) {
+      try {
+        const out = execFileSync(
+          'git',
+          ['rev-list', '--count', `${command.commitSha}..HEAD`],
+          gitOpts,
+        ).trim();
+        const n = parseInt(out, 10);
+        if (Number.isFinite(n)) commitsAhead = n;
+      } catch { /* non-fatal — leave null */ }
+    }
 
     const markerPath = path.join(repoPath, '.git', 'origin-restore-marker');
     fs.writeFileSync(markerPath, JSON.stringify({
       restoredAt: new Date().toISOString(),
-      treeSha,
-      sessionId,
+      treeSha: targetTree,
+      commitSha: command.commitSha || null,
       mode: 'soft',
+      headBeforeRestore,
+      commitsAhead,
+      originalBranch,
+      stashed,
+      stashName: stashed ? stashName : null,
+      sessionId,
     }), { mode: 0o600 });
 
+    const aheadFragment = commitsAhead != null
+      ? ` (${commitsAhead} commit${commitsAhead === 1 ? '' : 's'} ahead of restored snapshot)`
+      : '';
     await reportResult('restore', 'success',
-      `Soft-restored files to tree ${treeSha.slice(0, 7)}. HEAD unchanged — use "git diff" to review or "git checkout ." to revert.`);
+      `Soft-restored files to tree ${targetTree.slice(0, 7)}. HEAD unchanged (still at ${headBeforeRestore.slice(0, 7) || 'unknown'}${aheadFragment}). ` +
+      `Use "git diff" to review or "git checkout ." to revert. ` +
+      (stashed ? `Pre-restore changes stashed as "${stashName}" — recover with "git stash pop".` : ''));
   } catch (err: any) {
     await reportResult('restore', 'failed', err?.message || 'Unknown error during restore');
   }
@@ -944,17 +1068,28 @@ async function ping() {
       process.exit(0);
     }
 
-    // If parent agent process died, end the session and exit
-    if (parentPid > 0 && !isProcessAlive(parentPid)) {
-      await endSession();
-      process.exit(0);
-    }
-
-    // If we couldn't find the parent PID (common for Codex/Cursor), fall back
-    // to state file freshness — if no prompt activity for 5 minutes, agent is dead
-    if (parentPid <= 0 && isStateFileStale()) {
-      await endSession();
-      process.exit(0);
+    // Confirm "parent gone" over multiple ticks before ending —
+    // see PARENT_DEAD_TICKS_BEFORE_END comment. A single failed
+    // check can fire on transient kernel state (process briefly
+    // unreachable) or on a pattern-matched PID that was always
+    // short-lived. We don't want to end on those.
+    const parentLooksDead =
+      (parentPid > 0 && !isProcessAlive(parentPid)) ||
+      (parentPid <= 0 && isStateFileStale());
+    if (parentLooksDead) {
+      parentDeadTickCount++;
+      if (parentDeadTickCount >= PARENT_DEAD_TICKS_BEFORE_END) {
+        await endSession();
+        process.exit(0);
+      }
+      // Not yet confirmed — keep pinging. Falls through to normal
+      // heartbeat so the server's updatedAt stays current; the
+      // session-cleanup sweep handles the long-silence case if our
+      // process is itself killed before confirmation.
+    } else {
+      // Reset on any live check so transient "dead" blips don't
+      // accumulate across long periods of healthy operation.
+      parentDeadTickCount = 0;
     }
 
     // If session state file was removed (session ended by hook), exit
@@ -1004,9 +1139,15 @@ async function ping() {
       // While the parent is alive we keep pinging — the server can recompute
       // RUNNING/IDLE from lastActivityAt on subsequent pings.
       if (data.status && data.status !== 'RUNNING' && data.status !== 'IDLE') {
+        // Same multi-tick confirmation as above — a single
+        // process-tree check can't be trusted to decide whether the
+        // agent is really gone. We already incremented
+        // parentDeadTickCount in the loop above; honor the same
+        // threshold here.
         const parentDead = parentPid > 0 && !isProcessAlive(parentPid);
         const noParent = parentPid <= 0;
-        if (parentDead || (noParent && isStateFileStale())) {
+        const confirmed = parentDeadTickCount >= PARENT_DEAD_TICKS_BEFORE_END;
+        if (confirmed && (parentDead || (noParent && isStateFileStale()))) {
           try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
           if (stateFile) {
             try {
