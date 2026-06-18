@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { loadConfig, loadRepoConfig, saveRepoConfig, clearRepoConfig } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
+import { syncNotesFromRemote } from '../git-notes.js';
 
 export async function linkCommand(slug?: string, opts?: { clear?: boolean }): Promise<void> {
   const config = loadConfig();
@@ -15,6 +16,11 @@ export async function linkCommand(slug?: string, opts?: { clear?: boolean }): Pr
     console.log(chalk.red('Not inside a git repository. Run this from your project directory.'));
     process.exit(1);
   }
+
+  // Connecting a repo to Origin is the natural moment to pull down any
+  // attribution notes a previous owner pushed, and to install the fetch
+  // refspec so plain `git pull` keeps them synced from here on.
+  syncNotesFromRemote(gitRoot);
 
   // Clear mode
   if (opts?.clear) {

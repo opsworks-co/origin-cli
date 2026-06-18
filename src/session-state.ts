@@ -4,6 +4,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { execSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import type { PromptEdit } from './prompt-capture/types.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -59,7 +60,22 @@ export interface SessionState {
   // synthesized transcript when no real JSONL is available.
   promptResponses?: string[];
   repoPath: string;           // Git repo root path OR working directory
+  // Last cwd seen on a lifecycle hook (session-start, pre/post-tool-use).
+  // Differs from repoPath when the harness moves the session into a linked
+  // git worktree AFTER session-start: the state file stays registered under
+  // the main repo's .git, but the session actually works in the worktree.
+  // Bare git hooks (prepare-commit-msg, post-commit) get no stdin metadata,
+  // so this is their only signal for matching a worktree commit to the
+  // session that made it when several sessions share one repo.
+  lastCwd?: string;
   headShaAtStart: string | null; // HEAD commit SHA when session started (null if no git)
+  // Shadow commit (created by createShadowCommit at session start) that
+  // snapshots the FULL working tree — tracked mods + untracked — as it was
+  // when the session began. Unlike headShaAtStart (a clean commit), this
+  // captures pre-existing uncommitted dirt, so the heartbeat can diff against
+  // it to tell genuine session edits apart from dirt that was already there.
+  // Null when the tree was clean at start (no shadow needed).
+  sessionStartShadowSha?: string | null;
   headShaAtLastStop: string | null; // HEAD SHA after last prompt stop (for per-prompt diffs)
   prePromptSha: string | null;  // HEAD SHA before current prompt (for per-prompt git diffs)
   // Per-prompt shadow commits captured by the heartbeat daemon when it
@@ -88,6 +104,20 @@ export interface SessionState {
     // capture from sweeping in pre-existing dirty changes.
     chatOnly?: boolean;
   }>;
+  // Live per-edit ledger appended by the post-tool-use hook as each
+  // Edit / Write / MultiEdit fires, stamped with the prompt index active at
+  // capture time. Authoritative: the exact tool inputs, caught in real time,
+  // so they dodge the transcript's editsJson truncation, format drift, and
+  // not-yet-flushed-at-Stop races. Merged with the transcript capture at
+  // Stop/session-end (mergeLedgerWithTranscript) so shell/commit edits the
+  // live hook never sees are still covered. Bounded by LIVE_EDIT_MAX_ENTRIES
+  // and per-content clamping in hooks.ts. Disable with ORIGIN_LIVE_CAPTURE=0.
+  liveEdits?: Array<{
+    promptIndex: number;
+    toolName: string;
+    capturedAt: string;
+    edits: PromptEdit[];
+  }>;
   branch: string | null;      // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support
   // Ring buffer of tool-call pre/post records. Field kept as `subagents` for
@@ -112,7 +142,34 @@ export interface SessionState {
   // by the OTHER session (HEAD has moved) and credits them to the wrong
   // agent in AI Blame.
   sessionCommitShas?: string[];
-  enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
+  // policyId/ruleId/policyName ride along (sent by session/start since the
+  // audit-reporting change) so hook-level blocks can report WHICH policy
+  // fired; older state files lack them and degrade to type-only reports.
+  enforcementRules?: Array<{
+    type: string; condition: string; action: string; severity: string;
+    policyId?: string; ruleId?: string; policyName?: string;
+  }>;
+  // When enforcementRules was last refreshed from the server (epoch ms).
+  // The heartbeat rewrites the rules from each ping; pre-tool-use does a
+  // TTL-bounded refetch when this is stale (or absent) so a policy created
+  // mid-session is enforced without waiting for the next session start.
+  // Absent on older state files → treated as "stale", triggers a refresh.
+  enforcementRulesFetchedAt?: number;
+  // Hard budget cap lockout. Set when the server reports a blocking cap
+  // breached (session PATCH response or heartbeat ping), cleared when it
+  // reports clear. user-prompt-submit and pre-tool-use consult this to
+  // block new AI work; ORIGIN_BUDGET_OVERRIDE=1 bypasses.
+  budgetBlocked?: boolean;
+  budgetBlockReason?: string;
+  // Scoped SOFT-cap warning (warn-only — nothing is locked). Persisted by
+  // the heartbeat from ping payloads; user-prompt-submit surfaces it once
+  // per distinct reason in the conversation and records it in
+  // budgetWarnShownFor so the banner doesn't repeat on every prompt.
+  budgetWarnReason?: string;
+  budgetWarnShownFor?: string;
+  // One audit report per lockout episode — set after the first blocked
+  // prompt/tool reports to /violations, cleared when the lockout lifts.
+  budgetBlockReported?: boolean;
   trailId?: string;           // Trail ID if session is linked to an active trail
   agentSlug?: string;         // Agent slug (claude-code, cursor, codex, gemini, etc.)
   // Files the agent loaded into context (deduped, capped). Populated lazily

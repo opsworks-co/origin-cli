@@ -56,6 +56,19 @@ export interface PromptEdit {
   source: PromptEditSource;
   // Set when source === 'commit'. The commit that landed this edit.
   commitSha?: string;
+  // 1-based line in the file where this edit's region begins, captured
+  // against the ACTUAL file at edit time (the post-edit working tree for
+  // tool calls, the commit for `git show`-derived edits). This is the
+  // ground truth for the displayed gutter: tool-call payloads
+  // (old_string / new_string) carry no position, so without this the
+  // server's synthesized diff anchors every hunk at line 1 and the AI
+  // Blame / Session Diff gutters show wrong line numbers (a change at
+  // line 23 rendered as `@@ -1,1 +1,2 @@`). Absent when the position
+  // couldn't be resolved (e.g. a deletion whose content is gone, or an
+  // edit overwritten before capture) — the server then falls back to its
+  // synthetic cursor, so this is always safe to omit.
+  oldStart?: number;
+  newStart?: number;
 }
 
 export interface PromptCapture {

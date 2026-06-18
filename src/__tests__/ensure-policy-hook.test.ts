@@ -145,15 +145,77 @@ describe('ensurePolicyHookInstalled', () => {
     expect(typeof result.reason).toBe('string');
   });
 
-  it('skips repos where the global core.hooksPath routes through Origin', () => {
-    // When the user ran `origin enable --global`, Origin sets
-    // `core.hooksPath` (global) to ~/.origin/git-hooks. The global
-    // pre-commit fires for every repo; installing a per-repo one
-    // would be redundant. We can't easily set the user's actual
-    // global git config in a unit test (it would mutate ~/.gitconfig),
-    // so this case is captured in the integration-test plan rather
-    // than here. The other reasons (already-installed, custom-hooks-
-    // path-set, fresh-install) are exercised above.
-    expect(true).toBe(true);
+  // ── Global core.hooksPath (Origin-managed dir) ─────────────────────────
+  // We don't touch the user's real ~/.gitconfig — GIT_CONFIG_GLOBAL is
+  // pointed at a temp config file for the duration of each test.
+
+  function makeGlobalHooksSetup(): { hooksDir: string; cleanup: string[] } {
+    // The dir must contain ".origin/git-hooks" for the managed-dir check.
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-global-'));
+    const hooksDir = path.join(base, '.origin', 'git-hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const cfgPath = path.join(base, 'gitconfig');
+    fs.writeFileSync(cfgPath, `[core]\n\thooksPath = ${hooksDir}\n`);
+    process.env.GIT_CONFIG_GLOBAL = cfgPath;
+    return { hooksDir, cleanup: [base] };
+  }
+
+  it('skips when the Origin-managed global dir already has a pre-commit hook', () => {
+    const { hooksDir, cleanup } = makeGlobalHooksSetup();
+    repos.push(...cleanup);
+    fs.writeFileSync(path.join(hooksDir, 'pre-commit'), '#!/bin/sh\n# origin-global-pre-commit\n', { mode: 0o755 });
+    const repo = makeTmpRepo();
+    repos.push(repo);
+
+    const result = ensurePolicyHookInstalled(repo);
+
+    expect(result.installed).toBe(false);
+    expect(result.reason).toBe('global-origin-hooks-active');
+    expect(readHook(repo)).toBeNull(); // no redundant per-repo hook
+  });
+
+  it('heals an Origin-managed global dir that is missing pre-commit', () => {
+    // Regression: global hooks dirs written by CLI versions that
+    // predate the global pre-commit hook carry only post-commit/
+    // pre-push/prepare-commit-msg. With core.hooksPath set, git
+    // ignores .git/hooks entirely, so the old skip-because-global
+    // behavior left CONTENT_FILTER and secret-scan enforcement dead
+    // on the whole machine (user-reported June 11: a "block 'blyat'"
+    // policy didn't block a Codex commit).
+    const { hooksDir, cleanup } = makeGlobalHooksSetup();
+    repos.push(...cleanup);
+    // Simulate the stale dir: post-commit present, pre-commit absent.
+    fs.writeFileSync(path.join(hooksDir, 'post-commit'), '#!/bin/sh\n# origin-global-post-commit\n', { mode: 0o755 });
+    const repo = makeTmpRepo();
+    repos.push(repo);
+
+    const result = ensurePolicyHookInstalled(repo);
+
+    expect(result.installed).toBe(true);
+    expect(result.reason).toBe('healed-global-pre-commit');
+    const healed = fs.readFileSync(path.join(hooksDir, 'pre-commit'), 'utf-8');
+    expect(healed).toContain('# origin-global-pre-commit');
+    // The hook resolves the binary into $ORIGIN_BIN, so assert on the
+    // subcommand invocation rather than a literal "origin" prefix.
+    expect(healed).toContain('hooks git-pre-commit');
+    // Executable bit set — git silently skips non-executable hooks.
+    expect(fs.statSync(path.join(hooksDir, 'pre-commit')).mode & 0o111).not.toBe(0);
+    // Still no per-repo hook — the global one covers the repo.
+    expect(readHook(repo)).toBeNull();
+  });
+
+  it('healing is idempotent — second call skips', () => {
+    const { hooksDir, cleanup } = makeGlobalHooksSetup();
+    repos.push(...cleanup);
+    const repo = makeTmpRepo();
+    repos.push(repo);
+
+    ensurePolicyHookInstalled(repo);
+    const healedContent = fs.readFileSync(path.join(hooksDir, 'pre-commit'), 'utf-8');
+    const second = ensurePolicyHookInstalled(repo);
+
+    expect(second.installed).toBe(false);
+    expect(second.reason).toBe('global-origin-hooks-active');
+    expect(fs.readFileSync(path.join(hooksDir, 'pre-commit'), 'utf-8')).toBe(healedContent);
   });
 });

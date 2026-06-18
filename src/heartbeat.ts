@@ -17,6 +17,18 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 import * as fzstd from 'fzstd';
 import { createShadowCommit, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import {
+  parseSessionLimits,
+  evaluateSessionLimits,
+  sendDesktopNotification,
+} from './session-limits.js';
+import {
+  evaluateBudgetBreach,
+  BUDGET_BLOCKING_AGENTS,
+  writeBudgetLockNotice,
+  clearBudgetLockNotice,
+  type BudgetBreachState,
+} from './budget-breach.js';
 
 const args = process.argv.slice(2);
 const sessionId = args[0];
@@ -155,6 +167,10 @@ async function pushInflightDiff(): Promise<void> {
       sessionStartDirtyFiles?: string[];
       sessionCommitShas?: string[];
       headShaAtStart?: string;
+      // Dirty-tree snapshot SHA from session start (tracked + untracked).
+      // Used as the "what did the session change" baseline so pre-existing
+      // working-tree dirt isn't mistaken for the session's own edits.
+      sessionStartShadowSha?: string | null;
       // Shadow commits captured at the START of each Codex prompt by
       // pushInflightCodexState. Each entry is the baseline SHA for that
       // prompt's turn — the diff scope for prompt N is shadowSha[N]..HEAD.
@@ -266,6 +282,27 @@ async function pushInflightDiff(): Promise<void> {
       // file — and that path needs full-file context to anchor edits.
       uncommittedDiff = execFileSync('git', ['diff', '--unified=2000', 'HEAD'], gitOpts).toString();
     } catch { /* clean tree — no uncommitted */ }
+    // `git diff HEAD` omits NEW untracked files — so a prompt that creates a
+    // file showed fewer files/lines in its per-prompt diff than the Full
+    // Session Diff (git-capture.ts appends untracked, so the full diff has
+    // them). Append untracked here too, the same way, to keep them in sync.
+    try {
+      const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], gitOpts).toString().trim();
+      if (untracked) {
+        for (const file of untracked.split('\n').filter(Boolean)) {
+          let out = '';
+          try {
+            out = execFileSync('git', ['diff', '--no-index', '/dev/null', file], gitOpts).toString();
+          } catch (e: any) {
+            // `git diff --no-index` exits 1 when there IS a diff — stdout still
+            // holds the patch (encoding is set, so it's a string).
+            out = e?.stdout != null ? String(e.stdout) : '';
+          }
+          out = out.trim();
+          if (out) uncommittedDiff = uncommittedDiff ? uncommittedDiff + '\n' + out : out;
+        }
+      }
+    } catch { /* ls-files failed — skip untracked */ }
 
     if (!committedDiff && !uncommittedDiff) return; // nothing to send
 
@@ -299,7 +336,17 @@ async function pushInflightDiff(): Promise<void> {
     // gives us all files whose current content differs from the session-
     // start snapshot, so we can mark them as session work even when no
     // commit exists yet.
-    const sessionStartShadow = state.headShaAtStart || state.prePromptSha;
+    //
+    // Prefer the session-start DIRTY shadow (a snapshot of the full working
+    // tree — tracked + untracked — taken when the session began). Diffing
+    // against it reports only what changed SINCE session start, so files that
+    // were already dirty before the session (pre-existing uncommitted edits
+    // from a prior agent or the user) do NOT register as "touched" and stay
+    // in the strip set. Falling back to headShaAtStart (a CLEAN commit) — the
+    // old behavior — counted that pre-existing dirt as session work, which
+    // leaked it onto every prompt, including pure read-only ones.
+    const sessionStartShadow =
+      state.sessionStartShadowSha || state.headShaAtStart || state.prePromptSha;
     if (sessionStartDirty.size > 0 && sessionStartShadow && isHex(sessionStartShadow)) {
       try {
         const out = execFileSync(
@@ -1061,6 +1108,95 @@ async function endSession() {
   try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
 }
 
+// ─── SESSION_LIMITS policy checks ──────────────────────────────────────────
+//
+// The heartbeat is the only component with a timer (hooks fire only on agent
+// activity — an idle session triggers nothing), so idle detection and the
+// time-based notifications live here. "Idle" = state-file mtime age: every
+// lifecycle hook bumps it via saveSessionState, so it stays fresh while the
+// user or agent is working and only ages when both go quiet.
+//
+// Once-flags are process-local: the daemon lives for the whole session, so
+// each notification fires once (idle notify re-arms when activity resumes).
+// A daemon restart re-notifying once is acceptable; persisting the flags in
+// the state file is not — writing it would bump the mtime we use as the
+// idle signal.
+let idleNotified = false;
+let durationWarned = false;
+let durationCapNotified = false;
+// Current budget-breach episode (null = not breached). Process-local
+// for the same reason as the flags above.
+let budgetBreach: BudgetBreachState | null = null;
+// Last scoped soft-cap warning we desktop-notified for (null = none
+// active). Distinct message = new episode = new notification.
+let softWarnNotifiedFor: string | null = null;
+
+async function checkSessionLimits(): Promise<void> {
+  if (!stateFile) return;
+  let state: { enforcementRules?: any[]; startedAt?: string; prompts?: string[] };
+  let mtimeMs: number;
+  try {
+    state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    mtimeMs = fs.statSync(stateFile).mtimeMs;
+  } catch { return; }
+
+  const cfg = parseSessionLimits(state.enforcementRules);
+  if (!cfg) return;
+  const status = evaluateSessionLimits(cfg, state.startedAt, mtimeMs, Date.now());
+
+  // Idle notification — re-arms once the session shows activity again, so
+  // each idle EPISODE notifies once.
+  if (status.idleNotifyDue) {
+    if (!idleNotified) {
+      idleNotified = true;
+      sendDesktopNotification(
+        'Origin — idle session',
+        `Your session has been idle for ${Math.round(status.idleMinutes)} min. ` +
+        `Close it and start fresh next time — resuming a large context costs far more than a new session.`,
+      );
+    }
+  } else {
+    idleNotified = false;
+  }
+
+  // Approaching the duration cap — one heads-up so the block isn't a surprise.
+  if (status.durationWarnDue && !durationWarned && cfg.maxDurationMinutes) {
+    durationWarned = true;
+    sendDesktopNotification(
+      'Origin — session limit approaching',
+      `This session is ${Math.round(status.ageMinutes)} min old; your team's limit is ` +
+      `${cfg.maxDurationMinutes} min. Wrap up and start a new session soon.`,
+    );
+  }
+
+  // Duration cap crossed — notify once. The actual prompt blocking happens
+  // in user-prompt-submit (commands/hooks.ts), which reads the same rules;
+  // the session itself is left to end via the normal stale/parent-death
+  // path so an in-flight turn is never cut off.
+  if (status.durationExceeded && !durationCapNotified && cfg.maxDurationMinutes) {
+    durationCapNotified = true;
+    sendDesktopNotification(
+      'Origin — session limit reached',
+      cfg.enforce
+        ? `This session passed your team's ${cfg.maxDurationMinutes}-min limit. New prompts are blocked — start a new session to continue.`
+        : `This session passed your team's ${cfg.maxDurationMinutes}-min limit. Consider starting a new session.`,
+    );
+  }
+
+  // Max idle — auto-end. Only for enforcing (action: block) rules. Safe by
+  // construction: an in-flight turn bumps the state file constantly, so a
+  // session can only be "idle past the limit" when nothing is running.
+  if (status.idleEndDue && cfg.maxIdleMinutes) {
+    sendDesktopNotification(
+      'Origin — session ended by policy',
+      `Session idle for ${Math.round(status.idleMinutes)} min — ended per your team's ` +
+      `${cfg.maxIdleMinutes}-min idle limit. Your work is saved; start a new session when you're back.`,
+    );
+    await endSession();
+    process.exit(0);
+  }
+}
+
 async function ping() {
   try {
     // If PID file is gone, session ended — exit
@@ -1098,6 +1234,11 @@ async function ping() {
       process.exit(0);
     }
 
+    // Team SESSION_LIMITS policy: idle notification, duration warnings,
+    // max-idle auto-end. Works in local mode too — notifications and the
+    // auto-end don't need the API.
+    await checkSessionLimits();
+
     // Only ping API in connected mode
     if (isConnected) {
       const resp = await fetch(`${apiUrl}/api/mcp/session/${sessionId}/ping`, {
@@ -1108,18 +1249,154 @@ async function ping() {
         },
         body: JSON.stringify({ branch: getCurrentBranch() }),
       });
-      const data = await resp.json() as { ok: boolean; status?: string; command?: any };
+      const data = await resp.json() as {
+        ok: boolean;
+        status?: string;
+        command?: any;
+        budget?: { blocked?: boolean; level?: string; message?: string };
+        // Live policy set, recomputed server-side each ping. Persisted into
+        // session state so pre-tool-use enforces a mid-session policy change
+        // within one ping interval (~30s) instead of only at session start.
+        enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string; policyId?: string; ruleId?: string; policyName?: string }>;
+        activePolicies?: string[];
+      };
 
-      // Push live diff for the in-flight prompt so the dashboard
-      // shows the change as it happens, instead of staying empty
-      // until the next prompt or session end. Fire-and-forget so a
-      // slow git diff doesn't delay the ping cadence.
+      // Budget lockout propagation — persist the server's hard-cap state
+      // into the session state file so user-prompt-submit / pre-tool-use
+      // can block new work within one ping interval (~30s) of a breach,
+      // even mid-turn, instead of only at the next session start.
+      if (data.budget && stateFile && fs.existsSync(stateFile)) {
+        try {
+          const raw = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+          const blocked = !!data.budget.blocked;
+          const reason = blocked ? (data.budget.message || 'Hard budget cap exceeded') : undefined;
+          // Scoped SOFT-cap warning (warning: true, blocked: false) —
+          // persisted so the next user-prompt-submit can surface it in
+          // the conversation; cleared (re-arming the banner) when the
+          // warning lifts.
+          const warnReason = !blocked && (data.budget as any).warning
+            ? (data.budget.message || 'Soft budget cap exceeded')
+            : undefined;
+          if (
+            !!raw.budgetBlocked !== blocked ||
+            raw.budgetBlockReason !== reason ||
+            (raw.budgetWarnReason || undefined) !== warnReason
+          ) {
+            raw.budgetBlocked = blocked;
+            raw.budgetBlockReason = reason;
+            if (!blocked) raw.budgetBlockReported = undefined; // next episode reports again
+            raw.budgetWarnReason = warnReason;
+            if (!warnReason) raw.budgetWarnShownFor = undefined; // re-arm for the next episode
+            fs.writeFileSync(stateFile, JSON.stringify(raw), { mode: 0o600 });
+          }
+          // One desktop notification per distinct warning (mid-session
+          // soft-cap crossings shouldn't wait for the next prompt).
+          if (warnReason && softWarnNotifiedFor !== warnReason) {
+            softWarnNotifiedFor = warnReason;
+            sendDesktopNotification(
+              'Origin — budget warning',
+              `${warnReason}. Work continues (soft limit) — mind the spend.`,
+            );
+          }
+          if (!warnReason) softWarnNotifiedFor = null;
+        } catch { /* best effort — next tick retries */ }
+
+        // Breach reaction: notify the user the moment a hard-cap breach
+        // is first seen, then end the session once the breach has stood
+        // for the grace window AND the session is quiet (no in-flight
+        // turn — state mtime is bumped by every lifecycle hook). See
+        // budget-breach.ts for why neither happens immediately. The
+        // persistence write above bumps mtime at episode start, which
+        // harmlessly folds into the quiet window.
+        try {
+          const mtimeMs = fs.statSync(stateFile).mtimeMs;
+          const hadEpisode = budgetBreach !== null;
+          const decision = evaluateBudgetBreach(
+            budgetBreach,
+            !!data.budget.blocked,
+            mtimeMs,
+            Date.now(),
+          );
+          budgetBreach = decision.state;
+          // Agent-aware reaction: blockable agents (Claude Code, Gemini)
+          // get their session ended — their prompt/tool gates have already
+          // stopped the loop, so nothing is lost. Codex/Cursor IGNORE
+          // those gates: their sessions stay ALIVE so the continued burn
+          // keeps appearing on the dashboard (badged over-budget); the
+          // AGENTS.md notice + git pre-commit gate are their enforcement.
+          const raw = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as { agentSlug?: string; repoPath?: string };
+          const slug = (raw.agentSlug || '').toLowerCase();
+          const canTerminate = BUDGET_BLOCKING_AGENTS.has(slug);
+          if (decision.notifyDue) {
+            writeBudgetLockNotice(raw.repoPath, data.budget.message || 'hard budget cap exceeded');
+            sendDesktopNotification(
+              'Origin — budget cap exceeded',
+              `${data.budget.message || 'Your team\'s hard budget cap was exceeded'}. ` +
+              (canTerminate
+                ? `New AI work is blocked and this session will be ended shortly. `
+                : `New prompts keep tracking but commits are blocked. `) +
+              `It unblocks when the period resets or an admin raises the cap.`,
+            );
+          }
+          if (hadEpisode && decision.state === null) {
+            // Breach lifted — remove the model-facing stop-work notice.
+            clearBudgetLockNotice(raw.repoPath);
+          }
+          if (decision.terminateDue && canTerminate) {
+            sendDesktopNotification(
+              'Origin — session ended by budget policy',
+              'Budget cap exceeded — this session was ended. Your work is saved; ' +
+              'sessions resume when the cap resets or an admin raises it.',
+            );
+            await endSession();
+            process.exit(0);
+          }
+        } catch { /* never let breach handling break the ping loop */ }
+      }
+
+      // Live policy refresh — persist the server's current enforcementRules
+      // into session state so pre-tool-use blocks a file that violates a
+      // policy created AFTER this session started, within one ping (~30s).
+      // Same write-only-on-change discipline as budget above to avoid
+      // needless state churn / mtime bumps.
+      if (data.enforcementRules && stateFile && fs.existsSync(stateFile)) {
+        try {
+          const raw = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+          const next = JSON.stringify(data.enforcementRules);
+          if (JSON.stringify(raw.enforcementRules || []) !== next) {
+            raw.enforcementRules = data.enforcementRules;
+            if (data.activePolicies) raw.activePolicies = data.activePolicies;
+            raw.enforcementRulesFetchedAt = Date.now();
+            fs.writeFileSync(stateFile, JSON.stringify(raw), { mode: 0o600 });
+          } else {
+            // Unchanged, but still mark fresh so pre-tool-use's TTL doesn't
+            // trigger a redundant refetch on a session the heartbeat covers.
+            raw.enforcementRulesFetchedAt = Date.now();
+            fs.writeFileSync(stateFile, JSON.stringify(raw), { mode: 0o600 });
+          }
+        } catch { /* best effort — next tick retries */ }
+      }
+
+      // Codex doesn't surface its assistant output (or prompt boundaries) via
+      // hooks — Stop only fires at turn end and there's no streaming hook. We
+      // poll the rollout JSONL on every tick to refresh prompts[] + per-prompt
+      // shadows and show assistant text live.
+      //
+      // This MUST run BEFORE pushInflightDiff and be AWAITED: pushInflightDiff
+      // attributes the uncommitted working tree to `promptIndex =
+      // prompts.length - 1`. With the old order (diff first, both
+      // fire-and-forget), pushInflightDiff could read a STALE prompts[] and pin
+      // a NEW prompt's uncommitted change onto an earlier, already-finished
+      // (often read-only) prompt's row — the AI-Blame "P1 wrote a line P3
+      // actually wrote" bug. Refreshing the prompt list first keeps the index
+      // current. No-op for non-Codex agents (guarded inside).
+      await pushInflightCodexState().catch(() => { /* non-fatal */ });
+
+      // Push live diff for the in-flight prompt so the dashboard shows the
+      // change as it happens, instead of staying empty until the next prompt
+      // or session end. Fire-and-forget so a slow git diff doesn't delay the
+      // ping cadence.
       pushInflightDiff().catch(() => { /* non-fatal */ });
-      // Codex doesn't surface its assistant output via hooks while a
-      // prompt is in flight — Stop only fires at turn end and there's
-      // no streaming hook. Poll the rollout JSONL on every tick so the
-      // dashboard shows assistant text + tool calls live.
-      pushInflightCodexState().catch(() => { /* non-fatal */ });
 
       // Handle pending commands from the dashboard
       if (data.command && data.command.type === 'restore') {

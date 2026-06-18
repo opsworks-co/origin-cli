@@ -187,6 +187,15 @@ export const api = {
   syncRepo: (id: string) => request(`/api/repos/${id}/sync`, { method: 'POST' }),
   getRepos: () => request('/api/repos'),
   getWhoami: () => request('/api/mcp/whoami'),
+  // Pre-push governance check: is the developer's agent enabled enough to
+  // allow this push? Returns { allowed, agentEnabled, agentName, mode }.
+  // Accepts an AbortSignal so the pre-push hook can bound the wait — a slow
+  // or down API must never stall a developer's push.
+  pushCheck: (agentSlug?: string, signal?: AbortSignal) =>
+    request(
+      `/api/mcp/push-check${agentSlug ? `?agentSlug=${encodeURIComponent(agentSlug)}` : ''}`,
+      signal ? { signal } : {},
+    ),
   getMe: async () => {
     const res = await request('/api/auth/me');
     assertObj(res, 'getMe');
@@ -235,6 +244,30 @@ export const api = {
   },
   pingSession: (id: string) =>
     request(`/api/mcp/session/${id}/ping`, { method: 'POST' }),
+  // Live, scope-filtered policy set for a running session — lets pre-tool-use
+  // pick up a policy created AFTER the session started (the heartbeat refreshes
+  // the same data from its ping, but isn't always running for Codex/Cursor).
+  refreshSessionPolicies: async (id: string): Promise<{
+    activePolicies: string[];
+    enforcementRules: Array<{ type: string; condition: string; action: string; severity: string; policyId?: string; ruleId?: string; policyName?: string }>;
+  }> => {
+    const res = await request(`/api/mcp/session/${id}/policies`);
+    assertObj(res, 'refreshSessionPolicies');
+    return res as { activePolicies: string[]; enforcementRules: any[] };
+  },
+  // Lockout re-check — called by hooks only while a session is budget-
+  // blocked, so the block lifts as soon as the period resets or an admin
+  // raises the cap.
+  getBudgetStatus: async (sessionId?: string): Promise<{ blocked: boolean; level?: string; message: string }> => {
+    // Pass the locked session's id so the server re-checks the SAME scope
+    // that blocked it (agent/user/repo/model cap), not just the org-wide
+    // cap — otherwise a scoped hard lock would lift the moment the org cap
+    // is under limit. Omitted for local-only sessions (no server row).
+    const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+    const res = await request(`/api/mcp/budget-status${qs}`);
+    assertObj(res, 'getBudgetStatus');
+    return res as { blocked: boolean; level?: string; message: string };
+  },
   ingestCommits: async (data: {
     repoPath: string;
     repoUrl?: string;
@@ -288,6 +321,12 @@ export const api = {
   getSessions: (params?: Record<string, string>) => {
     const q = new URLSearchParams(params).toString();
     return request(`/api/sessions${q ? `?${q}` : ''}`);
+  },
+  // Feature Trails live server-side (single source of truth). The CLI reads
+  // them; creation/management happens in the dashboard.
+  getTrails: (params?: Record<string, string>) => {
+    const q = new URLSearchParams(params).toString();
+    return request(`/api/trails${q ? `?${q}` : ''}`);
   },
   getSession: async (id: string) => {
     const res = await request(`/api/sessions/${id}`);
@@ -364,7 +403,18 @@ export const api = {
       body: JSON.stringify({ findings, source: 'pre-commit' }),
     }),
 
-  reportViolation: (data: { machineId: string; policyId: string; description: string; filepath?: string }) =>
+  // policyId identifies a dashboard policy; policyType covers enforcement
+  // without a Policy row (e.g. BUDGET_CAP) and feeds the stats
+  // violations-by-type histogram. At least one of the two is required.
+  reportViolation: (data: {
+    machineId: string;
+    policyId?: string;
+    policyType?: string;
+    policyName?: string;
+    description: string;
+    filepath?: string;
+    sessionId?: string;
+  }) =>
     request('/api/mcp/violations', {
       method: 'POST',
       body: JSON.stringify(data),

@@ -1,4 +1,5 @@
-import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
+import { loadConfig, saveConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
+import { decidePushBlock } from '../push-block.js';
 import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
 import { api, readAuthStatus } from '../api.js';
@@ -26,15 +27,29 @@ import {
 import { captureGitState, getDirtyFiles, createShadowCommit, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
-import { writeGitNotes, type PromptNoteEntry } from '../git-notes.js';
+import { writeGitNotes, shouldIncludePromptText, type PromptNoteEntry } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
-import { findTrailByBranch, addSessionToTrail } from '../trail-state.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
 import { writeSessionMemory, buildMemoryContext, readRecentMemory } from '../memory.js';
 import { backfillAcceptanceForSession } from '../acceptance.js';
 import { addTodosFromSession } from '../todo.js';
-import { capturePromptEdits } from '../prompt-capture/index.js';
+import {
+  capturePromptEdits,
+  extractEditsFromToolCall,
+  anchorEditPositions,
+  buildCapturesFromLedger,
+  mergeLedgerWithTranscript,
+} from '../prompt-capture/index.js';
+import type { PromptCapture } from '../prompt-capture/index.js';
+import { parseSessionLimits, buildDurationBlockMessage, sendDesktopNotification } from '../session-limits.js';
+import {
+  BUDGET_BLOCKING_AGENTS,
+  writeBudgetLockNotice,
+  clearBudgetLockNotice,
+  buildBudgetBanner,
+  buildBudgetWarningBanner,
+} from '../budget-breach.js';
 import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -686,6 +701,70 @@ function buildOriginFrameworkGuidance(): string {
   ].join('\n');
 }
 
+// ─── Per-agent context injection ──────────────────────────────────────────
+//
+// Build the stdout payload that delivers Origin's session context (policies,
+// repo attribution, handoff/memory, and the authoring framework) to an
+// agent. The channel differs per agent because each one's hook protocol
+// surfaces hook output differently — getting this wrong means the model
+// silently never sees the context:
+//
+//   • claude-code — a top-level `systemMessage` is shown to the HUMAN only;
+//     the MODEL receives context exclusively via
+//     hookSpecificOutput.additionalContext. We emit BOTH so the user sees
+//     the banner (parity with Gemini) AND the model actually gets the
+//     framework/policies. (This was the bug: Claude only ever got
+//     `systemMessage`, so the model never received any of it.)
+//   • cursor — reads `additional_context`.
+//   • gemini / windsurf / others — read `systemMessage`.
+//   • codex — renders hook stdout as warnings, so a full block spams the
+//     warning area; it reads everything from AGENTS.md instead. Returns
+//     null (callers keep their codex-only budget-banner branch).
+//
+// Returns the JSON string to write to stdout, or null when nothing should be
+// written (codex, or empty context).
+export function buildContextInjectionPayload(
+  agentSlug: string | undefined,
+  hookEventName: 'SessionStart' | 'UserPromptSubmit',
+  systemMsg: string,
+): string | null {
+  if (!systemMsg) return null;
+  if (agentSlug === 'codex') return null;
+  if (agentSlug === 'claude-code') {
+    return JSON.stringify({
+      systemMessage: systemMsg,
+      hookSpecificOutput: { hookEventName, additionalContext: systemMsg },
+    });
+  }
+  if (agentSlug === 'cursor') {
+    return JSON.stringify({ additional_context: systemMsg });
+  }
+  return JSON.stringify({ systemMessage: systemMsg });
+}
+
+// Anchor where the human-facing portion of the preamble begins. Everything
+// before it (budget banner, agent system prompt) is either already surfaced
+// on its own stderr line or is model-only config, not a user banner.
+const PREAMBLE_VISIBLE_ANCHOR = 'Origin: Session tracking active';
+
+// Mirror the Origin context block to STDERR so it's VISIBLE on the agent's
+// initial screen. Gemini renders the stdout `systemMessage` as a banner, so
+// the user sees the preamble there — but Claude Code, Codex, and Cursor do
+// NOT render SessionStart stdout as a banner; they only surface hook STDERR
+// (the same channel the budget banner already uses and which ships visibly
+// today). Without this, the preamble reaches the model but never the human on
+// those three. Gemini is skipped to avoid printing it twice. Additive: the
+// stdout model-delivery payload (buildContextInjectionPayload) is unchanged.
+export function emitVisiblePreamble(agentSlug: string | undefined, systemMsg: string): void {
+  if (!systemMsg || agentSlug === 'gemini') return;
+  const at = systemMsg.indexOf(PREAMBLE_VISIBLE_ANCHOR);
+  const block = (at >= 0 ? systemMsg.slice(at) : systemMsg).trim();
+  if (!block) return;
+  const bold = '\x1b[1m', indigo = '\x1b[38;5;111m', dim = '\x1b[2m', reset = '\x1b[0m';
+  const body = block.split('\n').map((l) => `${dim}│${reset} ${l}`).join('\n');
+  process.stderr.write(`\n${bold}${indigo}◆ Origin${reset}\n${body}\n\n`);
+}
+
 // ─── Concurrent Session State Lookup ──────────────────────────────────────
 
 /**
@@ -719,6 +798,68 @@ function buildOriginFrameworkGuidance(): string {
 const STABLE_SESSION_ID_AGENTS = ['claude-code', 'windsurf'];
 export function hookLookupSessionId(sessionId: string | undefined, agentSlug?: string): string | undefined {
   return STABLE_SESSION_ID_AGENTS.includes(agentSlug || '') ? sessionId : undefined;
+}
+
+/**
+ * Compare two directory paths for identity, tolerating symlinks (macOS
+ * /var → /private/var) and trailing-slash/relative differences. Used to
+ * match a session's lastCwd against a git hook's cwd.
+ */
+function sameDir(a?: string | null, b?: string | null): boolean {
+  if (!a || !b) return false;
+  const norm = (p: string): string => {
+    let r = p;
+    try { r = fs.realpathSync(p); } catch { /* deleted dir — compare as-is */ }
+    return path.resolve(r);
+  };
+  return norm(a) === norm(b);
+}
+
+/**
+ * List candidate sessions for a BARE git hook (prepare-commit-msg,
+ * post-commit, pre-push) — invocations that get no session_id/cwd on stdin
+ * and must resolve the session from process.cwd() alone.
+ *
+ * Two worktree problems this solves (multi-session, parallel-worktree repos):
+ *   1. A linked worktree has its own git dir (.git/worktrees/<name>) with no
+ *      origin-session-*.json — the session registered its state under the
+ *      MAIN repo's .git before the harness created the worktree. Fall back
+ *      to repo-level sessions so the hook sees them at all.
+ *   2. Several sessions are active at repo level. Narrow by each session's
+ *      last-seen lifecycle-hook cwd (state.lastCwd): sessions whose lastCwd
+ *      matches the hook's cwd exactly win; otherwise sessions known to be
+ *      working elsewhere are dropped, keeping only those with unknown cwd
+ *      (pre-upgrade state files). Worktrees are one-session-by-design, so an
+ *      exact lastCwd match is the strongest signal we have.
+ *
+ * Exported for testing.
+ */
+export function listSessionsForGitHook(hookCwd: string): SessionState[] {
+  let sessions = listActiveSessions(hookCwd);
+  if (sessions.length === 0) {
+    const mainRepo = getGitRoot(hookCwd); // collapses linked worktree → main repo
+    if (mainRepo && !sameDir(mainRepo, hookCwd)) {
+      sessions = listActiveSessions(mainRepo);
+      if (sessions.length > 0) {
+        debugLog('git-hook-sessions', 'worktree fallback to repo-level sessions', {
+          hookCwd, mainRepo, count: sessions.length,
+        });
+      }
+    }
+  }
+  if (sessions.length > 1) {
+    const exact = sessions.filter(s => sameDir(s.lastCwd, hookCwd));
+    if (exact.length > 0) {
+      debugLog('git-hook-sessions', 'narrowed by lastCwd', {
+        hookCwd, matched: exact.map(s => s.sessionId.slice(0, 12)),
+      });
+      return exact;
+    }
+    // No exact match — drop sessions demonstrably working elsewhere; keep
+    // only those whose cwd is unknown (state files predating lastCwd).
+    return sessions.filter(s => !s.lastCwd);
+  }
+  return sessions;
 }
 
 function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?: string): { state: SessionState; saveCwd: string } | null {
@@ -780,7 +921,14 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
     // to attach its prompt to a still-active Gemini session in the same repo
     // and the new turn ended up rendered as Gemini.
     if (agentSlug) {
-      const matching = sessions.filter(s => sessionMatchesAgent(s, agentSlug));
+      let matching = sessions.filter(s => sessionMatchesAgent(s, agentSlug));
+      if (matching.length > 1) {
+        // Same-agent tie (e.g. two Gemini windows): prefer the session whose
+        // last-seen lifecycle cwd matches this hook's cwd — disambiguates
+        // parallel worktrees, where each session works in its own directory.
+        const cwdMatched = matching.filter(s => sameDir(s.lastCwd, hookCwd));
+        if (cwdMatched.length > 0) matching = cwdMatched;
+      }
       if (matching.length > 0) {
         const best = matching[0]; // already sorted by startedAt desc
         debugLog('findStateForHook', 'agent-filtered match', {
@@ -809,6 +957,18 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
     if (sessions.length === 1) {
       const best = sessions[0];
       debugLog('findStateForHook', 'single active session (no agent slug)', { sessionId: best.sessionId, model: best.model, tag: best.sessionTag });
+      return { state: best, saveCwd: best.repoPath || repoPath };
+    }
+
+    // Multiple sessions, no agent slug: a session whose last-seen lifecycle
+    // cwd matches this hook's cwd is unambiguous (parallel-worktree case —
+    // each session works in its own directory).
+    const cwdMatched = sessions.filter(s => sameDir(s.lastCwd, hookCwd));
+    if (cwdMatched.length === 1) {
+      const best = cwdMatched[0];
+      debugLog('findStateForHook', 'disambiguated by lastCwd', {
+        hookCwd, sessionId: best.sessionId, model: best.model, tag: best.sessionTag,
+      });
       return { state: best, saveCwd: best.repoPath || repoPath };
     }
 
@@ -2381,6 +2541,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
       // Output system message
       let systemMsg = '';
+      // Budget banner FIRST \u2014 a resumed session under a breached cap must
+      // open with the warning, same as a fresh one. The flag comes from
+      // the persisted state (stamped by session-start / heartbeat pings).
+      if (existing.budgetBlocked) {
+        systemMsg += buildBudgetBanner(existing.budgetBlockReason || 'Hard budget cap exceeded') + '\n\n';
+      }
       if (existing.agentSystemPrompt) systemMsg += existing.agentSystemPrompt + '\n\n';
       systemMsg += 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
       if (existing.activePolicies && Array.isArray(existing.activePolicies) && existing.activePolicies.length > 0) {
@@ -2396,12 +2562,15 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       // and re-emitting on resume is harmless (the model will see the
       // same guidance whether or not it saw it earlier).
       systemMsg += '\n\n' + buildOriginFrameworkGuidance();
-      const isCursorReuse = agentSlug === 'cursor';
-      const isCodexReuse = agentSlug === 'codex';
-      const outputKeyReuse = isCursorReuse ? 'additional_context' : 'systemMessage';
-      if (!isCodexReuse) {
-        process.stdout.write(JSON.stringify({ [outputKeyReuse]: systemMsg }));
+      const reusePayload = buildContextInjectionPayload(agentSlug, 'SessionStart', systemMsg);
+      if (reusePayload) {
+        process.stdout.write(reusePayload);
+      } else if (agentSlug === 'codex' && existing.budgetBlocked) {
+        // Codex shows hook stdout as warnings — surface the banner there.
+        process.stdout.write(buildBudgetBanner(existing.budgetBlockReason || 'Hard budget cap exceeded') + '\n');
       }
+      // Visible preamble on resume too (parity with Gemini) — see emitVisiblePreamble.
+      emitVisiblePreamble(agentSlug, systemMsg);
 
       // Write rules file for reused sessions too
       try {
@@ -2533,6 +2702,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
   try {
     let sessionId: string;
+    // Set when the server refused session/start with a 429 (hard budget
+    // cap). The local fallback session is created anyway but flagged
+    // budgetBlocked so every enforcement layer sees the lockout.
+    let budgetRefusedReason: string | undefined;
+    // Scoped SOFT-cap breach — warn-only (amber banner, no lockout).
+    let budgetWarnReason: string | undefined;
     let agentSystemPrompt: string | undefined;
     let activePolicies: string[] | undefined;
     let enforcementRules: any[] | undefined;
@@ -2572,7 +2747,28 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         if (result.startedAt) {
           apiStartedAt = result.startedAt as string;
         }
-        debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt, verboseCapture });
+        // Over-budget sessions are TRACKED with a warning, not refused —
+        // the server creates the row (badged on the dashboard) and ships
+        // the breach here so client-side gates lock work from prompt #1.
+        const startBudget = (result as any).budget;
+        if (startBudget?.blocked) {
+          budgetRefusedReason = startBudget.message || 'Budget limit exceeded';
+          process.stderr.write(
+            `[origin] Budget limit reached — ${budgetRefusedReason}. This session is tracked but ` +
+            `new AI work (including commits) is locked until the cap resets or an admin raises it.\n`,
+          );
+        } else if (startBudget?.warning) {
+          // Scoped SOFT cap exceeded (this developer's user/agent/repo
+          // limit). Purely informational: amber banner on the initial
+          // screen + a desktop notification — nothing is locked.
+          budgetWarnReason = startBudget.message || 'Soft budget cap exceeded';
+          process.stderr.write(`[origin] Budget warning — ${budgetWarnReason}.\n`);
+          sendDesktopNotification(
+            'Origin — budget warning',
+            `${budgetWarnReason}. Work continues (soft limit) — mind the spend.`,
+          );
+        }
+        debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt, verboseCapture, budgetBlocked: !!startBudget?.blocked, budgetWarning: !!startBudget?.warning });
       } catch (apiErr: any) {
         // API failed — fall back to local session instead of aborting entirely.
         // AGENT_DISABLED is the expected response when an admin hasn't
@@ -2583,6 +2779,21 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           const agentName = apiErr?.body?.agent?.name || finalAgentSlug || 'this agent';
           debugLog('session-start', 'agent disabled, keeping session local', { agentName });
           process.stderr.write(`[origin] ${agentName} is disabled in your org — session kept local. An admin has been notified to enable it.\n`);
+        } else if (apiErr?.status === 429) {
+          // Hard budget cap refused the session. The fallback below still
+          // creates a LOCAL session — that's deliberate (tracking should
+          // degrade, not vanish) — but it must carry the lockout, or
+          // agents whose hook protocols can't block (Codex, Cursor) sail
+          // on with nothing in their way: user-reported, codex edited and
+          // committed while all three hard caps sat at 110%. The flag
+          // below feeds the prompt/tool gates AND the git pre-commit
+          // gate, which blocks the commit for every agent.
+          budgetRefusedReason = apiErr?.message || 'Budget limit exceeded';
+          debugLog('session-start', 'budget 429 — local session will carry the lockout', { reason: budgetRefusedReason });
+          process.stderr.write(
+            `[origin] Session blocked — budget limit reached. ${budgetRefusedReason} ` +
+            `New AI work (including commits) is locked until the cap resets or an admin raises it.\n`,
+          );
         } else {
           debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
           process.stderr.write(`[origin] API error (falling back to local): ${apiErr.message}\n`);
@@ -2623,12 +2834,17 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     const sessionStartDirty = getDirtyFiles(repoPath);
     let initialPrePromptSha = sessionStartHead;
     let initialPrePromptDirtyFiles = sessionStartDirty;
+    // SHA of the dirty-tree snapshot taken at session start (full working
+    // tree, tracked + untracked). The heartbeat diffs against this to keep
+    // pre-existing dirt from being attributed to the session's prompts.
+    let sessionStartShadowSha: string | null = null;
     if (sessionStartDirty.length > 0) {
       try {
         const startShadowTag = sessionTag || sessionId.slice(0, 12);
         const startShadow = createShadowCommit(repoPath, `start-${startShadowTag}`);
         if (startShadow) {
           initialPrePromptSha = startShadow;
+          sessionStartShadowSha = startShadow;
           initialPrePromptDirtyFiles = [];
           debugLog('session-start', 'created session-start shadow', {
             shadow: startShadow.slice(0, 12),
@@ -2690,7 +2906,9 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       startedAt: apiStartedAt || new Date().toISOString(),
       prompts: [],
       repoPath,
+      lastCwd: hookCwd,
       headShaAtStart: sessionStartHead,
+      sessionStartShadowSha,
       headShaAtLastStop: null,
       prePromptSha: initialPrePromptSha,
       prePromptDirtyFiles: initialPrePromptDirtyFiles,
@@ -2710,6 +2928,23 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       previousSessionId,
       previousSessionStartedAt,
     };
+
+    // Hard budget cap breached at start (server-reported budget payload,
+    // or a legacy 429 refusal) — the session still tracks, but flagged
+    // blocked so the prompt/tool gates (Claude Code / Gemini) and the git
+    // pre-commit gate (every agent, incl. Codex/Cursor whose hooks can't
+    // block) all enforce the lockout. The AGENTS.md notice is the
+    // model-facing layer: Codex/Cursor read it natively and stop working
+    // on their own instead of failing mysteriously at commit time.
+    if (budgetRefusedReason) {
+      state.budgetBlocked = true;
+      state.budgetBlockReason = budgetRefusedReason;
+      writeBudgetLockNotice(repoPath, budgetRefusedReason);
+    } else {
+      // Not breached — clear any notice left by a previous lockout so a
+      // lifted cap doesn't keep scaring agents in this repo.
+      clearBudgetLockNotice(repoPath);
+    }
 
     // Multi-repo: store all repo paths and per-repo git state
     if (allRepoPaths && allRepoPaths.length > 1) {
@@ -2738,20 +2973,10 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     saveSessionState(state, saveCwd, sessionTag);
     debugLog('session-start', 'state saved', { sessionId, sessionTag });
 
-    // Auto-attach session to active trail on the current branch
-    if (branch) {
-      try {
-        const trail = findTrailByBranch(repoPath, branch);
-        if (trail && (trail.status === 'active' || trail.status === 'review')) {
-          addSessionToTrail(repoPath, trail.id, sessionId);
-          state.trailId = trail.id;
-          saveSessionState(state, saveCwd, sessionTag);
-          debugLog('session-start', 'auto-attached to trail', { trailId: trail.id, trailName: trail.name });
-        }
-      } catch (trailErr: any) {
-        debugLog('session-start', 'trail auto-attach failed (non-fatal)', { message: trailErr.message });
-      }
-    }
+    // Trail auto-attach is now server-side (session/end matches the session
+    // to repo-scoped Feature Trails by repo + branch) — the CLI no longer
+    // maintains a parallel per-repo git-ref trail store. The Origin dashboard
+    // is the single source of truth for trails.
 
     // Start background heartbeat daemon (both connected and standalone mode)
     // In standalone: heartbeat detects parent process death + state file staleness → auto-ends session
@@ -2765,6 +2990,15 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
     // Build system message: agent system prompt first, then tracking notice + policies + attribution
     let systemMsg = '';
+    // Budget banner goes FIRST \u2014 a breached hard cap must be the very
+    // first thing on the agent's initial screen, before any prompt or
+    // tracking notice. Scoped soft-cap breaches get the amber warn-only
+    // variant instead.
+    if (budgetRefusedReason) {
+      systemMsg += buildBudgetBanner(budgetRefusedReason) + '\n\n';
+    } else if (budgetWarnReason) {
+      systemMsg += buildBudgetWarningBanner(budgetWarnReason) + '\n\n';
+    }
     if (agentSystemPrompt) {
       systemMsg += agentSystemPrompt + '\n\n';
     }
@@ -2821,16 +3055,22 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     systemMsg += '\n\n' + buildOriginFrameworkGuidance();
     debugLog('session-start', 'framework guidance injected');
 
-    // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
-    // Codex displays hook stdout as warnings — skip (reads from rules files instead)
-    const isCursor = agentSlug === 'cursor';
-    const isCodex = agentSlug === 'codex';
-    const outputKey = isCursor ? 'additional_context' : 'systemMessage';
-    if (!isCodex) {
-      const output = JSON.stringify({ [outputKey]: systemMsg });
-      process.stdout.write(output);
+    // Deliver the context through each agent's correct channel (see
+    // buildContextInjectionPayload). Codex gets null here — it reads from
+    // AGENTS.md — but we still surface the budget banner in its warning
+    // area: "your cap is breached" belongs on the initial screen.
+    const payload = buildContextInjectionPayload(agentSlug, 'SessionStart', systemMsg);
+    if (payload) {
+      process.stdout.write(payload);
+    } else if (agentSlug === 'codex' && budgetRefusedReason) {
+      process.stdout.write(buildBudgetBanner(budgetRefusedReason) + '\n');
+    } else if (agentSlug === 'codex' && budgetWarnReason) {
+      process.stdout.write(buildBudgetWarningBanner(budgetWarnReason) + '\n');
     }
-    debugLog('session-start', 'system prompt injected', { key: outputKey, length: systemMsg.length });
+    // Make the preamble VISIBLE for the agents that don't render stdout as a
+    // banner (everyone but Gemini) — see emitVisiblePreamble.
+    emitVisiblePreamble(agentSlug, systemMsg);
+    debugLog('session-start', 'system prompt injected', { agent: agentSlug, length: systemMsg.length, budgetBanner: !!budgetRefusedReason, budgetWarnBanner: !!budgetWarnReason });
 
     // Write rules files so agents natively see Origin policies
     if (systemMsg) {
@@ -2849,12 +3089,248 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       process.stderr.write(`[origin] Session blocked — ${err.message}\n`);
     } else if (status === 429) {
       process.stderr.write(`[origin] Session blocked — budget limit reached. ${err.message}\n`);
+      // The refusal must leave a LOCAL trace. Codex/Cursor ignore hook
+      // exit-2 blocking and don't reliably fire user-prompt-submit (whose
+      // own 429 fallback would persist the lockout) — so without a state
+      // file carrying budgetBlocked here, the agent kept editing and
+      // committing past a breached hard cap with nothing in its way
+      // (user-reported: codex committed while all three caps sat at
+      // 110%). Persist a minimal local-only session flagged blocked so
+      // the git pre-commit gate — which git enforces for EVERY agent —
+      // has something to read.
+      try {
+        const scHookCwd = input.cwd || process.cwd();
+        const scRepoPath = discoverGitRoot(scHookCwd) || getGitRoot(scHookCwd) || '';
+        if (scRepoPath) {
+          const fbId = `local-${crypto.randomUUID()}`;
+          const fbTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
+          const fbState: SessionState = {
+            sessionId: fbId,
+            claudeSessionId: input.session_id || fbId,
+            agentSessionId: input.session_id || undefined,
+            transcriptPath: input.transcript_path || '',
+            model: input.model || agentSlug || 'unknown',
+            startedAt: new Date().toISOString(),
+            prompts: [],
+            repoPath: scRepoPath,
+            lastCwd: scHookCwd,
+            headShaAtStart: getHeadSha(scHookCwd),
+            headShaAtLastStop: null,
+            prePromptSha: getHeadSha(scHookCwd),
+            branch: getBranch(scHookCwd),
+            sessionTag: fbTag,
+            agentSlug,
+            budgetBlocked: true,
+            budgetBlockReason: err?.message || 'Budget limit exceeded',
+          };
+          saveSessionState(fbState, scRepoPath, fbTag);
+          writeBudgetLockNotice(scRepoPath, fbState.budgetBlockReason || 'Budget limit exceeded');
+          debugLog('session-start', '429 — persisted local blocked state for the git-hook budget gate', {
+            sessionTag: fbTag, repoPath: scRepoPath,
+          });
+        }
+      } catch { /* stderr warning above already delivered */ }
     } else if (err.message?.includes('Unknown agent') || err.message?.includes('not registered')) {
       process.stderr.write(`[origin] Agent not registered. Ask your admin to add it in the Origin dashboard.\n`);
     } else {
       process.stderr.write(`[origin] session-start error: ${err.message}\n`);
     }
   }
+}
+
+// ─── Budget Lockout (layer-1 hard-cap enforcement) ─────────────────────────
+//
+// When the org breaches a hard (block:true) budget cap, the server reports
+// it on session PATCH responses and heartbeat pings; the flag is persisted
+// in session state. These helpers turn it into hook decisions: user-prompt-
+// submit blocks new prompts and pre-tool-use blocks tool calls via exit 2
+// (honored by Claude Code and Gemini CLI). Cursor/Codex hook protocols
+// don't honor blocking exits, so they get a stderr warning — their commits
+// are still gated by the policy pre-commit hook, and new sessions are
+// refused server-side. Client-side enforcement is a guardrail, not a
+// security boundary; ORIGIN_BUDGET_OVERRIDE=1 bypasses for emergencies.
+
+// BUDGET_BLOCKING_AGENTS (agents whose hook protocol honors exit-2
+// blocking) now lives in budget-breach.ts — shared with the heartbeat,
+// which keeps non-blockable agents' sessions ALIVE on a breach so their
+// continued burn stays tracked.
+
+/** Pure decision: block, warn, or pass. Exported for tests. */
+export function budgetLockoutDecision(opts: {
+  budgetBlocked?: boolean;
+  budgetBlockReason?: string;
+  agentSlug?: string;
+  overrideEnv?: string;
+}): { block: boolean; warn: boolean; reason: string } {
+  if (!opts.budgetBlocked) return { block: false, warn: false, reason: '' };
+  const reason =
+    `[Origin Budget] ${opts.budgetBlockReason || 'Hard budget cap exceeded'} — ` +
+    `new AI work is blocked until the cap resets or an admin raises it. ` +
+    `Emergency override: export ORIGIN_BUDGET_OVERRIDE=1`;
+  if (opts.overrideEnv === '1') return { block: false, warn: true, reason };
+  const slug = (opts.agentSlug || 'claude-code').toLowerCase();
+  const canBlock = BUDGET_BLOCKING_AGENTS.has(slug);
+  return { block: canBlock, warn: !canBlock, reason };
+}
+
+/** Persist the budget signal carried on a session PATCH response. */
+function applyBudgetSignal(state: SessionState, apiResponse: unknown, saveCwd: string): void {
+  const budget = (apiResponse as any)?.budget;
+  if (!budget || typeof budget !== 'object') return;
+  const blocked = !!budget.blocked;
+  const reason = typeof budget.message === 'string' ? budget.message : undefined;
+  if (!!state.budgetBlocked === blocked && state.budgetBlockReason === (blocked ? reason : undefined)) return;
+  state.budgetBlocked = blocked;
+  state.budgetBlockReason = blocked ? reason : undefined;
+  if (!blocked) state.budgetBlockReported = undefined; // next episode reports again
+  try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+  debugLog('budget', blocked ? 'budget lockout SET' : 'budget lockout cleared', { reason });
+}
+
+/**
+ * Hook-time gate. Re-checks the server while locked out (so the block
+ * lifts the moment the period resets or an admin raises the cap — only
+ * runs in the blocked state, so no steady-state API load), then blocks
+ * or warns per the agent's capabilities. On re-check failure we keep
+ * blocking: the last confirmed server state was "blocked", and the
+ * override env is the documented escape hatch.
+ */
+async function enforceBudgetLockout(
+  state: SessionState,
+  agentSlug: string | undefined,
+  saveCwd: string,
+  hookName: string,
+): Promise<void> {
+  if (!state.budgetBlocked) return;
+  if (isConnectedMode()) {
+    try {
+      const status = await api.getBudgetStatus(
+        state.sessionId && !state.sessionId.startsWith('local-') ? state.sessionId : undefined,
+      );
+      if (!status.blocked) {
+        state.budgetBlocked = false;
+        state.budgetBlockReason = undefined;
+        state.budgetBlockReported = undefined;
+        try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+        debugLog(hookName, 'budget lockout lifted by server re-check');
+        return;
+      }
+      if (status.message) state.budgetBlockReason = status.message;
+    } catch { /* keep blocking on re-check failure */ }
+  }
+  const decision = budgetLockoutDecision({
+    budgetBlocked: state.budgetBlocked,
+    budgetBlockReason: state.budgetBlockReason,
+    agentSlug: agentSlug || state.agentSlug,
+    overrideEnv: process.env.ORIGIN_BUDGET_OVERRIDE,
+  });
+  // Audit the lockout — once per episode, not per blocked call (a single
+  // breach can block dozens of tool calls in one turn; one audit row +
+  // admin notification carries the signal without the spam). The flag
+  // clears with the lockout, so the next episode reports again.
+  if ((decision.block || decision.warn) && !state.budgetBlockReported && isConnectedMode()) {
+    try {
+      const agentCfg = loadConfig();
+      await api.reportViolation({
+        machineId: agentCfg?.machineId || 'unknown',
+        policyType: 'BUDGET_CAP',
+        policyName: 'Hard budget cap',
+        description: `[${hookName}] ${state.budgetBlockReason || 'Hard budget cap exceeded'} — ${decision.block ? 'blocked' : 'warned (agent cannot block)'}`,
+        sessionId: state.sessionId && !state.sessionId.startsWith('local-') ? state.sessionId : undefined,
+      });
+      state.budgetBlockReported = true;
+      try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+    } catch { /* never block the block on reporting */ }
+  }
+  if (decision.block) {
+    debugLog(hookName, 'BLOCKED by budget lockout', { reason: decision.reason });
+    process.stderr.write(decision.reason + '\n');
+    process.exit(2);
+  }
+  if (decision.warn) {
+    debugLog(hookName, 'budget lockout warning (agent cannot block)', { reason: decision.reason });
+    process.stderr.write(decision.reason + '\n');
+  }
+}
+
+// ─── SESSION_LIMITS max-duration gate ───────────────────────────────────────
+//
+// Counterpart to the heartbeat's timer-side checks (see session-limits.ts
+// for the full policy contract). Called from user-prompt-submit only:
+// blocking at prompt boundaries forces the restart without ever cutting an
+// in-flight turn. Same agent-capability gating as the budget lockout —
+// exit 2 is honored by Claude Code and Gemini; other agents get a stderr
+// warning and rely on the heartbeat notifications.
+function enforceSessionDurationLimit(
+  state: SessionState,
+  agentSlug: string | undefined,
+  hookName: string,
+): void {
+  const cfg = parseSessionLimits(state.enforcementRules);
+  if (!cfg?.enforce || cfg.maxDurationMinutes === undefined || !state.startedAt) return;
+  const ageMinutes = (Date.now() - new Date(state.startedAt).getTime()) / 60_000;
+  if (!isFinite(ageMinutes) || ageMinutes < cfg.maxDurationMinutes) return;
+
+  const message = buildDurationBlockMessage(cfg.maxDurationMinutes, ageMinutes);
+  const slug = (agentSlug || state.agentSlug || 'claude-code').toLowerCase();
+  if (BUDGET_BLOCKING_AGENTS.has(slug)) {
+    debugLog(hookName, 'BLOCKED by SESSION_LIMITS max duration', {
+      ageMinutes: Math.round(ageMinutes),
+      maxDurationMinutes: cfg.maxDurationMinutes,
+      sessionId: state.sessionId,
+    });
+    process.stderr.write(message + '\n');
+    process.exit(2);
+  }
+  debugLog(hookName, 'SESSION_LIMITS max duration exceeded (agent cannot block)', {
+    ageMinutes: Math.round(ageMinutes),
+    maxDurationMinutes: cfg.maxDurationMinutes,
+  });
+  process.stderr.write(message + '\n');
+}
+
+// Self-heal a session that started in local-only mode. When the
+// session-start API call can't reach/authenticate the server, start falls
+// back to a `local-` sessionId and the session lives only on disk — it
+// never appears in Origin until something re-registers it. Previously that
+// only happened in the stop handler, so a session whose stop never ran
+// cleanly (crash, end-before-stop, still-offline-at-stop) stayed invisible
+// forever. This re-registers on the server and persists the real id back to
+// state. Idempotent: no-op for server-id sessions, when disconnected, or
+// when the call fails again (stays local, retried on the next hook).
+// Returns true when a migration succeeded this call.
+export async function ensureServerSession(
+  state: SessionState,
+  saveCwd: string,
+  agentSlug: string | undefined,
+  scope: string,
+): Promise<boolean> {
+  if (!isConnectedMode()) return false;
+  if (!state.sessionId || !state.sessionId.startsWith('local-')) return false;
+  try {
+    const agentConfig = loadAgentConfig();
+    if (!agentConfig?.machineId) return false;
+    debugLog(scope, 'migrating local session to server', { local: state.sessionId });
+    const startRes = await api.startSession({
+      machineId: agentConfig.machineId,
+      prompt: (state.prompts && state.prompts[0]) || '',
+      model: isSpecificModel(state.model) ? state.model : 'claude',
+      repoPath: state.repoPath || saveCwd,
+      agentSlug,
+      branch: state.branch || undefined,
+      agentSessionId: (state as any).agentSessionId || state.claudeSessionId,
+    } as any);
+    const newId = (startRes as any)?.sessionId;
+    if (typeof newId === 'string' && newId && !newId.startsWith('local-')) {
+      debugLog(scope, 'local session migrated', { from: state.sessionId, to: newId });
+      state.sessionId = newId;
+      try { saveSessionState(state, saveCwd, state.sessionTag); } catch { /* non-fatal */ }
+      return true;
+    }
+  } catch (err: any) {
+    debugLog(scope, 'local→server migration failed (non-fatal)', { message: err?.message });
+  }
+  return false;
 }
 
 async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: string): Promise<void> {
@@ -2959,6 +3435,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     if (state) {
       if (input.transcript_path) state.transcriptPath = input.transcript_path;
       saveSessionState(state, found!.saveCwd, state.sessionTag);
+      // Self-heal a local-only session here too — every prompt is a retry
+      // point, so a transient server outage at start no longer hides the
+      // whole session from Origin until (or unless) stop runs.
+      await ensureServerSession(state, found!.saveCwd, agentSlug, 'user-prompt-submit');
     }
   }
   if (!state) {
@@ -3183,6 +3663,14 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             branch: fbBranch,
             sessionTag: fbTag,
           };
+          // Hard cap refused the session server-side (429) — carry the
+          // lockout into the fallback state so the budget gate below
+          // blocks this very prompt instead of letting work continue
+          // merely because tracking degraded to local.
+          if (status === 429) {
+            state.budgetBlocked = true;
+            state.budgetBlockReason = err?.message || 'Budget limit exceeded';
+          }
           saveSessionState(state, repoPath, fbTag);
           debugLog('user-prompt-submit', 'local fallback session created', { sessionId: fbId, sessionTag: fbTag });
         }
@@ -3193,6 +3681,25 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   if (!state) {
     debugLog('user-prompt-submit', 'ABORT: no session state', { hookCwd });
     return;
+  }
+
+  // ── Budget lockout gate ──────────────────────────────────────────────
+  // Blocks the prompt (exit 2) when a hard cap is breached, BEFORE any
+  // bookkeeping — a blocked prompt never reaches the model, so it must
+  // not be recorded as a turn either.
+  if (state) {
+    await enforceBudgetLockout(state, agentSlug, hookCwd, 'user-prompt-submit');
+  }
+
+  // ── SESSION_LIMITS max-duration gate ─────────────────────────────────
+  // Team policy: sessions older than max_duration_minutes stop accepting
+  // prompts (action: block). Enforced ONLY at prompt boundaries — never
+  // mid-turn — so in-flight work is never cut off; the user finishes the
+  // current turn, then the next prompt is refused with a message telling
+  // them to start a fresh session. The heartbeat handles the time-based
+  // notifications (idle notify, approaching-cap warning, max-idle auto-end).
+  if (state) {
+    enforceSessionDurationLimit(state, agentSlug, 'user-prompt-submit');
   }
 
   const rawPrompt = input.prompt || '';
@@ -3448,6 +3955,8 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
                   cacheReadTokens: codexData.cacheReadTokens ?? 0,
                   cacheCreationTokens: 0,
                   toolCalls: 0,
+                  toolBreakdown: [],
+                  filesRead: [],
                 };
               }
               // Sync state.prompts from the rollout so the dashboard sees
@@ -3542,7 +4051,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         api.updateSession(state.sessionId, {
           prompt: joinedPrompt || undefined,
           transcript: displayTranscript || undefined,
-          model: model && model !== 'unknown' && model !== 'default' ? model : undefined,
+          model: isSpecificModel(model) ? model : undefined,
           filesChanged: parsed?.filesChanged && parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
           tokensUsed: hbTokensUsed > 0 ? hbTokensUsed : undefined,
           inputTokens: hbInputTokens > 0 ? hbInputTokens : undefined,
@@ -3611,6 +4120,16 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       }
     } catch { /* status read is best-effort */ }
 
+    // Mid-session scoped soft-cap warning — the heartbeat persisted it
+    // from a ping payload. Surface the amber banner in the conversation
+    // ONCE per distinct reason (budgetWarnShownFor records delivery), so
+    // a crossing mid-session is visible without nagging every prompt.
+    if (state.budgetWarnReason && state.budgetWarnShownFor !== state.budgetWarnReason) {
+      systemMsg += buildBudgetWarningBanner(state.budgetWarnReason) + '\n\n';
+      state.budgetWarnShownFor = state.budgetWarnReason;
+      try { saveSessionState(state, state.repoPath || hookCwd, state.sessionTag); } catch { /* re-shows next prompt */ }
+    }
+
     if (state.agentSystemPrompt) {
       systemMsg += state.agentSystemPrompt + '\n\n';
     }
@@ -3633,16 +4152,9 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     } catch {}
 
     if (systemMsg) {
-      // Cursor uses `additional_context`, Claude Code / others use `systemMessage`
-      // Codex displays hook stdout as warnings — skip (reads from rules files instead)
-      const cursorAgents = ['cursor'];
-      const isCodex = agentSlug === 'codex';
-      const outputKey = (agentSlug && cursorAgents.includes(agentSlug)) ? 'additional_context' : 'systemMessage';
-      if (!isCodex) {
-        const output = JSON.stringify({ [outputKey]: systemMsg });
-        process.stdout.write(output);
-      }
-      debugLog('user-prompt-submit', 'systemMessage injected', { key: outputKey, length: systemMsg.length });
+      const payload = buildContextInjectionPayload(agentSlug, 'UserPromptSubmit', systemMsg);
+      if (payload) process.stdout.write(payload);
+      debugLog('user-prompt-submit', 'context injected', { agent: agentSlug, length: systemMsg.length });
     }
   } catch (sysErr: any) {
     debugLog('user-prompt-submit', 'systemMessage injection failed (non-fatal)', { message: sysErr.message });
@@ -4445,35 +4957,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       // recovered, register it server-side now so the rest of the
       // update lands on a real row instead of a 404. Persist the new
       // id back to state so future hooks use it directly.
-      if (state.sessionId.startsWith('local-')) {
-        try {
-          const agentConfig = (await import('../config.js')).loadAgentConfig();
-          if (agentConfig?.machineId) {
-            debugLog('stop', 'migrating local session to server', { local: state.sessionId });
-            const startRes = await api.startSession({
-              machineId: agentConfig.machineId,
-              prompt: prompts[0] || '',
-              model: model !== 'unknown' ? model : 'claude',
-              repoPath: state.repoPath || hookCwd,
-              agentSlug,
-              branch: state.branch || undefined,
-              // Prefer the unified agentSessionId on state (set at
-              // session-start to claudeSessionId || cursor conversation_id
-              // etc); fall back to claudeSessionId for back-compat with
-              // older state files written before that field was added.
-              agentSessionId: (state as any).agentSessionId || state.claudeSessionId,
-            } as any);
-            const newId = (startRes as any)?.sessionId;
-            if (typeof newId === 'string' && newId && !newId.startsWith('local-')) {
-              debugLog('stop', 'local session migrated', { from: state.sessionId, to: newId });
-              state.sessionId = newId;
-              try { saveSessionState(state, hookCwd, state.sessionTag); } catch { /* non-fatal */ }
-            }
-          }
-        } catch (err: any) {
-          debugLog('stop', 'local→server migration failed (non-fatal)', { message: err?.message });
-        }
-      }
+      await ensureServerSession(state, hookCwd, agentSlug, 'stop');
 
       debugLog('stop', 'calling api.updateSession', {
         sessionId: state.sessionId,
@@ -4611,7 +5095,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             });
           }
         }
-        const captures = capturePromptEdits({
+        const transcriptCaptures = capturePromptEdits({
           agent: captureAgent,
           repoPath: state.repoPath,
           transcriptPath: capTranscript,
@@ -4620,9 +5104,14 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
           headShaAtStart: state.headShaAtStart || undefined,
           headShaAtEnd: gitCapture.headAfter || undefined,
         });
+        const captures = applyLiveLedger(transcriptCaptures, state, 'stop');
         if (captures.length > 0) {
           promptEditsByIndex = new Map();
           for (const cap of captures) {
+            // Anchor any edit the live ledger didn't already position
+            // (transcript-only agents like Gemini) against the final
+            // on-disk file. Already-anchored live edits are skipped.
+            if (state.repoPath) anchorEditPositions(cap.edits, state.repoPath);
             promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
           }
           debugLog('stop', 'capturePromptEdits ok', {
@@ -4637,10 +5126,14 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         });
       }
 
-      await api.updateSession(state.sessionId, {
+      const updateRes = await api.updateSession(state.sessionId, {
         prompt: joinedPrompt || undefined,
         transcript: displayTranscript || undefined,
-        model: model !== 'unknown' ? model : undefined,
+        // Only send a specific model (mirrors session-end). When the parse
+        // found nothing (resumed session, empty transcript), state.model is
+        // the bare brand "claude" — sending it would overwrite a real
+        // identifier (e.g. "claude-fable-5") stored by an earlier update.
+        model: isSpecificModel(model) ? model : undefined,
         filesChanged: sessionFilesChanged.length > 0 ? sessionFilesChanged : undefined,
         tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
         inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
@@ -4648,6 +5141,11 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         cacheReadTokens: parsed.cacheReadTokens > 0 ? parsed.cacheReadTokens : undefined,
         cacheCreationTokens: parsed.cacheCreationTokens > 0 ? parsed.cacheCreationTokens : undefined,
         toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
+        // Structured per-tool breakdown + files-read so the server stores
+        // them directly instead of re-parsing the display transcript (which
+        // is prompt-only for synthesized/aggregated sessions → "0 / None").
+        toolBreakdown: parsed.toolBreakdown.length > 0 ? parsed.toolBreakdown : undefined,
+        filesRead: mergeFilesRead(parsed.filesRead, state.filesRead),
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
         gitCapture: sessionGitCapture,
@@ -4661,6 +5159,11 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
           : undefined,
       });
       debugLog('stop', 'update complete');
+
+      // Persist the budget lockout signal the PATCH response carried, so
+      // the NEXT prompt / tool call gets blocked when a hard cap was
+      // breached by this turn's spend.
+      applyBudgetSignal(state, updateRes, hookCwd);
 
       // Send a heartbeat ping to keep the server-side session alive
       // (prevents the server's stale session cleanup from ending it)
@@ -4961,6 +5464,11 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
 
   debugLog('session-end', 'state loaded', { sessionId: state.sessionId, promptCount: state.prompts.length });
 
+  // Self-heal a local-only session before we try to end it — otherwise
+  // api.endSession on a `local-` id 404s and the whole session is lost
+  // from Origin (the exact "I don't see this session" gap).
+  await ensureServerSession(state, found!.saveCwd, agentSlug, 'session-end');
+
   // Update transcript path if provided
   if (input.transcript_path) {
     state.transcriptPath = input.transcript_path;
@@ -5189,7 +5697,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
             }
           } catch { /* non-fatal */ }
         }
-        const captures = capturePromptEdits({
+        const transcriptCaptures = capturePromptEdits({
           agent: captureAgent,
           repoPath: state.repoPath,
           transcriptPath: state.transcriptPath,
@@ -5198,9 +5706,13 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
           headShaAtStart: state.headShaAtStart || undefined,
           headShaAtEnd: gitCapture.headAfter || undefined,
         });
+        const captures = applyLiveLedger(transcriptCaptures, state, 'session-end');
         if (captures.length > 0) {
           promptEditsByIndex = new Map();
           for (const cap of captures) {
+            // Anchor transcript-only edits (e.g. Gemini) against the
+            // final on-disk file; live edits are already positioned.
+            if (state.repoPath) anchorEditPositions(cap.edits, state.repoPath);
             promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
           }
           debugLog('session-end', 'capturePromptEdits ok', {
@@ -5233,6 +5745,10 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         cacheReadTokens: parsed.cacheReadTokens > 0 ? parsed.cacheReadTokens : undefined,
         cacheCreationTokens: parsed.cacheCreationTokens > 0 ? parsed.cacheCreationTokens : undefined,
         toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
+        // See the stop handler — structured tool/files data so the PR-detail
+        // "behind the work" view doesn't depend on transcript-text markers.
+        toolBreakdown: parsed.toolBreakdown.length > 0 ? parsed.toolBreakdown : undefined,
+        filesRead: mergeFilesRead(parsed.filesRead, state.filesRead),
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
         gitCapture: gitCapture.diff ? gitCapture : undefined,
@@ -5249,21 +5765,8 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       debugLog('session-end', 'api.endSession complete');
     }
 
-    // Auto-attach session to active trail (safety net for auto-created sessions)
-    if (!state.trailId) {
-      try {
-        const endBranch = getBranch(hookCwd) || state.branch;
-        if (endBranch) {
-          const trail = findTrailByBranch(state.repoPath, endBranch);
-          if (trail && (trail.status === 'active' || trail.status === 'review')) {
-            addSessionToTrail(state.repoPath, trail.id, state.sessionId);
-            debugLog('session-end', 'auto-attached to trail (late)', { trailId: trail.id });
-          }
-        }
-      } catch (trailErr: any) {
-        debugLog('session-end', 'trail auto-attach failed (non-fatal)', { message: trailErr.message });
-      }
-    }
+    // Trail attachment is handled server-side at session/end now (see
+    // services/trails.ts) — no CLI-side git-ref trail store to update.
 
     // Write session files to origin-sessions branch (directory per session).
     // Pass promptEditsByIndex so changes.json ships the authoritative
@@ -5489,8 +5992,13 @@ export async function handlePostCommit(): Promise<void> {
     return;
   }
 
-  // Get latest commit info
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  // Get latest commit info. Run git in hookCwd, NOT repoPath: getGitRoot
+  // collapses a linked worktree to the main repo, whose HEAD is a different
+  // commit than the one just made in the worktree. Git runs this hook from
+  // the top of the working tree where the commit happened, so hookCwd always
+  // resolves the right HEAD; sha-addressed commands work from either since
+  // worktrees share the object store.
+  const execOpts = { encoding: 'utf-8' as const, cwd: hookCwd, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
   let commitSha: string, commitMessage: string, commitAuthor: string;
   try {
     commitSha = execFileSync('git', ['rev-parse', 'HEAD'], execOpts).trim();
@@ -5602,8 +6110,11 @@ export async function handlePostCommit(): Promise<void> {
     }
   }
 
-  // Get ALL active sessions for this repo (concurrent session support)
-  const activeSessions = listActiveSessions(hookCwd);
+  // Get ALL active sessions for this repo (concurrent session support).
+  // Worktree-aware: falls back to the main repo's state files when the hook
+  // runs inside a linked worktree, then narrows by last-seen lifecycle cwd
+  // so a sibling session in another worktree isn't credited with this commit.
+  const activeSessions = listSessionsForGitHook(hookCwd);
   activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
 
   // Pick the correct session — use process detection to disambiguate when multiple are active
@@ -5848,7 +6359,9 @@ export async function handlePostCommit(): Promise<void> {
     let sessionLinesRemoved = linesRemoved;
     if (state?.headShaAtStart && state.headShaAtStart !== commitSha) {
       try {
-        const snap = captureGitState(repoPath, state.headShaAtStart, { fullContext: true });
+        // hookCwd, not repoPath: the session-to-date diff must read the
+        // committing working tree's HEAD (worktree-safe, see execOpts above).
+        const snap = captureGitState(hookCwd, state.headShaAtStart, { fullContext: true });
         if (snap.committedDiff) {
           sessionToDateDiff = snap.committedDiff;
           sessionLinesAdded = snap.linesAdded || linesAdded;
@@ -5948,7 +6461,7 @@ export async function handlePostCommit(): Promise<void> {
     // Parse transcript for full metrics (or use empty defaults for agents without transcripts)
     const parsed = state.transcriptPath
       ? parseTranscript(state.transcriptPath, { since: state.startedAt })
-      : { prompts: [], filesChanged: [], tokensUsed: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0, summary: '', model: '', transcript: '' };
+      : { prompts: [], filesChanged: [], tokensUsed: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0, toolBreakdown: [], filesRead: [], summary: '', model: '', transcript: '' };
     const promptMappings = state.transcriptPath
       ? extractPromptFileMappings(state.transcriptPath)
       : [];
@@ -6020,10 +6533,13 @@ function extractFilePaths(toolName: string, toolInput: Record<string, any>): str
 }
 
 function enforceFileRestrictions(
-  rules: Array<{ type: string; condition: string; action: string; severity: string }>,
+  rules: Array<{
+    type: string; condition: string; action: string; severity: string;
+    policyId?: string; ruleId?: string; policyName?: string;
+  }>,
   filePaths: string[],
   repoPath: string,
-): { blocked: boolean; reason: string } | null {
+): { blocked: boolean; reason: string; file: string; policyId?: string; policyName?: string } | null {
   if (!rules || rules.length === 0 || filePaths.length === 0) return null;
 
   for (const rule of rules) {
@@ -6047,6 +6563,9 @@ function enforceFileRestrictions(
           return {
             blocked: true,
             reason: `[Origin Policy] Blocked: file "${candidate}" matches restricted pattern "${pattern}"`,
+            file: candidate,
+            policyId: rule.policyId,
+            policyName: rule.policyName,
           };
         }
       }
@@ -6129,6 +6648,15 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
   }
   const { state, saveCwd } = found;
 
+  // Track the session's last-seen cwd. The harness can move a session into a
+  // linked git worktree after session-start; bare git hooks (prepare-commit-msg,
+  // post-commit) then rely on lastCwd to match the worktree commit back to
+  // this session. Persisted by the unconditional save at the end of this hook.
+  if (hookCwd && state.lastCwd !== hookCwd) {
+    debugLog('pre-tool-use', 'lastCwd updated', { from: state.lastCwd, to: hookCwd });
+    state.lastCwd = hookCwd;
+  }
+
   // Extract file paths once — used for both lazy repo attach and policy enforcement.
   const toolInput = input.tool_input || {};
   const filePaths = extractFilePaths(input.tool_name || '', toolInput);
@@ -6148,16 +6676,67 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
     }
   }
 
+  // ── Live policy refresh (A) ───────────────────────────────────────────
+  // Before enforcing on a file op, pull the current rule set if our cached
+  // copy is stale. The heartbeat already refreshes rules from its ping, but
+  // it isn't always running (Codex/Cursor, or a just-started session), so we
+  // backstop here — TTL-throttled so a burst of tool calls doesn't hammer the
+  // API. This is what makes a policy created AFTER the session started take
+  // effect: a session that began with zero policies has empty enforcementRules
+  // and would otherwise never re-check. Best-effort — a failed refresh falls
+  // back to the cached rules and never blocks the agent.
+  const POLICY_REFRESH_TTL_MS = 30_000;
+  if (
+    filePaths.length > 0 &&
+    isConnectedMode() &&
+    state.sessionId && !state.sessionId.startsWith('local-') &&
+    Date.now() - (state.enforcementRulesFetchedAt || 0) > POLICY_REFRESH_TTL_MS
+  ) {
+    try {
+      const fresh = await api.refreshSessionPolicies(state.sessionId);
+      state.enforcementRules = fresh.enforcementRules;
+      if (fresh.activePolicies) state.activePolicies = fresh.activePolicies;
+      state.enforcementRulesFetchedAt = Date.now();
+      saveSessionState(state, saveCwd, state.sessionTag);
+    } catch { /* keep cached rules — never block the agent on a refresh blip */ }
+  }
+
   // ── Policy Enforcement: FILE_RESTRICTION ──────────────────────────────
   if (state.enforcementRules && state.enforcementRules.length > 0 && filePaths.length > 0) {
     const result = enforceFileRestrictions(state.enforcementRules, filePaths, state.repoPath);
     if (result?.blocked) {
       debugLog('pre-tool-use', 'BLOCKED by policy', { reason: result.reason });
+      // Report to the audit pipeline before exiting — these blocks used
+      // to be enforced silently, leaving no trace for admins. Awaited
+      // (with catch) since process.exit below would drop an in-flight
+      // request; the tool is blocked either way, so the latency is paid
+      // only on violations.
+      if (isConnectedMode()) {
+        try {
+          const agentCfg = loadConfig();
+          await api.reportViolation({
+            machineId: agentCfg?.machineId || 'unknown',
+            policyId: result.policyId,
+            policyType: 'FILE_RESTRICTION',
+            policyName: result.policyName,
+            description: `[pre-tool-use] ${result.reason.replace(/^\[Origin Policy\] /, '')}`,
+            filepath: result.file,
+            sessionId: state.sessionId && !state.sessionId.startsWith('local-') ? state.sessionId : undefined,
+          });
+        } catch { /* never block the block on reporting */ }
+      }
       // Exit code 2 + stderr blocks the tool for both Claude Code and Gemini CLI
       process.stderr.write(result.reason + '\n');
       process.exit(2);
     }
   }
+
+  // ── Budget lockout gate ────────────────────────────────────────────────
+  // Blocks tool calls mid-session once a hard cap is breached (the flag
+  // is set by the heartbeat ping or the previous turn's stop PATCH), so
+  // a running session stops doing work instead of overshooting the cap
+  // until the next session start.
+  await enforceBudgetLockout(state, agentSlug, saveCwd, 'pre-tool-use');
 
   // ── Auto-Snapshot: save working tree before file-modifying tools ────────
   const toolNameLower = (input.tool_name || '').toLowerCase();
@@ -6252,6 +6831,133 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
   debugLog('pre-tool-use', 'recorded', { toolCallId, toolName: record.toolName });
 }
 
+// ─── Live edit capture (PostToolUse ledger) ───────────────────────────────
+//
+// Record each Edit/Write/MultiEdit the instant its PostToolUse hook fires,
+// stamped with the active prompt. This is the authoritative source for
+// per-prompt blame: the exact tool inputs, before the transcript can
+// truncate them, drift in format, or lag behind on disk. Merged with the
+// transcript capture at Stop/session-end so shell/commit edits are still
+// covered. Kill-switch: ORIGIN_LIVE_CAPTURE=0.
+// Largest single edit (old + new content) we keep in the ledger. Bigger
+// edits are SKIPPED, not clamped: a clamped copy would no longer byte-match
+// the transcript's full record of the same tool call, so the merge couldn't
+// dedupe them and the file would be counted twice. Skipping lets the
+// transcript capture (full content) own oversized edits cleanly.
+const LIVE_EDIT_CONTENT_MAX = 96 * 1024;
+const LIVE_EDIT_MAX_ENTRIES = 2000;      // hard cap on ledger entry count
+// Total content-byte budget for the ledger. The state file is rewritten on
+// every tool call AND re-read on every hook, so an unbounded ledger would
+// drag the agent down. Past this, new edits fall back to the transcript
+// capture (no data loss — the transcript still records them).
+const LIVE_EDIT_MAX_TOTAL_BYTES = 6 * 1024 * 1024;
+
+function liveCaptureEnabled(): boolean {
+  return process.env.ORIGIN_LIVE_CAPTURE !== '0';
+}
+
+// Union of files-read from the transcript parse and the hook-captured
+// state.filesRead (pre-tool-use records Read-style tools live). Deduped,
+// capped, undefined when empty so the API payload stays clean.
+function mergeFilesRead(fromTranscript: string[], fromState?: string[]): string[] | undefined {
+  const set = new Set<string>();
+  for (const f of fromTranscript || []) if (f) set.add(f);
+  for (const f of fromState || []) if (f) set.add(f);
+  if (set.size === 0) return undefined;
+  return Array.from(set).slice(0, 500);
+}
+
+function editContentBytes(e: { oldContent?: string; newContent?: string }): number {
+  return (e.oldContent?.length || 0) + (e.newContent?.length || 0);
+}
+
+// Rough content-byte size of the existing ledger. Bounded by the entry cap,
+// so this stays cheap (a few thousand string-length reads at worst).
+function liveLedgerBytes(state: SessionState): number {
+  let n = 0;
+  for (const entry of state.liveEdits || []) {
+    for (const e of entry.edits) n += editContentBytes(e);
+  }
+  return n;
+}
+
+/**
+ * Pull edits from a PostToolUse payload and append them to the session's
+ * live ledger, tagged with the current prompt index. Returns true when the
+ * ledger changed (caller persists). Never throws.
+ */
+function recordLiveEdits(state: SessionState, input: Record<string, any>, repoPath: string): boolean {
+  if (!liveCaptureEnabled()) return false;
+  try {
+    const toolName = String(input.tool_name || '');
+    if (!toolName) return false;
+    // Claude Code PostToolUse → tool_input; other agents vary, so fall back.
+    const toolInput =
+      (input.tool_input && typeof input.tool_input === 'object') ? input.tool_input
+        : (input.toolInput && typeof input.toolInput === 'object') ? input.toolInput
+          : (input.tool_response && typeof input.tool_response === 'object' && input.tool_response.input) ? input.tool_response.input
+            : {};
+    const promptIndex = (state.prompts?.length || 0) - 1;
+    if (promptIndex < 0) return false;
+    const agentLabel = state.agentSlug === 'cursor' ? 'cursor' : 'claude';
+    // warnUnknown=false: this fires for EVERY tool (Read/Grep/Bash…) in a
+    // fresh per-call process, so the unknown-tool note would spam stderr.
+    const extracted = extractEditsFromToolCall(toolName, toolInput, repoPath, agentLabel, false);
+    if (extracted.length === 0) return false;
+    // Drop oversized edits (see LIVE_EDIT_CONTENT_MAX) — the transcript owns
+    // those at full fidelity. Keeping a clamped copy would break merge dedup.
+    const edits = extracted.filter((e) => editContentBytes(e) <= LIVE_EDIT_CONTENT_MAX);
+    if (edits.length === 0) {
+      debugLog('post-tool-use', 'live edit too large, deferring to transcript', { tool: toolName });
+      return false;
+    }
+    // Stamp each edit with its real file line BEFORE storing. PostToolUse
+    // fires after the tool wrote the file, so the on-disk content reflects
+    // the edit and we can read the true position the blame gutter shows.
+    // Without this the server synthesizes line numbers from line 1.
+    anchorEditPositions(edits, repoPath);
+    if (!state.liveEdits) state.liveEdits = [];
+    if (state.liveEdits.length >= LIVE_EDIT_MAX_ENTRIES || liveLedgerBytes(state) >= LIVE_EDIT_MAX_TOTAL_BYTES) {
+      // Ledger full — fall back to the transcript capture for this edit (it
+      // records the same tool call, so nothing is actually lost).
+      debugLog('post-tool-use', 'live ledger full, deferring to transcript', { entries: state.liveEdits.length });
+      return false;
+    }
+    state.liveEdits.push({
+      promptIndex,
+      toolName,
+      capturedAt: new Date().toISOString(),
+      edits,
+    });
+    debugLog('post-tool-use', 'live edit captured', { promptIndex, tool: toolName, edits: edits.length });
+    return true;
+  } catch (err: any) {
+    debugLog('post-tool-use', 'live capture failed (non-fatal)', { message: err?.message });
+    return false;
+  }
+}
+
+/**
+ * Layer the live ledger over a transcript capture at Stop/session-end. When
+ * the ledger has entries (Claude/Cursor PostToolUse fired), its exact
+ * tool-call edits win and the transcript supplies shell/commit backfill and
+ * prompt text. Empty ledger (e.g. Codex, or ORIGIN_LIVE_CAPTURE=0) → the
+ * transcript capture passes through unchanged.
+ */
+function applyLiveLedger(captures: PromptCapture[], state: SessionState, scope: string): PromptCapture[] {
+  if (!liveCaptureEnabled() || !state.liveEdits || state.liveEdits.length === 0) return captures;
+  const ledger = buildCapturesFromLedger(state.liveEdits);
+  if (ledger.length === 0) return captures;
+  const merged = mergeLedgerWithTranscript(ledger, captures);
+  debugLog(scope, 'merged live ledger with transcript', {
+    ledgerPrompts: ledger.length,
+    transcriptPrompts: captures.length,
+    mergedPrompts: merged.length,
+    ledgerEdits: ledger.reduce((n, c) => n + c.edits.length, 0),
+  });
+  return merged;
+}
+
 async function handlePostToolUse(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('post-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
@@ -6262,6 +6968,16 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
     return;
   }
   const { state, saveCwd } = found;
+
+  // Keep lastCwd current for bare git hooks (see handlePreToolUse). Saved
+  // immediately — the saves below only fire when a record matched or the
+  // branch changed, and a commit's prepare-commit-msg hook may run before
+  // either happens again.
+  if (hookCwd && state.lastCwd !== hookCwd) {
+    debugLog('post-tool-use', 'lastCwd updated', { from: state.lastCwd, to: hookCwd });
+    state.lastCwd = hookCwd;
+    saveSessionState(state, saveCwd, state.sessionTag);
+  }
 
   if (state.subagents && state.subagents.length > 0) {
     // Match the post-use to its pre-use record.
@@ -6306,6 +7022,13 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
     }
   } catch {
     // non-fatal
+  }
+
+  // ── Live edit ledger ──────────────────────────────────────────────────────
+  // Capture this tool call's edits in real time, tagged with the active
+  // prompt. Authoritative source for per-prompt blame at Stop/end.
+  if (recordLiveEdits(state, input, state.repoPath || saveCwd)) {
+    saveSessionState(state, saveCwd, state.sessionTag);
   }
 }
 
@@ -6426,10 +7149,54 @@ async function handleAfterFileEdit(input: Record<string, any>, agentSlug?: strin
 // ─── Git Hook: Pre-Commit (Secret Scan) ──────────────────────────────────
 
 /**
+ * Decide whether a policy applies to the commit being made, based on its
+ * per-agent assignments. Mirrors shouldSkipPolicy in the server's
+ * policy-engine (inverted: returns true when the policy SHOULD enforce):
+ *   - no assignments → org-wide, applies to every commit
+ *   - assigned → applies only when one of the assigned agents has an
+ *     active session in this repo; human commits (no active agent
+ *     session) skip agent-scoped policies
+ * Exported for tests.
+ */
+export function policyAppliesToCommit(
+  assignedAgents: Array<{ slug?: string | null }> | undefined,
+  activeAgentSlugs: Set<string>,
+): boolean {
+  const assigned = assignedAgents || [];
+  if (assigned.length === 0) return true;
+  return assigned.some((a) => !!a.slug && activeAgentSlugs.has(a.slug.toLowerCase()));
+}
+
+/**
  * Called by .git/hooks/pre-commit.
  * Scans staged diff for hardcoded secrets, API keys, and credentials.
  * Exits with code 1 to block the commit if secrets are found.
  */
+/**
+ * Pure decision for the pre-commit budget gate. Exported for tests.
+ *
+ * Blocks when any candidate Origin session for this repo/worktree is
+ * flagged budgetBlocked. Sessions only exist for AI agents, so a plain
+ * human commit in a repo with no locked AI session passes untouched.
+ * ORIGIN_BUDGET_OVERRIDE=1 is the documented emergency escape hatch
+ * (same as the prompt/tool gates).
+ */
+export function preCommitBudgetDecision(
+  sessions: Array<Pick<SessionState, 'sessionId' | 'budgetBlocked' | 'budgetBlockReason'>>,
+  overrideEnv: string | undefined,
+): { block: boolean; reason: string } {
+  if (overrideEnv === '1') return { block: false, reason: '' };
+  const locked = sessions.find((s) => s.budgetBlocked);
+  if (!locked) return { block: false, reason: '' };
+  return {
+    block: true,
+    reason:
+      `[Origin Budget] Commit blocked — ${locked.budgetBlockReason || 'hard budget cap exceeded'}. ` +
+      `New AI work is locked until the cap resets or an admin raises it. ` +
+      `Emergency override: ORIGIN_BUDGET_OVERRIDE=1 git commit ...`,
+  };
+}
+
 export async function handlePreCommit(): Promise<void> {
   debugLog('pre-commit', '=== GIT HOOK INVOKED ===', { pid: process.pid, cwd: process.cwd() });
 
@@ -6439,6 +7206,53 @@ export async function handlePreCommit(): Promise<void> {
   if (!repoPath) {
     debugLog('pre-commit', 'SKIP: not a git repo');
     return;
+  }
+
+  // ── 0. Budget hard-cap gate — the agent-agnostic choke point ─────────
+  // Hook-protocol blocking (exit 2 on prompt/tool hooks) only works for
+  // Claude Code and Gemini; Codex and Cursor ignore it. Git itself,
+  // however, honors a non-zero pre-commit exit no matter which agent is
+  // driving — so this is where a breached hard cap actually stops work
+  // from landing for EVERY agent. The lockout flag comes from session
+  // state (stamped by the heartbeat ping, the session PATCH path, or the
+  // 429-refused session-start fallback). Worktree-aware lookup so an
+  // agent committing from a sibling worktree is still matched.
+  try {
+    const candidates = listSessionsForGitHook(hookCwd);
+    const lockedCandidate = candidates.find((s) => s.budgetBlocked);
+    if (lockedCandidate && isConnectedMode()) {
+      // Re-check the server while locked (mirrors enforceBudgetLockout):
+      // the block must lift the moment an admin raises the cap or the
+      // period resets — a stale flag in a lingering state file must not
+      // keep blocking commits. On re-check failure keep blocking; the
+      // last confirmed server state was "blocked".
+      try {
+        const status = await api.getBudgetStatus(
+          lockedCandidate.sessionId && !lockedCandidate.sessionId.startsWith('local-')
+            ? lockedCandidate.sessionId
+            : undefined,
+        );
+        if (!status.blocked) {
+          lockedCandidate.budgetBlocked = false;
+          lockedCandidate.budgetBlockReason = undefined;
+          try { saveSessionState(lockedCandidate, lockedCandidate.repoPath || repoPath, lockedCandidate.sessionTag); } catch { /* non-fatal */ }
+          clearBudgetLockNotice(lockedCandidate.repoPath || repoPath);
+          debugLog('pre-commit', 'budget lockout lifted by server re-check');
+        } else if (status.message) {
+          lockedCandidate.budgetBlockReason = status.message;
+        }
+      } catch { /* keep blocking on re-check failure */ }
+    }
+    const decision = preCommitBudgetDecision(candidates, process.env.ORIGIN_BUDGET_OVERRIDE);
+    if (decision.block) {
+      debugLog('pre-commit', 'BLOCKED by budget lockout', { reason: decision.reason });
+      process.stderr.write('\n' + decision.reason + '\n\n');
+      process.exit(1);
+    }
+  } catch (gateErr: any) {
+    // The gate must never break commits on its own bugs — fall through
+    // to the normal policy checks.
+    debugLog('pre-commit', 'budget gate check failed (non-fatal)', { message: gateErr?.message });
   }
 
   const repoConfig = loadRepoConfig(repoPath);
@@ -6545,6 +7359,7 @@ export async function handlePreCommit(): Promise<void> {
         id: string;
         name: string;
         type: string;
+        assignedAgents?: Array<{ id: string; name: string; slug: string }>;
         rules: Array<{
           id: string;
           condition: string;
@@ -6556,7 +7371,32 @@ export async function handlePreCommit(): Promise<void> {
         }>;
       }>;
 
+      // Active AI session agent(s) in this repo — the scope context for
+      // per-agent policy assignments. Empty set = human commit (no agent
+      // session running here).
+      const activeAgentSlugs = new Set(
+        listActiveSessions(repoPath)
+          .map((s) => (s.agentSlug || '').toLowerCase())
+          .filter(Boolean),
+      );
+
       for (const policy of policies) {
+        // Honor per-agent assignments — mirrors shouldSkipPolicy in the
+        // server's policy-engine. No assignments = org-wide, enforce for
+        // every commit. Assigned = enforce only when one of the assigned
+        // agents has an active session in this repo; human commits (no
+        // active agent session) skip agent-scoped policies. Without this
+        // filter, a policy scoped to specific agents blocked EVERY commit
+        // in the org, including hand-typed ones.
+        if (!policyAppliesToCommit(policy.assignedAgents, activeAgentSlugs)) {
+          debugLog('pre-commit', 'skipping agent-scoped policy (no assigned agent active)', {
+            policy: policy.name,
+            assigned: (policy.assignedAgents || []).map((a) => a.slug),
+            active: [...activeAgentSlugs],
+          });
+          continue;
+        }
+
         for (const rule of policy.rules) {
           let cond: Record<string, any> = {};
           try { cond = JSON.parse(rule.condition); } catch { continue; }
@@ -6706,14 +7546,19 @@ export async function handlePreCommit(): Promise<void> {
         }))).catch(() => {});
       }
 
-      // Report policy violations
+      // Report policy violations. policyType rides along so the stats
+      // violations-by-type histogram attributes these correctly — without
+      // it, every pre-commit report landed in the "UNKNOWN" bucket.
       const policyViolations = violations.filter(v => v.policyId);
       for (const v of policyViolations) {
         await api.reportViolation({
           machineId: config?.machineId || 'unknown',
           policyId: v.policyId!,
+          policyType: v.policyType,
+          policyName: v.policyName,
           description: `[pre-commit] ${v.message}`,
           filepath: stagedFiles[0] || undefined,
+          sessionId: sessionId && !sessionId.startsWith('local-') ? sessionId : undefined,
         }).catch(() => {});
       }
     } catch (err: any) {
@@ -6954,7 +7799,10 @@ export function buildOriginTrailers(
  * that function's many other responsibilities.
  */
 function pickActiveSessionForCommit(hookCwd: string): SessionState | null {
-  const activeSessions = listActiveSessions(hookCwd);
+  // Worktree-aware lookup: falls back to the main repo's sessions when the
+  // hook runs inside a linked worktree (whose own git dir holds no state
+  // files), then narrows multiple candidates by last-seen lifecycle cwd.
+  const activeSessions = listSessionsForGitHook(hookCwd);
   activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
   if (activeSessions.length === 0) return null;
   if (activeSessions.length === 1) return activeSessions[0];
@@ -7135,8 +7983,76 @@ export async function handlePrePush(): Promise<void> {
   const connected = !!(config?.apiKey && config?.apiUrl);
   const strategy = config?.pushStrategy || 'auto';
 
-  if (!connected || config?.snapshotRepo || strategy === 'always') {
-    // Push origin-sessions branch if it exists (standalone mode only)
+  // ── Agent-disabled push gate ──────────────────────────────────────
+  // When the org opted in (Org.pushBlockMode) and the developer's coding
+  // agent is disabled in Origin, abort the push. Team connected keys only —
+  // solo keys self-manage their auto-enabled agents (the server also
+  // bypasses them). Best-effort + fail policy lives in decidePushBlock:
+  // a blocked decision exits non-zero so git aborts the push.
+  if (config && connected && config.keyType !== 'solo' && config.accountType !== 'developer') {
+    // The whole gate is wrapped so an internal bug (config read, etc.) can
+    // NEVER abort a legitimate push — only the deliberate process.exit(1)
+    // below blocks, and process.exit isn't catchable. Governance must fail
+    // open on its own errors; the real backstop is the PR merge gate.
+    try {
+      const repoConfig = loadRepoConfig(repoPath);
+      const agentCfg = loadAgentConfig();
+      const slug = repoConfig?.agent || agentCfg?.agentSlug || undefined;
+
+      let reachable = true;
+      let allowed: boolean | undefined;
+      let agentName: string | null = null;
+      let serverMode: string | undefined;
+      // Bound the check — a slow/down API must never stall the developer's
+      // push; on timeout we treat it as unreachable and apply the fail policy.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      try {
+        const r = (await api.pushCheck(slug, controller.signal)) as { allowed?: boolean; agentName?: string | null; mode?: string };
+        allowed = r?.allowed;
+        agentName = r?.agentName ?? null;
+        serverMode = r?.mode;
+      } catch {
+        reachable = false; // network/API error/timeout — apply cached fail policy
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      // Refresh the cached mode whenever we reached the server, so a later
+      // offline push applies the org's real fail policy.
+      if (reachable && serverMode && serverMode !== config.pushBlockMode) {
+        try { saveConfig({ ...config, pushBlockMode: serverMode }); } catch { /* cache is best-effort */ }
+      }
+
+      const decision = decidePushBlock({ reachable, allowed, agentName, cachedMode: config.pushBlockMode });
+      if (decision.block) {
+        console.error(`\n  ✖ Origin: push blocked — ${decision.reason}.`);
+        console.error('    Ask an admin to enable your agent in Origin, then push again.');
+        console.error('    To override this one push: git push --no-verify\n');
+        debugLog('pre-push', 'BLOCKED', { reason: decision.reason, slug, reachable });
+        process.exit(1);
+      }
+      debugLog('pre-push', 'push gate passed', { reachable, allowed, slug });
+    } catch (err: any) {
+      // Fail open on any unexpected internal error — never block a push due
+      // to a gate bug.
+      debugLog('pre-push', 'push gate errored — allowing push', { message: err?.message });
+    }
+  }
+
+  // Push the origin-sessions branch whenever prompt portability is on (the
+  // default) — connected OR standalone. The branch carries the full per-prompt
+  // payloads (+ diffs) that let AI blame survive a clone or a re-connect to a
+  // DIFFERENT Origin org: the server imports it on connect. This used to be
+  // skipped in connected mode ("data goes to the API"), which meant a repo
+  // connected to another org had no branch to import → no cross-org prompts/
+  // blame, and developers had to `git push origin origin-sessions` by hand.
+  // Privacy opt-out is the SAME flag that governs notes: notesIncludePrompts
+  // = false (per repo/machine) suppresses both. snapshotRepo / pushStrategy
+  // 'always' stay as explicit escape hatches.
+  const pushSessionsBranch =
+    shouldIncludePromptText(repoPath) || config?.snapshotRepo || strategy === 'always';
+  if (pushSessionsBranch) {
     try {
       execFileSync('git', ['rev-parse', 'refs/heads/origin-sessions'], execOpts);
       execFileSync('git', ['push', 'origin', 'origin-sessions', '--no-verify', '--quiet'], execOpts);
@@ -7145,16 +8061,40 @@ export async function handlePrePush(): Promise<void> {
       debugLog('pre-push', 'origin-sessions push skipped', { message: err.message });
     }
   } else {
-    debugLog('pre-push', 'SKIP origin-sessions push: connected mode');
+    debugLog('pre-push', 'SKIP origin-sessions push: prompt portability opted out');
   }
 
   // Push refs/notes/origin if they exist
+  let hasLocalNotes = false;
   try {
-    execFileSync('git', ['rev-parse', 'refs/notes/origin'], execOpts);
-    execFileSync('git', ['push', 'origin', 'refs/notes/origin', '--no-verify', '--quiet'], execOpts);
-    debugLog('pre-push', 'pushed refs/notes/origin');
-  } catch (err: any) {
-    debugLog('pre-push', 'notes push skipped', { message: err.message });
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', 'refs/notes/origin'], execOpts);
+    hasLocalNotes = true;
+  } catch {
+    debugLog('pre-push', 'SKIP notes push: no local refs/notes/origin');
+  }
+  if (hasLocalNotes) {
+    const pushNotes = () =>
+      execFileSync('git', ['push', 'origin', 'refs/notes/origin', '--no-verify', '--quiet'], execOpts);
+    try {
+      pushNotes();
+      debugLog('pre-push', 'pushed refs/notes/origin');
+    } catch (err: any) {
+      // Almost always a non-fast-forward rejection: another worktree or
+      // machine pushed newer notes since we last synced (each post-commit
+      // appends to the shared notes ref). Fetch the remote notes, merge them
+      // into ours, and retry the push ONCE. Strategy `ours` keeps the local
+      // note when both sides annotated the SAME commit — notes are per-commit
+      // JSON written by the committing machine, so ours is the authoritative
+      // one here and line-level strategies (cat_sort_uniq) would corrupt it.
+      try {
+        execFileSync('git', ['fetch', '--no-tags', 'origin', '+refs/notes/origin:refs/notes/origin-remote'], execOpts);
+        execFileSync('git', ['notes', '--ref=refs/notes/origin', 'merge', '-s', 'ours', 'refs/notes/origin-remote'], execOpts);
+        pushNotes();
+        debugLog('pre-push', 'pushed refs/notes/origin after merging remote notes');
+      } catch (retryErr: any) {
+        debugLog('pre-push', 'notes push skipped', { message: err.message, retryMessage: retryErr.message });
+      }
+    }
   }
 
   debugLog('pre-push', '=== GIT HOOK COMPLETE ===');

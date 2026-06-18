@@ -28,7 +28,7 @@ export async function callLLM(
   }
 
   const body = {
-    model: opts?.model || 'claude-sonnet-4-20250514',
+    model: opts?.model || 'claude-sonnet-4-6',
     max_tokens: opts?.maxTokens || 1024,
     system,
     messages: messages.map(m => ({ role: m.role, content: m.content })),

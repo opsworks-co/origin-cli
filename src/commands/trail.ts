@@ -1,15 +1,29 @@
 import chalk from 'chalk';
-import {
-  type Trail,
-  generateTrailId,
-  readTrail,
-  listTrails,
-  writeTrail,
-  findTrailByBranch,
-} from '../trail-state.js';
-import { getGitRoot, getBranch } from '../session-state.js';
+import { api } from '../api.js';
+import { isConnectedMode } from '../config.js';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────
+// ─── Feature Trails (read-only CLI view over the server) ────────────────────
+//
+// Trails are a server/dashboard feature: created in the web UI (Sessions →
+// Trails), scoped to a repo + branch patterns, and auto-collected from
+// finished sessions server-side. The CLI used to keep its own parallel
+// per-repo git-ref trail store; that has been retired so there is a SINGLE
+// source of truth. The CLI now just reads trails from the API; creation and
+// management happen in the dashboard.
+
+interface ApiTrail {
+  id: string;
+  name: string;
+  status: string;
+  priority: string;
+  repoName?: string | null;
+  branch?: string | null;
+  branches?: string[];
+  labels?: string[];
+  sessionCount?: number;
+  totalCost?: number;
+  updatedAt?: string;
+}
 
 const STATUS_COLORS: Record<string, (s: string) => string> = {
   active: chalk.green,
@@ -25,308 +39,85 @@ const PRIORITY_COLORS: Record<string, (s: string) => string> = {
   critical: chalk.red,
 };
 
-function formatTrailSummary(trail: Trail, verbose: boolean = false): string {
-  const statusFn = STATUS_COLORS[trail.status] || chalk.white;
-  const priorityFn = PRIORITY_COLORS[trail.priority] || chalk.white;
-  const id = chalk.gray(trail.id.slice(0, 12));
-  const status = statusFn(trail.status.toUpperCase().padEnd(7));
-  const priority = priorityFn(trail.priority);
-  const name = chalk.bold(trail.name);
-  const branch = chalk.cyan(trail.branch);
-  const sessions = chalk.gray(`${trail.sessions.length} sessions`);
+const DASHBOARD_HINT = 'Create and manage trails in the Origin dashboard → Sessions → Trails.';
 
-  let line = `  ${id}  ${status}  ${priority.padEnd(10)}  ${name}`;
+/** True (and prints guidance) when this machine isn't connected to a platform. */
+function requireConnected(): boolean {
+  if (isConnectedMode()) return true;
+  console.log(chalk.gray('Feature Trails are managed in the Origin platform.'));
+  console.log(chalk.gray('Connect with `origin login`, then use Sessions → Trails in the dashboard.'));
+  return false;
+}
+
+function formatTrail(t: ApiTrail, verbose: boolean): string {
+  const statusFn = STATUS_COLORS[t.status] || chalk.white;
+  const priorityFn = PRIORITY_COLORS[t.priority] || chalk.white;
+  const id = chalk.gray((t.id || '').slice(0, 12).padEnd(12));
+  const status = statusFn((t.status || '').toUpperCase().padEnd(7));
+  const priority = priorityFn((t.priority || '').padEnd(10));
+  let line = `  ${id}  ${status}  ${priority}  ${chalk.bold(t.name)}`;
   if (verbose) {
-    line += `\n           ${chalk.gray('Branch:')} ${branch}  ${sessions}`;
-    if (trail.labels.length > 0) {
-      line += `\n           ${chalk.gray('Labels:')} ${trail.labels.map(l => chalk.magenta(l)).join(', ')}`;
-    }
-    if (trail.reviewers.length > 0) {
-      line += `\n           ${chalk.gray('Reviewers:')} ${trail.reviewers.join(', ')}`;
-    }
-    line += `\n           ${chalk.gray('Updated:')} ${new Date(trail.updatedAt).toLocaleString()}`;
+    const branches = (t.branches && t.branches.length ? t.branches : (t.branch ? [t.branch] : []));
+    if (t.repoName) line += `\n              ${chalk.gray('Repo:')} ${chalk.cyan(t.repoName)}`;
+    if (branches.length) line += `\n              ${chalk.gray('Branches:')} ${branches.map((b) => chalk.cyan(b)).join(', ')}`;
+    if (t.labels && t.labels.length) line += `\n              ${chalk.gray('Labels:')} ${t.labels.map((l) => chalk.magenta(l)).join(', ')}`;
+    line += `\n              ${chalk.gray('Sessions:')} ${t.sessionCount ?? 0}  ${chalk.gray('Cost:')} $${(t.totalCost ?? 0).toFixed(2)}`;
   }
   return line;
 }
 
-// ─── Commands ─────────────────────────────────────────────────────────────
-
 /**
- * origin trail (no subcommand) — show current trail for this branch
- */
-export async function trailCommand(opts?: { verbose?: boolean }): Promise<void> {
-  const cwd = process.cwd();
-  const repoPath = getGitRoot(cwd);
-  if (!repoPath) {
-    console.error(chalk.red('Error: Not in a git repository.'));
-    return;
-  }
-
-  const branch = getBranch(cwd);
-  if (!branch) {
-    console.error(chalk.red('Error: Could not determine current branch.'));
-    return;
-  }
-
-  const trail = findTrailByBranch(repoPath, branch);
-  if (!trail) {
-    console.log(chalk.gray(`No trail associated with branch "${branch}".`));
-    console.log(chalk.gray('Create one with: origin trail create <name>'));
-    return;
-  }
-
-  console.log(chalk.bold('\n  Current Trail\n'));
-  console.log(formatTrailSummary(trail, true));
-  console.log('');
-}
-
-/**
- * origin trail list [--status <status>] [--label <label>]
+ * origin trail [list] — list the org's trails (read-only).
  */
 export async function trailListCommand(
   opts?: { status?: string; label?: string; verbose?: boolean },
 ): Promise<void> {
-  const cwd = process.cwd();
-  const repoPath = getGitRoot(cwd);
-  if (!repoPath) {
-    console.error(chalk.red('Error: Not in a git repository.'));
-    return;
-  }
-
-  let trails = listTrails(repoPath);
-
-  // Apply filters
-  if (opts?.status) {
-    trails = trails.filter(t => t.status === opts.status);
-  }
-  if (opts?.label) {
-    trails = trails.filter(t => t.labels.includes(opts.label!));
-  }
-
-  if (trails.length === 0) {
-    console.log(chalk.gray('No trails found.'));
-    return;
-  }
-
-  console.log(chalk.bold('\n  Trails\n'));
-  console.log(chalk.gray(`  ${'ID'.padEnd(14)}  ${'Status'.padEnd(9)}  ${'Priority'.padEnd(10)}  Name`));
-  console.log(chalk.gray('  ' + '─'.repeat(70)));
-
-  for (const trail of trails) {
-    console.log(formatTrailSummary(trail, opts?.verbose));
-  }
-  console.log(chalk.gray(`\n  ${trails.length} trail${trails.length === 1 ? '' : 's'}\n`));
-}
-
-/**
- * origin trail create <name> [--priority <p>] [--label <l>]
- */
-export async function trailCreateCommand(
-  name: string,
-  opts?: { priority?: string; label?: string },
-): Promise<void> {
-  const cwd = process.cwd();
-  const repoPath = getGitRoot(cwd);
-  if (!repoPath) {
-    console.error(chalk.red('Error: Not in a git repository.'));
-    return;
-  }
-
-  const branch = getBranch(cwd);
-  if (!branch) {
-    console.error(chalk.red('Error: Could not determine current branch.'));
-    return;
-  }
-
-  // Check if a trail already exists for this branch
-  const existing = findTrailByBranch(repoPath, branch);
-  if (existing) {
-    console.log(chalk.yellow(`A trail already exists for branch "${branch}": ${existing.name} (${existing.id.slice(0, 12)})`));
-    return;
-  }
-
-  const priority = (opts?.priority || 'medium') as Trail['priority'];
-  if (!['low', 'medium', 'high', 'critical'].includes(priority)) {
-    console.error(chalk.red(`Invalid priority "${priority}". Use: low, medium, high, critical`));
-    return;
-  }
-
-  const labels = opts?.label ? [opts.label] : [];
-  const now = new Date().toISOString();
-
-  const trail: Trail = {
-    id: generateTrailId(),
-    name,
-    branch,
-    repoPath,
-    status: 'active',
-    priority,
-    labels,
-    reviewers: [],
-    sessions: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  writeTrail(repoPath, trail);
-  console.log(chalk.green(`Trail created: ${trail.name} (${trail.id.slice(0, 12)})`));
-  console.log(chalk.gray(`  Branch: ${branch}`));
-  console.log(chalk.gray(`  Priority: ${priority}`));
-  if (labels.length > 0) {
-    console.log(chalk.gray(`  Labels: ${labels.join(', ')}`));
-  }
-}
-
-/**
- * origin trail update [id] --status <status> [--priority <p>]
- */
-export async function trailUpdateCommand(
-  id?: string,
-  opts?: { status?: string; priority?: string },
-): Promise<void> {
-  const cwd = process.cwd();
-  const repoPath = getGitRoot(cwd);
-  if (!repoPath) {
-    console.error(chalk.red('Error: Not in a git repository.'));
-    return;
-  }
-
-  // Find trail by ID or current branch
-  let trail: Trail | null = null;
-  if (id) {
-    // Try full ID first, then prefix match
-    trail = readTrail(repoPath, id);
-    if (!trail) {
-      const trails = listTrails(repoPath);
-      trail = trails.find(t => t.id.startsWith(id)) || null;
-    }
-  } else {
-    const branch = getBranch(cwd);
-    if (branch) {
-      trail = findTrailByBranch(repoPath, branch);
-    }
-  }
-
-  if (!trail) {
-    console.error(chalk.red('Error: Trail not found. Specify an ID or be on a branch with an associated trail.'));
-    return;
-  }
-
-  let updated = false;
-
-  if (opts?.status) {
-    const validStatuses = ['active', 'review', 'done', 'paused'];
-    if (!validStatuses.includes(opts.status)) {
-      console.error(chalk.red(`Invalid status "${opts.status}". Use: ${validStatuses.join(', ')}`));
+  if (!requireConnected()) return;
+  try {
+    const params: Record<string, string> = {};
+    if (opts?.status) params.status = opts.status;
+    if (opts?.label) params.label = opts.label;
+    const res = (await api.getTrails(params)) as { trails: ApiTrail[]; total: number };
+    const trails = res?.trails || [];
+    if (trails.length === 0) {
+      console.log(chalk.gray('No trails yet.'));
+      console.log(chalk.gray(`  ${DASHBOARD_HINT}`));
       return;
     }
-    trail.status = opts.status as Trail['status'];
-    updated = true;
-  }
-
-  if (opts?.priority) {
-    const validPriorities = ['low', 'medium', 'high', 'critical'];
-    if (!validPriorities.includes(opts.priority)) {
-      console.error(chalk.red(`Invalid priority "${opts.priority}". Use: ${validPriorities.join(', ')}`));
-      return;
-    }
-    trail.priority = opts.priority as Trail['priority'];
-    updated = true;
-  }
-
-  if (!updated) {
-    console.log(chalk.yellow('Nothing to update. Use --status or --priority.'));
-    return;
-  }
-
-  trail.updatedAt = new Date().toISOString();
-  writeTrail(repoPath, trail);
-  console.log(chalk.green(`Trail updated: ${trail.name}`));
-  console.log(formatTrailSummary(trail, true));
-}
-
-/**
- * origin trail assign <user> [trailId]
- */
-export async function trailAssignCommand(
-  user: string,
-  trailId?: string,
-): Promise<void> {
-  const cwd = process.cwd();
-  const repoPath = getGitRoot(cwd);
-  if (!repoPath) {
-    console.error(chalk.red('Error: Not in a git repository.'));
-    return;
-  }
-
-  let trail: Trail | null = null;
-  if (trailId) {
-    trail = readTrail(repoPath, trailId);
-    if (!trail) {
-      const trails = listTrails(repoPath);
-      trail = trails.find(t => t.id.startsWith(trailId)) || null;
-    }
-  } else {
-    const branch = getBranch(cwd);
-    if (branch) {
-      trail = findTrailByBranch(repoPath, branch);
-    }
-  }
-
-  if (!trail) {
-    console.error(chalk.red('Error: Trail not found.'));
-    return;
-  }
-
-  if (!trail.reviewers.includes(user)) {
-    trail.reviewers.push(user);
-    trail.updatedAt = new Date().toISOString();
-    writeTrail(repoPath, trail);
-    console.log(chalk.green(`Assigned ${user} as reviewer on trail "${trail.name}".`));
-  } else {
-    console.log(chalk.gray(`${user} is already a reviewer on trail "${trail.name}".`));
+    console.log(chalk.bold('\n  Trails\n'));
+    console.log(chalk.gray(`  ${'ID'.padEnd(12)}  ${'Status'.padEnd(7)}  ${'Priority'.padEnd(10)}  Name`));
+    console.log(chalk.gray('  ' + '─'.repeat(70)));
+    for (const t of trails) console.log(formatTrail(t, !!opts?.verbose));
+    console.log(chalk.gray(`\n  ${trails.length} of ${res.total} trail${res.total === 1 ? '' : 's'}.  ${DASHBOARD_HINT}\n`));
+  } catch (err: any) {
+    console.error(chalk.red(`Failed to fetch trails: ${err?.message || err}`));
   }
 }
 
-/**
- * origin trail label <label> [trailId]
- */
-export async function trailLabelCommand(
-  label: string,
-  trailId?: string,
-): Promise<void> {
-  const cwd = process.cwd();
-  const repoPath = getGitRoot(cwd);
-  if (!repoPath) {
-    console.error(chalk.red('Error: Not in a git repository.'));
-    return;
-  }
+/** origin trail (no subcommand) — same read-only list. */
+export async function trailCommand(opts?: { verbose?: boolean }): Promise<void> {
+  return trailListCommand(opts);
+}
 
-  let trail: Trail | null = null;
-  if (trailId) {
-    trail = readTrail(repoPath, trailId);
-    if (!trail) {
-      const trails = listTrails(repoPath);
-      trail = trails.find(t => t.id.startsWith(trailId)) || null;
-    }
-  } else {
-    const branch = getBranch(cwd);
-    if (branch) {
-      trail = findTrailByBranch(repoPath, branch);
-    }
-  }
+/** Trail mutations now live in the dashboard — point the user there. */
+function redirectToDashboard(): void {
+  console.log(chalk.yellow('Trail creation and editing moved to the Origin dashboard.'));
+  console.log(chalk.gray(`  ${DASHBOARD_HINT}`));
+  console.log(chalk.gray('  Trails auto-collect sessions by repo + branch — pick a repo and one or'));
+  console.log(chalk.gray('  more branches (use "feat/auth*" to match a prefix). View them with `origin trail list`.'));
+}
 
-  if (!trail) {
-    console.error(chalk.red('Error: Trail not found.'));
-    return;
-  }
-
-  if (!trail.labels.includes(label)) {
-    trail.labels.push(label);
-    trail.updatedAt = new Date().toISOString();
-    writeTrail(repoPath, trail);
-    console.log(chalk.green(`Added label "${label}" to trail "${trail.name}".`));
-  } else {
-    console.log(chalk.gray(`Label "${label}" already exists on trail "${trail.name}".`));
-  }
+// Signatures kept so the registered subcommands don't error; they now
+// redirect to the dashboard (the single source of truth).
+export async function trailCreateCommand(_name: string, _opts?: { priority?: string; label?: string }): Promise<void> {
+  redirectToDashboard();
+}
+export async function trailUpdateCommand(_id?: string, _opts?: { status?: string; priority?: string }): Promise<void> {
+  redirectToDashboard();
+}
+export async function trailAssignCommand(_user: string, _trailId?: string): Promise<void> {
+  redirectToDashboard();
+}
+export async function trailLabelCommand(_label: string, _trailId?: string): Promise<void> {
+  redirectToDashboard();
 }

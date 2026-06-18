@@ -40,6 +40,12 @@ export interface ParsedTranscript {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   toolCalls: number;
+  // Per-tool-name counts (Read, Edit, Bash, Grep, …) — the structured
+  // breakdown the server stores so "Tool calls" doesn't depend on
+  // re-parsing the display transcript text later.
+  toolBreakdown: Array<{ name: string; count: number }>;
+  // Files the agent READ (inspected) — distinct from filesChanged.
+  filesRead: string[];
   summary: string;
   model: string;
   transcript: string;
@@ -66,6 +72,34 @@ const FILE_MODIFICATION_TOOLS = new Set([
   'patch',
 ]);
 
+// Read-style tools — we capture the inspected file path from these so the
+// "Files read, not changed" view has structured data instead of relying on
+// transcript-text markers.
+const READ_TOOLS = new Set([
+  'Read', 'NotebookRead', 'mcp__acp__Read',
+  'read_file', 'ReadFile', 'view', 'cat',
+]);
+
+// Pull a file path out of a tool input regardless of which key the agent used.
+function toolInputPath(input: any): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const fp = input.file_path || input.notebook_path || input.path || input.filepath;
+  return typeof fp === 'string' ? fp : undefined;
+}
+
+// Build the structured tool fields from accumulated counts + read paths.
+function buildToolFields(
+  counts: Map<string, number>,
+  readSet: Set<string>,
+): { toolBreakdown: Array<{ name: string; count: number }>; filesRead: string[] } {
+  return {
+    toolBreakdown: Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count),
+    filesRead: Array.from(readSet).filter((f) => !shouldIgnoreFile(f)),
+  };
+}
+
 // ─── Parser ────────────────────────────────────────────────────────────────
 
 export function parseTranscript(transcriptPath: string, opts: { since?: Date | string | null } = {}): ParsedTranscript {
@@ -87,6 +121,8 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
     toolCalls: 0,
+    toolBreakdown: [],
+    filesRead: [],
     summary: '',
     model: '',
     transcript: '',
@@ -128,6 +164,8 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
   type GeminiTokens = { input?: number; output?: number; cached?: number; thoughts?: number };
   const seenGeminiIds = new Map<string, GeminiTokens>();
   const filesSet = new Set<string>();
+  const toolCounts = new Map<string, number>();
+  const readFilesSet = new Set<string>();
 
   for (const line of lines) {
     let entry: TranscriptLine;
@@ -189,10 +227,17 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
       if (!tokensAny && e.usageMetadata && typeof e.usageMetadata === 'object') {
         const u = e.usageMetadata as Record<string, unknown>;
         const n = (k: string) => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+        // Google's `promptTokenCount` is the TOTAL prompt size and already
+        // includes `cachedContentTokenCount` (cached tokens are a subset, not
+        // additive). Downstream sums `input` into inputTokens and `cached`
+        // into cacheReadTokens separately, so subtract the cached portion here
+        // to get fresh (non-cached) input — otherwise cached tokens are
+        // counted twice, inflating tokensUsed/cost.
+        const cached = n('cachedContentTokenCount');
         tokensAny = {
-          input: n('promptTokenCount'),
+          input: Math.max(0, n('promptTokenCount') - cached),
           output: n('candidatesTokenCount'),
-          cached: n('cachedContentTokenCount'),
+          cached,
           thoughts: n('thoughtsTokenCount'),
         };
       }
@@ -218,10 +263,10 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
           if (part?.functionCall) {
             result.toolCalls++;
             const name = part.functionCall.name || '';
-            if (FILE_MODIFICATION_TOOLS.has(name) && part.functionCall.args) {
-              const fp = part.functionCall.args.file_path || part.functionCall.args.path;
-              if (fp && typeof fp === 'string') filesSet.add(fp);
-            }
+            if (name) toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+            const fp = toolInputPath(part.functionCall.args);
+            if (fp && FILE_MODIFICATION_TOOLS.has(name)) filesSet.add(fp);
+            if (fp && READ_TOOLS.has(name)) readFilesSet.add(fp);
           }
         }
       }
@@ -240,14 +285,12 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
           // Count tool calls
           if (block.type === 'tool_use') {
             result.toolCalls++;
-
+            const name = block.name || '';
+            if (name) toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+            const fp = toolInputPath(block.input);
             // Extract file paths from file modification tools
-            if (block.name && FILE_MODIFICATION_TOOLS.has(block.name) && block.input) {
-              const filePath = block.input.file_path || block.input.notebook_path || block.input.path;
-              if (filePath && typeof filePath === 'string') {
-                filesSet.add(filePath);
-              }
-            }
+            if (fp && FILE_MODIFICATION_TOOLS.has(name)) filesSet.add(fp);
+            if (fp && READ_TOOLS.has(name)) readFilesSet.add(fp);
           }
 
           // Track last assistant text as summary
@@ -294,6 +337,7 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
 
   // Deduplicated file list, filtered through ignore patterns
   result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
+  Object.assign(result, buildToolFields(toolCounts, readFilesSet));
 
   // Truncate summary to 500 chars
   if (result.summary.length > 500) {
@@ -413,6 +457,8 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
     const data = JSON.parse(raw);
     const messages: GeminiMessage[] = data.messages || data.history || [];
     const filesSet = new Set<string>();
+    const toolCounts = new Map<string, number>();
+    const readFilesSet = new Set<string>();
     // Gemini CLI writes some assistant turns twice with the same `id`
     // and identical `tokens` (looks like a stream-finalize double-flush
     // on its end). Without dedupe we summed both rows and reported
@@ -453,10 +499,10 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
             if (part.functionCall) {
               result.toolCalls++;
               const name = part.functionCall.name || '';
-              if (FILE_MODIFICATION_TOOLS.has(name) && part.functionCall.args) {
-                const fp = part.functionCall.args.file_path || part.functionCall.args.path;
-                if (fp && typeof fp === 'string') filesSet.add(fp);
-              }
+              if (name) toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+              const fp = toolInputPath(part.functionCall.args);
+              if (fp && FILE_MODIFICATION_TOOLS.has(name)) filesSet.add(fp);
+              if (fp && READ_TOOLS.has(name)) readFilesSet.add(fp);
             }
           }
         }
@@ -479,10 +525,15 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
         if (!t && msgAny.usageMetadata && typeof msgAny.usageMetadata === 'object') {
           const u = msgAny.usageMetadata as Record<string, unknown>;
           const n = (k: string) => (typeof u[k] === 'number' ? (u[k] as number) : 0);
+          // `promptTokenCount` is the TOTAL prompt size and already includes
+          // `cachedContentTokenCount` (subset, not additive). `input` and
+          // `cached` are summed into separate fields downstream, so subtract
+          // the cached portion to avoid double-counting it.
+          const cached = n('cachedContentTokenCount');
           t = {
-            input: n('promptTokenCount'),
+            input: Math.max(0, n('promptTokenCount') - cached),
             output: n('candidatesTokenCount'),
-            cached: n('cachedContentTokenCount'),
+            cached,
             thoughts: n('thoughtsTokenCount'),
           };
         }
@@ -502,6 +553,7 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
     // 10x+ (same bug we fixed for Claude transcripts at line 184).
     result.tokensUsed = result.inputTokens + result.outputTokens;
     result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
+    Object.assign(result, buildToolFields(toolCounts, readFilesSet));
     if (!result.model) result.model = data.model || 'gemini';
 
     if (result.summary.length > 500) {
@@ -1332,13 +1384,32 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   // estimateCost below). Per-1M-token rates in USD.
   // NOTE: keep this table in sync with packages/cli/src/commands/prompt-status.ts
   // until both are consolidated into a single pricing module.
-  // bare "claude" brand (CLI fallback when real model unknown) → Opus default.
-  // Claude Code defaults to Opus and sessions were billed at Opus rates via
-  // the API — using Sonnet here slashed recomputed costs by 5×.
-  'claude': { input: 15,   output: 75 },
-  'sonnet': { input: 3,    output: 15 },
-  'opus':   { input: 15,   output: 75 },  // was 5/25 — undercounted Opus cost by 3×
-  'haiku':  { input: 0.80, output: 4  },  // matches Haiku 3.5 / 4 public rates
+  // bare "claude" brand (CLI fallback when real model unknown) → current Opus
+  // default. Claude Code defaults to Opus — using Sonnet here slashed
+  // recomputed costs of Opus sessions.
+  //
+  // Opus pricing is per-generation: Opus 4.5/4.6/4.7/4.8 are $5/$25; only
+  // Opus 4.1 and older were $15/$75. The bare 'opus' key carries the
+  // current-generation rate; legacy generations get explicit keys that win
+  // the longest-substring match. Known gap: "claude-opus-4" (Opus 4.0,
+  // retired June 2026) falls to the modern 'opus' rate — a "claude-opus-4"
+  // key can't be used because it substring-matches every claude-opus-4-x ID
+  // before the shorter modern keys.
+  //
+  // Haiku pricing is also per-generation: Haiku 4.5 is $1/$5; Haiku 3.5/4.0
+  // were $0.80/$4. Unlike Opus, the bare 'haiku' key keeps the legacy rate
+  // (most stored Haiku sessions predate 4.5) and the newer generation gets
+  // the explicit 'haiku-4-5' key, which is longer than 'haiku' so it wins
+  // the longest-substring match for "claude-haiku-4-5*" IDs. Known gap:
+  // "claude-3-haiku" ($0.25/$1.25) also falls to the 'haiku' rate.
+  'claude':    { input: 5,    output: 25 },  // bare brand → current Opus default
+  'sonnet':    { input: 3,    output: 15 },
+  'opus':      { input: 5,    output: 25 },  // Opus 4.5+
+  'opus-4-1':  { input: 15,   output: 75 },  // legacy Opus 4.1
+  '3-opus':    { input: 15,   output: 75 },  // legacy Claude 3 Opus
+  'fable':     { input: 10,   output: 50 },  // Claude Fable 5
+  'haiku':     { input: 0.80, output: 4  },  // legacy Haiku 3.5 / 4.0
+  'haiku-4-5': { input: 1.00, output: 5  },  // Haiku 4.5
   // Google — pricing per 1M tokens (≤200K context tier where two tiers exist)
   'gemini-2.5-pro': { input: 1.25, output: 10 },
   'gemini-2.5-flash': { input: 0.30, output: 2.50 },      // was 0.15/3.50 — wrong

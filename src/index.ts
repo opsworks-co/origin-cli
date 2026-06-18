@@ -33,6 +33,7 @@ import { configGetCommand, configSetCommand, configListCommand } from './command
 import { resumeCommand } from './commands/resume.js';
 import { shareCommand } from './commands/share.js';
 import { blameCommand } from './commands/blame.js';
+import { scrubNotesCommand } from './commands/scrub-notes.js';
 import { commitCommand } from './commands/commit.js';
 import { diffCommand } from './commands/diff.js';
 import { searchCommand } from './commands/search.js';
@@ -348,6 +349,12 @@ program.command('session-compare <id1> <id2>')
 
 // ─── Attribution & Blame ─────────────────────────────────────────────────
 
+program.command('scrub-notes')
+  .description('Remove prompt text from this repo\'s Origin git notes (metadata stays)')
+  .option('--push', 'Force-replace refs/notes/origin on the remote after scrubbing')
+  .option('--remote <name>', 'Remote to push to (default: origin)')
+  .action(scrubNotesCommand);
+
 program.command('blame <file>')
   .description('Show AI vs human attribution per line (like git blame)')
   .option('-l, --line <range>', 'Show specific line range (e.g., 10-20)')
@@ -502,28 +509,34 @@ program.command('share <sessionId>')
 
 // ─── Trail System ────────────────────────────────────────────────────────
 
-const trail = program.command('trail').description('Branch-centric work tracking');
+// Feature Trails are managed in the Origin dashboard (Sessions → Trails) and
+// auto-collect sessions server-side; the CLI is a read-only view now. The
+// create/update/assign/label subcommands stay registered (so existing scripts
+// don't error) but redirect to the dashboard — the single source of truth.
+const trail = program.command('trail').description('View Feature Trails (managed in the Origin dashboard)');
 trail.action(trailCommand);
 trail.command('list')
-  .description('List all trails')
+  .description("List your org's trails")
   .option('-s, --status <status>', 'Filter by status (active, review, done, paused)')
+  .option('-l, --label <label>', 'Filter by label')
+  .option('-v, --verbose', 'Show repo, branches, labels, and totals')
   .action(trailListCommand);
 trail.command('create <name>')
-  .description('Create a trail for the current branch')
+  .description('(moved) Create trails in the dashboard → Sessions → Trails')
   .option('-p, --priority <priority>', 'Priority (low, medium, high, critical)', 'medium')
   .option('-l, --label <labels...>', 'Labels to add')
   .action(trailCreateCommand);
 trail.command('update')
-  .description('Update the current trail')
+  .description('(moved) Edit trails in the dashboard → Sessions → Trails')
   .option('-s, --status <status>', 'New status (active, review, done, paused)')
   .option('-p, --priority <priority>', 'New priority')
   .option('-t, --title <title>', 'New title')
   .action(trailUpdateCommand);
 trail.command('assign <user>')
-  .description('Assign a reviewer to the current trail')
+  .description('(moved) Manage trails in the dashboard → Sessions → Trails')
   .action(trailAssignCommand);
 trail.command('label <labels...>')
-  .description('Add labels to the current trail')
+  .description('(moved) Manage trails in the dashboard → Sessions → Trails')
   .action(trailLabelCommand);
 
 // ─── Config ──────────────────────────────────────────────────────────────

@@ -1,12 +1,13 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260608.1815",
+  "version": "0.20260618.1736",
   "type": "module",
   "bin": {
     "origin": "./dist/index.js"
   },
   "scripts": {
-    "version:bump": "node -e \"const p=require('./package.json');const d=new Date();const hm=String(d.getHours()).padStart(2,'0')+String(d.getMinutes()).padStart(2,'0');p.version='0.'+d.toISOString().slice(0,10).replace(/-/g,'')+'.'+hm;require('fs').writeFileSync('./package.json',JSON.stringify(p,null,2)+'\\n')\"",
+    "version:bump": "node scripts/version-bump.cjs",
+    "prepare": "node scripts/write-build-info.cjs || true",
     "prebuild": "node scripts/write-build-info.cjs",
     "build": "tsc",
     "dev": "tsx src/index.ts",
@@ -20,7 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
-    "tsx": "^4.19.4",
+    "tsx": "^4.22.4",
     "typescript": "^5.8.3",
     "vitest": "^4.1.0"
   }

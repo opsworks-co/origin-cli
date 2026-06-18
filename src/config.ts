@@ -36,9 +36,18 @@ export interface OriginConfig {
   // ANTHROPIC_API_KEY takes precedence when both are set.
   anthropicApiKey?: string;
   agentSlugs?: Record<string, string>; // Per-tool agent slug overrides (e.g. { cursor: 'cursor-frontend' })
+  // Include prompt text in git notes (refs/notes/origin). Default TRUE —
+  // blame-with-prompts travels with the repo. Privacy-sensitive setups
+  // set false (here per machine, or per repo via .origin.json) to keep
+  // notes metadata-only, and run `origin scrub-notes` for history.
+  notesIncludePrompts?: boolean;
   keyType?: 'solo' | 'team';       // solo = personal dev key, team = org-managed key
   accountType?: 'developer' | 'org'; // Account type of the key owner
   orgName?: string;                 // Organization name for display
+  // Cached org push-block mode ('off' | 'on_fail_open' | 'on_fail_closed'),
+  // refreshed on every successful pre-push check. Lets the pre-push hook
+  // apply the org's fail policy when it can't reach the API at push time.
+  pushBlockMode?: string;
 }
 
 export interface AgentConfig {
@@ -159,6 +168,7 @@ export interface RepoConfig {
   ignorePatterns?: string[];
   trackTabCompletions?: boolean;
   secretScan?: boolean;  // Pre-commit secret scanning (default: true)
+  notesIncludePrompts?: boolean;  // Include prompt text in git notes (default: true)
 }
 
 export function loadRepoConfig(repoPath: string): RepoConfig | null {

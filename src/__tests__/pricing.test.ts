@@ -14,25 +14,46 @@ import { estimateCost, getDefaultPricing } from '../transcript.js';
 
 const ONE_MILLION = 1_000_000;
 
-describe('Anthropic Opus pricing — was undercounted by 3× (was $5/$25, should be $15/$75)', () => {
-  it('charges $15 per million input tokens for any opus variant', () => {
-    expect(estimateCost('claude-opus-4', ONE_MILLION, 0)).toBeCloseTo(15, 4);
-    expect(estimateCost('claude-opus-4-5', ONE_MILLION, 0)).toBeCloseTo(15, 4);
-    expect(estimateCost('claude-opus-4-6', ONE_MILLION, 0)).toBeCloseTo(15, 4);
-    expect(estimateCost('claude-opus-4-7', ONE_MILLION, 0)).toBeCloseTo(15, 4);
+describe('Anthropic Opus pricing — per generation: 4.5+ is $5/$25, 4.1 and older $15/$75', () => {
+  it('charges $5 per million input tokens for modern (4.5+) opus variants', () => {
+    expect(estimateCost('claude-opus-4-5', ONE_MILLION, 0)).toBeCloseTo(5, 4);
+    expect(estimateCost('claude-opus-4-6', ONE_MILLION, 0)).toBeCloseTo(5, 4);
+    expect(estimateCost('claude-opus-4-7', ONE_MILLION, 0)).toBeCloseTo(5, 4);
+    expect(estimateCost('claude-opus-4-8', ONE_MILLION, 0)).toBeCloseTo(5, 4);
   });
 
-  it('charges $75 per million output tokens for any opus variant', () => {
-    expect(estimateCost('claude-opus-4', 0, ONE_MILLION)).toBeCloseTo(75, 4);
-    expect(estimateCost('claude-opus-4-7', 0, ONE_MILLION)).toBeCloseTo(75, 4);
+  it('charges $25 per million output tokens for modern (4.5+) opus variants', () => {
+    expect(estimateCost('claude-opus-4-8', 0, ONE_MILLION)).toBeCloseTo(25, 4);
+    expect(estimateCost('claude-opus-4-7', 0, ONE_MILLION)).toBeCloseTo(25, 4);
   });
 
-  it('regression: a million Opus input tokens must NOT cost $5 (the old wrong value)', () => {
-    expect(estimateCost('claude-opus-4-7', ONE_MILLION, 0)).not.toBeCloseTo(5, 1);
+  it('charges legacy $15/$75 for Opus 4.1 and Claude 3 Opus', () => {
+    expect(estimateCost('claude-opus-4-1', ONE_MILLION, 0)).toBeCloseTo(15, 4);
+    expect(estimateCost('claude-opus-4-1-20250805', 0, ONE_MILLION)).toBeCloseTo(75, 4);
+    expect(estimateCost('claude-3-opus-20240229', ONE_MILLION, 0)).toBeCloseTo(15, 4);
   });
 
-  it('regression: a million Opus output tokens must NOT cost $25 (the old wrong value)', () => {
-    expect(estimateCost('claude-opus-4-7', 0, ONE_MILLION)).not.toBeCloseTo(25, 1);
+  it('regression: a million modern Opus input tokens must NOT cost $15 (the legacy rate)', () => {
+    expect(estimateCost('claude-opus-4-7', ONE_MILLION, 0)).not.toBeCloseTo(15, 1);
+  });
+
+  it('regression: a million modern Opus output tokens must NOT cost $75 (the legacy rate)', () => {
+    expect(estimateCost('claude-opus-4-7', 0, ONE_MILLION)).not.toBeCloseTo(75, 1);
+  });
+});
+
+describe('Anthropic Fable 5 pricing — $10/$50, not the bare-claude fallback', () => {
+  it('charges $10 per million input tokens', () => {
+    expect(estimateCost('claude-fable-5', ONE_MILLION, 0)).toBeCloseTo(10, 4);
+  });
+
+  it('charges $50 per million output tokens', () => {
+    expect(estimateCost('claude-fable-5', 0, ONE_MILLION)).toBeCloseTo(50, 4);
+  });
+
+  it('charges cache reads at 10% of input ($1.00/M) and writes at 125% ($12.50/M)', () => {
+    expect(estimateCost('claude-fable-5', 0, 0, ONE_MILLION, 0)).toBeCloseTo(1.0, 4);
+    expect(estimateCost('claude-fable-5', 0, 0, 0, ONE_MILLION)).toBeCloseTo(12.5, 4);
   });
 });
 
@@ -47,32 +68,56 @@ describe('Anthropic Sonnet pricing', () => {
   });
 });
 
-describe('cache pricing semantics', () => {
-  it('charges cache reads at 10% of input price (Opus: $1.50/M)', () => {
-    // 1M cache-read tokens on Opus → 0.1 × $15 = $1.50
-    expect(estimateCost('claude-opus-4-7', 0, 0, ONE_MILLION, 0)).toBeCloseTo(1.5, 4);
+describe('Anthropic Haiku pricing — per generation: 4.5 is $1/$5, 3.5/4.0 $0.80/$4', () => {
+  it('charges $1/$5 per million tokens for Haiku 4.5', () => {
+    expect(estimateCost('claude-haiku-4-5', ONE_MILLION, 0)).toBeCloseTo(1, 4);
+    expect(estimateCost('claude-haiku-4-5-20251001', ONE_MILLION, 0)).toBeCloseTo(1, 4);
+    expect(estimateCost('claude-haiku-4-5', 0, ONE_MILLION)).toBeCloseTo(5, 4);
   });
 
-  it('charges cache writes at 125% of input price (Opus: $18.75/M)', () => {
-    // 1M cache-creation tokens on Opus → 1.25 × $15 = $18.75
-    expect(estimateCost('claude-opus-4-7', 0, 0, 0, ONE_MILLION)).toBeCloseTo(18.75, 4);
+  it('charges legacy $0.80/$4 for older Haiku variants', () => {
+    expect(estimateCost('claude-haiku-3-5', ONE_MILLION, 0)).toBeCloseTo(0.8, 4);
+    expect(estimateCost('claude-haiku-3-5', 0, ONE_MILLION)).toBeCloseTo(4, 4);
+  });
+
+  it('regression: a million Haiku 4.5 input tokens must NOT cost $0.80 (the legacy rate)', () => {
+    expect(estimateCost('claude-haiku-4-5', ONE_MILLION, 0)).not.toBeCloseTo(0.8, 1);
+  });
+});
+
+describe('cache pricing semantics', () => {
+  it('charges cache reads at 10% of input price (modern Opus: $0.50/M)', () => {
+    // 1M cache-read tokens on Opus 4.7 → 0.1 × $5 = $0.50
+    expect(estimateCost('claude-opus-4-7', 0, 0, ONE_MILLION, 0)).toBeCloseTo(0.5, 4);
+  });
+
+  it('charges cache writes at 125% of input price (modern Opus: $6.25/M)', () => {
+    // 1M cache-creation tokens on Opus 4.7 → 1.25 × $5 = $6.25
+    expect(estimateCost('claude-opus-4-7', 0, 0, 0, ONE_MILLION)).toBeCloseTo(6.25, 4);
   });
 
   it('totals input + output + cache reads + cache writes correctly', () => {
-    // Mixed Opus session: 100K input + 10K output + 500K cache read + 50K cache write
-    // = (0.1 × 15) + (0.01 × 75) + (0.5 × 1.5) + (0.05 × 18.75)
-    // = 1.5 + 0.75 + 0.75 + 0.9375 = 3.9375
+    // Mixed Opus 4.7 session: 100K input + 10K output + 500K cache read + 50K cache write
+    // = (0.1 × 5) + (0.01 × 25) + (0.5 × 0.5) + (0.05 × 6.25)
+    // = 0.5 + 0.25 + 0.25 + 0.3125 = 1.3125
     expect(
       estimateCost('claude-opus-4-7', 100_000, 10_000, 500_000, 50_000),
-    ).toBeCloseTo(3.9375, 4);
+    ).toBeCloseTo(1.3125, 4);
   });
 });
 
 describe('default pricing table snapshot', () => {
-  // If anyone ever tries to silently lower the Opus price again, this fails.
-  it('Opus baseline rates match Anthropic public pricing', () => {
+  // If anyone ever tries to silently change Anthropic rates again, this fails.
+  it('Opus baseline rates match Anthropic public pricing per generation', () => {
     const pricing = getDefaultPricing();
-    expect(pricing['opus']).toEqual({ input: 15, output: 75 });
+    expect(pricing['opus']).toEqual({ input: 5, output: 25 });        // Opus 4.5+
+    expect(pricing['opus-4-1']).toEqual({ input: 15, output: 75 });   // legacy
+    expect(pricing['3-opus']).toEqual({ input: 15, output: 75 });     // legacy
+  });
+
+  it('Fable 5 baseline rates match Anthropic public pricing', () => {
+    const pricing = getDefaultPricing();
+    expect(pricing['fable']).toEqual({ input: 10, output: 50 });
   });
 
   it('Sonnet baseline rates match Anthropic public pricing', () => {
@@ -80,9 +125,10 @@ describe('default pricing table snapshot', () => {
     expect(pricing['sonnet']).toEqual({ input: 3, output: 15 });
   });
 
-  it('Haiku baseline rates match Haiku 3.5 / 4 public pricing', () => {
+  it('Haiku baseline rates match Anthropic public pricing per generation', () => {
     const pricing = getDefaultPricing();
-    expect(pricing['haiku']).toEqual({ input: 0.80, output: 4 });
+    expect(pricing['haiku']).toEqual({ input: 0.80, output: 4 });      // Haiku 3.5 / 4.0
+    expect(pricing['haiku-4-5']).toEqual({ input: 1.00, output: 5 });  // Haiku 4.5
   });
 });
 

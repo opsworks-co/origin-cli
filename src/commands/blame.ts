@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { getLineBlame, getSessionContextForCommit, type SessionContext } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
+import { syncNotesFromRemote } from '../git-notes.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,12 @@ export async function blameCommand(
     console.error(chalk.red('Error: Not in a git repository.'));
     return;
   }
+
+  // Pull attribution notes down from the remote before reading them, and
+  // install the fetch refspec so future ordinary `git pull`s keep them
+  // current. This is what makes blame work out-of-the-box on a fresh
+  // clone — `git clone` does not fetch refs/notes/* by itself.
+  syncNotesFromRemote(repoPath);
 
   // Get line-level attribution
   const attributions = getLineBlame(repoPath, file);

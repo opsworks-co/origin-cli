@@ -935,22 +935,23 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
 
 // ─── Global Git Hooks (core.hooksPath) ────────────────────────────────────
 
-function installGlobalGitHooks(): void {
-  const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
-
-  // Create global hooks directory
-  if (!fs.existsSync(globalHooksDir)) {
-    fs.mkdirSync(globalHooksDir, { recursive: true });
-  }
-
-  // Resolve full path to origin binary
+function resolveOriginBin(): string {
   let originBin = 'origin';
   try {
     const r = runDetailed('which', ['origin'], { timeoutMs: 2000 });
     if (r.status === 0 && r.stdout.trim()) originBin = r.stdout.trim();
   } catch { /* fallback to bare name */ }
+  return originBin;
+}
 
-  // Pre-commit hook — secret scanning (blocks commit on secrets found)
+// Write the global pre-commit hook into an Origin-managed hooks dir.
+// Shared by installGlobalGitHooks (origin enable) and the lazy heal in
+// ensurePolicyHookInstalled — global hooks dirs written by CLI versions
+// that predate the pre-commit hook carry only post-commit/pre-push/…,
+// and with core.hooksPath set, git ignores .git/hooks entirely, so a
+// missing global pre-commit silently disables ALL policy enforcement.
+export function writeGlobalPreCommitHook(globalHooksDir: string): void {
+  const originBin = resolveOriginBin();
   const preCommitPath = path.join(globalHooksDir, 'pre-commit');
   const preCommitContent = `#!/bin/sh
 # origin-global-pre-commit
@@ -987,6 +988,21 @@ fi
 `;
   fs.writeFileSync(preCommitPath, preCommitContent);
   fs.chmodSync(preCommitPath, '755');
+}
+
+function installGlobalGitHooks(): void {
+  const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
+
+  // Create global hooks directory
+  if (!fs.existsSync(globalHooksDir)) {
+    fs.mkdirSync(globalHooksDir, { recursive: true });
+  }
+
+  // Resolve full path to origin binary
+  const originBin = resolveOriginBin();
+
+  // Pre-commit hook — secret scanning + policy enforcement (blocks commits)
+  writeGlobalPreCommitHook(globalHooksDir);
 
   // Post-commit hook that also chains to local repo hooks
   const postCommitPath = path.join(globalHooksDir, 'post-commit');
@@ -1177,6 +1193,21 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
         stdio: ['pipe', 'pipe', 'ignore'],
       }).trim();
       if (globalHooksPath && globalHooksPath.includes(path.join('.origin', 'git-hooks'))) {
+        // The managed dir only covers this repo if it actually contains
+        // a pre-commit hook. Dirs written by CLI versions that predate
+        // the global pre-commit (≤ May 2026) carry only post-commit/
+        // pre-push/prepare-commit-msg — and with core.hooksPath set,
+        // git ignores .git/hooks entirely, so a missing global
+        // pre-commit means NO policy enforcement on any repo on the
+        // machine. Heal the dir in place instead of skipping.
+        const resolvedDir = globalHooksPath.startsWith('~')
+          ? path.join(os.homedir(), globalHooksPath.slice(1))
+          : globalHooksPath;
+        const globalPreCommit = path.join(resolvedDir, 'pre-commit');
+        if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPreCommit)) {
+          writeGlobalPreCommitHook(resolvedDir);
+          return { installed: true, reason: 'healed-global-pre-commit' };
+        }
         return { installed: false, reason: 'global-origin-hooks-active' };
       }
       if (globalHooksPath) {

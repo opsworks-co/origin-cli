@@ -10,6 +10,7 @@
 
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as fzstd from 'fzstd';
 import type { PromptCapture, PromptEdit, PromptEditOp } from './types.js';
 
@@ -55,6 +56,256 @@ export function capturePromptEdits(opts: CaptureInputs): PromptCapture[] {
     default:
       return [];
   }
+}
+
+// ─── Live capture (PostToolUse ledger) ─────────────────────────────────────
+//
+// The transcript extractor above reconstructs edits AFTER the fact by
+// re-parsing the agent's session file at Stop/end. The live path instead
+// records each edit the instant the agent's PostToolUse hook fires — same
+// (toolName, toolInput) the transcript would have carried, but caught in
+// real time. That dodges three transcript hazards: the 16 KB editsJson
+// truncation, transcript-format drift between agent releases, and a
+// transcript that hasn't flushed to disk yet when Stop runs.
+//
+// `extractEditsFromToolCall` is the single source of truth for
+// toolName → PromptEdit[]; the transcript extractor calls it too, so both
+// paths produce identical shapes and can be merged without surprises.
+
+/**
+ * Map one agent tool call (Edit / Write / MultiEdit / apply_patch …) to the
+ * PromptEdit list it represents. Pure: no IO, no side effects beyond the
+ * once-per-unknown-tool stderr note. Recognizes the same tool-name
+ * allow-lists as the transcript extractor (extendable via
+ * ~/.origin/tool-aliases.json).
+ */
+export function extractEditsFromToolCall(
+  toolName: string,
+  input: Record<string, any>,
+  repoPath: string,
+  agentLabel: 'claude' | 'cursor' | 'codex' | 'gemini' = 'claude',
+  // Whether to emit the once-per-unknown-tool stderr note. The transcript
+  // extractor wants it (one long-lived process, helps spot renamed edit
+  // tools). The live PostToolUse path must NOT: it runs a fresh process per
+  // tool call and fires for every tool (Read, Grep, Bash…), so the note
+  // would spam stderr on each non-edit call with no dedupe.
+  warnUnknown = true,
+): PromptEdit[] {
+  const name = String(toolName || '');
+  if (!name) return [];
+  const toolInput: any = input ?? {};
+
+  // ApplyPatch handed in `input` as a raw apply_patch string (Cursor) or in
+  // `input.command[1]` (Codex shell wrapper). Parse before the pickFilePath
+  // bail-out — the patch carries its own file paths inside
+  // `*** Update File:` markers, not in input.path.
+  if (APPLY_PATCH_TOOLS.has(name)) {
+    const patchText = typeof toolInput === 'string'
+      ? toolInput
+      : typeof toolInput.input === 'string' ? toolInput.input
+        : Array.isArray(toolInput.command) && typeof toolInput.command[1] === 'string' ? toolInput.command[1]
+          : '';
+    return parseApplyPatch(patchText, repoPath);
+  }
+
+  const file = pickFilePath(toolInput);
+  if (!file) return [];
+  const repoRelative = makeRepoRelative(file, repoPath);
+  const out: PromptEdit[] = [];
+
+  if (CLAUDE_EDIT_TOOLS.has(name)) {
+    out.push({
+      file: repoRelative,
+      op: 'edit',
+      oldContent: typeof toolInput.old_string === 'string' ? toolInput.old_string : '',
+      newContent: typeof toolInput.new_string === 'string' ? toolInput.new_string : '',
+      source: 'tool_call',
+    });
+  } else if (CLAUDE_WRITE_TOOLS.has(name)) {
+    const content = typeof toolInput.content === 'string'
+      ? toolInput.content
+      : typeof toolInput.file_text === 'string'
+        ? toolInput.file_text
+        : '';
+    out.push({ file: repoRelative, op: 'write', newContent: content, source: 'tool_call' });
+  } else if (CLAUDE_MULTI_EDIT_TOOLS.has(name) && Array.isArray(toolInput.edits)) {
+    for (const e of toolInput.edits) {
+      if (!e || typeof e !== 'object') continue;
+      out.push({
+        file: repoRelative,
+        op: 'edit',
+        oldContent: typeof e.old_string === 'string' ? e.old_string : '',
+        newContent: typeof e.new_string === 'string' ? e.new_string : '',
+        source: 'tool_call',
+      });
+    }
+  } else if (warnUnknown) {
+    // Tool we don't recognize but whose input carries a file path — possibly
+    // a renamed edit tool we should learn about. Log once.
+    noteUnknownTool(agentLabel, name, JSON.stringify(toolInput));
+  }
+  return out;
+}
+
+// Find the 1-based line where `needle` begins in `haystack`, or -1.
+// Prefers a full match of the (possibly multi-line) needle, then falls
+// back to its first line — agents occasionally normalize trailing
+// whitespace on write, so the whole block won't match byte-for-byte but
+// the first line still anchors the right row.
+function lineOfFirstOccurrence(haystack: string, needle: string): number {
+  if (!needle) return -1;
+  let idx = haystack.indexOf(needle);
+  if (idx < 0) {
+    const firstLine = needle.split('\n')[0];
+    if (!firstLine) return -1;
+    idx = haystack.indexOf(firstLine);
+    if (idx < 0) return -1;
+  }
+  // Count newlines before the match → 1-based line number.
+  let line = 1;
+  for (let i = 0; i < idx; i++) if (haystack.charCodeAt(i) === 10) line++;
+  return line;
+}
+
+/**
+ * Stamp each edit with the REAL 1-based line where its region begins,
+ * read from the actual file on disk. This is the position the AI Blame /
+ * Session Diff gutters display.
+ *
+ * Tool-call payloads (Edit's old_string/new_string, Write's content)
+ * carry no file position, so the server's synthesized diff would anchor
+ * every hunk at line 1. Call this at PostToolUse time — the file on disk
+ * already reflects the edit, so locating `newContent` gives the true row.
+ *
+ * Best-effort and never throws: an unreadable file, a vanished deletion,
+ * or an edit overwritten before capture simply leaves oldStart/newStart
+ * unset, and the server falls back to its synthetic cursor.
+ */
+export function anchorEditPositions(edits: PromptEdit[], repoPath: string): void {
+  for (const e of edits) {
+    try {
+      if (typeof e.newStart === 'number') continue; // already anchored
+      if (e.op === 'delete' || e.op === 'rename') continue;
+      // A whole-file write/create starts at the top of the file.
+      if (e.op === 'write' || e.op === 'create') {
+        e.oldStart = 1;
+        e.newStart = 1;
+        continue;
+      }
+      const abs = path.isAbsolute(e.file) ? e.file : path.join(repoPath, e.file);
+      let text: string;
+      try {
+        text = fs.readFileSync(abs, 'utf-8');
+      } catch {
+        continue; // file gone / unreadable — leave unanchored
+      }
+      // Anchor on the post-edit content (newContent). A localized edit
+      // replaces a contiguous region starting at the same line in both
+      // the old and new file, so old and new share one anchor — matching
+      // synthesize's shared-cursor model.
+      const line = lineOfFirstOccurrence(text, e.newContent ?? '');
+      if (line < 0) continue;
+      e.oldStart = line;
+      e.newStart = line;
+    } catch {
+      // Defensive: anchoring must never break capture.
+    }
+  }
+}
+
+/**
+ * One live-capture ledger entry: the edits a single PostToolUse fired,
+ * stamped with the prompt index active when it ran. Stored on SessionState
+ * and consumed at Stop/end via buildCapturesFromLedger.
+ */
+export interface LiveEditEntry {
+  promptIndex: number;
+  toolName?: string;
+  capturedAt?: string;
+  edits: PromptEdit[];
+}
+
+/**
+ * Fold a flat live-edit ledger into per-prompt PromptCaptures, grouping by
+ * promptIndex and preserving capture order within each prompt. Ledger
+ * entries carry only tool-call edits, so `commits` is always empty here —
+ * commit/shell attribution is layered in by mergeLedgerWithTranscript.
+ */
+export function buildCapturesFromLedger(entries: LiveEditEntry[]): PromptCapture[] {
+  if (!Array.isArray(entries) || entries.length === 0) return [];
+  const byIndex = new Map<number, PromptCapture>();
+  for (const entry of entries) {
+    if (!entry || !Array.isArray(entry.edits) || entry.edits.length === 0) continue;
+    const idx = Number.isInteger(entry.promptIndex) && entry.promptIndex >= 0 ? entry.promptIndex : 0;
+    let cap = byIndex.get(idx);
+    if (!cap) {
+      cap = { promptIndex: idx, promptText: '', agent: 'claude', edits: [], commits: [] };
+      byIndex.set(idx, cap);
+    }
+    for (const e of entry.edits) cap.edits.push(e);
+  }
+  return [...byIndex.values()].sort((a, b) => a.promptIndex - b.promptIndex);
+}
+
+function editKey(e: PromptEdit): string {
+  return [e.file, e.op, e.oldPath || '', e.oldContent ?? '', e.newContent ?? ''].join(' ');
+}
+
+/**
+ * Merge the live ledger (authoritative tool-call edits) with the transcript
+ * capture (which additionally backfills shell-driven and commit-sourced
+ * edits the live hook never sees). Keyed by promptIndex:
+ *   • ledger edits win — they're the exact tool inputs, never truncated;
+ *   • transcript edits the ledger lacks are kept, EXCEPT a commit/uncommitted
+ *     transcript edit for a file the ledger already covers with a tool_call
+ *     edit (that file is accounted for — keeping it would double-count lines);
+ *   • promptText and commit SHAs come from the transcript (the ledger has
+ *     neither).
+ */
+export function mergeLedgerWithTranscript(
+  ledger: PromptCapture[],
+  transcript: PromptCapture[],
+): PromptCapture[] {
+  if (!ledger || ledger.length === 0) return transcript;
+  const byIndex = new Map<number, PromptCapture>();
+  for (const cap of ledger) {
+    byIndex.set(cap.promptIndex, {
+      promptIndex: cap.promptIndex,
+      promptText: cap.promptText || '',
+      agent: cap.agent,
+      edits: [...cap.edits],
+      commits: [...(cap.commits || [])],
+    });
+  }
+  for (const tcap of transcript || []) {
+    const cap = byIndex.get(tcap.promptIndex);
+    if (!cap) {
+      byIndex.set(tcap.promptIndex, {
+        ...tcap,
+        edits: [...tcap.edits],
+        commits: [...(tcap.commits || [])],
+      });
+      continue;
+    }
+    if (tcap.promptText) cap.promptText = tcap.promptText;
+    const seen = new Set(cap.edits.map(editKey));
+    const ledgerToolCallFiles = new Set(
+      cap.edits.filter((e) => e.source === 'tool_call').map((e) => e.file),
+    );
+    for (const e of tcap.edits) {
+      if (seen.has(editKey(e))) continue;
+      // Don't re-add a commit/working-tree edit for a file the ledger already
+      // covers with the exact tool-call edit — that's the same change twice.
+      if (e.source !== 'tool_call' && ledgerToolCallFiles.has(e.file)) continue;
+      cap.edits.push(e);
+      seen.add(editKey(e));
+    }
+    const cset = new Set(cap.commits);
+    for (const c of tcap.commits || []) {
+      if (!cset.has(c)) { cap.commits.push(c); cset.add(c); }
+    }
+  }
+  return [...byIndex.values()].sort((a, b) => a.promptIndex - b.promptIndex);
 }
 
 // ─── Claude Code / Cursor ─────────────────────────────────────────────────
@@ -208,64 +459,8 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
 
     for (const block of content) {
       if (block?.type !== 'tool_use') continue;
-      const name = String(block.name || '');
-      const input = block.input || {};
-
-      // ApplyPatch handed in `input` as a raw apply_patch string (Cursor)
-      // or in `input.command[1]` (Codex shell wrapper). Parse before the
-      // pickFilePath bail-out — the patch carries its own file paths
-      // inside `*** Update File:` markers, not in input.path.
-      if (APPLY_PATCH_TOOLS.has(name)) {
-        const patchText = typeof input === 'string'
-          ? input
-          : typeof input.input === 'string' ? input.input
-            : Array.isArray(input.command) && typeof input.command[1] === 'string' ? input.command[1]
-              : '';
-        for (const e of parseApplyPatch(patchText, opts.repoPath)) {
-          current.edits.push(e);
-        }
-        continue;
-      }
-
-      const file = pickFilePath(input);
-      if (!file) continue;
-      const repoRelative = makeRepoRelative(file, opts.repoPath);
-
-      if (CLAUDE_EDIT_TOOLS.has(name)) {
-        current.edits.push({
-          file: repoRelative,
-          op: 'edit',
-          oldContent: typeof input.old_string === 'string' ? input.old_string : '',
-          newContent: typeof input.new_string === 'string' ? input.new_string : '',
-          source: 'tool_call',
-        });
-      } else if (CLAUDE_WRITE_TOOLS.has(name)) {
-        const content = typeof input.content === 'string'
-          ? input.content
-          : typeof input.file_text === 'string'
-            ? input.file_text
-            : '';
-        current.edits.push({
-          file: repoRelative,
-          op: 'write',
-          newContent: content,
-          source: 'tool_call',
-        });
-      } else if (CLAUDE_MULTI_EDIT_TOOLS.has(name) && Array.isArray(input.edits)) {
-        for (const e of input.edits) {
-          if (!e || typeof e !== 'object') continue;
-          current.edits.push({
-            file: repoRelative,
-            op: 'edit',
-            oldContent: typeof e.old_string === 'string' ? e.old_string : '',
-            newContent: typeof e.new_string === 'string' ? e.new_string : '',
-            source: 'tool_call',
-          });
-        }
-      } else {
-        // Tool we don't recognize but its input carries a file path —
-        // possibly a renamed edit tool we should know about. Log once.
-        noteUnknownTool(opts.agent, name, JSON.stringify(input));
+      for (const e of extractEditsFromToolCall(String(block.name || ''), block.input || {}, opts.repoPath, opts.agent)) {
+        current.edits.push(e);
       }
     }
   }

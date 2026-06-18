@@ -13,12 +13,20 @@ import crypto from 'crypto';
 // Pricing per 1M tokens (input/output) for common models
 // Used to estimate cost from transcript token counts
 const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead?: number }> = {
+  // Opus 4.5+ is $5/$25; only Opus 4.1 and older were $15/$75.
+  'claude-fable-5': { input: 10, output: 50, cacheRead: 1.0 },
+  'claude-opus-4-8': { input: 5, output: 25, cacheRead: 0.5 },
+  'claude-opus-4-7': { input: 5, output: 25, cacheRead: 0.5 },
+  'claude-opus-4-6': { input: 5, output: 25, cacheRead: 0.5 },
+  'claude-opus-4-5': { input: 5, output: 25, cacheRead: 0.5 },
+  'claude-opus-4-1': { input: 15, output: 75, cacheRead: 1.5 },
   'claude-opus-4': { input: 15, output: 75, cacheRead: 1.5 },
-  'claude-opus-4-5': { input: 15, output: 75, cacheRead: 1.5 },
+  'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.3 },
   'claude-sonnet-4': { input: 3, output: 15, cacheRead: 0.3 },
   'claude-sonnet-4-5': { input: 3, output: 15, cacheRead: 0.3 },
   'claude-sonnet-3-7': { input: 3, output: 15, cacheRead: 0.3 },
   'claude-sonnet-3-5': { input: 3, output: 15, cacheRead: 0.3 },
+  'claude-haiku-4-5': { input: 1, output: 5, cacheRead: 0.1 },
   'claude-haiku-3-5': { input: 0.8, output: 4, cacheRead: 0.08 },
   'claude-haiku-3': { input: 0.25, output: 1.25, cacheRead: 0.03 },
   'claude-3-opus': { input: 15, output: 75, cacheRead: 1.5 },

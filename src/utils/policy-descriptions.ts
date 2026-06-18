@@ -61,6 +61,16 @@ export function describeCondition(type: string, conditionJson: string): Conditio
       };
       return { summary: 'Review required', fixHint: 'This session will require human review' };
     }
+    case 'SESSION_LIMITS': {
+      const parts: string[] = [];
+      if (cond.idle_notify_minutes != null) parts.push(`notify after ${cond.idle_notify_minutes}m idle`);
+      if (cond.max_idle_minutes != null) parts.push(`auto-end after ${cond.max_idle_minutes}m idle`);
+      if (cond.max_duration_minutes != null) parts.push(`block new prompts after ${cond.max_duration_minutes}m`);
+      return {
+        summary: parts.length ? `Session limits: ${parts.join(', ')}` : 'Session limits policy',
+        fixHint: 'Close idle sessions and start a fresh session for each new task',
+      };
+    }
     default:
       return { summary: conditionJson, fixHint: 'Check with your admin' };
   }
@@ -82,6 +92,7 @@ export function policyTypeLabel(type: string): string {
     case 'COST_LIMIT': return 'Cost Limit';
     case 'FILE_RESTRICTION': return 'File Restriction';
     case 'REQUIRE_REVIEW': return 'Require Review';
+    case 'SESSION_LIMITS': return 'Session Limits';
     default: return type;
   }
 }
