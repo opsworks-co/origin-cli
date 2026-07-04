@@ -17,6 +17,23 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 import * as fzstd from 'fzstd';
 import { createShadowCommit, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+
+// Path of a file inside the git dir governing `repoPath` — worktree-aware
+// (a linked worktree's `.git` is a FILE; naive `<repoPath>/.git/<name>`
+// joins throw ENOTDIR there). Local copy: heartbeat.ts is a standalone
+// daemon that deliberately keeps its import surface minimal.
+function gitDirFile(repoPath: string, filename: string): string {
+  try {
+    const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (gitDir) {
+      const resolved = path.isAbsolute(gitDir) ? gitDir : path.resolve(repoPath, gitDir);
+      return path.join(resolved, filename);
+    }
+  } catch { /* fall through */ }
+  return path.join(repoPath, '.git', filename);
+}
 import {
   parseSessionLimits,
   evaluateSessionLimits,
@@ -917,7 +934,7 @@ async function handleRestore(command: {
         }
         throw err;
       }
-      const markerPath = path.join(repoPath, '.git', 'origin-restore-marker');
+      const markerPath = gitDirFile(repoPath, 'origin-restore-marker');
       fs.writeFileSync(markerPath, JSON.stringify({
         restoredAt: new Date().toISOString(),
         commitSha: command.commitSha,
@@ -977,7 +994,7 @@ async function handleRestore(command: {
       } catch { /* non-fatal — leave null */ }
     }
 
-    const markerPath = path.join(repoPath, '.git', 'origin-restore-marker');
+    const markerPath = gitDirFile(repoPath, 'origin-restore-marker');
     fs.writeFileSync(markerPath, JSON.stringify({
       restoredAt: new Date().toISOString(),
       treeSha: targetTree,

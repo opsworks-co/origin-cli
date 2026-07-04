@@ -5,6 +5,8 @@ import path from 'path';
 import { loadConfig, loadAgentConfig, loadRepoConfig, listProfiles } from '../config.js';
 import { api } from '../api.js';
 import { loadSessionState, listActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
+import { currentOwner, isForeignSession } from '../session-owner.js';
+import { processPendingForeignAction } from './sessions.js';
 import { git, gitDetailed } from '../utils/exec.js';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
@@ -25,9 +27,33 @@ export async function statusCommand() {
 
   console.log(chalk.bold('\n  Origin Status\n'));
 
-  // Mode status
-  const connected = config?.mode !== 'standalone' && config?.apiKey && config?.apiUrl;
+  // Mode status. NOTE: `hasCreds` means only "a key is saved locally" — it
+  // does NOT mean the server still accepts that key. After an account/org is
+  // deleted the key lingers in config and 401s on every request, so we must
+  // ask the server before claiming "Connected". The live probe below settles
+  // it: we hit /api/mcp/policies once and reuse the result for the Policies
+  // section further down (no double round-trip).
+  const hasCreds = Boolean(config?.mode !== 'standalone' && config?.apiKey && config?.apiUrl);
   const isSolo = config?.keyType === 'solo' || config?.accountType === 'developer';
+
+  // health: 'ok' (server accepts the key) | 'unauthorized' (key rejected, 401)
+  // | 'unreachable' (network/DNS failure — don't cry "disconnected" over a
+  // transient blip) | 'skip' (no creds, nothing to probe).
+  let health: 'ok' | 'unauthorized' | 'unreachable' | 'skip' = hasCreds ? 'unreachable' : 'skip';
+  let policiesResult: any = null;
+  let policiesError: any = null;
+  if (hasCreds) {
+    try {
+      policiesResult = await api.getPolicies();
+      health = 'ok';
+    } catch (err: any) {
+      policiesError = err;
+      health = err?.status === 401 ? 'unauthorized' : 'unreachable';
+    }
+  }
+  // "Connected" now means the server actually accepted the key, not just that
+  // one is on disk.
+  const connected = health === 'ok';
 
   // Single-key world (Path B). The active key is what authenticates
   // everything; the personal dashboard at /me federates the user's
@@ -40,11 +66,24 @@ export async function statusCommand() {
     console.log(chalk.yellow('  ⚡ Standalone mode (forced)'));
     console.log(chalk.gray('    Sessions tracked locally in git notes'));
     console.log(chalk.gray('    Run `origin config set mode auto` to reconnect'));
+  } else if (health === 'unauthorized') {
+    // Key is saved but the server rejected it (401) — typically the
+    // account/org was deleted or the key was revoked. Don't say "Connected".
+    console.log(chalk.red('  ✗ Not connected · credentials rejected by server (401)'));
+    const reason = policiesError?.serverError || policiesError?.message || 'Invalid API key';
+    console.log(chalk.gray(`    ${reason}`));
+    console.log(chalk.gray('    Run `origin login` to re-authenticate'));
+  } else if (health === 'unreachable') {
+    // Creds present but we couldn't reach the server. Could be offline or a
+    // transient blip — report it honestly without claiming the key is dead.
+    console.log(chalk.yellow('  ⚠ Cannot reach Origin API · using saved credentials'));
+    console.log(chalk.gray(`    API: ${config!.apiUrl}`));
+    console.log(chalk.gray('    Check your connection, then re-run `origin status`'));
   } else if (connected && isSolo) {
     console.log(chalk.green('  ✅ Connected · Solo Developer'));
     console.log(chalk.gray(`    📦 Personal workspace · All repos · All agents`));
   } else if (connected) {
-    const orgName = config.orgName || config.orgId || 'unknown';
+    const orgName = config!.orgName || config!.orgId || 'unknown';
     console.log(chalk.green(`  ✅ Connected · Team Member @ ${orgName}`));
     try {
       const data = await api.getWhoami() as any;
@@ -52,7 +91,7 @@ export async function statusCommand() {
       const agentLabel = data.agentScopes?.length > 0 ? `${data.agentScopes.length} agents` : `${data.agentCount || 0} agents`;
       console.log(chalk.gray(`    📦 ${repoLabel} · ${agentLabel}`));
     } catch {
-      console.log(chalk.gray(`    API: ${config.apiUrl}`));
+      console.log(chalk.gray(`    API: ${config!.apiUrl}`));
     }
   } else {
     console.log(chalk.green('  ✓ Standalone mode'));
@@ -130,25 +169,39 @@ export async function statusCommand() {
     console.log(chalk.gray('\n  No active session in this repo'));
   }
 
-  // ── Queued (local-only) sessions waiting to resync ──────────────
-  // These are sessions that were captured locally because the API rejected
-  // them (typically AGENT_DISABLED). Count them so the user knows to run
-  // `origin sessions sync` once an admin enables the agent.
-  if (connected) {
+  // ── Queued (local-only) sessions ────────────────────────────────
+  // Two distinct buckets among the `local-*` files in ~/.origin/sessions/:
+  //   • queued — captured under THIS account (e.g. agent was disabled); a
+  //     plain `origin sessions sync` will upload them.
+  //   • foreign — captured under a PREVIOUS account. We deliberately do NOT
+  //     upload these (that was the leak bug); the user chooses import/forget.
+  if (hasCreds) {
     try {
+      // Carry out any choice the user made on the dashboard banner first, so
+      // the counts below reflect the post-action state (no stale warning).
+      await processPendingForeignAction();
       const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
       if (fs.existsSync(sessionsDir)) {
+        const owner = currentOwner();
         const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
         let queued = 0;
+        let foreign = 0;
         for (const f of files) {
           try {
             const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, f), 'utf-8'));
-            if (typeof state?.sessionId === 'string' && state.sessionId.startsWith('local-')) queued++;
+            if (typeof state?.sessionId !== 'string' || !state.sessionId.startsWith('local-')) continue;
+            if (isForeignSession(state, owner)) foreign++;
+            else queued++;
           } catch { /* skip */ }
         }
         if (queued > 0) {
           console.log(chalk.yellow(`\n  ⏸  ${queued} session${queued === 1 ? '' : 's'} kept local (agent was disabled)`));
           console.log(chalk.gray('    Run `origin sessions sync` once an admin enables the agent.'));
+        }
+        if (foreign > 0) {
+          console.log(chalk.yellow(`\n  ⚠ ${foreign} session${foreign === 1 ? '' : 's'} captured under a previous Origin account`));
+          console.log(chalk.gray('    Run `origin sessions import` to bring them into this account,'));
+          console.log(chalk.gray('    or `origin sessions forget` to discard them.'));
         }
       }
     } catch { /* non-fatal */ }
@@ -191,35 +244,26 @@ export async function statusCommand() {
     } catch { /* ignore */ }
   }
 
-  // ── Policies & API Health (connected mode only) ────────────────
-  if (connected) {
-    try {
-      const data = await api.getPolicies() as any;
-      const policies = data.policies ?? data;
+  // ── Policies & API Health ──────────────────────────────────────
+  // Reuses the single probe from the top — no second round-trip. The header
+  // already reported unauthorized/unreachable, so here we only add detail.
+  if (hasCreds) {
+    if (health === 'ok') {
+      const policies = policiesResult?.policies ?? policiesResult;
       const count = Array.isArray(policies) ? policies.length : 0;
       console.log(chalk.green(`\n  ✓ ${count} active ${count === 1 ? 'policy' : 'policies'}`));
-    } catch (err: any) {
-      console.log(chalk.yellow(`\n  ⚠ Could not fetch policies: ${err.message}`));
-    }
-
-    try {
-      const res = await fetch(`${config!.apiUrl}/api/mcp/policies`, {
-        headers: { 'X-API-Key': config!.apiKey },
-      });
-      if (res.ok) {
-        console.log(chalk.green('  ✓ API connection healthy'));
-      } else {
-        console.log(chalk.red(`  ✗ API returned ${res.status}`));
-      }
-    } catch {
-      console.log(chalk.red('  ✗ Cannot reach Origin API'));
+      console.log(chalk.green('  ✓ API connection healthy'));
+    } else if (health === 'unauthorized') {
+      console.log(chalk.red(`\n  ✗ API returned 401 · key rejected`));
+    } else {
+      console.log(chalk.red(`\n  ✗ Cannot reach Origin API: ${policiesError?.message || 'network error'}`));
     }
   }
 
   // Saved profiles other than the active one — useful when switching
   // workplaces with `origin login --profile <name>`. Federation across
   // orgs you belong to happens server-side, so this section is rare.
-  if (connected && allProfiles.length > 1) {
+  if (hasCreds && allProfiles.length > 1) {
     console.log(chalk.bold('\n  Saved profiles'));
     for (const p of allProfiles) {
       const isActive = p.apiKey === config?.apiKey;

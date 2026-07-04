@@ -73,6 +73,18 @@ function filterCursorHooks(config: Record<string, any>): Record<string, any> {
   return config;
 }
 
+// Antigravity stores all Origin hooks under a single "origin" named group in
+// `.agents/hooks.json` (or ~/.gemini/config/hooks.json), so removal is a
+// single-key delete — guarded so we only drop a group that's actually ours.
+function filterAntigravityHooks(config: Record<string, any>): Record<string, any> {
+  const group = config.origin;
+  if (!group || typeof group !== 'object') return config;
+  if (JSON.stringify(group).includes('origin hooks antigravity')) {
+    delete config.origin;
+  }
+  return config;
+}
+
 function removeAiderConfig(filePath: string): number {
   if (!fs.existsSync(filePath)) return 0;
   try {
@@ -156,6 +168,13 @@ export async function disableCommand(opts?: { global?: boolean }): Promise<void>
   if (!isGlobal) {
     removedCount += removeAiderConfig(path.join(basePath, '.aider.conf.yml'));
   }
+
+  // Antigravity — .agents/hooks.json (local) or ~/.gemini/config/hooks.json (global)
+  const antigravityPath = isGlobal
+    ? path.join(basePath, '.gemini', 'config', 'hooks.json')
+    : path.join(basePath, '.agents', 'hooks.json');
+  const antigravityLabel = isGlobal ? '~/.gemini/config/hooks.json' : '.agents/hooks.json';
+  removedCount += removeOriginHooksFromFile(antigravityPath, antigravityLabel, filterAntigravityHooks);
 
   if (removedCount === 0) {
     console.log(chalk.gray('  No Origin hooks found in any agent config.'));

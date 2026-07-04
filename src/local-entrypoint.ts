@@ -292,8 +292,16 @@ export function writeSessionFiles(repoPath: string, data: SessionWriteData): voi
       [`${dir}/changes.json`, buildChangesJson(data)],
     ];
 
-    // PID-scoped temp index to avoid races
-    const tmpIndex = `${repoPath}/.git/origin-tmp-index-${process.pid}`;
+    // PID-scoped temp index to avoid races. Resolve the real git dir —
+    // for a worktree-session repoPath, `.git` is a FILE and the naive
+    // `${repoPath}/.git/…` path makes every index op exit 128 ("Not a
+    // directory"), silently dropping the whole origin-sessions write.
+    const gitDirForIndex = (() => {
+      const out = (gitOrNull(['rev-parse', '--git-common-dir'], execOpts) || '').trim();
+      if (!out) return `${repoPath}/.git`;
+      return out.startsWith('/') ? out : `${repoPath}/${out}`;
+    })();
+    const tmpIndex = `${gitDirForIndex}/origin-tmp-index-${process.pid}`;
     const envWithIndex = { ...process.env, GIT_INDEX_FILE: tmpIndex };
     const indexOpts = { ...execOpts, env: envWithIndex };
 

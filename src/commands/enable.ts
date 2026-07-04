@@ -63,7 +63,7 @@ function originCmd(cmd: string): string {
 
 // ─── Agent Definitions ────────────────────────────────────────────────────
 
-type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'windsurf' | 'codex' | 'aider';
+type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'windsurf' | 'codex' | 'aider' | 'antigravity';
 
 interface AgentConfig {
   name: string;
@@ -591,6 +591,49 @@ function installAiderHooks(gitRoot: string): void {
   console.log(chalk.gray('    • notifications-command: origin hooks aider stop'));
 }
 
+// ── Antigravity CLI Hooks ─────────────────────────────────────────────────
+
+// Antigravity (Google's agentic CLI/IDE, the successor to Gemini CLI) reads
+// hooks from `.agents/hooks.json` in the workspace, or `~/.gemini/config/hooks.json`
+// globally. The schema is a map of NAMED hook groups, each holding an event map
+// keyed by Claude-Code-style event names (SessionStart, UserPromptSubmit, Stop,
+// SessionEnd, PreToolUse, PostToolUse). We register everything under an "origin"
+// group so removal is a single-key delete. Each hook receives JSON on stdin and
+// (for PreToolUse) returns `{ "decision": "allow" | "deny" }` on stdout — the
+// lifecycle events we wire here are observe-only, so they need no decision.
+export function installAntigravityHooks(gitRoot: string): void {
+  const isGlobalInstall = gitRoot === os.homedir();
+  // Global config lives under the shared ~/.gemini dir; local config is the
+  // workspace .agents/ dir.
+  const hooksPath = isGlobalInstall
+    ? path.join(gitRoot, '.gemini', 'config', 'hooks.json')
+    : path.join(gitRoot, '.agents', 'hooks.json');
+
+  fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+
+  let config: Record<string, any> = {};
+  if (fs.existsSync(hooksPath)) {
+    backupExistingHooks(hooksPath);
+    try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = {}; }
+  }
+
+  // agy ONLY fires three hook events — Stop, PreToolUse, PostToolUse (verified
+  // against the binary; SessionStart/UserPromptSubmit/SessionEnd do not exist).
+  // PostToolUse drives in-session capture (it carries conversationId +
+  // transcriptPath); Stop finalizes; PreToolUse must return a decision so it
+  // never blocks the agent.
+  config.origin = {
+    enabled: true,
+    PostToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks antigravity post-tool-use') }] }],
+    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks antigravity stop') }] }],
+    PreToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks antigravity pre-tool-use') }] }],
+  };
+
+  fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
+  const label = isGlobalInstall ? '~/.gemini/config/hooks.json' : '.agents/hooks.json';
+  console.log(chalk.green(`  ✓ Hooks installed in ${label}`));
+}
+
 // ── Hook Backup (F8) ──────────────────────────────────────────────────────
 
 /**
@@ -678,6 +721,16 @@ const AGENTS: Record<AgentType, AgentConfig> = {
     hookCommand: 'origin hooks aider',
     installHooks: installAiderHooks,
   },
+  antigravity: {
+    name: 'Antigravity',
+    configDir: '.agents',
+    configFile: 'hooks.json',
+    detectDir: '.agents',
+    // Antigravity's terminal binary is `agy`; detection also checks `.agents/`.
+    command: 'agy',
+    hookCommand: 'origin hooks antigravity',
+    installHooks: installAntigravityHooks,
+  },
 };
 
 function isInNpxCache(name: string): boolean {
@@ -693,8 +746,9 @@ function isInNpxCache(name: string): boolean {
   return false;
 }
 
-// Only auto-detect the 4 officially supported agents
-const SUPPORTED_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex'];
+// Officially supported agents for auto-detection. Antigravity is included so
+// `origin enable` picks it up as Gemini-CLI users migrate to it.
+const SUPPORTED_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity'];
 
 function detectAgents(gitRoot: string): AgentType[] {
   const detected: AgentType[] = [];
@@ -723,8 +777,8 @@ function detectAgents(gitRoot: string): AgentType[] {
 // ─── Main Command ──────────────────────────────────────────────────────────
 
 // Agents that support global (~/) hook installation
-// Only the 4 officially supported agents — Windsurf/Aider coming soon
-const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex'];
+// Windsurf/Aider coming soon
+const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity'];
 
 export async function enableCommand(opts: { agent?: string; global?: boolean; local?: boolean; link?: string; agentSlug?: string }): Promise<void> {
   // Standalone mode doesn't require login

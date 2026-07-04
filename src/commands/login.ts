@@ -3,37 +3,54 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { createInterface } from 'readline/promises';
-import { saveConfig, saveProfile, listProfiles, loadConfig, deleteProfile } from '../config.js';
+import { saveConfig, saveProfile, listProfiles, loadConfig, deleteProfile, type OriginConfig } from '../config.js';
 import { clearReloginLock } from '../api.js';
+import { ownerFromConfig, stampUnstampedQueuedSessions, listForeignQueuedSessions, currentOwner } from '../session-owner.js';
+import { processPendingForeignAction } from './sessions.js';
 import chalk from 'chalk';
 
-// Wipe local session state when the workspace identity changes. Without
-// this, sessions captured under a previous account stay queued in
-// ~/.origin/sessions/ and can leak into the new account through retry/
-// resume paths. The local files were never visible on a server (their
-// sync calls 401'd after the old account was deleted), but they can
-// hydrate stale state into the next `origin enable` if the
-// session-state lookup ever picks them up. Clean slate is safer than
-// trying to be clever about which queue entries belong to whom.
-function clearLocalSessionState(): { sessions: number; heartbeats: number } {
-  const home = os.homedir();
-  let sessions = 0;
-  let heartbeats = 0;
-  for (const sub of ['sessions', 'heartbeats']) {
-    const dir = path.join(home, '.origin', sub);
-    if (!fs.existsSync(dir)) continue;
-    try {
-      for (const entry of fs.readdirSync(dir)) {
-        const p = path.join(dir, entry);
-        try {
-          fs.unlinkSync(p);
-          if (sub === 'sessions') sessions++;
-          else heartbeats++;
-        } catch { /* skip files we can't remove */ }
-      }
-    } catch { /* ignore — directory might be missing */ }
-  }
-  return { sessions, heartbeats };
+// Clear ephemeral heartbeat files. These are transient, account-agnostic
+// liveness records — stale ones from a previous account are useless and
+// harmless to drop. (Sessions, by contrast, we KEEP — see below.)
+function clearHeartbeats(): number {
+  const dir = path.join(os.homedir(), '.origin', 'heartbeats');
+  let cleared = 0;
+  try {
+    for (const entry of fs.readdirSync(dir)) {
+      try { fs.unlinkSync(path.join(dir, entry)); cleared++; } catch { /* skip */ }
+    }
+  } catch { /* missing dir */ }
+  return cleared;
+}
+
+// Handle an account switch at login. We used to DELETE all queued local
+// sessions here, which threw away the user's previous-account work. Instead
+// we now PRESERVE them: backfill an ownership stamp (the outgoing account) on
+// any unstamped queued session so the sync path treats them as foreign and
+// won't pull them into the new account. The user is then told they can run
+// `origin sessions import` to bring them in, or `origin sessions forget` to
+// discard — see status.ts and sessions.ts. New sessions are already stamped at
+// capture time (saveSessionState → ensureOwnerStamp); this backfill only
+// matters for legacy sessions captured before stamping existed.
+function handleWorkspaceSwitch(previousConfig: OriginConfig | null, newOrgId: string, newApiKey: string): void {
+  const switching = !!previousConfig?.orgId
+    && (previousConfig.orgId !== newOrgId || previousConfig.apiKey !== newApiKey);
+  if (!switching) return;
+  const previousOwner = ownerFromConfig(previousConfig);
+  stampUnstampedQueuedSessions(previousOwner);
+  clearHeartbeats();
+}
+
+// After login, if queued sessions from a previous account are sitting locally,
+// tell the user how to decide what happens to them. Call AFTER the new config
+// is saved so `currentOwner()` reflects the account they just logged into.
+function printForeignSessionHint(): void {
+  const foreign = listForeignQueuedSessions(currentOwner());
+  if (foreign.length === 0) return;
+  const n = foreign.length;
+  console.log(chalk.yellow(`\n  ⚠ ${n} session${n === 1 ? '' : 's'} from a previous Origin account ${n === 1 ? 'is' : 'are'} kept locally.`));
+  console.log(chalk.gray('    Run `origin sessions import` to bring them into this account,'));
+  console.log(chalk.gray('    or `origin sessions forget` to discard them.'));
 }
 
 // Best-effort: open a URL in the user's default browser. Falls back to
@@ -143,17 +160,9 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
       const result = await deviceCodeLogin(url);
       key = result.apiKey;
       const currentConfig = loadConfig();
-      // Workspace switch detection: if the orgId is changing (or the
-      // previous login was a different account), wipe queued local
-      // session state before saving the new config. Stops old data
-      // from contaminating the new account's view.
-      const switching = !!currentConfig?.orgId && currentConfig.orgId !== result.orgId;
-      if (switching) {
-        const cleared = clearLocalSessionState();
-        if (cleared.sessions || cleared.heartbeats) {
-          console.log(chalk.gray(`  Cleared ${cleared.sessions} stale session record${cleared.sessions === 1 ? '' : 's'} from previous workspace.`));
-        }
-      }
+      // Account switch: tag the previous account's queued sessions as foreign
+      // (instead of deleting them) so they don't leak into the new account.
+      handleWorkspaceSwitch(currentConfig, result.orgId, key);
       saveConfig({
         ...currentConfig,
         apiUrl: url,
@@ -189,6 +198,8 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
       console.log(chalk.green(`\n✓ Connected — ${isSolo ? 'Solo Developer' : `Team Member @ ${result.orgName}`}`));
       console.log(chalk.gray(`  Workspace: ${result.orgName}`));
       console.log(chalk.gray(`  Config saved to ~/.origin/config.json`));
+      await processPendingForeignAction();
+      printForeignSessionHint();
       process.exit(0);
     } catch (err: any) {
       console.log(chalk.yellow(`\n⚠ Browser login didn't complete: ${err.message}`));
@@ -255,6 +266,9 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
 
     // Save as primary config (always — this is the active account for CLI commands)
     const currentConfig = loadConfig();
+    // Account switch: tag the previous account's queued sessions as foreign
+    // (instead of deleting them) so they don't leak into the new account.
+    handleWorkspaceSwitch(currentConfig, data.orgId || '', key);
     saveConfig({
       ...currentConfig,
       apiUrl: url.replace(/\/+$/, ''),
@@ -314,6 +328,8 @@ export async function loginCommand(opts: { key?: string; url?: string; profile?:
     }
 
     console.log(chalk.gray(`  Config saved to ~/.origin/config.json`));
+    await processPendingForeignAction();
+    printForeignSessionHint();
   } catch (err: any) {
     console.log(chalk.red(`✗ Failed to connect: ${err.message}`));
     process.exit(1);

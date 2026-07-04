@@ -1,4 +1,6 @@
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { shouldIgnoreFile } from './ignore-patterns.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -1416,6 +1418,8 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   'gemini-3-pro': { input: 1.25, output: 10 },
   'gemini-3-flash': { input: 0.15, output: 0.60 },
+  'gemini-3.5-pro': { input: 1.25, output: 10 },    // Antigravity flagship
+  'gemini-3.5-flash': { input: 0.15, output: 0.60 }, // Antigravity default
   'gemini-2.0-flash': { input: 0.10, output: 0.40 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
   // OpenAI (for Cursor users)
@@ -1441,15 +1445,64 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'composer': { input: 2.50, output: 10.00 },
 };
 
-// Dynamic pricing: fetched from API, falls back to defaults
-let activePricing: ModelPricing = DEFAULT_MODEL_PRICING;
+// ── Dynamic pricing: API-served, disk-cached, defaults as fallback ──────────
+//
+// session-start fetches GET /api/pricing and calls setActivePricing — but
+// every hook runs as a SEPARATE process, so a module-global alone only ever
+// helped the session-start process. estimateCost actually runs in the
+// stop/session-end processes, which never fetched → they silently used the
+// baked-in table and the "dynamic pricing" was inert where it mattered.
+//
+// setActivePricing therefore persists the fetched table to
+// ~/.origin/pricing.json, and every process lazily loads that cache (merged
+// OVER the baked-in defaults, so models added in a newer CLI build survive an
+// older cached table). Stale (>7d) or corrupt caches are ignored — the
+// baked-in DEFAULT_MODEL_PRICING remains the offline floor, and the CI parity
+// test (CLI ↔ API tables) keeps that floor honest.
+const PRICING_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function pricingCachePath(): string {
+  return path.join(os.homedir(), '.origin', 'pricing.json');
+}
+
+function loadCachedPricing(): ModelPricing | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(pricingCachePath(), 'utf-8'));
+    if (!raw || typeof raw !== 'object' || typeof raw.fetchedAt !== 'string') return null;
+    if (Date.now() - new Date(raw.fetchedAt).getTime() > PRICING_CACHE_MAX_AGE_MS) return null;
+    if (!raw.pricing || typeof raw.pricing !== 'object') return null;
+    return raw.pricing as ModelPricing;
+  } catch {
+    return null; // missing / corrupt — defaults apply
+  }
+}
+
+let activePricing: ModelPricing | null = null; // resolved lazily per process
+
+function ensurePricingLoaded(): ModelPricing {
+  if (activePricing) return activePricing;
+  const cached = loadCachedPricing();
+  activePricing = cached ? { ...DEFAULT_MODEL_PRICING, ...cached } : DEFAULT_MODEL_PRICING;
+  return activePricing;
+}
 
 export function setActivePricing(pricing: ModelPricing): void {
-  activePricing = pricing;
+  activePricing = { ...DEFAULT_MODEL_PRICING, ...pricing };
+  try {
+    const dir = path.dirname(pricingCachePath());
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      pricingCachePath(),
+      JSON.stringify({ fetchedAt: new Date().toISOString(), pricing }),
+      { mode: 0o600 },
+    );
+  } catch {
+    // Cache write is best-effort — this process still has the table in memory.
+  }
 }
 
 export function getActivePricing(): ModelPricing {
-  return activePricing;
+  return ensurePricingLoaded();
 }
 
 export function getDefaultPricing(): ModelPricing {
@@ -1476,7 +1529,7 @@ const BARE_BRAND_KEYS = new Set(['claude', 'gemini', 'cursor', 'codex', 'compose
 //   4. Sonnet default
 export function resolveModelPricing(
   model: string,
-  pricing: ModelPricing = activePricing,
+  pricing: ModelPricing = ensurePricingLoaded(),
 ): { input: number; output: number; cachedInput?: number; key: string } {
   const normalized = normalizeModelKey(model);
   if (pricing[normalized]) return { ...pricing[normalized], key: normalized };

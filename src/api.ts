@@ -187,6 +187,16 @@ export const api = {
   syncRepo: (id: string) => request(`/api/repos/${id}/sync`, { method: 'POST' }),
   getRepos: () => request('/api/repos'),
   getWhoami: () => request('/api/mcp/whoami'),
+  // Tell the server how many sessions from a PREVIOUS account are sitting
+  // unimported locally, so the dashboard can show an import/forget banner.
+  // Returns { pendingAction: 'import' | 'forget' | null } — the web-initiated
+  // intent the CLI should carry out. Pass clearAction once it's been carried
+  // out so the server nulls it.
+  reportUnimportedSessions: (count: number, clearAction = false) =>
+    request('/api/mcp/report-unimported-sessions', {
+      method: 'POST',
+      body: JSON.stringify({ count, clearAction }),
+    }),
   // Pre-push governance check: is the developer's agent enabled enough to
   // allow this push? Returns { allowed, agentEnabled, agentName, mode }.
   // Accepts an AbortSignal so the pre-push hook can bound the wait — a slow
@@ -219,6 +229,7 @@ export const api = {
     hostname?: string;
     additionalRepoPaths?: string[];
     agentSessionId?: string;
+    importedFromPreviousAccount?: boolean;
   }) => {
     // Single-key world: server federates session writes across the user's
     // memberships on read (see /api/me/* on the API). No client-side

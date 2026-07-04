@@ -6,7 +6,7 @@ import { statusCommand } from './commands/status.js';
 import { policiesCommand } from './commands/policies.js';
 import { syncCommand } from './commands/sync.js';
 import { whoamiCommand } from './commands/whoami.js';
-import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanCommand, sessionsSyncCommand } from './commands/sessions.js';
+import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanCommand, sessionsSyncCommand, sessionsImportCommand, sessionsForgetCommand } from './commands/sessions.js';
 import { reviewCommand } from './commands/review.js';
 import { reviewPRCommand } from './commands/review-pr.js';
 import { intentReviewCommand } from './commands/intent-review.js';
@@ -628,6 +628,7 @@ hooks.command('gemini <event>').description('Handle Gemini CLI hook event').acti
 hooks.command('codex <event>').description('Handle Codex CLI hook event').action((event) => hooksCommand(event, 'codex'));
 hooks.command('windsurf <event>').description('Handle Windsurf hook event').action((event) => hooksCommand(event, 'windsurf'));
 hooks.command('aider <event>').description('Handle Aider hook event').action((event) => hooksCommand(event, 'aider'));
+hooks.command('antigravity <event>').description('Handle Antigravity hook event').action((event) => hooksCommand(event, 'antigravity'));
 hooks.command('git-pre-commit').description('Handle git pre-commit hook (secret scan)').action(() => handlePreCommit());
 hooks.command('git-prepare-commit-msg <msgFile> [source] [sha]')
   .description('Handle git prepare-commit-msg hook (writes Origin-Session trailer)')
@@ -687,6 +688,14 @@ sessions.command('sync')
   .description('Re-upload sessions that were kept local while their agent was disabled')
   .option('-q, --quiet', 'Suppress progress output')
   .action(async (opts) => { await sessionsSyncCommand(opts); });
+
+sessions.command('import')
+  .description('Bring sessions captured under a previous account into the current one')
+  .action(async () => { await sessionsImportCommand(); });
+
+sessions.command('forget')
+  .description('Discard queued sessions captured under a previous account')
+  .action(async () => { await sessionsForgetCommand(); });
 
 program.command('review <sessionId>')
   .description('Review a coding session')

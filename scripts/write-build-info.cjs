@@ -48,4 +48,9 @@ export const BUILD_INFO = ${JSON.stringify(buildInfo, null, 2)} as const;
 `;
 fs.writeFileSync(path.join(pkgRoot, 'src', 'build-info.ts'), srcGenerated);
 
-console.log(`[build-info] version=${buildInfo.version} sha=${shortSha}${dirty ? ' (dirty)' : ''} built=${buildInfo.builtAt}`);
+// Log to STDERR, not stdout. This runs as an npm `prepare` lifecycle script, so
+// it fires during `npm pack`/`npm publish` — and the release workflow does
+// `npm pack --json | jq`. Anything on stdout here lands ahead of the JSON array
+// and breaks the parse (`jq: Invalid numeric literal`), which silently failed
+// every CLI release. stderr keeps the diagnostic visible without polluting it.
+console.error(`[build-info] version=${buildInfo.version} sha=${shortSha}${dirty ? ' (dirty)' : ''} built=${buildInfo.builtAt}`);

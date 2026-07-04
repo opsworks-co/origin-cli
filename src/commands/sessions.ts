@@ -6,6 +6,7 @@ import { isConnectedMode, loadAgentConfig } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive } from '../session-state.js';
 import { git, gitOrNull } from '../utils/exec.js';
+import { currentOwner, isForeignSession, listForeignQueuedSessions, reportForeignSessionCount } from '../session-owner.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
@@ -722,8 +723,8 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
  * branch, and duration. The local file is removed on success and left in
  * place if the agent is still disabled (so a future run can try again).
  */
-export async function sessionsSyncCommand(opts: { quiet?: boolean }): Promise<{ synced: number; blocked: number; failed: number }> {
-  const result = { synced: 0, blocked: 0, failed: 0 };
+export async function sessionsSyncCommand(opts: { quiet?: boolean; markImported?: boolean }): Promise<{ synced: number; blocked: number; failed: number; foreign: number }> {
+  const result = { synced: 0, blocked: 0, failed: 0, foreign: 0 };
   if (!isConnectedMode()) {
     if (!opts.quiet) console.log(chalk.gray('Standalone mode — nothing to sync.'));
     return result;
@@ -741,15 +742,24 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean }): Promise<{ 
     return result;
   }
 
+  // Ownership gate: never upload a session captured under a DIFFERENT account.
+  // Without this, queued local sessions from a previous login get replayed
+  // under the current API key and silently re-homed into the new account.
+  const owner = currentOwner();
+
   const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
   const queued: { file: string; state: any }[] = [];
   for (const file of files) {
     try {
       const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), 'utf-8'));
-      if (typeof state?.sessionId === 'string' && state.sessionId.startsWith('local-')) {
-        queued.push({ file, state });
-      }
+      if (typeof state?.sessionId !== 'string' || !state.sessionId.startsWith('local-')) continue;
+      if (isForeignSession(state, owner)) { result.foreign++; continue; }
+      queued.push({ file, state });
     } catch { /* skip corrupt */ }
+  }
+
+  if (result.foreign > 0 && !opts.quiet) {
+    console.log(chalk.yellow(`  ⚠ Skipped ${result.foreign} session${result.foreign === 1 ? '' : 's'} from a previous account (run \`origin sessions import\` to claim them).`));
   }
 
   if (queued.length === 0) {
@@ -766,28 +776,40 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean }): Promise<{ 
     const label = `${state.agentSlug || 'session'} · ${state.sessionTag || state.sessionId.slice(0, 12)}`;
 
     let realSessionId: string;
-    try {
-      const repoUrl = gitOrNull(['remote', 'get-url', 'origin'], { cwd: state.repoPath || process.cwd() }) || undefined;
-      const startRes = await api.startSession({
-        machineId: agentConfig.machineId,
-        prompt: state.prompts?.[0]?.text || state.prompts?.[0] || '',
-        model: state.model || 'unknown',
-        repoPath: state.repoPath || process.cwd(),
-        repoUrl,
-        agentSlug: state.agentSlug || undefined,
-        branch: state.branch || undefined,
-        hostname: agentConfig.hostname || undefined,
-      });
-      realSessionId = startRes.sessionId as string;
-    } catch (err: any) {
-      if (err?.code === 'AGENT_DISABLED') {
-        if (!opts.quiet) console.log(chalk.yellow(`  ⏸  ${label} — agent still disabled, kept local`));
-        result.blocked++;
-      } else {
-        if (!opts.quiet) console.log(chalk.red(`  ✗  ${label} — ${err.message}`));
-        result.failed++;
+    if (typeof state.syncedSessionId === 'string' && state.syncedSessionId) {
+      // A previous run already started this session on the server but its
+      // session/end didn't land. Resume at end with the SAME id so we never
+      // create a second, orphaned server row.
+      realSessionId = state.syncedSessionId;
+    } else {
+      try {
+        const repoUrl = gitOrNull(['remote', 'get-url', 'origin'], { cwd: state.repoPath || process.cwd() }) || undefined;
+        const startRes = await api.startSession({
+          machineId: agentConfig.machineId,
+          prompt: state.prompts?.[0]?.text || state.prompts?.[0] || '',
+          model: state.model || 'unknown',
+          repoPath: state.repoPath || process.cwd(),
+          repoUrl,
+          agentSlug: state.agentSlug || undefined,
+          branch: state.branch || undefined,
+          hostname: agentConfig.hostname || undefined,
+          importedFromPreviousAccount: opts.markImported === true,
+        });
+        realSessionId = startRes.sessionId as string;
+        // Persist the real id BEFORE attempting end, so an end failure (or a
+        // crash) resumes at end next time instead of starting a duplicate.
+        state.syncedSessionId = realSessionId;
+        writeSessionFileAtomic(filePath, state);
+      } catch (err: any) {
+        if (err?.code === 'AGENT_DISABLED') {
+          if (!opts.quiet) console.log(chalk.yellow(`  ⏸  ${label} — agent still disabled, kept local`));
+          result.blocked++;
+        } else {
+          if (!opts.quiet) console.log(chalk.red(`  ✗  ${label} — ${err.message}`));
+          result.failed++;
+        }
+        continue;
       }
-      continue;
     }
 
     try {
@@ -819,6 +841,152 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean }): Promise<{ 
     console.log(chalk.bold(`Resynced: ${chalk.green(result.synced)}  ·  Still blocked: ${chalk.yellow(result.blocked)}  ·  Failed: ${chalk.red(result.failed)}`));
   }
   return result;
+}
+
+/** Atomically (tmp-write + rename) persist a queued session's state to disk.
+ *  Returns true on success. Used by import's re-tag / revert so a crash mid
+ *  write can never truncate the only copy of a session. */
+function writeSessionFileAtomic(filePath: string, state: unknown): boolean {
+  try {
+    const tmp = `${filePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `origin sessions import` — claim queued sessions captured under a PREVIOUS
+ * account into the current one. Re-stamps each foreign session's owner to the
+ * active account so the sync gate lets them through, then uploads them via the
+ * normal resync path. This is the "Yes, bring my old work over" choice.
+ *
+ * The web intent + dashboard banner are only cleared when the import actually
+ * DRAINS the foreign set (every session uploaded). If the agent is disabled or
+ * the server is unreachable, the un-uploaded sessions are reverted to their
+ * original foreign owner so they (a) stay in the import set for the next retry
+ * and (b) keep the banner up — instead of silently dropping the "import not
+ * finished" signal while the work sits unsent.
+ */
+export async function sessionsImportCommand(): Promise<{ synced: number; blocked: number; failed: number; cleared: boolean }> {
+  const noop = { synced: 0, blocked: 0, failed: 0, cleared: false };
+  if (!isConnectedMode()) {
+    console.log(chalk.gray('Standalone mode — nothing to import.'));
+    return noop;
+  }
+  const owner = currentOwner();
+  if (!owner) {
+    console.log(chalk.yellow('Not logged in — run `origin login` first.'));
+    return noop;
+  }
+  const foreign = listForeignQueuedSessions(owner);
+  if (foreign.length === 0) {
+    console.log(chalk.gray('No sessions from a previous account to import.'));
+    // Nothing pending on THIS machine (e.g. the choice was made on another
+    // machine) — clear the intent so it doesn't re-fire here every status.
+    await reportForeignSessionCount(true);
+    return { ...noop, cleared: true };
+  }
+
+  const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+  console.log(chalk.bold(`Importing ${foreign.length} session${foreign.length === 1 ? '' : 's'} into this account...\n`));
+
+  // Remember each file's ORIGINAL owner so we can put it back if its upload
+  // doesn't go through. A re-tagged-but-unuploaded session must stay FOREIGN —
+  // otherwise it drops out of the import set and the banner clears even though
+  // the work never reached the account.
+  const original = foreign.map(({ file, state }) => ({
+    file,
+    ownerOrgId: state.ownerOrgId as string | undefined,
+    ownerKeyHash: state.ownerKeyHash as string | undefined,
+  }));
+
+  // Re-stamp each foreign session to the current owner so sessionsSyncCommand's
+  // ownership gate lets it through and uploads it.
+  for (const { file, state } of foreign) {
+    state.ownerOrgId = owner.ownerOrgId;
+    state.ownerKeyHash = owner.ownerKeyHash;
+    if (!writeSessionFileAtomic(path.join(sessionsDir, file), state)) {
+      console.log(chalk.red(`  ✗  ${file} — could not re-tag`));
+    }
+  }
+
+  const result = await sessionsSyncCommand({ quiet: false, markImported: true });
+  const drained = result.blocked === 0 && result.failed === 0;
+
+  // Revert any session that did NOT upload (still on disk) back to its original
+  // foreign owner. Successful uploads were already removed by the sync, so this
+  // only touches the blocked/failed leftovers.
+  if (!drained) {
+    for (const o of original) {
+      const p = path.join(sessionsDir, o.file);
+      if (!fs.existsSync(p)) continue; // uploaded + removed
+      try {
+        const state = JSON.parse(fs.readFileSync(p, 'utf-8'));
+        state.ownerOrgId = o.ownerOrgId;
+        state.ownerKeyHash = o.ownerKeyHash;
+        writeSessionFileAtomic(p, state);
+      } catch {
+        // Unreadable JSON (shouldn't happen — we just wrote it). Leave the file
+        // tagged to the current owner; it falls back to the task's other path —
+        // a normal `origin sessions sync` uploads it later — rather than staying
+        // foreign. No data loss, just no banner signal for this one file.
+      }
+    }
+    console.log(chalk.yellow(`\n  Some sessions weren't uploaded (agent disabled or offline) — they'll be retried on the next \`origin status\`.`));
+  }
+
+  // Report the real remaining count and clear the web intent ONLY when the set
+  // fully drained. On a partial import the leftovers are foreign again, so this
+  // reports a non-zero count (banner stays up) and leaves the intent set.
+  await reportForeignSessionCount(drained);
+  return { synced: result.synced, blocked: result.blocked, failed: result.failed, cleared: drained };
+}
+
+/**
+ * `origin sessions forget` — discard queued sessions captured under a PREVIOUS
+ * account. This is the "No, only track new sessions from now on" choice; the
+ * local files are deleted and never uploaded.
+ */
+export async function sessionsForgetCommand(): Promise<void> {
+  const owner = currentOwner();
+  const foreign = listForeignQueuedSessions(owner);
+  if (foreign.length === 0) {
+    console.log(chalk.gray('No sessions from a previous account to forget.'));
+    return;
+  }
+  const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+  let removed = 0;
+  for (const { file } of foreign) {
+    try { fs.unlinkSync(path.join(sessionsDir, file)); removed++; } catch { /* already gone */ }
+  }
+  console.log(chalk.green(`Discarded ${removed} session${removed === 1 ? '' : 's'} from a previous account.`));
+  // Update the dashboard banner (count → 0) and clear any pending web intent.
+  await reportForeignSessionCount(true);
+}
+
+/**
+ * Carry out a web-initiated choice. The dashboard banner can set a pending
+ * action ('import' | 'forget') server-side; the CLI learns it when it reports
+ * its foreign-session count, then executes it against the local files here.
+ * Called from `origin status` and `origin login` — the reliable, awaited entry
+ * points. Best-effort and quiet about the no-op case.
+ */
+export async function processPendingForeignAction(): Promise<void> {
+  if (!isConnectedMode()) return;
+  const pending = await reportForeignSessionCount();
+  if (pending !== 'import' && pending !== 'forget') return;
+
+  console.log(chalk.gray(`\n  Applying your dashboard choice: ${pending} previous-account sessions...`));
+  // Each command reports the accurate remaining count and clears the web intent
+  // ITSELF — but only when the work is actually done (import: every session
+  // uploaded; forget: files deleted; no-op: nothing local to act on). We must
+  // NOT add an unconditional clear here: on a partial import (agent disabled /
+  // offline) it would wipe the intent and the banner, losing the retry.
+  if (pending === 'import') await sessionsImportCommand();
+  else await sessionsForgetCommand();
 }
 
 function timeAgo(dateStr: string): string {

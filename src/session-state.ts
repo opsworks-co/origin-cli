@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { execSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import type { PromptEdit } from './prompt-capture/types.js';
+import { ensureOwnerStamp } from './session-owner.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -34,6 +35,14 @@ export interface TabCompletionStats {
 
 export interface SessionState {
   sessionId: string;          // Origin API session ID
+  // Set by `origin sessions sync` once it has successfully replayed
+  // session/start for a queued local-* session: the REAL server session id,
+  // persisted BEFORE session/end is attempted. If session/end then fails (or
+  // the process dies), the next retry resumes at session/end with this id
+  // instead of calling session/start again — which would create a second,
+  // orphaned server row. Cleared implicitly when the file is removed on a
+  // fully-successful upload.
+  syncedSessionId?: string;
   // The agent's own session identifier, locked at session-start. Different
   // agents call it different things — Claude Code: session_id; Cursor:
   // session_id / conversation_id (matches the agent-transcripts/<id>/ dir);
@@ -186,6 +195,19 @@ export interface SessionState {
   previousSessionStartedAt?: string;
   status?: string;            // RUNNING | ENDED | COMPLETED
   endedAt?: string;           // ISO timestamp when session ended
+  // Owning Origin account, stamped once at first save (see session-owner.ts).
+  // ownerOrgId = the orgId that captured this session; ownerKeyHash = sha256
+  // fingerprint (first 16 hex) of that account's API key — never the raw key.
+  // Immutable after the first write so an account switch can't relabel a
+  // previous account's session. Absent on legacy/standalone sessions.
+  ownerOrgId?: string;
+  ownerKeyHash?: string;
+  // Canonical (main) repo path when repoPath is a linked worktree — the
+  // identity sent to the server (repo naming, session/commit ingest) so a
+  // worktree session attributes to the real project, while repoPath stays
+  // the WORKING root all git capture runs against. Equal to repoPath (or
+  // absent, on pre-worktree-fix states) for normal checkouts.
+  canonicalRepoPath?: string;
   // Multi-repo support: when cwd contains multiple git repos
   repoPaths?: string[];       // All git repo roots discovered under cwd
   perRepoState?: Record<string, {
@@ -212,33 +234,106 @@ export function getGitRoot(cwd?: string): string | null {
     const top = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     if (!top) return null;
     // Linked git worktrees report their own --show-toplevel — e.g.
-    // ~/.claude/worktrees/claude/quirky-albattani-c9f7c3. The basename then
+    // <repo>/.claude/worktrees/quirky-albattani-c9f7c3. The basename then
     // becomes the "repo name" on the dashboard, which is wrong: the
     // worktree is just a working copy of the SAME repo. Detect via
     // --git-common-dir (points at the MAIN repo's .git for linked
     // worktrees, equals "<top>/.git" otherwise) and walk back to the
     // actual repo so Origin attributes sessions to the canonical project.
-    try {
-      const commonDirRaw = execSync('git rev-parse --git-common-dir', {
-        encoding: 'utf-8', cwd: top, stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
-      if (commonDirRaw) {
-        const absCommonDir = path.isAbsolute(commonDirRaw)
-          ? commonDirRaw
-          : path.resolve(top, commonDirRaw);
-        const mainRepo = path.dirname(absCommonDir);
-        // Sanity: only collapse when the main repo path is a different,
-        // non-empty directory that actually exists. Anything weird → keep
-        // top so we don't accidentally hide the worktree session.
-        if (mainRepo && mainRepo !== top && fs.existsSync(mainRepo)) {
-          return mainRepo;
-        }
-      }
-    } catch { /* fall through */ }
-    return top;
+    //
+    // NOTE: this is the CANONICAL/identity root — the right thing to send
+    // to the server (repo naming, session/commit ingest) and to locate
+    // repo-level resources shared across worktrees (.git/hooks). It is the
+    // WRONG cwd for capturing a worktree session's work: diffs/HEAD/staged
+    // files must be read from the worktree itself (its files only show up
+    // here as untracked `.claude/worktrees/<id>/…` dirt, and its commits
+    // never move this HEAD). Use getWorkingGitRoot for git operations.
+    return getCanonicalRepoPath(top);
   } catch {
     return null;
   }
+}
+
+// The WORKING git root: the top of the working tree that actually contains
+// cwd — for a linked worktree, the worktree itself (NOT the main repo).
+// This is the correct cwd for every git operation that captures a session's
+// work: diff/HEAD/staged-file reads, shadow commits, restore. Verified on
+// production session 5606d120 (Claude Code worktree): capturing from the
+// collapsed main root recorded the session's edits as untracked
+// `.claude/worktrees/<id>/…` files, never saw its commits (main HEAD does
+// not move), and broke staged-file commit attribution.
+export function getWorkingGitRoot(cwd?: string): string | null {
+  try {
+    const top = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    return top || null;
+  } catch {
+    return null;
+  }
+}
+
+// Collapse a working-tree top to the canonical (main) repo path when it is a
+// linked worktree; returns the input path unchanged otherwise. Split out of
+// getGitRoot so callers holding a working root can derive the identity root
+// without re-running discovery.
+export function getCanonicalRepoPath(workRoot: string): string {
+  try {
+    const commonDirRaw = execSync('git rev-parse --git-common-dir', {
+      encoding: 'utf-8', cwd: workRoot, stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (commonDirRaw) {
+      const absCommonDir = path.isAbsolute(commonDirRaw)
+        ? commonDirRaw
+        : path.resolve(workRoot, commonDirRaw);
+      const mainRepo = path.dirname(absCommonDir);
+      // Sanity: only collapse when the main repo path is a different,
+      // non-empty directory that actually exists. Anything weird → keep
+      // the working root so we don't accidentally hide the worktree session.
+      if (mainRepo && mainRepo !== workRoot && fs.existsSync(mainRepo)) {
+        return mainRepo;
+      }
+    }
+  } catch { /* fall through */ }
+  return workRoot;
+}
+
+// Path of a file inside the git dir that governs `repoPath` — worktree-aware:
+// a linked worktree's `.git` is a FILE pointing at the per-worktree git dir
+// (<main>/.git/worktrees/<name>), so `path.join(repoPath, '.git', name)` is
+// wrong there. Resolves via `git rev-parse --git-dir`; falls back to the
+// plain join when git can't run (deleted repo — callers stat/read and treat
+// a miss as "no signal"). Use for files git itself keeps PER worktree
+// (COMMIT_EDITMSG); session state lives in the COMMON dir — see below.
+export function gitDirFilePath(repoPath: string, filename: string): string {
+  const gitDir = getGitDir(repoPath);
+  if (gitDir) {
+    const resolved = path.isAbsolute(gitDir) ? gitDir : path.resolve(repoPath, gitDir);
+    return path.join(resolved, filename);
+  }
+  return path.join(repoPath, '.git', filename);
+}
+
+export function getGitCommonDir(cwd?: string): string | null {
+  try {
+    const out = execSync('git rev-parse --git-common-dir', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    if (!out) return null;
+    return path.isAbsolute(out) ? out : path.resolve(cwd || process.cwd(), out);
+  } catch {
+    return null;
+  }
+}
+
+// Session state files live in the COMMON git dir — one place per repo,
+// shared by the main checkout and every linked worktree. Worktree sessions
+// (repoPath = the worktree top) must still be visible to repo-scoped
+// lookups (zombie sweeps, `origin sessions`, pre-commit policy/violation
+// session resolution, concurrent-session isolation), all of which resolve
+// from the main checkout or via the collapsing getGitRoot. Cross-worktree
+// ATTRIBUTION safety comes from lastCwd narrowing in listSessionsForGitHook,
+// not from hiding the files in per-worktree dirs.
+export function gitCommonDirFilePath(repoPath: string, filename: string): string {
+  const common = getGitCommonDir(repoPath);
+  if (common) return path.join(common, filename);
+  return path.join(repoPath, '.git', filename);
 }
 
 /**
@@ -342,6 +437,30 @@ export function getBranch(cwd?: string): string | null {
   }
 }
 
+// Resolve the branch the session is ACTUALLY on. `repoPath` is collapsed to
+// the MAIN repo for linked worktrees (getGitRoot does this so the dashboard
+// attributes the session to the canonical project, not the worktree's
+// basename). But the agent works on the worktree's OWN branch — reading the
+// branch from repoPath returns the MAIN checkout's branch ("main") for every
+// worktree session, which is the "all sessions show main" bug.
+//
+// Always prefer the live working directory (the hook's cwd, or the last cwd
+// seen on a lifecycle hook) where `git rev-parse HEAD` resolves the worktree's
+// branch; fall back to repoPath only when no working-dir cwd is known. Each
+// candidate is guarded so we never run getBranch() against process.cwd()
+// (an undefined cwd), which could be an unrelated directory.
+export function resolveSessionBranch(
+  state: { lastCwd?: string; repoPath?: string },
+  cwdHint?: string,
+): string | null {
+  for (const dir of [cwdHint, state.lastCwd, state.repoPath]) {
+    if (!dir) continue;
+    const b = getBranch(dir);
+    if (b) return b;
+  }
+  return null;
+}
+
 // ─── Session State Persistence ─────────────────────────────────────────────
 
 /**
@@ -352,8 +471,11 @@ export function getBranch(cwd?: string): string | null {
 export function getStatePath(cwd?: string, sessionTag?: string): string {
   const suffix = sessionTag ? `origin-session-${sessionTag}.json` : 'origin-session.json';
 
-  // Try git dir first
-  const gitDir = getGitDir(cwd);
+  // Try git dir first — the COMMON dir, so a worktree session's state is
+  // discoverable by repo-scoped lookups from any checkout (see
+  // gitCommonDirFilePath). Falls back to --git-dir (identical outside
+  // worktrees) for odd setups where --git-common-dir fails.
+  const gitDir = getGitCommonDir(cwd) || getGitDir(cwd);
   if (gitDir) {
     const resolvedGitDir = path.isAbsolute(gitDir) ? gitDir : path.resolve(cwd || process.cwd(), gitDir);
     return path.join(resolvedGitDir, suffix);
@@ -369,6 +491,9 @@ export function getStatePath(cwd?: string, sessionTag?: string): string {
 }
 
 export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string): void {
+  // First-write-wins ownership stamp so a later account switch can't pull this
+  // session into a different account (see session-owner.ts).
+  ensureOwnerStamp(state);
   const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
   const tmpStatePath = statePath + '.tmp.' + process.pid;
   fs.writeFileSync(tmpStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
@@ -427,6 +552,82 @@ export function clearSessionState(cwd?: string, sessionTag?: string): void {
 
 // ─── Concurrent Session Support ──────────────────────────────────────────
 
+// Idle cutoff for treating a non-ENDED session as actually-alive. A session
+// with no fresh git-state-file write, no live heartbeat, and no recent state
+// file touch within this window is a zombie (the agent process died without a
+// clean end) and must not be considered for commit attribution etc.
+const SESSION_STALE_MS = 3 * 60 * 60 * 1000; // 3 hours — matches findSessionByClaudeId / listAllActiveSessions
+
+/**
+ * Is this session genuinely still alive? An ENDED session is dead. Otherwise it
+ * counts as alive only if there's a fresh signal: the repo's git-state file was
+ * written recently, its heartbeat daemon's PID is live, or the state file the
+ * session was loaded from was touched recently. Zombie sessions (process died
+ * without a clean end — common for Cursor / stale-file agents) fail all three.
+ *
+ * `statePath` is the file the state was read from (attached by listActiveSessions
+ * as `__statePath`); pass it for the freshest signal.
+ */
+export function isSessionAlive(state: SessionState, statePath?: string): boolean {
+  if (!state) return false;
+  if ((state as any).status === 'ENDED' || state.endedAt) return false;
+
+  // 1. The repo's live git-state file was updated within the window.
+  // gitCommonDirFilePath: state.repoPath is the WORKING root, which for a
+  // linked worktree has a `.git` FILE — the state json lives in the COMMON
+  // git dir, not at <repoPath>/.git/.
+  if (state.repoPath && state.sessionTag) {
+    try {
+      const gitStateFile = gitCommonDirFilePath(state.repoPath, `origin-session-${state.sessionTag}.json`);
+      if (Date.now() - fs.statSync(gitStateFile).mtimeMs < SESSION_STALE_MS) return true;
+    } catch { /* file gone */ }
+  }
+  // 2. The heartbeat daemon's PID is still alive.
+  try {
+    const pidFile = path.join(os.homedir(), '.origin', 'heartbeats', `${state.sessionId}.pid`);
+    if (fs.existsSync(pidFile)) {
+      const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+      if (pid > 0) { process.kill(pid, 0); return true; }
+    }
+  } catch { /* process dead */ }
+  // 3. The state file we loaded from was touched recently.
+  const p = statePath || (state as any).__statePath;
+  if (p) {
+    try { if (Date.now() - fs.statSync(p).mtimeMs < SESSION_STALE_MS) return true; } catch { /* gone */ }
+  }
+  return false;
+}
+
+/**
+ * Permanently close a session locally: mark it ENDED and persist to the file it
+ * was loaded from (plus the ~/.origin/sessions global mirror). Used to
+ * auto-close zombie sessions so they don't linger "RUNNING" and keep getting
+ * picked for commit attribution. Returns true if it changed anything.
+ */
+export function markSessionEnded(state: SessionState): boolean {
+  if (!state || (state as any).status === 'ENDED') return false;
+  (state as any).status = 'ENDED';
+  state.endedAt = state.endedAt || new Date().toISOString();
+  const writeAtomic = (p: string) => {
+    try {
+      const tmp = `${p}.tmp.${process.pid}`;
+      fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+      fs.renameSync(tmp, p);
+    } catch { /* best effort */ }
+  };
+  const loadedFrom = (state as any).__statePath as string | undefined;
+  if (loadedFrom) writeAtomic(loadedFrom);
+  // Keep the global mirror in sync (the file may have been read from .git).
+  try {
+    if (state.repoPath && state.sessionTag) {
+      const cwdHash = crypto.createHash('md5').update(state.repoPath).digest('hex').slice(0, 12);
+      const mirror = path.join(os.homedir(), '.origin', 'sessions', `${cwdHash}-${state.sessionTag}.json`);
+      if (mirror !== loadedFrom && fs.existsSync(mirror)) writeAtomic(mirror);
+    }
+  } catch { /* ignore */ }
+  return true;
+}
+
 /**
  * List all active sessions in a git repo (or cwd).
  * Scans for all origin-session*.json files.
@@ -434,8 +635,9 @@ export function clearSessionState(cwd?: string, sessionTag?: string): void {
 export function listActiveSessions(cwd?: string): SessionState[] {
   const sessions: SessionState[] = [];
 
-  // Check git dir
-  const gitDir = getGitDir(cwd);
+  // Check git dir (COMMON dir — matches getStatePath, so a lookup from a
+  // worktree and one from the main checkout read the same directory)
+  const gitDir = getGitCommonDir(cwd) || getGitDir(cwd);
   if (gitDir) {
     const resolvedGitDir = path.isAbsolute(gitDir) ? gitDir : path.resolve(cwd || process.cwd(), gitDir);
     try {
@@ -443,13 +645,15 @@ export function listActiveSessions(cwd?: string): SessionState[] {
       for (const entry of entries) {
         if (entry.startsWith('origin-session') && entry.endsWith('.json')) {
           try {
-            const state = JSON.parse(fs.readFileSync(path.join(resolvedGitDir, entry), 'utf-8'));
+            const fullPath = path.join(resolvedGitDir, entry);
+            const state = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
             if (!state || typeof state !== 'object' || !state.sessionId) continue;
             // Extract sessionTag from filename: origin-session-TAG.json or origin-session.json
             if (!state.sessionTag) {
               const tagMatch = entry.match(/^origin-session-(.+)\.json$/);
               if (tagMatch) state.sessionTag = tagMatch[1];
             }
+            Object.defineProperty(state, '__statePath', { value: fullPath, enumerable: false });
             sessions.push(state);
           } catch { /* skip corrupt files */ }
         }
@@ -467,8 +671,10 @@ export function listActiveSessions(cwd?: string): SessionState[] {
     for (const entry of entries) {
       if (entry.startsWith(cwdHash) && entry.endsWith('.json')) {
         try {
-          const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, entry), 'utf-8'));
+          const fullPath = path.join(sessionsDir, entry);
+          const state = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
           if (!state || typeof state !== 'object' || !state.sessionId) continue;
+          Object.defineProperty(state, '__statePath', { value: fullPath, enumerable: false });
           sessions.push(state);
         } catch { /* skip */ }
       }
@@ -506,9 +712,10 @@ export function listAllActiveSessions(): SessionState[] {
             let isAlive = false;
 
             // Check 1: is there an active .git state file being updated?
+            // (worktree-aware: resolves the per-worktree git dir)
             if (state.repoPath && state.sessionTag) {
               try {
-                const gitStateFile = path.join(state.repoPath, `.git`, `origin-session-${state.sessionTag}.json`);
+                const gitStateFile = gitCommonDirFilePath(state.repoPath, `origin-session-${state.sessionTag}.json`);
                 const stat = fs.statSync(gitStateFile);
                 if (Date.now() - stat.mtimeMs < STALE_MS) {
                   isAlive = true;

@@ -202,3 +202,83 @@ describe('Commit-derived supplementation for shell-written files', () => {
     }
   });
 });
+
+describe('Cursor per-prompt isolation (no cumulative leak)', () => {
+  // Regression for the commit-detail bug where selecting prompt #3 showed
+  // prompt #2's changes too. Root cause: Cursor's agent-transcript JSONL was
+  // never wired into capturePromptEdits (its path isn't delivered via
+  // input.transcript_path), so editsJson stayed empty and the dashboard fell
+  // back to the cumulative working-tree pc.diff. With the real JSONL fed in,
+  // each turn's edits must be isolated to that turn — prompt 3 carries ONLY
+  // its own change, never prompt 2's.
+  it('attributes each Cursor turn to only its own StrReplace edit', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-cursor-'));
+    try {
+      const transcript = path.join(tmp, 'conv.jsonl');
+      fs.writeFileSync(
+        transcript,
+        [
+          JSON.stringify({ role: 'user', content: 'make some changes but not commit yet' }),
+          JSON.stringify({
+            role: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  name: 'StrReplace',
+                  input: {
+                    path: path.join(tmp, 'README.md'),
+                    old_string: 'Gemini sixth explore pass',
+                    new_string: 'Cursor explore pass — uncommitted',
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({ role: 'user', content: 'make some other changes and commit' }),
+          JSON.stringify({
+            role: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  name: 'StrReplace',
+                  input: {
+                    path: path.join(tmp, 'README.md'),
+                    old_string: 'Gemini explore pass — uncommitted',
+                    new_string: 'Cursor commit pass — consolidated',
+                  },
+                },
+              ],
+            },
+          }),
+        ].join('\n'),
+      );
+
+      const turns = capturePromptEdits({
+        agent: 'cursor',
+        repoPath: tmp,
+        transcriptPath: transcript,
+      });
+
+      expect(turns.length).toBe(2);
+
+      // Prompt 2 (turn 0): exactly its own edit.
+      expect(turns[0].edits).toHaveLength(1);
+      expect(turns[0].edits[0].file).toBe('README.md');
+      expect(turns[0].edits[0].newContent).toContain('Cursor explore pass');
+
+      // Prompt 3 (turn 1): exactly its own edit — NOT prompt 2's.
+      expect(turns[1].edits).toHaveLength(1);
+      expect(turns[1].edits[0].file).toBe('README.md');
+      expect(turns[1].edits[0].newContent).toContain('Cursor commit pass');
+      const leakedIntoP3 = turns[1].edits.some(
+        (e) => (e.newContent || '').includes('Cursor explore pass') ||
+          (e.oldContent || '').includes('Gemini sixth explore pass'),
+      );
+      expect(leakedIntoP3).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

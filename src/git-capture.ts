@@ -13,6 +13,13 @@ export interface CommitInfo {
   message: string;
   author: string;
   filesChanged: string[];
+  // Per-commit line counts (computed via --numstat). The API leaves a Commit
+  // row's additions/deletions NULL unless a provider (GitHub/GitLab) backfill
+  // runs — which never happens for local repos or RUNNING sessions, so commit
+  // pages showed no line stats and "AI authored" had nothing to aggregate.
+  // Sending them here lets the API populate the row at ingest time.
+  linesAdded: number;
+  linesRemoved: number;
 }
 
 export interface GitCaptureResult {
@@ -142,10 +149,28 @@ export function captureGitState(
       // layer (stripIgnoredSectionsFromDiff), which is the right place to
       // hide bookkeeping changes without lying about file counts.
       const filesChanged = filesRaw ? filesRaw.split('\n').filter(Boolean) : [];
-      commitDetails.push({ sha, message, author, filesChanged });
+      // Per-commit line counts from --numstat ("added<TAB>removed<TAB>path"
+      // per file; binary files report "-"). Summed across files.
+      let cAdded = 0;
+      let cRemoved = 0;
+      try {
+        const numstat = git(
+          ['diff-tree', '--no-commit-id', '--numstat', '-r', sha],
+          gitOpts,
+        ).trim();
+        for (const ln of numstat.split('\n')) {
+          const parts = ln.split('\t');
+          if (parts.length < 2) continue;
+          const a = Number(parts[0]);
+          const r = Number(parts[1]);
+          if (Number.isFinite(a)) cAdded += a;
+          if (Number.isFinite(r)) cRemoved += r;
+        }
+      } catch { /* numstat failed (e.g. root commit edge) — leave 0 */ }
+      commitDetails.push({ sha, message, author, filesChanged, linesAdded: cAdded, linesRemoved: cRemoved });
     } catch {
       // If we can't get details for a commit, include it with minimal info
-      commitDetails.push({ sha, message: '', author: '', filesChanged: [] });
+      commitDetails.push({ sha, message: '', author: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 });
     }
   }
 
@@ -382,6 +407,98 @@ export function createShadowCommit(repoPath: string, tag: string): string | null
     }
   } catch {
     return null;
+  }
+}
+
+export interface AgyDiffResult {
+  diff: string;            // unified diff of agy's work since the baseline
+  filesChanged: string[];  // files agy actually touched (pre-existing dirt excluded)
+  linesAdded: number;
+  linesRemoved: number;
+}
+
+/**
+ * Capture ONLY the changes `agy` made since a per-conversation baseline.
+ *
+ * agy exposes no per-prompt git baseline and no session-start event, so the
+ * naive `git diff HEAD` sweeps in everything dirty in the tree — including
+ * uncommitted edits and untracked files that existed BEFORE the agy session
+ * (the bug behind "the diff is wrong": a stray `test.txt` / unrelated edits
+ * showing up as the agent's work).
+ *
+ * `baselineSha` is a shadow commit (createShadowCommit) — or the session-start
+ * HEAD when the tree was clean — snapshotting the pre-existing working tree.
+ * Diffing against it means:
+ *   - tracked edits that predate the session are in the baseline tree → excluded
+ *   - untracked files present at baseline are in the baseline tree → excluded
+ *     from the untracked append (the key leak this fixes)
+ * Only files that exist now but NOT in the baseline are treated as agy-created.
+ */
+export function captureAgyDiff(repoPath: string, baselineSha: string | null): AgyDiffResult {
+  const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const empty: AgyDiffResult = { diff: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 };
+  // No baseline → we CANNOT tell the agent's work apart from pre-existing dirt,
+  // so return empty rather than falling back to `git diff HEAD` (which dumps the
+  // whole dirty tree and mis-attributes pre-existing changes to a read-only
+  // turn). A clean-start session records its baseline as the session-start HEAD
+  // sha, so the caller still passes a real sha in that case — only the
+  // genuinely-unset case lands here.
+  if (!baselineSha || !HEX.test(baselineSha)) return empty;
+  const base = baselineSha;
+
+  // Resolve the baseline TREE (the shadow's snapshot of the pre-existing tree;
+  // a bare HEAD sha resolves to its own tree).
+  const baseTree = gitOrNull(['rev-parse', `${base}^{tree}`], gitOpts);
+  if (!baseTree || !HEX.test(baseTree)) return empty;
+
+  // Snapshot the CURRENT working tree (tracked + untracked) as a tree object,
+  // then diff tree-to-tree. This is the only way to get a clean delta: a plain
+  // `git diff <shadow>` compares the index to the shadow tree, so pre-existing
+  // untracked files (in the shadow tree, absent from the index) surface as
+  // spurious deletions. Tree-to-tree cancels anything identical in both.
+  const curTree = writeWorkingTree(repoPath, gitOpts);
+  if (!curTree) return empty;
+
+  let diff = '';
+  const files = new Set<string>();
+  try {
+    diff = git(['diff', '--unified=2000', baseTree, curTree], gitOpts).trim();
+    const names = git(['diff', '--name-only', baseTree, curTree], gitOpts).trim();
+    if (names) for (const f of names.split('\n').filter(Boolean)) files.add(f);
+  } catch { /* best-effort */ }
+
+  diff = stripIgnoredSectionsFromDiff(diff);
+  if (diff.length > MAX_DIFF_SIZE) diff = diff.slice(0, MAX_DIFF_SIZE);
+
+  let linesAdded = 0;
+  let linesRemoved = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
+    else if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+  }
+  // Keep only files whose hunks survived stripIgnoredSectionsFromDiff (drops
+  // Origin's own AGENTS.md / GEMINI.md bookkeeping from the count too).
+  const filesChanged = [...files].filter(f => diff.includes(`b/${f}`));
+  return { diff, filesChanged, linesAdded, linesRemoved };
+}
+
+/**
+ * Write the current working tree (HEAD + staged + unstaged + untracked) to the
+ * git object store as a tree object via a private temp index, WITHOUT touching
+ * .git/index or the user's working tree. Returns the tree SHA, or null.
+ */
+function writeWorkingTree(repoPath: string, gitOpts: { cwd: string; timeoutMs: number; maxBuffer: number }): string | null {
+  const tmpIndex = path.join(os.tmpdir(), `origin-agy-tree-${process.pid}-${Date.now()}.idx`);
+  const indexOpts = { ...gitOpts, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } };
+  try {
+    git(['read-tree', 'HEAD'], indexOpts);
+    try { git(['add', '-A', '--', '.'], indexOpts); } catch { /* best-effort */ }
+    const tree = git(['write-tree'], indexOpts).trim();
+    return HEX.test(tree) ? tree : null;
+  } catch {
+    return null;
+  } finally {
+    try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
   }
 }
 

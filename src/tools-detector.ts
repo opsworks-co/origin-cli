@@ -16,6 +16,7 @@ const CLI_CHECKS = [
   { name: 'code',      cmd: 'which code' },       // VS Code
   { name: 'codium',    cmd: 'which codium' },      // VSCodium
   { name: 'codex',     cmd: 'which codex' },       // OpenAI Codex CLI
+  { name: 'antigravity', cmd: 'which agy' },        // Google Antigravity CLI (binary: agy)
 ];
 
 // ── IDE extensions that indicate AI tool usage ───────────────────────────────
