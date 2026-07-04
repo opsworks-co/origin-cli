@@ -1,6 +1,6 @@
 # Origin CLI Documentation
 
-Origin is an AI coding governance platform that tracks, attributes, and governs AI-assisted code across your team. The CLI hooks into AI coding agents (Claude Code, Cursor, Gemini, Windsurf, Aider) to capture session data, enforce policies, and provide attribution analytics.
+Origin is an AI coding governance platform that tracks, attributes, and governs AI-assisted code across your team. The CLI hooks into AI coding agents (Claude Code, Cursor, Codex, Gemini, Antigravity, Windsurf, Aider) to capture session data, enforce policies, and provide attribution analytics.
 
 ## Table of Contents
 

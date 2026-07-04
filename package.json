@@ -1,6 +1,7 @@
 {
   "name": "@origin/cli",
   "version": "0.20260704.1959",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "origin": "./dist/index.js"

@@ -10,14 +10,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dolobanko/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
+  <a href="https://github.com/opsworks-co/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
   <a href="https://getorigin.io"><img src="https://img.shields.io/badge/web-getorigin.io-6366f1" alt="Website"></a>
 </p>
 
 ---
 
 Origin runs silently next to any AI coding agent — Claude Code, Cursor, Codex,
-Gemini CLI, Aider, Windsurf, Copilot, and more — and captures every session:
+Gemini CLI, Antigravity, Windsurf, and more — and captures every session:
 prompts, files touched, tokens, cost, diffs. All of it lives in your git repo as
 notes and refs. `git clone` brings the history with the code. No server, no
 login, no API keys required.
@@ -97,7 +97,7 @@ No telemetry by default. Opt in with `origin config set telemetry true`.
 
 ## Supported agents
 
-**Shipping:** Claude Code · Cursor · Codex CLI · Gemini CLI · Windsurf
+**Shipping:** Claude Code · Cursor · Codex (CLI + IDE) · Gemini CLI · Antigravity · Windsurf
 **In development:** Aider · GitHub Copilot · Cody · Continue · Codeium · Cline
 
 Detection runs on CLI availability, IDE extension inspection, MCP config, and
