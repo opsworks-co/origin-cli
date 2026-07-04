@@ -1,0 +1,16 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "a6cdfb73-d8c6-4c1f-a54c-6374d2dd7f8c",
+    "model": "claude",
+    "promptCount": 13,
+    "promptSummary": "we need a permamnen fix this issue happens regularly",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 33,
+    "linesRemoved": 4,
+    "originUrl": "https://getorigin.io/sessions/a6cdfb73-d8c6-4c1f-a54c-6374d2dd7f8c",
+    "timestamp": "2026-04-08T03:35:44.495Z"
+  }
+}

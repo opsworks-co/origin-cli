@@ -1,0 +1,16 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "local-d4f05372-98eb-4942-abf6-79292eeda3a5",
+    "model": "claude-code",
+    "promptCount": 116,
+    "promptSummary": "So, what the fuck is wrong with you? Where is your last answer? I don't see it again.",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 121,
+    "linesRemoved": 64,
+    "originUrl": "https://getorigin.io/sessions/local-d4f05372-98eb-4942-abf6-79292eeda3a5",
+    "timestamp": "2026-04-05T16:06:40.984Z"
+  }
+}

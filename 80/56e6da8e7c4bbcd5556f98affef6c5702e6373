@@ -1,0 +1,17 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "34c4ef7c-a91e-42c7-828b-7baabfc56815",
+    "model": "claude-opus-4-7",
+    "agent": "claude-code",
+    "promptCount": 2,
+    "promptSummary": "deploy the shit and update github repos including origin-cli",
+    "tokensUsed": 21877,
+    "costUsd": 10.8044,
+    "durationMs": 7635066,
+    "linesAdded": 474,
+    "linesRemoved": 88,
+    "originUrl": "https://getorigin.io/sessions/34c4ef7c-a91e-42c7-828b-7baabfc56815",
+    "timestamp": "2026-05-05T18:37:42.374Z"
+  }
+}
