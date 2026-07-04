@@ -1,0 +1,16 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "detected-claude-mn91dhqy",
+    "model": "claude",
+    "promptCount": 0,
+    "promptSummary": "",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 90,
+    "linesRemoved": 40,
+    "originUrl": "https://getorigin.io/sessions/detected-claude-mn91dhqy",
+    "timestamp": "2026-03-27T15:08:28.811Z"
+  }
+}
