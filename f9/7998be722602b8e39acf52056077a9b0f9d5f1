@@ -1,0 +1,16 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "local-113d9117-c1a6-4288-8c64-a1745f37944b",
+    "model": "claude-code",
+    "promptCount": 3,
+    "promptSummary": "Artem D, [3/28/26 9:49 AM]\nartemdolobanko@Artems-MacBook-Pro opaloka % tail -200 ~/.origin/hooks.log | grep -E \"session-start|session-end|reusing|no state|heartbeat|calling api\\.(start|end)\"\n[2026-03-...",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 1,
+    "linesRemoved": 1,
+    "originUrl": "https://getorigin.io/sessions/local-113d9117-c1a6-4288-8c64-a1745f37944b",
+    "timestamp": "2026-03-28T13:54:24.435Z"
+  }
+}

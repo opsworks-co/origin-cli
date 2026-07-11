@@ -1,0 +1,16 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "detected-codex-mr6zezzl",
+    "model": "codex",
+    "promptCount": 0,
+    "promptSummary": "",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 6223,
+    "linesRemoved": 2471,
+    "originUrl": "https://getorigin.io/sessions/detected-codex-mr6zezzl",
+    "timestamp": "2026-07-04T23:16:56.626Z"
+  }
+}
