@@ -1,0 +1,16 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "detected-claude-mn2letol",
+    "model": "claude",
+    "promptCount": 0,
+    "promptSummary": "",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 26,
+    "linesRemoved": 8,
+    "originUrl": "https://getorigin.io/sessions/detected-claude-mn2letol",
+    "timestamp": "2026-03-23T02:54:59.971Z"
+  }
+}
