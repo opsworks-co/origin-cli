@@ -67,6 +67,7 @@ import {
 import { attachOrphanCommitFiles } from '../prompt-completeness.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, type PromptNoteEntry } from '../git-notes.js';
+import { parseMarkersFromTranscript, parseMarkersFromTranscriptPath } from '../origin-markers.js';
 import { redactSecrets } from '../redaction.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
@@ -4687,6 +4688,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             previousSessionId: state.previousSessionId,
             filesRead: state.filesRead,
             prompts: buildPromptNoteEntries(state, agentSlug || state.agentSlug, model || state.model, promptEditsByIndex),
+            markers: parseMarkersFromTranscript(parsed.transcript),
             tokensUsed: parsed.tokensUsed,
             costUsd,
             durationMs: durationMs > 0 ? durationMs : 0,
@@ -5253,6 +5255,10 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
           previousSessionId: state.previousSessionId,
           filesRead: state.filesRead,
           prompts: buildPromptNoteEntries(state, agentSlug || state.agentSlug, model, promptEditsByIndex),
+          // Parse the agent's own [Origin: …] markers from the transcript so
+          // the "why" behind this change travels in the note (pulled per-file
+          // by a later agent via get_file_context). Non-fatal on parse error.
+          markers: parseMarkersFromTranscript(parsed.transcript),
           tokensUsed: parsed.tokensUsed,
           costUsd,
           durationMs,
@@ -5877,6 +5883,10 @@ export async function handlePostCommit(): Promise<void> {
       previousSessionId: state?.previousSessionId,
       filesRead: state?.filesRead,
       prompts: state ? buildPromptNoteEntries(state, state.agentSlug, noteModel || state.model) : undefined,
+      // No in-memory transcript here (post-commit hook) — read markers from
+      // the session's transcript file. Matters for Codex, which routes its
+      // note writes through this path.
+      markers: parseMarkersFromTranscriptPath(state?.transcriptPath),
       tokensUsed: 0,
       costUsd: 0,
       durationMs: 0,

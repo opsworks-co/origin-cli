@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { redactSecrets } from './redaction.js';
 import { api } from './api.js';
 import { loadConfig, loadRepoConfig } from './config.js';
+import type { OriginMarkers } from './origin-markers.js';
 
 function redact(text: string): string {
   return redactSecrets(text || '').redacted;
@@ -65,6 +66,13 @@ export interface GitNoteData {
   // refs/notes/origin can see this without an Origin DB account. Capped
   // per-prompt to keep notes under push-friendly size limits.
   prompts?: PromptNoteEntry[];
+  // The agent's own `[Origin: Intent/Decision/Open/Verify]` markers, parsed
+  // from this session's transcript. This is the "why" behind the change —
+  // the single most valuable thing for the NEXT agent (it stops a later
+  // agent "fixing" something that was deliberate). Session-level (not
+  // per-prompt): every commit from the session carries the same markers.
+  // Treated as prompt text for privacy: withheld when notes are metadata-only.
+  markers?: OriginMarkers;
   // Origin web URL where the full session can be inspected (for users in
   // the same org).
   originUrl: string;
@@ -119,6 +127,32 @@ function capEditsJsonForNote(raw: string | null | undefined): string | undefined
   if (Buffer.byteLength(raw, 'utf-8') <= EDITS_JSON_MAX_BYTES) return raw;
   const slice = raw.slice(0, EDITS_JSON_MAX_BYTES - EDITS_TRUNCATED_MARKER.length);
   return slice + EDITS_TRUNCATED_MARKER;
+}
+
+// Cap + redact the marker buckets before they go into a note. Bounded so
+// a chatty session can't bloat the note; each entry is redacted like any
+// other prompt-derived text. Returns undefined when nothing survives.
+const MARKERS_MAX_PER_BUCKET = 12;
+function sanitizeMarkersForNote(markers: OriginMarkers | undefined): OriginMarkers | undefined {
+  if (!markers) return undefined;
+  const clean = (arr: string[] | undefined): string[] | undefined => {
+    if (!arr || arr.length === 0) return undefined;
+    const out = arr
+      .slice(0, MARKERS_MAX_PER_BUCKET)
+      .map((s) => redact(s))
+      .filter((s) => s.length > 0);
+    return out.length ? out : undefined;
+  };
+  const result: OriginMarkers = {};
+  const intent = clean(markers.intent);
+  const decision = clean(markers.decision);
+  const open = clean(markers.open);
+  const verify = clean(markers.verify);
+  if (intent) result.intent = intent;
+  if (decision) result.decision = decision;
+  if (open) result.open = open;
+  if (verify) result.verify = verify;
+  return intent || decision || open || verify ? result : undefined;
 }
 
 // Build the serialized note payload. Pure — exported for tests. When
@@ -182,6 +216,9 @@ export function buildNotePayload(data: GitNoteData, includePromptText: boolean):
         previousSessionId: data.previousSessionId || undefined,
         filesRead,
         prompts,
+        // Markers are the agent's own commentary — gate them behind the
+        // same prompt-text privacy switch as promptSummary/fullPrompt.
+        markers: includePromptText ? sanitizeMarkersForNote(data.markers) : undefined,
         tokensUsed: data.tokensUsed,
         costUsd: parseFloat(data.costUsd.toFixed(4)),
         durationMs: data.durationMs,
@@ -218,6 +255,11 @@ export function scrubNoteObject(note: any): { changed: boolean; scrubbed: any } 
   }
   if (typeof origin.fullPrompt === 'string' && origin.fullPrompt.length > 0) {
     delete origin.fullPrompt;
+    changed = true;
+  }
+  // Markers are agent commentary — drop them under the metadata-only gate.
+  if (origin.markers && typeof origin.markers === 'object') {
+    delete origin.markers;
     changed = true;
   }
   if (Array.isArray(origin.prompts)) {

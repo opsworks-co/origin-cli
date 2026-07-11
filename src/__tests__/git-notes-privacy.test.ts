@@ -13,6 +13,7 @@ import type { GitNoteData } from '../git-notes.js';
 
 const SECRET_PROMPT = 'rewrite the billing engine before the acquisition call';
 const SECRET_SUMMARY = 'billing engine rewrite for acquisition';
+const SECRET_DECISION = 'kept the acquisition pricing table hardcoded for now';
 
 function noteData(): GitNoteData {
   return {
@@ -39,6 +40,10 @@ function noteData(): GitNoteData {
         commitSha: 'head456',
       },
     ],
+    markers: {
+      intent: ['ship billing rewrite'],
+      decision: [SECRET_DECISION],
+    },
     originUrl: 'https://getorigin.io/sessions/sess-1',
     tokensUsed: 1000,
     costUsd: 1.23,
@@ -59,6 +64,9 @@ describe('buildNotePayload with prompt text opted out', () => {
     expect(parsed.origin.fullPrompt).toBeUndefined();
     expect(parsed.origin.model).toBe('claude-fable-5');
     expect(parsed.origin.promptCount).toBe(2);
+    // Markers are agent commentary — withheld in the opted-out posture.
+    expect(payload).not.toContain('acquisition pricing table');
+    expect(parsed.origin.markers).toBeUndefined();
     const p0 = parsed.origin.prompts[0];
     expect(p0.text).toBeUndefined();
     expect(p0.files).toEqual(['src/billing.ts']);
@@ -77,6 +85,9 @@ describe('buildNotePayload with prompt text opted out', () => {
     expect(parsed.origin.promptTextWithheld).toBeUndefined();
     expect(parsed.origin.prompts[0].text).toBe(SECRET_PROMPT);
     expect(JSON.parse(parsed.origin.prompts[0].editsJson).promptText).toBe(SECRET_PROMPT);
+    // Markers travel in the opted-in (default) posture — the "why".
+    expect(parsed.origin.markers.decision).toEqual([SECRET_DECISION]);
+    expect(parsed.origin.markers.intent).toEqual(['ship billing rewrite']);
   });
 });
 
@@ -88,6 +99,7 @@ describe('scrubNoteObject (retroactive cleanup)', () => {
     const serialized = JSON.stringify(scrubbed);
     expect(serialized).not.toContain('billing engine');
     expect(serialized).not.toContain('acquisition');
+    expect(scrubbed.origin.markers).toBeUndefined();
     expect(scrubbed.origin.promptTextWithheld).toBe(true);
     expect(scrubbed.origin.model).toBe('claude-fable-5');
     expect(scrubbed.origin.prompts[0].files).toEqual(['src/billing.ts']);
