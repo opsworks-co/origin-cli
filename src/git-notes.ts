@@ -1,4 +1,8 @@
 import { execFileSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as crypto from 'crypto';
 import { redactSecrets } from './redaction.js';
 import { api } from './api.js';
 import { loadConfig, loadRepoConfig } from './config.js';
@@ -331,6 +335,56 @@ export function syncNotesFromRemote(repoPath: string): boolean {
     if (beforeSha === remoteSha) return false;
     execFileSync('git', ['notes', '--ref=refs/notes/origin', 'merge', '-s', 'ours', 'refs/notes/origin-remote'], execOpts);
     return refSha(repoPath, 'refs/notes/origin') !== beforeSha;
+  } catch {
+    return false;
+  }
+}
+
+// ─── SessionStart notes fetch (throttled) ────────────────────────────────
+//
+// syncNotesFromRemote installs a persistent refspec so ordinary `git pull`s
+// carry notes down — but a FRESH clone that hasn't pulled since (the exact
+// "new teammate opens the repo" case) starts with no local notes, so the
+// SessionStart "Repository AI context" block renders almost nothing until
+// the user runs `origin link`/`blame`. Wiring the sync into SessionStart
+// closes that gap, but SessionStart fires on every agent launch, so we
+// gate the fetch behind a per-repo backoff: once the notes are present the
+// refspec keeps them fresh on normal pulls and re-fetching every launch
+// would just add latency. Hot-path cost when throttled is a single stat().
+const NOTES_SYNC_BACKOFF_MS = 6 * 60 * 60 * 1000;
+
+function notesSyncStampPath(repoPath: string): string {
+  const key = crypto.createHash('sha256').update(repoPath).digest('hex').slice(0, 16);
+  return path.join(os.homedir(), '.origin', 'notes-sync', `${key}.stamp`);
+}
+
+// Fetch remote notes at most once per backoff window per repo. Returns true
+// when a fetch actually ran this call (regardless of whether it changed any
+// local notes). Best-effort and silent: a missing remote, offline, or no
+// upstream notes all degrade to a no-op, and the persistent refspec still
+// carries notes on the next ordinary pull. Safe to call on every
+// SessionStart.
+export function syncNotesFromRemoteThrottled(repoPath: string): boolean {
+  const stamp = notesSyncStampPath(repoPath);
+  try {
+    if (Date.now() - fs.statSync(stamp).mtimeMs < NOTES_SYNC_BACKOFF_MS) return false;
+  } catch {
+    // No stamp yet — first sync for this repo (the fresh-clone case). Fall
+    // through and fetch.
+  }
+  // Stamp BEFORE fetching so a slow/hanging network can't let concurrent
+  // session starts pile up parallel fetches, and a persistently failing
+  // fetch still waits out the window (the refspec covers the gap on the
+  // next pull).
+  try {
+    fs.mkdirSync(path.dirname(stamp), { recursive: true });
+    fs.writeFileSync(stamp, new Date().toISOString());
+  } catch {
+    // Can't persist the stamp (read-only home, etc.) — proceed once anyway.
+  }
+  try {
+    syncNotesFromRemote(repoPath);
+    return true;
   } catch {
     return false;
   }

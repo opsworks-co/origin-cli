@@ -122,11 +122,18 @@ export function extractEditsFromToolCall(
       source: 'tool_call',
     });
   } else if (CLAUDE_WRITE_TOOLS.has(name)) {
+    // Cursor's `Write` carries the file body in `contents` (plural), not
+    // `content`/`file_text`. Without this, every Cursor write was treated as
+    // content-less and backfilled from the LATER live file — so each turn's
+    // per-prompt diff showed the whole current file as additions (bubba:
+    // "remove 1 and add 4" read +8 for an 8-line file instead of +4/-1).
     const content = typeof toolInput.content === 'string'
       ? toolInput.content
       : typeof toolInput.file_text === 'string'
         ? toolInput.file_text
-        : '';
+        : typeof toolInput.contents === 'string'
+          ? toolInput.contents
+          : '';
     out.push({ file: repoRelative, op: 'write', newContent: content, source: 'tool_call' });
   } else if (CLAUDE_MULTI_EDIT_TOOLS.has(name) && Array.isArray(toolInput.edits)) {
     for (const e of toolInput.edits) {
@@ -261,6 +268,21 @@ function editKey(e: PromptEdit): string {
  *     edit (that file is accounted for — keeping it would double-count lines);
  *   • promptText and commit SHAs come from the transcript (the ledger has
  *     neither).
+ *
+ * RESUME RE-HOMING: the ledger's promptIndex is stamped from the live
+ * `state.prompts.length - 1` counter, which RESETS when a session is resumed
+ * after a gap (a fresh session-state is created for the same logical session).
+ * Post-resume edits then reuse pre-resume indices — e.g. turn 5's whole-file
+ * write is filed under index 1 and collides with turn 1's create (prod session
+ * e0d3ddc9: turn 5's 19-row write welded onto turn 1, turn 4's edit onto the
+ * chat-only turn 0). The TRANSCRIPT is parsed from the full ordered
+ * conversation, so its per-prompt structure is the source of truth for WHICH
+ * prompt an edit belongs to. Re-home every ledger edit whose content matches a
+ * transcript edit to that transcript prompt, keeping the ledger's own index
+ * only for edits the transcript never captured (the ledger's genuine value:
+ * untruncated tool inputs the transcript missed). This is a NO-OP for a normal
+ * (non-resumed) session — each ledger edit already matches its own index — and
+ * is agent-agnostic (any agent whose live ledger + transcript disagree).
  */
 export function mergeLedgerWithTranscript(
   ledger: PromptCapture[],
@@ -268,14 +290,34 @@ export function mergeLedgerWithTranscript(
 ): PromptCapture[] {
   if (!ledger || ledger.length === 0) return transcript;
   const byIndex = new Map<number, PromptCapture>();
+  const ensureCap = (idx: number, seed?: PromptCapture): PromptCapture => {
+    let cap = byIndex.get(idx);
+    if (!cap) {
+      cap = { promptIndex: idx, promptText: seed?.promptText || '', agent: seed?.agent || 'claude', edits: [], commits: [] };
+      byIndex.set(idx, cap);
+    }
+    return cap;
+  };
+  // Content-key → the transcript prompt that actually authored it (first
+  // occurrence wins, matching the earliest-prompt ownership the server uses).
+  const homeByEditKey = new Map<string, number>();
+  for (const tcap of transcript || []) {
+    for (const e of tcap.edits) {
+      const k = editKey(e);
+      if (!homeByEditKey.has(k)) homeByEditKey.set(k, tcap.promptIndex);
+    }
+  }
   for (const cap of ledger) {
-    byIndex.set(cap.promptIndex, {
-      promptIndex: cap.promptIndex,
-      promptText: cap.promptText || '',
-      agent: cap.agent,
-      edits: [...cap.edits],
-      commits: [...(cap.commits || [])],
-    });
+    for (const e of cap.edits) {
+      const home = homeByEditKey.get(editKey(e));
+      ensureCap(home !== undefined ? home : cap.promptIndex, cap).edits.push(e);
+    }
+    // Ledger commits are empty in practice, but preserve any at the ledger's
+    // own index (they carry no content to re-home on).
+    if (cap.commits && cap.commits.length) {
+      const c = ensureCap(cap.promptIndex, cap);
+      for (const sha of cap.commits) if (!c.commits.includes(sha)) c.commits.push(sha);
+    }
   }
   for (const tcap of transcript || []) {
     const cap = byIndex.get(tcap.promptIndex);
@@ -467,6 +509,18 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
 
   if (current) turns.push(current);
   attributeCommitsToPrompts(turns, opts);
+  // Cursor's `Write` tool records only the file PATH in the transcript, not the
+  // written CONTENT — so the tool_call edit is content-less. Backfill the
+  // content from git/disk BEFORE the supplement pass (which would otherwise
+  // treat the path-only edit as "already covered" and skip it).
+  backfillContentLessWrites(turns, opts);
+  // Whole-file-write agents (Cursor) re-emit the ENTIRE file each turn, so a
+  // rewrite's newContent is the full file with no oldContent — the per-prompt
+  // synthesized diff then counts every line as added. Chain consecutive writes
+  // into real deltas by giving each rewrite the file's prior in-session content
+  // as oldContent. Runs AFTER backfill so content-less writes already have
+  // their bodies.
+  chainWholeFileWrites(turns);
   // Transcript agents also edit files via shell (Gemini run_shell_command,
   // Claude/Cursor Bash with `cat >`/`>` redirects); those writes aren't
   // captured as tool_call edits. Backfill them from the commits each turn
@@ -713,12 +767,36 @@ function extractFromCodexRollout(opts: CaptureInputs): PromptCapture[] {
     if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output') {
       const out = stringifyCodexOutput(payload?.output);
       if (!out) continue;
-      for (const sha of extractGitShasFromOutput(out)) {
+      for (const marker of extractGitShasFromOutput(out)) {
+        // `git commit` prints a SHORT sha (`[branch abc1234]`), but the
+        // post-commit hook records the FULL 40-char sha (`git rev-parse
+        // HEAD`) in sessionCommitShas. A plain `Set(fullShas).has(short)`
+        // never matches, so once the hook fired we dropped every
+        // commit-derived edit — leaving editsJson with no file for the
+        // session and making the server's session diff fall through to the
+        // unscoped whole-repo `git diff HEAD` (the unrelated-file "+202"
+        // leak). Match by prefix and prefer the full sha for downstream
+        // attribution so blame/commit-detail key off the same sha git does.
+        const ownShas = (opts.sessionCommitShas || []).filter((s) => HEX.test(s));
+        const m = marker.toLowerCase();
+        let sha = marker;
+        if (ownShas.length > 0) {
+          const matched = ownShas.find((full) => {
+            const f = full.toLowerCase();
+            return f === m || f.startsWith(m) || m.startsWith(f);
+          });
+          if (!matched) continue; // not one of this session's commits
+          sha = matched;
+        } else {
+          // No ownership list to resolve against — expand the short marker
+          // to its full sha ourselves so commit-derived edits key off the
+          // same 40-char sha the rest of the pipeline uses.
+          try {
+            const full = execFileSync('git', ['rev-parse', `${marker}^{commit}`], gitOpts).trim();
+            if (HEX.test(full)) sha = full;
+          } catch { /* unresolvable marker — fall back to the short form */ }
+        }
         if (seenShas.has(sha)) continue;
-        // Constrain to commits this session authored when the post-commit
-        // hook gave us that list; otherwise trust the output marker.
-        const ownShas = new Set((opts.sessionCommitShas || []).filter((s) => HEX.test(s)));
-        if (ownShas.size > 0 && !ownShas.has(sha)) continue;
         seenShas.add(sha);
         turns[currentPromptIdx].commits.push(sha);
         appendCommitEdits(turns[currentPromptIdx], sha, opts.repoPath, gitOpts);
@@ -941,6 +1019,17 @@ function appendCommitEdits(
   // Pull each changed file's BEFORE blob via `git show <sha>^:<file>` and
   // AFTER blob via `git show <sha>:<file>`. New files have no `^:` blob;
   // deletions have no `:` blob — handle both.
+  // Files this turn already captured via a precise tool-call edit
+  // (apply_patch). That hunk is the ground truth for the change; adding a
+  // second source:'commit' edit for the same file makes the turn's
+  // editsJson carry the change twice and the per-turn view renders it as
+  // two hunks — the "+20 for a +10 append" double-count on prod session
+  // d3a36b7e. Mirror supplementUncoveredCommittedFiles' covered-set guard:
+  // for a file already covered, just stamp the tool-call edits with this
+  // commit's sha (so they still render as committed) and skip the blob.
+  const covered = new Set(
+    turn.edits.filter((e) => e.source !== 'commit').map((e) => e.file),
+  );
   let names: string;
   try {
     names = execFileSync(
@@ -955,6 +1044,14 @@ function appendCommitEdits(
     const status = parts[0];
     const file = parts.slice(1).join(' '); // handle paths with spaces (rare)
     const repoRelative = makeRepoRelative(file, repoPath);
+    if (covered.has(repoRelative)) {
+      for (const e of turn.edits) {
+        if (e.file === repoRelative && e.source !== 'commit' && !e.commitSha) {
+          e.commitSha = sha;
+        }
+      }
+      continue;
+    }
     let oldContent: string | undefined;
     let newContent: string | undefined;
     if (status !== 'A' && status !== 'D') {
@@ -1053,6 +1150,158 @@ function supplementUncoveredCommittedFiles(turns: PromptCapture[], opts: Capture
         source: 'commit',
         commitSha: sha,
       });
+    }
+  }
+}
+
+// Fill in the CONTENT of write/create edits that carry a file path but no
+// newContent. Cursor's `Write` tool logs only the file path in the transcript
+// (`[Tool: Write]\n<path>`) — the written content lives in Cursor's internal
+// composer DB, which the CLI doesn't read — so extractEditsFromToolCall emits
+// `op:'write', newContent:''`. Left as-is, synthesizePromptDiff has nothing to
+// render and the turn's created files show blank (and AI Blame can't attribute
+// their lines). Recover the content from git: each such edit is stamped by
+// attributeCommitsToPrompts with the commit its file landed in, so
+// `git show <sha>:<file>` yields the exact committed bytes; for a write that is
+// still uncommitted, read the current working-tree file. Upgrades the edit IN
+// PLACE (op/position preserved) so it stays a single tool_call edit rather than
+// a duplicate `source:'commit'` one. Runs for every JSONL agent but is a no-op
+// unless an edit is genuinely content-less, so Claude/Gemini writes (which DO
+// carry content) are untouched.
+//
+// Caveat: when a file is written by this prompt AND edited by a later prompt in
+// the same commit, `git show` returns the FINAL bytes, so a shared file is
+// credited to the writer in full. Files only this prompt touched are exact.
+// Best-effort: any git/fs failure leaves the edit content-less (the server's
+// session-diff reconstruction still covers the display).
+export function backfillContentLessWrites(turns: PromptCapture[], opts: CaptureInputs): void {
+  if (!opts.repoPath) return;
+  const gitOpts = { cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  for (let ti = 0; ti < turns.length; ti++) {
+    const turn = turns[ti];
+    for (let ei = 0; ei < turn.edits.length; ei++) {
+      const e = turn.edits[ei];
+      if (e.op !== 'write' && e.op !== 'create') continue;
+      if (typeof e.newContent === 'string' && e.newContent.length > 0) continue; // already has content
+
+      // Edits to the SAME file that happened AFTER this write (rest of
+      // this turn, then every later turn). Both the commit blob and the
+      // live file reflect the state AFTER those edits — a commit made by
+      // a later turn sweeps this file, and attributeCommitsToPrompts
+      // stamps that sha on THIS turn too, so blindly reading the blob
+      // credited this prompt with later prompts' lines (prod petrushka
+      // 8661b904: prompt 1's write backfilled with the 6-row file prompt
+      // 2 had extended; API #575 covers display, this fixes the source).
+      const sameFile = (f: string) => f === e.file || f.endsWith('/' + e.file) || e.file.endsWith('/' + f);
+      const laterEdits: typeof turn.edits = [];
+      let laterRewrite = false;
+      const scanEdits = (edits: typeof turn.edits, from: number) => {
+        for (let k = from; k < edits.length; k++) {
+          const o = edits[k];
+          if (!sameFile(o.file)) continue;
+          if (o.op === 'write' || o.op === 'create') laterRewrite = true;
+          else if (o.op === 'edit') laterEdits.push(o);
+        }
+      };
+      scanEdits(turn.edits, ei + 1);
+      for (let tj = ti + 1; tj < turns.length; tj++) scanEdits(turns[tj].edits, 0);
+      if (laterRewrite) {
+        // A later whole-file write replaced the content wholesale — this
+        // turn's version is unrecoverable from current state. Leave the
+        // edit content-less (the server's reconstruction handles display)
+        // rather than stamping another turn's file onto this one.
+        e.backfillSource = 'skipped-later-rewrite';
+        continue;
+      }
+
+      // Commit path first: the edit's own sha, then any sha this turn owns.
+      const shas: string[] = [];
+      if (typeof e.commitSha === 'string' && HEX.test(e.commitSha)) shas.push(e.commitSha);
+      for (const s of turn.commits) if (HEX.test(s) && !shas.includes(s)) shas.push(s);
+      let content: string | null = null;
+      let source = '';
+      for (const sha of shas) {
+        try {
+          const out = execFileSync('git', ['show', `${sha}:${e.file}`], gitOpts);
+          if (out) { content = out; source = 'commit-blob'; break; }
+        } catch { /* file not in this commit — try the next */ }
+      }
+      // Uncommitted write: read the current working-tree file.
+      if (!content) {
+        try {
+          const abs = path.isAbsolute(e.file) ? e.file : path.join(opts.repoPath, e.file);
+          content = fs.readFileSync(abs, 'utf-8');
+          source = 'live-file';
+        } catch { /* gone/unreadable — leave content-less */ }
+      }
+      if (!content) continue;
+
+      // Walk the file back to THIS turn's post-write state by
+      // reverse-applying later edits, newest first. Each edit's own
+      // old/new pair is exact; an edit whose newContent isn't present
+      // (e.g. it landed in a commit older than the blob we read) is a
+      // safe no-op.
+      let reversed = 0;
+      for (let k = laterEdits.length - 1; k >= 0; k--) {
+        const o = laterEdits[k];
+        const oldC = typeof o.oldContent === 'string' ? o.oldContent : '';
+        const newC = typeof o.newContent === 'string' ? o.newContent : '';
+        if (!oldC || !newC) continue;
+        if (content.includes(newC)) {
+          content = content.replace(newC, oldC);
+          reversed++;
+        }
+      }
+      e.newContent = content;
+      e.backfillSource = reversed > 0 ? `${source}+reversed-${reversed}` : source;
+    }
+  }
+}
+
+// Chain consecutive whole-file writes into per-turn deltas. Cursor rewrites the
+// ENTIRE file on every edit (op:'write', full body, no oldContent), so a turn
+// that only changed a couple of lines synthesized a diff that added the whole
+// file. We track the file's content as it evolves across turns (through writes
+// AND str-replace edits) and set each rewrite's oldContent to the file's state
+// BEFORE this turn — turning "+8 for an 8-line file" into the true "+4/-1".
+//
+// The FIRST write to a file keeps empty oldContent: an in-session create is a
+// genuine all-additions edit, and a first write to a PRE-existing file has a
+// baseline we can't see in the transcript (the server/git handles that one).
+// Exported for unit testing.
+export function chainWholeFileWrites(turns: PromptCapture[]): void {
+  const lastContent = new Map<string, string>();
+  for (const turn of turns) {
+    for (const e of turn.edits) {
+      if (e.op === 'write' || e.op === 'create') {
+        if (typeof e.newContent !== 'string' || e.newContent.length === 0) continue;
+        const prev = lastContent.get(e.file);
+        if (
+          prev != null && prev.length > 0 &&
+          prev !== e.newContent &&
+          (typeof e.oldContent !== 'string' || e.oldContent.length === 0)
+        ) {
+          e.oldContent = prev;
+          // It replaced content that already existed this session — a
+          // modification, not a create.
+          if (e.op === 'create') e.op = 'write';
+        }
+        lastContent.set(e.file, e.newContent);
+      } else if (e.op === 'edit') {
+        // Keep the tracked content in sync so a write AFTER an edit chains from
+        // the post-edit state, not the last full write.
+        const cur = lastContent.get(e.file);
+        if (
+          cur != null &&
+          typeof e.oldContent === 'string' && e.oldContent.length > 0 &&
+          typeof e.newContent === 'string' &&
+          cur.includes(e.oldContent)
+        ) {
+          lastContent.set(e.file, cur.replace(e.oldContent, e.newContent));
+        }
+      } else if (e.op === 'delete' || e.op === 'rename') {
+        lastContent.delete(e.file);
+      }
     }
   }
 }

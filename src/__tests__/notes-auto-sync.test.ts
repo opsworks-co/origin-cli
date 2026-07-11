@@ -12,7 +12,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { syncNotesFromRemote, NOTES_FETCH_REFSPEC } from '../git-notes.js';
+import { syncNotesFromRemote, syncNotesFromRemoteThrottled, NOTES_FETCH_REFSPEC } from '../git-notes.js';
 
 let tmpRoot: string;
 let upstream: string;
@@ -110,5 +110,30 @@ describe('syncNotesFromRemote', () => {
     execFileSync('git', ['init', lonely], { stdio: 'pipe' });
     muteHooks(lonely);
     expect(syncNotesFromRemote(lonely)).toBe(false);
+  });
+});
+
+// The SessionStart wrapper: syncs once per repo per backoff window so the
+// hot path isn't a `git fetch` on every agent launch. HOME is redirected
+// into the temp dir so the per-repo stamp never touches the real ~/.origin.
+describe('syncNotesFromRemoteThrottled', () => {
+  const realHome = process.env.HOME;
+  beforeEach(() => { process.env.HOME = tmpRoot; });
+  afterEach(() => { process.env.HOME = realHome; });
+
+  it('fetches on the first call, then throttles within the window', () => {
+    // Fresh clone: no local notes yet.
+    expect(() => git(clone, 'notes', '--ref=origin', 'show', 'HEAD')).toThrow();
+
+    // First call runs the sync and brings the upstream note down.
+    expect(syncNotesFromRemoteThrottled(clone)).toBe(true);
+    expect(git(clone, 'notes', '--ref=origin', 'show', 'HEAD')).toContain('claude-fable-5');
+
+    // A stamp was written under the redirected HOME.
+    const stampDir = path.join(tmpRoot, '.origin', 'notes-sync');
+    expect(fs.readdirSync(stampDir).length).toBeGreaterThan(0);
+
+    // Second call within the backoff window is a no-op (throttled).
+    expect(syncNotesFromRemoteThrottled(clone)).toBe(false);
   });
 });

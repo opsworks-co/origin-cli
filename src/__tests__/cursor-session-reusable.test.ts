@@ -57,4 +57,16 @@ describe('cursorSessionReusable — when a Cursor/Codex session-start may reuse 
     expect(cursorSessionReusable('claude-code', 'a', 'b')).toBe(true);
     expect(cursorSessionReusable(undefined, 'a', 'b')).toBe(true);
   });
+
+  // Prod incident efe174db/603dbf4a: the Cursor stop-hook auto-create built a
+  // session state but forgot to record agentSessionId. That empty id made this
+  // guard ADOPT it (case above), so a NEW chat's session-start reused the
+  // auto-created session and re-sent the prior chat's 6 prompts. The auto-create
+  // now sets agentSessionId; with the id recorded, a DIFFERENT chat is blocked —
+  // exactly the mismatch case. This pins the invariant the fix restores.
+  it('blocks a sibling chat from adopting an auto-created session that records its id', () => {
+    const autoCreatedChatId = '5588fbe2-5f8a-4092-b114-549b59628e2c'; // now recorded
+    const newChatId = 'e2aebd47-1315-4594-9eac-5757b4b994e1';
+    expect(cursorSessionReusable('cursor', newChatId, autoCreatedChatId)).toBe(false);
+  });
 });

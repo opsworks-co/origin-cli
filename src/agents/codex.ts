@@ -10,6 +10,7 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 import * as fzstd from 'fzstd';
 import { debugLog } from '../debug-log.js';
+import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
 
 // ─── Codex Session Data Discovery ─────────────────────────────────────────
 
@@ -57,9 +58,27 @@ export interface CodexSessionData {
  * mini-model / system-style / no-tools fallback for variants we lack an exact
  * string for. Exported for testing.
  */
+/**
+ * True only when the prompt UNMISTAKABLY identifies one of Codex's internal
+ * meta-calls — the ambient-suggestion safety filter. Safe to call on a LIVE
+ * hook prompt (user-prompt-submit) to drop it before capture: the match is
+ * ANCHORED to the prompt's start, so a user merely mentioning the feature
+ * ("why do Codex ambient suggestions show up as sessions?") is never dropped.
+ * Deliberately EXCLUDES the looser discovery-time patterns in
+ * isCodexInternalSubroutine below (substring ambient-mention, title
+ * generation, output summarizer) — dropping a live user prompt is worse than
+ * letting a rare meta-call through (the server-side subroutine sweep still
+ * archives whatever slips past). Tolerates non-string hook input.
+ */
+export function isKnownCodexInternalPrompt(prompt: unknown): boolean {
+  if (typeof prompt !== 'string') return false;
+  return /^You are an expert at upholding safety and compliance standards/i.test(prompt.trim());
+}
+
 export function isCodexInternalSubroutine(o: { model?: string | null; prompt?: string | null; toolCalls?: number }): boolean {
   const p = (o.prompt || '').trim();
   if (!p) return false;
+  if (isKnownCodexInternalPrompt(p)) return true;
   const KNOWN = [
     /Codex ambient suggestions/i,
     /You are an expert at upholding safety and compliance standards/i,
@@ -111,8 +130,9 @@ export function discoverCodexSessionData(
     };
 
     let raw = '';
-    if (opts.threadId && /^[A-Za-z0-9_-]+$/.test(opts.threadId)) {
-      const byIdQuery = `SELECT id, model, tokens_used, rollout_path, cwd, first_user_message FROM threads WHERE id = '${opts.threadId}' LIMIT 1;`;
+    const DISCOVER_COLS = 'id, model, tokens_used, rollout_path, cwd, first_user_message';
+    const byIdQuery = buildCodexThreadByIdQuery(DISCOVER_COLS, opts.threadId);
+    if (byIdQuery) {
       raw = execFileSync('sqlite3', [dbPath, byIdQuery], sqliteOpts).trim();
       if (!raw) {
         debugLog('codex', 'discoverCodexSessionData: threadId not found in SQLite', { threadId: opts.threadId });
@@ -123,9 +143,7 @@ export function discoverCodexSessionData(
       // exact match means concurrent codex threads in sibling repos
       // can't be confused for each other; if no row matches we bail
       // (callers expect null when nothing fits).
-      const exactCwd = repoPath.replace(/'/g, "''"); // escape single-quote for SQL
-      const byCwdQuery = `SELECT id, model, tokens_used, rollout_path, cwd, first_user_message FROM threads WHERE cwd = '${exactCwd}' ORDER BY updated_at DESC LIMIT 1;`;
-      raw = execFileSync('sqlite3', [dbPath, byCwdQuery], sqliteOpts).trim();
+      raw = execFileSync('sqlite3', [dbPath, buildCodexThreadByCwdQuery(DISCOVER_COLS, repoPath)], sqliteOpts).trim();
       if (!raw) {
         debugLog('codex', 'discoverCodexSessionData: no thread for exact cwd', { repoPath });
         return null;
@@ -272,17 +290,15 @@ export function findCodexRolloutPath(repoPath: string, threadId?: string): strin
     };
 
     let raw = '';
-    if (threadId && /^[A-Za-z0-9_-]+$/.test(threadId)) {
-      const byIdQuery = `SELECT id, rollout_path FROM threads WHERE id = '${threadId}' LIMIT 1;`;
+    const byIdQuery = buildCodexThreadByIdQuery('id, rollout_path', threadId);
+    if (byIdQuery) {
       raw = execFileSync('sqlite3', [stateFiles[0].path, byIdQuery], sqliteOpts).trim();
       if (!raw) {
         debugLog('codex', 'findCodexRolloutPath: threadId not in SQLite', { threadId });
         return null;
       }
     } else {
-      const exactCwd = repoPath.replace(/'/g, "''");
-      const byCwdQuery = `SELECT id, rollout_path FROM threads WHERE cwd = '${exactCwd}' ORDER BY updated_at DESC LIMIT 1;`;
-      raw = execFileSync('sqlite3', [stateFiles[0].path, byCwdQuery], sqliteOpts).trim();
+      raw = execFileSync('sqlite3', [stateFiles[0].path, buildCodexThreadByCwdQuery('id, rollout_path', repoPath)], sqliteOpts).trim();
       if (!raw) return null;
     }
     const parts = raw.split('|');

@@ -4,6 +4,8 @@ import chalk from 'chalk';
 import { loadConfig } from '../config.js';
 import { api } from '../api.js';
 import { git, gitOrNull } from '../utils/exec.js';
+import { getCanonicalRepoPath } from '../session-state.js';
+import { syncRepoHistory, BACKFILL_TIMEOUT_MS } from '../history-backfill.js';
 
 function getGitRoot(): string | null {
   return gitOrNull(['rev-parse', '--show-toplevel']);
@@ -39,6 +41,45 @@ export async function syncCommand() {
   console.log(chalk.bold('\n🔄 Syncing to Origin\n'));
   console.log(chalk.gray(`  Repository: ${repoName}`));
   console.log(chalk.gray(`  Git root: ${gitRoot}`));
+
+  // Commit history: advertise HEAD's ancestry and backfill whatever the
+  // server has never seen. This is the manual trigger for the same round
+  // the session-start and post-commit hooks run automatically — forced, so
+  // a user-invoked sync re-checks with the server even when the local sync
+  // marker says everything is current.
+  try {
+    // syncRepoHistory reports errors through its log callback (a failed
+    // advertise is status 'partial' with unknown 0) — capture the last one
+    // so a 403/network failure surfaces to the user instead of vanishing.
+    let lastError: string | undefined;
+    const history = await syncRepoHistory({
+      repoPath: getCanonicalRepoPath(gitRoot),
+      hookCwd: gitRoot,
+      force: true,
+      ingest: (data) => api.ingestCommits(data, { timeoutMs: BACKFILL_TIMEOUT_MS }),
+      log: (_message, data) => {
+        if (data && typeof data.message === 'string') lastError = data.message;
+      },
+    });
+    if (history.status === 'synced' && history.accepted > 0) {
+      console.log(chalk.green(`  ✓ Commit history: backfilled ${history.accepted} missing commit${history.accepted === 1 ? '' : 's'}`));
+    } else if (history.status === 'synced') {
+      // `advertised` is the checked window (capped at 500), NOT Origin's
+      // total — don't present it as such for large repos.
+      console.log(chalk.green(`  ✓ Commit history: up to date (checked the ${history.advertised} most recent commits)`));
+    } else if (history.status === 'partial' && history.unknown === 0) {
+      // The advertise request itself failed — nothing was synced at all.
+      console.log(chalk.yellow(`  ⚠ Commit history: sync request failed${lastError ? ` (${lastError})` : ''}`));
+    } else if (history.status === 'partial') {
+      console.log(chalk.yellow(`  ⚠ Commit history: partial sync (${history.accepted}/${history.unknown} missing commits sent)${lastError ? ` (${lastError})` : ''} — run again to retry`));
+    } else if (history.status === 'locked') {
+      console.log(chalk.yellow('  ⚠ Commit history: another sync is already running — try again in a few minutes'));
+    } else if (history.status === 'no-git') {
+      console.log(chalk.gray('  – Commit history: no commits to sync'));
+    }
+  } catch (err: any) {
+    console.log(chalk.yellow(`  ⚠ Commit history sync failed: ${err.message}`));
+  }
 
   // Check for .entire directory
   if (!fs.existsSync(entireDir)) {

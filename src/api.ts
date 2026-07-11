@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { loadConfig } from './config.js';
+import { fetchWithTimeout } from './fetch-timeout.js';
 
 function getConfig() {
   const config = loadConfig();
@@ -115,18 +116,18 @@ function assertFields(res: unknown, label: string, fields: string[]): asserts re
   }
 }
 
-async function request(path: string, opts: RequestInit = {}) {
+async function request(path: string, opts: RequestInit = {}, timeoutMs?: number) {
   const config = getConfig();
   let res: Response;
   try {
-    res = await fetch(`${config.apiUrl}${path}`, {
+    res = await fetchWithTimeout(`${config.apiUrl}${path}`, {
       ...opts,
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': config.apiKey,
         ...opts.headers as Record<string, string>,
       },
-    });
+    }, timeoutMs);
   } catch (err: any) {
     writeAuthStatus({
       state: 'unreachable',
@@ -230,6 +231,10 @@ export const api = {
     additionalRepoPaths?: string[];
     agentSessionId?: string;
     importedFromPreviousAccount?: boolean;
+    // Recent HEAD SHAs (newest first) — lets the server's basename-fallback
+    // repo gate corroborate a moved local-only checkout by SHA overlap, the
+    // same proof /commits/ingest offers via commits[] + its advertisement.
+    recentShas?: string[];
   }) => {
     // Single-key world: server federates session writes across the user's
     // memberships on read (see /api/me/* on the API). No client-side
@@ -282,6 +287,10 @@ export const api = {
   ingestCommits: async (data: {
     repoPath: string;
     repoUrl?: string;
+    // SHAs reachable from HEAD (newest first). Server replies with
+    // `unknownShas` — the subset it has no Commit row for — which the
+    // post-commit hook then backfills. See history-backfill.ts.
+    recentShas?: string[];
     commits: Array<{
       sha: string;
       message?: string;
@@ -296,8 +305,8 @@ export const api = {
       // changes instead of the session aggregate.
       diff?: string;
     }>;
-  }) => {
-    const res = await request('/api/mcp/commits/ingest', { method: 'POST', body: JSON.stringify(data) });
+  }, reqOpts?: { timeoutMs?: number }) => {
+    const res = await request('/api/mcp/commits/ingest', { method: 'POST', body: JSON.stringify(data) }, reqOpts?.timeoutMs);
     assertObj(res, 'ingestCommits');
     return res;
   },

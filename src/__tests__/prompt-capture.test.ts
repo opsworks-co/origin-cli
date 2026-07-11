@@ -282,3 +282,105 @@ describe('Cursor per-prompt isolation (no cumulative leak)', () => {
     }
   });
 });
+
+describe('Codex commit-and-go: no per-turn double-capture', () => {
+  // Regression for prod session d3a36b7e (Codex): a turn that BOTH
+  // apply_patch'd a file AND committed it rendered the change twice — the
+  // per-turn view showed "+20 -0" for a 10-line append (two hunks for the
+  // same file). Root cause: extractFromCodexRollout pushes the apply_patch
+  // edit (source:'tool_call') AND, on seeing the commit's `[branch sha]`
+  // marker, appendCommitEdits pushes a second source:'commit' edit for the
+  // SAME file with no dedup. The file must appear exactly once, and the
+  // surviving tool_call edit must carry the commit's sha so the UI still
+  // shows it as committed.
+  function makeRepo(): { tmp: string; git: (a: string[]) => string; shortSha: string; fullSha: string } {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-codex-cag-'));
+    const git = (args: string[]) => execFileSync('git', args, { cwd: tmp, encoding: 'utf-8' });
+    git(['init', '-q']);
+    git(['config', 'user.email', 't@t.co']);
+    git(['config', 'user.name', 'T']);
+    // Root commit so the stavdrica commit has a parent — appendCommitEdits'
+    // `git diff-tree -r <sha>` (no --root) reports nothing for a root commit.
+    fs.writeFileSync(path.join(tmp, 'seed.txt'), 'seed\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'seed']);
+    // The committed file whose change the apply_patch also authored.
+    const body = ['alpha', 'bravo', 'charlie', 'delta', 'echo'].map((l) => l + '\n').join('');
+    fs.writeFileSync(path.join(tmp, 'stavdrica'), body);
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'Add stavdrica']);
+    const fullSha = git(['rev-parse', 'HEAD']).trim();
+    const shortSha = fullSha.slice(0, 7);
+    return { tmp, git, shortSha, fullSha };
+  }
+
+  function rollout(tmp: string, shortSha: string, includeApplyPatch: boolean): string {
+    const patch =
+      '*** Begin Patch\n*** Add File: stavdrica\n' +
+      ['alpha', 'bravo', 'charlie', 'delta', 'echo'].map((l) => '+' + l).join('\n') +
+      '\n*** End Patch';
+    const lines: string[] = [
+      JSON.stringify({ payload: { type: 'message', role: 'user', content: [{ text: 'create stavdrica and commit' }] } }),
+    ];
+    if (includeApplyPatch) {
+      lines.push(JSON.stringify({ payload: { type: 'custom_tool_call', name: 'apply_patch', input: patch } }));
+    }
+    lines.push(JSON.stringify({ payload: { type: 'function_call_output', output: `[main ${shortSha}] Add stavdrica` } }));
+    const rp = path.join(tmp, 'rollout.jsonl');
+    fs.writeFileSync(rp, lines.join('\n'));
+    return rp;
+  }
+
+  it('records stavdrica once (not apply_patch + commit) and marks it committed', () => {
+    const { tmp, shortSha, fullSha } = makeRepo();
+    try {
+      const rp = rollout(tmp, shortSha, /* includeApplyPatch */ true);
+      const turns = capturePromptEdits({
+        agent: 'codex',
+        repoPath: tmp,
+        transcriptPath: rp,
+        // Empty list = live capture before post-commit recorded the sha:
+        // the output marker is trusted, so appendCommitEdits runs.
+        sessionCommitShas: [],
+      });
+      expect(turns.length).toBe(1);
+      const stav = turns[0].edits.filter((e) => e.file === 'stavdrica');
+      // Exactly one edit — the apply_patch tool_call, NOT a second commit blob.
+      expect(stav).toHaveLength(1);
+      expect(stav[0].source).toBe('tool_call');
+      // …but stamped with the commit so the UI still shows it as committed.
+      expect(stav[0].commitSha).toBe(fullSha);
+      expect(turns[0].commits).toContain(fullSha);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('captures the commit-derived edit even when sessionCommitShas holds the FULL sha', () => {
+    // Bug 2 root cause: the `[branch <short>]` marker was compared with
+    // `Set(fullShas).has(short)`, which never matches, so once the
+    // post-commit hook recorded the full sha the commit-derived edit was
+    // dropped — leaving editsJson with no file for this session, which made
+    // the server's session diff fall through to the unscoped whole-repo
+    // `git diff HEAD` and absorb unrelated uncommitted files (the +202 leak).
+    const { tmp, shortSha, fullSha } = makeRepo();
+    try {
+      // No apply_patch — Codex edited via shell, so the ONLY editsJson signal
+      // for stavdrica is the commit-derived edit.
+      const rp = rollout(tmp, shortSha, /* includeApplyPatch */ false);
+      const turns = capturePromptEdits({
+        agent: 'codex',
+        repoPath: tmp,
+        transcriptPath: rp,
+        sessionCommitShas: [fullSha], // full sha, short marker in rollout
+      });
+      expect(turns.length).toBe(1);
+      const stav = turns[0].edits.filter((e) => e.file === 'stavdrica');
+      expect(stav).toHaveLength(1);
+      expect(stav[0].source).toBe('commit');
+      expect(stav[0].commitSha).toBe(fullSha);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

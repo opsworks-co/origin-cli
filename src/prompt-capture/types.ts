@@ -69,6 +69,13 @@ export interface PromptEdit {
   // synthetic cursor, so this is always safe to omit.
   oldStart?: number;
   newStart?: number;
+  // Where a content-less write's newContent was recovered from
+  // (backfillContentLessWrites): 'commit-blob' / 'live-file', with a
+  // '+reversed-N' suffix when N later edits were reverse-applied to walk
+  // the file back to THIS turn's state, or 'skipped-later-rewrite' when a
+  // later whole-file write made the state unrecoverable. Diagnostic --
+  // the server ignores it, but it makes bad backfills attributable.
+  backfillSource?: string;
 }
 
 export interface PromptCapture {

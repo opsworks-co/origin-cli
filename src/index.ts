@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { loginCommand } from './commands/login.js';
-import { initCommand } from './commands/init.js';
 import { statusCommand } from './commands/status.js';
 import { policiesCommand } from './commands/policies.js';
 import { syncCommand } from './commands/sync.js';
@@ -19,7 +18,7 @@ import { recapCommand } from './commands/recap.js';
 import { enableCommand } from './commands/enable.js';
 import { disableCommand } from './commands/disable.js';
 import { linkCommand } from './commands/link.js';
-import { hooksCommand, handlePostCommit, handlePrePush, handlePreCommit, handlePrepareCommitMsg } from './commands/hooks.js';
+import { hooksCommand, handlePostCommit, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
 import { promptsCommand } from './commands/prompts.js';
@@ -127,19 +126,11 @@ program.command('login')
   .option('--profile <name>', 'Save as named profile (default: auto-detect "dev" or "team")')
   .option('--browser', 'Force browser device-code flow (used by auto-relogin)')
   .action(loginCommand);
-// `init` is now an alias for `enable` — kept for back-compat with anyone
-// who already pasted `origin login && origin init` into their docs/scripts.
-// New users should run `origin enable` directly.
-program.command('init')
-  .description('Alias for `origin enable` — register machine + install global hooks')
-  .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
-  .option('--local', 'Install hooks for this repo only (default: machine-wide)')
-  .option('--no-hooks', 'Skip hook installation entirely')
-  .action(initCommand);
 program.command('enable')
   .description('Register this machine + install Origin git hooks (defaults to machine-wide so every repo is tracked)')
   .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, windsurf, aider). Auto-detects if omitted.')
   .option('--local', 'Install hooks for the current repo only (default: machine-wide)')
+  .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
   .option('-g, --global', 'Deprecated — global is now the default; flag kept for back-compat (no-op)')
   .option('-l, --link <slug>', 'Link this repo to an Origin agent by slug (writes .origin.json)')
   .option('-s, --agent-slug <slug>', 'Override agent slug for this tool (e.g. cursor-frontend). Saved to config.')
@@ -634,6 +625,9 @@ hooks.command('git-prepare-commit-msg <msgFile> [source] [sha]')
   .description('Handle git prepare-commit-msg hook (writes Origin-Session trailer)')
   .action((msgFile: string, source?: string) => handlePrepareCommitMsg(msgFile, source));
 hooks.command('git-post-commit').description('Handle git post-commit hook').action(() => handlePostCommit());
+// Detached child spawned by the session-start hook — runs the local-history
+// advertise-and-backfill round without holding the session start open.
+hooks.command('git-history-sync').description('Internal: backfill local commit history to Origin').action(() => handleHistorySync());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
 hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (rebase/amend)').action(async () => {
   const { preserveAttributionBatch, parseRewriteInput, handleCherryPick } = await import('./history-preservation.js');
@@ -924,7 +918,7 @@ context.command('clear')
 const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   {
     label: 'SETUP',
-    commands: ['login', 'init', 'enable', 'disable', 'link', 'attach', 'whoami', 'status'],
+    commands: ['login', 'enable', 'disable', 'link', 'attach', 'whoami', 'status'],
   },
   {
     label: 'ATTRIBUTION',

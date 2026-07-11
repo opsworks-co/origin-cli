@@ -17,6 +17,9 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 import * as fzstd from 'fzstd';
 import { createShadowCommit, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { fetchWithTimeout } from './fetch-timeout.js';
+import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from './codex-thread-query.js';
+import { isCodexInternalSubroutine } from './agents/codex.js';
 
 // Path of a file inside the git dir governing `repoPath` — worktree-aware
 // (a linked worktree's `.git` is a FILE; naive `<repoPath>/.git/<name>`
@@ -134,6 +137,33 @@ function isStateFileStale(): boolean {
     return age > STALE_THRESHOLD_MS;
   } catch {
     return true; // file gone = session ended
+  }
+}
+
+// UNIVERSAL liveness signal — the agent's OWN transcript file. Every agent
+// (Claude / Codex / Gemini / Cursor / Antigravity) appends to its transcript on
+// real activity, and Origin NEVER writes it (unlike the self-bumped state file,
+// which for a hookless agent like Cursor makes state-file mtime useless). So a
+// stale transcript mtime means the agent stopped working — it closed, or went
+// idle past the window. This is the ONE signal that catches the Cursor/IDE
+// zombie heartbeat (parentPid=0, pings forever after close) that no process
+// check can reach. Fires ONLY when we HAVE a transcript path that still exists;
+// a missing/absent transcript is inconclusive (left to the process / state-file
+// checks). Pairs with the server no-ping sweep: the heartbeat ends the session
+// on a confirmed stale transcript, and the sweep is the backstop if this
+// process is itself killed first.
+const TRANSCRIPT_IDLE_MS = 20 * 60 * 1000; // 20 minutes — moderate
+
+function isTranscriptStale(): boolean {
+  if (!stateFile) return false;
+  try {
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as { transcriptPath?: string };
+    const tp = state.transcriptPath;
+    if (!tp || typeof tp !== 'string') return false; // no transcript → inconclusive
+    const stat = fs.statSync(tp);                     // throws if the file is gone → caught
+    return Date.now() - stat.mtimeMs > TRANSCRIPT_IDLE_MS;
+  } catch {
+    return false; // unreadable / missing → don't conclude death from this signal
   }
 }
 
@@ -444,7 +474,7 @@ async function pushInflightDiff(): Promise<void> {
       }
     } catch { /* fresh repo with no HEAD — fine */ }
 
-    await fetch(`${apiUrl}/api/mcp/session/${sessionId}`, {
+    await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
       body: JSON.stringify({
@@ -469,15 +499,22 @@ async function pushInflightDiff(): Promise<void> {
 
 /**
  * Live Codex rollout poller. Reads ~/.codex/state_*.sqlite to find this
- * repo's rollout JSONL, decompresses + parses it for user prompts and
+ * SESSION's rollout JSONL, decompresses + parses it for user prompts and
  * assistant text, and pushes the result via api.updateSession so the
  * dashboard shows Codex's in-flight output without waiting for Stop or
  * the next UserPromptSubmit. Mirrors the minimal slice of
- * discoverCodexSessionData / parseCodexRollout from commands/hooks.ts —
- * we don't share a module because heartbeat.ts is a standalone daemon
- * with its own dependency surface.
+ * discoverCodexSessionData / parseCodexRollout from agents/codex.ts —
+ * we don't share that module because heartbeat.ts is a standalone daemon
+ * with its own dependency surface, but the thread LOOKUP goes through the
+ * shared strict builder (codex-thread-query.ts): exact thread id first
+ * (the id session-start locked onto state.agentSessionId), falling back to
+ * exact `cwd = repoPath` equality. NEVER basename LIKE — the old
+ * `cwd LIKE '%basename%'` lookup matched any thread whose cwd merely
+ * contained the repo basename (sibling dirs, foreign repos, meta-call
+ * threads), and pushInflightCodexState then overwrote state.prompts with
+ * that foreign conversation.
  */
-function findCodexRollout(repoPath: string): { rolloutPath: string; threadId: string; model: string; firstUserMessage: string } | null {
+function findCodexRollout(repoPath: string, threadId?: string): { rolloutPath: string; threadId: string; model: string; firstUserMessage: string } | null {
   try {
     const codexDir = path.join(os.homedir(), '.codex');
     if (!fs.existsSync(codexDir)) return null;
@@ -487,19 +524,28 @@ function findCodexRollout(repoPath: string): { rolloutPath: string; threadId: st
       .sort((a, b) => b.mtime - a.mtime);
     if (stateFiles.length === 0) return null;
 
-    const repoBasename = path.basename(repoPath);
-    if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
-    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
-    const threadQuery = `SELECT id, model, rollout_path, first_user_message FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
-    const raw = execFileSync('sqlite3', [stateFiles[0].path, threadQuery], {
+    const sqliteOpts = {
       encoding: 'utf-8' as const, timeout: 3000,
       stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    };
+    const COLS = 'id, model, rollout_path, first_user_message';
+    let raw = '';
+    const byIdQuery = buildCodexThreadByIdQuery(COLS, threadId);
+    if (byIdQuery) {
+      raw = execFileSync('sqlite3', [stateFiles[0].path, byIdQuery], sqliteOpts).trim();
+    }
+    if (!raw) {
+      // No locked thread id, or its row isn't in SQLite (yet) — Codex's
+      // stdin ids rotate per turn, so a rotating id landing here is normal.
+      // Fall back to EXACT cwd equality, never LIKE.
+      const byCwdQuery = buildCodexThreadByCwdQuery(COLS, repoPath);
+      raw = execFileSync('sqlite3', [stateFiles[0].path, byCwdQuery], sqliteOpts).trim();
+    }
     if (!raw) return null;
 
     const parts = raw.split('|');
     if (parts.length < 4) return null;
-    const threadId = parts[0];
+    const matchedThreadId = parts[0];
     const model = parts[1] || 'codex';
     let rolloutPath = parts[2] || '';
     const firstUserMessage = parts.slice(3).join('|') || '';
@@ -510,7 +556,7 @@ function findCodexRollout(repoPath: string): { rolloutPath: string; threadId: st
       if (fs.existsSync(abs)) rolloutPath = abs;
       else return null;
     }
-    return { rolloutPath, threadId, model, firstUserMessage };
+    return { rolloutPath, threadId: matchedThreadId, model, firstUserMessage };
   } catch { return null; }
 }
 
@@ -677,14 +723,31 @@ async function pushInflightCodexState(): Promise<void> {
       prompts?: string[];
       agentSlug?: string;
       sessionId?: string;
+      agentSessionId?: string;
+      claudeSessionId?: string;
     };
     if ((state.agentSlug || '').toLowerCase() !== 'codex') return;
     if (!state.repoPath) return;
 
-    const rollout = findCodexRollout(state.repoPath);
+    // Anchor on the thread id session-start locked (agentSessionId = Codex's
+    // threads.id); claudeSessionId is the rotating stdin id and usually won't
+    // match a SQLite row, in which case findCodexRollout falls back to exact
+    // cwd equality.
+    const rollout = findCodexRollout(state.repoPath, state.agentSessionId || state.claudeSessionId || undefined);
     if (!rollout) return;
     const parsed = parseCodexRolloutLive(rollout.rolloutPath);
     if (!parsed) return;
+
+    // Codex's own internal meta-call threads (ambient-suggestion safety
+    // filter, title generation) can share the repo's cwd. If the exact-cwd
+    // fallback matched one, do NOT overwrite this session's prompts with the
+    // meta conversation — same filter discovery uses, corroborated here with
+    // the parsed rollout's real model/tool-call counts.
+    if (isCodexInternalSubroutine({
+      model: parsed.model || rollout.model,
+      prompt: rollout.firstUserMessage,
+      toolCalls: parsed.toolCalls,
+    })) return;
 
     const existing = state.prompts || [];
     const newer = parsed.userPrompts.length > existing.length;
@@ -749,7 +812,7 @@ async function pushInflightCodexState(): Promise<void> {
     const promptsForPush = parsed.userPrompts.length > 0 ? parsed.userPrompts : existing;
     const joinedPrompt = promptsForPush.join('\n\n---\n\n');
 
-    await fetch(`${apiUrl}/api/mcp/session/${sessionId}`, {
+    await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
       body: JSON.stringify({
@@ -772,7 +835,7 @@ async function pushInflightCodexState(): Promise<void> {
 async function reportResult(type: string, status: 'success' | 'failed', message: string) {
   if (!isConnected) return;
   try {
-    await fetch(`${apiUrl}/api/mcp/session/${sessionId}/command-result`, {
+    await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}/command-result`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
       body: JSON.stringify({ type, status, message }),
@@ -1086,7 +1149,7 @@ async function endSession() {
         }
       }
 
-      await fetch(`${apiUrl}/api/mcp/session/end`, {
+      await fetchWithTimeout(`${apiUrl}/api/mcp/session/end`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1226,8 +1289,18 @@ async function ping() {
     // check can fire on transient kernel state (process briefly
     // unreachable) or on a pattern-matched PID that was always
     // short-lived. We don't want to end on those.
+    // When we can CONFIRM the agent process is alive, trust that over everything
+    // (the app/terminal is open — keep the session alive even if idle). Only
+    // when there's NO live-process signal (parentPid≤0 IDE agents like Cursor,
+    // or a dead PID) do we fall back to activity signals.
+    const processConfirmedAlive = parentPid > 0 && isProcessAlive(parentPid);
     const parentLooksDead =
       (parentPid > 0 && !isProcessAlive(parentPid)) ||
+      // Universal backstop for every agent WITHOUT a live-process signal: the
+      // agent stopped writing its own transcript (closed, or idle past the
+      // window). This is what finally catches the hookless-IDE zombie (Cursor
+      // parentPid=0, pings forever after close) that no process check can reach.
+      (!processConfirmedAlive && isTranscriptStale()) ||
       (parentPid <= 0 && isStateFileStale());
     if (parentLooksDead) {
       parentDeadTickCount++;
@@ -1258,7 +1331,7 @@ async function ping() {
 
     // Only ping API in connected mode
     if (isConnected) {
-      const resp = await fetch(`${apiUrl}/api/mcp/session/${sessionId}/ping`, {
+      const resp = await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}/ping`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1441,7 +1514,7 @@ async function ping() {
         const parentDead = parentPid > 0 && !isProcessAlive(parentPid);
         const noParent = parentPid <= 0;
         const confirmed = parentDeadTickCount >= PARENT_DEAD_TICKS_BEFORE_END;
-        if (confirmed && (parentDead || (noParent && isStateFileStale()))) {
+        if (confirmed && (parentDead || (noParent && (isTranscriptStale() || isStateFileStale())))) {
           try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
           if (stateFile) {
             try {

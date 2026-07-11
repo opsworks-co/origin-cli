@@ -17,7 +17,10 @@ import fs from 'fs';
 // remove something from here you're admitting a breaking change.
 const HISTORICAL_COMMAND_NAMES = [
   // Primary (currently visible in --help)
-  'login', 'init', 'doctor',
+  // NOTE: `init` was removed deliberately — it was a redundant wrapper around
+  // `origin enable` (which already registers the machine + installs hooks) and
+  // its only unique flag, --standalone, now lives on `enable`.
+  'login', 'doctor',
   'blame', 'diff', 'stats', 'chat',
   'sessions', 'explain', 'resume', 'share',
   'issue', 'context',

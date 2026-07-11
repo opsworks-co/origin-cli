@@ -780,9 +780,20 @@ function detectAgents(gitRoot: string): AgentType[] {
 // Windsurf/Aider coming soon
 const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity'];
 
-export async function enableCommand(opts: { agent?: string; global?: boolean; local?: boolean; link?: string; agentSlug?: string }): Promise<void> {
+export async function enableCommand(opts: { agent?: string; global?: boolean; local?: boolean; link?: string; agentSlug?: string; standalone?: boolean }): Promise<void> {
   // Standalone mode doesn't require login
   const config = loadConfig();
+
+  // `--standalone` forces local-only mode even when logged in (formerly
+  // `origin init --standalone`). Flip the stored mode BEFORE the connected
+  // checks below so machine registration / key probing are skipped and hooks
+  // install for a purely-local setup.
+  if (opts.standalone && isConnectedMode() && config) {
+    config.mode = 'standalone';
+    saveConfig(config);
+    console.log(chalk.green('\n✓ Switched to standalone mode'));
+    console.log(chalk.gray('  API credentials kept — run `origin config set mode auto` to reconnect.'));
+  }
 
   // Default = global. Pass --local to scope hooks to the current repo
   // only. The legacy --global flag is still accepted (and is now a no-op

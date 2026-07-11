@@ -167,15 +167,37 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
     }
   }
 
-  // If no target, use active session
+  // If no target, use the active session — or, when connected with no local
+  // active session, fall back to the most recent platform session for this
+  // repo so `origin explain` "just works" after a session ran (some agents
+  // don't leave a local state file).
   if (!sessionId) {
     const state = loadSessionState();
     if (state) {
       sessionId = state.sessionId;
       console.log(chalk.gray(`Using active session: ${sessionId}`));
-    } else {
-      console.log(chalk.red('No session ID provided and no active session found.'));
-      console.log(chalk.gray('Usage: origin explain <sessionId>'));
+    } else if (connected && config) {
+      try {
+        const params: Record<string, string> = { limit: '1' };
+        if (repoPath) {
+          try {
+            const remoteUrl = git(['remote', 'get-url', 'origin'], { cwd: repoPath }).trim();
+            const m = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+            if (m) params.repoName = m[1];
+          } catch { /* no remote — latest across repos */ }
+        }
+        const data = await api.getSessions(params) as any;
+        const latest = data?.sessions?.[0];
+        if (latest?.id) {
+          const latestId = String(latest.id);
+          sessionId = latestId;
+          console.log(chalk.gray(`Using latest session: ${latestId.slice(0, 8)} (${latest.aiTitle || latest.model || 'session'})`));
+        }
+      } catch { /* fall through to the usage hint below */ }
+    }
+    if (!sessionId) {
+      console.log(chalk.red('No session ID provided and no recent session found.'));
+      console.log(chalk.gray('Run `origin sessions` to list IDs, then: origin explain <sessionId>'));
       console.log(chalk.gray('       origin explain --commit <sha>'));
       return;
     }
@@ -422,7 +444,16 @@ export async function explainCommand(target?: string, opts?: { short?: boolean; 
 
     console.log('');
   } catch (err: any) {
-    console.log(chalk.red(`Failed to load session: ${err.message}`));
+    const msg = err?.message || String(err);
+    // A bad/typo'd id (e.g. `origin explain origin explain` → id "origin")
+    // 404s as "Session not found" — point the user at how to find a real id
+    // instead of a bare failure.
+    if (/not found/i.test(msg)) {
+      console.log(chalk.red(`No session matching "${sessionId}".`));
+      console.log(chalk.gray('Run `origin sessions` to list IDs, then: origin explain <id>'));
+    } else {
+      console.log(chalk.red(`Failed to load session: ${msg}`));
+    }
   }
 }
 

@@ -421,6 +421,44 @@ export function discoverAllGitRoots(cwd?: string): string[] {
   return roots;
 }
 
+/**
+ * True when `p` is the bare openclaw cowork CONTAINER directory
+ * (`…/.openclaw/workspace`) itself, not a repo inside it.
+ *
+ * The openclaw harness repeatedly relaunches a bare `claude` at this container
+ * — no git repo, no repos inside — as warm-up / health-check probes that send
+ * no prompt and touch no file. session-start uses this to skip registering a
+ * throwaway non-git "workspace" session for those launches. Real work in the
+ * harness launches from a repo SUBDIR under the container
+ * (`…/.openclaw/workspace/<repo>`), which resolves to that repo and is tracked
+ * normally — so only the empty container launch is dropped.
+ *
+ * Deliberately matches ONLY the intentional `.openclaw/workspace` cowork
+ * pattern — NOT a bare `~/workspace`, which is commonly a real project dir.
+ */
+export function isCoworkContainerPath(p: string | null | undefined): boolean {
+  if (!p) return false;
+  const norm = p.replace(/[\\/]+$/, '');
+  return /(^|[\\/])\.openclaw[\\/]workspace$/.test(norm);
+}
+
+/**
+ * True when `p` is a filesystem ROOT (`/`, `C:\`). No real coding session
+ * runs at the root of the filesystem — but agent apps' own internal LLM
+ * subroutines do: the Codex app fires its ambient-suggestion safety filter /
+ * title-generation meta-calls with `cwd: "/"`, and each one fired the full
+ * session-start → user-prompt-submit → stop hook trio, registering a
+ * repo-less junk session (e.g. "gpt-5.4-mini / 0 files / 'You are an expert
+ * at upholding safety and compliance standards for Codex ambient
+ * suggestions…'"). session-start uses this to skip registering any non-git
+ * session anchored at a bare filesystem root.
+ */
+export function isFilesystemRootPath(p: string | null | undefined): boolean {
+  if (!p) return false;
+  const resolved = path.resolve(p);
+  return resolved === path.parse(resolved).root;
+}
+
 export function getHeadSha(cwd?: string): string | null {
   try {
     return execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
@@ -482,6 +520,14 @@ export function getStatePath(cwd?: string, sessionTag?: string): string {
   }
 
   // Fallback: store in ~/.origin/sessions/ keyed by cwd hash
+  return getGlobalFallbackStatePath(cwd, sessionTag);
+}
+
+// Sandbox-safe state location, OUTSIDE the repo's .git — keyed by cwd (+ tag)
+// so save and load agree. Codex's workspace-write sandbox forbids writes inside
+// .git, so a hook that can't persist state into .git lands it here instead.
+// This is also the path getStatePath returns when there's no git dir at all.
+export function getGlobalFallbackStatePath(cwd?: string, sessionTag?: string): string {
   const effectiveCwd = cwd || process.cwd();
   const cwdHash = crypto.createHash('md5').update(effectiveCwd).digest('hex').slice(0, 12);
   const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
@@ -495,9 +541,26 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
   // session into a different account (see session-owner.ts).
   ensureOwnerStamp(state);
   const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
-  const tmpStatePath = statePath + '.tmp.' + process.pid;
-  fs.writeFileSync(tmpStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
-  fs.renameSync(tmpStatePath, statePath);
+  try {
+    const tmpStatePath = statePath + '.tmp.' + process.pid;
+    fs.writeFileSync(tmpStatePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+    fs.renameSync(tmpStatePath, statePath);
+  } catch (err: any) {
+    // Sandboxed agents (Codex's workspace-write) forbid writes INSIDE .git →
+    // EPERM/EACCES. A thrown save aborts the whole Stop hook, which the agent
+    // then surfaces as "hook timed out after 10s". Persist to the sandbox-safe
+    // fallback the loader also checks instead of failing the hook.
+    if (err?.code === 'EPERM' || err?.code === 'EACCES' || err?.code === 'EROFS') {
+      const fb = getGlobalFallbackStatePath(cwd, sessionTag || state.sessionTag);
+      if (fb !== statePath) {
+        const tmpFb = fb + '.tmp.' + process.pid;
+        fs.writeFileSync(tmpFb, JSON.stringify(state, null, 2), { mode: 0o600 });
+        fs.renameSync(tmpFb, fb);
+      }
+    } else {
+      throw err;
+    }
+  }
 
   // Also mirror to ~/.origin/sessions/ for global discovery (origin sessions --all)
   // Always mark as RUNNING since this is an active save
@@ -514,40 +577,51 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
 
 export function loadSessionState(cwd?: string, sessionTag?: string): SessionState | null {
   const statePath = getStatePath(cwd, sessionTag);
-  try {
-    const parsed = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
-    if (!parsed || typeof parsed !== 'object' || !parsed.sessionId || !parsed.claudeSessionId) {
+  const tryRead = (p: string): SessionState | null => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      if (!parsed || typeof parsed !== 'object' || !parsed.sessionId || !parsed.claudeSessionId) return null;
+      return parsed;
+    } catch {
       return null;
     }
-    return parsed;
-  } catch {
-    return null;
-  }
+  };
+  const primary = tryRead(statePath);
+  if (primary) return primary;
+  // Sandbox couldn't write .git → the state landed in the global fallback.
+  const fb = getGlobalFallbackStatePath(cwd, sessionTag);
+  if (fb !== statePath) return tryRead(fb);
+  return null;
 }
 
 export function clearSessionState(cwd?: string, sessionTag?: string): void {
   const statePath = getStatePath(cwd, sessionTag);
-  try {
-    // Instead of deleting, mark as ended and archive to ~/.origin/sessions/
-    const raw = fs.readFileSync(statePath, 'utf-8');
-    const state = JSON.parse(raw);
-    state.status = 'ENDED';
-    state.endedAt = new Date().toISOString();
-
-    // Archive to ~/.origin/sessions/ so origin sessions --all can find it
-    const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
-    fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
-    const archivePath = path.join(archiveDir, `${state.sessionId.slice(0, 12)}.json`);
-    const tmpArchivePath = archivePath + '.tmp.' + process.pid;
-    fs.writeFileSync(tmpArchivePath, JSON.stringify(state), { mode: 0o600 });
-    fs.renameSync(tmpArchivePath, archivePath);
-
-    // Remove active state file
-    fs.unlinkSync(statePath);
-  } catch {
-    // file doesn't exist or corrupt, try plain delete
-    try { fs.unlinkSync(statePath); } catch { /* ignore */ }
+  const fbPath = getGlobalFallbackStatePath(cwd, sessionTag);
+  // The active state lives in .git normally, or in the global fallback when a
+  // sandbox blocked the .git write — read from wherever it actually landed.
+  let raw: string | null = null;
+  for (const p of (fbPath !== statePath ? [statePath, fbPath] : [statePath])) {
+    try { raw = fs.readFileSync(p, 'utf-8'); break; } catch { /* try next */ }
   }
+  try {
+    if (raw) {
+      // Instead of deleting, mark as ended and archive to ~/.origin/sessions/
+      const state = JSON.parse(raw);
+      state.status = 'ENDED';
+      state.endedAt = new Date().toISOString();
+
+      // Archive to ~/.origin/sessions/ so origin sessions --all can find it
+      const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
+      fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+      const archivePath = path.join(archiveDir, `${state.sessionId.slice(0, 12)}.json`);
+      const tmpArchivePath = archivePath + '.tmp.' + process.pid;
+      fs.writeFileSync(tmpArchivePath, JSON.stringify(state), { mode: 0o600 });
+      fs.renameSync(tmpArchivePath, archivePath);
+    }
+  } catch { /* corrupt state — fall through to plain delete */ }
+  // Remove the active state file from both possible locations.
+  try { fs.unlinkSync(statePath); } catch { /* ignore */ }
+  if (fbPath !== statePath) { try { fs.unlinkSync(fbPath); } catch { /* ignore */ } }
 }
 
 // ─── Concurrent Session Support ──────────────────────────────────────────

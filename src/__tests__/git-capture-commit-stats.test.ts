@@ -48,6 +48,26 @@ describe('captureGitState — per-commit line stats', () => {
     expect(c.filesChanged.sort()).toEqual(['a.txt', 'seed.txt']);
   }, 30_000);
 
+  it('captures a per-commit unified patch on each commitDetails entry', () => {
+    // The API stores this so blame/diff read committed lines from git truth
+    // instead of reconstructing them (session 4f36ee1c). New file + modify.
+    const headBefore = gitIn(dir, ['rev-parse', 'HEAD']).trim();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'l1\nl2\n');
+    fs.writeFileSync(path.join(dir, 'seed.txt'), 'changed\n');
+    gitIn(dir, ['add', '-A']);
+    gitIn(dir, ['commit', '-q', '-m', 'work']);
+
+    const res = captureGitState(dir, headBefore);
+    const c = res.commitDetails[0];
+    expect(typeof c.patch).toBe('string');
+    expect(c.patch).toContain('diff --git a/a.txt b/a.txt');
+    expect(c.patch).toContain('+l1');
+    expect(c.patch).toContain('+l2');
+    expect(c.patch).toContain('diff --git a/seed.txt b/seed.txt');
+    // No commit-header noise — `--format=` yields only the diff.
+    expect(c.patch).not.toMatch(/^commit [0-9a-f]{40}/m);
+  }, 30_000);
+
   it('sums line counts across multiple commits', () => {
     const headBefore = gitIn(dir, ['rev-parse', 'HEAD']).trim();
     fs.writeFileSync(path.join(dir, 'a.txt'), 'x\n');             // +1

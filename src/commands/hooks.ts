@@ -33,11 +33,27 @@ import {
 import { captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
 import { parseAntigravityTranscript, estimateAntigravityUsage } from '../antigravity-transcript.js';
 import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
+import { buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
 import { durableUpdateSession, durableEndSession, drainUpdateQueue } from '../update-queue.js';
 import { debugLog } from '../debug-log.js';
 import {
+  listRecentShas,
+  backfillUnknownCommits,
+  shouldAdvertiseHistory,
+  writeSyncMarker,
+  acquireBackfillLock,
+  releaseBackfillLock,
+  extractCommitDiff,
+  syncRepoHistory,
+  shouldSyncStandalone,
+  hasFreshFailedAttempt,
+  RECENT_SHAS_LIMIT,
+  BACKFILL_TIMEOUT_MS,
+} from '../history-backfill.js';
+import {
   discoverCodexSessionData, findCodexRolloutPath, readCodexRolloutFile,
   getCodexPromptsTimeline, parseCodexRollout, isCodexInternalSubroutine,
+  isKnownCodexInternalPrompt,
   type PromptTimelineEntry, type CodexSessionData,
 } from '../agents/codex.js';
 import { readGeminiModel, discoverGeminiTranscriptPath, getGeminiPromptsTimeline } from '../agents/gemini.js';
@@ -50,7 +66,7 @@ import {
 } from '../agents/registry.js';
 import { attachOrphanCommitFiles } from '../prompt-completeness.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
-import { writeGitNotes, shouldIncludePromptText, type PromptNoteEntry } from '../git-notes.js';
+import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, type PromptNoteEntry } from '../git-notes.js';
 import { redactSecrets } from '../redaction.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
@@ -277,6 +293,12 @@ export function scopeSessionDiffToStart(
     const clean = captureGitState(repoPath, shadowSha, { fullContext: true });
     if (clean.baselineIsShadow && typeof clean.workingTreeDiff === 'string') {
       gitCapture.diff = clean.workingTreeDiff;
+      // Also re-scope uncommittedDiff — the server folds it into the Full
+      // Session Diff fallback, so leaving the raw `git diff HEAD` here let
+      // PRE-EXISTING uncommitted files (a prior session's dirt) resurface even
+      // after `diff` was cleaned. captureGitState now sets clean.uncommittedDiff
+      // to the shadow-scoped working-tree diff for no-commit sessions.
+      gitCapture.uncommittedDiff = clean.uncommittedDiff;
       gitCapture.linesAdded = clean.linesAdded;
       gitCapture.linesRemoved = clean.linesRemoved;
       debugLog('session-diff', 'scoped to session-start shadow', {
@@ -843,6 +865,13 @@ export function hookLookupSessionId(sessionId: string | undefined, agentSlug?: s
   return STABLE_SESSION_ID_AGENTS.includes(agentSlug || '') ? sessionId : undefined;
 }
 
+// How many recent HEAD SHAs a session-creating call advertises so the
+// server's basename-fallback repo gate can corroborate by SHA overlap (the
+// only rung available to a local-only repo whose checkout moved paths). Far
+// smaller than the ingest advertisement (RECENT_SHAS_LIMIT = 500): one shared
+// SHA already proves shared history, and this runs on every session start.
+export const SESSION_START_RECENT_SHAS = 20;
+
 /**
  * Whether a candidate active session may be REUSED for an incoming Cursor
  * session-start. Cursor's conversation_id (stored as agentSessionId) is the
@@ -895,10 +924,9 @@ export function resolveCodexThreadId(repoPath: string): string | null {
           .sort((a, b) => b.mtime - a.mtime)
       : [];
     if (stateFiles.length === 0) return null;
-    const exactCwd = repoPath.replace(/'/g, "''");
     const out = execFileSync('sqlite3', [
       stateFiles[0].path,
-      `SELECT id FROM threads WHERE cwd = '${exactCwd}' ORDER BY updated_at DESC LIMIT 1;`,
+      buildCodexThreadByCwdQuery('id', repoPath),
     ], {
       encoding: 'utf-8' as const, timeout: 3000,
       stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
@@ -1180,6 +1208,71 @@ function resolvePromptForCommit(
 
 // (parseCodexRollout / findLatestRollout moved to ../agents/codex.ts)
 
+// ─── Session-start history sync ────────────────────────────────────────────
+// The post-commit hook heals a local repo's missing history, but only when a
+// NEW commit is made — a repo used read-only or pull-only (reviewing agents'
+// branches, pulling teammates' work) never fires it, so "12 commits in git,
+// 3 in Origin" persisted there. Session start is the other natural trigger:
+// gate cheaply in-process (two git queries + a marker read), and when the
+// marker says history may be out of sync, hand the actual round to a
+// DETACHED child. An in-process fire-and-forget fetch would NOT be free
+// here: the pending socket keeps Node's event loop alive, and Claude Code
+// waits for the hook process to exit — so session start would stall for the
+// whole backfill. (git post-commit dodges this because the installed shell
+// hook backgrounds the CLI with `&`.)
+function maybeSpawnHistorySync(repoPath: string, workRoot: string): void {
+  try {
+    // Strict standalone gate (marker keyed by the WORKING root, matching
+    // syncRepoHistory): the post-commit gate's +1-commit slack would let a
+    // single pulled commit read as "in-sync" here, where no live ingest
+    // covers it. A fresh failed-attempt stamp (permanently 403ing repo,
+    // API outage) suppresses the spawn for the backoff window — post-commit
+    // and forced `origin sync` still heal it.
+    const gate = shouldSyncStandalone(workRoot, workRoot);
+    if (!gate.sync || !gate.head) return;
+    if (hasFreshFailedAttempt(workRoot)) {
+      debugLog('session-start', 'history sync skipped — recent failed attempt (backoff)', { workRoot });
+      return;
+    }
+    const bin = process.argv[1];
+    if (!bin) return;
+    const child = spawn(process.execPath, [bin, 'hooks', 'git-history-sync'], {
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        ORIGIN_HISTORY_REPO: repoPath,
+        ORIGIN_HISTORY_CWD: workRoot,
+      },
+    });
+    child.unref();
+    debugLog('session-start', 'history sync child spawned', { repoPath, count: gate.count });
+  } catch (err: any) {
+    debugLog('session-start', 'history sync spawn failed (non-fatal)', { message: err?.message });
+  }
+}
+
+// Entrypoint for the detached child (`origin hooks git-history-sync`).
+// Re-checks the gate via syncRepoHistory (concurrent session starts race to
+// spawn; the backfill lock serializes them) and runs the full
+// advertise-and-backfill round with the long backfill timeout.
+export async function handleHistorySync(): Promise<void> {
+  const hookCwd = process.env.ORIGIN_HISTORY_CWD || process.cwd();
+  const repoPath = process.env.ORIGIN_HISTORY_REPO || getGitRoot(hookCwd);
+  if (!repoPath || !isConnectedMode()) return;
+  try {
+    const outcome = await syncRepoHistory({
+      repoPath,
+      hookCwd,
+      ingest: (data) => api.ingestCommits(data, { timeoutMs: BACKFILL_TIMEOUT_MS }),
+      log: (message, data) => debugLog('history-sync', message, data),
+    });
+    debugLog('history-sync', 'round complete', { ...outcome });
+  } catch (err: any) {
+    debugLog('history-sync', 'round failed (non-fatal)', { message: err?.message });
+  }
+}
+
 async function handleSessionStart(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('session-start', 'begin', { agentSlug, inputKeys: Object.keys(input) });
 
@@ -1285,6 +1378,36 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       debugLog('session-start', 'multi-repo session detected', { repoPaths: discovered, workspacePath: hookCwd });
     }
   }
+
+  // Openclaw cowork harness: skip the empty-container probe launches. Something
+  // in the ~/.openclaw/workspace harness relaunches a bare `claude` AT the
+  // container (no git repo, no repos inside) roughly every 40s as
+  // warm-up/health-check runs that send no prompt and touch no file. Each one
+  // used to register a throwaway non-git "workspace" session (0 prompts /
+  // tokens / tools), flooding the Sessions list ~90×/hour (user-reported). Real
+  // work in the harness launches from a repo SUBDIR (…/.openclaw/workspace/
+  // <repo>) which resolves to that repo (getGitRoot / discoverAllGitRoots ≥ 1)
+  // and is tracked normally — so dropping ONLY the bare, empty, non-git
+  // container launch removes the noise without losing a real session. (The
+  // server-side empty-session sweep still archives any a pre-guard CLI made.)
+  //
+  // GIT-REPO REQUIRED: a session may ONLY be tracked from inside a git
+  // repository. Origin is git-native — a non-git directory has no commits,
+  // diff, branch, or repo identity to attribute, so tracking one only ever
+  // produced junk "repos" (`/`, the openclaw `workspace` container,
+  // filesystem-root Codex/agent meta-calls that fire the hook trio with cwd="/"
+  // or an ambient container) and empty 0-prompt sessions on the dashboard. If
+  // cwd is not a git repo AND has no git repos beneath it, drop the whole
+  // session lifecycle up front, for ANY agent. (A multi-repo workspace sets
+  // allRepoPaths and is tracked normally; real work under a container launches
+  // from a repo SUBDIR that resolves to that repo.) This generalizes the
+  // earlier openclaw-container / filesystem-root special cases into the one
+  // rule the user asked for: no git repo → no session.
+  if (isNonGitProject && !allRepoPaths) {
+    debugLog('session-start', 'skip: directory is not a git repository (no session)', { repoPath, agentSlug });
+    return;
+  }
+
   // Canonical (main-repo) identity for the server: repo naming, session
   // start, commit ingest. For a linked worktree this differs from repoPath
   // (the working root); everywhere git RUNS uses repoPath, everywhere the
@@ -1321,6 +1444,13 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       }
     } catch (err: any) {
       debugLog('session-start', 'policy hook auto-install failed (non-fatal)', { message: err?.message });
+    }
+    // Heal missing local history from session start too (see
+    // maybeSpawnHistorySync). Canonical path names the repo (and keys the
+    // sync marker — same key the post-commit hook uses); the WORKING root is
+    // where git reads run, so a worktree session advertises its own HEAD.
+    if (connected) {
+      maybeSpawnHistorySync(canonicalRepoPath, repoPath);
     }
   } else if (allRepoPaths) {
     // Multi-repo workspace — install in each discovered repo so
@@ -1721,6 +1851,9 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           existing.activePolicies.map((p: string) => `- ${p}`).join('\n');
       }
       try {
+        syncNotesFromRemoteThrottled(repoPath);
+      } catch {}
+      try {
         const attributionCtx = buildAttributionContext(repoPath);
         if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
       } catch {}
@@ -1836,6 +1969,18 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     debugLog('session-start', 'no git remote origin (non-fatal)');
   }
 
+  // Recent HEAD SHAs for the server's basename-fallback repo gate. A
+  // local-only repo has no remote for the gate's agreement rung, so when its
+  // checkout moves to a new path this advertisement is the only proof that
+  // ties the session to the existing row — without it session/start
+  // auto-registered a duplicate while ingest kept SHA-corroborating to the
+  // old one, splitting sessions from their commits. hookCwd first: a worktree
+  // shares the canonical repo's history and repoPath may be the collapsed
+  // main checkout.
+  let sessionRecentShas = listRecentShas(hookCwd, SESSION_START_RECENT_SHAS);
+  if (sessionRecentShas.length === 0) sessionRecentShas = listRecentShas(repoPath, SESSION_START_RECENT_SHAS);
+  debugLog('session-start', 'recent HEAD shas advertised', { count: sessionRecentShas.length });
+
   // Worktree-first: hookCwd is the agent's actual working dir (the linked
   // worktree), repoPath is collapsed to the main repo. Reading repoPath first
   // returned the main checkout's branch ("main") for every worktree session.
@@ -1902,6 +2047,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           // called "zen-margulis-c0587a".
           repoPath: canonicalRepoPath,
           repoUrl: repoUrl || undefined,
+          recentShas: sessionRecentShas.length > 0 ? sessionRecentShas : undefined,
           agentSlug: finalAgentSlug,
           branch: branch || undefined,
           hostname: agentConfig.hostname || undefined,
@@ -2166,6 +2312,17 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     if (activePolicies && Array.isArray(activePolicies) && activePolicies.length > 0) {
       systemMsg += '\n\nActive policies for this session:\n' +
         activePolicies.map((p: string) => `- ${p}`).join('\n');
+    }
+
+    // Pull remote notes down first (throttled) so the attribution/memory
+    // blocks below reflect work done on OTHER clones — the fresh-clone
+    // teammate case. Without this, a just-cloned repo shows almost no AI
+    // context until the user runs `origin link`/`blame`. No-op after the
+    // first sync until the backoff window elapses; never fatal.
+    try {
+      syncNotesFromRemoteThrottled(repoPath);
+    } catch {
+      // Non-fatal — attribution below still renders whatever notes are local.
     }
 
     // Inject AI attribution context so the agent knows what other agents have done
@@ -2507,6 +2664,25 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   }
   debugLog('user-prompt-submit', 'cwd resolved', { hookCwd });
 
+  // Codex internal meta-call prompts (ambient-suggestion safety filter, title
+  // generation, output summarizer) fire real user-prompt-submit hooks. Their
+  // threads never land in Codex's SQLite, so the discovery-time filter
+  // (isCodexInternalSubroutine in discoverCodexSessionData) never sees them —
+  // the prompt would be recorded straight from stdin. Two failure modes this
+  // blocks: (a) cwd="/" runs auto-create a repo-less junk session for the
+  // meta-prompt (the session-start root guard skips registration, but this
+  // hook would re-create it), and (b) a meta-call fired with a REPO cwd would
+  // reuse the repo's live Codex session and splice the meta-prompt into a
+  // real conversation. Anchored-match only (isKnownCodexInternalPrompt) — a
+  // prompt merely MENTIONING the meta-prompt text is kept, and the mini-model
+  // heuristic is deliberately NOT applied to live prompts.
+  if (agentSlug === 'codex' && isKnownCodexInternalPrompt(input.prompt)) {
+    debugLog('user-prompt-submit', 'skip: codex internal subroutine prompt', {
+      model: input.model, promptPreview: String(input.prompt || '').slice(0, 80),
+    });
+    return;
+  }
+
   // ── Find session state using concurrent-aware lookup ────────────────────────
   // For agents with unstable session_id (Cursor, Codex), don't use it for lookup
   const stableAgents = STABLE_SESSION_ID_AGENTS;
@@ -2701,6 +2877,11 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         try {
           repoUrl = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] }).trim();
         } catch { /* no remote — that's fine */ }
+        // Same recent-HEAD advertisement as the session-start path: auto-create
+        // is the common session-creating route for Codex (its SessionStart hook
+        // is unreliable), so without it a moved local-only checkout would
+        // auto-register a duplicate repo row here.
+        const autoRecentShas = listRecentShas(repoPath, SESSION_START_RECENT_SHAS);
 
         let sessionId: string;
         let agentSystemPrompt: string | undefined;
@@ -2721,6 +2902,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
               model,
               repoPath: canonicalRepoPath || repoPath,
               repoUrl: repoUrl || undefined,
+              recentShas: autoRecentShas.length > 0 ? autoRecentShas : undefined,
               agentSlug: finalAgentSlug,
               branch: branch || undefined,
               agentSessionId: autoAgentSessionId,
@@ -3080,6 +3262,23 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       // non-fatal
     }
 
+    // Cursor doesn't route its agent-transcript JSONL through
+    // input.transcript_path, so store the discovered path in state — the
+    // heartbeat reads state.transcriptPath to detect a stale (closed/idle)
+    // conversation and end the session (Part A of robust session-end). Every
+    // other agent already carries transcriptPath from input/discovery, so this
+    // makes the universal transcript-mtime liveness signal work for Cursor too.
+    if (agentSlug === 'cursor' && !state.transcriptPath) {
+      try {
+        const cursorId = state.agentSessionId || state.claudeSessionId;
+        const tp = cursorId ? findCursorTranscriptJsonl(cursorId) : null;
+        if (tp) {
+          state.transcriptPath = tp;
+          debugLog('user-prompt-submit', 'cursor transcript path stored for liveness', { tp });
+        }
+      } catch { /* non-fatal */ }
+    }
+
     // Ensure session stays RUNNING (may have been auto-expired by listAllActiveSessions)
     state.status = 'RUNNING';
     saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
@@ -3350,20 +3549,37 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       const recoveryRepoPath = discoverGitRoot(hookCwd) || hookCwd;
       const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
       const archiveEntries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
+      // The stop payload's conversation anchor (Cursor's conversation_id, else
+      // session_id). An EXACT match on it recovers THIS chat's own session even
+      // when its state file was mis-tagged or cleaned up — without it the
+      // freshest-in-repo heuristic below missed a switched-away chat's session
+      // and the auto-create fabricated a DUPLICATE (prod: an empty stub session
+      // appeared next to the real one). An exact match wins even when ENDED:
+      // adopting/re-opening the right session beats minting a duplicate.
+      const incomingChatId = (typeof (input as any).conversation_id === 'string' && (input as any).conversation_id)
+        || (typeof input.session_id === 'string' && input.session_id) || '';
       let bestCandidate: SessionState | null = null;
       let bestAge = Infinity;
+      let exactMatch: SessionState | null = null;
+      let exactAge = Infinity;
       for (const entry of archiveEntries) {
         try {
           const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
           if (!s?.sessionId || !s?.startedAt) continue;
           const age = Date.now() - new Date(s.startedAt).getTime();
           if (age > 24 * 60 * 60 * 1000) continue;
-          if (s.status === 'ENDED' && s.endedAt) continue;
           if (s.repoPath !== recoveryRepoPath) continue;
           if (agentSlug && !sessionMatchesAgent(s, agentSlug)) continue;
+          const chatId = s.agentSessionId || s.claudeSessionId || '';
+          if (incomingChatId && chatId === incomingChatId) {
+            if (age < exactAge) { exactMatch = s; exactAge = age; }
+            continue;
+          }
+          if (s.status === 'ENDED' && s.endedAt) continue;
           if (age < bestAge) { bestCandidate = s; bestAge = age; }
         } catch { /* skip */ }
       }
+      bestCandidate = exactMatch || bestCandidate;
       if (bestCandidate) {
         debugLog('stop', 'recovered session from archive', { sessionId: bestCandidate.sessionId, tag: bestCandidate.sessionTag });
         saveSessionState(bestCandidate, recoveryRepoPath, bestCandidate.sessionTag);
@@ -3415,6 +3631,19 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             const synthesized: SessionState = {
               sessionId: newSessionId,
               claudeSessionId: input.session_id,
+              // Anchor the chat identity so a DIFFERENT Cursor chat's
+              // session-start can't adopt this session. cursorSessionReusable
+              // treats a session with no agentSessionId as "unknown → adopt",
+              // so omitting it let the next chat in the same repo reuse this
+              // one and glue its prompts on (prod efe174db: a new "basta" chat
+              // reused this auto-created session and re-sent the prior chat's
+              // 6 prompts). Resolve it EXACTLY as session-start does
+              // (conversation_id preferred, else session_id) so the reuse
+              // guard compares like-for-like — using the raw session_id here
+              // while session-start anchors on conversation_id would block the
+              // SAME chat's next turn from reusing this session.
+              agentSessionId: (typeof input.conversation_id === 'string' && input.conversation_id)
+                || (input.session_id as string),
               transcriptPath: input.transcript_path || '',
               model: typeof input.model === 'string' ? input.model : 'cursor',
               startedAt: new Date().toISOString(),
@@ -4020,10 +4249,22 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
           // to its commit on the commit-detail page. Without these the
           // "Prompts in this commit" panel says "No linked prompts" even
           // when the per-prompt mapping was captured correctly.
+          //
+          // Stamp the commit sha ONLY when this turn's capture actually saw
+          // a new commit land since its baseline (committedDiff non-empty).
+          // Unconditionally stamping current HEAD spread a later commit's
+          // sha onto turns that never committed (the cumulative-stamp class
+          // — prod petrushka 2a3a52aa), and the server's fill-only guard
+          // can't help when the row is still null. The boundary race (the
+          // commit's true turn not yet detected by the poll) is resolved
+          // server-side by the attribution sweep (#582).
           let synthCommitSha: string | null = null;
           let synthTreeSha: string | null = null;
           try {
-            synthCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            const sawNewCommit = !!(gitCapture.committedDiff && gitCapture.committedDiff.trim());
+            if (sawNewCommit) {
+              synthCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: state.repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+            }
             synthTreeSha = getWorkingTreeSha(state.repoPath);
           } catch { /* ignore */ }
           promptMappings.push({
@@ -5295,37 +5536,10 @@ export async function handlePostCommit(): Promise<void> {
     return;
   }
 
-  // Get files changed in this commit
-  let filesChanged: string[] = [];
-  try {
-    const raw = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', commitSha], execOpts).trim();
-    filesChanged = raw ? raw.split('\n').filter(Boolean) : [];
-  } catch { /* ignore */ }
-
-  // Get diff for this single commit. Try three strategies in order:
-  //   1. `git diff <sha>~1..<sha>` — fast, works for non-root commits.
-  //   2. `git diff-tree -p --root <sha>` — uses the commit's own parent
-  //      pointers (no `~1` lookup), so survives detached HEAD / shallow
-  //      / weird-ref scenarios where (1) errors silently with empty stdout.
-  //   3. `git show <sha> --format=` — last-resort, handles merge commits.
-  // The CLI used to give up after (1) and (3) when (1) returned empty
-  // stdout without throwing (some Codex worktrees do this on freshly
-  // created branches), so commit.patch stayed NULL and the dashboard
-  // had to fall back to the session-level aggregate.
-  let diff = '';
-  try {
-    diff = execFileSync('git', ['diff', `${commitSha}~1..${commitSha}`], execOpts).trim();
-  } catch { /* try fallback below */ }
-  if (!diff) {
-    try {
-      diff = execFileSync('git', ['diff-tree', '-p', '--root', '--no-color', commitSha], execOpts).trim();
-    } catch { /* try fallback below */ }
-  }
-  if (!diff) {
-    try {
-      diff = execFileSync('git', ['show', commitSha, '--format=', '--diff-merges=first-parent'], execOpts).trim();
-    } catch { /* give up — commit.patch stays null and the dashboard falls back */ }
-  }
+  // Per-commit diff + files. Shared with the history backfill so the
+  // fallback chain (empty stdout on fresh branches, root commits, merges)
+  // is fixed in one place — see extractCommitDiff for the strategy notes.
+  const { diff, filesChanged } = extractCommitDiff(hookCwd, commitSha);
   if (!diff) {
     debugLog('post-commit', 'WARN: empty per-commit diff after all three strategies', { commitSha });
   }
@@ -5363,9 +5577,29 @@ export async function handlePostCommit(): Promise<void> {
           return execFileSync('git', ['log', '-1', '--format=%cI'], execOpts).trim() || undefined;
         } catch { return undefined; }
       })();
+      // Advertise the SHAs reachable from HEAD so the server can report
+      // which of them it has never seen. For a local repo (no provider
+      // webhook, no server-side git access) this hook is the ONLY ingest
+      // path, so history that predates hook installation — or arrived via
+      // `git pull`, which fires no post-commit — stays invisible without it.
+      // Gated on a per-repo sync marker: in steady state (marker head still
+      // an ancestor, exactly one commit added) nothing is advertised and the
+      // server does no extra work. The marker is only written after a
+      // successful server round-trip, so a failed ingest self-heals — the
+      // next commit sees a stale marker and re-advertises.
+      // Marker/lock key is the WORKING root (hookCwd), matching the
+      // session-start path's syncRepoHistory: keying by the canonical path
+      // made a main checkout and a linked worktree with divergent HEADs
+      // fight over one marker. The server-facing repoPath stays canonical.
+      const history = shouldAdvertiseHistory(hookCwd, hookCwd);
+      const recentShas = history.advertise ? listRecentShas(hookCwd) : [];
+      if (recentShas.length >= RECENT_SHAS_LIMIT) {
+        debugLog('post-commit', 'history window truncated at cap — older commits stay unsynced', { cap: RECENT_SHAS_LIMIT });
+      }
       api.ingestCommits({
         repoPath,
         repoUrl,
+        recentShas: recentShas.length > 0 ? recentShas : undefined,
         commits: [{
           sha: commitSha,
           message: commitMessage,
@@ -5381,7 +5615,55 @@ export async function handlePostCommit(): Promise<void> {
           diff: diff ? diff.slice(0, 500_000) : undefined,
         }],
       })
-        .then((r) => debugLog('post-commit', 'shadow ingest ok', { ingested: r?.ingested, repoId: r?.repoId }))
+        .then(async (r) => {
+          debugLog('post-commit', 'shadow ingest ok', { ingested: r?.ingested, repoId: r?.repoId });
+          if (!history.head) return;
+          const unknownShas = Array.isArray(r?.unknownShas) ? (r.unknownShas as string[]) : [];
+          if (recentShas.length === 0 || unknownShas.length === 0) {
+            // Steady-state commit, or the server already knows everything
+            // we advertised — record the confirmed position. (When the
+            // gate wanted to advertise but rev-list produced nothing, skip
+            // the write so the check re-runs next commit.)
+            if (!history.advertise || recentShas.length > 0) {
+              writeSyncMarker(hookCwd, history.head, history.count);
+            }
+            return;
+          }
+          if (!acquireBackfillLock(hookCwd)) {
+            debugLog('post-commit', 'history backfill already in flight — skipping', { unknown: unknownShas.length });
+            return;
+          }
+          try {
+            debugLog('post-commit', 'history backfill start', { unknown: unknownShas.length });
+            const unknownSet = new Set(unknownShas);
+            const { accepted, failed } = await backfillUnknownCommits({
+              repoPath,
+              hookCwd,
+              repoUrl,
+              unknownShas,
+              // Advertised SHAs the server acknowledged — lets the server's
+              // repo-resolution confidence gate corroborate each batch even
+              // though the batch's own commits are all unknown to it.
+              knownShas: recentShas.filter((s) => !unknownSet.has(s)),
+              // The hook-default 8s fetch timeout is sized for tiny live
+              // calls; backfill batches carry ~1MB of patches.
+              ingest: (data) => api.ingestCommits(data, { timeoutMs: BACKFILL_TIMEOUT_MS }),
+              onBatchError: (err: any) => debugLog('post-commit', 'history backfill batch failed — continuing', { message: err?.message }),
+            });
+            debugLog('post-commit', 'history backfill done', { accepted, failed });
+            // Only a fully clean run moves the marker; a partial one leaves
+            // it stale so the next commit retries what's missing. Note the
+            // server deliberately skips some advertised SHAs (its own
+            // origin-sessions bookkeeping commits) without creating rows —
+            // they'd re-report unknown forever, so the marker (not the
+            // server's answer) is what ends the loop.
+            if (!failed) writeSyncMarker(hookCwd, history.head, history.count);
+          } catch (err: any) {
+            debugLog('post-commit', 'history backfill failed (non-fatal)', { message: err?.message });
+          } finally {
+            releaseBackfillLock(hookCwd);
+          }
+        })
         .catch((err: any) => debugLog('post-commit', 'shadow ingest failed (non-fatal)', { message: err?.message }));
     } catch (err: any) {
       debugLog('post-commit', 'shadow ingest setup failed', { message: err?.message });

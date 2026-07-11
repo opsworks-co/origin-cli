@@ -267,6 +267,23 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     console.log(chalk.bold(`\nSessions — all repos (${display.length} total)\n`));
   }
 
+  // Repo column: redundant in single-repo mode (the header names the repo), so
+  // only shown for --all/--global where rows span multiple repos.
+  const showRepo = !!opts.all;
+
+  // Column headers, aligned to the exact widths used by the data rows below.
+  const header = [
+    `  ${'ID'.padEnd(8)}`,
+    `${'MODEL / AGENT'.padEnd(25)}`,
+    `${'STATUS'.padEnd(12)}`,
+    `${'FILES'.padEnd(9)}`,
+    `${'COST'.padEnd(7)}`,
+    `${'AGE'.padEnd(10)}`,
+  ];
+  if (showRepo) header.push(`${'REPO'.padEnd(22)}`);
+  if (showSource) header.push('SOURCE');
+  console.log(chalk.dim(header.join('  ')));
+
   for (const entry of display) {
     // Resolve display values from whichever data source is available
     const isLocal = entry.source === 'local' || entry.source === 'both';
@@ -327,13 +344,20 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     }
 
     const line = [
-      `  ${chalk.dim(id)}`,
+      `  ${chalk.dim(id.padEnd(8))}`,
       `${chalk.cyan(displayModel.padEnd(25))}`,
       `${statusColor(status.padEnd(12))}`,
       `${String(files).padStart(3)} files`,
       `${chalk.dim('$' + cost.toFixed(2).padStart(6))}`,
       `${chalk.dim(age.padEnd(10))}`,
     ];
+    if (showRepo) {
+      // Repo identity for this session (owner/repo when known), truncated to
+      // the column width so multi-repo output stays aligned.
+      let repoLabel = String((platform as any)?.repoName || (local as any)?.repoName || '—');
+      if (repoLabel.length > 22) repoLabel = repoLabel.slice(0, 21) + '…';
+      line.push(chalk.white(repoLabel.padEnd(22)));
+    }
     if (showSource) {
       line.push(sourceTag);
     }

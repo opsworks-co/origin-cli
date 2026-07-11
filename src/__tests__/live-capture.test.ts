@@ -152,6 +152,42 @@ describe('mergeLedgerWithTranscript', () => {
     expect(merged[0].commits).toEqual(['sha2']); // commit linkage still carried
   });
 
+  it('re-homes resume-collided ledger edits to the transcript prompt that authored them (prod e0d3ddc9)', () => {
+    // After a resume the live counter reset, so turn 4's edit was filed under
+    // index 0 and turn 5's whole-file write under index 1 — colliding with the
+    // chat-only turn 0 and turn 1's create. The transcript (parsed from the
+    // full conversation) has the correct per-prompt structure.
+    const create = { file: 'pups', op: 'write' as const, newContent: ['r1','r2','r3','r4','r5','r6','r7','r8','r9','r10'].join('\n'), source: 'tool_call' as const };
+    const write12 = { file: 'pups', op: 'write' as const, newContent: Array.from({ length: 12 }, (_, i) => `w${i}`).join('\n'), source: 'tool_call' as const };
+    const edit5 = { file: 'pups', op: 'edit' as const, oldContent: 'w11', newContent: 'w11\ne1\ne2\ne3\ne4\ne5', source: 'tool_call' as const };
+    const edit4 = { file: 'pups', op: 'edit' as const, oldContent: 'w5', newContent: 'w5\nf1\nf2\nf3\nf4', source: 'tool_call' as const };
+    const write19 = { file: 'pups', op: 'write' as const, newContent: Array.from({ length: 19 }, (_, i) => `x${i}`).join('\n'), source: 'tool_call' as const };
+    // Ledger grouped by the COLLIDED indices (buildCapturesFromLedger output).
+    const ledger: PromptCapture[] = [
+      { promptIndex: 0, promptText: '', agent: 'claude', edits: [edit4], commits: [] },              // turn 4 mis-filed
+      { promptIndex: 1, promptText: '', agent: 'claude', edits: [create, write19], commits: [] },     // turn 1 create + turn 5 write mis-filed
+      { promptIndex: 2, promptText: '', agent: 'claude', edits: [write12], commits: [] },
+      { promptIndex: 3, promptText: '', agent: 'claude', edits: [edit5], commits: [] },
+    ];
+    // Transcript: correct absolute structure across all six turns.
+    const transcript: PromptCapture[] = [
+      { promptIndex: 0, promptText: 'check uncommitted', agent: 'claude', edits: [], commits: [] },
+      { promptIndex: 1, promptText: 'create pups', agent: 'claude', edits: [create], commits: [] },
+      { promptIndex: 2, promptText: 'remove 2 add 4', agent: 'claude', edits: [write12], commits: [] },
+      { promptIndex: 3, promptText: 'add 5', agent: 'claude', edits: [edit5], commits: [] },
+      { promptIndex: 4, promptText: 'add 4', agent: 'claude', edits: [edit4], commits: [] },
+      { promptIndex: 5, promptText: 'add 3 remove 5', agent: 'claude', edits: [write19], commits: [] },
+    ];
+    const merged = mergeLedgerWithTranscript(ledger, transcript);
+    const byIdx = new Map(merged.map((c) => [c.promptIndex, c]));
+    expect(byIdx.get(0)!.edits).toHaveLength(0);                          // no P4 edit welded onto chat turn
+    expect(byIdx.get(1)!.edits.map((e) => e.newContent)).toEqual([create.newContent]); // ONLY the create, no P5 write
+    expect(byIdx.get(2)!.edits.map((e) => e.newContent)).toEqual([write12.newContent]);
+    expect(byIdx.get(3)!.edits.map((e) => e.newContent)).toEqual([edit5.newContent]);
+    expect(byIdx.get(4)!.edits.map((e) => e.newContent)).toEqual([edit4.newContent]);
+    expect(byIdx.get(5)!.edits.map((e) => e.newContent)).toEqual([write19.newContent]);
+  });
+
   it('carries a transcript-only prompt the ledger has no entry for', () => {
     const ledger: PromptCapture[] = [
       { promptIndex: 0, promptText: '', agent: 'claude', edits: [ledgerEdit], commits: [] },

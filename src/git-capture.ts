@@ -20,6 +20,15 @@ export interface CommitInfo {
   // Sending them here lets the API populate the row at ingest time.
   linesAdded: number;
   linesRemoved: number;
+  // Per-commit unified patch (`git show <sha>`). The API stores this on the
+  // Commit row so blame + the Full Session Diff can source committed lines
+  // from git truth. Without it, LOCAL-repo commits (never pushed, so the
+  // provider patch-backfill can't reach them) and mid-session commits on a
+  // RUNNING session land with `patch: null`, forcing the blame view into
+  // fragile reconstruction that duplicated/inflated lines (session 4f36ee1c
+  // `colors` rendered 14 lines for a 9-line file). Capped like the session
+  // diff; omitted when empty or oversize.
+  patch?: string;
 }
 
 export interface GitCaptureResult {
@@ -167,7 +176,19 @@ export function captureGitState(
           if (Number.isFinite(r)) cRemoved += r;
         }
       } catch { /* numstat failed (e.g. root commit edge) — leave 0 */ }
-      commitDetails.push({ sha, message, author, filesChanged, linesAdded: cAdded, linesRemoved: cRemoved });
+      // Per-commit unified patch — git truth for the committed lines, so the
+      // API doesn't have to reconstruct them. `git show --format=` prints only
+      // the diff (no commit header); `-m --first-parent` gives a merge commit a
+      // real patch too. Strip ignored sections and cap so a huge commit can't
+      // blow the payload; drop it entirely past the cap (better no patch than a
+      // truncated, malformed one that mis-parses in blame).
+      let patch = '';
+      try {
+        const raw = git(['show', '--format=', '-m', '--first-parent', ...unifiedFlag, sha], gitOpts);
+        patch = stripIgnoredSectionsFromDiff(raw).trim();
+        if (patch.length > MAX_DIFF_SIZE) patch = '';
+      } catch { /* show failed — leave patch empty, API falls back */ }
+      commitDetails.push({ sha, message, author, filesChanged, linesAdded: cAdded, linesRemoved: cRemoved, ...(patch && { patch }) });
     } catch {
       // If we can't get details for a commit, include it with minimal info
       commitDetails.push({ sha, message: '', author: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 });
@@ -246,11 +267,23 @@ export function captureGitState(
     }
   }
   try {
-    if (safeBefore) {
-      // `git diff <commit>` compares working tree to commit's tree.
-      // Includes staged + unstaged. Untracked still needs special handling.
+    if (safeBefore && baselineIsShadow) {
+      // SHADOW baseline (a session-start / per-prompt working-tree snapshot):
+      // use a TREE-TO-TREE diff so PRE-EXISTING UNTRACKED files a prior session
+      // left in the tree (already captured in the shadow) CANCEL OUT. Plain
+      // `git diff <shadow>` would instead show them as spurious DELETIONS — the
+      // shadow tracks them, but the real index doesn't — and the untracked
+      // re-append would double them. Mirrors captureAgyDiff (writeWorkingTree +
+      // baseTree..curTree), the mechanism that already handles this for agy.
+      const baseTree = gitOrNull(['rev-parse', `${safeBefore}^{tree}`], gitOpts);
+      const curTree = writeWorkingTree(repoPath, gitOpts);
+      if (baseTree && HEX.test(baseTree) && curTree && HEX.test(curTree)) {
+        workingTreeDiff = git(['diff', ...unifiedFlag, baseTree, curTree], gitOpts).trim();
+      }
+    } else if (safeBefore) {
+      // Real-commit baseline (clean start): `git diff <commit>` compares working
+      // tree to the commit's tree (staged + unstaged); untracked appended below.
       workingTreeDiff = git(['diff', ...unifiedFlag, safeBefore], gitOpts).trim();
-      // Append untracked file diffs
       if (!opts?.committedOnly) {
         try {
           const untracked = git(['ls-files', '--others', '--exclude-standard'], gitOpts).trim();
@@ -263,10 +296,10 @@ export function captureGitState(
           }
         } catch { /* skip */ }
       }
-      if (workingTreeDiff.length > MAX_DIFF_SIZE) {
-        workingTreeDiff = workingTreeDiff.slice(0, MAX_DIFF_SIZE);
-        diffTruncated = true;
-      }
+    }
+    if (workingTreeDiff.length > MAX_DIFF_SIZE) {
+      workingTreeDiff = workingTreeDiff.slice(0, MAX_DIFF_SIZE);
+      diffTruncated = true;
     }
   } catch {
     workingTreeDiff = '';
@@ -281,6 +314,23 @@ export function captureGitState(
   committedDiff = stripIgnoredSectionsFromDiff(committedDiff);
   uncommittedDiff = stripIgnoredSectionsFromDiff(uncommittedDiff);
   workingTreeDiff = stripIgnoredSectionsFromDiff(workingTreeDiff);
+
+  // When the baseline is a session-start (or per-prompt) working-tree SHADOW
+  // and the session made no commits, the honest per-prompt diff is the change
+  // SINCE that shadow — not `git diff HEAD`, which re-surfaces PRE-EXISTING
+  // uncommitted files a PRIOR session left in the tree (Cursor session
+  // d0a25d8d: a read-only prompt captured +149 / 7 files it never touched).
+  // workingTreeDiff is `shadow..worktree`, so files already present in the
+  // shadow cancel out; only genuinely-new changes remain. Gated on
+  // `commitShas.length === 0` so we never fold committed work into the
+  // uncommitted field. Applies to EVERY agent that anchors on a session-start
+  // shadow (Cursor/Codex/Claude/Gemini via captureGitState); clean-start
+  // sessions have no shadow (baseline === HEAD) so this is a no-op for them,
+  // and Antigravity has its own tree-to-tree captureAgyDiff.
+  if (baselineIsShadow && commitShas.length === 0) {
+    uncommittedDiff = workingTreeDiff;
+    diff = workingTreeDiff;
+  }
 
   // Count lines added/removed
   let linesAdded = 0;

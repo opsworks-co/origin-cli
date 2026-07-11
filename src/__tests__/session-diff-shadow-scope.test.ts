@@ -71,6 +71,56 @@ describe('scopeSessionDiffToStart', () => {
     expect(cap.linesAdded).toBe(1);
   });
 
+  it('a read-only session over pre-existing UNTRACKED files captures an EMPTY diff (not the prior session-s files)', () => {
+    // The exact bug (Cursor session d0a25d8d): a prior session left NEW
+    // untracked files in the tree; this session only READS. `git diff HEAD`
+    // (+ untracked append) would surface all of them as +N. Anchored on the
+    // session-start shadow, captureGitState must report nothing.
+    fs.writeFileSync(path.join(repo, 'README.md'), '# base\n');
+    git(repo, ['add', '.']);
+    git(repo, ['commit', '-q', '-m', 'base']);
+
+    // Prior session's uncommitted, UNTRACKED work sitting in the tree.
+    fs.mkdirSync(path.join(repo, 'src'));
+    fs.writeFileSync(path.join(repo, 'src/a.py'), 'a = 1\nb = 2\nc = 3\n');
+    fs.writeFileSync(path.join(repo, 'pyproject.toml'), '[tool]\nx = 1\n');
+
+    // Session start snapshots the dirty (untracked) tree into a shadow.
+    const shadow = createShadowCommit(repo, 'start-readonly');
+    expect(shadow).toBeTruthy();
+
+    // Read-only prompt: no edits. Capture against the shadow baseline.
+    const cap = captureGitState(repo, shadow, { fullContext: true });
+    expect(cap.baselineIsShadow).toBe(true);
+    expect(cap.commitShas.length).toBe(0);
+    // The fix: uncommitted/diff are `shadow..worktree` — empty, since nothing
+    // changed since the shadow. Pre-existing files never surface.
+    expect(cap.uncommittedDiff).toBe('');
+    expect(cap.diff).toBe('');
+    expect(cap.linesAdded).toBe(0);
+  });
+
+  it('scopeSessionDiffToStart re-scopes uncommittedDiff too (not just diff)', () => {
+    const file = path.join(repo, 'notes.txt');
+    fs.writeFileSync(file, 'a\nb\n');
+    git(repo, ['add', '.']);
+    git(repo, ['commit', '-q', '-m', 'base']);
+    const headAtStart = git(repo, ['rev-parse', 'HEAD']);
+    // pre-existing dirt, then shadow, then this session's edit
+    fs.appendFileSync(file, 'PRIOR dirt\n');
+    const shadow = createShadowCommit(repo, 'start');
+    fs.appendFileSync(file, 'THIS session line\n');
+
+    const cap = captureGitState(repo, headAtStart, { fullContext: true });
+    // Raw uncommittedDiff (git diff HEAD) carries the prior dirt as +.
+    expect(cap.uncommittedDiff).toMatch(/^\+PRIOR dirt/m);
+
+    scopeSessionDiffToStart(cap, repo, shadow);
+    // uncommittedDiff is now shadow-scoped: only this session's line is added.
+    expect(cap.uncommittedDiff).not.toMatch(/^\+PRIOR dirt/m);
+    expect(cap.uncommittedDiff).toMatch(/^\+THIS session line/m);
+  });
+
   it('is a no-op when there is no session-start shadow (clean start)', () => {
     const file = path.join(repo, 'a.txt');
     fs.writeFileSync(file, 'x\n');
