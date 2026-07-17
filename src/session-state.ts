@@ -170,6 +170,10 @@ export interface SessionState {
   // block new AI work; ORIGIN_BUDGET_OVERRIDE=1 bypasses.
   budgetBlocked?: boolean;
   budgetBlockReason?: string;
+  // Why session/start failed and this session stayed local. Read by `origin
+  // status` to report the REAL reason (repo-not-registered, agent-disabled, …)
+  // instead of a canned "agent was disabled" string.
+  syncBlock?: import('./sync-block.js').SyncBlock;
   // Scoped SOFT-cap warning (warn-only — nothing is locked). Persisted by
   // the heartbeat from ping payloads; user-prompt-submit surfaces it once
   // per distinct reason in the conversation and records it in

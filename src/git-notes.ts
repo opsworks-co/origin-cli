@@ -326,6 +326,58 @@ export function shouldIncludePromptText(repoPath: string): boolean {
 // or updated.
 export const NOTES_FETCH_REFSPEC = '+refs/notes/origin:refs/notes/origin-remote';
 
+// A forced refspec that maps the remote's notes STRAIGHT onto local
+// refs/notes/origin. Older `origin enable` releases installed this, and it
+// silently destroys attribution: the leading '+' force-updates the local ref on
+// every ordinary `git fetch`/`git pull`, so any note written locally but not yet
+// pushed (offline, a failed push, a push that lost a race) is gone with no
+// warning. Reproduced: write a local note, `git pull`, note vanishes.
+//
+// The staging refspec above plus `notes merge -s ours` is the safe equivalent —
+// it keeps the local machine authoritative for commits it annotated itself. We
+// strip this one wherever we find it so already-configured repos stop losing
+// notes on the next pull.
+export const LEGACY_CLOBBERING_NOTES_REFSPEC = '+refs/notes/origin:refs/notes/origin';
+
+/**
+ * Remove the legacy clobbering refspec from a remote, if present.
+ * Returns true when one was removed. Best-effort; never throws.
+ */
+export function removeLegacyNotesRefspec(repoPath: string, remote: string): boolean {
+  const execOpts = {
+    cwd: repoPath,
+    stdio: 'pipe' as const,
+    timeout: 5_000,
+    encoding: 'utf-8' as const,
+  };
+  try {
+    const existing = execFileSync(
+      'git', ['config', '--get-all', `remote.${remote}.fetch`], execOpts,
+    );
+    if (!existing.split('\n').map((s) => s.trim()).includes(LEGACY_CLOBBERING_NOTES_REFSPEC)) {
+      return false;
+    }
+  } catch {
+    return false; // no fetchspecs configured at all
+  }
+  try {
+    // --unset-all with an exact-match value pattern: the value is a fixed
+    // literal, and `^…$` anchors it so a longer refspec that merely contains
+    // this string can't be caught by accident.
+    execFileSync(
+      'git',
+      [
+        'config', '--unset-all', `remote.${remote}.fetch`,
+        `^\\+refs/notes/origin:refs/notes/origin$`,
+      ],
+      execOpts,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function syncNotesFromRemote(repoPath: string): boolean {
   const execOpts = {
     cwd: repoPath,
@@ -346,7 +398,14 @@ export function syncNotesFromRemote(repoPath: string): boolean {
   }
   if (!remote) return false;
 
-  // 1. Persistent refspec — added once, then every git pull syncs notes.
+  // 0. Heal repos configured by an older `origin enable`, which installed a
+  //    forced direct refspec that wipes unpushed local notes on every pull.
+  //    Done here (not just in `enable`) because this runs on SessionStart, so
+  //    an already-poisoned repo gets repaired without the user doing anything.
+  removeLegacyNotesRefspec(repoPath, remote);
+
+  // 1. Persistent refspec — added once, then every git pull syncs notes into
+  //    the staging ref, which step 3 merges (never clobbers).
   try {
     const existing = execFileSync('git', ['config', '--get-all', `remote.${remote}.fetch`], execOpts);
     if (!existing.includes(NOTES_FETCH_REFSPEC)) {

@@ -18,7 +18,8 @@ import { recapCommand } from './commands/recap.js';
 import { enableCommand } from './commands/enable.js';
 import { disableCommand } from './commands/disable.js';
 import { linkCommand } from './commands/link.js';
-import { hooksCommand, handlePostCommit, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync } from './commands/hooks.js';
+import { hooksCommand, handlePostCommit,
+  handleGitPostCheckout, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
 import { promptsCommand } from './commands/prompts.js';
@@ -69,7 +70,7 @@ import {
 } from './commands/issue.js';
 import { checkForUpdate } from './version-check.js';
 import { BUILD_INFO } from './build-info.js';
-import { readFileSync } from 'fs';
+import { readFileSync, writeSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -646,16 +647,12 @@ hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (reb
   // Also check for cherry-pick context
   handleCherryPick(repoPath);
 });
-hooks.command('git-post-checkout').description('Handle git post-checkout hook').action(async () => {
-  const { handlePostCheckout } = await import('./history-preservation.js');
-  const { getGitRoot } = await import('./session-state.js');
-  const repoPath = getGitRoot(process.cwd());
-  if (!repoPath) return;
-  const args = process.argv.slice(process.argv.indexOf('git-post-checkout') + 1);
-  const prevHead = args[0] || '';
-  const newHead = args[1] || '';
-  handlePostCheckout(repoPath, prevHead, newHead);
-});
+hooks.command('git-post-checkout')
+  .description('Handle git post-checkout hook (notes on clone; attribution on stash)')
+  .action(async () => {
+    const args = process.argv.slice(process.argv.indexOf('git-post-checkout') + 1);
+    await handleGitPostCheckout(args[0] || '', args[1] || '', args[2] || '');
+  });
 
 // ─── Sessions ────────────────────────────────────────────────────────────
 
@@ -1007,6 +1004,39 @@ program.hook('postAction', async () => {
       console.log(chalk.gray(`  Run: origin upgrade\n`));
     }
   } catch { /* never fail */ }
+});
+
+// ─── Output: write help/errors synchronously ───────────────────────────────
+//
+// Commander writes help with process.stdout.write and then exits. When stdout is
+// a PIPE (`origin --help | less`, CI, anything capturing output) those writes are
+// ASYNCHRONOUS, so process.exit() can drop whatever hasn't flushed — the help cuts
+// off mid-word. It survives a terminal (writes there are synchronous) and usually
+// survives a shell pipe (the whole ~12KB fits the 64KB pipe buffer in one go),
+// which is why it looked like a flaky test rather than a real bug: captured under
+// load, the output came back 7095 bytes instead of 11977, truncated mid-line.
+//
+// writeSync blocks until the bytes are gone, so there is nothing left to lose at
+// exit. Loop on the return value (a single writeSync may write only part) and
+// retry EAGAIN, which a non-blocking pipe can raise under pressure.
+function writeAllSync(fd: number, str: string): void {
+  const buf = Buffer.from(str, 'utf-8');
+  let written = 0;
+  while (written < buf.length) {
+    try {
+      written += writeSync(fd, buf, written);
+    } catch (err: any) {
+      if (err?.code === 'EAGAIN') continue; // pipe full — try again
+      // Last resort: never let a write failure break the command itself.
+      try { process.stdout.write(buf.subarray(written).toString('utf-8')); } catch { /* give up */ }
+      return;
+    }
+  }
+}
+
+program.configureOutput({
+  writeOut: (str) => writeAllSync(1, str),
+  writeErr: (str) => writeAllSync(2, str),
 });
 
 program.parse();

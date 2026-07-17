@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import readline from 'readline';
 import { gitDetailed } from '../utils/exec.js';
 import { getGitRoot, getBranch } from '../session-state.js';
@@ -85,23 +86,21 @@ function gatherRepoContext(cwd: string): string {
     }
   }
 
-  // Session list from origin-sessions branch
+  // Session list from stored sessions (refs or branch backend)
   {
-    const treeRes = gitDetailed(['ls-tree', '--name-only', 'origin-sessions:sessions/'], gitOpts);
-    if (treeRes.status === 0) {
-      const tree = treeRes.stdout.trim();
-      if (tree) {
-        const sessions = tree.split('\n').filter(Boolean);
+    {
+      {
+        const sessions = listSessionIds(repoRoot);
         parts.push(`\nTracked sessions: ${sessions.length}`);
         for (const sid of sessions.slice(-10)) {
           if (!SAFE_ID.test(sid)) {
             parts.push(`  ${sid}`);
             continue;
           }
-          const metaRes = gitDetailed(['show', `origin-sessions:sessions/${sid}/metadata.json`], gitOpts);
-          if (metaRes.status === 0) {
+          const metaRaw = readSessionFile(repoRoot, sid, 'metadata.json');
+          if (metaRaw) {
             try {
-              const m = JSON.parse(metaRes.stdout.trim());
+              const m = JSON.parse(metaRaw.trim());
               parts.push(`  ${sid}: model=${m.model || '?'}, cost=$${m.costUsd?.toFixed(4) || '?'}, tokens=${m.tokensUsed || '?'}`);
             } catch {
               parts.push(`  ${sid}`);

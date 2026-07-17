@@ -1,3 +1,5 @@
+import path from 'path';
+
 // Parser for Antigravity (`agy`) transcripts.
 //
 // agy has no SessionStart/UserPromptSubmit hook events — only Stop / PreToolUse
@@ -19,6 +21,31 @@ export interface AntigravityTranscript {
   model: string | null;   // normalized slug, e.g. "gemini-3.5-flash"
   inputChars: number;     // user-side text (for token estimation)
   outputChars: number;    // model-side text (for token estimation)
+  // Absolute paths of every file the session touched (edit/write/read tools),
+  // pulled from tool_calls[].args. agy reports no reliable repo root — its
+  // `workspacePaths[0]` is often the workspace/project NAME, not the folder the
+  // edits landed in — so these paths are how the CLI recovers the TRUE git root
+  // to attribute the session to (see deriveAgyRepoPath in commands/hooks.ts).
+  filePaths: string[];
+}
+
+// PascalCase (and a few snake_case) keys agy uses for file arguments across its
+// edit/write/read/glob tools. Mirrors agyToolArg / agyToolPaths.
+const AGY_FILE_ARG_KEYS = ['TargetFile', 'AbsolutePath', 'FilePath', 'Path', 'file_path', 'file', 'path', 'DirectoryPath'];
+
+// Collect ABSOLUTE file paths from one step's tool_calls. Relative paths are
+// dropped — only an absolute path can be resolved back to a git root without
+// knowing the (unreliable) cwd.
+function stepFilePaths(step: any): string[] {
+  const out: string[] = [];
+  for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+    const a = (tc && tc.args) || {};
+    for (const k of AGY_FILE_ARG_KEYS) {
+      const v = a[k];
+      if (typeof v === 'string' && v.trim() && path.isAbsolute(v.trim())) out.push(v.trim());
+    }
+  }
+  return out;
 }
 
 // Per-prompt cap on assembled assistant text — keeps the synthesized transcript
@@ -116,6 +143,9 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   let model: string | null = null;
   let inputChars = 0;
   let outputChars = 0;
+  // Preserve first-seen order (a read/edit early in the session is the best
+  // repo-root signal); dedup via the Set.
+  const filePathSet = new Set<string>();
   // When agy compacts a long session it drops a CHECKPOINT step ("Resuming from
   // a compaction") and then RE-INJECTS the original user request as a fresh
   // USER_EXPLICIT step. That is not a new prompt — counting it produces a
@@ -158,6 +188,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         const text = plannerStepText(step);
         if (text && turns.length > 0) turns[turns.length - 1].buf.push(text);
       }
+      for (const p of stepFilePaths(step)) filePathSet.add(p);
     }
   }
 
@@ -179,7 +210,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   const promptTimes = turns.map((t) => t.createdAt);
   const responses = turns.map((t) => t.buf.join('\n\n').trim().slice(0, MAX_RESPONSE_LEN));
 
-  return { prompts, responses, promptTimes, model, inputChars, outputChars };
+  return { prompts, responses, promptTimes, model, inputChars, outputChars, filePaths: [...filePathSet] };
 }
 
 // agy exposes no token counts, so we estimate from text length (~4 chars/token,

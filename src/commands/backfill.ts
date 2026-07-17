@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { isAiCommit } from '../attribution.js';
@@ -315,21 +316,14 @@ function scanOriginSessions(repoPath: string): OriginSessionInfo[] {
 function scanOriginSessionsBranch(repoPath: string): OriginSessionInfo[] {
   const results: OriginSessionInfo[] = [];
   try {
-    // List all sessions in origin-sessions branch
-    const raw = git(
-      ['ls-tree', '--name-only', 'origin-sessions', 'sessions/'],
-      gitOpts(repoPath),
-    ).trim();
-    if (!raw) return results;
+    // List all stored sessions (refs or branch backend)
+    const dirs = listSessionIds(repoPath);
+    if (dirs.length === 0) return results;
 
-    const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
     for (const dir of dirs) {
       if (!SAFE_ID.test(dir)) continue;
       try {
-        const metaJson = git(
-          ['show', `origin-sessions:sessions/${dir}/metadata.json`],
-          gitOpts(repoPath),
-        ).trim();
+        const metaJson = (readSessionFile(repoPath, dir, 'metadata.json') ?? '').trim();
         const meta = JSON.parse(metaJson);
         if (!meta) continue;
 
@@ -346,23 +340,25 @@ function scanOriginSessionsBranch(repoPath: string): OriginSessionInfo[] {
           : meta.updatedAt ? new Date(meta.updatedAt).getTime()
           : startMs + 3600000; // default 1hr window
 
+        // The session's commits live in metadata.json under `git`, which is
+        // where the CLI has always written them (see buildMetadataJson).
+        //
+        // This used to read `meta.commitSha` / `meta.headShaAtStart` — a flat
+        // shape the writer never produced — and then a commits.json that nothing
+        // writes at all. Both silently yielded nothing, so `commits` was ALWAYS
+        // empty and every session looked commit-less to the backfill.
         const commits: string[] = [];
-        if (meta.commitSha) commits.push(meta.commitSha);
-        if (meta.headShaAtStart) commits.push(meta.headShaAtStart);
-        // Try to read commits list
-        try {
-          const commitsJson = git(
-            ['show', `origin-sessions:sessions/${dir}/commits.json`],
-            gitOpts(repoPath),
-          ).trim();
-          const commitsList = JSON.parse(commitsJson);
-          if (Array.isArray(commitsList)) {
-            for (const c of commitsList) {
-              const sha = typeof c === 'string' ? c : c?.sha;
-              if (sha) commits.push(sha);
-            }
-          }
-        } catch { /* no commits file */ }
+        const seen = new Set<string>();
+        const addSha = (sha: unknown) => {
+          if (typeof sha !== 'string' || !/^[a-fA-F0-9]{7,64}$/.test(sha)) return;
+          if (seen.has(sha)) return;
+          seen.add(sha);
+          commits.push(sha);
+        };
+        for (const sha of meta.git?.commitShas ?? []) addSha(sha);
+        // headAfter is the session's end state — useful when commitShas is empty
+        // (e.g. a session captured before commitShas was populated).
+        addSha(meta.git?.headAfter);
 
         results.push({
           sessionId: meta.sessionId || dir,
@@ -930,3 +926,6 @@ function formatConfidence(confidence: Confidence): string {
       return chalk.gray('  LOW');
   }
 }
+
+// Internals exercised by session-file-shape-readers.test.ts. Not a public API.
+export const __testing = { scanOriginSessionsBranch };

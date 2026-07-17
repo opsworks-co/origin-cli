@@ -24,6 +24,15 @@ export interface OriginConfig {
   hookChaining?: boolean;
   mode?: 'standalone' | 'auto'; // Force standalone even when logged in
   snapshotRepo?: string; // External git remote URL for origin-sessions branch
+  // Where session files are stored (see session-store.ts).
+  //   'refs' (default) — one ref per session under refs/origin/sessions/*.
+  //     Parallel agents write disjoint refs, so there's no write contention and
+  //     write cost stays flat as history grows.
+  //   'branch' — the legacy shared `origin-sessions` orphan branch. Set this if
+  //     you need session data as a browsable branch on GitHub for a consumer
+  //     that only reads that format.
+  // Reads check BOTH backends, so switching either way is non-destructive.
+  sessionBackend?: 'branch' | 'refs';
   autoSnapshot?: boolean;  // Auto-save snapshots before agent file edits (default: false)
   // Sign Origin's own commits (auto-snapshots, origin-sessions branch, shadow
   // snapshots). Uses git's `commit-tree -S`, which honors the user's existing

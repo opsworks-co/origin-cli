@@ -40,6 +40,18 @@ export function hasMarkers(m: OriginMarkers | undefined): m is OriginMarkers {
   return !!m && !!(m.intent?.length || m.decision?.length || m.open?.length || m.verify?.length);
 }
 
+// True when a marker's content is just the unfilled template — angle-bracket
+// placeholders (e.g. "<one sentence on WHY…>" or "<choice you made> — <why>")
+// with nothing but glue between them. Some agents (seen with Codex) echo the
+// [Origin: …] template verbatim instead of filling it in; those placeholders
+// must not be stored in git notes (or shown on the PR surface). Real prose
+// never reduces to empty; generics like "Map<string, any>" keep "Map".
+// Mirrors self-reported-brief.ts on the server so both surfaces agree.
+function isPlaceholderMarker(content: string): boolean {
+  const withoutPlaceholders = content.replace(/<[^>]*>/g, '');
+  return withoutPlaceholders.replace(/[\s—–\-:.,;/|()]+/g, '').length === 0;
+}
+
 // Light cleanup — mirrors the server's cleanContent: strip wrapping
 // quotes, collapse whitespace, cap length, drop a single trailing period.
 function cleanContent(raw: string): string {
@@ -71,6 +83,9 @@ export function parseOriginMarkers(text: string | null | undefined): OriginMarke
     const kind = m[1].toLowerCase() as 'intent' | 'decision' | 'open' | 'verify';
     const content = cleanContent(m[2]);
     if (!content) continue;
+    // Drop unfilled template placeholders — don't persist "<one sentence…>"
+    // into git notes where a later agent would pull it as prior context.
+    if (isPlaceholderMarker(content)) continue;
     const key = `${kind}::${content.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);

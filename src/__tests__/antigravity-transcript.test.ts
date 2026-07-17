@@ -156,7 +156,7 @@ describe('helpers', () => {
   });
 
   it('handles empty/garbage transcripts without throwing', () => {
-    expect(parseAntigravityTranscript('')).toEqual({ prompts: [], responses: [], promptTimes: [], model: null, inputChars: 0, outputChars: 0 });
+    expect(parseAntigravityTranscript('')).toEqual({ prompts: [], responses: [], promptTimes: [], model: null, inputChars: 0, outputChars: 0, filePaths: [] });
     expect(parseAntigravityTranscript('not json\n{bad').prompts).toEqual([]);
   });
 });
@@ -218,5 +218,37 @@ describe('prompt ordering by real created_at (stable identity)', () => {
   it('emits promptTimes aligned even for the single-prompt case', () => {
     const { promptTimes } = parseAntigravityTranscript(user('hi', '2026-07-04T19:00:00Z'));
     expect(promptTimes).toEqual([Date.parse('2026-07-04T19:00:00Z')]);
+  });
+});
+
+describe('filePaths (repo-root recovery signal)', () => {
+  // The root of the "origin-demo-12 vs origin-demo-1" bug: agy's workspace name
+  // is unreliable, so repo identity is recovered from the ABSOLUTE paths of the
+  // files the session actually touched. The parser must surface those.
+  it('collects absolute edit/write/read paths and drops relative ones', () => {
+    const jsonl = [
+      JSON.stringify({ type: 'USER_INPUT', source: 'USER_EXPLICIT', content: '<USER_REQUEST>edit files</USER_REQUEST>' }),
+      JSON.stringify({ type: 'PLANNER_RESPONSE', source: 'MODEL', tool_calls: [
+        { name: 'write_to_file', args: { TargetFile: '/Users/artemdolobanko/Documents/origin-demo-1/file1.txt' } },
+        { name: 'replace_file_content', args: { AbsolutePath: '/Users/artemdolobanko/Documents/origin-demo-1/file2.txt' } },
+        { name: 'view_file', args: { FilePath: 'relative/only.txt' } }, // dropped — not absolute
+        { name: 'write_to_file', args: { TargetFile: '/Users/artemdolobanko/Documents/origin-demo-1/file1.txt' } }, // dup collapsed
+      ] }),
+    ].join('\n');
+    const { filePaths } = parseAntigravityTranscript(jsonl);
+    expect(filePaths).toEqual([
+      '/Users/artemdolobanko/Documents/origin-demo-1/file1.txt',
+      '/Users/artemdolobanko/Documents/origin-demo-1/file2.txt',
+    ]);
+  });
+
+  it('is empty when the session touched no files', () => {
+    const jsonl = [
+      JSON.stringify({ type: 'USER_INPUT', source: 'USER_EXPLICIT', content: '<USER_REQUEST>just chat</USER_REQUEST>' }),
+      JSON.stringify({ type: 'PLANNER_RESPONSE', source: 'MODEL', tool_calls: [
+        { name: 'run_command', args: { CommandLine: 'ls' } },
+      ] }),
+    ].join('\n');
+    expect(parseAntigravityTranscript(jsonl).filePaths).toEqual([]);
   });
 });

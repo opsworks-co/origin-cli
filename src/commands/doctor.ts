@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -121,14 +122,8 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
     // 1c. Fix stale "running" sessions on origin-sessions branch + orphaned entries
     try {
       const gitOpts = { cwd: repoPath };
-      // Check if origin-sessions branch exists
-      git(['rev-parse', 'refs/heads/origin-sessions'], gitOpts);
-
-      const tree = git(
-        ['ls-tree', '--name-only', 'refs/heads/origin-sessions', 'sessions/'],
-        gitOpts,
-      ).trim();
-      const sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
+      // Empty is fine: the loop no-ops and the reports below are count-guarded.
+      const sessionDirs = listSessionIds(repoPath).map((id) => `sessions/${id}`);
       let orphanedEntries = 0;
       let staleRunning = 0;
 
@@ -138,10 +133,7 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
       for (const dir of sessionDirs) {
         try {
           if (!/^sessions\/[a-zA-Z0-9_.-]+$/.test(dir)) continue;
-          const metaRaw = git(
-            ['show', `refs/heads/origin-sessions:${dir}/metadata.json`],
-            gitOpts,
-          ).trim();
+          const metaRaw = (readSessionFile(repoPath, dir.replace('sessions/', ''), 'metadata.json') ?? '').trim();
           const metadata = JSON.parse(metaRaw);
 
           // Check for "running" sessions that are no longer active (no state file)

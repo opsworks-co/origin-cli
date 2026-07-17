@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -7,6 +8,7 @@ import { api } from '../api.js';
 import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive } from '../session-state.js';
 import { git, gitOrNull } from '../utils/exec.js';
 import { currentOwner, isForeignSession, listForeignQueuedSessions, reportForeignSessionCount } from '../session-owner.js';
+import { makeSyncBlock } from '../sync-block.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
@@ -31,23 +33,14 @@ function listLocalSessions(repoPath: string): LocalSession[] {
   const sessions: LocalSession[] = [];
 
   try {
-    // Check if origin-sessions branch exists
-    git(['rev-parse', 'refs/heads/origin-sessions'], gitOpts);
-  } catch {
-    return sessions;
-  }
-
-  try {
-    // List session directories on the origin-sessions branch
-    const raw = git(['ls-tree', '--name-only', 'origin-sessions', 'sessions/'], gitOpts).trim();
-    if (!raw) return sessions;
-
-    const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
+    // List stored sessions (refs or branch backend)
+    const dirs = listSessionIds(repoPath);
+    if (dirs.length === 0) return sessions;
 
     for (const dir of dirs) {
       if (!SAFE_ID.test(dir)) continue;
       try {
-        const metadataJson = git(['show', `origin-sessions:sessions/${dir}/metadata.json`], gitOpts).trim();
+        const metadataJson = (readSessionFile(repoPath, dir, 'metadata.json') ?? '').trim();
         const metadata = JSON.parse(metadataJson);
         sessions.push({
           sessionId: metadata.sessionId || dir,
@@ -479,7 +472,7 @@ export async function sessionDetailCommand(id: string) {
   if (repoPath) {
     try {
       if (!SAFE_ID.test(session.sessionId)) throw new Error('invalid session id');
-      const prompts = git(['show', `origin-sessions:sessions/${session.sessionId}/prompts.md`], { cwd: repoPath }).trim();
+      const prompts = (readSessionFile(repoPath, session.sessionId, 'prompts.md') ?? '').trim();
       if (prompts) {
         console.log(chalk.bold('\n  Prompts:\n'));
         console.log(prompts.split('\n').map(l => '    ' + l).join('\n'));
@@ -575,18 +568,14 @@ export async function sessionEndCommand(id: string) {
     const repoPath = getGitRoot();
     if (repoPath) {
       const gitOpts = { cwd: repoPath };
-      const BRANCH = 'origin-sessions';
-      // Check if branch exists
-      git(['rev-parse', `refs/heads/${BRANCH}`], gitOpts);
-      const tree = git(['ls-tree', '--name-only', `refs/heads/${BRANCH}`, 'sessions/'], gitOpts).trim();
-      const sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
+      const sessionDirs = listSessionIds(repoPath).map((sid) => `sessions/${sid}`);
 
       for (const dir of sessionDirs) {
         const safeId = dir.replace('sessions/', '');
         if (!SAFE_ID.test(safeId)) continue;
         if (safeId === id || safeId.startsWith(id) || id.startsWith(safeId.slice(0, 8))) {
           try {
-            const metaRaw = git(['show', `refs/heads/${BRANCH}:${dir}/metadata.json`], gitOpts).trim();
+            const metaRaw = (readSessionFile(repoPath, safeId, 'metadata.json') ?? '').trim();
             const metadata = JSON.parse(metaRaw);
             if (metadata.status === 'running') {
               // Use writeSessionFiles to update the branch
@@ -682,21 +671,16 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
   if (repoPath) {
     try {
       const gitOpts = { cwd: repoPath };
-      const BRANCH = 'origin-sessions';
 
-      // Check if branch exists
-      git(['rev-parse', `refs/heads/${BRANCH}`], gitOpts);
-      const tree = git(['ls-tree', '--name-only', `refs/heads/${BRANCH}`, 'sessions/'], gitOpts).trim();
-      if (!tree) return;
-
-      const sessionDirs = tree.split('\n').filter(Boolean);
+      const sessionDirs = listSessionIds(repoPath).map((sid) => `sessions/${sid}`);
+      if (sessionDirs.length === 0) return;
       const { writeSessionFiles } = await import('../local-entrypoint.js');
       let branchCleaned = 0;
 
       for (const dir of sessionDirs) {
         try {
           if (!/^sessions\/[a-zA-Z0-9_.-]+$/.test(dir)) continue;
-          const metaRaw = git(['show', `refs/heads/${BRANCH}:${dir}/metadata.json`], gitOpts).trim();
+          const metaRaw = (readSessionFile(repoPath, dir.replace('sessions/', ''), 'metadata.json') ?? '').trim();
           const metadata = JSON.parse(metaRaw);
           if (metadata.status === 'running') {
             writeSessionFiles(repoPath, {
@@ -825,6 +809,12 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean; markImported?
         state.syncedSessionId = realSessionId;
         writeSessionFileAtomic(filePath, state);
       } catch (err: any) {
+        // Persist the real reason so `origin status` reports it accurately
+        // between sync runs (repo-not-registered vs agent-disabled vs …).
+        try {
+          state.syncBlock = makeSyncBlock(err, state.repoPath || '', new Date().toISOString());
+          writeSessionFileAtomic(filePath, state);
+        } catch { /* non-fatal */ }
         if (err?.code === 'AGENT_DISABLED') {
           if (!opts.quiet) console.log(chalk.yellow(`  ⏸  ${label} — agent still disabled, kept local`));
           result.blocked++;

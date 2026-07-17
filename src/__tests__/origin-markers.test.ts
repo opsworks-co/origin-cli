@@ -31,6 +31,18 @@ describe('parseOriginMarkers (plain text)', () => {
     expect(m.decision).toEqual(['X', 'Y']);
   });
 
+  it('drops unfilled template placeholders (never persists <…> to git notes)', () => {
+    const template = [
+      "[Origin: Intent] <one sentence on WHY you're making this change>",
+      '[Origin: Decision] <choice you made> — <why>',
+      '[Origin: Verify] <something a human reviewer should check>',
+    ].join('\n');
+    expect(parseOriginMarkers(template)).toBeUndefined();
+    // Real content that merely contains angle brackets survives.
+    const real = parseOriginMarkers('[Origin: Decision] switched to Map<string, any> — simpler')!;
+    expect(real.decision).toEqual(['switched to Map<string, any> — simpler']);
+  });
+
   it('returns undefined when there are no markers', () => {
     expect(parseOriginMarkers('just some prose\nno markers here')).toBeUndefined();
     expect(parseOriginMarkers('')).toBeUndefined();

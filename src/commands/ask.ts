@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { readSessionFile } from '../session-store.js';
 import { execSync } from 'child_process';
 import { getGitRoot } from '../session-state.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
@@ -205,10 +206,7 @@ async function askAboutFile(file: string, query: string, repoPath: string, line?
     if (relevant.length === 0 && prompts.length === 0) {
       // Try loading from git branch
       try {
-        const md = execSync(
-          `git show origin-sessions:sessions/${sid}/prompts.md 2>/dev/null`,
-          execOpts
-        ).trim();
+        const md = (readSessionFile(repoPath, sid, 'prompts.md') ?? '').trim();
         if (md) {
           const preview = md.slice(0, 300).replace(/\n/g, ' ');
           console.log(chalk.white(`    ${preview}${md.length > 300 ? '...' : ''}`));

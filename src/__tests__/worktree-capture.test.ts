@@ -30,6 +30,7 @@ import {
 } from '../session-state.js';
 import { listSessionsForGitHook } from '../commands/hooks.js';
 import { writeSessionFiles } from '../local-entrypoint.js';
+import { readSessionFile } from '../session-store.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8' }).trim();
@@ -139,11 +140,14 @@ describe('worktree-aware git roots', () => {
       originUrl: '',
       changes: [],
     });
-    // The origin-sessions branch must exist with this session's metadata —
-    // before the fix the temp-index path hit ENOTDIR ("Not a directory")
-    // and the whole write was silently swallowed by the outer catch.
-    const meta = git(wt, 'show', 'refs/heads/origin-sessions:sessions/sess-wt-1/metadata.json');
-    expect(JSON.parse(meta).sessionId).toBe('sess-wt-1');
+    // The session's metadata must be readable back — before the fix the
+    // temp-index path hit ENOTDIR ("Not a directory") and the whole write was
+    // silently swallowed by the outer catch. Read through the store rather than
+    // a raw branch path: what matters here is that the write landed at all,
+    // whichever backend is active.
+    const meta = readSessionFile(wt, 'sess-wt-1', 'metadata.json');
+    expect(meta, 'session write was swallowed').toBeTruthy();
+    expect(JSON.parse(meta!).sessionId).toBe('sess-wt-1');
   });
 
   it('a session registered under the MAIN repo is still reachable from a worktree hook (mid-session EnterWorktree)', () => {

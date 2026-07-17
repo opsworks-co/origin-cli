@@ -69,6 +69,7 @@ import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChan
 import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, type PromptNoteEntry } from '../git-notes.js';
 import { parseMarkersFromTranscript, parseMarkersFromTranscriptPath } from '../origin-markers.js';
 import { redactSecrets } from '../redaction.js';
+import { makeSyncBlock } from '../sync-block.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
 import { writeSessionMemory, buildMemoryContext, readRecentMemory } from '../memory.js';
@@ -756,12 +757,16 @@ function writeAgentRulesFile(agentSlug: string, systemMsg: string, repoPath: str
 // model maps 1:1 to what the reviewer will see.
 function buildOriginFrameworkGuidance(): string {
   return [
-    'Origin authoring framework — emit these markers inline in your responses when there is real signal worth surfacing to the human reviewer. Don\'t force one per turn.',
+    'Origin authoring framework — when there is real signal worth surfacing to the human reviewer, emit these markers inline in your responses. Don\'t force one per turn; skip a marker entirely if you have nothing real for it.',
+    '',
+    'REPLACE each <…> below with your own words. Never emit a marker with the angle-bracket placeholder still in it, and never copy this template block verbatim — a marker whose content is still a <…> placeholder is discarded as noise.',
     '',
     '  [Origin: Intent] <one sentence on WHY you\'re making this change>',
     '  [Origin: Decision] <choice you made> — <why>',
     '  [Origin: Open] <something you didn\'t finish, or aren\'t sure about>',
     '  [Origin: Verify] <something a human reviewer should check>',
+    '',
+    'Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.',
     '',
     'Markers are parsed verbatim — keep the bracket format exact. Multi-line content is fine; the marker line itself must stay on one line. Be honest: do not claim verifications you didn\'t do. These appear on the PR review surface alongside Origin\'s server-synthesized summary; agent-emitted markers take precedence.',
   ].join('\n');
@@ -1595,6 +1600,25 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       debugLog('session-start', 'codex thread_id resolved before reuse', {
         threadId: codexThread.slice(0, 12), repoPath,
       });
+    } else {
+      // Codex's SQLite returned no thread for this cwd — the rollout row isn't
+      // written yet, or was momentarily locked/unreadable during a mid-session
+      // git/account switch. Leaving the id empty makes the server miss every
+      // agentSessionId-keyed reuse rung and spawn a TWIN (user-reported: two
+      // identical Codex rows after a "switched GitHub account" turn). Recover
+      // the stable id from a still-alive Codex session in THIS repo so the
+      // conversation id survives the drift. (Only the transient-null case —
+      // a genuinely different thread id is left to the server's drift guard so
+      // we never glue two distinct Codex conversations together here.)
+      const liveCodexId = listActiveSessions(repoPath)
+        .filter((s) => sessionMatchesAgent(s, finalAgentSlug || '') && !!s.agentSessionId)
+        .map((s) => s.agentSessionId as string)[0];
+      if (liveCodexId) {
+        agentSessionId = liveCodexId;
+        debugLog('session-start', 'codex thread_id recovered from live session state (SQLite drift)', {
+          threadId: liveCodexId.slice(0, 12), repoPath,
+        });
+      }
     }
   }
 
@@ -2029,6 +2053,9 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     let budgetRefusedReason: string | undefined;
     // Scoped SOFT-cap breach — warn-only (amber banner, no lockout).
     let budgetWarnReason: string | undefined;
+    // Why session/start failed and the session stayed local (persisted on the
+    // state so `origin status` reports the REAL reason, not a canned string).
+    let syncBlock: import('../sync-block.js').SyncBlock | undefined;
     let agentSystemPrompt: string | undefined;
     let activePolicies: string[] | undefined;
     let enforcementRules: any[] | undefined;
@@ -2100,10 +2127,23 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         // toggled the agent on yet; in that case the platform also fired
         // notifications to the developer + admins, so the CLI just needs to
         // explain why the session stayed local.
+        // Record WHY this session stayed local so `origin status` can report
+        // the real reason instead of always blaming "agent disabled".
+        syncBlock = makeSyncBlock(apiErr, repoPath || '', new Date().toISOString());
         if (apiErr?.code === 'AGENT_DISABLED') {
           const agentName = apiErr?.body?.agent?.name || finalAgentSlug || 'this agent';
           debugLog('session-start', 'agent disabled, keeping session local', { agentName });
           process.stderr.write(`[origin] ${agentName} is disabled in your org — session kept local. An admin has been notified to enable it.\n`);
+        } else if (apiErr?.code === 'REPO_NOT_REGISTERED' || apiErr?.serverError === 'Repository not registered') {
+          // Team keys don't auto-register repos (only solo does). Tell the user
+          // exactly which repo and how to fix it — never a silent/mislabeled loss.
+          const repoName = path.basename(repoPath || '') || (repoPath || 'this repo');
+          debugLog('session-start', 'repo not registered, keeping session local', { repoPath });
+          process.stderr.write(
+            `[origin] "${repoName}" isn't registered in your org — session kept local (not lost). ` +
+            `An owner can add it: Repositories → Add Repo, or \`origin repo:add --name ${repoName} --path ${repoPath || '.'}\`. ` +
+            `Then run \`origin sessions sync\`.\n`,
+          );
         } else if (apiErr?.status === 429) {
           // Hard budget cap refused the session. The fallback below still
           // creates a LOCAL session — that's deliberate (tracking should
@@ -2240,6 +2280,10 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     // block) all enforce the lockout. The AGENTS.md notice is the
     // model-facing layer: Codex/Cursor read it natively and stop working
     // on their own instead of failing mysteriously at commit time.
+    // Stamp the real block reason (agent-disabled / repo-not-registered / …)
+    // so `origin status` reports it accurately instead of a canned string.
+    if (syncBlock) state.syncBlock = syncBlock;
+
     if (budgetRefusedReason) {
       state.budgetBlocked = true;
       state.budgetBlockReason = budgetRefusedReason;
@@ -4841,9 +4885,14 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         status: 'running', apiUrl,
         promptEditsByIndex: promptEditsByIndex ?? undefined,
       });
+      // Store only — no publish/push on the per-prompt path. Folding into the
+      // shared origin-sessions branch rewrites its whole tree, so doing it every
+      // prompt is exactly the cost (and cross-agent contention) the refs backend
+      // exists to avoid. The session is durable locally the moment this returns;
+      // it reaches the remote at the next publish moment — a commit, or session
+      // end — which is also when another user would have reason to read it.
       writeSessionFiles(state.repoPath, writeData);
-      pushSessionBranch(state.repoPath);
-      debugLog('stop', 'session files written + pushed', { prompts: writeData.prompts.length, costUsd: writeData.costUsd });
+      debugLog('stop', 'session files written', { prompts: writeData.prompts.length, costUsd: writeData.costUsd });
     } catch (gitErr: any) {
       debugLog('stop', 'session files write/push failed (non-fatal)', { message: gitErr.message });
     }
@@ -5239,8 +5288,10 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       promptEditsByIndex: promptEditsByIndex ?? undefined,
     });
     writeSessionFiles(state.repoPath, writeData);
-    pushSessionBranch(state.repoPath);
-    debugLog('session-end', 'session files written + pushed');
+    // Publish moment: fold onto the origin-sessions branch and push, so the
+    // finished session travels to whoever clones next.
+    pushSessionBranch(state.repoPath, writeData.sessionId);
+    debugLog('session-end', 'session files written + published');
 
     // Write Git Notes with AI attribution metadata on each commit
     if (gitCapture.commitShas.length > 0) {
@@ -6035,8 +6086,10 @@ export async function handlePostCommit(): Promise<void> {
       extraFiles: filesChanged,
     });
     writeSessionFiles(repoPath, writeData);
-    pushSessionBranch(repoPath);
-    debugLog('post-commit', 'session files written + pushed', {
+    // Publish moment: a commit is when the work becomes something another user
+    // will pull, so the context behind it has to be on the branch alongside it.
+    pushSessionBranch(repoPath, writeData.sessionId);
+    debugLog('post-commit', 'session files written + published', {
       prompts: writeData.prompts.length,
       costUsd: writeData.costUsd,
       files: writeData.filesChanged.length,
@@ -6755,6 +6808,55 @@ export function preCommitBudgetDecision(
       `New AI work is locked until the cap resets or an admin raises it. ` +
       `Emergency override: ORIGIN_BUDGET_OVERRIDE=1 git commit ...`,
   };
+}
+
+/** A clone passes an all-zero previous HEAD (40 hex chars for sha1, 64 for sha256). */
+function isNullRef(ref: string): boolean {
+  return /^0+$/.test(ref) && ref.length >= 40;
+}
+
+/**
+ * git post-checkout. Two jobs, told apart by the previous HEAD:
+ *
+ *  - **Fresh clone** (previous HEAD is the null ref) → fetch attribution notes.
+ *    `git clone` fetches refs/heads/* and refs/tags/* and nothing else, so
+ *    refs/notes/origin never comes down with it and a new teammate — or an agent
+ *    cloning the repo — sees no attribution at all. Git does run post-checkout
+ *    after a clone, and Origin's hooks are global (core.hooksPath), so this fires
+ *    even in a repo nobody ran `origin enable` in.
+ *
+ *  - **Any other branch checkout** → the pre-existing stash/attribution
+ *    preservation. Note this only reaches machines with global hooks now that the
+ *    global dir has a post-checkout at all: `core.hooksPath` makes git ignore
+ *    .git/hooks entirely, so the repo-local hook history-preservation installs
+ *    never ran for them.
+ *
+ * Git passes flag=1 for ordinary branch switches, not just clones, so the flag
+ * alone can't distinguish them — the null-ref previous HEAD is the clone tell.
+ *
+ * Never throws: this runs inside someone's `git clone`/`git checkout`, and a hook
+ * that fails or hangs makes git look broken in a repo unrelated to Origin.
+ */
+export async function handleGitPostCheckout(prevHead: string, newHead: string, flag: string): Promise<void> {
+  try {
+    if (flag !== '1') return; // file checkout — neither job applies
+
+    const repoPath = getGitRoot(process.cwd());
+    if (!repoPath) return;
+
+    if (isNullRef(prevHead || '')) {
+      debugLog('post-checkout', 'fresh clone detected — syncing notes', { repoPath });
+      // Installs the persistent (staging) refspec, fetches, and merges -s ours.
+      // Throttled so this and a SessionStart moments later don't both fetch.
+      syncNotesFromRemoteThrottled(repoPath);
+      return;
+    }
+
+    const { handlePostCheckout } = await import('../history-preservation.js');
+    handlePostCheckout(repoPath, prevHead, newHead);
+  } catch {
+    // Never fail a checkout.
+  }
 }
 
 export async function handlePreCommit(): Promise<void> {
@@ -8196,6 +8298,47 @@ export function agyDetectSessionCommit(repoPath: string, baselineSha?: string): 
   } catch { return { treeClean: false }; }
 }
 
+/**
+ * Recover the TRUE git root for an Antigravity session.
+ *
+ * agy's `workspacePaths[0]` is unreliable — it is frequently the workspace or
+ * project NAME (e.g. "origin-demo-12"), not the folder the edits landed in
+ * (e.g. /Users/.../origin-demo-1). Sent verbatim as repoPath, the server can't
+ * match a registered repo → 403 → the session is kept local and invisible. So
+ * we prefer the git root of the files the session ACTUALLY touched (absolute
+ * paths from the transcript's tool_calls), and fall back to the workspace path /
+ * cwd only when no such path exists. Every candidate is normalized to its git
+ * toplevel (getGitRoot) so the server's path lookup matches a registered repo.
+ */
+export function deriveAgyRepoPath(filePaths: string[], workspacePath: string | undefined, cwd: string): string {
+  // 1. Most-touched git root among the files agy actually edited/read.
+  const counts = new Map<string, number>();
+  for (const p of filePaths) {
+    if (!path.isAbsolute(p)) continue;
+    let root: string | null = null;
+    try { root = getGitRoot(path.dirname(p)); } catch { root = null; }
+    if (root) counts.set(root, (counts.get(root) || 0) + 1);
+  }
+  if (counts.size > 0) {
+    let best = ''; let bestN = -1;
+    for (const [root, n] of counts) if (n > bestN) { best = root; bestN = n; }
+    if (best) return best;
+  }
+  // 2. Workspace path — but ONLY if it resolves to a real git root. This is
+  //    where a bare project name ("origin-demo-12") gets rejected instead of
+  //    silently becoming the repo identity.
+  if (workspacePath) {
+    let wsRoot: string | null = null;
+    try { wsRoot = getGitRoot(workspacePath); } catch { wsRoot = null; }
+    if (wsRoot) return wsRoot;
+  }
+  // 3. cwd's git root, then raw fallbacks (preserve prior behaviour for a
+  //    genuinely non-git workspace rather than inventing a path).
+  let cwdRoot: string | null = null;
+  try { cwdRoot = getGitRoot(cwd); } catch { cwdRoot = null; }
+  return cwdRoot || workspacePath || cwd;
+}
+
 async function handleAntigravity(event: string, input: Record<string, any>): Promise<void> {
   // PreToolUse: agy reads {decision} on stdout. Enforce file-restriction +
   // budget from the locally-cached rule set (no network on the hot path).
@@ -8209,8 +8352,13 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
     // files). A clean tree yields no shadow, so anchor on HEAD instead. Once
     // per conversation, guarded by baselineSha.
     if (cid && !cache?.baselineSha) {
-      const rp = (Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string')
-        ? input.workspacePaths[0] : process.cwd();
+      // Prefer the git root of the file THIS tool is about to touch over agy's
+      // workspacePaths[0] (often a bare project name) so the baseline shadow
+      // lands in the same repo the session gets attributed to.
+      const wsPath = (Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string')
+        ? input.workspacePaths[0] : undefined;
+      const toolFile = agyToolPaths(input.toolCall).filePath;
+      const rp = deriveAgyRepoPath(toolFile ? [toolFile] : [], wsPath, process.cwd());
       let base: string | null = null;
       try { base = createShadowCommit(rp, `agy-start-${cid.slice(0, 8)}`) || getHeadSha(rp); } catch { /* non-fatal */ }
       if (base) {
@@ -8248,9 +8396,6 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
     return;
   }
   const cachedForRepo = readAgyRulesCache(conversationId);
-  const repoPath = (Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string')
-    ? input.workspacePaths[0]
-    : (cachedForRepo?.repoPath || (typeof input.cwd === 'string' ? input.cwd : process.cwd()));
   if (!isConnectedMode()) return;
   const agentConfig = loadAgentConfig();
   if (!agentConfig?.machineId) return;
@@ -8259,6 +8404,21 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
   try { jsonl = fs.readFileSync(transcriptPath, 'utf-8'); } catch { return; }
   const parsed = parseAntigravityTranscript(jsonl);
   if (parsed.prompts.length === 0) return; // nothing capturable yet
+
+  // Repo identity comes from the git root of the files agy ACTUALLY touched —
+  // NOT agy's workspacePaths[0], which is often a bare project name that no
+  // registered repo matches (→ 403 → session stuck local, the "origin-demo-12
+  // vs origin-demo-1" bug). Fall back to the workspace path / cached root / cwd
+  // only when the transcript carries no absolute file path.
+  const wsPath0 = (Array.isArray(input.workspacePaths) && typeof input.workspacePaths[0] === 'string')
+    ? input.workspacePaths[0] : undefined;
+  const repoPath = deriveAgyRepoPath(
+    parsed.filePaths,
+    wsPath0 || cachedForRepo?.repoPath,
+    typeof input.cwd === 'string' ? input.cwd : process.cwd(),
+  );
+  debugLog(event, 'antigravity repoPath resolved', { repoPath, wsPath0, filesInTranscript: parsed.filePaths.length });
+
   const usage = estimateAntigravityUsage(parsed);
   const model = parsed.model || 'gemini-3-pro';
   const branch = getBranch(repoPath) || undefined;

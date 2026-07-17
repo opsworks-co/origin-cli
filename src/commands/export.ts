@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import fs from 'fs';
 import { git, gitDetailed } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
@@ -31,7 +32,7 @@ function listLocalSessions(repoPath: string): ExportSession[] {
   }
 
   try {
-    const raw = git(['ls-tree', '--name-only', 'origin-sessions', 'sessions/'], gitOpts).trim();
+    const raw = listSessionIds(repoPath).map((id) => `sessions/${id}`).join('\n');
     if (!raw) return sessions;
 
     const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
@@ -39,7 +40,7 @@ function listLocalSessions(repoPath: string): ExportSession[] {
     for (const dir of dirs) {
       if (!SAFE_ID.test(dir)) continue;
       try {
-        const metadataJson = git(['show', `origin-sessions:sessions/${dir}/metadata.json`], gitOpts).trim();
+        const metadataJson = (readSessionFile(repoPath, dir, 'metadata.json') ?? '').trim();
         const m = JSON.parse(metadataJson);
         sessions.push({
           sessionId: m.sessionId || dir,

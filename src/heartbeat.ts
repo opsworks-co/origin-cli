@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'fs';
+import { assessRestoreSafety } from './restore-safety.js';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
@@ -972,17 +973,24 @@ async function handleRestore(command: {
       headBeforeRestore = execFileSync('git', ['rev-parse', 'HEAD'], gitOpts).trim();
     } catch { /* ignore */ }
 
-    // Stash any uncommitted work so we don't lose it. Stash name is
-    // searchable so the post-restore panel can point the user at it.
-    let stashed = false;
+    // Stash any uncommitted work so we don't lose it, and REFUSE to continue if
+    // that stash didn't happen — the restore modes below overwrite the working
+    // tree (see assessRestoreSafety for why this matters).
     const stashName = `origin-restore-autostash-${Date.now()}`;
-    try {
-      const dirty = execFileSync('git', ['status', '--porcelain'], gitOpts).trim();
-      if (dirty) {
-        execFileSync('git', ['stash', 'push', '-u', '-m', stashName], gitOpts);
-        stashed = true;
-      }
-    } catch { /* ignore */ }
+    const safety = assessRestoreSafety(
+      (a) => execFileSync('git', a, gitOpts),
+      stashName,
+    );
+    const stashed = safety.stashed;
+    if (!safety.safe) {
+      await reportResult(
+        'restore',
+        'failed',
+        `Restore aborted — ${safety.reason}. Your working tree is untouched. ` +
+        `Commit or stash your changes and try again.`,
+      );
+      return;
+    }
 
     if (restoreMode === 'hard') {
       // Destructive: move HEAD to commitSha and reset working tree to

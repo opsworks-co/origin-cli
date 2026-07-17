@@ -1437,6 +1437,13 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'gpt-5.4':     { input: 3.00,  output: 12.00 },
   'gpt-5.5':     { input: 5.00,  output: 30.00, cachedInput: 0.50 },
   'gpt-5.5-pro': { input: 30.00, output: 180.00 },
+  //   gpt-5.6 (GA 2026-07-09) — 3 tiers Sol/Terra/Luna, 90%-off cached input.
+  //   Plain "gpt-5.6" = Sol (flagship), same rates as 5.5, per the
+  //   plain-key = flagship convention (Codex's default). The tier keys win the
+  //   longest-substring match for "gpt-5.6-terra" / "gpt-5.6-luna".
+  'gpt-5.6':       { input: 5.00,  output: 30.00,  cachedInput: 0.50 },
+  'gpt-5.6-terra': { input: 2.50,  output: 15.00,  cachedInput: 0.25 },
+  'gpt-5.6-luna':  { input: 1.00,  output: 6.00,   cachedInput: 0.10 },
   'codex':       { input: 2.00,  output: 8.00 },
   // Cursor — default to sonnet pricing since most Cursor users are on claude-sonnet-4.
   // If getCursorModelFromDb resolves the real model, estimateCost will match a more

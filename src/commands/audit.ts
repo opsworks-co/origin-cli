@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import fs from 'fs';
 import path from 'path';
 import { git, gitDetailed } from '../utils/exec.js';
@@ -113,21 +114,14 @@ function listLocalSessionsForAudit(repoPath: string, from: string, to: string): 
   const fromDate = new Date(from).getTime();
   const toDate = new Date(to).getTime();
 
-  {
-    const r = gitDetailed(['rev-parse', 'refs/heads/origin-sessions'], gitOpts(repoPath));
-    if (r.status !== 0) return sessions;
-  }
-
   try {
-    const raw = git(['ls-tree', '--name-only', 'origin-sessions', 'sessions/'], gitOpts(repoPath)).trim();
-    if (!raw) return sessions;
-
-    const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
+    const dirs = listSessionIds(repoPath);
+    if (dirs.length === 0) return sessions;
 
     for (const dir of dirs) {
       if (!SAFE_ID.test(dir)) continue;
       try {
-        const metadataJson = git(['show', `origin-sessions:sessions/${dir}/metadata.json`], gitOpts(repoPath)).trim();
+        const metadataJson = (readSessionFile(repoPath, dir, 'metadata.json') ?? '').trim();
         const metadata = JSON.parse(metadataJson);
         const startedAt = metadata.startedAt || '';
         const sessionTime = new Date(startedAt).getTime();

@@ -6,6 +6,7 @@ import { loadConfig, loadAgentConfig, loadRepoConfig, listProfiles } from '../co
 import { api } from '../api.js';
 import { loadSessionState, listActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
 import { currentOwner, isForeignSession } from '../session-owner.js';
+import { describeSyncBlock, type SyncBlockCode } from '../sync-block.js';
 import { processPendingForeignAction } from './sessions.js';
 import { git, gitDetailed } from '../utils/exec.js';
 
@@ -186,17 +187,44 @@ export async function statusCommand() {
         const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
         let queued = 0;
         let foreign = 0;
+        // Group local-only sessions by the REAL reason they didn't upload,
+        // recorded on `state.syncBlock` at capture/sync time. Sessions from
+        // before this field existed (or never attempted) land in `unknown`.
+        const byReason = new Map<SyncBlockCode | 'unknown', number>();
+        const reposByReason = new Map<SyncBlockCode | 'unknown', Set<string>>();
         for (const f of files) {
           try {
             const state = JSON.parse(fs.readFileSync(path.join(sessionsDir, f), 'utf-8'));
             if (typeof state?.sessionId !== 'string' || !state.sessionId.startsWith('local-')) continue;
-            if (isForeignSession(state, owner)) foreign++;
-            else queued++;
+            if (isForeignSession(state, owner)) { foreign++; continue; }
+            queued++;
+            const code: SyncBlockCode | 'unknown' = state?.syncBlock?.code || 'unknown';
+            byReason.set(code, (byReason.get(code) || 0) + 1);
+            const repoPath = state?.syncBlock?.repoPath || state?.repoPath || '';
+            if (repoPath) {
+              if (!reposByReason.has(code)) reposByReason.set(code, new Set());
+              reposByReason.get(code)!.add(path.basename(repoPath) || repoPath);
+            }
           } catch { /* skip */ }
         }
         if (queued > 0) {
-          console.log(chalk.yellow(`\n  ⏸  ${queued} session${queued === 1 ? '' : 's'} kept local (agent was disabled)`));
-          console.log(chalk.gray('    Run `origin sessions sync` once an admin enables the agent.'));
+          // One honest line per distinct reason, most actionable first.
+          const order: (SyncBlockCode | 'unknown')[] = [
+            'repo-not-registered', 'agent-disabled', 'budget', 'auth', 'unreachable', 'error', 'unknown',
+          ];
+          for (const code of order) {
+            const n = byReason.get(code);
+            if (!n) continue;
+            const { label, hint } = code === 'unknown'
+              ? { label: 'not uploaded yet', hint: 'Run `origin sessions sync` to upload them (or see why).' }
+              : describeSyncBlock(code);
+            const repos = reposByReason.get(code);
+            const reposNote = repos && repos.size > 0
+              ? chalk.gray(` — ${[...repos].slice(0, 4).join(', ')}${repos.size > 4 ? `, +${repos.size - 4} more` : ''}`)
+              : '';
+            console.log(chalk.yellow(`\n  ⏸  ${n} session${n === 1 ? '' : 's'} kept local · ${label}`) + reposNote);
+            console.log(chalk.gray(`    ${hint}`));
+          }
         }
         if (foreign > 0) {
           console.log(chalk.yellow(`\n  ⚠ ${foreign} session${foreign === 1 ? '' : 's'} captured under a previous Origin account`));

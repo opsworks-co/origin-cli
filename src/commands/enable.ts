@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { syncNotesFromRemote } from '../git-notes.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -1015,6 +1016,57 @@ function resolveOriginBin(): string {
 // that predate the pre-commit hook carry only post-commit/pre-push/…,
 // and with core.hooksPath set, git ignores .git/hooks entirely, so a
 // missing global pre-commit silently disables ALL policy enforcement.
+// Write the global pre-push hook. This is the gate that enforces the org's
+// push-block policy (Agents → Push control → "Block pushes from disabled
+// agents"). `origin hooks git-pre-push` exits non-zero to abort a blocked push.
+//
+// CRITICAL: the hook must propagate that exit code. It used to run
+// `"$ORIGIN_BIN" hooks git-pre-push` and then fall through to the local-hook
+// chain, so the SCRIPT's exit status was that trailing `if` — which returns 0
+// when no local hook exists. On the default (global) install no local pre-push
+// exists, so a blocked push printed "push blocked" and then git pushed anyway:
+// the entire push-block feature was inert. The pre-commit hook always did this
+// right (capture $?, re-exit); pre-push just wasn't given the same treatment.
+export function writeGlobalPrePushHook(globalHooksDir: string): void {
+  const originBin = resolveOriginBin();
+  const prePushPath = path.join(globalHooksDir, 'pre-push');
+  const prePushContent = `#!/bin/sh
+# origin-global-pre-push
+# Installed by: origin enable --global
+
+# Ensure PATH includes common npm/node locations
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
+
+# Use full path to origin
+ORIGIN_BIN=""
+if [ -x "${originBin}" ]; then
+  ORIGIN_BIN="${originBin}"
+elif command -v origin >/dev/null 2>&1; then
+  ORIGIN_BIN="origin"
+elif [ -x "/opt/homebrew/bin/origin" ]; then
+  ORIGIN_BIN="/opt/homebrew/bin/origin"
+elif [ -x "/usr/local/bin/origin" ]; then
+  ORIGIN_BIN="/usr/local/bin/origin"
+fi
+
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-pre-push
+  RESULT=$?
+  if [ $RESULT -ne 0 ]; then
+    exit $RESULT
+  fi
+fi
+
+# Chain to local repo hooks if they exist
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/pre-push"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+`;
+  fs.writeFileSync(prePushPath, prePushContent);
+  fs.chmodSync(prePushPath, '755');
+}
+
 export function writeGlobalPreCommitHook(globalHooksDir: string): void {
   const originBin = resolveOriginBin();
   const preCommitPath = path.join(globalHooksDir, 'pre-commit');
@@ -1055,21 +1107,70 @@ fi
   fs.chmodSync(preCommitPath, '755');
 }
 
-function installGlobalGitHooks(): void {
-  const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
-
-  // Create global hooks directory
-  if (!fs.existsSync(globalHooksDir)) {
-    fs.mkdirSync(globalHooksDir, { recursive: true });
-  }
-
-  // Resolve full path to origin binary
+// Write the global post-checkout hook. Git runs post-checkout after `git clone`,
+// which is the only moment we can rescue attribution for a fresh clone: clone
+// fetches refs/heads/* and refs/tags/* and nothing else, so refs/notes/origin
+// never comes down on its own. With core.hooksPath pointing at this dir the hook
+// fires in EVERY repo on the machine — including ones the user never ran
+// `origin enable` in — so a clone lands with its notes already present.
+//
+// Two things this must not do, because it runs on every checkout on the machine:
+//   - Fire on ordinary checkouts. Git passes flag=1 for branch switches too, NOT
+//     just clones; the clone signature is a null-ref previous HEAD. Keying on the
+//     flag alone would run a network fetch on every `git checkout`.
+//   - Slow git down or break it. The clone test is a shell string compare (no
+//     node startup on the common path), the real work is backgrounded so the
+//     clone never blocks on the network, and the hook always exits 0.
+export function writeGlobalPostCheckoutHook(globalHooksDir: string): void {
   const originBin = resolveOriginBin();
+  const postCheckoutPath = path.join(globalHooksDir, 'post-checkout');
+  const postCheckoutContent = `#!/bin/sh
+# origin-global-post-checkout
+# Installed by: origin enable --global
+# Fetches AI attribution notes after a fresh clone (git does not clone them).
 
-  // Pre-commit hook — secret scanning + policy enforcement (blocks commits)
-  writeGlobalPreCommitHook(globalHooksDir);
+# args: $1 = previous HEAD, $2 = new HEAD, $3 = 1 for branch checkout / 0 for file
+# File checkouts (flag=0) are the common, noisy case and neither job applies —
+# bail before touching node. Everything else routes to the CLI, which tells a
+# clone (null-ref previous HEAD) from an ordinary switch. Mirrors the repo-local
+# hook history-preservation installs.
+if [ "$3" != "1" ]; then exit 0; fi
 
-  // Post-commit hook that also chains to local repo hooks
+# Ensure PATH includes common npm/node locations
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
+
+ORIGIN_BIN=""
+if [ -x "${originBin}" ]; then
+  ORIGIN_BIN="${originBin}"
+elif command -v origin >/dev/null 2>&1; then
+  ORIGIN_BIN="origin"
+elif [ -x "/opt/homebrew/bin/origin" ]; then
+  ORIGIN_BIN="/opt/homebrew/bin/origin"
+elif [ -x "/usr/local/bin/origin" ]; then
+  ORIGIN_BIN="/usr/local/bin/origin"
+fi
+
+# Backgrounded: a slow network must never hold up someone's clone.
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-post-checkout "$1" "$2" "$3" >/dev/null 2>&1 &
+fi
+
+# Chain to local repo hooks if they exist
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-checkout"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+
+exit 0
+`;
+  fs.writeFileSync(postCheckoutPath, postCheckoutContent);
+  fs.chmodSync(postCheckoutPath, '755');
+}
+
+// Write the global post-commit hook. Fires the CLI capture in the background,
+// then chains to any local repo post-commit hook.
+export function writeGlobalPostCommitHook(globalHooksDir: string): void {
+  const originBin = resolveOriginBin();
   const postCommitPath = path.join(globalHooksDir, 'post-commit');
   const postCommitContent = `#!/bin/sh
 # origin-global-post-commit
@@ -1091,7 +1192,10 @@ elif [ -x "/usr/local/bin/origin" ]; then
 fi
 
 if [ -n "$ORIGIN_BIN" ]; then
-  "$ORIGIN_BIN" hooks git-post-commit &
+  # Redirect stdout/stderr to /dev/null so the backgrounded child doesn't
+  # inherit git's stdout fd. Otherwise it holds the write-end of a
+  # \`git commit | tee\` pipe open and tee stalls until origin exits.
+  "$ORIGIN_BIN" hooks git-post-commit >/dev/null 2>&1 &
 fi
 
 # Chain to local repo hooks if they exist
@@ -1102,42 +1206,12 @@ fi
 `;
   fs.writeFileSync(postCommitPath, postCommitContent);
   fs.chmodSync(postCommitPath, '755');
+}
 
-  // Pre-push hook that also chains to local repo hooks
-  const prePushPath = path.join(globalHooksDir, 'pre-push');
-  const prePushContent = `#!/bin/sh
-# origin-global-pre-push
-# Installed by: origin enable --global
-
-# Ensure PATH includes common npm/node locations
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
-
-# Use full path to origin
-ORIGIN_BIN=""
-if [ -x "${originBin}" ]; then
-  ORIGIN_BIN="${originBin}"
-elif command -v origin >/dev/null 2>&1; then
-  ORIGIN_BIN="origin"
-elif [ -x "/opt/homebrew/bin/origin" ]; then
-  ORIGIN_BIN="/opt/homebrew/bin/origin"
-elif [ -x "/usr/local/bin/origin" ]; then
-  ORIGIN_BIN="/usr/local/bin/origin"
-fi
-
-if [ -n "$ORIGIN_BIN" ]; then
-  "$ORIGIN_BIN" hooks git-pre-push
-fi
-
-# Chain to local repo hooks if they exist
-LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/pre-push"
-if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
-  "$LOCAL_HOOK" "$@"
-fi
-`;
-  fs.writeFileSync(prePushPath, prePushContent);
-  fs.chmodSync(prePushPath, '755');
-
-  // Post-rewrite hook for attribution preservation through rebase/amend
+// Write the global post-rewrite hook (rebase/amend). Preserves attribution
+// notes in the background, then chains to any local repo post-rewrite hook.
+export function writeGlobalPostRewriteHook(globalHooksDir: string): void {
+  const originBin = resolveOriginBin();
   const postRewritePath = path.join(globalHooksDir, 'post-rewrite');
   const postRewriteContent = `#!/bin/sh
 # origin-global-post-rewrite
@@ -1159,7 +1233,9 @@ elif [ -x "/usr/local/bin/origin" ]; then
 fi
 
 if [ -n "$ORIGIN_BIN" ]; then
-  "$ORIGIN_BIN" hooks git-post-rewrite "$@" &
+  # Redirect so the backgrounded child doesn't hold git's stdout fd open
+  # (same \`git commit | tee\` / pipe-stall reason as post-commit).
+  "$ORIGIN_BIN" hooks git-post-rewrite "$@" >/dev/null 2>&1 &
 fi
 
 # Chain to local repo hooks if they exist
@@ -1170,6 +1246,33 @@ fi
 `;
   fs.writeFileSync(postRewritePath, postRewriteContent);
   fs.chmodSync(postRewritePath, '755');
+}
+
+function installGlobalGitHooks(): void {
+  const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
+
+  // Create global hooks directory
+  if (!fs.existsSync(globalHooksDir)) {
+    fs.mkdirSync(globalHooksDir, { recursive: true });
+  }
+
+  // Resolve full path to origin binary
+  const originBin = resolveOriginBin();
+
+  // Pre-commit hook — secret scanning + policy enforcement (blocks commits)
+  writeGlobalPreCommitHook(globalHooksDir);
+
+  // Post-checkout hook — pulls attribution notes down after a fresh clone.
+  writeGlobalPostCheckoutHook(globalHooksDir);
+
+  // Post-commit hook — fires capture in the background, chains local hooks.
+  writeGlobalPostCommitHook(globalHooksDir);
+
+  // Pre-push hook that also chains to local repo hooks
+  writeGlobalPrePushHook(globalHooksDir);
+
+  // Post-rewrite hook for attribution preservation through rebase/amend
+  writeGlobalPostRewriteHook(globalHooksDir);
 
   // Prepare-commit-msg hook — writes Origin-Session trailer into COMMIT_EDITMSG.
   // Must run SYNCHRONOUSLY (not backgrounded) because git waits for the hook
@@ -1268,6 +1371,14 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
         const resolvedDir = globalHooksPath.startsWith('~')
           ? path.join(os.homedir(), globalHooksPath.slice(1))
           : globalHooksPath;
+        // Same story for post-checkout: dirs written before it existed have no
+        // post-checkout, so a fresh clone on this machine would silently land
+        // without its attribution notes. Heal it in place — checked separately
+        // from pre-commit because a dir can be missing either one.
+        const globalPostCheckout = path.join(resolvedDir, 'post-checkout');
+        if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPostCheckout)) {
+          writeGlobalPostCheckoutHook(resolvedDir);
+        }
         const globalPreCommit = path.join(resolvedDir, 'pre-commit');
         if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPreCommit)) {
           writeGlobalPreCommitHook(resolvedDir);
@@ -1459,47 +1570,28 @@ export function installGitPrePushHook(gitRoot: string): void {
 }
 
 // ─── Auto-fetch attribution refs ─────────────────────────────────────────
-// Git doesn't fetch refs/notes/* on clone or `git fetch`. We add an extra
-// fetchspec to `remote.<name>.fetch` so notes come down alongside branches,
-// then run a one-shot fetch so the user sees existing attribution without
-// waiting for the next manual pull. Safe to call repeatedly — git dedupes
-// fetchspecs by value when you use `config --add` guarded by a pre-check.
+// Git doesn't fetch refs/notes/* on clone or `git fetch`, so attribution has to
+// be wired up explicitly.
+//
+// This used to install `+refs/notes/origin:refs/notes/origin` itself — a forced
+// refspec mapping the remote's notes straight onto the local ref. That silently
+// destroyed attribution: every ordinary `git pull` force-updated refs/notes/origin
+// from the remote, wiping any note written locally but not yet pushed (offline, a
+// failed push). Reproduced: write a local note, pull, note gone.
+//
+// syncNotesFromRemote does the safe equivalent — stages into
+// refs/notes/origin-remote, then `git notes merge -s ours` so this machine stays
+// authoritative for commits it annotated itself — installs the persistent
+// refspec, fetches once so existing attribution lands now, and strips the legacy
+// clobbering refspec if an older release left one behind.
 function configureNotesRefspecAndFetch(repoPath: string): void {
   try {
-    // Pick the first configured remote (usually "origin"). If none, nothing
-    // to do — the repo has no remote to fetch from.
     const remotesRaw = runDetailed('git', ['remote'], { cwd: repoPath, timeoutMs: 3000 });
     const remote = (remotesRaw.stdout || '').trim().split('\n')[0].trim();
-    if (!remote) {
-      return;
-    }
+    if (!remote) return; // no remote — nothing to fetch from
 
-    const NOTES_SPEC = `+refs/notes/origin:refs/notes/origin`;
-
-    // Check current fetchspecs for this remote — only add if missing so
-    // re-running `origin enable` doesn't keep appending duplicates.
-    const current = runDetailed(
-      'git',
-      ['config', '--get-all', `remote.${remote}.fetch`],
-      { cwd: repoPath, timeoutMs: 3000 },
-    );
-    const existing = (current.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
-    if (!existing.includes(NOTES_SPEC)) {
-      runDetailed(
-        'git',
-        ['config', '--add', `remote.${remote}.fetch`, NOTES_SPEC],
-        { cwd: repoPath, timeoutMs: 3000 },
-      );
-      console.log(chalk.green(`  ✓ Configured ${remote} to fetch attribution notes (refs/notes/origin)`));
-    }
-
-    // One-shot fetch so any notes already on the remote land locally now.
-    // `|| true` semantics: we don't care if the remote has no notes ref yet
-    // (common for repos that never pushed them) — the config is what matters.
-    runDetailed('git', ['fetch', remote, 'refs/notes/origin:refs/notes/origin', '--no-tags'], {
-      cwd: repoPath,
-      timeoutMs: 10_000,
-    });
+    syncNotesFromRemote(repoPath);
+    console.log(chalk.green(`  ✓ Configured ${remote} to fetch attribution notes (refs/notes/origin)`));
   } catch {
     // Non-fatal — user can still push/pull manually with explicit refspecs.
   }

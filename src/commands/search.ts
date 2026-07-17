@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { git, gitDetailed } from '../utils/exec.js';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import { searchPrompts, type PromptRecord } from '../local-db.js';
 import { getGitRoot, type SessionState } from '../session-state.js';
 import { isConnectedMode } from '../config.js';
@@ -292,7 +293,7 @@ function searchGitNotes(
 }
 
 /**
- * Scan origin-sessions branch for matching prompts.
+ * Scan stored sessions (either backend) for matching prompts.
  */
 function searchSessionsBranch(
   repoPath: string,
@@ -300,24 +301,15 @@ function searchSessionsBranch(
   opts: { limit: number; from?: Date; agent?: string },
 ): SearchResult[] {
   const results: SearchResult[] = [];
-  {
-    const r = gitDetailed(['rev-parse', 'refs/heads/origin-sessions'], { cwd: repoPath });
-    if (r.status !== 0) return results;
-  }
 
   try {
-    const listing = git(
-      ['ls-tree', '--name-only', 'refs/heads/origin-sessions', 'sessions/'],
-      { cwd: repoPath },
-    ).trim();
-    if (!listing) return results;
+    const sessionIds = listSessionIds(repoPath);
+    if (sessionIds.length === 0) return results;
 
-    const dirs = listing.split('\n').filter(Boolean);
     const lowerQuery = query.toLowerCase();
 
-    for (const dir of dirs) {
+    for (const sessionId of sessionIds) {
       if (results.length >= opts.limit) break;
-      const sessionId = dir.replace('sessions/', '');
       if (!SAFE_ID.test(sessionId)) continue;
       try {
         let model = 'unknown';
@@ -327,11 +319,8 @@ function searchSessionsBranch(
 
         // Read metadata
         try {
-          const metaRaw = git(
-            ['show', `refs/heads/origin-sessions:${dir}/metadata.json`],
-            { cwd: repoPath },
-          ).trim();
-          const meta = JSON.parse(metaRaw);
+          const metaRaw = readSessionFile(repoPath, sessionId, 'metadata.json');
+          const meta = JSON.parse((metaRaw ?? '').trim());
           model = meta.model || 'unknown';
           agentName = meta.agentName || '';
           startedAt = meta.startedAt || '';
@@ -343,10 +332,7 @@ function searchSessionsBranch(
         // Agent filter
         if (opts.agent && !matchesAgent(model, agentName, opts.agent)) continue;
 
-        const promptsMd = git(
-          ['show', `refs/heads/origin-sessions:${dir}/prompts.md`],
-          { cwd: repoPath },
-        ).trim();
+        const promptsMd = (readSessionFile(repoPath, sessionId, 'prompts.md') ?? '').trim();
 
         if (!promptsMd.toLowerCase().includes(lowerQuery)) continue;
 

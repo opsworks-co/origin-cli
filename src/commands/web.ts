@@ -1,4 +1,5 @@
 import http from 'http';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -103,16 +104,16 @@ function gatherData(repoRoot: string) {
   // Sessions
   const sessions: SessionInfo[] = [];
   try {
-    const tree = execSync('git ls-tree --name-only origin-sessions:sessions/ 2>/dev/null', execOpts).trim();
-    if (tree) {
-      for (const sid of tree.split('\n').filter(Boolean).slice(-30)) {
+    const ids = listSessionIds(repoRoot);
+    if (ids.length > 0) {
+      for (const sid of ids.slice(-30)) {
         let model = 'unknown';
         let date = '';
         let cost: number | undefined;
         let tokens: number | undefined;
         let promptCount: number | undefined;
         try {
-          const meta = execSync(`git show origin-sessions:sessions/${sid}/metadata.json 2>/dev/null`, execOpts).trim();
+          const meta = (readSessionFile(repoRoot, sid, 'metadata.json') ?? '').trim();
           if (meta) {
             const m = JSON.parse(meta);
             model = m.model || 'unknown';

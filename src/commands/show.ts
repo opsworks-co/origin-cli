@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { listSessionIds, readSessionFile } from '../session-store.js';
 import { execFileSync, execSync } from 'child_process';
 import { getGitRoot, loadSessionState, listActiveSessions } from '../session-state.js';
 import { loadConfig, isConnectedMode } from '../config.js';
@@ -71,47 +72,38 @@ function loadLocalSession(sessionId: string, repoPath: string): FullSession | nu
   const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
   // Try to find session dir on origin-sessions branch
   let dir = sessionId;
-  try {
-    execSync(`git show origin-sessions:sessions/${sessionId}/metadata.json`, execOpts);
-  } catch {
+  if (!readSessionFile(repoPath, sessionId, 'metadata.json')) {
     // Short ID prefix match
-    try {
-      const raw = execSync('git ls-tree --name-only origin-sessions sessions/', execOpts).trim();
-      const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
-      dir = dirs.find(d => d.startsWith(sessionId)) || sessionId;
-    } catch { return null; }
+    const found = listSessionIds(repoPath).find((d) => d.startsWith(sessionId));
+    if (!found) return null;
+    dir = found;
   }
 
   try {
-    const metaJson = execSync(`git show origin-sessions:sessions/${dir}/metadata.json`, execOpts).trim();
+    const metaJson = (readSessionFile(repoPath, dir, 'metadata.json') ?? '').trim();
     const meta = JSON.parse(metaJson);
 
-    // Load prompts
-    let prompts: FullSession['prompts'] = [];
-    try {
-      const promptsJson = execSync(`git show origin-sessions:sessions/${dir}/prompts.json`, execOpts).trim();
-      const parsed = JSON.parse(promptsJson);
-      if (Array.isArray(parsed)) {
-        prompts = parsed.map((p: any, i: number) => ({
-          index: p.index ?? i,
-          text: p.text || p.promptText || '',
-          filesChanged: p.filesChanged,
-          linesAdded: p.linesAdded,
-          linesRemoved: p.linesRemoved,
-        }));
-      }
-    } catch { /* no prompts file */ }
+    // Prompts come from prompts.md — the only prompt file the CLI has ever
+    // written. This used to read a prompts.json that nothing produces, so the
+    // list was always empty.
+    const prompts = parsePromptsMarkdown(readSessionFile(repoPath, dir, 'prompts.md'));
 
+    // metadata.json is NESTED (cost.usd, tokens.total, lines.added) — see
+    // buildMetadataJson in local-entrypoint.ts. These were read as though it
+    // were flat (meta.costUsd, meta.tokensUsed, meta.linesAdded), which always
+    // yielded 0. Not currently visible — showCommand renders these numbers from
+    // the git note and only takes `prompts` from here — but the struct is public
+    // enough that returning zeros for data we hold is a trap for the next caller.
     return {
       sessionId: meta.sessionId || dir,
       model: meta.model || 'unknown',
       agent: meta.agent || '',
       duration: formatDuration(meta.durationMs || 0),
-      cost: formatCost(meta.costUsd || 0),
-      tokensUsed: meta.tokensUsed || 0,
-      promptCount: meta.promptCount || prompts.length,
-      linesAdded: meta.linesAdded || 0,
-      linesRemoved: meta.linesRemoved || 0,
+      cost: formatCost(meta.cost?.usd ?? 0),
+      tokensUsed: meta.tokens?.total ?? 0,
+      promptCount: prompts.length,
+      linesAdded: meta.lines?.added ?? 0,
+      linesRemoved: meta.lines?.removed ?? 0,
       prompts,
     };
   } catch {
@@ -119,12 +111,51 @@ function loadLocalSession(sessionId: string, repoPath: string): FullSession | nu
   }
 }
 
+/**
+ * Pull the prompts out of a prompts.md written by buildPromptsMd.
+ *
+ * Shape it parses (one block per prompt):
+ *   ## Prompt 1
+ *
+ *   <text>
+ *
+ *   **Files changed:**
+ *   - `a.ts`
+ */
+function parsePromptsMarkdown(md: string | null): FullSession['prompts'] {
+  if (!md) return [];
+  const prompts: FullSession['prompts'] = [];
+  // Keep the heading so we can recover the real (1-based) index rather than
+  // assuming the blocks are contiguous.
+  const blocks = md.split(/^## Prompt /m).slice(1);
+  for (const block of blocks) {
+    const idxMatch = block.match(/^(\d+)/);
+    const body = block.replace(/^\d+\s*/, '');
+    const [beforeFiles, filesPart] = body.split('**Files changed:**');
+    const text = beforeFiles.replace(/\n---\n?/g, '').trim();
+    const filesChanged = filesPart
+      ? filesPart.split('\n')
+          .map((l) => l.match(/^-\s+`(.+)`$/)?.[1])
+          .filter((f): f is string => !!f)
+      : undefined;
+    prompts.push({
+      index: idxMatch ? parseInt(idxMatch[1], 10) : prompts.length + 1,
+      text,
+      filesChanged,
+    });
+  }
+  return prompts;
+}
+
 async function loadApiSession(sessionId: string): Promise<FullSession | null> {
   try {
     const session = await api.getSession(sessionId) as any;
     if (!session) return null;
+    // promptIndex is 1-based (it matches "## Prompt N" in prompts.md), so the
+    // positional fallback has to be 1-based too — `?? i` mixed the two and the
+    // renderer then added 1 on top, numbering prompts 2,3,4…
     const prompts = (session.promptChanges || []).map((pc: any, i: number) => ({
-      index: pc.promptIndex ?? i,
+      index: pc.promptIndex ?? i + 1,
       text: pc.promptText || '',
       filesChanged: pc.filesChanged || [],
       linesAdded: pc.linesAdded,
@@ -314,7 +345,8 @@ export async function showCommand(commitSha: string, options: { json?: boolean }
       if (p.linesAdded) stats.push(chalk.green(`+${p.linesAdded}`));
       if (p.linesRemoved) stats.push(chalk.red(`-${p.linesRemoved}`));
       const statStr = stats.length > 0 ? ` ${chalk.gray('(')}${stats.join(chalk.gray(', '))}${chalk.gray(')')}` : '';
-      console.log(`  ${chalk.gray(`${p.index + 1}.`)} ${chalk.white(`"${text}"`)}${statStr}`);
+      // p.index is already 1-based from both loaders — don't re-add one.
+      console.log(`  ${chalk.gray(`${p.index}.`)} ${chalk.white(`"${text}"`)}${statStr}`);
     }
   }
 
@@ -328,3 +360,7 @@ export async function showCommand(commitSha: string, options: { json?: boolean }
 
   console.log('');
 }
+
+// Internals exercised by session-file-shape-readers.test.ts, which pins these
+// readers against a file set produced by the real writer. Not a public API.
+export const __testing = { loadLocalSession, parsePromptsMarkdown };

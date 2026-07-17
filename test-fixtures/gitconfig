@@ -1,0 +1,14 @@
+# Global git config for the test suite (see vitest.config.ts).
+#
+# Tests must not see the developer's real global config — on a machine
+# with Origin installed it points core.hooksPath at the REAL network-
+# calling git hooks, which fired on every fixture commit (~1-8s each,
+# flaky under parallel load). But a bare GIT_CONFIG_GLOBAL=/dev/null is
+# too much isolation: several fixtures push/clone `main` and relied on
+# the host (CI runner) setting init.defaultBranch=main. This file is the
+# deterministic middle ground.
+[init]
+	defaultBranch = main
+[core]
+	# A path that contains no hooks — disables ALL git hooks in fixtures.
+	hooksPath = /dev/null

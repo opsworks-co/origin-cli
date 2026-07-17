@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { loadConfig, isConnectedMode } from '../config.js';
+import { readSessionFile, listSessionIds } from '../session-store.js';
 import { api } from '../api.js';
 import { loadSessionState, getGitRoot, getHeadSha } from '../session-state.js';
 import { getPromptsBySession } from '../local-db.js';
@@ -44,12 +45,11 @@ interface LocalSessionData {
 }
 
 function loadLocalSession(sessionId: string, repoPath: string): LocalSessionData | null {
-  const gitOpts = { cwd: repoPath };
   try {
     const dir = resolveSessionDir(sessionId, repoPath);
     if (!dir || !SAFE_ID.test(dir)) return null;
-    const metadataJson = git(['show', `origin-sessions:sessions/${dir}/metadata.json`], gitOpts).trim();
-    return JSON.parse(metadataJson);
+    const metadataJson = readSessionFile(repoPath, dir, 'metadata.json');
+    return metadataJson ? JSON.parse(metadataJson.trim()) : null;
   } catch {
     return null;
   }
@@ -57,16 +57,11 @@ function loadLocalSession(sessionId: string, repoPath: string): LocalSessionData
 
 function resolveSessionDir(sessionId: string, repoPath: string): string | null {
   if (!SAFE_ID.test(sessionId)) return null;
-  const gitOpts = { cwd: repoPath };
   // Try exact match
-  const r = runDetailed('git', ['show', `origin-sessions:sessions/${sessionId}/metadata.json`], gitOpts);
-  if (r.status === 0) return sessionId;
+  if (readSessionFile(repoPath, sessionId, 'metadata.json')) return sessionId;
   // Short ID prefix match
   try {
-    const raw = git(['ls-tree', '--name-only', 'origin-sessions', 'sessions/'], gitOpts).trim();
-    if (!raw) return null;
-    const dirs = raw.split('\n').filter(Boolean).map(d => d.replace('sessions/', ''));
-    return dirs.find(d => d.startsWith(sessionId)) || null;
+    return listSessionIds(repoPath).find((d) => d.startsWith(sessionId)) || null;
   } catch {
     return null;
   }
@@ -76,7 +71,7 @@ function loadLocalPromptsMarkdown(sessionId: string, repoPath: string): string |
   try {
     const dir = resolveSessionDir(sessionId, repoPath);
     if (!dir || !SAFE_ID.test(dir)) return null;
-    return git(['show', `origin-sessions:sessions/${dir}/prompts.md`], { cwd: repoPath }).trim();
+    return readSessionFile(repoPath, dir, 'prompts.md')?.trim() ?? null;
   } catch {
     return null;
   }

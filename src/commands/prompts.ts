@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { readSessionFile } from '../session-store.js';
 import { getGitRoot } from '../session-state.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
 import { isConnectedMode } from '../config.js';
@@ -49,12 +50,12 @@ function getPromptsForSession(sessionId: string, cwd: string): string[] {
     return dbPrompts.map((p) => p.promptText);
   }
 
-  // Try origin-sessions branch
+  // Try stored sessions (refs or branch backend)
   if (!/^[a-zA-Z0-9_.-]+$/.test(sessionId)) return [];
-  const r = runDetailed('git', ['show', `origin-sessions:sessions/${sessionId}/prompts.md`], { cwd });
-  if (r.status !== 0) return [];
+  const stored = readSessionFile(cwd, sessionId, 'prompts.md');
+  if (!stored) return [];
   try {
-    const raw = r.stdout.trim();
+    const raw = stored.trim();
     // Parse prompts from markdown — each prompt starts with ## Prompt
     const prompts: string[] = [];
     const sections = raw.split(/^## Prompt \d+/m).slice(1);
