@@ -1,0 +1,16 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "detected-codex-mrpg5x3w",
+    "model": "codex",
+    "promptCount": 0,
+    "promptSummary": "",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 3237,
+    "linesRemoved": 366,
+    "originUrl": "https://getorigin.io/sessions/detected-codex-mrpg5x3w",
+    "timestamp": "2026-07-17T21:25:37.629Z"
+  }
+}
