@@ -8422,6 +8422,14 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
   const usage = estimateAntigravityUsage(parsed);
   const model = parsed.model || 'gemini-3-pro';
   const branch = getBranch(repoPath) || undefined;
+  // Send the git remote too — repos imported from GitHub are registered by
+  // REMOTE identity (path = "github.com/owner/repo"), not a filesystem path, so
+  // a repoPath-only lookup 404s even though Codex/Claude (which send repoUrl)
+  // match fine. Mirror their derivation so agy attributes to the same repo.
+  let repoUrl: string | undefined;
+  try {
+    repoUrl = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim() || undefined;
+  } catch { /* no remote — path-only, as before */ }
   // agy exposes no tokens → estimate cost from the estimated tokens × price so
   // the session shows a sensible (clearly-estimated) cost instead of $0.
   const costUsd = estimateCost(model, usage.inputTokens, usage.outputTokens);
@@ -8435,6 +8443,7 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
       prompt: parsed.prompts[0],
       model,
       repoPath,
+      repoUrl,
       agentSlug: 'antigravity',
       agentSessionId: conversationId,
       branch,
