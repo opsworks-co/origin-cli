@@ -8016,6 +8016,11 @@ interface AgyRulesCache {
   // everything at once, the commit swept up ALL of their work, so they all get
   // linked to that commit (the "prompts in this commit" set).
   dirtyPromptIndices?: number[];
+  // Last commit SHA this session already ingested to the server. agy ingests
+  // detected commits itself (the sandboxed agent often disables the git
+  // post-commit hook), and its post-tool-use hook fires many times per turn —
+  // this skips re-ingesting the same commit on every fire.
+  ingestedCommitSha?: string;
 }
 function writeAgyRulesCache(conversationId: string, data: AgyRulesCache): void {
   try {
@@ -8510,6 +8515,44 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
     dirty.clear();
   }
 
+  // Ingest the commit ROW ourselves. Normally the git post-commit hook calls
+  // api.ingestCommits, but agy runs sandboxed and the model routinely commits
+  // with hooks DISABLED (`git -c core.hooksPath=/dev/null commit`, to dodge the
+  // sandbox's .git-write restrictions). Then the post-commit ingest never fires
+  // and the commit is 404 server-side — the turn shows "uncommitted" forever
+  // even though we linked its SHA. So ingest it here too. Idempotent (server
+  // dedups by SHA); guarded by ingestedCommitSha so the many per-turn hook
+  // fires don't re-send; fire-and-forget so a slow call never blocks capture.
+  let ingestedCommitSha = cachedForRepo?.ingestedCommitSha;
+  if (commitSha && !isWatcherSync && commitSha !== ingestedCommitSha && /^[a-fA-F0-9]{7,40}$/.test(commitSha)) {
+    try {
+      const cOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+      const { diff: cDiff, filesChanged: cFiles } = extractCommitDiff(repoPath, commitSha);
+      let cAdd = 0, cDel = 0;
+      if (cDiff) for (const l of cDiff.split('\n')) { if (l.startsWith('+') && !l.startsWith('+++')) cAdd++; else if (l.startsWith('-') && !l.startsWith('---')) cDel++; }
+      const g = (fmt: string) => { try { return execFileSync('git', ['log', '-1', `--format=${fmt}`, commitSha], cOpts).trim(); } catch { return ''; } };
+      void api.ingestCommits({
+        repoPath,
+        repoUrl,
+        commits: [{
+          sha: commitSha,
+          message: g('%s'),
+          author: g('%an'),
+          branch: branch || null,
+          filesChanged: cFiles,
+          additions: cAdd,
+          deletions: cDel,
+          committedAt: g('%cI') || undefined,
+          diff: cDiff ? cDiff.slice(0, 500_000) : undefined,
+        }],
+      }).then((r: any) => debugLog(event, 'antigravity commit ingested', { commitSha: commitSha.slice(0, 8), ingested: r?.ingested }))
+        .catch((e: any) => debugLog(event, 'antigravity commit ingest failed (non-fatal)', { message: e?.message }));
+      ingestedCommitSha = commitSha;
+    } catch (e: any) {
+      debugLog(event, 'antigravity commit ingest error', { message: e?.message });
+    }
+  }
+
   // Cache the server's rules + budget lock so PreToolUse can enforce locally,
   // plus the per-prompt baselines (preserve the session baselineSha set on the
   // first pre-tool-use). REAL hooks only — the watcher never writes the cache
@@ -8524,6 +8567,7 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
     promptBaselines,
     lastSyncShadow,
     dirtyPromptIndices: [...dirty],
+    ingestedCommitSha,
   });
 
   // Register the agy session as a local SessionState (with the files it touched)
