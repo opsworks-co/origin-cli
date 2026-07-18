@@ -3,6 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
+// Prepend common npm/node/brew bin dirs so a hook invoked by a GUI git client
+// (which doesn't source the login shell profile) can still resolve `origin`.
+// Mirrors the PATH export the global core.hooksPath hooks use.
+const HOOK_PATH_SHIM =
+  'export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH"';
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 interface RewriteMapping {
@@ -162,7 +168,12 @@ function installPostRewriteHook(hooksDir: string): void {
     ORIGIN_MARKER,
     '# Preserve Origin attribution notes when commits are rewritten',
     '# Receives old-sha new-sha pairs on stdin (from git rebase/amend)',
-    'origin hooks git-post-rewrite "$@" &',
+    // PATH shim so GUI git clients (Tower/Sourcetree/VS Code) that don't source
+    // the login profile can still find `origin` — otherwise the hook silently
+    // no-ops and rebase/amend loses attribution. Redirect so the backgrounded
+    // child doesn't stall a `git commit --amend | tee` pipe.
+    HOOK_PATH_SHIM,
+    'origin hooks git-post-rewrite "$@" >/dev/null 2>&1 &',
   ].join('\n') + '\n';
 
   if (fs.existsSync(hookPath)) {
@@ -172,7 +183,7 @@ function installPostRewriteHook(hooksDir: string): void {
       return;
     }
     // Append to existing hook
-    fs.appendFileSync(hookPath, '\n' + ORIGIN_MARKER + '\n' + 'origin hooks git-post-rewrite "$@" &\n');
+    fs.appendFileSync(hookPath, '\n' + ORIGIN_MARKER + '\n' + HOOK_PATH_SHIM + '\n' + 'origin hooks git-post-rewrite "$@" >/dev/null 2>&1 &\n');
   } else {
     fs.writeFileSync(hookPath, hookScript);
   }
@@ -193,8 +204,9 @@ function installPostCheckoutHook(hooksDir: string): void {
     ORIGIN_MARKER,
     '# Handle stash operations that may affect attribution',
     '# $1=prev-HEAD, $2=new-HEAD, $3=flag (1=branch checkout, 0=file checkout)',
+    HOOK_PATH_SHIM,
     'if [ "$3" = "1" ]; then',
-    '  origin hooks git-post-checkout "$@" &',
+    '  origin hooks git-post-checkout "$@" >/dev/null 2>&1 &',
     'fi',
   ].join('\n') + '\n';
 
@@ -208,8 +220,9 @@ function installPostCheckoutHook(hooksDir: string): void {
     const append = [
       '',
       ORIGIN_MARKER,
+      HOOK_PATH_SHIM,
       'if [ "$3" = "1" ]; then',
-      '  origin hooks git-post-checkout "$@" &',
+      '  origin hooks git-post-checkout "$@" >/dev/null 2>&1 &',
       'fi',
     ].join('\n') + '\n';
     fs.appendFileSync(hookPath, append);

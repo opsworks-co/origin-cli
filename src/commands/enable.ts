@@ -1519,12 +1519,14 @@ export function installGitPostCommitHook(gitRoot: string): void {
       console.log(chalk.gray('  ✓ Git post-commit hook already installed'));
       return;
     }
-    // Append to existing hook
-    const append = `\n${ORIGIN_MARKER}\n${hookScript} &\n`;
+    // Append to existing hook. Redirect the backgrounded child so it doesn't
+    // inherit git's stdout fd and stall a `git commit | tee` pipe (same fix as
+    // the global post-commit hook).
+    const append = `\n${ORIGIN_MARKER}\n${hookScript} >/dev/null 2>&1 &\n`;
     fs.appendFileSync(hookPath, append);
   } else {
     // Create new hook file
-    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript} &\n`;
+    const content = `#!/bin/sh\n${ORIGIN_MARKER}\n${hookScript} >/dev/null 2>&1 &\n`;
     fs.writeFileSync(hookPath, content);
   }
 
