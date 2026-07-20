@@ -52,6 +52,29 @@ function getCommitForLine(repoPath: string, filePath: string, lineNum: number): 
   }
 }
 
+// The commits that changed this specific line over time, newest→oldest, via
+// `git log -L`. Used by drift recovery to find the INTRODUCING commit when the
+// current-blame commit only reformatted/moved the line. Capped so a line with
+// deep history doesn't fan out into dozens of server calls.
+function getLineHistoryCommits(repoPath: string, filePath: string, lineNum: number): string[] {
+  if (!Number.isInteger(lineNum) || lineNum < 1) return [];
+  try {
+    const out = git(
+      ['log', '-L', `${lineNum},${lineNum}:${filePath}`, '--format=%H', '-s', '--max-count=6'],
+      { cwd: repoPath },
+    );
+    const shas: string[] = [];
+    const seen = new Set<string>();
+    for (const l of out.split('\n')) {
+      const s = l.trim();
+      if (/^[0-9a-f]{40}$/.test(s) && !seen.has(s)) { seen.add(s); shas.push(s); }
+    }
+    return shas;
+  } catch {
+    return [];
+  }
+}
+
 function getCommitInfo(repoPath: string, sha: string): { date: string; author: string; message: string } | null {
   if (!HEX.test(sha)) return null;
   try {
@@ -97,7 +120,24 @@ async function showLineWhy(repoPath: string, filePath: string, lineNum: number):
   // client never fetched. This is the robust path; the git-notes logic below
   // stays as the offline/standalone fallback.
   if (isConnectedMode()) {
-    const card = await tryServerWhy(repoPath, relPath, commitSha, lineContent);
+    let card = await tryServerWhy(repoPath, relPath, commitSha, lineContent);
+    // Drift recovery: `git blame` credits whoever LAST touched the line, which
+    // may be a later reformat/rename, not the turn that INTRODUCED it. When the
+    // blame commit gives a weak match, walk the line's own history (git log -L)
+    // to older commits and prefer the one whose session authored this exact line
+    // (confidence: high). Marks the card `drifted` so the reader knows the line
+    // moved since it was written.
+    if (!card || card.session == null || card.confidence !== 'high') {
+      for (const sha of getLineHistoryCommits(repoPath, relPath, lineNum)) {
+        if (sha === commitSha) continue;
+        const alt = await tryServerWhy(repoPath, relPath, sha, lineContent);
+        if (alt && alt.session) {
+          alt.drifted = true;
+          if (alt.confidence === 'high') { card = alt; break; }
+          if (!card || card.session == null) card = alt; // first attributable fallback
+        }
+      }
+    }
     if (card && card.session) { renderServerCard(card, relPath, lineNum, lineContent); return; }
   }
 
@@ -349,6 +389,7 @@ function renderServerCard(card: any, relPath: string, lineNum: number, lineConte
     .join(' · ');
   if (meta) console.log(chalk.gray(`  ${meta}`));
   console.log(chalk.gray(`  Commit: ${String(card.sha || '').slice(0, 8)} — ${(card.message || '').split('\n')[0]}`));
+  if (card.drifted) console.log(chalk.gray('  (line moved since it was written — traced to the introducing commit)'));
 
   // ── Accountability: markers, review, rework ──────────────────────────
   const mk = card.markers;
