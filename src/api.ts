@@ -187,6 +187,13 @@ export const api = {
   getMachines: () => request('/api/machines'),
   syncRepo: (id: string) => request(`/api/repos/${id}/sync`, { method: 'POST' }),
   getRepos: () => request('/api/repos'),
+  // Origin Why: provenance for a single line — which session/prompt authored it.
+  getWhy: (repoId: string, q: { sha: string; file?: string; content?: string }) => {
+    const params = new URLSearchParams({ sha: q.sha });
+    if (q.file) params.set('file', q.file);
+    if (q.content) params.set('content', q.content);
+    return request(`/api/repos/${repoId}/why?${params.toString()}`);
+  },
   getWhoami: () => request('/api/mcp/whoami'),
   // Tell the server how many sessions from a PREVIOUS account are sitting
   // unimported locally, so the dashboard can show an import/forget banner.

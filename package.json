@@ -1,6 +1,6 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260718.108",
+  "version": "0.20260720.2225",
   "license": "MIT",
   "type": "module",
   "bin": {

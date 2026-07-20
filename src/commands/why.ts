@@ -2,8 +2,8 @@ import chalk from 'chalk';
 import path from 'path';
 import { getGitRoot } from '../session-state.js';
 import { getLineBlame, LineAttribution } from '../attribution.js';
-import { isConnectedMode } from '../config.js';
-import { git, runDetailed } from '../utils/exec.js';
+import { isConnectedMode, loadConfig } from '../config.js';
+import { git, gitOrNull, runDetailed } from '../utils/exec.js';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
 
@@ -89,6 +89,16 @@ async function showLineWhy(repoPath: string, filePath: string, lineNum: number):
   if (!commitSha || commitSha.startsWith('0000000')) {
     console.log(chalk.yellow('  Uncommitted change — not yet attributed.\n'));
     return;
+  }
+
+  // Server-first: Origin's attribution engine resolves session + prompt from
+  // the commit SHA directly (DB-side), so it works even when git notes aren't
+  // present locally — a fresh clone, squashed/rebased history, or notes the
+  // client never fetched. This is the robust path; the git-notes logic below
+  // stays as the offline/standalone fallback.
+  if (isConnectedMode()) {
+    const card = await tryServerWhy(repoPath, relPath, commitSha, lineContent);
+    if (card && card.session) { renderServerCard(card, relPath, lineNum, lineContent); return; }
   }
 
   // Step 2: get commit info
@@ -278,6 +288,69 @@ async function showFileWhy(repoPath: string, filePath: string): Promise<void> {
   }
 
   console.log(chalk.gray(`\n  Tip: ${chalk.cyan(`origin why ${relPath}:42`)} to see which prompt wrote a specific line\n`));
+}
+
+// Map the local checkout to its Origin repo id (git remote → fullName, else
+// repo basename) so we can call the server /why endpoint.
+async function resolveOriginRepoId(repoPath: string): Promise<{ id: string } | null> {
+  try {
+    const { api } = await import('../api.js');
+    const repos = (await api.getRepos()) as any[];
+    const remote = gitOrNull(['remote', 'get-url', 'origin'], { cwd: repoPath }) || '';
+    const fullName = (remote.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/) || [])[1] || '';
+    const base = path.basename(repoPath);
+    return (
+      (fullName && repos.find((r: any) => r.fullName === fullName || r.name === fullName.split('/')[1])) ||
+      repos.find((r: any) => r.name === base) ||
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+// Ask the server which session + prompt authored this line. Returns null on any
+// failure so the caller falls back to the local git-notes path.
+async function tryServerWhy(repoPath: string, relPath: string, sha: string, lineContent: string): Promise<any | null> {
+  const repo = await resolveOriginRepoId(repoPath);
+  if (!repo) return null;
+  try {
+    const { api } = await import('../api.js');
+    return await api.getWhy(repo.id, { sha, file: relPath, content: lineContent });
+  } catch {
+    return null;
+  }
+}
+
+function renderServerCard(card: any, relPath: string, lineNum: number, lineContent: string): void {
+  const s = card.session || {};
+  const p = card.prompt;
+  const apiUrl = loadConfig()?.apiUrl || 'https://getorigin.io';
+  const dateStr = s.startedAt
+    ? new Date(s.startedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    : '';
+
+  // The caller (showLineWhy) already printed the "Line N in file" + content
+  // header before choosing this path — don't repeat it.
+  console.log(
+    chalk.white(`  Written by ${chalk.cyan(s.agent || s.model || 'AI')}`) +
+      (s.model ? chalk.gray(` · ${s.model}`) : '') +
+      (dateStr ? chalk.gray(` · ${dateStr}`) : ''),
+  );
+  if (p) {
+    console.log(chalk.green(`  Prompt #${p.index}: "${(p.text || '').replace(/\s+/g, ' ').trim()}"`));
+  }
+  const meta = [
+    typeof s.costUsd === 'number' ? `$${s.costUsd.toFixed(2)}` : '',
+    s.tokensUsed ? `${(s.tokensUsed / 1000).toFixed(1)}k tokens` : '',
+    card.confidence ? `confidence: ${card.confidence}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  if (meta) console.log(chalk.gray(`  ${meta}`));
+  console.log(chalk.gray(`  Commit: ${String(card.sha || '').slice(0, 8)} — ${(card.message || '').split('\n')[0]}`));
+  console.log(chalk.blue(`  ${apiUrl}${s.url || '/sessions/' + s.id}`));
+  console.log(chalk.gray(`\n  Run ${chalk.cyan(`origin explain ${String(s.id || '').slice(0, 8)}`)} for full details\n`));
 }
 
 export async function whyCommand(input: string) {
