@@ -185,7 +185,9 @@ program.command('prompts <file-or-session-id>')
 program.command('why [file[:line]]')
   .description('Which AI session/prompt wrote a line — or a whole stack trace (--trace)')
   .option('--trace [file]', 'Resolve a stack trace: read from a file, or pipe it via stdin')
-  .action((input, opts) => whyCommand(input, opts));
+  .option('--pr-comment [number]', 'Post the trace provenance onto a PR (CI). PR # from the flag or ORIGIN_PR_NUMBER/GITHUB_REF')
+  .option('--json', 'With --trace: emit machine-readable provenance (for a CI/agent fix-forward step)')
+  .action((input, opts) => whyCommand(input, { trace: opts.trace, prComment: opts.prComment, json: opts.json }));
 
 program.command('chat')
   .description('Interactive AI assistant — ask questions about your AI-authored code in natural language')

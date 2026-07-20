@@ -472,7 +472,26 @@ function resolveFrameFile(framePath: string, repoPath: string, repoFiles: string
   return byBase.length === 1 ? byBase[0] : null;
 }
 
-async function whyTraceCommand(traceArg: string | boolean, repoPath: string): Promise<void> {
+// Resolve the PR/MR number to comment on. Explicit --pr-comment <n> wins; then
+// common CI env vars; then GitHub Actions' refs/pull/<n>/merge. Returns null if
+// none are present — the CLI still prints the trace, just can't post it.
+function resolvePrNumber(prCommentArg: string | boolean | undefined): number | null {
+  if (typeof prCommentArg === 'string' && /^\d+$/.test(prCommentArg.trim())) return parseInt(prCommentArg, 10);
+  const env = process.env;
+  for (const v of [env.ORIGIN_PR_NUMBER, env.PR_NUMBER, env.CHANGE_ID /* Jenkins */, env.CI_MERGE_REQUEST_IID /* GitLab */]) {
+    if (v && /^\d+$/.test(v.trim())) return parseInt(v, 10);
+  }
+  const ref = env.GITHUB_REF || '';                 // refs/pull/123/merge
+  const m = ref.match(/refs\/pull\/(\d+)\//);
+  if (m) return parseInt(m[1], 10);
+  return null;
+}
+
+async function whyTraceCommand(
+  traceArg: string | boolean,
+  repoPath: string,
+  opts?: { prComment?: string | boolean; json?: boolean },
+): Promise<void> {
   const { readFileSync, existsSync } = await import('fs');
   let text = '';
   if (typeof traceArg === 'string' && traceArg && existsSync(traceArg)) text = readFileSync(traceArg, 'utf-8');
@@ -491,7 +510,11 @@ async function whyTraceCommand(traceArg: string | boolean, repoPath: string): Pr
   let repoFiles: string[] = [];
   try { repoFiles = git(['ls-files'], { cwd: repoPath }).split('\n').filter(Boolean); } catch { /* ignore */ }
 
-  const results: Array<{ file: string; line: number; content: string; card: any }> = [];
+  // Resolve the repo once so both the per-frame cards and the PR-comment POST
+  // share it. (tryServerWhy resolves it too, but we need the id here anyway.)
+  const repo = await resolveOriginRepoId(repoPath);
+
+  const results: Array<{ file: string; line: number; content: string; sha: string; card: any }> = [];
   for (const fr of frames) {
     const rel = resolveFrameFile(fr.file, repoPath, repoFiles);
     if (!rel) continue;
@@ -500,33 +523,84 @@ async function whyTraceCommand(traceArg: string | boolean, repoPath: string): Pr
     let content = '';
     try { content = (readFileSync(path.join(repoPath, rel), 'utf-8').split('\n')[fr.line - 1] || '').trim(); } catch { /* ignore */ }
     const card = await tryServerWhy(repoPath, rel, sha, content);
-    if (card && card.session) results.push({ file: rel, line: fr.line, content, card });
+    if (card && card.session) results.push({ file: rel, line: fr.line, content, sha, card });
   }
 
   const apiUrl = loadConfig()?.apiUrl || 'https://getorigin.io';
-  console.log(chalk.bold(`\n  Origin Why · stack trace`) + chalk.gray(`  (${frames.length} frames, ${results.length} attributed in this repo)`));
+
+  // Machine-readable output for a CI/agent fix-forward step: pipe this into an
+  // agent alongside the failing trace so it fixes with the authoring prompt +
+  // the [Origin: Verify] checklist in hand.
+  if (opts?.json) {
+    console.log(JSON.stringify({
+      frames: frames.length,
+      attributed: results.length,
+      results: results.map((r) => ({
+        file: r.file, line: r.line, sha: r.sha, content: r.content,
+        session: { id: r.card.session?.id, agent: r.card.session?.agent, model: r.card.session?.model, url: `${apiUrl}${r.card.session?.url || '/sessions/' + r.card.session?.id}` },
+        prompt: r.card.prompt || null,
+        confidence: r.card.confidence,
+        verify: r.card.markers?.verifies || [],
+      })),
+    }, null, 2));
+    // Still honor --pr-comment below when both are set.
+  }
+
+  if (!opts?.json) {
+    console.log(chalk.bold(`\n  Origin Why · stack trace`) + chalk.gray(`  (${frames.length} frames, ${results.length} attributed in this repo)`));
+  }
   if (results.length === 0) {
-    console.log(chalk.gray('\n  No frames mapped to AI-authored code in this repo.\n'));
+    if (!opts?.json) console.log(chalk.gray('\n  No frames mapped to AI-authored code in this repo.\n'));
     return;
   }
-  for (const r of results) {
-    const s = r.card.session || {};
-    const p = r.card.prompt;
+  if (!opts?.json) {
+    for (const r of results) {
+      const s = r.card.session || {};
+      const p = r.card.prompt;
+      console.log('');
+      console.log('  ' + chalk.white(`${r.file}:${r.line}`) + (r.content ? chalk.gray(`  ${r.content.slice(0, 60)}`) : ''));
+      console.log('    ' + chalk.cyan(s.agent || s.model || 'AI') + (p ? chalk.gray(` · prompt #${p.index} `) + chalk.green(`"${(p.text || '').replace(/\s+/g, ' ').trim().slice(0, 60)}"`) : ''));
+      const vs = r.card.markers?.verifies || [];
+      if (vs.length) console.log('    ' + chalk.yellow('Verify: ') + chalk.gray(vs[0]) + chalk.gray(' — checked?'));
+      console.log('    ' + chalk.blue(`${apiUrl}${s.url || '/sessions/' + s.id}`));
+    }
     console.log('');
-    console.log('  ' + chalk.white(`${r.file}:${r.line}`) + (r.content ? chalk.gray(`  ${r.content.slice(0, 60)}`) : ''));
-    console.log('    ' + chalk.cyan(s.agent || s.model || 'AI') + (p ? chalk.gray(` · prompt #${p.index} `) + chalk.green(`"${(p.text || '').replace(/\s+/g, ' ').trim().slice(0, 60)}"`) : ''));
-    const vs = r.card.markers?.verifies || [];
-    if (vs.length) console.log('    ' + chalk.yellow('Verify: ') + chalk.gray(vs[0]) + chalk.gray(' — checked?'));
-    console.log('    ' + chalk.blue(`${apiUrl}${s.url || '/sessions/' + s.id}`));
   }
-  console.log('');
+
+  // ── CI auto-link: post the provenance back to the PR/MR ────────────────
+  if (opts?.prComment) {
+    const prNumber = resolvePrNumber(opts.prComment);
+    if (!repo) {
+      console.error(chalk.yellow('  --pr-comment: this checkout isn\'t linked to an Origin repo; skipping.'));
+      return;
+    }
+    if (!prNumber) {
+      console.error(chalk.yellow('  --pr-comment: no PR number found. Pass ') + chalk.cyan('--pr-comment <number>') + chalk.yellow(' or set ORIGIN_PR_NUMBER.'));
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const { api } = await import('../api.js');
+      const resp: any = await api.postWhyPrComment(repo.id, {
+        prNumber,
+        frames: results.map((r) => ({ file: r.file, line: r.line, sha: r.sha, content: r.content })),
+      });
+      if (resp?.posted) {
+        console.log('  ' + chalk.green(`✓ Posted provenance for ${resp.resolved} line(s) to PR #${prNumber}.`));
+      } else {
+        console.error('  ' + chalk.yellow(`Could not post to PR #${prNumber}: ${resp?.error || resp?.reason || 'unknown'}`));
+      }
+    } catch (e: any) {
+      console.error('  ' + chalk.red(`--pr-comment failed: ${e?.message || e}`));
+    }
+  }
 }
 
-export async function whyCommand(input: string, opts?: { trace?: string | boolean }) {
+export async function whyCommand(input: string, opts?: { trace?: string | boolean; prComment?: string | boolean; json?: boolean }) {
   const repoPathForTrace = getGitRoot(process.cwd());
-  if (opts?.trace) {
+  if (opts?.trace || opts?.prComment) {
     if (!repoPathForTrace) { console.log(chalk.red('Not inside a git repository.')); process.exit(1); }
-    await whyTraceCommand(opts.trace, repoPathForTrace);
+    await whyTraceCommand(opts.trace ?? true, repoPathForTrace, { prComment: opts.prComment, json: opts.json });
     return;
   }
   if (!input) {

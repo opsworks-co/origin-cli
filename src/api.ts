@@ -194,6 +194,13 @@ export const api = {
     if (q.content) params.set('content', q.content);
     return request(`/api/repos/${repoId}/why?${params.toString()}`);
   },
+  // Origin Why (CI): post a provenance comment for a batch of failing-trace
+  // frames onto a PR/MR. The server resolves each frame → session/prompt and
+  // formats the comment, so the CLI only sends raw frames + the PR number.
+  postWhyPrComment: (
+    repoId: string,
+    body: { prNumber: number; frames: Array<{ file?: string; line?: number; sha?: string; content?: string }> },
+  ) => request(`/api/repos/${repoId}/why/pr-comment`, { method: 'POST', body: JSON.stringify(body) }),
   getWhoami: () => request('/api/mcp/whoami'),
   // Tell the server how many sessions from a PREVIOUS account are sitting
   // unimported locally, so the dashboard can show an import/forget banner.
