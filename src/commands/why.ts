@@ -349,11 +349,150 @@ function renderServerCard(card: any, relPath: string, lineNum: number, lineConte
     .join(' · ');
   if (meta) console.log(chalk.gray(`  ${meta}`));
   console.log(chalk.gray(`  Commit: ${String(card.sha || '').slice(0, 8)} — ${(card.message || '').split('\n')[0]}`));
+
+  // ── Accountability: markers, review, rework ──────────────────────────
+  const mk = card.markers;
+  if (mk) {
+    for (const d of (mk.decisions || []).slice(0, 2)) console.log(chalk.cyan('  Decision: ') + chalk.gray(d));
+    for (const v of (mk.verifies || []).slice(0, 2)) console.log(chalk.yellow('  Verify: ') + chalk.gray(v) + chalk.gray(' — was this checked?'));
+    for (const o of (mk.opens || []).slice(0, 1)) console.log(chalk.gray('  Open: ' + o));
+  }
+  const rv = card.review;
+  if (rv) {
+    const badge =
+      rv.status === 'APPROVED' ? chalk.green('reviewed ✓') :
+      rv.status === 'REJECTED' ? chalk.red('rejected ✗') :
+      chalk.yellow('review pending');
+    const who = rv.isAutoReview ? 'AI review' : 'human';
+    const risk = rv.riskLevel ? `, risk: ${rv.riskLevel}` : '';
+    console.log('  ' + badge + chalk.gray(` (${who}${risk})`));
+  } else {
+    console.log('  ' + chalk.yellow('not reviewed'));
+  }
+  if (typeof card.reworkTouches === 'number' && card.reworkTouches > 1) {
+    console.log(chalk.gray(`  re-touched ${card.reworkTouches}× in this session (churn)`));
+  }
+
+  console.log('');
   console.log(chalk.blue(`  ${apiUrl}${s.url || '/sessions/' + s.id}`));
   console.log(chalk.gray(`\n  Run ${chalk.cyan(`origin explain ${String(s.id || '').slice(0, 8)}`)} for full details\n`));
 }
 
-export async function whyCommand(input: string) {
+// ─── Stack-trace ingestion: `origin why --trace [file]` ──────────────────
+// Parse a stack trace (stdin or a file) into file:line frames and run the same
+// per-line provenance for each frame inside this repo — so a crash points at
+// the prompts that authored the failing code path.
+
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) { resolve(''); return; }
+    let data = '';
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', (c) => (data += c));
+    process.stdin.on('end', () => resolve(data));
+    setTimeout(() => resolve(data), 2000); // don't hang forever if no EOF
+  });
+}
+
+function parseStackFrames(text: string): Array<{ file: string; line: number }> {
+  const frames: Array<{ file: string; line: number }> = [];
+  const seen = new Set<string>();
+  const add = (file: string, lineStr: string) => {
+    const line = parseInt(lineStr, 10);
+    if (!file || !Number.isInteger(line) || line < 1) return;
+    if (/node_modules|site-packages|\/dist\/|\.min\.js/.test(file)) return; // deps/build noise
+    const key = `${file}:${line}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    frames.push({ file, line });
+  };
+  const patterns: RegExp[] = [
+    /File\s+"([^"]+)",\s+line\s+(\d+)/g,          // Python:  File "x.py", line 47
+    /\(([^\s()]+\.[A-Za-z]+):(\d+)\)/g,           // Java/JS: (Foo.java:47) / (file.ts:47)
+    /at\s+[^\s(]+\s+\(?([^\s():]+):(\d+)(?::\d+)?\)?/g, // JS: at fn (file.ts:47:9)
+    /([^\s():"']+\.[A-Za-z]+):(\d+)/g,            // generic: path/file.ext:47
+  ];
+  for (const re of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) add(m[1], m[2]);
+  }
+  return frames;
+}
+
+// Map a trace frame's path (absolute / relative / module-ish) to a repo file.
+function resolveFrameFile(framePath: string, repoPath: string, repoFiles: string[]): string | null {
+  const norm = framePath.replace(/^\.\//, '');
+  // Exact repo-relative or suffix match against tracked files.
+  const hit = repoFiles.find((f) => f === norm || norm.endsWith('/' + f) || f.endsWith('/' + norm));
+  if (hit) return hit;
+  // Fall back to basename (last resort; ambiguous if the name repeats).
+  const base = path.basename(norm);
+  const byBase = repoFiles.filter((f) => path.basename(f) === base);
+  return byBase.length === 1 ? byBase[0] : null;
+}
+
+async function whyTraceCommand(traceArg: string | boolean, repoPath: string): Promise<void> {
+  const { readFileSync, existsSync } = await import('fs');
+  let text = '';
+  if (typeof traceArg === 'string' && traceArg && existsSync(traceArg)) text = readFileSync(traceArg, 'utf-8');
+  else text = await readStdin();
+  if (!text.trim()) {
+    console.error(chalk.red('No stack trace provided. Pipe one in:  ') + chalk.gray('cat error.log | origin why --trace'));
+    process.exitCode = 1;
+    return;
+  }
+  if (!isConnectedMode()) {
+    console.error(chalk.red('Trace resolution needs a connected Origin account.'));
+    process.exitCode = 1;
+    return;
+  }
+  const frames = parseStackFrames(text);
+  let repoFiles: string[] = [];
+  try { repoFiles = git(['ls-files'], { cwd: repoPath }).split('\n').filter(Boolean); } catch { /* ignore */ }
+
+  const results: Array<{ file: string; line: number; content: string; card: any }> = [];
+  for (const fr of frames) {
+    const rel = resolveFrameFile(fr.file, repoPath, repoFiles);
+    if (!rel) continue;
+    const sha = getCommitForLine(repoPath, rel, fr.line);
+    if (!sha || sha.startsWith('0000000')) continue;
+    let content = '';
+    try { content = (readFileSync(path.join(repoPath, rel), 'utf-8').split('\n')[fr.line - 1] || '').trim(); } catch { /* ignore */ }
+    const card = await tryServerWhy(repoPath, rel, sha, content);
+    if (card && card.session) results.push({ file: rel, line: fr.line, content, card });
+  }
+
+  const apiUrl = loadConfig()?.apiUrl || 'https://getorigin.io';
+  console.log(chalk.bold(`\n  Origin Why · stack trace`) + chalk.gray(`  (${frames.length} frames, ${results.length} attributed in this repo)`));
+  if (results.length === 0) {
+    console.log(chalk.gray('\n  No frames mapped to AI-authored code in this repo.\n'));
+    return;
+  }
+  for (const r of results) {
+    const s = r.card.session || {};
+    const p = r.card.prompt;
+    console.log('');
+    console.log('  ' + chalk.white(`${r.file}:${r.line}`) + (r.content ? chalk.gray(`  ${r.content.slice(0, 60)}`) : ''));
+    console.log('    ' + chalk.cyan(s.agent || s.model || 'AI') + (p ? chalk.gray(` · prompt #${p.index} `) + chalk.green(`"${(p.text || '').replace(/\s+/g, ' ').trim().slice(0, 60)}"`) : ''));
+    const vs = r.card.markers?.verifies || [];
+    if (vs.length) console.log('    ' + chalk.yellow('Verify: ') + chalk.gray(vs[0]) + chalk.gray(' — checked?'));
+    console.log('    ' + chalk.blue(`${apiUrl}${s.url || '/sessions/' + s.id}`));
+  }
+  console.log('');
+}
+
+export async function whyCommand(input: string, opts?: { trace?: string | boolean }) {
+  const repoPathForTrace = getGitRoot(process.cwd());
+  if (opts?.trace) {
+    if (!repoPathForTrace) { console.log(chalk.red('Not inside a git repository.')); process.exit(1); }
+    await whyTraceCommand(opts.trace, repoPathForTrace);
+    return;
+  }
+  if (!input) {
+    console.error(chalk.red('Usage: ') + 'origin why <file>:<line>   ' + chalk.gray('or  origin why --trace < error.log'));
+    process.exitCode = 1;
+    return;
+  }
   const { file, line } = parseFileAndLine(input);
 
   const repoPath = getGitRoot(process.cwd());

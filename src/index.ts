@@ -182,9 +182,10 @@ program.command('prompts <file-or-session-id>')
   .option('--limit <n>', 'Max entries to show', '10')
   .action(promptsCommand);
 
-program.command('why <file[:line]>')
-  .description('Find which AI session and prompt wrote a specific line of code')
-  .action(whyCommand);
+program.command('why [file[:line]]')
+  .description('Which AI session/prompt wrote a line — or a whole stack trace (--trace)')
+  .option('--trace [file]', 'Resolve a stack trace: read from a file, or pipe it via stdin')
+  .action((input, opts) => whyCommand(input, opts));
 
 program.command('chat')
   .description('Interactive AI assistant — ask questions about your AI-authored code in natural language')
