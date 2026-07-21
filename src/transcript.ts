@@ -102,6 +102,139 @@ function buildToolFields(
   };
 }
 
+// ─── GitHub Copilot events.jsonl → Claude-Code JSONL ─────────────────────────
+// The Copilot CLI records its transcript as `events.jsonl` under
+// `~/.copilot/session-state/<id>/` — one event per line with a dotted `type`
+// (`session.start`, `user.message`, `assistant.message`, `tool.execution_*`,
+// `session.shutdown`, …). Rewrite the events we care about into the Claude-Code
+// JSONL shape so the existing parser and display formatter handle Copilot with
+// no special-casing downstream. Returns null when `raw` isn't Copilot events.
+export function convertCopilotEventsToClaude(raw: string): string | null {
+  const trimmed = raw.trim();
+  // Copilot's dotted event names are unique to it — cheap, specific detector.
+  if (!/"type"\s*:\s*"(session\.start|assistant\.message|user\.message)"/.test(trimmed)) {
+    return null;
+  }
+
+  type Block = { type: string; text?: string; id?: string; name?: string; input?: unknown };
+  type Usage = {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+  const out: Array<Record<string, unknown>> = [];
+  // Track the last assistant turn + the authoritative session token totals so we
+  // can attach input/cache once (they only exist in aggregate on shutdown, while
+  // per-message `outputTokens` already sum to the session output total).
+  let lastAssistant: Record<string, any> | null = null;
+  let shutdownTotals: Usage | null = null;
+
+  for (const line of trimmed.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    let ev: any;
+    try {
+      ev = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    const d = ev?.data || {};
+    const ts = ev?.timestamp;
+
+    if (ev?.type === 'user.message') {
+      // `content` is the clean user text; `transformedContent` is the same
+      // wrapped in <current_datetime>/<system_notification> envelopes.
+      let content = typeof d.content === 'string' ? d.content : '';
+      if (!content && typeof d.transformedContent === 'string') {
+        content = d.transformedContent
+          .replace(/<current_datetime>[\s\S]*?<\/current_datetime>/gi, '')
+          .replace(/<system_notification>[\s\S]*?<\/system_notification>/gi, '')
+          .trim();
+      }
+      if (content) {
+        out.push({ type: 'user', message: { role: 'user', content }, timestamp: ts });
+      }
+    } else if (ev?.type === 'assistant.message') {
+      const blocks: Block[] = [];
+      if (typeof d.content === 'string' && d.content.trim()) {
+        blocks.push({ type: 'text', text: d.content });
+      }
+      for (const tr of Array.isArray(d.toolRequests) ? d.toolRequests : []) {
+        blocks.push({
+          type: 'tool_use',
+          id: tr?.toolCallId,
+          name: tr?.name,
+          input: tr?.arguments ?? {},
+        });
+      }
+      if (!blocks.length) continue;
+      const usage: Usage = {};
+      if (typeof d.outputTokens === 'number') usage.output_tokens = d.outputTokens;
+      const entry: Record<string, any> = {
+        type: 'assistant',
+        message: { id: d.messageId, role: 'assistant', model: d.model, content: blocks, usage },
+        timestamp: ts,
+      };
+      out.push(entry);
+      lastAssistant = entry;
+    } else if (ev?.type === 'session.shutdown') {
+      // Prefer the aggregate tokenDetails; the last shutdown wins (resume writes
+      // one per lifecycle) and reflects the final session totals.
+      const td = d.tokenDetails;
+      if (td && typeof td === 'object') {
+        shutdownTotals = {
+          input_tokens: td.input?.tokenCount ?? 0,
+          cache_read_input_tokens: td.cache_read?.tokenCount ?? 0,
+          cache_creation_input_tokens: td.cache_write?.tokenCount ?? 0,
+        };
+      }
+    }
+  }
+
+  if (lastAssistant && shutdownTotals) {
+    // Attach input/cache totals to a single message so the parser (which sums
+    // per-message usage) counts them exactly once. Output stays per-message.
+    Object.assign(lastAssistant.message.usage, {
+      input_tokens: shutdownTotals.input_tokens ?? 0,
+      cache_read_input_tokens: shutdownTotals.cache_read_input_tokens ?? 0,
+      cache_creation_input_tokens: shutdownTotals.cache_creation_input_tokens ?? 0,
+    });
+  }
+
+  return out.length ? out.map((e) => JSON.stringify(e)).join('\n') : null;
+}
+
+/**
+ * Read GitHub Copilot's real per-session model from its events.jsonl.
+ * Copilot's hook stdin never carries `model` (session.start only says
+ * `selectedModel: "auto"`), so without this the session falls back to the bare
+ * "claude" brand. The first `assistant.message` carries the resolved model
+ * (e.g. "claude-haiku-4.5") on `data.model`.
+ */
+export function readCopilotModel(transcriptPath: string): string | null {
+  try {
+    if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
+    const raw = fs.readFileSync(transcriptPath, 'utf-8');
+    if (!/"type"\s*:\s*"assistant\.message"/.test(raw)) return null;
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t || !t.includes('assistant.message')) continue;
+      let ev: any;
+      try {
+        ev = JSON.parse(t);
+      } catch {
+        continue;
+      }
+      const m = ev?.type === 'assistant.message' ? ev?.data?.model : undefined;
+      if (typeof m === 'string' && m.trim()) return m.trim();
+    }
+  } catch {
+    // best-effort — fall back to the caller's default
+  }
+  return null;
+}
+
 // ─── Parser ────────────────────────────────────────────────────────────────
 
 export function parseTranscript(transcriptPath: string, opts: { since?: Date | string | null } = {}): ParsedTranscript {
@@ -134,7 +267,11 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     return result;
   }
 
-  const raw = fs.readFileSync(transcriptPath, 'utf-8');
+  let raw = fs.readFileSync(transcriptPath, 'utf-8');
+  // GitHub Copilot writes events.jsonl; rewrite to Claude-Code JSONL up front so
+  // the rest of the parser is agent-agnostic.
+  const copilotConverted = convertCopilotEventsToClaude(raw);
+  if (copilotConverted != null) raw = copilotConverted;
   result.transcript = raw;
 
   // Detect format: Gemini uses a single JSON object { "messages": [...] }, Claude/Cursor use JSONL.
@@ -596,7 +733,14 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
     return [];
   }
 
-  const raw = fs.readFileSync(transcriptPath, 'utf-8');
+  let raw = fs.readFileSync(transcriptPath, 'utf-8');
+  // GitHub Copilot events.jsonl → Claude-Code JSONL first, so per-prompt file
+  // mappings (which drive per-turn diff attribution) see the `create`/`edit`
+  // tool_use blocks under the right prompt. Without this the raw `user.message`
+  // / `assistant.message` types match neither branch below and every Copilot
+  // session returned zero mappings — so the git diff fell onto the wrong turn.
+  const copilotConverted = convertCopilotEventsToClaude(raw);
+  if (copilotConverted != null) raw = copilotConverted;
   const trimmed = raw.trim();
 
   // Detect format: Gemini uses a single JSON object { "messages": [...] }, Claude/Cursor use JSONL.
@@ -939,7 +1083,13 @@ export function formatTranscriptForDisplay(
     return '';
   }
 
-  const raw = fs.readFileSync(transcriptPath, 'utf-8');
+  let raw = fs.readFileSync(transcriptPath, 'utf-8');
+  // GitHub Copilot events.jsonl → Claude-Code JSONL. The converted lines are
+  // Claude-shaped (`{"type":"user","message":{…}}`), so force the JSONL renderer
+  // rather than letting the Gemini-chats detector misfire on `"type":"user"`.
+  const copilotConverted = convertCopilotEventsToClaude(raw);
+  const isCopilot = copilotConverted != null;
+  if (isCopilot) raw = copilotConverted as string;
   const trimmed = raw.trim();
   if (!trimmed) return '';
 
@@ -957,7 +1107,9 @@ export function formatTranscriptForDisplay(
   const looksLikeGeminiChatsJsonl =
     /\n?\{[^\n]*"type"\s*:\s*"(gemini|user|model|tool)"/.test(firstLines) ||
     /\{[^\n]*"\$set"\s*:/.test(firstLines);
-  if (looksLikeGeminiChatsJsonl) {
+  if (isCopilot) {
+    messages = formatJSONLMessages(raw, verbose);
+  } else if (looksLikeGeminiChatsJsonl) {
     messages = formatGeminiChatsJsonl(raw, verbose);
   } else if (trimmed.startsWith('{') && !trimmed.includes('\n')) {
     messages = formatGeminiMessages(raw, verbose);

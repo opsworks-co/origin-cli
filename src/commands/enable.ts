@@ -5,7 +5,8 @@ import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
 import { execSync } from 'child_process';
-import { run, runDetailed } from '../utils/exec.js';
+import { run, runDetailed, findExecutable } from '../utils/exec.js';
+import { isWindows } from '../utils/platform.js';
 import { loadConfig, saveConfig, saveRepoConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
@@ -27,10 +28,9 @@ function getOriginBinPath(): string {
     }
   } catch { /* fallback */ }
 
-  // 2. which origin
+  // 2. which/where origin
   try {
-    const r = runDetailed('which', ['origin'], { timeoutMs: 2000 });
-    const binPath = r.status === 0 ? r.stdout.trim() : '';
+    const binPath = findExecutable('origin');
     if (binPath) return path.dirname(binPath);
   } catch { /* fallback */ }
 
@@ -55,6 +55,19 @@ function getOriginBinPath(): string {
 }
 
 function originCmd(cmd: string): string {
+  if (isWindows()) {
+    // The POSIX `PATH=dir:$PATH origin …` shim is invalid under cmd/PowerShell,
+    // which is what agents run their hooks-json `command`/`bash` field through
+    // on native Windows. Emit an absolute-path invocation instead — valid in
+    // cmd, PowerShell, and git-bash alike — so agents WITHOUT a `powershell`
+    // field (Cursor/Codex/Gemini/Claude/Antigravity) still fire on Windows.
+    // (These commands are agent-run; git hooks use their own #!/bin/sh shim.)
+    const bin = originBinaryPath();
+    if (bin === 'origin') return cmd; // unresolved → rely on PATH
+    const args = cmd.replace(/^origin\b\s*/, '');
+    const quoted = /\s/.test(bin) ? `"${bin}"` : bin;
+    return `${quoted} ${args}`.trim();
+  }
   const binDir = getOriginBinPath();
   if (binDir && binDir !== '/usr/bin' && binDir !== '/bin') {
     return `PATH=${binDir}:$PATH ${cmd}`;
@@ -62,9 +75,47 @@ function originCmd(cmd: string): string {
   return cmd;
 }
 
+// True if a hook entry's command string is one Origin installed, in ANY shell
+// form: the unix `PATH=… origin hooks cursor …`, the Windows `"C:\…\origin.cmd"
+// hooks cursor …`, or a bare `origin hooks cursor …`. Keys off the shell-
+// agnostic `hooks <agent>` marker (NOT the literal `origin hooks`, which the
+// Windows form breaks) so idempotent re-install finds prior entries on every
+// platform. Pass `agent` to scope to one agent's entries; omit to match any.
+function isOriginHookCommand(cmd: unknown, agent?: string): boolean {
+  if (typeof cmd !== 'string') return false;
+  if (agent) return cmd.includes(`hooks ${agent} `) || cmd.endsWith(`hooks ${agent}`);
+  return /\bhooks (claude-code|cursor|gemini|devin|windsurf|codex|copilot|antigravity|aider)\b/.test(cmd);
+}
+
+// Absolute path to the origin launcher, for embedding in native-shell hooks
+// (the PowerShell variant below). Mirrors the unix PATH-shim's intent: agent
+// processes may not inherit the install dir on PATH, so point at it directly.
+function originBinaryPath(): string {
+  try {
+    const resolved = findExecutable('origin');
+    if (resolved) return resolved;
+  } catch { /* fall through */ }
+  const binDir = getOriginBinPath();
+  if (binDir) return path.join(binDir, isWindows() ? 'origin.cmd' : 'origin');
+  return 'origin';
+}
+
+// PowerShell form of an `origin …` invocation, for the `powershell` field that
+// Windsurf/Copilot hooks.json schemas run via `powershell -Command` on native
+// Windows (the sh `PATH=dir:$PATH origin …` form is invalid there). The `&`
+// call operator invokes an absolute path even when it contains spaces; a bare
+// `origin` (no resolvable path) still works when the npm global bin is on PATH.
+function originPowershellCmd(cmd: string): string {
+  const args = cmd.replace(/^origin\b\s*/, '');
+  const bin = originBinaryPath();
+  if (bin === 'origin') return `origin ${args}`.trim();
+  const quoted = `'${bin.replace(/'/g, "''")}'`; // PS escapes ' by doubling it
+  return `& ${quoted} ${args}`.trim();
+}
+
 // ─── Agent Definitions ────────────────────────────────────────────────────
 
-type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'windsurf' | 'codex' | 'aider' | 'antigravity';
+type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'devin' | 'codex' | 'aider' | 'antigravity' | 'copilot';
 
 interface AgentConfig {
   name: string;
@@ -186,7 +237,7 @@ function hasOriginClaudeHooksInSettings(parsed: any): boolean {
     for (const entry of entries) {
       if (!entry?.hooks || !Array.isArray(entry.hooks)) continue;
       for (const h of entry.hooks) {
-        if (typeof h?.command === 'string' && h.command.includes('origin hooks claude-code')) {
+        if (isOriginHookCommand(h?.command, 'claude-code')) {
           return true;
         }
       }
@@ -203,7 +254,7 @@ function stripOriginClaudeHooksFromParsedSettings(parsed: any): void {
     parsed.hooks[event] = entries.filter((entry: any) => {
       if (!entry?.hooks || !Array.isArray(entry.hooks)) return true;
       return !entry.hooks.some((h: any) =>
-        typeof h?.command === 'string' && h.command.includes('origin hooks claude-code')
+        isOriginHookCommand(h?.command, 'claude-code')
       );
     });
     if (parsed.hooks[event].length === 0) {
@@ -214,7 +265,7 @@ function stripOriginClaudeHooksFromParsedSettings(parsed: any): void {
 
 // ── Cursor Hooks ───────────────────────────────────────────────────────────
 
-function installCursorHooks(gitRoot: string): void {
+export function installCursorHooks(gitRoot: string): void {
   const cursorDir = path.join(gitRoot, '.cursor');
   const hooksPath = path.join(cursorDir, 'hooks.json');
 
@@ -260,7 +311,7 @@ function installCursorHooks(gitRoot: string): void {
   for (const legacy of ['agentSessionStart', 'agentSessionEnd']) {
     if (Array.isArray(config.hooks[legacy])) {
       config.hooks[legacy] = config.hooks[legacy].filter(
-        (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks cursor'))
+        (h: any) => !isOriginHookCommand(h.command, 'cursor')
       );
       if (config.hooks[legacy].length === 0) delete config.hooks[legacy];
     }
@@ -273,7 +324,7 @@ function installCursorHooks(gitRoot: string): void {
     // which broke the previous startsWith check and produced duplicates on
     // every re-run of `origin enable`.
     config.hooks[eventType] = config.hooks[eventType].filter(
-      (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks'))
+      (h: any) => !isOriginHookCommand(h.command)
     );
     config.hooks[eventType].push(...entries);
   }
@@ -319,11 +370,11 @@ function installGeminiHooks(gitRoot: string): void {
     settings.hooks[eventType] = settings.hooks[eventType].filter((entry: any) => {
       if (entry.hooks) {
         entry.hooks = entry.hooks.filter(
-          (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks'))
+          (h: any) => !isOriginHookCommand(h.command)
         );
         return entry.hooks.length > 0;
       }
-      return !(entry.command && typeof entry.command === 'string' && entry.command.includes('origin hooks'));
+      return !isOriginHookCommand(entry.command);
     });
     settings.hooks[eventType].push(...entries);
   }
@@ -333,42 +384,99 @@ function installGeminiHooks(gitRoot: string): void {
   console.log(chalk.green(`  ✓ Hooks installed in ${geminiLabel}`));
 }
 
-// ── Windsurf Hooks ────────────────────────────────────────────────────────
+// ── Devin Hooks ───────────────────────────────────────────────────────────
+// Devin (Cognition; formerly Windsurf) exposes lifecycle hooks through the
+// Devin CLI at `.devin/hooks.v1.json`, using the SAME format and event names
+// as Claude Code — top-level PascalCase event keys, each an array of
+// `{ hooks: [{ type: 'command', command }] }`, no wrapper. The stdin payload
+// (session_id, prompt, transcript_path) matches Claude Code's, so the runtime
+// handler reuses the claude-code path. See docs.devin.ai/cli/extensibility/
+// hooks/lifecycle-hooks. (Devin Desktop, the ex-Windsurf GUI, has no third-
+// party hooks — it uses MCP servers + rules in .devin/rules/, which Origin's
+// context injection targets at hook time.)
 
-function installWindsurfHooks(gitRoot: string): void {
-  const windsurfDir = path.join(gitRoot, '.windsurf');
-  const hooksPath = path.join(windsurfDir, 'hooks.json');
+export function installDevinHooks(gitRoot: string): void {
+  const devinDir = path.join(gitRoot, '.devin');
+  const hooksPath = path.join(devinDir, 'hooks.v1.json');
 
-  if (!fs.existsSync(windsurfDir)) {
-    fs.mkdirSync(windsurfDir, { recursive: true });
+  if (!fs.existsSync(devinDir)) {
+    fs.mkdirSync(devinDir, { recursive: true });
   }
 
-  let config: Record<string, any> = { version: 1, hooks: {} };
+  let config: Record<string, any> = {};
   if (fs.existsSync(hooksPath)) {
     backupExistingHooks(hooksPath);
-    try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = { version: 1, hooks: {} }; }
+    try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = {}; }
   }
 
-  if (!config.hooks) config.hooks = {};
-
+  const dv = (sub: string) => ({ hooks: [{ type: 'command', command: originCmd(`origin hooks devin ${sub}`) }] });
   const hooks: Record<string, any[]> = {
-    sessionStart: [{ command: originCmd('origin hooks windsurf session-start') }],
-    stop: [{ command: originCmd('origin hooks windsurf stop') }],
-    beforeSubmitPrompt: [{ command: originCmd('origin hooks windsurf user-prompt-submit') }],
-    sessionEnd: [{ command: originCmd('origin hooks windsurf session-end') }],
+    SessionStart: [dv('session-start')],
+    Stop: [dv('stop')],
+    UserPromptSubmit: [dv('user-prompt-submit')],
+    SessionEnd: [dv('session-end')],
   };
 
   for (const [eventType, entries] of Object.entries(hooks)) {
-    if (!config.hooks[eventType]) config.hooks[eventType] = [];
-    config.hooks[eventType] = config.hooks[eventType].filter(
-      (h: any) => !(h.command && typeof h.command === 'string' && h.command.includes('origin hooks'))
+    if (!config[eventType]) config[eventType] = [];
+    config[eventType] = config[eventType].filter(
+      (h: any) => !isOriginHookCommand(h?.hooks?.[0]?.command || h?.command),
     );
-    config.hooks[eventType].push(...entries);
+    config[eventType].push(...entries);
   }
 
   fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
-  const windsurfLabel = gitRoot === os.homedir() ? `~/.windsurf/hooks.json` : `.windsurf/hooks.json`;
-  console.log(chalk.green(`  ✓ Hooks installed in ${windsurfLabel}`));
+  const devinLabel = gitRoot === os.homedir() ? `~/.devin/hooks.v1.json` : `.devin/hooks.v1.json`;
+  console.log(chalk.green(`  ✓ Hooks installed in ${devinLabel}`));
+}
+
+// ── GitHub Copilot CLI Hooks ─────────────────────────────────────────────
+// Copilot CLI supports lifecycle hooks (docs.github.com/copilot/reference/
+// hooks-reference). Repo-level hooks live in .github/hooks/*.json; user-level in
+// ~/.copilot/hooks/*.json. Schema: { version, hooks: { EventName: [{ type, command }] } }
+// with VS-Code-compatible PascalCase event names. stdin delivers session_id,
+// prompt (UserPromptSubmit) and transcript_path (Stop) — the same shape as Claude
+// Code, so capture flows through the generic hook path (no bespoke parser needed).
+export function installCopilotHooks(gitRoot: string): void {
+  const isGlobal = gitRoot === os.homedir();
+  const hooksDir = isGlobal
+    ? path.join(os.homedir(), '.copilot', 'hooks')
+    : path.join(gitRoot, '.github', 'hooks');
+  const hooksPath = path.join(hooksDir, 'origin.json');
+
+  if (!fs.existsSync(hooksDir)) {
+    fs.mkdirSync(hooksDir, { recursive: true });
+  }
+
+  // A dedicated file we own entirely — Copilot merges every *.json in the dir,
+  // so there's nothing to preserve/back up here (unlike the shared settings of
+  // the other agents).
+  //
+  // The Copilot CLI uses camelCase event names (sessionStart, userPromptSubmitted,
+  // agentStop, sessionEnd — NOT the PascalCase VS-Code variants) and runs command
+  // hooks from the `bash` field. We set `command` as a documented fallback, and a
+  // `powershell` variant so the hook also fires under native Windows PowerShell.
+  // (docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-hooks)
+  const cmd = (event: string) => originCmd(`origin hooks copilot ${event}`);
+  const hook = (event: string) => [{
+    type: 'command',
+    bash: cmd(event),
+    command: cmd(event),
+    powershell: originPowershellCmd(`origin hooks copilot ${event}`),
+  }];
+  const config = {
+    version: 1,
+    hooks: {
+      sessionStart: hook('session-start'),
+      userPromptSubmitted: hook('user-prompt-submit'),
+      agentStop: hook('stop'),
+      sessionEnd: hook('session-end'),
+    },
+  };
+
+  fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
+  const label = isGlobal ? '~/.copilot/hooks/origin.json' : '.github/hooks/origin.json';
+  console.log(chalk.green(`  ✓ Hooks installed in ${label}`));
 }
 
 // ── Codex CLI Hooks ──────────────────────────────────────────────────────
@@ -662,7 +770,7 @@ function filterOriginHooks(entries: any[]): any[] {
   return entries.filter((entry: any) => {
     if (!entry.hooks) return true;
     return !entry.hooks.some((h: any) =>
-      h.command && typeof h.command === 'string' && h.command.includes('origin hooks')
+      isOriginHookCommand(h.command)
     );
   });
 }
@@ -695,14 +803,14 @@ const AGENTS: Record<AgentType, AgentConfig> = {
     hookCommand: 'origin hooks gemini',
     installHooks: installGeminiHooks,
   },
-  windsurf: {
-    name: 'Windsurf',
-    configDir: '.windsurf',
-    configFile: 'hooks.json',
-    detectDir: '.windsurf',
-    command: 'windsurf',
-    hookCommand: 'origin hooks windsurf',
-    installHooks: installWindsurfHooks,
+  devin: {
+    name: 'Devin',
+    configDir: '.devin',
+    configFile: 'hooks.v1.json',
+    detectDir: '.devin',
+    command: 'devin',
+    hookCommand: 'origin hooks devin',
+    installHooks: installDevinHooks,
   },
   codex: {
     name: 'Codex CLI',
@@ -732,6 +840,18 @@ const AGENTS: Record<AgentType, AgentConfig> = {
     hookCommand: 'origin hooks antigravity',
     installHooks: installAntigravityHooks,
   },
+  copilot: {
+    name: 'GitHub Copilot',
+    // Repo hooks live in .github/hooks/; global in ~/.copilot/hooks/ (handled in
+    // installCopilotHooks). No reliable repo-local marker dir, so detection is by
+    // the `copilot` CLI binary being on PATH.
+    configDir: '.github/hooks',
+    configFile: 'origin.json',
+    detectDir: '',
+    command: 'copilot',
+    hookCommand: 'origin hooks copilot',
+    installHooks: installCopilotHooks,
+  },
 };
 
 function isInNpxCache(name: string): boolean {
@@ -749,7 +869,7 @@ function isInNpxCache(name: string): boolean {
 
 // Officially supported agents for auto-detection. Antigravity is included so
 // `origin enable` picks it up as Gemini-CLI users migrate to it.
-const SUPPORTED_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity'];
+const SUPPORTED_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity', 'devin', 'copilot'];
 
 function detectAgents(gitRoot: string): AgentType[] {
   const detected: AgentType[] = [];
@@ -760,12 +880,9 @@ function detectAgents(gitRoot: string): AgentType[] {
       continue;
     }
     // Check if binary exists on PATH
-    {
-      const r = runDetailed('which', [agent.command], { timeoutMs: 2000 });
-      if (r.status === 0 && r.stdout.trim()) {
-        detected.push(type);
-        continue;
-      }
+    if (findExecutable(agent.command)) {
+      detected.push(type);
+      continue;
     }
     // Check npx cache (e.g. codex installed via npx)
     if (isInNpxCache(agent.command)) {
@@ -779,7 +896,7 @@ function detectAgents(gitRoot: string): AgentType[] {
 
 // Agents that support global (~/) hook installation
 // Windsurf/Aider coming soon
-const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity'];
+const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity', 'devin', 'copilot'];
 
 export async function enableCommand(opts: { agent?: string; global?: boolean; local?: boolean; link?: string; agentSlug?: string; standalone?: boolean }): Promise<void> {
   // Standalone mode doesn't require login
@@ -883,10 +1000,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
       // In global mode, detect which agent binaries are installed or config dirs exist
       agentsToEnable = GLOBAL_CAPABLE_AGENTS.filter((type) => {
         // Check CLI availability
-        {
-          const r = runDetailed('which', [AGENTS[type].command], { timeoutMs: 2000 });
-          if (r.status === 0 && r.stdout.trim()) return true;
-        }
+        if (findExecutable(AGENTS[type].command)) return true;
         // Fall back to config directory detection (e.g. Cursor may not install CLI to PATH)
         const detectDir = AGENTS[type].detectDir;
         if (detectDir && fs.existsSync(path.join(os.homedir(), detectDir))) {
@@ -1004,8 +1118,8 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
 function resolveOriginBin(): string {
   let originBin = 'origin';
   try {
-    const r = runDetailed('which', ['origin'], { timeoutMs: 2000 });
-    if (r.status === 0 && r.stdout.trim()) originBin = r.stdout.trim();
+    const binPath = findExecutable('origin');
+    if (binPath) originBin = binPath;
   } catch { /* fallback to bare name */ }
   return originBin;
 }

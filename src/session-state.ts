@@ -4,6 +4,7 @@ import os from 'os';
 import crypto from 'crypto';
 import { execSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { processInfo } from './utils/process-detect.js';
 import type { PromptEdit } from './prompt-capture/types.js';
 import { ensureOwnerStamp } from './session-owner.js';
 
@@ -942,23 +943,18 @@ function findAncestorPid(pattern: RegExp, maxDepth = 10): number {
   try {
     let pid = process.ppid || 0;
     for (let i = 0; i < maxDepth && pid > 1; i++) {
-      // Get the command and parent of this PID
-      const info = execSync(`ps -p ${pid} -o ppid=,command=`, {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
-      // Pull ppid off the front BEFORE testing the rest against
-      // the pattern so the "match" is on the actual command line,
-      // not "<ppid> <command>".
-      const firstSpace = info.indexOf(' ');
-      const commandPart = firstSpace >= 0 ? info.slice(firstSpace + 1) : info;
+      // Parent + command line for this PID, cross-platform (ps on Unix,
+      // Win32_Process CIM on Windows) — see utils/process-detect.ts.
+      const info = processInfo(pid);
+      if (!info) break;
+      const commandPart = info.command;
       // Skip Origin's own hook subprocesses — they match every
       // agent pattern via their argv but die after the hook
       // returns. Walking past them gets us to the real agent.
       const isOriginSelf = ORIGIN_HOOK_MARKER.test(commandPart);
       if (!isOriginSelf && pattern.test(commandPart)) return pid;
       // Move to parent
-      const ppid = parseInt(info.trim().split(/\s+/)[0], 10);
+      const ppid = info.ppid;
       if (isNaN(ppid) || ppid <= 1 || ppid === pid) break;
       pid = ppid;
     }
@@ -1017,7 +1013,7 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
     // UserPromptSubmit / PreToolUse / Stop / etc., so a fresh file mtime
     // means Claude is alive. Staleness threshold is raised to 90 min in
     // heartbeat.ts so a long read of a single response doesn't false-end.
-    const LONG_RUNNING_AGENTS = ['windsurf'];
+    const LONG_RUNNING_AGENTS = ['devin'];
     // Cursor: Electron helpers die immediately, can't track parent PID.
     // Claude Code: macOS wrapper trap (see above). Treat both as
     // stale-file-only.

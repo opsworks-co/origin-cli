@@ -44,6 +44,7 @@ const DEFAULT_IGNORE_PATTERNS = [
   'AGENTS.md',
   'GEMINI.md',
   '.windsurfrules',
+  '.devin/rules/origin.md',
   // Claude Code's parallel-branch worktrees. They show up as submodule
   // (160000 mode) entries in git diff when Cursor / other agents run in
   // a repo that previously hosted Claude Code worktrees. They aren't the
@@ -169,6 +170,7 @@ const ORIGIN_AUTO_MANAGED_BASENAMES = new Set<string>([
   'AGENTS.md',
   'GEMINI.md',
   '.windsurfrules',
+  '.devin/rules/origin.md',
   // .gitignore is intentionally NOT in this set — see the matching
   // explanation in apps/api/src/utils/auto-managed-files.ts. Hiding
   // user-requested .gitignore changes from the captured diff caused

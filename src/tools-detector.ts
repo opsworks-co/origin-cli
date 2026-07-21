@@ -9,7 +9,7 @@ const CLI_CHECKS = [
   { name: 'cursor',    cmd: 'which cursor' },
   { name: 'aider',     cmd: 'which aider' },
   { name: 'gemini',    cmd: 'which gemini' },
-  { name: 'windsurf',  cmd: 'which windsurf' },
+  { name: 'devin',     cmd: 'which devin' },
   { name: 'copilot',   cmd: 'which github-copilot-cli' },
   { name: 'cody',      cmd: 'which cody' },
   { name: 'continue',  cmd: 'which continue' },
@@ -91,7 +91,7 @@ export function detectTools(): string[] {
   // ── Layer 1.5: Config directory detection (IDE may not install CLI to PATH)
   const CONFIG_DIR_TOOLS: Record<string, string> = {
     '.cursor': 'cursor',
-    '.windsurf': 'windsurf',
+    '.devin': 'devin',
   };
   for (const [dir, tool] of Object.entries(CONFIG_DIR_TOOLS)) {
     if (!found.has(tool) && fs.existsSync(path.join(os.homedir(), dir))) {
@@ -138,7 +138,7 @@ export function detectIDEExtensions(): string[] {
   const extensionDirs = [
     path.join(os.homedir(), '.vscode', 'extensions'),
     path.join(os.homedir(), '.cursor', 'extensions'),
-    path.join(os.homedir(), '.windsurf', 'extensions'),
+    path.join(os.homedir(), '.devin', 'extensions'),
     path.join(os.homedir(), '.vscode-oss', 'extensions'),  // VSCodium
   ];
 

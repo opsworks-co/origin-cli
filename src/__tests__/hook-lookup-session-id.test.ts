@@ -18,9 +18,9 @@ import { describe, expect, it } from 'vitest';
 import { hookLookupSessionId } from '../commands/hooks.js';
 
 describe('hookLookupSessionId', () => {
-  it('passes the id through for stable-id agents (Claude Code, Windsurf)', () => {
+  it('passes the id through for stable-id agents (Claude Code, Devin)', () => {
     expect(hookLookupSessionId('sess-123', 'claude-code')).toBe('sess-123');
-    expect(hookLookupSessionId('sess-123', 'windsurf')).toBe('sess-123');
+    expect(hookLookupSessionId('sess-123', 'devin')).toBe('sess-123');
   });
 
   it('returns undefined for Gemini so a resumed session resolves via agent-filtered fallback', () => {

@@ -26,7 +26,7 @@ function shortAgent(agent: string | undefined): string {
   if (a.startsWith('codex')) return 'codex';
   if (a.startsWith('gemini')) return 'gemini';
   if (a.startsWith('cursor')) return 'cursor';
-  if (a.startsWith('windsurf')) return 'windsurf';
+  if (a.startsWith('devin') || a.startsWith('windsurf')) return 'devin';
   return agent;
 }
 

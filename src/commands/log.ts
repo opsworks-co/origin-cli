@@ -40,7 +40,7 @@ function agentLabel(note: OriginNote): string {
       'cursor': 'Cursor',
       'gemini': 'Gemini CLI',
       'codex': 'Codex',
-      'windsurf': 'Windsurf',
+      'devin': 'Devin',
       'aider': 'Aider',
       'copilot': 'Copilot',
       'amp': 'Amp',

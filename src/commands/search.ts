@@ -90,7 +90,7 @@ function agentFromModel(model: string): string {
   if (lower.includes('cursor')) return 'Cursor';
   if (lower.includes('gemini') || lower.includes('google')) return 'Gemini';
   if (lower.includes('codex') || lower.includes('openai') || lower.includes('gpt')) return 'Codex';
-  if (lower.includes('windsurf')) return 'Windsurf';
+  if (lower.includes('devin') || lower.includes('windsurf')) return 'Devin';
   if (lower.includes('aider')) return 'Aider';
   return model;
 }

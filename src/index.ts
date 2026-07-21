@@ -129,7 +129,7 @@ program.command('login')
   .action(loginCommand);
 program.command('enable')
   .description('Register this machine + install Origin git hooks (defaults to machine-wide so every repo is tracked)')
-  .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, windsurf, aider). Auto-detects if omitted.')
+  .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, devin, aider). Auto-detects if omitted.')
   .option('--local', 'Install hooks for the current repo only (default: machine-wide)')
   .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
   .option('-g, --global', 'Deprecated — global is now the default; flag kept for back-compat (no-op)')
@@ -452,7 +452,7 @@ program.command('search <query>')
   .description('Full-text search across all AI prompt history')
   .option('-l, --limit <n>', 'Max results', '20')
   .option('--from <date>', 'Filter by date (e.g., 7d, 2w, 1m, or 2025-01-01)')
-  .option('--agent <name>', 'Filter by agent (claude, cursor, gemini, codex, windsurf, aider)')
+  .option('--agent <name>', 'Filter by agent (claude, cursor, gemini, codex, devin, aider)')
   .option('-m, --model <model>', 'Filter by model')
   .option('-r, --repo <path>', 'Filter by repo path')
   .action(searchCommand);
@@ -621,7 +621,8 @@ hooks.command('claude-code <event>').description('Handle Claude Code hook event'
 hooks.command('cursor <event>').description('Handle Cursor hook event').action((event) => hooksCommand(event, 'cursor'));
 hooks.command('gemini <event>').description('Handle Gemini CLI hook event').action((event) => hooksCommand(event, 'gemini'));
 hooks.command('codex <event>').description('Handle Codex CLI hook event').action((event) => hooksCommand(event, 'codex'));
-hooks.command('windsurf <event>').description('Handle Windsurf hook event').action((event) => hooksCommand(event, 'windsurf'));
+hooks.command('devin <event>').description('Handle Devin hook event').action((event) => hooksCommand(event, 'devin'));
+hooks.command('copilot <event>').description('Handle GitHub Copilot hook event').action((event) => hooksCommand(event, 'copilot'));
 hooks.command('aider <event>').description('Handle Aider hook event').action((event) => hooksCommand(event, 'aider'));
 hooks.command('antigravity <event>').description('Handle Antigravity hook event').action((event) => hooksCommand(event, 'antigravity'));
 hooks.command('git-pre-commit').description('Handle git pre-commit hook (secret scan)').action(() => handlePreCommit());

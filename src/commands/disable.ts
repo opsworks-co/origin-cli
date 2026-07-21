@@ -73,6 +73,24 @@ function filterCursorHooks(config: Record<string, any>): Record<string, any> {
   return config;
 }
 
+// Devin's .devin/hooks.v1.json uses top-level event keys (SessionStart, …)
+// with no `hooks` wrapper — the Claude-Code entry shape but one level up. Strip
+// Origin command entries from each event array and drop empties.
+function filterDevinHooks(config: Record<string, any>): Record<string, any> {
+  for (const eventType of Object.keys(config)) {
+    if (!Array.isArray(config[eventType])) continue;
+    config[eventType] = config[eventType].filter((entry: any) => {
+      if (!entry?.hooks) return true;
+      entry.hooks = entry.hooks.filter(
+        (h: any) => !(h.command && typeof h.command === 'string' && h.command.startsWith('origin hooks')),
+      );
+      return entry.hooks.length > 0;
+    });
+    if (config[eventType].length === 0) delete config[eventType];
+  }
+  return config;
+}
+
 // Antigravity stores all Origin hooks under a single "origin" named group in
 // `.agents/hooks.json` (or ~/.gemini/config/hooks.json), so removal is a
 // single-key delete — guarded so we only drop a group that's actually ours.
@@ -156,12 +174,18 @@ export async function disableCommand(opts?: { global?: boolean }): Promise<void>
     filterClaudeOrGeminiHooks
   );
 
-  // Windsurf — .windsurf/hooks.json (same format as Cursor)
-  const windsurfLabel = isGlobal ? '~/.windsurf/hooks.json' : '.windsurf/hooks.json';
+  // Devin — .devin/hooks.v1.json (Claude-Code hook format). Also sweep the
+  // legacy Windsurf .windsurf/hooks.json in case an older install left one.
+  const devinLabel = isGlobal ? '~/.devin/hooks.v1.json' : '.devin/hooks.v1.json';
+  removedCount += removeOriginHooksFromFile(
+    path.join(basePath, '.devin', 'hooks.v1.json'),
+    devinLabel,
+    filterDevinHooks,
+  );
   removedCount += removeOriginHooksFromFile(
     path.join(basePath, '.windsurf', 'hooks.json'),
-    windsurfLabel,
-    filterCursorHooks
+    isGlobal ? '~/.windsurf/hooks.json' : '.windsurf/hooks.json',
+    filterCursorHooks,
   );
 
   // Aider — .aider.conf.yml (only for per-repo mode)

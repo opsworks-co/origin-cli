@@ -3,7 +3,7 @@ import { decidePushBlock } from '../push-block.js';
 import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
 import { api, readAuthStatus } from '../api.js';
-import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, extractPromptImages, setActivePricing } from '../transcript.js';
+import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, extractPromptImages, setActivePricing, readCopilotModel } from '../transcript.js';
 import {
   saveSessionState,
   loadSessionState,
@@ -64,6 +64,8 @@ import {
   isSpecificModel, sessionMatchesAgent, isCodexLikeModel,
   attributionPgrepChecks, standalonePgrepChecks, resolveAgentDisplayName,
 } from '../agents/registry.js';
+import { isProcessRunning } from '../utils/process-detect.js';
+import { ensureSqlite, querySqlite } from '../utils/sqlite.js';
 import { attachOrphanCommitFiles } from '../prompt-completeness.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, type PromptNoteEntry } from '../git-notes.js';
@@ -147,23 +149,16 @@ const durableEnd = (sessionId: string, data: any) =>
   durableEndSession(sessionId, data, (e, m, d) => debugLog(e, m, d));
 
 /**
- * Run a pgrep command safely, filtering out the current process (and its children)
- * to avoid false-positive matches when the pattern appears in our own argv.
- * Returns true if at least one *other* process matched.
+ * Detect whether a process matching a registry pgrep pattern is running,
+ * filtering out our own process tree to avoid false positives when the
+ * pattern appears in our own argv. Cross-platform (pgrep on Unix, Win32_Process
+ * command-line scan on Windows) — see utils/process-detect.ts.
+ *
+ * Accepts either a bare pattern or a legacy `pgrep -f "…"` command string
+ * (what the registry stores), so existing call sites pass their `.cmd` verbatim.
  */
 function safePgrep(pgrepCmd: string): boolean {
-  const myPid = process.pid;
-  const myPpid = process.ppid;
-  // Parse command string into args for execFileSync (e.g. 'pgrep -f "pattern"')
-  const parts = pgrepCmd.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-  const cmd = parts[0] || 'pgrep';
-  const args = parts.slice(1).map(a => a.replace(/^"|"$/g, ''));
-  // Run pgrep, capture PIDs, filter out our own process tree
-  const raw = execFileSync(cmd, args, { encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] }).trim();
-  if (!raw) return false;
-  const pids = raw.split('\n').map(p => parseInt(p.trim(), 10)).filter(p => !isNaN(p));
-  const filtered = pids.filter(p => p !== myPid && p !== myPpid);
-  return filtered.length > 0;
+  return isProcessRunning(pgrepCmd);
 }
 
 // ─── Diff Filtering ─────────────────────────────────────────────────────
@@ -437,7 +432,7 @@ function getCursorConversationSummary(conversationId: string): { title: string; 
     if (!fs.existsSync(dbPath)) return null;
 
     const escapedId = conversationId.replace(/'/g, "''");
-    const result = execFileSync('sqlite3', ['-separator', '|||', dbPath, `SELECT title, tldr, overview, summaryBullets FROM conversation_summaries WHERE conversationId='${escapedId}' LIMIT 1`], { encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 2000 }).trim();
+    const result = querySqlite(dbPath, `SELECT title, tldr, overview, summaryBullets FROM conversation_summaries WHERE conversationId='${escapedId}' LIMIT 1`, { separator: '|||', timeoutMs: 2000 }).trim();
     if (!result) return null;
     const parts = result.split('|||');
     return {
@@ -711,11 +706,19 @@ function writeAgentRulesFile(agentSlug: string, systemMsg: string, repoPath: str
     // Codex and Antigravity both read AGENTS.md from the project root.
     target = path.join(repoPath, 'AGENTS.md');
     useMarker = true;
-  } else if (agentSlug === 'windsurf') {
-    target = path.join(repoPath, '.windsurfrules');
+  } else if (agentSlug === 'devin') {
+    // Devin (formerly Windsurf) reads always-on rules from .devin/rules/.
+    // Devin Desktop has no third-party hooks, so this rules file is Origin's
+    // only context-injection surface there; the Devin CLI reads it too.
+    target = path.join(repoPath, '.devin', 'rules', 'origin.md');
     useMarker = true;
   } else if (agentSlug === 'gemini') {
     target = path.join(repoPath, 'GEMINI.md');
+    useMarker = true;
+  } else if (agentSlug === 'copilot') {
+    // Copilot CLI + VS Code read repo custom instructions from
+    // .github/copilot-instructions.md. Managed-marker section keeps user content.
+    target = path.join(repoPath, '.github', 'copilot-instructions.md');
     useMarker = true;
   }
 
@@ -866,7 +869,7 @@ export function emitVisiblePreamble(agentSlug: string | undefined, systemMsg: st
 // "no exact match for stable claudeSessionId — new session needed" and
 // ABORTed, never writing completedPromptMappings / advancing prePromptSha.
 // Prompts kept growing (UserPromptSubmit worked) while diffs froze.
-const STABLE_SESSION_ID_AGENTS = ['claude-code', 'windsurf'];
+const STABLE_SESSION_ID_AGENTS = ['claude-code', 'devin', 'copilot'];
 export function hookLookupSessionId(sessionId: string | undefined, agentSlug?: string): string | undefined {
   return STABLE_SESSION_ID_AGENTS.includes(agentSlug || '') ? sessionId : undefined;
 }
@@ -930,13 +933,11 @@ export function resolveCodexThreadId(repoPath: string): string | null {
           .sort((a, b) => b.mtime - a.mtime)
       : [];
     if (stateFiles.length === 0) return null;
-    const out = execFileSync('sqlite3', [
+    const out = querySqlite(
       stateFiles[0].path,
       buildCodexThreadByCwdQuery('id', repoPath),
-    ], {
-      encoding: 'utf-8' as const, timeout: 3000,
-      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    }).trim();
+      { timeoutMs: 3000 },
+    ).trim();
     return out || null;
   } catch {
     return null;
@@ -1510,7 +1511,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   //     END of this session-start block (after repoPath is final).
   // Antigravity (like Claude Code) fires SessionStart once per session and
   // carries a stable session_id across hook events, so it can anchor state.
-  const agentsWithStableSessionId = ['claude-code', 'windsurf', 'antigravity'];
+  const agentsWithStableSessionId = ['claude-code', 'devin', 'antigravity', 'copilot'];
   const hasStableSessionId = agentsWithStableSessionId.includes(agentSlug || '');
   // Cursor prefers `conversation_id` — stable per-chat and matches the
   // `agent-transcripts/<id>/` directory name. Cursor's `session_id`
@@ -1967,13 +1968,22 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         debugLog('session-start', 'model from Gemini transcript', { model: geminiModel, transcriptPath });
       }
     }
+    // Copilot's hook stdin carries no model (selectedModel:"auto") — read the
+    // real model from its events.jsonl so the session isn't stamped bare "claude".
+    if (agentSlug === 'copilot' && transcriptPath) {
+      const copilotModel = readCopilotModel(transcriptPath);
+      if (copilotModel) {
+        model = copilotModel;
+        debugLog('session-start', 'model from Copilot transcript', { model: copilotModel, transcriptPath });
+      }
+    }
   }
   if (!model || model === 'unknown' || model === 'default') {
     const AGENT_DEFAULT_MODELS: Record<string, string> = {
       'gemini': 'gemini',
       'claude-code': 'claude',
       'cursor': 'cursor',
-      'windsurf': 'windsurf',
+      'devin': 'devin',
       'codex': 'codex',
       'aider': 'aider',
       // Antigravity is multi-model; its flagship is Gemini 3 Pro. The hook's
@@ -2914,6 +2924,13 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             const gm = readGeminiModel(tp);
             if (gm) model = gm;
           }
+        }
+        // Same for Copilot — its stdin has no model, so the fallback above lands
+        // on the bare "claude" brand. Read the real model from events.jsonl when
+        // it already has an assistant turn (self-heals from turn 2 onward).
+        if (agentSlug === 'copilot' && !isSpecificModel(model) && typeof input.transcript_path === 'string' && input.transcript_path) {
+          const cm = readCopilotModel(input.transcript_path);
+          if (cm) model = cm;
         }
         const autoTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
 
@@ -4240,6 +4257,35 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         promptMappings = [...kept, ...promptMappings];
       }
 
+      // A committing turn that edits via a shell command (e.g. Copilot's
+      // `printf >> file && git commit`, or any `sed -i`/`echo >>`) produces NO
+      // transcript edit-tool call, so extractPromptFileMappings emits an EMPTY
+      // mapping for it. That empty mapping otherwise satisfies the safety net
+      // below, so the turn shows +0 / no diff even though git captured its real
+      // work against the per-prompt shadow baseline. Drop the empty mapping when
+      // gitCapture shows this turn actually changed code, so the safety-net
+      // synthesis re-derives the per-prompt diff from git.
+      {
+        const emptyCurIdx = promptMappings.findIndex(pm =>
+          pm.promptIndex === currentPromptIdx &&
+          !(pm.diff || (pm as any).uncommittedDiff) &&
+          !(pm.filesChanged && pm.filesChanged.length > 0) &&
+          !(pm as any).chatOnly);
+        if (emptyCurIdx >= 0) {
+          const gitHasWork = !!(
+            (gitCapture.committedDiff || '').trim() ||
+            (gitCapture.workingTreeDiff || '').trim() ||
+            (gitCapture.uncommittedDiff || '').trim()
+          );
+          if (gitHasWork) {
+            promptMappings.splice(emptyCurIdx, 1);
+            debugLog('stop', 'dropped empty current-prompt mapping — git shows work (shell-edit turn)', {
+              promptIndex: currentPromptIdx,
+            });
+          }
+        }
+      }
+
       // Safety net: ensure the CURRENT prompt has a mapping even if transcript
       // parsing missed it. Without this, the latest prompt shows empty on the
       // platform until the NEXT prompt fires (when user-prompt-submit captures it).
@@ -4929,7 +4975,12 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
   // Many agents fire sessionEnd after each prompt/task, NOT on actual exit.
   // Treat it as an update (like Stop) so the session stays RUNNING.
   // The heartbeat daemon detects when the agent actually exits and ends the session.
-  const agentsWithFakeSessionEnd = ['cursor', 'codex', 'claude-code'];
+  // Copilot fires sessionEnd after EVERY agentStop (the agent goes idle waiting
+  // for the next prompt), not on app exit — so treating it as terminal marked
+  // the session COMPLETED after every prompt. Treat it as a Stop; the heartbeat
+  // daemon's transcript-mtime staleness check ends the session when the Copilot
+  // app actually closes.
+  const agentsWithFakeSessionEnd = ['cursor', 'codex', 'claude-code', 'copilot'];
   if (agentsWithFakeSessionEnd.includes(agentSlug || '')) {
     // Capture the raw sessionEnd payload. Cursor 2.x sends a rich payload
     // (reason, final_status, duration_ms, is_background_agent, conversation_id)
@@ -5555,6 +5606,8 @@ async function pinCodexCommitToProducer(state: SessionState, hookCwd: string): P
 
 export async function handlePostCommit(): Promise<void> {
   debugLog('post-commit', '=== GIT HOOK INVOKED ===', { pid: process.pid, cwd: process.cwd() });
+  // Ready the SQLite backend for the Codex thread reader below (see hooksCommand).
+  await ensureSqlite();
   // Replay any queued capture uploads (fire-and-forget; commit already done).
   drainUpdateQueue((e, m, d) => debugLog(e, m, d)).catch(() => {});
 
@@ -5908,7 +5961,7 @@ export async function handlePostCommit(): Promise<void> {
         { cmd: 'pgrep -f "gemini.*cli|/gemini "', model: 'gemini' },
         { cmd: 'pgrep -f "codex"', model: 'codex' },
         { cmd: 'pgrep -f "aider"', model: 'aider' },
-        { cmd: 'pgrep -f "windsurf"', model: 'windsurf' },
+        { cmd: 'pgrep -f "devin|windsurf"', model: 'devin' },
         { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
         { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
       ];
@@ -8684,6 +8737,12 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
 export async function hooksCommand(event: string, agentSlug?: string): Promise<void> {
   debugLog(event, '=== HOOK INVOKED ===', { pid: process.pid, argv: process.argv, cwd: process.cwd() });
 
+  // Select the SQLite backend once (sqlite3 CLI on mac/linux, in-process
+  // sql.js on native Windows) so the synchronous Cursor/Codex model readers
+  // downstream have a backend ready. Cheap + idempotent; a failure just leaves
+  // model detection degraded, exactly as on a Windows box without sqlite3.
+  await ensureSqlite();
+
   // Internal: the detached agy transcript watcher. Reads its target from env,
   // not stdin, so handle it before readStdin() (which would otherwise block).
   if (agentSlug === 'antigravity' && event === '__watch') {
@@ -8708,13 +8767,40 @@ export async function hooksCommand(event: string, agentSlug?: string): Promise<v
     try { dedupeAgentFlatHooks(event, '.cursor', 'cursor'); } catch (err: any) {
       debugLog(event, 'cursor dedupe check failed (non-fatal)', { message: err?.message });
     }
-  } else if (agentSlug === 'windsurf') {
-    try { dedupeAgentFlatHooks(event, '.windsurf', 'windsurf'); } catch (err: any) {
-      debugLog(event, 'windsurf dedupe check failed (non-fatal)', { message: err?.message });
-    }
   }
+  // devin — .devin/hooks.v1.json (Claude-Code shape, not the flat Cascade
+  // format dedupeAgentFlatHooks expects); the installer dedupes on write, so
+  // no self-heal branch here.
 
   const input = await readStdin();
+
+  // The Copilot CLI delivers its hook payload in camelCase (sessionId,
+  // transcriptPath, stopReason); the rest of this pipeline is Claude-Code-shaped
+  // and reads snake_case. Normalize the fields we depend on so session identity
+  // and transcript discovery work without special-casing every read site.
+  // (prompt / cwd share the same name across both.)
+  if (agentSlug === 'copilot') {
+    if (input.session_id == null && input.sessionId != null) input.session_id = input.sessionId;
+    if (input.transcript_path == null && input.transcriptPath != null) input.transcript_path = input.transcriptPath;
+    if (input.stop_reason == null && input.stopReason != null) input.stop_reason = input.stopReason;
+    // Copilot appends its own <system_notification>…</system_notification> blocks
+    // (e.g. "call rename_session") onto the user's prompt. Strip them so the
+    // captured prompt and the generated session title reflect what the user typed.
+    if (typeof input.prompt === 'string') {
+      input.prompt = input.prompt.replace(/<system_notification>[\s\S]*?<\/system_notification>/gi, '').trim();
+    }
+    // Log the transcript shape (path + head) so we can wire Copilot response/tool
+    // capture to its actual on-disk format (undocumented — needs a real sample).
+    let transcriptInfo: Record<string, any> = { path: input.transcript_path || null };
+    try {
+      if (input.transcript_path && fs.existsSync(input.transcript_path)) {
+        transcriptInfo = { path: input.transcript_path, exists: true, head: fs.readFileSync(input.transcript_path, 'utf-8').slice(0, 500) };
+      } else {
+        transcriptInfo.exists = false;
+      }
+    } catch (err: any) { transcriptInfo.err = err?.message; }
+    debugLog(event, 'copilot payload', { keys: Object.keys(input), hasSession: !!input.session_id, hasPrompt: !!input.prompt, transcript: transcriptInfo });
+  }
 
   // Antigravity (agy) has its own event set + payload shape — handle it on a
   // dedicated path instead of the SessionStart-based handlers below.

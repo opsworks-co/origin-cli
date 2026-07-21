@@ -5,7 +5,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { querySqlite } from '../utils/sqlite.js';
 import { debugLog } from '../debug-log.js';
 import type { PromptTimelineEntry } from './codex.js';
 
@@ -21,17 +21,18 @@ export function getCursorModelFromDb(conversationId: string): string | null {
     const dbPath = path.join(os.homedir(), '.cursor', 'ai-tracking', 'ai-code-tracking.db');
     if (!fs.existsSync(dbPath)) return null;
 
-    // Use sqlite3 CLI to query — avoids native module dependency
-    const sqlOpts = { encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 2000 };
+    // Cross-platform read (sqlite3 CLI on mac/linux, in-process sql.js on
+    // Windows) — see utils/sqlite.ts. Avoids a native module dependency.
+    const sqlOpts = { timeoutMs: 2000 };
     const escapedId = conversationId.replace(/'/g, "''");
-    const result = execFileSync('sqlite3', [dbPath, `SELECT model FROM conversation_summaries WHERE conversationId='${escapedId}' LIMIT 1`], sqlOpts).trim();
+    const result = querySqlite(dbPath, `SELECT model FROM conversation_summaries WHERE conversationId='${escapedId}' LIMIT 1`, sqlOpts).trim();
     if (result && result !== 'default' && result !== 'unknown') return result;
 
     // Fallback: check tracked_file_content or ai_code_hashes for this conversation
-    const result2 = execFileSync('sqlite3', [dbPath, `SELECT DISTINCT model FROM tracked_file_content WHERE conversationId='${escapedId}' AND model IS NOT NULL AND model != '' LIMIT 1`], sqlOpts).trim();
+    const result2 = querySqlite(dbPath, `SELECT DISTINCT model FROM tracked_file_content WHERE conversationId='${escapedId}' AND model IS NOT NULL AND model != '' LIMIT 1`, sqlOpts).trim();
     if (result2 && result2 !== 'default' && result2 !== 'unknown') return result2;
 
-    const result3 = execFileSync('sqlite3', [dbPath, `SELECT DISTINCT model FROM ai_code_hashes WHERE conversationId='${escapedId}' AND model IS NOT NULL AND model != '' LIMIT 1`], sqlOpts).trim();
+    const result3 = querySqlite(dbPath, `SELECT DISTINCT model FROM ai_code_hashes WHERE conversationId='${escapedId}' AND model IS NOT NULL AND model != '' LIMIT 1`, sqlOpts).trim();
     if (result3 && result3 !== 'default' && result3 !== 'unknown') return result3;
   } catch {
     // sqlite3 not available or DB locked — non-fatal

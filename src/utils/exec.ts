@@ -21,6 +21,7 @@ import {
   type SpawnSyncOptions,
 } from 'child_process';
 import path from 'path';
+import { whichCommand } from './platform.js';
 
 export interface RunOptions {
   cwd?: string;
@@ -107,6 +108,27 @@ export function runDetailed(
   };
 }
 
+// ─── Executable lookup (cross-platform) ─────────────────────────────────────
+
+/**
+ * Locate an executable on PATH, cross-platform. Uses `where` on native
+ * Windows and `which` on macOS/Linux/WSL, returning the first resolved path
+ * (`where` can print several lines when a name resolves multiple ways).
+ * Returns null if the tool is not found.
+ *
+ * Replaces the old `runDetailed('which', [name])` pattern — `which` does not
+ * exist on native Windows, so those calls silently failed there.
+ */
+export function findExecutable(name: string, opts: RunOptions = {}): string | null {
+  const r = runDetailed(whichCommand(), [name], { timeoutMs: 2_000, ...opts });
+  if (r.status !== 0) return null;
+  const first = r.stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .find(Boolean);
+  return first || null;
+}
+
 // ─── Git ───────────────────────────────────────────────────────────────────
 
 /**
@@ -139,98 +161,13 @@ export function gitOrNull(args: string[], opts: RunOptions = {}): string | null 
   }
 }
 
-// ─── SQLite (sqlite3 CLI) ──────────────────────────────────────────────────
-
-/**
- * Run a SQL query against a SQLite database via the `sqlite3` CLI.
- *
- * The query MUST be a static string. Bind parameters via the `params`
- * array — they're passed as `.param set @name 'value'` so SQLite handles
- * escaping, not the shell.
- *
- * Returns rows as `string[][]` (one array per row, columns in select order).
- */
-export function sqliteQuery(
-  dbPath: string,
-  query: string,
-  params: Array<string | number> = [],
-  opts: RunOptions = {},
-): string[][] {
-  if (typeof dbPath !== 'string' || !dbPath) {
-    throw new Error('[exec/sqlite] dbPath required');
-  }
-  if (typeof query !== 'string' || !query) {
-    throw new Error('[exec/sqlite] query required');
-  }
-  // Build a parameterized command using sqlite3's .param syntax. The CLI
-  // executes commands prefixed with `.` and then runs the query, with named
-  // parameters bound safely (no shell interpolation).
-  const lines: string[] = ['.mode list', '.separator |||'];
-  for (let i = 0; i < params.length; i++) {
-    const v = params[i];
-    if (typeof v === 'number') {
-      lines.push(`.param set :p${i} ${v}`);
-    } else {
-      // Escape single quotes for SQL literal — but the value is bound,
-      // not interpolated into the query, so this is just SQL string syntax.
-      lines.push(`.param set :p${i} '${String(v).replace(/'/g, "''")}'`);
-    }
-  }
-  lines.push(query);
-  const script = lines.join('\n');
-
-  // Pipe the script via stdin instead of -cmd args so quoting can't bite us.
-  const r = spawnSync('sqlite3', [dbPath], {
-    input: script,
-    cwd: opts.cwd,
-    timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER,
-    encoding: 'utf-8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: opts.env ? { ...process.env, ...opts.env } as NodeJS.ProcessEnv : process.env,
-  });
-  if (r.status !== 0 && !opts.allowNonZeroExit) {
-    throw new Error(`[exec/sqlite] sqlite3 exited ${r.status}: ${r.stderr || ''}`);
-  }
-  const out = r.stdout || '';
-  if (!out.trim()) return [];
-  return out
-    .split('\n')
-    .filter((l) => l.length > 0)
-    .map((l) => l.split('|||'));
-}
-
-/**
- * Convenience: run a query and return the first column of the first row,
- * or null if no row.
- */
-export function sqliteScalar(
-  dbPath: string,
-  query: string,
-  params: Array<string | number> = [],
-  opts: RunOptions = {},
-): string | null {
-  try {
-    const rows = sqliteQuery(dbPath, query, params, opts);
-    if (rows.length === 0) return null;
-    const first = rows[0][0];
-    return first ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * True if the `sqlite3` CLI is available on PATH.
- */
-export function hasSqlite(): boolean {
-  try {
-    runDetailed('sqlite3', ['-version']);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// ─── SQLite ─────────────────────────────────────────────────────────────────
+//
+// SQLite reads live in utils/sqlite.ts (querySqlite / ensureSqlite): the
+// `sqlite3` CLI on macOS/Linux, an in-process sql.js WASM reader on native
+// Windows (no bundled sqlite3 binary there). The old CLI-only sqliteQuery/
+// sqliteScalar helpers that lived here were unused and had no Windows fallback,
+// so they were removed — use utils/sqlite.ts instead.
 
 // ─── Path safety ───────────────────────────────────────────────────────────
 

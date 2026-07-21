@@ -25,7 +25,7 @@ function agentLabel(note: Record<string, any>): string {
     const map: Record<string, string> = {
       'claude': 'Claude Code', 'claude-code': 'Claude Code',
       'cursor': 'Cursor', 'gemini': 'Gemini CLI', 'codex': 'Codex',
-      'windsurf': 'Windsurf', 'aider': 'Aider', 'copilot': 'Copilot',
+      'devin': 'Devin', 'aider': 'Aider', 'copilot': 'Copilot',
       'amp': 'Amp', 'junie': 'Junie', 'opencode': 'Opencode',
       'rovo': 'Rovo', 'droid': 'Droid',
     };

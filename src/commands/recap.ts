@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { gitOrNull } from '../utils/exec.js';
 import { getAllPrompts } from '../local-db.js';
 import { getOpenTodos } from '../todo.js';
 import { isConnectedMode } from '../config.js';
@@ -38,14 +38,16 @@ interface GitRecap {
   filesChanged: number;
 }
 
-function getGitRecap(repoPath: string, since: string): GitRecap {
+// All git access goes through the safe exec wrapper (array args, no shell), so
+// this works under native-Windows cmd/PowerShell too — the old shell strings
+// used `-C`, `2>/dev/null`, `$(…)` command substitution and `|| ` fallback,
+// none of which are cmd syntax. gitOrNull returns null on any non-zero exit
+// (missing ref, not-a-repo), which drives the same graceful fallbacks.
+export function getGitRecap(repoPath: string, since: string): GitRecap {
   const result: GitRecap = { commits: 0, aiCommits: 0, filesChanged: 0 };
   try {
     const sinceDate = new Date(since).toISOString();
-    const logOut = execSync(
-      `git -C "${repoPath}" log --oneline --after="${sinceDate}" 2>/dev/null`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-    ).trim();
+    const logOut = gitOrNull(['log', '--oneline', `--after=${sinceDate}`], { cwd: repoPath }) || '';
     const lines = logOut ? logOut.split('\n').filter(Boolean) : [];
     result.commits = lines.length;
 
@@ -53,24 +55,26 @@ function getGitRecap(repoPath: string, since: string): GitRecap {
     let aiCount = 0;
     for (const line of lines) {
       const sha = line.split(' ')[0];
-      try {
-        const msg = execSync(
-          `git -C "${repoPath}" show --format="%B" --no-patch "${sha}" 2>/dev/null`,
-          { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-        );
-        if (/co-authored-by|claude|cursor|gemini|windsurf|aider|\[ai\]/i.test(msg)) {
-          aiCount++;
-        }
-      } catch { /* ignore */ }
+      if (!sha) continue;
+      const msg = gitOrNull(['show', '--format=%B', '--no-patch', sha], { cwd: repoPath });
+      if (msg && /co-authored-by|claude|cursor|gemini|devin|windsurf|aider|\[ai\]/i.test(msg)) {
+        aiCount++;
+      }
     }
     result.aiCommits = aiCount;
 
-    // Count unique files changed
-    const diffOut = execSync(
-      `git -C "${repoPath}" diff --name-only HEAD@{${new Date(since).toISOString()}} HEAD 2>/dev/null || ` +
-      `git -C "${repoPath}" diff --name-only $(git -C "${repoPath}" rev-list --after="${sinceDate}" HEAD | tail -1)^ HEAD 2>/dev/null`,
-      { encoding: 'utf-8', shell: '/bin/sh', stdio: ['pipe', 'pipe', 'pipe'] },
-    ).trim();
+    // Count unique files changed. Prefer the reflog-relative diff (HEAD as of
+    // the window start); if the reflog doesn't reach that far, fall back to the
+    // oldest commit in range — replacing the old `git … || $(rev-list … | tail -1)`
+    // shell one-liner with two plain calls.
+    let diffOut = gitOrNull(['diff', '--name-only', `HEAD@{${sinceDate}}`, 'HEAD'], { cwd: repoPath });
+    if (diffOut == null) {
+      const revs = gitOrNull(['rev-list', `--after=${sinceDate}`, 'HEAD'], { cwd: repoPath });
+      const oldest = revs ? revs.split('\n').filter(Boolean).pop() : undefined;
+      if (oldest) {
+        diffOut = gitOrNull(['diff', '--name-only', `${oldest}^`, 'HEAD'], { cwd: repoPath });
+      }
+    }
     result.filesChanged = diffOut ? diffOut.split('\n').filter(Boolean).length : 0;
   } catch { /* ignore git errors */ }
   return result;

@@ -30,10 +30,10 @@ describe('buildContextInjectionPayload', () => {
     expect(out).toEqual({ additional_context: MSG });
   });
 
-  it('gemini and windsurf use systemMessage', () => {
+  it('gemini and devin use systemMessage', () => {
     expect(JSON.parse(buildContextInjectionPayload('gemini', 'SessionStart', MSG)!))
       .toEqual({ systemMessage: MSG });
-    expect(JSON.parse(buildContextInjectionPayload('windsurf', 'SessionStart', MSG)!))
+    expect(JSON.parse(buildContextInjectionPayload('devin', 'SessionStart', MSG)!))
       .toEqual({ systemMessage: MSG });
   });
 
@@ -76,7 +76,7 @@ describe('emitVisiblePreamble', () => {
   };
 
   it('writes the preamble to stderr for codex, cursor, claude-code, and unknown agents', () => {
-    for (const agent of ['codex', 'cursor', 'claude-code', 'windsurf', 'aider']) {
+    for (const agent of ['codex', 'cursor', 'claude-code', 'devin', 'aider']) {
       const out = capture(agent, FULL);
       expect(out, agent).toContain('Origin: Session tracking active');
       expect(out, agent).toContain('Block .pzdc File Extension');

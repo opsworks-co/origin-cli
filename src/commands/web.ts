@@ -4,6 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execSync } from 'child_process';
+import { git } from '../utils/exec.js';
 import chalk from 'chalk';
 import { getGitRoot, getBranch } from '../session-state.js';
 import { getAllPrompts } from '../local-db.js';
@@ -36,7 +37,7 @@ interface SessionInfo {
 }
 
 function gatherData(repoRoot: string) {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoRoot, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoRoot };
   const branch = getBranch(repoRoot) || 'unknown';
 
   // Commits with notes
@@ -49,7 +50,7 @@ function gatherData(repoRoot: string) {
   const modelCounts: Record<string, number> = {};
 
   try {
-    const log = execSync('git log --format="%H|%aI|%s|%an" -100 2>/dev/null', execOpts).trim();
+    const log = git(['log', '--format=%H|%aI|%s|%an', '-100'], gitOpts).trim();
     if (log) {
       for (const line of log.split('\n').filter(Boolean)) {
         const [sha, date, ...rest] = line.split('|');
@@ -63,7 +64,7 @@ function gatherData(repoRoot: string) {
         let linesRemoved = 0;
 
         try {
-          const note = execSync(`git notes --ref=origin show ${sha} 2>/dev/null`, execOpts).trim();
+          const note = git(['notes', '--ref=origin', 'show', sha], gitOpts).trim();
           const parsed = JSON.parse(note);
           const data = parsed.origin || parsed;
           isAi = true;
@@ -76,7 +77,7 @@ function gatherData(repoRoot: string) {
         // Get line stats if not from note
         if (!linesAdded && !linesRemoved) {
           try {
-            const stat = execSync(`git diff-tree --root --numstat ${sha} 2>/dev/null`, execOpts).trim();
+            const stat = git(['diff-tree', '--root', '--numstat', sha], gitOpts).trim();
             for (const s of stat.split('\n').slice(1)) {
               const [a, r] = s.split('\t');
               if (a !== '-') linesAdded += parseInt(a) || 0;

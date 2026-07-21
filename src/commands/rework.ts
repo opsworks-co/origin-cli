@@ -78,7 +78,7 @@ function detectAgentName(repoPath: string, sha: string): string {
     if (m.includes('gpt') || m.includes('o1-') || m.includes('o3-') || m.includes('o4-')) return 'GPT';
     if (m.includes('codex')) return 'Codex';
     if (m.includes('copilot')) return 'Copilot';
-    if (m.includes('windsurf')) return 'Windsurf';
+    if (m.includes('devin') || m.includes('windsurf')) return 'Devin';
     if (m.includes('aider')) return 'Aider';
     if (m.includes('cursor')) return 'Cursor';
     return note.model;

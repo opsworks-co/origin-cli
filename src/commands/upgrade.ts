@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
+import { findExecutable } from '../utils/exec.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -94,8 +95,9 @@ function getCurrentVersion(): string {
  */
 function getInstalledVersion(): string | null {
   try {
-    // Use `which origin` to find the actual binary, then read its package.json
-    const originPath = execSync('which origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    // Locate the actual binary (where on Windows, which elsewhere), then read
+    // its package.json — `which` doesn't exist on native Windows.
+    const originPath = findExecutable('origin');
     if (!originPath) return null;
     // Follow symlinks to find the real location
     const realPath = fs.realpathSync(originPath);

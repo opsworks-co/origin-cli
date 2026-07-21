@@ -28,6 +28,18 @@ describe('resolveAgentDisplayName (precedence)', () => {
     expect(resolveAgentDisplayName('gemini-2.5-pro')).toBe('Gemini CLI');
     expect(resolveAgentDisplayName(undefined)).toBe('AI');
   });
+  it('the slug is authoritative over the model — agents that run foreign models', () => {
+    // Copilot/Windsurf run Claude/GPT models; resolving by model alone mislabels
+    // them ("Claude Code"/"Cursor"). The slug wins when present.
+    expect(resolveAgentDisplayName('claude-haiku-4.5', 'copilot')).toBe('Copilot');
+    expect(resolveAgentDisplayName('gpt-5-mini', 'copilot')).toBe('Copilot');
+    expect(resolveAgentDisplayName('claude-sonnet-4-6', 'windsurf')).toBe('Windsurf');
+    expect(resolveAgentDisplayName('gpt-5.5', 'codex')).toBe('Codex');
+    // 'claude-code' pipeline slug maps to the registry's 'claude' entry.
+    expect(resolveAgentDisplayName('claude-opus-4-8', 'claude-code')).toBe('Claude Code');
+    // Unknown slug falls back to model-based resolution.
+    expect(resolveAgentDisplayName('claude-opus-4-8', 'mystery-agent')).toBe('Claude Code');
+  });
 });
 
 describe('sessionMatchesAgent', () => {

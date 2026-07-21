@@ -1,6 +1,6 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260720.2345",
+  "version": "0.20260721.2013",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -18,10 +18,12 @@
   "dependencies": {
     "chalk": "^5.4.1",
     "commander": "^12.1.0",
-    "fzstd": "^0.1.1"
+    "fzstd": "^0.1.1",
+    "sql.js": "^1.14.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
+    "@types/sql.js": "^1.4.11",
     "tsx": "^4.22.4",
     "typescript": "^5.8.3",
     "vitest": "^4.1.0"

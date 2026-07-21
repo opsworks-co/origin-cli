@@ -10,7 +10,7 @@ function detectToolFromModel(model: string, fallbackTool?: string): string {
   if (m.includes('gemini') || m.includes('gemma')) return 'gemini-cli';
   if (m.includes('gpt') || m.includes('o1-') || m.includes('o3-') || m.includes('o4-')) return 'cursor';
   if (m.includes('codex')) return 'codex';
-  if (m.includes('windsurf')) return 'windsurf';
+  if (m.includes('devin') || m.includes('windsurf') || m.includes('cascade')) return 'devin';
   if (m.includes('copilot')) return 'copilot';
   if (m.includes('continue')) return 'continue';
   if (m.includes('amp')) return 'amp';

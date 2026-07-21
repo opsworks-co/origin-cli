@@ -218,6 +218,10 @@ function copyToClipboard(text: string): boolean {
     if (process.platform === 'darwin') {
       run('pbcopy', [], { input: text });
       return true;
+    } else if (process.platform === 'win32') {
+      // `clip` is a Windows built-in that reads stdin onto the clipboard.
+      const r = runDetailed('clip', [], { input: text });
+      return r.status === 0;
     } else if (process.platform === 'linux') {
       const r = runDetailed('xclip', ['-selection', 'clipboard'], { input: text });
       if (r.status === 0) return true;

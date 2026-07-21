@@ -6,7 +6,7 @@
  * stale install that silently drifted away from the published artifact.
  *
  * What this does:
- *   1. Locate the installed `origin` binary via `which` + realpath
+ *   1. Locate the installed `origin` binary via which/where + realpath
  *   2. `npm pack` the installed package into a temp dir to produce a
  *      tarball equivalent to what was published
  *   3. Fetch the manifest from https://getorigin.io/cli/version.json
@@ -31,7 +31,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { runDetailed } from '../utils/exec.js';
+import { runDetailed, findExecutable } from '../utils/exec.js';
 import { BUILD_INFO } from '../build-info.js';
 
 const SERVER_URL = 'https://getorigin.io';
@@ -78,16 +78,16 @@ export async function verifyInstallCommand(opts: VerifyOpts = {}): Promise<void>
   }
 
   // ── 1. Locate installed binary ───────────────────────────────────────────
-  const which = runDetailed('which', ['origin'], { timeoutMs: 2_000 });
-  if (which.status !== 0 || !which.stdout.trim()) {
+  const installedBin = findExecutable('origin');
+  if (!installedBin) {
     result.ok = false;
     result.errors.push('Could not locate `origin` on PATH.');
     return emit(result, opts);
   }
   try {
-    result.installedPath = fs.realpathSync(which.stdout.trim());
+    result.installedPath = fs.realpathSync(installedBin);
   } catch {
-    result.installedPath = which.stdout.trim();
+    result.installedPath = installedBin;
   }
 
   // Read the installed package.json to get the actual installed version —

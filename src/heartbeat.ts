@@ -20,6 +20,7 @@ import * as fzstd from 'fzstd';
 import { createShadowCommit, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { fetchWithTimeout } from './fetch-timeout.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from './codex-thread-query.js';
+import { ensureSqlite, querySqlite } from './utils/sqlite.js';
 import { isCodexInternalSubroutine } from './agents/codex.js';
 
 // Path of a file inside the git dir governing `repoPath` — worktree-aware
@@ -525,22 +526,19 @@ function findCodexRollout(repoPath: string, threadId?: string): { rolloutPath: s
       .sort((a, b) => b.mtime - a.mtime);
     if (stateFiles.length === 0) return null;
 
-    const sqliteOpts = {
-      encoding: 'utf-8' as const, timeout: 3000,
-      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    };
+    const sqliteOpts = { timeoutMs: 3000 };
     const COLS = 'id, model, rollout_path, first_user_message';
     let raw = '';
     const byIdQuery = buildCodexThreadByIdQuery(COLS, threadId);
     if (byIdQuery) {
-      raw = execFileSync('sqlite3', [stateFiles[0].path, byIdQuery], sqliteOpts).trim();
+      raw = querySqlite(stateFiles[0].path, byIdQuery, sqliteOpts).trim();
     }
     if (!raw) {
       // No locked thread id, or its row isn't in SQLite (yet) — Codex's
       // stdin ids rotate per turn, so a rotating id landing here is normal.
       // Fall back to EXACT cwd equality, never LIKE.
       const byCwdQuery = buildCodexThreadByCwdQuery(COLS, repoPath);
-      raw = execFileSync('sqlite3', [stateFiles[0].path, byCwdQuery], sqliteOpts).trim();
+      raw = querySqlite(stateFiles[0].path, byCwdQuery, sqliteOpts).trim();
     }
     if (!raw) return null;
 
@@ -1287,6 +1285,9 @@ async function checkSessionLimits(): Promise<void> {
 
 async function ping() {
   try {
+    // Ready the SQLite backend for findCodexRollout below (sqlite3 CLI on
+    // mac/linux, in-process sql.js on Windows). Idempotent + cached.
+    await ensureSqlite();
     // If PID file is gone, session ended — exit
     if (!fs.existsSync(pidFile)) {
       process.exit(0);

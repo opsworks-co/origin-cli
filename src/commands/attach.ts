@@ -1,5 +1,4 @@
 import chalk from 'chalk';
-import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -7,6 +6,7 @@ import { loadConfig, loadAgentConfig } from '../config.js';
 import { getGitRoot, getGitDir, getHeadSha, getBranch, saveSessionState, loadSessionState, listActiveSessions, startHeartbeat } from '../session-state.js';
 import type { SessionState } from '../session-state.js';
 import { api } from '../api.js';
+import { matchingProcessPids } from '../utils/process-detect.js';
 
 // ─── Agent Detection ──────────────────────────────────────────────────────
 
@@ -27,32 +27,12 @@ const KNOWN_AGENTS: AgentInfo[] = [
   { slug: 'aider', displayName: 'Aider', pgrepPattern: 'aider' },
 ];
 
-/**
- * Run pgrep safely, filtering out the current process tree.
- * Returns matched PIDs (excluding our own process).
- */
-function safePgrepPids(pattern: string): number[] {
-  const myPid = process.pid;
-  const myPpid = process.ppid;
-  try {
-    const raw = execFileSync('pgrep', ['-f', pattern], {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    if (!raw) return [];
-    return raw
-      .split('\n')
-      .map(p => parseInt(p.trim(), 10))
-      .filter(p => !isNaN(p) && p !== myPid && p !== myPpid);
-  } catch {
-    return [];
-  }
-}
-
 function detectRunningAgents(): Array<AgentInfo & { pid: number }> {
   const found: Array<AgentInfo & { pid: number }> = [];
   for (const agent of KNOWN_AGENTS) {
-    const pids = safePgrepPids(agent.pgrepPattern);
+    // Cross-platform process match (pgrep on Unix, Win32_Process scan on
+    // Windows), excluding our own tree — see utils/process-detect.ts.
+    const pids = matchingProcessPids(agent.pgrepPattern);
     if (pids.length > 0) {
       found.push({ ...agent, pid: pids[0] });
     }

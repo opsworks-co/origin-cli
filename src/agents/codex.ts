@@ -7,7 +7,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { querySqlite } from '../utils/sqlite.js';
 import * as fzstd from 'fzstd';
 import { debugLog } from '../debug-log.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
@@ -124,16 +124,13 @@ export function discoverCodexSessionData(
     // When threadId is absent (session-start itself, first call before
     // anything's been stored), we fall back to EXACT cwd equality —
     // never `LIKE` — and never to "latest thread overall."
-    const sqliteOpts = {
-      encoding: 'utf-8' as const, timeout: 3000,
-      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    };
+    const sqliteOpts = { timeoutMs: 3000 };
 
     let raw = '';
     const DISCOVER_COLS = 'id, model, tokens_used, rollout_path, cwd, first_user_message';
     const byIdQuery = buildCodexThreadByIdQuery(DISCOVER_COLS, opts.threadId);
     if (byIdQuery) {
-      raw = execFileSync('sqlite3', [dbPath, byIdQuery], sqliteOpts).trim();
+      raw = querySqlite(dbPath, byIdQuery, sqliteOpts).trim();
       if (!raw) {
         debugLog('codex', 'discoverCodexSessionData: threadId not found in SQLite', { threadId: opts.threadId });
         return null;
@@ -143,7 +140,7 @@ export function discoverCodexSessionData(
       // exact match means concurrent codex threads in sibling repos
       // can't be confused for each other; if no row matches we bail
       // (callers expect null when nothing fits).
-      raw = execFileSync('sqlite3', [dbPath, buildCodexThreadByCwdQuery(DISCOVER_COLS, repoPath)], sqliteOpts).trim();
+      raw = querySqlite(dbPath, buildCodexThreadByCwdQuery(DISCOVER_COLS, repoPath), sqliteOpts).trim();
       if (!raw) {
         debugLog('codex', 'discoverCodexSessionData: no thread for exact cwd', { repoPath });
         return null;
@@ -284,21 +281,18 @@ export function findCodexRolloutPath(repoPath: string, threadId?: string): strin
       .sort((a, b) => b.mtime - a.mtime);
     if (stateFiles.length === 0) return null;
 
-    const sqliteOpts = {
-      encoding: 'utf-8' as const, timeout: 3000,
-      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    };
+    const sqliteOpts = { timeoutMs: 3000 };
 
     let raw = '';
     const byIdQuery = buildCodexThreadByIdQuery('id, rollout_path', threadId);
     if (byIdQuery) {
-      raw = execFileSync('sqlite3', [stateFiles[0].path, byIdQuery], sqliteOpts).trim();
+      raw = querySqlite(stateFiles[0].path, byIdQuery, sqliteOpts).trim();
       if (!raw) {
         debugLog('codex', 'findCodexRolloutPath: threadId not in SQLite', { threadId });
         return null;
       }
     } else {
-      raw = execFileSync('sqlite3', [stateFiles[0].path, buildCodexThreadByCwdQuery('id, rollout_path', repoPath)], sqliteOpts).trim();
+      raw = querySqlite(stateFiles[0].path, buildCodexThreadByCwdQuery('id, rollout_path', repoPath), sqliteOpts).trim();
       if (!raw) return null;
     }
     const parts = raw.split('|');

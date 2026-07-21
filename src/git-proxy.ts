@@ -1,7 +1,8 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { gitOrNull, runDetailed } from './utils/exec.js';
+import { isWindows } from './utils/platform.js';
 import { preserveAttributionOnRewrite, handleCherryPick } from './history-preservation.js';
 import { getGitRoot, getHeadSha } from './session-state.js';
 
@@ -40,6 +41,19 @@ const INTERCEPTED_COMMANDS = new Set([
  * IMPORTANT: This is opt-in only. Users must explicitly run `origin proxy install`.
  */
 export function installProxy(): { success: boolean; message: string } {
+  // The proxy is a POSIX `#!/bin/sh` wrapper shadowing `git` on PATH via a
+  // `~/.origin/bin/git` (no extension) + `export PATH=…`. None of that works
+  // under native Windows (cmd/PowerShell need a `git.exe`/`git.cmd` shim and
+  // registry/user PATH, not an sh export). WSL is Linux and works. So refuse
+  // cleanly here rather than write a wrapper that silently never intercepts.
+  if (isWindows()) {
+    return {
+      success: false,
+      message: 'The git proxy is not supported on native Windows (its wrapper is a POSIX shell script). ' +
+        'Origin\'s git hooks capture the same rewrites without it — no action needed.',
+    };
+  }
+
   // Find the real git binary
   const realGitPath = findRealGit();
   if (!realGitPath) {
@@ -259,42 +273,31 @@ function handlePostRebase(repoPath: string, headBefore: string, headAfter: strin
     //   sha2 HEAD@{1}: rebase (pick): commit message
     //   sha3 HEAD@{2}: rebase (start): checkout upstream
 
-    const execOpts = {
-      cwd: repoPath,
-      encoding: 'utf-8' as const,
-      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-    };
-
-    // Get commits between old HEAD and new HEAD
+    // All git access via the safe wrapper (array args, no shell) — the old
+    // shell strings interpolated ${headBefore}/${headAfter}/${sha} (injection)
+    // and used `2>/dev/null || true`, which isn't cmd syntax. gitOrNull returns
+    // null on non-zero exit, replacing the `|| true` swallow.
     // Old branch commits (before rebase)
-    const oldCommits = execSync(
-      `git rev-list ${headBefore} --not ${headAfter} 2>/dev/null || true`,
-      execOpts,
-    ).trim().split('\n').filter(Boolean);
+    const oldCommits = (gitOrNull(['rev-list', headBefore, '--not', headAfter], { cwd: repoPath }) || '')
+      .split('\n').filter(Boolean);
 
     // New branch commits (after rebase)
-    const newCommits = execSync(
-      `git rev-list ${headAfter} --not ${headBefore} 2>/dev/null || true`,
-      execOpts,
-    ).trim().split('\n').filter(Boolean);
+    const newCommits = (gitOrNull(['rev-list', headAfter, '--not', headBefore], { cwd: repoPath }) || '')
+      .split('\n').filter(Boolean);
 
     // Match old to new by commit message (best effort)
     const oldMessages = new Map<string, string>();
     for (const sha of oldCommits) {
-      try {
-        const msg = execSync(`git log -1 --format=%s ${sha}`, execOpts).trim();
-        oldMessages.set(msg, sha);
-      } catch { /* skip */ }
+      const msg = gitOrNull(['log', '-1', '--format=%s', sha], { cwd: repoPath });
+      if (msg) oldMessages.set(msg, sha);
     }
 
     for (const newSha of newCommits) {
-      try {
-        const msg = execSync(`git log -1 --format=%s ${newSha}`, execOpts).trim();
-        const oldSha = oldMessages.get(msg);
-        if (oldSha) {
-          preserveAttributionOnRewrite(repoPath, oldSha, newSha);
-        }
-      } catch { /* skip */ }
+      const msg = gitOrNull(['log', '-1', '--format=%s', newSha], { cwd: repoPath });
+      const oldSha = msg ? oldMessages.get(msg) : undefined;
+      if (oldSha) {
+        preserveAttributionOnRewrite(repoPath, oldSha, newSha);
+      }
     }
   } catch {
     // Non-fatal
@@ -341,11 +344,13 @@ function generateWrapperScript(realGitPath: string): string {
  */
 function findRealGit(): string | null {
   try {
-    // Use `which -a git` to find all git binaries, skip our wrapper
-    const allGits = execSync('which -a git 2>/dev/null || command -v git', {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim().split('\n').filter(Boolean);
+    // `which -a git` lists ALL git binaries so we can skip our own wrapper (a
+    // single-result lookup would just return the wrapper, which is first on
+    // PATH). This path is unix-only — installProxy refuses on native Windows —
+    // so `which` is correct here. Routed through the safe exec wrapper (array
+    // args, no shell string).
+    const r = runDetailed('which', ['-a', 'git'], { timeoutMs: 2_000 });
+    const allGits = (r.status === 0 ? r.stdout : '').trim().split('\n').filter(Boolean);
 
     for (const gitPath of allGits) {
       const resolved = gitPath.trim();

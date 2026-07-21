@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import { readSessionFile } from '../session-store.js';
-import { execSync } from 'child_process';
+import { git } from '../utils/exec.js';
 import { getGitRoot } from '../session-state.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
 import { isConnectedMode } from '../config.js';
@@ -130,12 +130,12 @@ export async function askCommand(
 // ── File-based lookup: find which session wrote a file ───────────────────────
 
 async function askAboutFile(file: string, query: string, repoPath: string, line?: string): Promise<boolean> {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoPath };
 
   // Find recent commits that touched this file
   let commits: string[];
   try {
-    const log = execSync(`git log --format=%H -20 -- "${file}"`, execOpts).trim();
+    const log = git(['log', '--format=%H', '-20', '--', file], gitOpts).trim();
     commits = log ? log.split('\n') : [];
   } catch {
     console.log(chalk.yellow(`  Could not find git history for ${file}`));
@@ -153,10 +153,7 @@ async function askAboutFile(file: string, query: string, repoPath: string, line?
 
   for (const sha of commits) {
     try {
-      const noteContent = execSync(
-        `git notes --ref=origin show ${sha} 2>/dev/null`,
-        { ...execOpts, stdio: ['pipe', 'pipe', 'pipe'] }
-      ).trim();
+      const noteContent = git(['notes', '--ref=origin', 'show', sha], gitOpts).trim();
       const noteData = JSON.parse(noteContent);
       const sid = noteData?.origin?.sessionId || noteData?.sessionId;
       if (sid && !sessionIds.includes(sid)) {
@@ -228,18 +225,18 @@ interface BranchSearchResult {
 }
 
 function searchOriginSessionsBranch(query: string, repoPath: string, limit: number): BranchSearchResult[] {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const gitOpts = { cwd: repoPath };
   const results: BranchSearchResult[] = [];
 
   try {
-    execSync('git rev-parse refs/heads/origin-sessions', execOpts);
+    git(['rev-parse', 'refs/heads/origin-sessions'], gitOpts);
   } catch {
     return results;
   }
 
   try {
     // List all session directories
-    const tree = execSync('git ls-tree --name-only origin-sessions:sessions/', execOpts).trim();
+    const tree = git(['ls-tree', '--name-only', 'origin-sessions:sessions/'], gitOpts).trim();
     if (!tree) return results;
 
     const sessionDirs = tree.split('\n');
@@ -250,10 +247,7 @@ function searchOriginSessionsBranch(query: string, repoPath: string, limit: numb
 
       try {
         // Search prompts.md
-        const md = execSync(
-          `git show origin-sessions:sessions/${sid}/prompts.md 2>/dev/null`,
-          execOpts
-        ).trim();
+        const md = git(['show', `origin-sessions:sessions/${sid}/prompts.md`], gitOpts).trim();
         if (md.toLowerCase().includes(lowerQuery)) {
           const idx = md.toLowerCase().indexOf(lowerQuery);
           const start = Math.max(0, idx - 50);

@@ -47,7 +47,7 @@ describe('buildOriginTrailers', () => {
     ['o1-preview', 'Cursor'],
     ['gemini-2.0-pro', 'Gemini CLI'],
     ['codex-mini', 'Codex'],
-    ['windsurf-auto', 'Windsurf'],
+    ['windsurf-auto', 'Devin'],
     ['aider', 'Aider'],
     ['copilot-gpt4', 'Copilot'],
     ['amp-claude', 'Amp'],

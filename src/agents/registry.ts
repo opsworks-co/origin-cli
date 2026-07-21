@@ -43,7 +43,7 @@ export const AGENTS: AgentDefinition[] = [
   { slug: 'junie',    displayName: 'Junie',       modelPattern: /junie|jetbrains/i,              attributionPgrep: 'pgrep -f "junie|jetbrains.*ai"' },
   { slug: 'opencode', displayName: 'Opencode',    modelPattern: /opencode/i,                     attributionPgrep: 'pgrep -f "opencode"',                    standalonePgrep: 'pgrep -f "opencode"' },
   { slug: 'aider',    displayName: 'Aider',       modelPattern: /aider/i,                        attributionPgrep: 'pgrep -f "aider"',                       standalonePgrep: 'pgrep -f "bin/aider|aider.*--model"' },
-  { slug: 'windsurf', displayName: 'Windsurf',    modelPattern: /windsurf|codeium/i,             attributionPgrep: 'pgrep -f "windsurf"' },
+  { slug: 'devin',    displayName: 'Devin',       modelPattern: /devin|windsurf|codeium|cascade/i, attributionPgrep: 'pgrep -f "devin"' },
   { slug: 'codex',    displayName: 'Codex',       modelPattern: /codex/i,                        attributionPgrep: 'pgrep -f "codex"',                       standalonePgrep: 'pgrep -f "codex"' },
   { slug: 'gemini',   displayName: 'Gemini CLI',  modelPattern: /gemini|google/i,                attributionPgrep: 'pgrep -f "gemini.*cli|/gemini "',        standalonePgrep: 'pgrep -f "gemini.*cli|bin/gemini"' },
   { slug: 'claude',   displayName: 'Claude Code', modelPattern: /claude|anthropic|sonnet|opus|haiku/i, attributionPgrep: 'pgrep -f "claude.*stream-json"',    standalonePgrep: 'pgrep -f "claude.*stream-json"' },
@@ -62,7 +62,7 @@ export function agentDefinition(slug: string | undefined | null): AgentDefinitio
 // Bare agent-brand strings that are NOT real model identifiers — never worth
 // persisting over a captured real model ("claude-opus-4-8" etc.).
 export const BARE_BRAND_MODELS = new Set([
-  'claude', 'gemini', 'cursor', 'codex', 'windsurf', 'aider',
+  'claude', 'gemini', 'cursor', 'codex', 'devin', 'aider',
   'copilot', 'amp', 'opencode', 'continue', 'junie', 'rovo', 'droid',
   'ai', 'unknown', 'default', '',
 ]);
@@ -125,14 +125,23 @@ export function standalonePgrepChecks(): Array<{ cmd: string; model: string }> {
  * names like "copilot-gpt4" hit Copilot before the generic gpt→Cursor rule).
  */
 export function resolveAgentDisplayName(model: string | undefined, agentSlug?: string): string {
-  if (agentSlug === 'antigravity') return 'Antigravity';
+  // The slug is authoritative when present. Copilot and Windsurf run Claude/GPT
+  // models, so resolving by model alone mislabels them (a Copilot session on
+  // claude-haiku-4.5 came out "Claude Code"; a Codex session on gpt-5 → "Cursor").
+  const slug = (agentSlug || '').toLowerCase();
+  if (slug) {
+    if (slug === 'antigravity') return 'Antigravity';
+    // Pipeline slugs like 'claude-code' map to the registry's 'claude' entry.
+    const def = BY_SLUG.get(slug === 'claude-code' ? 'claude' : slug);
+    if (def) return def.displayName;
+  }
   const m = (model || '').toLowerCase();
   if (m.includes('copilot')) return 'Copilot';
   if (m.includes('amp')) return 'Amp';
   if (m.includes('junie')) return 'Junie';
   if (m.includes('opencode')) return 'Opencode';
   if (m.includes('aider')) return 'Aider';
-  if (m.includes('windsurf')) return 'Windsurf';
+  if (m.includes('devin') || m.includes('windsurf') || m.includes('cascade')) return 'Devin';
   if (m.includes('codex')) return 'Codex';
   if (m.includes('gemini')) return 'Gemini CLI';
   if (m.includes('claude') || m.includes('sonnet') || m.includes('opus')) return 'Claude Code';

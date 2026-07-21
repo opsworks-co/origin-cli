@@ -12,6 +12,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as fzstd from 'fzstd';
+import { convertCopilotEventsToClaude } from '../transcript.js';
 import type { PromptCapture, PromptEdit, PromptEditOp } from './types.js';
 
 export type { PromptCapture, PromptEdit, PromptEditOp } from './types.js';
@@ -114,11 +115,21 @@ export function extractEditsFromToolCall(
   const out: PromptEdit[] = [];
 
   if (CLAUDE_EDIT_TOOLS.has(name)) {
+    // GitHub Copilot's `edit` tool names its fields `old_str`/`new_str` (Claude
+    // uses `old_string`/`new_string`). Without the alias every Copilot edit was
+    // captured with EMPTY content, so editsJson carried no usable diff and the
+    // per-prompt view fell back to the git working-tree diff — which attributed
+    // the SAME cumulative change to every turn (each "+5" edit read "+10", and
+    // every turn showed the last turn's rows).
+    const oldContent = typeof toolInput.old_string === 'string' ? toolInput.old_string
+      : typeof toolInput.old_str === 'string' ? toolInput.old_str : '';
+    const newContent = typeof toolInput.new_string === 'string' ? toolInput.new_string
+      : typeof toolInput.new_str === 'string' ? toolInput.new_str : '';
     out.push({
       file: repoRelative,
       op: 'edit',
-      oldContent: typeof toolInput.old_string === 'string' ? toolInput.old_string : '',
-      newContent: typeof toolInput.new_string === 'string' ? toolInput.new_string : '',
+      oldContent,
+      newContent,
       source: 'tool_call',
     });
   } else if (CLAUDE_WRITE_TOOLS.has(name)) {
@@ -141,8 +152,8 @@ export function extractEditsFromToolCall(
       out.push({
         file: repoRelative,
         op: 'edit',
-        oldContent: typeof e.old_string === 'string' ? e.old_string : '',
-        newContent: typeof e.new_string === 'string' ? e.new_string : '',
+        oldContent: typeof e.old_string === 'string' ? e.old_string : (typeof e.old_str === 'string' ? e.old_str : ''),
+        newContent: typeof e.new_string === 'string' ? e.new_string : (typeof e.new_str === 'string' ? e.new_str : ''),
         source: 'tool_call',
       });
     }
@@ -457,7 +468,15 @@ function noteUnknownTool(agent: string, toolName: string, argsPreview: string): 
 
 function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
   if (!opts.transcriptPath || !fs.existsSync(opts.transcriptPath)) return [];
-  const raw = fs.readFileSync(opts.transcriptPath, 'utf-8');
+  let raw = fs.readFileSync(opts.transcriptPath, 'utf-8');
+  // GitHub Copilot records events.jsonl (user.message/assistant.message); its
+  // capture routes through this Claude-shaped extractor (captureAgent falls to
+  // 'claude'). Convert first so the assistant tool_use blocks — the create/edit
+  // calls that carry `path`/`file_text` — are visible; without this every
+  // Copilot turn produced zero edits, so the per-prompt diff, line counts, and
+  // committed/uncommitted status were all empty.
+  const copilotConverted = convertCopilotEventsToClaude(raw);
+  if (copilotConverted != null) raw = copilotConverted;
   const lines = raw.split('\n').filter((l) => l.trim());
 
   const turns: PromptCapture[] = [];
