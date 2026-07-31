@@ -12,7 +12,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
-import { capturePromptEdits } from '../prompt-capture/index.js';
+import { capturePromptEdits, extractApplyPatchesFromExecWrapper } from '../prompt-capture/index.js';
 
 const FIXTURE_DIR = path.join(__dirname, 'fixtures');
 
@@ -379,6 +379,93 @@ describe('Codex commit-and-go: no per-turn double-capture', () => {
       expect(stav).toHaveLength(1);
       expect(stav[0].source).toBe('commit');
       expect(stav[0].commitSha).toBe(fullSha);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Codex ≥0.145 exec-wrapper format', () => {
+  // Regression for the Windows gpt-5.6-sol session that captured tokens but
+  // showed 0 files / +0-0 lines / 0 tools. Codex 0.145+ stopped emitting a
+  // `custom_tool_call` named "apply_patch" with a raw patch; it now routes
+  // edits through the shell tool — a `custom_tool_call` named "exec" whose
+  // `input` is JS that calls `tools.apply_patch("*** Begin Patch…")`. The
+  // old name check matched neither shell nor patch, so every edit was lost.
+
+  it('extractApplyPatchesFromExecWrapper unwraps a JS-embedded patch', () => {
+    const wrapper =
+      'const patch = "*** Begin Patch\\n*** Add File: rows.txt\\n+Row 1\\n+Row 2\\n*** End Patch";\n' +
+      'const r = await tools.apply_patch(patch);\n' +
+      'text(typeof r === "string" ? r : JSON.stringify(r));\n';
+    const patches = extractApplyPatchesFromExecWrapper(wrapper);
+    expect(patches).toHaveLength(1);
+    expect(patches[0]).toContain('*** Add File: rows.txt');
+    expect(patches[0]).toContain('+Row 1');
+    // \n escapes are decoded back to real newlines so parseApplyPatch works.
+    expect(patches[0].split('\n').length).toBeGreaterThan(2);
+  });
+
+  it('captures the created file from an exec-wrapped apply_patch (rows.txt +4)', () => {
+    const patchJs =
+      '*** Begin Patch\\n*** Add File: rows.txt\\n+Row 1\\n+Row 2\\n+Row 3\\n+Row 4\\n*** End Patch';
+    const input =
+      `const patch = "${patchJs}";\nconst r = await tools.apply_patch(patch);\ntext(r);\n`;
+    const shell =
+      'const r = await tools.exec_command({"cmd":"cat rows.txt","workdir":"/repo"});\ntext(r.output);\n';
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-codex-145-'));
+    try {
+      const lines = [
+        JSON.stringify({ payload: { type: 'message', role: 'user', content: [{ text: 'create 1 file with 4 rows' }] } }),
+        JSON.stringify({ payload: { type: 'custom_tool_call', name: 'exec', input } }),
+        JSON.stringify({ payload: { type: 'custom_tool_call', name: 'exec', input: shell } }),
+        JSON.stringify({ payload: { type: 'custom_tool_call_output', output: [{ type: 'input_text', text: 'Row 1\nRow 2\nRow 3\nRow 4\n' }] } }),
+      ];
+      const rp = path.join(tmp, 'rollout.jsonl');
+      fs.writeFileSync(rp, lines.join('\n'));
+      const turns = capturePromptEdits({ agent: 'codex', repoPath: '/repo', transcriptPath: rp, sessionCommitShas: [] });
+      expect(turns).toHaveLength(1);
+      const rows = turns[0].edits.filter((e) => e.file === 'rows.txt');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].op).toBe('create');
+      expect(rows[0].source).toBe('tool_call');
+      expect(rows[0].newContent).toContain('Row 4');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('attributes a commit from a custom_tool_call_output array marker', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-codex-145c-'));
+    const git = (args: string[]) => execFileSync('git', args, { cwd: tmp, encoding: 'utf-8' });
+    try {
+      git(['init', '-q']);
+      git(['config', 'user.email', 't@t.co']);
+      git(['config', 'user.name', 'T']);
+      fs.writeFileSync(path.join(tmp, 'seed.txt'), 'seed\n');
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'seed']);
+      fs.writeFileSync(path.join(tmp, 'rows.txt'), 'Row 1\nRow 2\n');
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'Add rows']);
+      const fullSha = git(['rev-parse', 'HEAD']).trim();
+      const shortSha = fullSha.slice(0, 7);
+      const lines = [
+        JSON.stringify({ payload: { type: 'message', role: 'user', content: [{ text: 'add rows and commit' }] } }),
+        // New shape: output is an array of {type,text} blocks, not a string.
+        JSON.stringify({ payload: { type: 'custom_tool_call_output', output: [
+          { type: 'input_text', text: 'Script completed\nOutput:\n' },
+          { type: 'input_text', text: `[main ${shortSha}] Add rows\n 1 file changed\n` },
+        ] } }),
+      ];
+      const rp = path.join(tmp, 'rollout.jsonl');
+      fs.writeFileSync(rp, lines.join('\n'));
+      const turns = capturePromptEdits({ agent: 'codex', repoPath: tmp, transcriptPath: rp, sessionCommitShas: [fullSha] });
+      expect(turns).toHaveLength(1);
+      expect(turns[0].commits).toContain(fullSha);
+      const rows = turns[0].edits.filter((e) => e.file === 'rows.txt');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].commitSha).toBe(fullSha);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

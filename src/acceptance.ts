@@ -23,6 +23,7 @@ export interface AcceptanceNote {
 }
 
 const execOpts = (cwd: string) => ({
+    windowsHide: true,
   cwd,
   encoding: 'utf-8' as const,
   stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],

@@ -68,6 +68,37 @@ describe('cleanPrompt — system-injected envelope filtering', () => {
     expect(parsed.prompts).toEqual(['fix the failing test']);
   });
 
+  it('unwraps Codex image-attachment prompts (Files mentioned / My request for Codex)', () => {
+    const file = writeJsonl([
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content:
+            '# Files mentioned by the user:\n## codex-clipboard-abc.png:\n/tmp/codex-clipboard-abc.png\n## My request for Codex:\nadd a login button <image name=[Image #1] path="/tmp/codex-clipboard-abc.png"></image>',
+        },
+      },
+    ]);
+    const parsed = parseTranscript(file);
+    // Only the real request survives; the wrapper + <image> tag are stripped.
+    expect(parsed.prompts).toEqual(['add a login button']);
+  });
+
+  it('drops a Codex image-only prompt (no text after the marker) rather than showing the envelope', () => {
+    const file = writeJsonl([
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content:
+            '# Files mentioned by the user:\n## shot.png:\n/tmp/shot.png\n## My request for Codex:\n<image name=[Image #1] path="/tmp/shot.png"></image>',
+        },
+      },
+    ]);
+    const parsed = parseTranscript(file);
+    expect(parsed.prompts).toEqual([]);
+  });
+
   it('keeps a normal prompt that has no envelope at all', () => {
     const file = writeJsonl([
       {

@@ -5,6 +5,7 @@ import { findExecutable } from '../utils/exec.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -52,10 +53,31 @@ export async function upgradeCommand(opts: { check?: boolean }): Promise<void> {
   const success = downloadAndInstall(latest.url, latest.sha256);
 
   if (success) {
-    // Verify the upgrade actually took effect
+    // Verify the upgrade actually took effect. Compare against the target
+    // version we just installed (definitive) rather than "different from the
+    // current version" — the latter false-warns whenever the current-version
+    // read itself fell back (e.g. the old Windows 0.0.0 bug).
     const newVersion = getInstalledVersion();
-    if (newVersion && newVersion !== currentVersion) {
+    if (newVersion && newVersion === latest.version) {
       console.log(chalk.green(`\n  ✓ Successfully upgraded to ${newVersion}!\n`));
+      // Restart the Codex rollout watcher so it runs the JUST-INSTALLED code.
+      // Without this the old daemon keeps executing its stale in-memory version
+      // (upgrade only swaps dist/ on disk), silently mis-capturing sessions
+      // until a reboot or its 24h lifetime. No-op where it isn't auto-started.
+      try {
+        const { restartCodexWatch } = await import('../codex-watch.js');
+        if (restartCodexWatch().restarted) {
+          console.log(chalk.gray('  ✓ Restarted the Codex watcher on the new version\n'));
+        }
+      } catch { /* non-fatal: the watcher self-restarts at next logon / 24h */ }
+      // Same for the multi-agent transcript watcher — cycle it onto the fresh
+      // code so it doesn't keep capturing with the stale in-memory version.
+      try {
+        const { restartTranscriptWatch } = await import('../transcript-watch.js');
+        if (restartTranscriptWatch().restarted) {
+          console.log(chalk.gray('  ✓ Restarted the transcript watcher on the new version\n'));
+        }
+      } catch { /* non-fatal: the watcher self-restarts at next logon / 24h */ }
     } else {
       console.log(chalk.yellow(`\n  ⚠ npm install succeeded but the active origin binary was not updated.`));
       console.log(chalk.yellow(`    This usually means origin was installed with a different Node/npm.`));
@@ -78,9 +100,15 @@ export async function upgradeCommand(opts: { check?: boolean }): Promise<void> {
 
 // ─── Version Checking ──────────────────────────────────────────────────────
 
-function getCurrentVersion(): string {
+export function getCurrentVersion(): string {
   try {
-    const pkgPath = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'package.json');
+    // Use fileURLToPath — NOT `new URL(import.meta.url).pathname`. On Windows
+    // the latter yields "/C:/…/package.json" (a spurious leading slash before
+    // the drive letter), which readFileSync can't open, so every upgrade
+    // reported "Current version: 0.0.0". fileURLToPath decodes the file URL
+    // to a real OS path on all platforms (same approach as index.ts).
+    // upgrade.js lives at dist/commands/ → two levels up is the package root.
+    const pkgPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json');
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
     return pkg.version || '0.0.0';
   } catch {
@@ -94,12 +122,34 @@ function getCurrentVersion(): string {
  * different prefix than where `origin` resolves from.
  */
 function getInstalledVersion(): string | null {
+  // Primary: read the version npm just installed globally. `npm root -g`
+  // returns the global node_modules dir on every platform, so
+  // <root>/@origin/cli/package.json is the authoritative post-install version.
+  // This is the reliable path on Windows, where the earlier bin-shim walk
+  // failed: `npm i -g` writes origin.cmd into %AppData%\npm\ but the package
+  // into %AppData%\npm\node_modules\@origin\cli\ — so resolving "../package.json"
+  // from the shim landed on %AppData%\npm (no package.json) and every upgrade
+  // falsely warned "the active origin binary was not updated."
   try {
-    // Locate the actual binary (where on Windows, which elsewhere), then read
-    // its package.json — `which` doesn't exist on native Windows.
+    const root = execSync('npm root -g', { windowsHide: true,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 15_000,
+    }).trim();
+    if (root) {
+      const pkgJson = path.join(root, '@origin', 'cli', 'package.json');
+      if (fs.existsSync(pkgJson)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgJson, 'utf-8'));
+        if (pkg.version) return pkg.version;
+      }
+    }
+  } catch { /* fall through to the bin-shim walk */ }
+
+  // Fallback: locate the binary on PATH and walk to its package.json. Works on
+  // the Unix global layout (bin symlinked into the package's dist).
+  try {
     const originPath = findExecutable('origin');
     if (!originPath) return null;
-    // Follow symlinks to find the real location
     const realPath = fs.realpathSync(originPath);
     const pkgDir = path.resolve(path.dirname(realPath), '..');
     const pkgJson = path.join(pkgDir, 'package.json');
@@ -175,7 +225,7 @@ function downloadAndInstall(url: string, expectedSha256: string): boolean {
 
   try {
     console.log(chalk.gray('  Downloading...'));
-    execSync(`curl -fsSL "${url}" -o "${tgzPath}"`, {
+    execSync(`curl -fsSL "${url}" -o "${tgzPath}"`, { windowsHide: true,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 30_000,
@@ -196,7 +246,7 @@ function downloadAndInstall(url: string, expectedSha256: string): boolean {
     }
 
     console.log(chalk.gray('  Installing...'));
-    execSync(`npm install -g "${tgzPath}"`, {
+    execSync(`npm install -g "${tgzPath}"`, { windowsHide: true,
       encoding: 'utf-8',
       stdio: 'inherit',
       timeout: 60_000,

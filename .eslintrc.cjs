@@ -17,7 +17,7 @@
  * Anywhere else, use the helpers from `./utils/exec.js`:
  *   - run / runDetailed
  *   - git / gitDetailed / gitOrNull
- *   - sqliteQuery / sqliteScalar
+ *   - querySqlite / ensureSqlite (from ./utils/sqlite.js)
  */
 module.exports = {
   root: true,
@@ -39,7 +39,7 @@ module.exports = {
           {
             name: 'child_process',
             message:
-              'Do not import child_process directly. Use the safe helpers in src/utils/exec.ts (run, runDetailed, git, gitDetailed, sqliteQuery). String-concatenation execSync calls are a shell-injection footgun.',
+              'Do not import child_process directly. Use the safe helpers in src/utils/exec.ts (run, runDetailed, git, gitDetailed) or src/utils/sqlite.ts (querySqlite). String-concatenation execSync calls are a shell-injection footgun.',
           },
         ],
       },

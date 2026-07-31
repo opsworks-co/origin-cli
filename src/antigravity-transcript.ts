@@ -4,7 +4,8 @@ import path from 'path';
 //
 // agy has no SessionStart/UserPromptSubmit hook events — only Stop / PreToolUse
 // / PostToolUse, and those carry a `transcriptPath` to a JSONL file at
-//   ~/.gemini/antigravity-cli/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl
+//   ~/.gemini/antigravity/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl
+// (older builds used ~/.gemini/antigravity-cli/brain; discovery scans both).
 // Each line is one step: { type, source, content, step_index, created_at,
 // tool_calls? }. We pull the user prompts and the model from it (agy does NOT
 // expose token counts anywhere, so usage is estimated by the caller).
@@ -27,6 +28,21 @@ export interface AntigravityTranscript {
   // edits landed in — so these paths are how the CLI recovers the TRUE git root
   // to attribute the session to (see deriveAgyRepoPath in commands/hooks.ts).
   filePaths: string[];
+  // Absolute paths the session actually EDITED/WROTE (not reads/greps), so
+  // files-changed isn't inflated by files it only inspected. Session union.
+  filesEdited: string[];
+  // Per-prompt edited paths, aligned with prompts[] — lets the watcher attribute
+  // (and diff) file changes to the right turn.
+  promptFilesEdited: string[][];
+  // Per-prompt edit records WITH content (agy records CodeContent /
+  // TargetContent+ReplacementContent), normalized for buildDiffFromEdits so agy
+  // turns get real diffs and line counts.
+  promptEditRecords: AgyEditRecord[][];
+  // True for each prompt whose tool calls actually ran `git commit`. This is the
+  // DETERMINISTIC signal for which turn produced a commit — inferring it from
+  // "which turn edited a file the commit contains" is ambiguous when several
+  // turns edit the same file (every commit then resolves to the same turn).
+  promptRanCommit: boolean[];
 }
 
 // PascalCase (and a few snake_case) keys agy uses for file arguments across its
@@ -39,6 +55,69 @@ const AGY_FILE_ARG_KEYS = ['TargetFile', 'AbsolutePath', 'FilePath', 'Path', 'fi
 function stepFilePaths(step: any): string[] {
   const out: string[] = [];
   for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+    const a = (tc && tc.args) || {};
+    for (const k of AGY_FILE_ARG_KEYS) {
+      const v = a[k];
+      if (typeof v === 'string' && v.trim() && path.isAbsolute(v.trim())) out.push(v.trim());
+    }
+  }
+  return out;
+}
+
+// agy tool names whose category is a file mutation (edit/write) — used to tell
+// files the session CHANGED from files it merely READ, so files-changed isn't
+// inflated by reads. Keyed off the same AGY_TOOL_LABEL map the UI colors by.
+const AGY_EDIT_LABELS = new Set(['Edit', 'Write']);
+
+// agy DOES record the content it writes, under PascalCase keys:
+//   write_to_file       → CodeContent (the whole new file)
+//   replace_file_content→ TargetContent (old) / ReplacementContent (new)
+// Normalize those into the same {file, toolName, input} shape the shared
+// buildDiffFromEdits() consumes, so agy gets real per-prompt diffs and line
+// counts instead of file-names-only.
+export interface AgyEditRecord { file: string; toolName: string; input: Record<string, unknown> }
+
+function stepEditRecords(step: any): AgyEditRecord[] {
+  const out: AgyEditRecord[] = [];
+  for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+    const label = AGY_TOOL_LABEL[tc?.name] || '';
+    if (!AGY_EDIT_LABELS.has(label)) continue;
+    const a = (tc && tc.args) || {};
+    const file = AGY_FILE_ARG_KEYS.map((k) => a[k]).find((v) => typeof v === 'string' && v.trim() && path.isAbsolute(v.trim()));
+    if (typeof file !== 'string') continue;
+    if (typeof a.CodeContent === 'string') {
+      // Whole-file write/create.
+      out.push({ file: file.trim(), toolName: 'Write', input: { content: a.CodeContent } });
+    } else if (typeof a.ReplacementContent === 'string' || typeof a.TargetContent === 'string') {
+      // Region replace — maps onto the Edit (old_string/new_string) shape.
+      out.push({
+        file: file.trim(),
+        toolName: 'Edit',
+        input: { old_string: typeof a.TargetContent === 'string' ? a.TargetContent : '', new_string: typeof a.ReplacementContent === 'string' ? a.ReplacementContent : '' },
+      });
+    }
+  }
+  return out;
+}
+
+// Did this step run `git commit`? agy records shell invocations as run_command
+// with the command line in `CommandLine`. This is the ground truth for which
+// turn produced a commit.
+function stepRanGitCommit(step: any): boolean {
+  for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+    const a = (tc && tc.args) || {};
+    const cmd = typeof a.CommandLine === 'string' ? a.CommandLine : '';
+    if (/git\s+commit/.test(cmd)) return true;
+  }
+  return false;
+}
+
+// ABSOLUTE paths from a step's EDIT/WRITE tool_calls only (not reads/greps).
+function stepEditedFilePaths(step: any): string[] {
+  const out: string[] = [];
+  for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+    const label = AGY_TOOL_LABEL[tc?.name] || '';
+    if (!AGY_EDIT_LABELS.has(label)) continue;
     const a = (tc && tc.args) || {};
     for (const k of AGY_FILE_ARG_KEYS) {
       const v = a[k];
@@ -136,7 +215,7 @@ function plannerStepText(step: any): string {
 // One user turn plus the assistant output assembled under it. Kept together so
 // that when we sort by prompt time, text + response + timestamp move as a unit
 // (see the sort at the end of parseAntigravityTranscript).
-interface AgyTurn { text: string; createdAt: number | null; buf: string[] }
+interface AgyTurn { text: string; createdAt: number | null; buf: string[]; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean }
 
 export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript {
   const turns: AgyTurn[] = [];
@@ -174,7 +253,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         const isReinjection = sawCompaction && turns.length > 0 && turns[turns.length - 1].text === req;
         if (!isReinjection) {
           const ms = typeof step?.created_at === 'string' ? Date.parse(step.created_at) : NaN;
-          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, buf: [] });
+          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, buf: [], editedFiles: [], editRecords: [], ranCommit: false });
           inputChars += req.length;
         }
       }
@@ -189,6 +268,11 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         if (text && turns.length > 0) turns[turns.length - 1].buf.push(text);
       }
       for (const p of stepFilePaths(step)) filePathSet.add(p);
+      if (turns.length > 0) {
+        for (const p of stepEditedFilePaths(step)) turns[turns.length - 1].editedFiles.push(p);
+        for (const r of stepEditRecords(step)) turns[turns.length - 1].editRecords.push(r);
+        if (stepRanGitCommit(step)) turns[turns.length - 1].ranCommit = true;
+      }
     }
   }
 
@@ -209,8 +293,13 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   const prompts = turns.map((t) => t.text);
   const promptTimes = turns.map((t) => t.createdAt);
   const responses = turns.map((t) => t.buf.join('\n\n').trim().slice(0, MAX_RESPONSE_LEN));
+  // Per-prompt EDITED files (dedup), aligned with prompts[]; and the session union.
+  const promptFilesEdited = turns.map((t) => [...new Set(t.editedFiles)]);
+  const promptEditRecords = turns.map((t) => t.editRecords);
+  const promptRanCommit = turns.map((t) => t.ranCommit);
+  const filesEdited = [...new Set(turns.flatMap((t) => t.editedFiles))];
 
-  return { prompts, responses, promptTimes, model, inputChars, outputChars, filePaths: [...filePathSet] };
+  return { prompts, responses, promptTimes, model, inputChars, outputChars, filePaths: [...filePathSet], filesEdited, promptFilesEdited, promptEditRecords, promptRanCommit };
 }
 
 // agy exposes no token counts, so we estimate from text length (~4 chars/token,

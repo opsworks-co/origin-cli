@@ -6,6 +6,20 @@ import * as os from 'os';
 
 const HEX = /^[a-fA-F0-9]+$/;
 
+// Unique temp-index path. `pid + Date.now()` was not unique: two shadows created
+// inside the same millisecond in one process reuse the same GIT_INDEX_FILE and
+// corrupt each other's tree (one of them then reports the other's contents, or
+// fails outright). Reproducible by running the git-heavy test suites in
+// parallel. The counter makes it collision-free within a process, the pid across
+// processes.
+let tmpIndexSeq = 0;
+function tmpIndexPath(prefix: string): string {
+  tmpIndexSeq += 1;
+  return path
+    .join(os.tmpdir(), `${prefix}-${process.pid}-${Date.now()}-${tmpIndexSeq}.idx`)
+    .replace(/\\/g, '/');
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 export interface CommitInfo {
@@ -412,8 +426,19 @@ export function createShadowCommit(repoPath: string, tag: string): string | null
 
     // Use a private index file so we don't touch .git/index.
     // The temp index starts as a copy of HEAD's tree.
-    const tmpIndex = path.join(os.tmpdir(), `origin-shadow-${process.pid}-${Date.now()}.idx`);
-    const indexOpts = { ...gitOpts, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } };
+    // Forward slashes: Git-for-Windows can mishandle a backslash GIT_INDEX_FILE.
+    const tmpIndex = tmpIndexPath('origin-shadow');
+    // A guaranteed committer identity. `git commit-tree` (step 5) FAILS with
+    // "committer identity unknown" when the box has no user.name/user.email
+    // configured — the root cause of shadow-commit failure on fresh Windows
+    // installs, which then made the session diff fall back to `git diff HEAD`
+    // and sweep in every pre-existing dirty file (the "+91 should be +2" bug).
+    // These are internal objects, never pushed, so a fixed identity is safe.
+    const shadowIdentity = {
+      GIT_AUTHOR_NAME: 'Origin', GIT_AUTHOR_EMAIL: 'shadow@origin.local',
+      GIT_COMMITTER_NAME: 'Origin', GIT_COMMITTER_EMAIL: 'shadow@origin.local',
+    };
+    const indexOpts = { ...gitOpts, env: { ...process.env, ...shadowIdentity, GIT_INDEX_FILE: tmpIndex } };
 
     try {
       // 1. Seed the temp index with HEAD's tree
@@ -437,10 +462,11 @@ export function createShadowCommit(repoPath: string, tag: string): string | null
       const headTree = gitOrNull(['rev-parse', `${headSha}^{tree}`], gitOpts);
       if (headTree === treeSha) return null;
 
-      // 5. commit-tree with HEAD as parent
+      // 5. commit-tree with HEAD as parent. Pass the fixed identity so this
+      //    never fails on a box without user.name/user.email configured.
       const commitRes = gitDetailed(
         ['commit-tree', treeSha, '-p', headSha, '-m', `origin shadow ${tag} ${new Date().toISOString()}`],
-        gitOpts,
+        { ...gitOpts, env: { ...process.env, ...shadowIdentity } },
       );
       if (commitRes.status !== 0) return null;
       const shadowSha = (commitRes.stdout || '').trim();
@@ -538,7 +564,7 @@ export function captureAgyDiff(repoPath: string, baselineSha: string | null): Ag
  * .git/index or the user's working tree. Returns the tree SHA, or null.
  */
 function writeWorkingTree(repoPath: string, gitOpts: { cwd: string; timeoutMs: number; maxBuffer: number }): string | null {
-  const tmpIndex = path.join(os.tmpdir(), `origin-agy-tree-${process.pid}-${Date.now()}.idx`);
+  const tmpIndex = tmpIndexPath('origin-agy-tree');
   const indexOpts = { ...gitOpts, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } };
   try {
     git(['read-tree', 'HEAD'], indexOpts);
@@ -549,6 +575,85 @@ function writeWorkingTree(repoPath: string, gitOpts: { cwd: string; timeoutMs: n
     return null;
   } finally {
     try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Repo-relative paths whose content differs between a shadow commit and the
+ * CURRENT working tree (tracked + untracked). Answers "what has this session
+ * actually touched since it started".
+ *
+ * Callers must NOT hand-roll this as `git diff <shadow> --name-only`. That form
+ * compares the shadow commit against the INDEX, and a pre-existing untracked
+ * file lives in the shadow tree but not in the index — so git reports it as a
+ * deletion and it looks "touched" when nothing changed. Snapshotting the
+ * worktree as a tree and diffing tree-to-tree cancels anything identical in
+ * both. Same reasoning as captureAgyDiff above.
+ *
+ * Returns [] on any failure — callers treat that as "no touch signal" and fall
+ * back to their commit-based signal.
+ */
+export function filesChangedSinceShadow(repoPath: string, shadowSha: string): string[] {
+  if (!shadowSha || !HEX.test(shadowSha)) return [];
+  const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const baseTree = gitOrNull(['rev-parse', `${shadowSha}^{tree}`], gitOpts);
+  if (!baseTree || !HEX.test(baseTree)) return [];
+  const curTree = writeWorkingTree(repoPath, gitOpts);
+  if (!curTree) return [];
+  try {
+    return git(['diff', '--name-only', baseTree, curTree], gitOpts)
+      .trim().split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * One prompt's share of a commit: the diff between that prompt's baseline
+ * shadow and the commit, restricted to the commit's files.
+ *
+ * A commit's own stat is the wrong number to show against a prompt. Take a file
+ * created untracked with 10 lines by prompt 2, then extended by 5 and committed
+ * by prompt 3: git reports the commit as +15 (the whole file is new to git), so
+ * crediting the raw commit stat makes prompt 3 look like it wrote 15 lines. The
+ * prompt's baseline shadow already holds the 10-line version, so
+ * baseline->commit is the +5 it actually contributed.
+ *
+ * Tree-to-tree, not `git diff <shadow> <commit>`, for the usual reason: the
+ * shadow stages untracked files, so comparing against anything index-based
+ * turns pre-existing untracked content into phantom deletions.
+ *
+ * Returns null when there is no usable baseline or the diff can't be computed —
+ * callers then fall back to the commit's own stat, i.e. today's behaviour.
+ */
+export function commitDiffScopedToPrompt(
+  repoPath: string,
+  baselineSha: string | null | undefined,
+  commitSha: string,
+  files: string[],
+): { diff: string; linesAdded: number; linesRemoved: number } | null {
+  if (!baselineSha || !HEX.test(baselineSha) || !HEX.test(commitSha)) return null;
+  if (baselineSha === commitSha) return null;
+  const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const baseTree = gitOrNull(['rev-parse', `${baselineSha}^{tree}`], gitOpts);
+  const commitTree = gitOrNull(['rev-parse', `${commitSha}^{tree}`], gitOpts);
+  if (!baseTree || !commitTree || !HEX.test(baseTree) || !HEX.test(commitTree)) return null;
+  if (baseTree === commitTree) return { diff: '', linesAdded: 0, linesRemoved: 0 };
+  try {
+    const args = ['diff', '--unified=2000', baseTree, commitTree];
+    if (files.length) args.push('--', ...files);
+    let diff = git(args, gitOpts).trim();
+    diff = stripIgnoredSectionsFromDiff(diff);
+    if (diff.length > MAX_DIFF_SIZE) diff = diff.slice(0, MAX_DIFF_SIZE);
+    let linesAdded = 0;
+    let linesRemoved = 0;
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) linesAdded++;
+      else if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
+    }
+    return { diff, linesAdded, linesRemoved };
+  } catch {
+    return null;
   }
 }
 

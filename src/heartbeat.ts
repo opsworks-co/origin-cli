@@ -16,12 +16,13 @@ import { assessRestoreSafety } from './restore-safety.js';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import * as fzstd from 'fzstd';
-import { createShadowCommit, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { createShadowCommit, filesChangedSinceShadow, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import { fetchWithTimeout } from './fetch-timeout.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from './codex-thread-query.js';
 import { ensureSqlite, querySqlite } from './utils/sqlite.js';
-import { isCodexInternalSubroutine } from './agents/codex.js';
+import { isCodexInternalSubroutine, findCodexRolloutByCwd, parseCodexRolloutLive } from './agents/codex.js';
+import { parentLooksDead, heartbeatSuperseded } from './heartbeat-liveness.js';
 
 // Path of a file inside the git dir governing `repoPath` — worktree-aware
 // (a linked worktree's `.git` is a FILE; naive `<repoPath>/.git/<name>`
@@ -30,7 +31,10 @@ import { isCodexInternalSubroutine } from './agents/codex.js';
 function gitDirFile(repoPath: string, filename: string): string {
   try {
     const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
-      cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      // windowsHide: this daemon is spawned DETACHED, so it owns no console —
+      // any console-subsystem child (git.exe) allocates its own, i.e. a visible
+      // window that flashes on every call. See the note on getCurrentBranch.
+      cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
     }).trim();
     if (gitDir) {
       const resolved = path.isAbsolute(gitDir) ? gitDir : path.resolve(repoPath, gitDir);
@@ -169,6 +173,42 @@ function isTranscriptStale(): boolean {
   }
 }
 
+// The Codex rollout path the live-capture loop (pushInflightCodexState) last
+// resolved. Codex hooks don't pass transcript_path, so state.transcriptPath is
+// empty and the universal transcript-staleness signal can't see Codex activity
+// at all — the heartbeat then relies purely on the recorded parentPid. That pid
+// is the process that fired session-start; after a machine sleep or an app
+// restart the SAME Codex chat continues under a NEW pid, so the recorded one is
+// dead while the session is very much alive. We track the rollout this loop is
+// already reading and use ITS mtime as a positive liveness signal below.
+let codexRolloutForLiveness: string | null = null;
+
+// Positive liveness: is the agent DEMONSTRABLY writing its own transcript /
+// rollout right now (mtime within the idle window)? Unlike isTranscriptStale
+// (which is false — "inconclusive" — when there's no path), this returns true
+// ONLY on a real, freshly-touched file. It overrides a dead RECORDED parentPid
+// in the reap decision: without it the heartbeat ends a session the user is
+// actively resuming, and the next prompt auto-creates a SPLIT duplicate session
+// (user-reported: Codex Desktop on Windows, same chat continued after a long
+// idle → the continuation landed in a brand-new session).
+function isAgentActivelyWriting(): boolean {
+  const paths: string[] = [];
+  try {
+    if (stateFile) {
+      const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as { transcriptPath?: string };
+      if (st.transcriptPath && typeof st.transcriptPath === 'string') paths.push(st.transcriptPath);
+    }
+  } catch { /* unreadable state → fall through to the rollout path */ }
+  if (codexRolloutForLiveness) paths.push(codexRolloutForLiveness);
+  for (const p of paths) {
+    try {
+      const stat = fs.statSync(p);
+      if (Date.now() - stat.mtimeMs <= TRANSCRIPT_IDLE_MS) return true;
+    } catch { /* missing / unreadable → try the next candidate */ }
+  }
+  return false;
+}
+
 /**
  * Read the agent's current git branch from the session's repo path.
  * Hooks fire on prompt-submit which Gemini/Codex/etc don't always trigger,
@@ -186,6 +226,16 @@ function getCurrentBranch(): string | null {
       encoding: 'utf-8',
       cwd: repoPath,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // windowsHide is NOT optional here. startHeartbeat spawns this daemon
+      // with detached:true, which on Windows is DETACHED_PROCESS — we own no
+      // console, so git.exe (a console-subsystem program) allocates one per
+      // call: a terminal window that pops up and vanishes. ping() runs this
+      // every PING_INTERVAL_MS (30s) for the daemon's whole life, and the
+      // daemon outlives the agent window by up to the 90-min stale threshold,
+      // so the flashes continue long after every agent is closed. Every other
+      // git call in this file gets windowsHide via the local `gitOpts`; these
+      // two hand-rolled option objects were the gap. See utils/exec.ts.
+      windowsHide: true,
     }).trim() || null;
   } catch {
     return null;
@@ -236,7 +286,7 @@ async function pushInflightDiff(): Promise<void> {
 
     const promptIndex = prompts.length - 1;
     const promptText = (prompts[promptIndex] || '').slice(0, 1000);
-    const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000 };
+    const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000, windowsHide: true };
     const isHex = (s: string) => /^[a-fA-F0-9]{7,40}$/.test(s);
     const isAncestor = (anc: string, descendant: string): boolean => {
       if (!isHex(anc) || !isHex(descendant)) return false;
@@ -313,7 +363,9 @@ async function pushInflightDiff(): Promise<void> {
           // misses, forcing attribution into content-keyed guessing.
           // Full-file context lets every edit anchor to a real position
           // and removes the guesswork. Capped by MAX_DIFF_SIZE below.
-          const out = execFileSync('git', ['show', sha, '--format=', '--no-color', '--unified=2000'], gitOpts).toString().trim();
+          // -c diff.ignoreSubmodules=none so a submodule pointer bump still
+          // renders its `Subproject commit` section (see utils/exec.ts).
+          const out = execFileSync('git', ['-c', 'diff.ignoreSubmodules=none', 'show', sha, '--format=', '--no-color', '--unified=2000'], gitOpts).toString().trim();
           if (out) parts.push(out);
         } catch { /* commit may be unreachable after a rebase */ }
       }
@@ -329,7 +381,7 @@ async function pushInflightDiff(): Promise<void> {
       // --unified=2000: see comment above on committed diff. Per-prompt
       // diff feeds the blame fallback when sessionDiff doesn't cover the
       // file — and that path needs full-file context to anchor edits.
-      uncommittedDiff = execFileSync('git', ['diff', '--unified=2000', 'HEAD'], gitOpts).toString();
+      uncommittedDiff = execFileSync('git', ['-c', 'diff.ignoreSubmodules=none', 'diff', '--unified=2000', 'HEAD'], gitOpts).toString();
     } catch { /* clean tree — no uncommitted */ }
     // `git diff HEAD` omits NEW untracked files — so a prompt that creates a
     // file showed fewer files/lines in its per-prompt diff than the Full
@@ -397,17 +449,21 @@ async function pushInflightDiff(): Promise<void> {
     const sessionStartShadow =
       state.sessionStartShadowSha || state.headShaAtStart || state.prePromptSha;
     if (sessionStartDirty.size > 0 && sessionStartShadow && isHex(sessionStartShadow)) {
-      try {
-        const out = execFileSync(
-          'git',
-          ['diff', sessionStartShadow, '--name-only'],
-          gitOpts,
-        ).toString();
-        for (const ln of out.split('\n')) {
-          const t = ln.trim();
-          if (t) sessionTouched.add(t);
-        }
-      } catch { /* shadow gone — fall back to commit-only signal */ }
+      // MUST be tree-to-tree, not `git diff <shadow>`. The shadow COMMIT holds a
+      // full snapshot (tracked + untracked, staged via `git add -A`), but a plain
+      // `git diff <commit>` compares that commit against the INDEX — and a
+      // pre-existing untracked file is in the shadow tree yet absent from the
+      // index, so git reports it as a DELETION. Those phantom deletions landed in
+      // sessionTouched, which meant every pre-existing untracked file failed the
+      // `!sessionTouched.has(f)` test below and was never added to excludeSet. It
+      // then survived into the published diff and got rendered fully-added by the
+      // untracked-append above — a read-only turn reporting "+210 lines, 18 files"
+      // of dirt it never touched. Tracked dirt was unaffected (it genuinely
+      // matches the shadow), which is why such turns showed additions but zero
+      // deletions. Snapshotting the worktree as a tree and diffing tree-to-tree
+      // cancels anything identical in both. Same trap, same fix as captureAgyDiff
+      // in git-capture.ts — see writeWorkingTree there.
+      for (const t of filesChangedSinceShadow(repoPath, sessionStartShadow)) sessionTouched.add(t);
     }
     const excludeSet = new Set<string>();
     for (const f of sessionStartDirty) {
@@ -431,6 +487,16 @@ async function pushInflightDiff(): Promise<void> {
     };
     committedDiff = stripFiles(committedDiff);
     uncommittedDiff = stripFiles(uncommittedDiff);
+
+    // Drop Origin's OWN bookkeeping files (CLAUDE.md, .devin/rules/origin.md,
+    // AGENTS.md …) and user-ignored paths. The excludeSet above can't catch
+    // them: Origin WRITES those files at session start, so they count as
+    // "touched by this session" and survive the pre-existing-dirt filter —
+    // Origin then billed its own injected context as the agent's work. Reported
+    // live: a chat-only Devin turn (0 files changed, no code written) showed
+    // "+52 lines" = CLAUDE.md (18) + .devin/rules/origin.md (32) + 2 headers.
+    committedDiff = stripIgnoredSectionsFromDiff(committedDiff);
+    uncommittedDiff = stripIgnoredSectionsFromDiff(uncommittedDiff);
 
     if (!committedDiff && !uncommittedDiff) return; // pure pre-existing dirt — nothing to publish
 
@@ -540,7 +606,15 @@ function findCodexRollout(repoPath: string, threadId?: string): { rolloutPath: s
       const byCwdQuery = buildCodexThreadByCwdQuery(COLS, repoPath);
       raw = querySqlite(stateFiles[0].path, byCwdQuery, sqliteOpts).trim();
     }
-    if (!raw) return null;
+    if (!raw) {
+      // SQLite unreadable — on native Windows Codex holds state_*.sqlite open in
+      // WAL mode → sql.js reads a torn image → "database disk image is
+      // malformed". Resolve the rollout straight off disk so live mid-session
+      // capture still works (model + first message get corrected at Stop).
+      const disk = findCodexRolloutByCwd(codexDir, repoPath);
+      if (disk) return { rolloutPath: disk.path, threadId: disk.threadId, model: 'codex', firstUserMessage: '' };
+      return null;
+    }
 
     const parts = raw.split('|');
     if (parts.length < 4) return null;
@@ -556,160 +630,6 @@ function findCodexRollout(repoPath: string, threadId?: string): { rolloutPath: s
       else return null;
     }
     return { rolloutPath, threadId: matchedThreadId, model, firstUserMessage };
-  } catch { return null; }
-}
-
-function parseCodexRolloutLive(rolloutFile: string): {
-  userPrompts: string[];
-  // Per-prompt timestamps (ms epoch) parsed from the rollout's user message
-  // events. Used to compute the per-prompt diff baseline at heartbeat time
-  // — the LAST committed sha whose commit time is at-or-before the prompt
-  // start. Without this, baselines fall back to whichever HEAD existed when
-  // the heartbeat happened to notice the prompt, which is usually AFTER
-  // Codex has already made commits inside the prompt (then the diff against
-  // that "baseline" loses the prompt's real work).
-  promptTimestamps: number[];
-  transcript: string;
-  tokensUsed: number;
-  inputTokens: number;
-  outputTokens: number;
-  model?: string;
-  toolCalls: number;
-} | null {
-  try {
-    let content: string;
-    if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
-      const compressed = fs.readFileSync(rolloutFile);
-      const decompressed = fzstd.decompress(new Uint8Array(compressed));
-      content = Buffer.from(decompressed).toString('utf-8');
-    } else {
-      content = fs.readFileSync(rolloutFile, 'utf-8');
-    }
-
-    const lines = content.split('\n').filter(l => l.trim());
-    const turns: Array<{ role: string; content: string }> = [];
-    const promptTimestamps: number[] = [];
-    const pendingTools = new Map<string, number>();
-    let maxInputTokens = 0, maxOutputTokens = 0, maxTotalTokens = 0;
-    let model: string | undefined;
-    let toolCalls = 0;
-    const TRUNC = 2000;
-    const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
-
-    const extractText = (c: any): string => {
-      if (typeof c === 'string') return c;
-      if (!Array.isArray(c)) return '';
-      return c.map((p: any) => p?.text || (typeof p === 'string' ? p : '') || (typeof p?.content === 'string' ? p.content : '')).filter(Boolean).join('');
-    };
-
-    for (const line of lines) {
-      try {
-        const event = JSON.parse(line);
-        const tokenUsage = event?.total_token_usage || event?.data?.total_token_usage || event?.payload?.info?.total_token_usage || event?.payload?.total_token_usage;
-        if (tokenUsage) {
-          const i = tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0;
-          const o = tokenUsage.output_tokens || tokenUsage.completion_tokens || 0;
-          const t = tokenUsage.total_tokens || (i + o);
-          if (t > maxTotalTokens) { maxInputTokens = i; maxOutputTokens = o; maxTotalTokens = t; }
-        }
-        if (!model && (event?.model || event?.data?.model || event?.payload?.model)) {
-          model = event.model || event.data?.model || event.payload?.model;
-        }
-        const payload = event?.payload;
-        const ptype = payload?.type || '';
-        if (ptype === 'message') {
-          const role = payload.role || 'assistant';
-          const text = extractText(payload.content);
-          if (text.trim()) {
-            const isUser = role === 'user' || role === 'human';
-            const isEcho = isUser && (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text));
-            if (!isEcho) {
-              const cleaned = isUser
-                ? text
-                    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
-                    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
-                    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
-                    .trim()
-                : text;
-              if (cleaned) {
-                turns.push({ role, content: cleaned });
-                // Capture per-user-prompt timestamp from any of Codex's
-                // event-level time fields. Without this the prompt baseline
-                // falls back to "whenever heartbeat noticed", which is
-                // usually AFTER Codex made commits inside the prompt.
-                if (isUser) {
-                  const ts = (() => {
-                    const candidates = [
-                      event?.timestamp,
-                      event?.created_at,
-                      event?.payload?.timestamp,
-                      event?.payload?.created_at,
-                      payload?.timestamp,
-                      payload?.created_at,
-                    ];
-                    for (const c of candidates) {
-                      if (typeof c === 'number' && Number.isFinite(c)) return c > 1e12 ? c : c * 1000;
-                      if (typeof c === 'string') {
-                        const n = Date.parse(c);
-                        if (Number.isFinite(n)) return n;
-                      }
-                    }
-                    return 0;
-                  })();
-                  promptTimestamps.push(ts);
-                }
-              }
-            }
-          }
-        } else if (ptype === 'reasoning') {
-          const summary = Array.isArray(payload.summary) ? payload.summary : [];
-          const t = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n\n');
-          if (t.trim()) turns.push({ role: 'assistant', content: `[Reasoning] ${t}` });
-        } else if (ptype === 'function_call' || ptype === 'local_shell_call') {
-          toolCalls++;
-          const tool = payload.name || (ptype === 'local_shell_call' ? 'shell' : 'tool');
-          const args = payload.arguments ?? payload.action ?? payload.command ?? '';
-          const argStr = typeof args === 'string' ? args : JSON.stringify(args);
-          const callId = payload.call_id || payload.id || '';
-          const idx = turns.length;
-          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(argStr)}` });
-          if (callId) pendingTools.set(callId, idx);
-        } else if (ptype === 'function_call_output' || ptype === 'local_shell_call_output') {
-          const callId = payload.call_id || payload.id || '';
-          const out = typeof payload.output === 'string' ? payload.output
-            : (payload.output?.content ? (typeof payload.output.content === 'string' ? payload.output.content : JSON.stringify(payload.output.content))
-            : JSON.stringify(payload.output ?? ''));
-          if (out) {
-            const idx = callId ? pendingTools.get(callId) : undefined;
-            if (idx !== undefined) {
-              turns[idx].content += `\n[Output] ${truncate(out)}`;
-              pendingTools.delete(callId);
-            } else {
-              turns.push({ role: 'assistant', content: `[Output] ${truncate(out)}` });
-            }
-          }
-        }
-      } catch { /* skip malformed lines */ }
-    }
-
-    if (turns.length === 0 && maxTotalTokens === 0) return null;
-    const userPrompts: string[] = [];
-    for (const t of turns) {
-      if (t.role === 'user' || t.role === 'human') {
-        const c = t.content.trim();
-        if (c) userPrompts.push(c);
-      }
-    }
-    return {
-      userPrompts,
-      promptTimestamps,
-      transcript: JSON.stringify(turns),
-      tokensUsed: maxTotalTokens,
-      inputTokens: maxInputTokens,
-      outputTokens: maxOutputTokens,
-      model,
-      toolCalls,
-    };
   } catch { return null; }
 }
 
@@ -734,6 +654,10 @@ async function pushInflightCodexState(): Promise<void> {
     // cwd equality.
     const rollout = findCodexRollout(state.repoPath, state.agentSessionId || state.claudeSessionId || undefined);
     if (!rollout) return;
+    // Anchor the liveness signal to the rollout we're actively reading, so the
+    // reap decision (parentLooksDead) can tell "same chat, new pid after a
+    // sleep/restart" from a genuinely dead session. See isAgentActivelyWriting.
+    codexRolloutForLiveness = rollout.rolloutPath;
     const parsed = parseCodexRolloutLive(rollout.rolloutPath);
     if (!parsed) return;
 
@@ -864,7 +788,7 @@ async function handleBranch(command: { commitSha?: string; branchName?: string; 
     return;
   }
 
-  const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: 'pipe' as const, timeout: 15000 };
+  const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: 'pipe' as const, timeout: 15000, windowsHide: true };
 
   try {
     // Generate branch name if not provided
@@ -955,7 +879,7 @@ async function handleRestore(command: {
     return;
   }
 
-  const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: 'pipe' as const, timeout: 15000 };
+  const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: 'pipe' as const, timeout: 15000, windowsHide: true };
 
   try {
     // Get current branch (fallback to HEAD sha if detached)
@@ -1288,8 +1212,26 @@ async function ping() {
     // Ready the SQLite backend for findCodexRollout below (sqlite3 CLI on
     // mac/linux, in-process sql.js on Windows). Idempotent + cached.
     await ensureSqlite();
-    // If PID file is gone, session ended — exit
-    if (!fs.existsSync(pidFile)) {
+    // If the PID file is gone the session ended — exit. Also exit when the file
+    // no longer names US: startHeartbeat/stopHeartbeat race when two hooks fire
+    // at once, both daemons spawn, and the second overwrites the pid file. The
+    // loser used to keep pinging forever (the file still EXISTED, it just named
+    // the winner), leaving orphaned daemons that bump session state and hold
+    // sessions RUNNING long after the agent exited.
+    const pidFileExists = fs.existsSync(pidFile);
+    let pidFileOwner: number | null = null;
+    if (pidFileExists) {
+      try {
+        const parsed = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+        pidFileOwner = Number.isFinite(parsed) ? parsed : null;
+      } catch { pidFileOwner = null; }
+    }
+    if (heartbeatSuperseded({ pidFileExists, pidFileOwner, myPid: process.pid })) {
+      // Superseded — the newer daemon owns this session now. Exit WITHOUT
+      // endSession(): the session is still live under the winner, and ending it
+      // here would tear down an active session. (process.exit clears the
+      // interval; referencing `interval` here would hit its TDZ on the very
+      // first ping(), which runs before that const is initialized.)
       process.exit(0);
     }
 
@@ -1302,16 +1244,20 @@ async function ping() {
     // (the app/terminal is open — keep the session alive even if idle). Only
     // when there's NO live-process signal (parentPid≤0 IDE agents like Cursor,
     // or a dead PID) do we fall back to activity signals.
-    const processConfirmedAlive = parentPid > 0 && isProcessAlive(parentPid);
-    const parentLooksDead =
-      (parentPid > 0 && !isProcessAlive(parentPid)) ||
-      // Universal backstop for every agent WITHOUT a live-process signal: the
-      // agent stopped writing its own transcript (closed, or idle past the
-      // window). This is what finally catches the hookless-IDE zombie (Cursor
-      // parentPid=0, pings forever after close) that no process check can reach.
-      (!processConfirmedAlive && isTranscriptStale()) ||
-      (parentPid <= 0 && isStateFileStale());
-    if (parentLooksDead) {
+    // Fresh transcript/rollout activity (isAgentActivelyWriting) vetoes the reap
+    // even when the RECORDED parentPid is dead — after a machine sleep or an app
+    // restart the same chat continues under a new pid, so reaping on the dead
+    // pid alone split an actively-resumed Codex Desktop session in two. Predicate
+    // extracted to heartbeat-liveness.ts so it's unit-tested (this module starts
+    // the ping daemon on import and can't be imported from a test).
+    const looksDead = parentLooksDead({
+      recordedParentPid: parentPid,
+      recordedParentAlive: parentPid > 0 && isProcessAlive(parentPid),
+      transcriptStale: isTranscriptStale(),
+      stateFileStale: isStateFileStale(),
+      agentActivelyWriting: isAgentActivelyWriting(),
+    });
+    if (looksDead) {
       parentDeadTickCount++;
       if (parentDeadTickCount >= PARENT_DEAD_TICKS_BEFORE_END) {
         await endSession();

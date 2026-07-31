@@ -27,8 +27,25 @@ export function buildCodexThreadByIdQuery(columns: string, threadId: string | nu
   return `SELECT ${columns} FROM threads WHERE id = '${threadId}' LIMIT 1;`;
 }
 
-/** SQL for the strict exact-cwd lookup (single-quotes escaped). */
+/** SQL for the strict exact-cwd lookup (single-quotes escaped).
+ *
+ * Codex is a native app and stores `cwd` in the OS-native form: on Windows
+ * that's backslashes (`C:\soft\repo`), whereas Origin normalizes repoPath to
+ * forward slashes (`C:/soft/repo`). A single `cwd = repoPath` comparison then
+ * matches nothing on Windows — the session is created with zero prompts and
+ * gets swept as an empty handshake (the real cause of Codex sessions never
+ * appearing on native Windows). Match BOTH separator forms so the lookup
+ * succeeds regardless of which style either side wrote. This stays STRICT on
+ * path *content* (no LIKE, no basename fallback), so the multi-repo isolation
+ * the exact match guarantees is preserved. */
 export function buildCodexThreadByCwdQuery(columns: string, repoPath: string): string {
-  const exactCwd = repoPath.replace(/'/g, "''");
-  return `SELECT ${columns} FROM threads WHERE cwd = '${exactCwd}' ORDER BY updated_at DESC LIMIT 1;`;
+  const variants = new Set<string>([
+    repoPath,
+    repoPath.replace(/\\/g, '/'),
+    repoPath.replace(/\//g, '\\'),
+  ]);
+  const inList = [...variants]
+    .map(v => `'${v.replace(/'/g, "''")}'`)
+    .join(', ');
+  return `SELECT ${columns} FROM threads WHERE cwd IN (${inList}) ORDER BY updated_at DESC LIMIT 1;`;
 }

@@ -33,12 +33,25 @@ describe('resolveAgentDisplayName (precedence)', () => {
     // them ("Claude Code"/"Cursor"). The slug wins when present.
     expect(resolveAgentDisplayName('claude-haiku-4.5', 'copilot')).toBe('Copilot');
     expect(resolveAgentDisplayName('gpt-5-mini', 'copilot')).toBe('Copilot');
-    expect(resolveAgentDisplayName('claude-sonnet-4-6', 'windsurf')).toBe('Windsurf');
+    // Devin (formerly Windsurf) runs Claude models; the slug still wins. The
+    // legacy 'windsurf' slug resolves to Devin for back-compat with old sessions.
+    expect(resolveAgentDisplayName('claude-sonnet-4-6', 'devin')).toBe('Devin');
+    expect(resolveAgentDisplayName('claude-sonnet-4-6', 'windsurf')).toBe('Devin');
     expect(resolveAgentDisplayName('gpt-5.5', 'codex')).toBe('Codex');
     // 'claude-code' pipeline slug maps to the registry's 'claude' entry.
     expect(resolveAgentDisplayName('claude-opus-4-8', 'claude-code')).toBe('Claude Code');
     // Unknown slug falls back to model-based resolution.
     expect(resolveAgentDisplayName('claude-opus-4-8', 'mystery-agent')).toBe('Claude Code');
+  });
+  it('resolves Devin SWE-* models to Devin even without a slug', () => {
+    // Devin CLI runs SWE-1.6; a session whose slug went unrecorded (a Devin run
+    // captured via the claude-code hook) must still resolve to Devin by model,
+    // not fall through to "Claude Code".
+    expect(resolveAgentDisplayName('SWE-1.6')).toBe('Devin');
+    expect(resolveAgentDisplayName('SWE-1.6 Slow')).toBe('Devin');
+    expect(resolveAgentDisplayName('swe-1-6-slow')).toBe('Devin');
+    // The slug still wins when present.
+    expect(resolveAgentDisplayName('SWE-1.6', 'devin')).toBe('Devin');
   });
 });
 
@@ -51,6 +64,8 @@ describe('sessionMatchesAgent', () => {
     expect(sessionMatchesAgent({ model: 'composer-2.5-fast' }, 'cursor')).toBe(true);
     expect(sessionMatchesAgent({ model: 'gemini-2.5-pro' }, 'gemini')).toBe(true);
     expect(sessionMatchesAgent({ model: 'claude-opus-4-8' }, 'codex')).toBe(false);
+    // Devin's SWE-* models match the devin agent.
+    expect(sessionMatchesAgent({ model: 'SWE-1.6' }, 'devin')).toBe(true);
   });
   it('unknown agents fall back to substring matching', () => {
     expect(sessionMatchesAgent({ model: 'somenewagent-v1' }, 'somenewagent')).toBe(true);

@@ -87,6 +87,10 @@ export interface GitNoteData {
   snapshot?: boolean;
   snapshotAt?: string;
   filesChanged?: string[];
+  // Real sub-agents (Claude Code `Task` spawns) this session launched — the
+  // honest "N sub-agents" record. Each entry names the configured sub-agent
+  // type and the parent turn it ran under. Empty/absent when none were used.
+  subagents?: Array<{ type: string | null; promptIndex: number; files?: string[] }>;
 }
 
 // Per-prompt attribution row stored inside the commit note. Optional fields
@@ -228,6 +232,9 @@ export function buildNotePayload(data: GitNoteData, includePromptText: boolean):
         aiPercentage: data.aiPercentage ?? undefined,
         humanPercentage: data.humanPercentage ?? undefined,
         mixedPercentage: data.mixedPercentage ?? undefined,
+        // Real sub-agent spawns (metadata only — no prompt text, so not gated
+        // behind the privacy switch). Absent when the session used none.
+        subagents: data.subagents && data.subagents.length ? data.subagents : undefined,
         timestamp: new Date().toISOString(),
       },
     },
@@ -345,6 +352,7 @@ export const LEGACY_CLOBBERING_NOTES_REFSPEC = '+refs/notes/origin:refs/notes/or
  */
 export function removeLegacyNotesRefspec(repoPath: string, remote: string): boolean {
   const execOpts = {
+    windowsHide: true,
     cwd: repoPath,
     stdio: 'pipe' as const,
     timeout: 5_000,
@@ -380,6 +388,7 @@ export function removeLegacyNotesRefspec(repoPath: string, remote: string): bool
 
 export function syncNotesFromRemote(repoPath: string): boolean {
   const execOpts = {
+    windowsHide: true,
     cwd: repoPath,
     stdio: 'pipe' as const,
     timeout: 15_000,
@@ -528,6 +537,7 @@ export function writeGitNotes(
   data: GitNoteData,
 ): void {
   const execOpts = {
+    windowsHide: true,
     cwd: repoPath,
     stdio: 'pipe' as const,
     timeout: 10000,

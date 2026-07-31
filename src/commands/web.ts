@@ -617,7 +617,7 @@ export async function webCommand(opts: { port?: string }) {
     // Open browser
     try {
       const openCmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-      execSync(`${openCmd} ${url}`, { stdio: 'ignore' });
+      execSync(`${openCmd} ${url}`, { windowsHide: true, stdio: 'ignore' });
     } catch { /* ignore */ }
   });
 }

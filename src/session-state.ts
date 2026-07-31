@@ -27,6 +27,25 @@ export interface ToolCallRecord {
   result?: string;
 }
 
+/**
+ * A REAL sub-agent spawn — recorded only for the `Task` tool (Claude Code's
+ * child-agent launcher), not for every tool call (that's ToolCallRecord above).
+ * `subagentType` is the configured agent invoked (`tool_input.subagent_type`,
+ * e.g. "code-reviewer"); its model lives in that agent's own config, so we
+ * capture the type/description/prompt and timing, and attribute it to the
+ * prompt turn it ran under. Stored on SessionState.subagentSpawns[].
+ * See docs/notes/SUBAGENT_AUDIT.md (R3).
+ */
+export interface SubagentSpawn {
+  toolCallId: string;
+  subagentType: string | null;
+  description: string | null;
+  prompt: string | null;
+  promptIndex: number;   // the parent turn this sub-agent ran under
+  startedAt: string;
+  endedAt?: string;
+}
+
 export interface TabCompletionStats {
   count: number;
   acceptedCount: number;
@@ -64,6 +83,20 @@ export interface SessionState {
   model: string;
   startedAt: string;          // ISO timestamp
   prompts: string[];          // Accumulated user prompts
+  // The agent's id for the most recently saved prompt (stdin `prompt_id`).
+  // Guards against a duplicate save when ONE prompt fires the user-prompt-
+  // submit hook twice — which happens with the Devin CLI, whose runtime reads
+  // BOTH ~/.claude (claude-code) and ~/.devin (devin) hook configs and so
+  // invokes our hook once per config with the SAME payload. Same prompt_id
+  // landing back-to-back on the same session = the collision, not a new turn.
+  lastPromptId?: string;
+  // The prompt_id + wall-clock of the most recently PROCESSED stop hook.
+  // Same guard as lastPromptId but for the Stop lifecycle event: the Devin
+  // CLI fires Stop once per hook-config (2-3× per turn, same session + same
+  // prompt_id), each creating a redundant auto-snapshot + updateSession.
+  // A stop whose prompt_id matches within a short window is the collision.
+  lastStopPromptId?: string;
+  lastStopAt?: string;
   // Per-prompt assistant responses, captured opportunistically when the
   // agent ships the reply on stdin (Gemini's `prompt_response`). Indexed
   // by prompt index so we can interleave them with `prompts` in the
@@ -134,6 +167,9 @@ export interface SessionState {
   // backward compat with serialized session-state files. See R2 in
   // docs/notes/SUBAGENT_AUDIT.md.
   subagents?: ToolCallRecord[];
+  // Real sub-agent spawns (Task tool only) — the honest "N sub-agents" count,
+  // distinct from the `subagents` tool-call ring buffer above.
+  subagentSpawns?: SubagentSpawn[];
   tabCompletions?: TabCompletionStats;
   agentSystemPrompt?: string; // Cached agent system prompt for session resume
   activePolicies?: string[];  // Cached active policies for session resume
@@ -228,7 +264,7 @@ export interface SessionState {
 
 export function getGitDir(cwd?: string): string | null {
   try {
-    return execSync('git rev-parse --git-dir', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    return execSync('git rev-parse --git-dir', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
   } catch {
     return null;
   }
@@ -236,7 +272,7 @@ export function getGitDir(cwd?: string): string | null {
 
 export function getGitRoot(cwd?: string): string | null {
   try {
-    const top = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const top = execSync('git rev-parse --show-toplevel', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     if (!top) return null;
     // Linked git worktrees report their own --show-toplevel — e.g.
     // <repo>/.claude/worktrees/quirky-albattani-c9f7c3. The basename then
@@ -269,7 +305,7 @@ export function getGitRoot(cwd?: string): string | null {
 // not move), and broke staged-file commit attribution.
 export function getWorkingGitRoot(cwd?: string): string | null {
   try {
-    const top = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const top = execSync('git rev-parse --show-toplevel', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     return top || null;
   } catch {
     return null;
@@ -282,7 +318,7 @@ export function getWorkingGitRoot(cwd?: string): string | null {
 // without re-running discovery.
 export function getCanonicalRepoPath(workRoot: string): string {
   try {
-    const commonDirRaw = execSync('git rev-parse --git-common-dir', {
+    const commonDirRaw = execSync('git rev-parse --git-common-dir', { windowsHide: true,
       encoding: 'utf-8', cwd: workRoot, stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     if (commonDirRaw) {
@@ -319,7 +355,7 @@ export function gitDirFilePath(repoPath: string, filename: string): string {
 
 export function getGitCommonDir(cwd?: string): string | null {
   try {
-    const out = execSync('git rev-parse --git-common-dir', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const out = execSync('git rev-parse --git-common-dir', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     if (!out) return null;
     return path.isAbsolute(out) ? out : path.resolve(cwd || process.cwd(), out);
   } catch {
@@ -466,7 +502,7 @@ export function isFilesystemRootPath(p: string | null | undefined): boolean {
 
 export function getHeadSha(cwd?: string): string | null {
   try {
-    return execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    return execSync('git rev-parse HEAD', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
   } catch {
     return null;
   }
@@ -474,7 +510,7 @@ export function getHeadSha(cwd?: string): string | null {
 
 export function getBranch(cwd?: string): string | null {
   try {
-    return execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
+    return execSync('git rev-parse --abbrev-ref HEAD', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
   } catch {
     return null;
   }
@@ -1014,10 +1050,21 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
     // means Claude is alive. Staleness threshold is raised to 90 min in
     // heartbeat.ts so a long read of a single response doesn't false-end.
     const LONG_RUNNING_AGENTS = ['devin'];
+    // Copilot: the desktop app's process tree is the same shape as Cursor's —
+    // short-lived helpers around a GUI host — so the ancestor walk never finds a
+    // durable "copilot" process to watch. It also cost real time on the BLOCKING
+    // prompt-submit path: findAncestorPid climbs up to 10 levels, each level a
+    // Win32_Process WMI query (~100-250ms on Windows), and for copilot it ran
+    // TWICE because the pattern lookup missed and then the bash/zsh/sh fallback
+    // ran too — up to 20 WMI queries, measured as 0.8-2.6s of the hook. Copilot
+    // fires session-start/stop/session-end reliably, so the state-file mtime
+    // signal (which is what stale-file-only uses) is the better liveness source
+    // anyway.
+    //
     // Cursor: Electron helpers die immediately, can't track parent PID.
     // Claude Code: macOS wrapper trap (see above). Treat both as
     // stale-file-only.
-    const STALE_FILE_ONLY_AGENTS = ['cursor', 'claude-code'];
+    const STALE_FILE_ONLY_AGENTS = ['cursor', 'claude-code', 'copilot'];
     const AGENT_PROCESS_PATTERNS: Record<string, RegExp> = {
       'gemini': /gemini/i,
       'aider': /aider/i,
@@ -1050,6 +1097,14 @@ export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string
     const child = spawn(process.execPath, [heartbeatScript, sessionId, apiUrl, '', pidFile, String(parentPid), stateFile || ''], {
       detached: true,
       stdio: 'ignore',
+      // Windows: `detached` maps to DETACHED_PROCESS, so the child does NOT
+      // inherit the parent's console — node.exe (a console app) then allocates
+      // its OWN, which appears as a terminal window. The heartbeat lives for
+      // hours, so that window STAYS OPEN, and a new one appears on every
+      // session-start. Codex Desktop fires session-start constantly, so the
+      // user ended up with an endless pile of console windows. CREATE_NO_WINDOW
+      // (windowsHide) suppresses it. No-op on macOS/Linux.
+      windowsHide: true,
       env: { ...process.env, ORIGIN_HEARTBEAT_API_KEY: apiKey },
     });
     child.unref();

@@ -10,124 +10,134 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/opsworks-co/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
+  <a href="https://github.com/dolobanko/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
   <a href="https://getorigin.io"><img src="https://img.shields.io/badge/web-getorigin.io-6366f1" alt="Website"></a>
 </p>
 
 ---
 
-## The problem
-
-AI agents write more and more of your code, but git only records who *committed*.
-Six months from now, `git blame` will point at a teammate — not at the agent, not
-at the prompt that produced the change, not at what it cost or what else changed
-in that session. The prompt — the actual source of the code — dies with the
-terminal window.
-
-Origin fixes that. It runs silently beside your AI coding agent and records every
-session — prompts, per-prompt diffs, files touched, tokens, cost — into your git
-repo as notes and refs. `git clone` brings the AI history along with the code.
-
-**Supported agents:** Claude Code · Cursor · Codex · Gemini CLI (auto-detected).
-Antigravity, Windsurf and Aider support is experimental.
+Origin runs silently next to any AI coding agent — Claude Code, Cursor, Codex,
+Gemini CLI, Aider, Windsurf, Copilot, and more — and captures every session:
+prompts, files touched, tokens, cost, diffs. All of it lives in your git repo as
+notes and refs. `git clone` brings the history with the code. No server, no
+login, no API keys required.
 
 ## Install
 
 ```bash
 npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
-origin enable        # auto-detects your agents, installs hooks
 ```
-
-The CLI runs standalone by default: no account, no server — everything stays in
-your repo and on your machine. (Connecting it to the [team platform](#for-teams)
-is where logins and API keys come in.)
 
 ## Quick start
 
-There is no step 2 — after `origin enable`, just code with your agent like you
-always do. Origin captures each session automatically. When your first AI session
-has run:
+```bash
+origin enable                     # auto-detect agents, install git hooks
+# ...code with any AI agent — Origin tracks automatically
+origin blame src/index.ts       # see which AI wrote each line
+```
+
+That's it. Nothing to configure.
+
+---
+
+## The four beats
+
+Origin maps to one idea per verb. Everything else is detail.
+
+### 01 — Every agent.
+
+Auto-detected. Claude Code, Cursor, Codex, Gemini CLI, Aider, Windsurf, Copilot,
+Continue, Cody, Cline, Codeium, Roo, Kilo. One command picks up whichever tool
+you use.
 
 ```bash
-$ origin sessions
-
-  Sessions (1 total)
-
-  8f41ac02  claude-fable-5   ENDED   4 files  $0.87  12m ago
+origin enable           # detect agents + install hooks
+origin agents         # list detected agents
+origin status         # show the active session
 ```
 
-Every session is broken into per-prompt snapshots — what you asked, what the
-agent changed, what it cost:
+### 02 — Every prompt.
+
+Each turn is captured as a snapshot: prompt text, model, files touched, diff,
+tokens, cost, duration.
 
 ```bash
-origin session 8f41ac02     # replay the session, prompt by prompt
-origin snapshot             # per-prompt snapshots of the current session
+origin snapshot       # list per-prompt snapshots in the current session
+origin sessions       # list all sessions
+origin session <id>   # replay a single session
+origin rewind --to <sha>   # restore working tree to any snapshot
 ```
 
-And once AI-written code is in your repo, attribution is line-level:
+### 03 — Every line.
+
+Line-level attribution across agents and sessions. Point at any line, get the
+exact prompt that wrote it.
 
 ```bash
-$ origin blame src/auth.ts
-
-  Line  Tag   Agent    Model            Author  Content
-  ─────────────────────────────────────────────────────────────
-  41    [AI]  claude   claude-fable-5   dev     const token = rotate(session)
-  42    [AI]  claude   claude-fable-5   dev     await store.save(token)
-  43    [HU]                            dev     // TODO: audit log
-
-  Summary: AI: 2 (67%)  Human: 1 (33%)
-
-$ origin why src/auth.ts:41    # the exact prompt behind that line
+origin blame <file>          # per-line AI/human + model per line
+origin why <file>:<line>     # the exact prompt behind one line
+origin diff                  # annotated diff, AI vs human
+origin search "auth bug"     # full-text search across prompts
 ```
 
-## What that gives you day to day
+### 04 — In your git repo.
 
-**"Which AI wrote this line, and why?"** — When something breaks, don't stop at
-who committed. `origin blame` separates AI from human lines per agent and model;
-`origin why file:line` pulls up the exact prompt that produced the line;
-`origin search "refresh token"` full-text-searches every prompt ever run against
-the repo.
-
-**"What did the agent actually do?"** — Agents touch more than you asked for.
-`origin session <id>` replays a session turn by turn: prompt, diff, files,
-tokens, cost. `origin recap` gives you the end-of-day summary; `origin stats`
-the AI-vs-human ratio for the whole repo.
-
-**"The agent made a mess — get me back."** — Every prompt is a snapshot.
-`origin rewind --to <snapshot>` restores the working tree to the moment before
-things went sideways — finer-grained than your last commit.
-
-**"The history must travel with the code."** — Everything lives in git, not in a
-vendor database:
+Nothing leaves your machine. Sessions live in `refs/notes/origin` and the
+`origin-sessions` branch. Clone the repo, clone the history.
 
 ```
-refs/notes/origin          per-commit agent / model / session / cost
-origin-sessions branch     transcripts, prompts, per-prompt file changes
+refs/notes/origin          per-commit model / session / cost / tokens
+origin-sessions            transcripts, prompts, file changes
 ~/.origin/config.json      CLI config (machine-local)
 ```
 
-Clone the repo, get the history. Works offline. No telemetry by default.
+No telemetry by default. Opt in with `origin config set telemetry true`.
 
-**"Old repo, no history?"** — `origin backfill --apply` retroactively tags past
-commits by detecting the agents that authored them.
+---
+
+## Supported agents
+
+**Full session capture (native hooks):** Claude Code · Cursor · Codex CLI · Gemini CLI · GitHub Copilot · Windsurf · Antigravity
+**Commit-time detection:** Aider · Cody · Continue · Codeium · Cline · Amp · Junie · OpenCode · Rovo Dev · Droid
+
+Detection runs on CLI availability, IDE extension inspection, MCP config, and
+process detection at commit time.
+
+---
+
+## More commands
+
+The CLI has 50+ commands covering review, governance, handoff, memory, TODOs,
+time travel, reports, audit, and CI integration. See [`DOCS.md`](./DOCS.md) or
+run `origin --help`.
+
+Commonly used beyond the four beats:
+
+```bash
+origin stats                 # AI vs human stats for the repo
+origin handoff show          # pass context to the next agent
+origin recap                 # end-of-day summary
+origin backfill --apply      # retroactively tag old commits
+origin policies              # list active governance policies
+origin doctor                # diagnose stuck sessions
+origin upgrade               # update to latest
+```
+
+---
 
 ## For teams
 
-The CLI answers "what happened in my repo." [getorigin.io](https://getorigin.io)
-answers "what is AI doing across my team": a live dashboard of every session,
-per-user and per-agent cost, budgets that actually block overspend, model and
-content policies enforced at commit time, PR compliance checks, and audit
-trails.
+[getorigin.io](https://getorigin.io) adds the team layer on top of the CLI:
+live dashboard, per-user cost attribution, model and budget policies, PR
+compliance checks, audit trails, and GitHub App / Slack integrations. Free for
+solo developers, $29/user/month for teams.
 
-This is the part that needs an account: `origin login` authenticates the CLI and
-issues the API key that links your sessions to your org. Free for solo
-developers, $29/user/month for teams.
+```bash
+origin login      # authenticate with your Origin instance
+origin enable       # register the machine + install hooks
+```
 
-## More
-
-The CLI has 50+ commands — review, governance, handoff between agents, session
-memory, TODO tracking, reports, CI integration. See [`DOCS.md`](./DOCS.md) or run
-`origin --help`.
+---
 
 ## License
 

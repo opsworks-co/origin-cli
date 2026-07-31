@@ -132,8 +132,21 @@ export function discoverCodexSessionData(
     if (byIdQuery) {
       raw = querySqlite(dbPath, byIdQuery, sqliteOpts).trim();
       if (!raw) {
-        debugLog('codex', 'discoverCodexSessionData: threadId not found in SQLite', { threadId: opts.threadId });
-        return null;
+        // SQLite unreadable — on native Windows, Codex holds state_*.sqlite
+        // open in WAL mode and actively writes it, so sql.js's whole-file read
+        // returns "database disk image is malformed" and every thread lookup
+        // fails. Fall back to the append-only rollout file on disk, matched by
+        // the thread id embedded in its filename.
+        const diskById = opts.threadId
+          ? findLatestRollout(path.join(codexDir, 'sessions'), opts.threadId)
+          : '';
+        if (diskById) {
+          raw = `${opts.threadId}|codex|0|${diskById}||`;
+          debugLog('codex', 'discoverCodexSessionData: resolved rollout from disk by threadId (sqlite unreadable)', { threadId: opts.threadId, rollout: diskById });
+        } else {
+          debugLog('codex', 'discoverCodexSessionData: threadId not found in SQLite or on disk', { threadId: opts.threadId });
+          return null;
+        }
       }
     } else {
       // No locked thread yet — match strictly on `cwd = repoPath`. The
@@ -142,8 +155,18 @@ export function discoverCodexSessionData(
       // (callers expect null when nothing fits).
       raw = querySqlite(dbPath, buildCodexThreadByCwdQuery(DISCOVER_COLS, repoPath), sqliteOpts).trim();
       if (!raw) {
-        debugLog('codex', 'discoverCodexSessionData: no thread for exact cwd', { repoPath });
-        return null;
+        // Same Windows WAL/"malformed" fallback — resolve by cwd from each
+        // rollout's session_meta line (Codex stores the OS-native path; the
+        // matcher compares separator-insensitively). This is the actual fix
+        // for Codex sessions never capturing on native Windows.
+        const disk = findCodexRolloutByCwd(codexDir, repoPath);
+        if (disk) {
+          raw = `${disk.threadId}|codex|0|${disk.path}|${repoPath}|`;
+          debugLog('codex', 'discoverCodexSessionData: resolved rollout from disk by cwd (sqlite unreadable)', { repoPath, threadId: disk.threadId, rollout: disk.path });
+        } else {
+          debugLog('codex', 'discoverCodexSessionData: no thread for exact cwd (sqlite + disk)', { repoPath });
+          return null;
+        }
       }
     }
 
@@ -288,12 +311,19 @@ export function findCodexRolloutPath(repoPath: string, threadId?: string): strin
     if (byIdQuery) {
       raw = querySqlite(stateFiles[0].path, byIdQuery, sqliteOpts).trim();
       if (!raw) {
-        debugLog('codex', 'findCodexRolloutPath: threadId not in SQLite', { threadId });
+        // Windows WAL/"malformed" fallback — the rollout file is named after
+        // the thread id, so resolve it straight off disk.
+        const diskById = threadId ? findLatestRollout(path.join(codexDir, 'sessions'), threadId) : '';
+        if (diskById) return diskById;
+        debugLog('codex', 'findCodexRolloutPath: threadId not in SQLite or on disk', { threadId });
         return null;
       }
     } else {
       raw = querySqlite(stateFiles[0].path, buildCodexThreadByCwdQuery('id, rollout_path', repoPath), sqliteOpts).trim();
-      if (!raw) return null;
+      if (!raw) {
+        const disk = findCodexRolloutByCwd(codexDir, repoPath);
+        return disk ? disk.path : null;
+      }
     }
     const parts = raw.split('|');
     const resolvedThreadId = parts[0];
@@ -382,6 +412,238 @@ export function getCodexPromptsTimeline(repoPath: string, threadId?: string): Pr
 // (non-cached input, cached reads, reasoning folded into output).
 // This is the only public consumer; production callers go through
 // `discoverCodexSessionData` above.
+// Produce a readable (tool, display) label for a Codex tool call. Codex
+// ≥0.145 wraps shell/patch calls in JS (`const r = await tools.exec_command(
+// {"cmd":"…"}); text(r.output);` or `…tools.apply_patch(patch);`), so the
+// raw `input` string is noisy. Unwrap the underlying command / patch for the
+// transcript. Falls back to the raw string for any shape we don't recognize.
+function describeCodexToolCall(name: string, input: string): { tool: string; display: string } {
+  if (!input) return { tool: name || 'tool', display: '' };
+  // apply_patch embedded in the exec wrapper.
+  if (/tools\.apply_patch/.test(input) && input.includes('*** Begin Patch')) {
+    const m = input.match(/"\*\*\* Begin Patch[\s\S]*?\*\*\* End Patch(?:\\n)*"/);
+    if (m) {
+      try { return { tool: 'apply_patch', display: JSON.parse(m[0]) }; }
+      catch { return { tool: 'apply_patch', display: m[0] }; }
+    }
+    return { tool: 'apply_patch', display: input };
+  }
+  // exec_command wrapper — recover the `"cmd":"…"` value (escaped-quote aware).
+  if (/tools\.exec_command/.test(input) || name === 'exec' || name === 'exec_command') {
+    const cm = input.match(/"cmd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (cm) {
+      try { return { tool: 'shell', display: JSON.parse(`"${cm[1]}"`) }; }
+      catch { return { tool: 'shell', display: cm[1] }; }
+    }
+  }
+  return { tool: name || 'tool', display: input };
+}
+
+// Flatten Codex tool-call output into text. ≥0.145 returns an array of
+// content blocks (`[{ type: 'input_text', text: '…' }]`); older builds use a
+// plain string or `{ content }`.
+function stringifyCodexToolOutput(out: any): string {
+  if (out == null) return '';
+  if (typeof out === 'string') return out;
+  if (Array.isArray(out)) {
+    return out
+      .map((b) => (typeof b === 'string' ? b : (typeof b?.text === 'string' ? b.text : (typeof b?.content === 'string' ? b.content : ''))))
+      .filter(Boolean)
+      .join('');
+  }
+  if (typeof out === 'object') {
+    if (typeof out.content === 'string') return out.content;
+    if (typeof out.stdout === 'string') return out.stdout;
+    if (Array.isArray(out.content)) {
+      return out.content.map((b: any) => (typeof b?.text === 'string' ? b.text : '')).filter(Boolean).join('');
+    }
+    try { return JSON.stringify(out); } catch { return ''; }
+  }
+  return String(out);
+}
+
+// Lean, live-heartbeat variant of parseCodexRollout used by the CLI heartbeat
+// (pushInflightCodexState). It runs every ~30s on the in-flight rollout to keep
+// the dashboard's transcript/tokens/prompts fresh WHILE the agent is working,
+// and additionally recovers per-user-prompt timestamps for the diff baseline.
+//
+// It MUST stay schema-parity with parseCodexRollout above: they read the SAME
+// rollout and the heartbeat's output OVERWRITES the stop-hook's transcript on
+// the server (mcp PATCH is last-writer-wins on the transcript field). When this
+// parser lagged behind on the Codex ≥0.145 `custom_tool_call` schema (#803 only
+// updated parseCodexRollout, not this twin), every heartbeat tick shipped a
+// tool-less transcript that clobbered the richer stop-hook one — the
+// user-reported "tool output was there, then disappeared" bug (gpt-5.6-sol,
+// Windows). Co-located here so the two can't drift apart unnoticed again;
+// locked by codex-live-parser.test.ts.
+export function parseCodexRolloutLive(rolloutFile: string): {
+  userPrompts: string[];
+  // Per-prompt timestamps (ms epoch) parsed from the rollout's user message
+  // events. Used to compute the per-prompt diff baseline at heartbeat time
+  // — the LAST committed sha whose commit time is at-or-before the prompt
+  // start. Without this, baselines fall back to whichever HEAD existed when
+  // the heartbeat happened to notice the prompt, which is usually AFTER
+  // Codex has already made commits inside the prompt (then the diff against
+  // that "baseline" loses the prompt's real work).
+  promptTimestamps: number[];
+  transcript: string;
+  tokensUsed: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  model?: string;
+  toolCalls: number;
+} | null {
+  try {
+    let content: string;
+    if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
+      const compressed = fs.readFileSync(rolloutFile);
+      const decompressed = fzstd.decompress(new Uint8Array(compressed));
+      content = Buffer.from(decompressed).toString('utf-8');
+    } else {
+      content = fs.readFileSync(rolloutFile, 'utf-8');
+    }
+
+    const lines = content.split('\n').filter(l => l.trim());
+    const turns: Array<{ role: string; content: string }> = [];
+    const promptTimestamps: number[] = [];
+    const pendingTools = new Map<string, number>();
+    let maxInputTokens = 0, maxOutputTokens = 0, maxTotalTokens = 0, maxCachedInputTokens = 0;
+    let model: string | undefined;
+    let toolCalls = 0;
+    const TRUNC = 2000;
+    const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;
+
+    const extractText = (c: any): string => {
+      if (typeof c === 'string') return c;
+      if (!Array.isArray(c)) return '';
+      return c.map((p: any) => p?.text || (typeof p === 'string' ? p : '') || (typeof p?.content === 'string' ? p.content : '')).filter(Boolean).join('');
+    };
+
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        const tokenUsage = event?.total_token_usage || event?.data?.total_token_usage || event?.payload?.info?.total_token_usage || event?.payload?.total_token_usage;
+        if (tokenUsage) {
+          const i = tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0;
+          const o = tokenUsage.output_tokens || tokenUsage.completion_tokens || 0;
+          const cached = tokenUsage.cached_input_tokens || tokenUsage.prompt_tokens_details?.cached_tokens || 0;
+          const t = tokenUsage.total_tokens || (i + o);
+          if (t > maxTotalTokens) { maxInputTokens = i; maxOutputTokens = o; maxCachedInputTokens = cached; maxTotalTokens = t; }
+        }
+        if (!model && (event?.model || event?.data?.model || event?.payload?.model)) {
+          model = event.model || event.data?.model || event.payload?.model;
+        }
+        const payload = event?.payload;
+        const ptype = payload?.type || '';
+        if (ptype === 'message') {
+          const role = payload.role || 'assistant';
+          const text = extractText(payload.content);
+          if (text.trim()) {
+            const isUser = role === 'user' || role === 'human';
+            const isEcho = isUser && (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text));
+            if (!isEcho) {
+              const cleaned = isUser
+                ? text
+                    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+                    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+                    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+                    .trim()
+                : text;
+              if (cleaned) {
+                turns.push({ role, content: cleaned });
+                // Capture per-user-prompt timestamp from any of Codex's
+                // event-level time fields. Without this the prompt baseline
+                // falls back to "whenever heartbeat noticed", which is
+                // usually AFTER Codex made commits inside the prompt.
+                if (isUser) {
+                  const ts = (() => {
+                    const candidates = [
+                      event?.timestamp,
+                      event?.created_at,
+                      event?.payload?.timestamp,
+                      event?.payload?.created_at,
+                      payload?.timestamp,
+                      payload?.created_at,
+                    ];
+                    for (const c of candidates) {
+                      if (typeof c === 'number' && Number.isFinite(c)) return c > 1e12 ? c : c * 1000;
+                      if (typeof c === 'string') {
+                        const n = Date.parse(c);
+                        if (Number.isFinite(n)) return n;
+                      }
+                    }
+                    return 0;
+                  })();
+                  promptTimestamps.push(ts);
+                }
+              }
+            }
+          }
+        } else if (ptype === 'reasoning') {
+          const summary = Array.isArray(payload.summary) ? payload.summary : [];
+          const t = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n\n');
+          if (t.trim()) turns.push({ role: 'assistant', content: `[Reasoning] ${t}` });
+        } else if (ptype === 'function_call' || ptype === 'local_shell_call' || ptype === 'custom_tool_call') {
+          // Codex ≥0.145 (gpt-5.6-sol/terra) records every tool call as a
+          // `custom_tool_call` (name "exec"/"apply_patch") whose `input` is
+          // either a JS wrapper (tools.exec_command / tools.apply_patch) or a
+          // raw `*** Begin Patch`. describeCodexToolCall unwraps all shapes.
+          toolCalls++;
+          const rawArgs = payload.input ?? payload.arguments ?? payload.action ?? payload.command ?? '';
+          const argStr = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs);
+          const { tool, display } = describeCodexToolCall(
+            payload.name || (ptype === 'local_shell_call' ? 'shell' : 'tool'),
+            argStr,
+          );
+          const callId = payload.call_id || payload.id || '';
+          const idx = turns.length;
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(display)}` });
+          if (callId) pendingTools.set(callId, idx);
+        } else if (ptype === 'function_call_output' || ptype === 'local_shell_call_output' || ptype === 'custom_tool_call_output') {
+          const callId = payload.call_id || payload.id || '';
+          const out = stringifyCodexToolOutput(payload.output);
+          if (out) {
+            const idx = callId ? pendingTools.get(callId) : undefined;
+            if (idx !== undefined) {
+              turns[idx].content += `\n[Output] ${truncate(out)}`;
+              pendingTools.delete(callId);
+            } else {
+              turns.push({ role: 'assistant', content: `[Output] ${truncate(out)}` });
+            }
+          }
+        }
+      } catch { /* skip malformed lines */ }
+    }
+
+    if (turns.length === 0 && maxTotalTokens === 0) return null;
+    const userPrompts: string[] = [];
+    for (const t of turns) {
+      if (t.role === 'user' || t.role === 'human') {
+        const c = t.content.trim();
+        if (c) userPrompts.push(c);
+      }
+    }
+    // EXCLUDE cache reads from tokensUsed/inputTokens to match the platform
+    // contract (every other agent reports input+output only; cache is separate).
+    // Codex's input_tokens INCLUDES cached, so subtract it. Mirrors
+    // parseCodexRollout — keeps the heartbeat (live) and stop-hook token
+    // definitions identical so a mid-session update can't disagree with the end.
+    const liveNonCachedInput = Math.max(0, maxInputTokens - maxCachedInputTokens);
+    return {
+      userPrompts,
+      promptTimestamps,
+      transcript: JSON.stringify(turns),
+      tokensUsed: liveNonCachedInput + maxOutputTokens,
+      inputTokens: liveNonCachedInput,
+      outputTokens: maxOutputTokens,
+      cacheReadTokens: maxCachedInputTokens,
+      model,
+      toolCalls,
+    };
+  } catch { return null; }
+}
+
 export function parseCodexRollout(
   codexDir: string,
   rolloutPath: string,
@@ -565,24 +827,25 @@ export function parseCodexRollout(
           if (text.trim()) {
             turns.push({ role: 'assistant', content: `[Reasoning] ${text}` });
           }
-        } else if (payloadType === 'function_call' || payloadType === 'local_shell_call') {
+        } else if (payloadType === 'function_call' || payloadType === 'local_shell_call' || payloadType === 'custom_tool_call') {
           toolCalls++;
-          const tool = payload.name || (payloadType === 'local_shell_call' ? 'shell' : 'tool');
-          const rawArgs = payload.arguments ?? payload.action ?? payload.command ?? '';
+          // Codex ≥0.145 records every tool call as a `custom_tool_call`
+          // named "exec" whose `input` is a JS wrapper (tools.exec_command
+          // / tools.apply_patch). The old branch only knew `function_call`,
+          // so the new CLI reported 0 tools. Unwrap for a readable label.
+          const rawArgs = payload.input ?? payload.arguments ?? payload.action ?? payload.command ?? '';
           const argStr = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs);
+          const { tool, display } = describeCodexToolCall(
+            payload.name || (payloadType === 'local_shell_call' ? 'shell' : 'tool'),
+            argStr,
+          );
           const callId = payload.call_id || payload.id || '';
           const idx = turns.length;
-          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(argStr)}` });
+          turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(display)}` });
           if (callId) pendingTools.set(callId, idx);
-        } else if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output') {
+        } else if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output' || payloadType === 'custom_tool_call_output') {
           const callId = payload.call_id || payload.id || '';
-          const out = typeof payload.output === 'string'
-            ? payload.output
-            : (payload.output?.content
-                ? (typeof payload.output.content === 'string'
-                    ? payload.output.content
-                    : JSON.stringify(payload.output.content))
-                : JSON.stringify(payload.output ?? ''));
+          const out = stringifyCodexToolOutput(payload.output);
           if (out) {
             const idx = callId ? pendingTools.get(callId) : undefined;
             if (idx !== undefined) {
@@ -667,12 +930,17 @@ export function parseCodexRollout(
     //                     e.g. $0.50/M for gpt-5.5)
     //   outputTokens    — visible output + reasoning, both billed at
     //                     the output rate
-    //   tokensUsed      — grand total including reasoning, so the
-    //                     dashboard token column doesn't under-report
-    //                     deep-thinking sessions
+    //   tokensUsed      — non-cached input + output (incl. reasoning). EXCLUDES
+    //                     cache reads, matching the platform contract every
+    //                     other agent follows (Claude/Cursor/agy all report
+    //                     input+output only; cache is tracked separately in
+    //                     cacheReadTokens). Including cache here made Codex look
+    //                     ~14× less token-efficient than an identical Claude
+    //                     session in the benchmark scorecard — an artifact of
+    //                     the definition, not real work.
     const nonCachedInputTokens = Math.max(0, maxInputTokens - maxCachedInputTokens);
     const billableOutputTokens = maxOutputTokens + maxReasoningOutputTokens;
-    const grandTotalTokens = nonCachedInputTokens + maxCachedInputTokens + billableOutputTokens;
+    const grandTotalTokens = nonCachedInputTokens + billableOutputTokens;
 
     return {
       tokensUsed: grandTotalTokens,
@@ -695,6 +963,97 @@ export function parseCodexRollout(
  * Scan ~/.codex/sessions/ for the most recent rollout file, optionally
  * matching a thread ID in the filename.
  */
+/**
+ * Read the `cwd` recorded in a Codex rollout's first `session_meta` line,
+ * without fully parsing the (potentially huge) line. Handles plain `.jsonl`
+ * (reads just the head) and `.jsonl.zst` (decompresses, reads the head).
+ * Returns the OS-native path Codex stored, or null.
+ */
+export function readRolloutCwd(filePath: string): string | null {
+  try {
+    let head = '';
+    if (filePath.endsWith('.zst') || filePath.endsWith('.zstd')) {
+      const decompressed = fzstd.decompress(new Uint8Array(fs.readFileSync(filePath)));
+      head = Buffer.from(decompressed.subarray(0, 16_384)).toString('utf-8');
+    } else {
+      const fd = fs.openSync(filePath, 'r');
+      try {
+        const buf = Buffer.alloc(16_384);
+        const n = fs.readSync(fd, buf, 0, buf.length, 0);
+        head = buf.toString('utf-8', 0, n);
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+    // `cwd` appears early in the session_meta payload (before base_instructions).
+    const m = head.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    if (!m) return null;
+    // Unescape the JSON string (turns "C:\\soft\\x" into "C:\soft\x").
+    return JSON.parse(`"${m[1]}"`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Disk-based resolver for the Codex thread that matches `repoPath`, used when
+ * the SQLite state DB can't be read. On native Windows, Codex holds
+ * state_*.sqlite open in WAL mode and actively writes it, so sql.js's
+ * whole-file read fails with "database disk image is malformed" and every
+ * thread lookup returns nothing — leaving the session empty and swept. The
+ * rollout `.jsonl` files are append-only and self-describing (each opens with
+ * a session_meta line carrying `cwd` + the thread id in its filename), so we
+ * resolve the current thread purely from disk. Matches cwd separator-
+ * insensitively (Origin normalizes to '/', Codex writes native '\' on
+ * Windows); returns the newest matching rollout.
+ */
+export function findCodexRolloutByCwd(
+  codexDir: string,
+  repoPath: string,
+): { path: string; threadId: string } | null {
+  const sessionsDir = path.join(codexDir, 'sessions');
+  if (!fs.existsSync(sessionsDir)) return null;
+  const norm = (p: string) => p.replace(/\\/g, '/');
+  const wantedNorm = norm(repoPath);
+
+  const candidates: { path: string; mtime: number }[] = [];
+  try {
+    const years = fs.readdirSync(sessionsDir).filter(d => /^\d{4}$/.test(d)).sort().slice(-1);
+    for (const y of years) {
+      const yDir = path.join(sessionsDir, y);
+      const months = fs.readdirSync(yDir).filter(d => /^\d{2}$/.test(d)).sort().slice(-2);
+      for (const mo of months) {
+        const moDir = path.join(yDir, mo);
+        const days = fs.readdirSync(moDir).filter(d => /^\d{2}$/.test(d)).sort().slice(-2);
+        for (const d of days) {
+          const dDir = path.join(moDir, d);
+          for (const f of fs.readdirSync(dDir)) {
+            if (!f.includes('rollout') || !(f.endsWith('.jsonl') || f.endsWith('.jsonl.zst'))) continue;
+            const fp = path.join(dDir, f);
+            try { candidates.push({ path: fp, mtime: fs.statSync(fp).mtimeMs }); } catch { /* skip unreadable */ }
+          }
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime);
+
+  // Newest first — the current session's rollout is almost always the first
+  // file we read, so this usually touches one file.
+  for (const c of candidates.slice(0, 40)) {
+    const cwd = readRolloutCwd(c.path);
+    if (!cwd || norm(cwd) !== wantedNorm) continue;
+    const idMatch = path.basename(c.path).match(
+      /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/,
+    );
+    if (!idMatch) continue;
+    return { path: c.path, threadId: idMatch[1] };
+  }
+  return null;
+}
+
 export function findLatestRollout(sessionsDir: string, threadId: string): string {
   let best = '';
   let bestMtime = 0;

@@ -717,7 +717,7 @@ function extractFromCodexRollout(opts: CaptureInputs): PromptCapture[] {
   if (!opts.repoPath) return [];
   const rolloutText = readCodexRolloutText(opts);
   if (!rolloutText) return [];
-  const gitOpts = { cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const gitOpts = { windowsHide: true, cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
 
   // Walk the rollout chronologically. Each real user-role `message` event
   // advances the current prompt index. Each `custom_tool_call` named
@@ -764,26 +764,56 @@ function extractFromCodexRollout(opts: CaptureInputs): PromptCapture[] {
 
     if (currentPromptIdx < 0) continue;
 
-    // apply_patch is Codex's primary edit tool. The rollout records it
-    // as a `custom_tool_call` with name="apply_patch" and the patch text
-    // in `input`. Parsing this gives us the EXACT files and lines Codex
-    // changed — independent of whatever junk the working tree carries.
-    if (
-      (payloadType === 'custom_tool_call' || payloadType === 'function_call') &&
-      payload?.name === 'apply_patch'
-    ) {
-      const patchText = typeof payload.input === 'string'
+    // apply_patch is Codex's primary edit tool. Its rollout shape drifted:
+    //   • ≤0.131: a `custom_tool_call`/`function_call` named "apply_patch"
+    //     whose `input` is the raw `*** Begin Patch … *** End Patch` text.
+    //   • ≥0.145 (gpt-5.6-sol and later): patches are routed through the
+    //     shell tool, recorded as a `custom_tool_call` named "exec" whose
+    //     `input` is a JS wrapper — `const patch = "*** Begin Patch…";
+    //     await tools.apply_patch(patch);`. The name is "exec", NOT
+    //     "apply_patch", and the patch is a JS string literal. The old
+    //     name check matched neither, so every 0.145+ edit was dropped —
+    //     the session captured tokens (token events are unchanged) but
+    //     showed 0 files / +0-0 lines (Windows codex "didn't capture
+    //     everything").
+    if (payloadType === 'custom_tool_call' || payloadType === 'function_call' || payloadType === 'local_shell_call') {
+      const toolName = payload?.name || '';
+      const rawInput = typeof payload.input === 'string'
         ? payload.input
         : typeof payload.arguments === 'string' ? payload.arguments : '';
-      const edits = parseApplyPatch(patchText, opts.repoPath);
-      for (const e of edits) turns[currentPromptIdx].edits.push(e);
-      continue;
+      if (toolName === 'apply_patch') {
+        // Raw patch, or a JS wrapper in builds that route the dedicated
+        // apply_patch tool through one — handle both.
+        const patches = /tools\.apply_patch/.test(rawInput)
+          ? extractApplyPatchesFromExecWrapper(rawInput)
+          : [rawInput];
+        for (const patch of patches) {
+          for (const e of parseApplyPatch(patch, opts.repoPath)) turns[currentPromptIdx].edits.push(e);
+        }
+        continue;
+      }
+      if (toolName === 'exec' || toolName === 'exec_command' || toolName === 'shell') {
+        // ≥0.145: pull any apply_patch(es) embedded in the exec wrapper.
+        // A plain shell command has no `*** Begin Patch`, so this is a
+        // no-op for real shell calls (whose file effects fold in later via
+        // commit walking).
+        for (const patch of extractApplyPatchesFromExecWrapper(rawInput)) {
+          for (const e of parseApplyPatch(patch, opts.repoPath)) turns[currentPromptIdx].edits.push(e);
+        }
+        continue;
+      }
     }
 
-    // function_call_output / local_shell_call_output may contain git
-    // commit SHAs in their stdout — attribute those commits to the
-    // current prompt and pull their per-file edits from `git show`.
-    if (payloadType === 'function_call_output' || payloadType === 'local_shell_call_output') {
+    // Tool-call output events may contain git commit SHAs in their stdout —
+    // attribute those commits to the current prompt and pull their per-file
+    // edits from `git show`. Codex ≥0.145 renames the shell-output event to
+    // `custom_tool_call_output` (was `function_call_output`), so without it
+    // committed Codex work on the new CLI loses all commit-derived edits.
+    if (
+      payloadType === 'function_call_output' ||
+      payloadType === 'local_shell_call_output' ||
+      payloadType === 'custom_tool_call_output'
+    ) {
       const out = stringifyCodexOutput(payload?.output);
       if (!out) continue;
       for (const marker of extractGitShasFromOutput(out)) {
@@ -873,9 +903,22 @@ function readCodexEventTimestamp(event: any, payload: any): number {
 function stringifyCodexOutput(out: any): string {
   if (out == null) return '';
   if (typeof out === 'string') return out;
+  // Codex ≥0.145 returns tool output as an array of content blocks
+  // (`[{ type: 'input_text', text: '…' }, …]`) rather than a plain string
+  // or `{ content }`. Concatenate the text so commit-SHA markers in stdout
+  // (`[branch abc1234] msg`) are still visible.
+  if (Array.isArray(out)) {
+    return out
+      .map((b) => (typeof b === 'string' ? b : (typeof b?.text === 'string' ? b.text : (typeof b?.content === 'string' ? b.content : ''))))
+      .filter(Boolean)
+      .join('');
+  }
   if (typeof out === 'object') {
     if (typeof out.content === 'string') return out.content;
     if (typeof out.stdout === 'string') return out.stdout;
+    if (Array.isArray(out.content)) {
+      return out.content.map((b: any) => (typeof b?.text === 'string' ? b.text : '')).filter(Boolean).join('');
+    }
     try { return JSON.stringify(out); } catch { return ''; }
   }
   return String(out);
@@ -892,6 +935,50 @@ function extractGitShasFromOutput(out: string): string[] {
     shas.push(m[1]);
   }
   return shas;
+}
+
+// Pull the `*** Begin Patch … *** End Patch` body out of Codex ≥0.145's
+// exec JS wrapper. That build records edits as a shell call whose `input`
+// is JavaScript that assigns the patch to a string literal and passes it to
+// `tools.apply_patch(...)`, e.g.:
+//
+//   const patch = "*** Begin Patch\n*** Update File: rows.txt\n@@\n+Row 5\n*** End Patch";
+//   const r = await tools.apply_patch(patch);
+//   text(typeof r === "string" ? r : JSON.stringify(r));
+//
+// The patch is a JS double-quoted string literal, so its escaping (\n, \",
+// \\) is JSON-compatible — each match is JSON.parse-d back to the real
+// multi-line patch. Returns every embedded patch (one exec usually carries
+// one, but batched multi-patch execs are handled). Exported for testing.
+export function extractApplyPatchesFromExecWrapper(wrapper: string): string[] {
+  if (!wrapper || wrapper.indexOf('*** Begin Patch') < 0) return [];
+  const out: string[] = [];
+  // Each quoted literal spanning a whole Begin→End patch. Non-greedy body,
+  // tolerating a trailing `\n` before the closing quote.
+  const re = /"\*\*\* Begin Patch[\s\S]*?\*\*\* End Patch(?:\\n)*"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(wrapper)) !== null) {
+    try {
+      const parsed = JSON.parse(m[0]);
+      if (typeof parsed === 'string' && parsed.includes('*** Begin Patch')) out.push(parsed);
+    } catch {
+      // Manual unescape fallback if the literal isn't valid JSON.
+      const inner = m[0].slice(1, -1)
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\');
+      if (inner.includes('*** Begin Patch')) out.push(inner);
+    }
+  }
+  // Fallback: the patch appears unquoted (raw). Slice from Begin to End.
+  if (out.length === 0) {
+    const b = wrapper.indexOf('*** Begin Patch');
+    const eMark = '*** End Patch';
+    const e = wrapper.indexOf(eMark, b);
+    if (b >= 0 && e >= 0) out.push(wrapper.slice(b, e + eMark.length));
+  }
+  return out;
 }
 
 // Parse Codex's apply_patch format and emit ONE PromptEdit per hunk
@@ -1116,7 +1203,7 @@ function appendCommitEdits(
 function supplementUncoveredCommittedFiles(turns: PromptCapture[], opts: CaptureInputs): void {
   const shas = (opts.sessionCommitShas || []).filter((s) => HEX.test(s));
   if (shas.length === 0 || !opts.repoPath) return;
-  const gitOpts = { cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const gitOpts = { windowsHide: true, cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
 
   // Owner = highest-promptIndex turn that claims each sha (the committer).
   const ownerForSha = new Map<string, PromptCapture>();
@@ -1195,7 +1282,7 @@ function supplementUncoveredCommittedFiles(turns: PromptCapture[], opts: Capture
 // session-diff reconstruction still covers the display).
 export function backfillContentLessWrites(turns: PromptCapture[], opts: CaptureInputs): void {
   if (!opts.repoPath) return;
-  const gitOpts = { cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const gitOpts = { windowsHide: true, cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
   for (let ti = 0; ti < turns.length; ti++) {
     const turn = turns[ti];
     for (let ei = 0; ei < turn.edits.length; ei++) {
@@ -1335,7 +1422,7 @@ function attributeCommitsToPrompts(turns: PromptCapture[], opts: CaptureInputs):
   // claim the same commit when squashed edits cross prompt boundaries.
   const shas = (opts.sessionCommitShas || []).filter((s) => HEX.test(s));
   if (shas.length === 0 || !opts.repoPath) return;
-  const gitOpts = { cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000 };
+  const gitOpts = { windowsHide: true, cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000 };
 
   const filesByCommit = new Map<string, Set<string>>();
   for (const sha of shas) {

@@ -9,7 +9,7 @@ import { scrubNoteObject } from '../git-notes.js';
 // prompt-text carriers (promptSummary, fullPrompt, per-prompt text, the
 // promptText embedded in editsJson) are removed.
 export async function scrubNotesCommand(opts: { push?: boolean; remote?: string }): Promise<void> {
-  const execOpts = {
+  const execOpts = { windowsHide: true,
     cwd: process.cwd(),
     stdio: 'pipe' as const,
     timeout: 30_000,

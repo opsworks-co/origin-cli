@@ -1,4 +1,8 @@
 import { execFileSync } from 'child_process';
+import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { listActiveSessions } from './session-state.js';
 import { readAcceptanceNote } from './acceptance.js';
 
@@ -85,6 +89,7 @@ export interface MoveDetection {
 // ─── Git Helpers ──────────────────────────────────────────────────────────
 
 const execOpts = (cwd: string) => ({
+    windowsHide: true,
   encoding: 'utf-8' as const,
   cwd,
   stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
@@ -802,12 +807,60 @@ export function computeAttributionStats(
   };
 }
 
+// NO time budget here, deliberately. An earlier version capped the walk at
+// 1500ms and published a partial result, which meant the agent could silently
+// receive an attribution summary covering only some of the 30 commits — a wrong
+// answer dressed up as a right one. The context is the product; truncating it to
+// hit a latency target is the wrong trade. The disk cache below is what makes
+// this affordable: the walk runs once per HEAD, not once per prompt.
+function attributionCacheFile(repoPath: string): string {
+  // Hash the path so a repo-relative name can't escape the cache dir, and so
+  // Windows drive colons / separators don't leak into the filename.
+  const key = crypto.createHash('sha256').update(path.resolve(repoPath)).digest('hex').slice(0, 32);
+  return path.join(os.homedir(), '.origin', 'attribution-cache', `${key}.json`);
+}
+
 /**
- * Build a concise AI attribution context string for injection into agent system prompts.
- * Designed to be fast (lightweight git operations, limited commit range).
+ * Build a concise AI attribution context string for injection into agent system
+ * prompts, memoized on (repoPath, HEAD).
+ *
+ * The cache MUST be on disk, not in memory: every hook fire is a brand-new node
+ * process, so a module-level map would never see a second hit. Keyed on HEAD
+ * because that is what the content derives from — consecutive prompts in a
+ * session almost always share a HEAD, so only the first prompt after a commit
+ * pays anything.
+ *
  * Returns null if no meaningful AI activity found.
  */
 export function buildAttributionContext(repoPath: string): string | null {
+  let head = '';
+  try {
+    head = execFileSync('git', ['rev-parse', 'HEAD'], execOpts(repoPath)).trim();
+  } catch { /* not a repo / no commits — fall through to an uncached build */ }
+
+  const cacheFile = head ? attributionCacheFile(repoPath) : '';
+  if (cacheFile) {
+    try {
+      const c = JSON.parse(fs.readFileSync(cacheFile, 'utf-8')) as { head?: string; context?: string | null };
+      // A cached `null` is a real answer ("no AI activity here") and is worth
+      // honouring — re-deriving it costs the same full walk as a hit.
+      if (c && c.head === head) return c.context ?? null;
+    } catch { /* absent or corrupt — rebuild */ }
+  }
+
+  const context = buildAttributionContextUncached(repoPath);
+
+  if (cacheFile) {
+    try {
+      fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify({ head, context, builtAt: new Date().toISOString() }), { mode: 0o600 });
+    } catch { /* cache is an optimization — never fail the hook over it */ }
+  }
+
+  return context;
+}
+
+function buildAttributionContextUncached(repoPath: string): string | null {
   try {
     const opts = execOpts(repoPath);
 

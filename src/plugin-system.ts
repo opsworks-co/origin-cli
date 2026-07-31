@@ -172,6 +172,9 @@ export function executePlugin(
       const child = spawn(cmd, args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: PLUGIN_TIMEOUT_MS,
+        // Don't pop a console window per plugin invocation on Windows when the
+        // hook runs under a GUI agent (Codex Desktop). No-op elsewhere.
+        windowsHide: true,
         env: {
           ...sanitizedEnv,
           ORIGIN_PLUGIN_EVENT: event,
@@ -298,7 +301,7 @@ function isCommandAccessible(command: string): boolean {
 
   // Check PATH
   try {
-    execSync(`which ${cmd}`, { stdio: 'pipe' });
+    execSync(`which ${cmd}`, { windowsHide: true, stdio: 'pipe' });
     return true;
   } catch {
     return false;

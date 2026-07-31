@@ -155,8 +155,45 @@ describe('helpers', () => {
     expect(u).toEqual({ inputTokens: 10, outputTokens: 100, totalTokens: 110, estimated: true });
   });
 
+  it('filesEdited excludes read-only tools (only edit/write targets count as changed)', () => {
+    const u = (text: string) =>
+      JSON.stringify({ type: 'USER_INPUT', source: 'USER_EXPLICIT', content: `<USER_REQUEST>\n${text}\n</USER_REQUEST>` });
+    // POSIX-style absolute paths — absolute on BOTH win32 and posix so the
+    // path.isAbsolute() filter in the parser behaves the same on every CI runner.
+    const jsonl = [
+      u('create kapusta'),
+      // a READ — must NOT count as changed
+      JSON.stringify({ type: 'PLANNER_RESPONSE', source: 'MODEL', tool_calls: [{ name: 'view_file', args: { AbsolutePath: '/repo/README.md', toolSummary: 'Viewing' } }] }),
+      // an EDIT/WRITE — must count
+      JSON.stringify({ type: 'PLANNER_RESPONSE', source: 'MODEL', tool_calls: [{ name: 'write_to_file', args: { TargetFile: '/repo/kapusta', toolSummary: 'Create kapusta' } }] }),
+    ].join('\n');
+    const { filesEdited, filePaths, promptFilesEdited } = parseAntigravityTranscript(jsonl);
+    expect(filesEdited).toEqual(['/repo/kapusta']);
+    expect(filePaths).toContain('/repo/README.md'); // read still tracked for cwd recovery
+    expect(promptFilesEdited).toEqual([['/repo/kapusta']]);
+  });
+
+  it('captures per-prompt edit CONTENT (CodeContent / ReplacementContent) for real diffs', () => {
+    const u = (text: string) =>
+      JSON.stringify({ type: 'USER_INPUT', source: 'USER_EXPLICIT', content: `<USER_REQUEST>\n${text}\n</USER_REQUEST>` });
+    const jsonl = [
+      u('create oooi with 17 rows'),
+      JSON.stringify({ type: 'PLANNER_RESPONSE', source: 'MODEL', tool_calls: [{ name: 'write_to_file', args: { TargetFile: '/repo/oooi', CodeContent: Array.from({length:17},(_,i)=>`Row ${i+1}`).join('\n') + '\n', toolSummary: 'Create' } }] }),
+      u('add 3 more rows'),
+      JSON.stringify({ type: 'PLANNER_RESPONSE', source: 'MODEL', tool_calls: [{ name: 'replace_file_content', args: { TargetFile: '/repo/oooi', TargetContent: 'Row 17\n', ReplacementContent: 'Row 17\nRow 18\nRow 19\nRow 20\n', toolSummary: 'Append' } }] }),
+    ].join('\n');
+    const { promptEditRecords } = parseAntigravityTranscript(jsonl);
+    // Turn 0: a whole-file write carrying its content.
+    expect(promptEditRecords[0]).toHaveLength(1);
+    expect(promptEditRecords[0][0].toolName).toBe('Write');
+    expect(String(promptEditRecords[0][0].input.content).split('\n').filter(Boolean)).toHaveLength(17);
+    // Turn 1: a region replace mapped onto the Edit old/new shape.
+    expect(promptEditRecords[1][0].toolName).toBe('Edit');
+    expect(promptEditRecords[1][0].input.new_string).toContain('Row 20');
+  });
+
   it('handles empty/garbage transcripts without throwing', () => {
-    expect(parseAntigravityTranscript('')).toEqual({ prompts: [], responses: [], promptTimes: [], model: null, inputChars: 0, outputChars: 0, filePaths: [] });
+    expect(parseAntigravityTranscript('')).toEqual({ prompts: [], responses: [], promptTimes: [], model: null, inputChars: 0, outputChars: 0, filePaths: [], filesEdited: [], promptFilesEdited: [], promptEditRecords: [], promptRanCommit: [] });
     expect(parseAntigravityTranscript('not json\n{bad').prompts).toEqual([]);
   });
 });

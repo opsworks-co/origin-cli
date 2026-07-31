@@ -138,7 +138,12 @@ function selectSnapshot(prompt: string): Promise<number | null> {
  * Safety: git stash first, confirmation required.
  */
 export async function rewindCommand(
-  opts?: { to?: string },
+  // mode mirrors the dashboard's cloud restore (see handleRestore in heartbeat.ts):
+  //   soft (default) — write the target's files into the working tree, leave HEAD
+  //                    alone. Recoverable: the pre-rewind state is stashed.
+  //   hard           — `git reset --hard <sha>`: moves HEAD too and DISCARDS any
+  //                    commits after the target on this branch.
+  opts?: { to?: string; soft?: boolean; hard?: boolean },
 ): Promise<void> {
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
@@ -204,8 +209,11 @@ export async function rewindCommand(
       ? `${targetSnapshot.shortSha} — "${targetSnapshot.message}"`
       : targetSha.slice(0, 8);
 
+    const mode: 'soft' | 'hard' = opts.hard ? 'hard' : 'soft';
     const confirmed = await confirm(
-      chalk.yellow(`\nRewind to ${desc}? This will reset your working directory. [y/N] `),
+      mode === 'hard'
+        ? chalk.red(`\nHARD rewind to ${desc}?\nThis moves HEAD and DISCARDS any commits after it on this branch. [y/N] `)
+        : chalk.yellow(`\nRewind to ${desc}? This restores the files into your working directory (HEAD unchanged). [y/N] `),
     );
 
     if (!confirmed) {
@@ -220,8 +228,12 @@ export async function rewindCommand(
     }
 
     try {
-      git(['checkout', targetSha, '--', '.'], gitOpts(repoPath));
-      console.log(chalk.green(`Rewound to ${desc}.`));
+      if (mode === 'hard') {
+        git(['reset', '--hard', targetSha], gitOpts(repoPath));
+      } else {
+        git(['checkout', targetSha, '--', '.'], gitOpts(repoPath));
+      }
+      console.log(chalk.green(`Rewound to ${desc} (${mode}).`));
       if (hasStashed) {
         console.log(chalk.gray(`Your uncommitted changes are stashed. Run "git stash pop" to restore them.`));
       }

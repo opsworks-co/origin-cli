@@ -54,6 +54,25 @@ function getOriginBinPath(): string {
   return '';
 }
 
+// Absolute path to the CLI's own JS entry point (dist/index.js), so Windows
+// hook commands can invoke `node.exe <entry>` and skip npm's `origin.cmd` batch
+// shim (which drags cmd.exe — and a visible console window — into every hook
+// fire). Returns '' when it can't be resolved with confidence, in which case
+// the caller falls back to the shim.
+function cliEntryScript(): string {
+  try {
+    const entry = process.argv[1];
+    if (!entry) return '';
+    const abs = path.resolve(entry);
+    // Only trust a real .js file — `origin` may itself have been launched via
+    // the .cmd shim or a bundler stub we shouldn't hard-code into hooks.
+    if (!abs.toLowerCase().endsWith('.js') || !fs.existsSync(abs)) return '';
+    return abs;
+  } catch {
+    return '';
+  }
+}
+
 function originCmd(cmd: string): string {
   if (isWindows()) {
     // The POSIX `PATH=dir:$PATH origin …` shim is invalid under cmd/PowerShell,
@@ -62,9 +81,23 @@ function originCmd(cmd: string): string {
     // cmd, PowerShell, and git-bash alike — so agents WITHOUT a `powershell`
     // field (Cursor/Codex/Gemini/Claude/Antigravity) still fire on Windows.
     // (These commands are agent-run; git hooks use their own #!/bin/sh shim.)
+    const args = cmd.replace(/^origin\b\s*/, '');
+
+    // Prefer `node.exe <cli-entry.js>` over npm's `origin.cmd` shim. The shim is
+    // a BATCH file, so every hook fire launches cmd.exe to interpret it — and
+    // under a GUI agent (Codex Desktop) that cmd.exe gets a visible console
+    // window. Codex fires session-start/user-prompt-submit/stop constantly, so
+    // the user saw an endless stream of cmd windows. Invoking node directly
+    // removes the interpreter entirely (one process instead of two).
+    const entry = cliEntryScript();
+    if (entry) {
+      const node = /\s/.test(process.execPath) ? `"${process.execPath}"` : process.execPath;
+      const js = /\s/.test(entry) ? `"${entry}"` : entry;
+      return `${node} ${js} ${args}`.trim();
+    }
+
     const bin = originBinaryPath();
     if (bin === 'origin') return cmd; // unresolved → rely on PATH
-    const args = cmd.replace(/^origin\b\s*/, '');
     const quoted = /\s/.test(bin) ? `"${bin}"` : bin;
     return `${quoted} ${args}`.trim();
   }
@@ -107,6 +140,17 @@ function originBinaryPath(): string {
 // `origin` (no resolvable path) still works when the npm global bin is on PATH.
 function originPowershellCmd(cmd: string): string {
   const args = cmd.replace(/^origin\b\s*/, '');
+  // Prefer `node.exe <cli-entry.js>` — same reason as originCmd(): npm's `origin`
+  // shim is a BATCH file, so invoking it spawns cmd.exe, and under a GUI agent
+  // that cmd.exe gets a VISIBLE console window. Copilot fires hooks on every
+  // lifecycle event, so the user saw a stream of black cmd windows. Calling node
+  // directly removes the interpreter entirely.
+  const entry = cliEntryScript();
+  if (entry) {
+    const node = `'${process.execPath.replace(/'/g, "''")}'`;
+    const js = `'${entry.replace(/'/g, "''")}'`;
+    return `& ${node} ${js} ${args}`.trim();
+  }
   const bin = originBinaryPath();
   if (bin === 'origin') return `origin ${args}`.trim();
   const quoted = `'${bin.replace(/'/g, "''")}'`; // PS escapes ' by doubling it
@@ -428,6 +472,49 @@ export function installDevinHooks(gitRoot: string): void {
   fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
   const devinLabel = gitRoot === os.homedir() ? `~/.devin/hooks.v1.json` : `.devin/hooks.v1.json`;
   console.log(chalk.green(`  ✓ Hooks installed in ${devinLabel}`));
+
+  // Transition: the Devin/Windsurf DESKTOP GUI still runs Cascade, which reads
+  // the legacy `.windsurf/hooks.json` (Cascade schema), NOT `.devin/hooks.v1`.
+  // Install both so GUI Cascade sessions keep capturing until Cascade is fully
+  // retired. Both point at the same `origin hooks devin` handler.
+  installLegacyCascadeHooks(gitRoot);
+}
+
+// Legacy Windsurf Cascade hooks — the ex-Windsurf desktop GUI reads
+// `.windsurf/hooks.json` with camelCase event names and prefers the
+// `powershell` field on Windows. Points at `origin hooks devin` (the Cascade
+// slug `hooks windsurf` command was removed in the rebrand). Kept as a
+// transition shim; safe to drop once Cascade is gone everywhere.
+function installLegacyCascadeHooks(gitRoot: string): void {
+  const windsurfDir = path.join(gitRoot, '.windsurf');
+  const hooksPath = path.join(windsurfDir, 'hooks.json');
+  if (!fs.existsSync(windsurfDir)) fs.mkdirSync(windsurfDir, { recursive: true });
+
+  let config: Record<string, any> = { version: 1, hooks: {} };
+  if (fs.existsSync(hooksPath)) {
+    backupExistingHooks(hooksPath);
+    try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = { version: 1, hooks: {} }; }
+  }
+  if (!config.hooks) config.hooks = {};
+
+  const cs = (sub: string) => ({
+    command: originCmd(`origin hooks devin ${sub}`),
+    powershell: originPowershellCmd(`origin hooks devin ${sub}`),
+  });
+  const hooks: Record<string, any[]> = {
+    sessionStart: [cs('session-start')],
+    stop: [cs('stop')],
+    beforeSubmitPrompt: [cs('user-prompt-submit')],
+    sessionEnd: [cs('session-end')],
+  };
+  for (const [eventType, entries] of Object.entries(hooks)) {
+    if (!config.hooks[eventType]) config.hooks[eventType] = [];
+    config.hooks[eventType] = config.hooks[eventType].filter((h: any) => !isOriginHookCommand(h.command));
+    config.hooks[eventType].push(...entries);
+  }
+  fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
+  const label = gitRoot === os.homedir() ? `~/.windsurf/hooks.json` : `.windsurf/hooks.json`;
+  console.log(chalk.green(`  ✓ Cascade hooks installed in ${label} (desktop transition)`));
 }
 
 // ── GitHub Copilot CLI Hooks ─────────────────────────────────────────────
@@ -481,21 +568,102 @@ export function installCopilotHooks(gitRoot: string): void {
 
 // ── Codex CLI Hooks ──────────────────────────────────────────────────────
 
-function installCodexHooks(gitRoot: string): void {
+// Windows watcher-only cleanup: remove every Origin-written Codex hook artifact
+// so Codex stops trying (and failing) to run them, while leaving the user's own
+// config and the `[features] hooks` flag untouched. Strips:
+//   1. Origin hook entries from any standalone .codex/hooks.json (deleting the
+//      file only if it held nothing but Origin hooks).
+//   2. Origin's delimited `# origin-codex-inline-hooks-*` and
+//      `# origin-trusted-hooks-*` blocks from ~/.codex/config.toml, plus any
+//      un-delimited `[hooks.state."<source>:…"]` trust tables a pre-marker CLI
+//      left behind (keyed on either the hooks.json or config.toml source path).
+// Idempotent and best-effort — a leftover only means Codex logs a benign hook
+// error until the next `origin enable`.
+// A `[hooks.state."<source-path>:…"]` key stores the source path, and the path
+// separators land in the TOML file either SINGLE-escaped (`C:\Users`, e.g. a
+// hand-written or older config) or DOUBLE-escaped (`C:\\Users`, TOML basic-string
+// escaping the CLI itself emits). Build a regex fragment for the path that
+// matches BOTH — regex-escape each non-backslash run, and let every path
+// separator match one-or-two literal backslashes. On POSIX (no backslashes) this
+// is just the escaped path. Without this, the Windows strip silently no-ops on a
+// double- or single-backslash config that the other form was written for.
+export function backslashTolerantPathRe(p: string): string {
+  return p
+    .split('\\')
+    .map((seg) => seg.replace(/[.*+?^${}()|[\]]/g, '\\$&'))
+    .join('(?:\\\\){1,2}');
+}
+
+function stripOriginCodexHooksWindows(hooksPath: string, configTomlPath: string): void {
+  // 1. Standalone hooks.json.
+  try {
+    if (fs.existsSync(hooksPath)) {
+      backupExistingHooks(hooksPath);
+      let existing: Record<string, any> = {};
+      try { existing = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { existing = {}; }
+      if (existing.hooks && typeof existing.hooks === 'object') {
+        for (const ev of Object.keys(existing.hooks)) {
+          existing.hooks[ev] = filterOriginHooks(existing.hooks[ev] || []);
+          if (existing.hooks[ev].length === 0) delete existing.hooks[ev];
+        }
+      }
+      const stillHasHooks = existing.hooks && Object.keys(existing.hooks).length > 0;
+      const stillHasOtherKeys = Object.keys(existing).some((k) => k !== 'hooks');
+      if (!stillHasHooks && !stillHasOtherKeys) {
+        fs.rmSync(hooksPath, { force: true });
+      } else {
+        fs.writeFileSync(hooksPath, JSON.stringify(existing, null, 2) + '\n');
+      }
+    }
+  } catch { /* best-effort */ }
+
+  // 2. config.toml inline + trust blocks. Preserve everything else (incl. the
+  //    [features] hooks flag — we do NOT flip it here).
+  try {
+    if (!fs.existsSync(configTomlPath)) return;
+    const toml = fs.readFileSync(configTomlPath, 'utf-8');
+    let next = toml;
+    next = next.replace(/\n# origin-trusted-hooks-begin[\s\S]*?# origin-trusted-hooks-end\n?/g, '');
+    next = next.replace(/\n# origin-codex-inline-hooks-begin[\s\S]*?# origin-codex-inline-hooks-end\n?/g, '');
+    // Un-delimited orphan trust tables written by older CLIs, keyed on either
+    // the hooks.json or the config.toml source path.
+    for (const keySource of [hooksPath, configTomlPath]) {
+      const orphanHookStateRe = new RegExp(
+        `\\n\\[hooks\\.state\\."${backslashTolerantPathRe(keySource)}:[^"\\n]*"\\]\\s*\\n\\s*trusted_hash\\s*=\\s*"[^"\\n]*"\\s*`,
+        'g',
+      );
+      next = next.replace(orphanHookStateRe, '\n');
+    }
+    if (next !== toml) {
+      fs.writeFileSync(configTomlPath, next);
+      console.log(chalk.gray('    • Removed stale Origin Codex hook blocks from ~/.codex/config.toml'));
+    }
+  } catch { /* best-effort */ }
+}
+
+export function installCodexHooks(gitRoot: string): void {
   const codexDir = path.join(gitRoot, '.codex');
   const hooksPath = path.join(codexDir, 'hooks.json');
+  const globalCodexDir = path.join(os.homedir(), '.codex');
+  const configTomlPath = path.join(globalCodexDir, 'config.toml');
+
+  // ── Windows: watcher-only, NO Codex lifecycle hooks ──────────────────────
+  // Codex's Windows sandbox blocks the hooks (they can't inject context or
+  // capture) yet Codex still surfaces them as red "SessionStart/UserPromptSubmit/
+  // Stop hook (failed)" errors. Capture on Windows is now the hook-independent
+  // rollout watcher (`origin codex-watch`, auto-started by enable), so the hooks
+  // are pure noise. Register NOTHING and STRIP any Origin hook blocks a prior
+  // CLI wrote — leaving the user's own config and the [features] flag untouched.
+  // macOS/Linux still install hooks (they work + do context injection) below.
+  if (isWindows()) {
+    stripOriginCodexHooksWindows(hooksPath, configTomlPath);
+    console.log(chalk.green('  ✓ Codex capture on Windows uses the rollout watcher (origin codex-watch) — hooks are not installed'));
+    return;
+  }
 
   if (!fs.existsSync(codexDir)) {
     fs.mkdirSync(codexDir, { recursive: true });
   }
-
-  let config: Record<string, any> = { hooks: {} };
-  if (fs.existsSync(hooksPath)) {
-    backupExistingHooks(hooksPath);
-    try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = { hooks: {} }; }
-  }
-
-  if (!config.hooks) config.hooks = {};
 
   // Codex supports: SessionStart, Stop, UserPromptSubmit (no SessionEnd/BeforeAgent/AfterAgent)
   const hooks: Record<string, any[]> = {
@@ -504,15 +672,25 @@ function installCodexHooks(gitRoot: string): void {
     Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex stop'), timeout: 10 }] }],
   };
 
-  for (const [eventType, entries] of Object.entries(hooks)) {
-    if (!config.hooks[eventType]) config.hooks[eventType] = [];
-    config.hooks[eventType] = filterOriginHooks(config.hooks[eventType]);
-    config.hooks[eventType].push(...entries);
+  // macOS/Linux only (Windows returned early above — it's watcher-only). The
+  // standalone .codex/hooks.json is the sole hook source here; inline config.toml
+  // hooks are never written off Windows, so there is no double-source.
+  {
+    let config: Record<string, any> = { hooks: {} };
+    if (fs.existsSync(hooksPath)) {
+      backupExistingHooks(hooksPath);
+      try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = { hooks: {} }; }
+    }
+    if (!config.hooks) config.hooks = {};
+    for (const [eventType, entries] of Object.entries(hooks)) {
+      if (!config.hooks[eventType]) config.hooks[eventType] = [];
+      config.hooks[eventType] = filterOriginHooks(config.hooks[eventType]);
+      config.hooks[eventType].push(...entries);
+    }
+    fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
+    const codexLabel = gitRoot === os.homedir() ? `~/.codex/hooks.json` : `.codex/hooks.json`;
+    console.log(chalk.green(`  ✓ Hooks installed in ${codexLabel}`));
   }
-
-  fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
-  const codexLabel = gitRoot === os.homedir() ? `~/.codex/hooks.json` : `.codex/hooks.json`;
-  console.log(chalk.green(`  ✓ Hooks installed in ${codexLabel}`));
 
   // Auto-enable the hooks feature flag in ~/.codex/config.toml so the user
   // doesn't need to pass `-c features.hooks=true` every time.
@@ -522,8 +700,6 @@ function installCodexHooks(gitRoot: string): void {
   // https://developers.openai.com/codex/config-basic#feature-flags). We
   // write the new canonical key, and if a user's config still has the
   // legacy `codex_hooks = true` we rewrite it in-place during this run.
-  const globalCodexDir = path.join(os.homedir(), '.codex');
-  const configTomlPath = path.join(globalCodexDir, 'config.toml');
   try {
     if (!fs.existsSync(globalCodexDir)) {
       fs.mkdirSync(globalCodexDir, { recursive: true });
@@ -567,11 +743,50 @@ function installCodexHooks(gitRoot: string): void {
       PreCompact: 'pre_compact',
       PostCompact: 'post_compact',
     };
-    const trustedHashLines: string[] = [];
+
+    // A Codex build discovers hooks from up to four sources and "loads all
+    // matching hooks" from every one: ~/.codex/hooks.json, <repo>/.codex/
+    // hooks.json, and inline `[hooks]` in either config.toml. Origin has always
+    // shipped the standalone ~/.codex/hooks.json file. The 2026-07 Codex DESKTOP
+    // self-update (app v26.721.x) stopped discovering that user-global FILE
+    // (openai/codex#27133), so Origin ALSO began registering the hooks INLINE in
+    // ~/.codex/config.toml — a separate discovery source read through a different
+    // code path (load_toml_hooks_from_layer) that survived the file-discovery
+    // regression, is provably read by the updated build (its trusted_hash state
+    // is honored), and dodges the worktree project-root discovery bug too.
+    //
+    // FIX 2: on Windows we now ship config.toml inline as the SINGLE source and
+    // no longer write the standalone hooks.json (stripped above). That removes
+    // the "loading hooks from both … prefer a single representation" warning and
+    // the resulting double-fire on builds that discover BOTH — while STILL
+    // working on the regressed Desktop build (inline is read by every build with
+    // the hooks engine, stable since v0.124.0). macOS/Linux is unchanged: no
+    // inline hooks, hooks.json remains the sole source. The runtime turn_id
+    // dedup in commands/hooks.ts still guards any residual double-fire (e.g. a
+    // stale hooks.json a user restored by hand).
+    const alsoRegisterInlineConfig = isWindows();
+
+    // The trusted_hash is a sha256 over canonical JSON of the NORMALIZED hook
+    // identity (event_name + optional matcher + normalized handler) — it is
+    // independent of WHICH source the hook came from. So the same hash trusts
+    // the hook under every source; only the state KEY's `key_source` prefix
+    // differs (the abs path to the file that declared it: hooks.json for the
+    // standalone file, config.toml for the inline copy).
+    type HashEntry = { eventLabel: string; groupIndex: number; handlerIndex: number; hash: string };
+    const hashEntries: HashEntry[] = [];
+    // Inline-TOML rendering of the same hooks, as `[[hooks.<Event>]]` groups
+    // each holding `[[hooks.<Event>.hooks]]` handler tables.
+    const inlineHookLines: string[] = [];
     for (const [pascalEvent, groups] of Object.entries(hooks)) {
       const eventLabel = eventLabelMap[pascalEvent];
       if (!eventLabel) continue;
       groups.forEach((group: any, groupIndex: number) => {
+        if (alsoRegisterInlineConfig) {
+          inlineHookLines.push(`\n[[hooks.${pascalEvent}]]`);
+          if (group.matcher !== undefined && group.matcher !== null) {
+            inlineHookLines.push(`matcher = ${tomlLiteralString(String(group.matcher))}`);
+          }
+        }
         (group.hooks || []).forEach((handler: any, handlerIndex: number) => {
           // Mirror Codex's HookHandlerConfig::Command normalization:
           //   timeout defaults to 600, capped to at least 1; async defaults
@@ -594,34 +809,70 @@ function installCodexHooks(gitRoot: string): void {
           const canonical = sortObjectKeysDeep(identity);
           const json = JSON.stringify(canonical);
           const hash = crypto.createHash('sha256').update(json).digest('hex');
-          const key = `${hooksPath}:${eventLabel}:${groupIndex}:${handlerIndex}`;
-          // TOML quoted-key with escaped backslashes/quotes inside.
-          const safeKey = key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-          trustedHashLines.push(
-            `\n[hooks.state."${safeKey}"]`,
-            `trusted_hash = "sha256:${hash}"`,
-          );
+          hashEntries.push({ eventLabel, groupIndex, handlerIndex, hash });
+          if (alsoRegisterInlineConfig) {
+            inlineHookLines.push(
+              `[[hooks.${pascalEvent}.hooks]]`,
+              `type = "command"`,
+              // TOML literal (single-quoted) string: no escape processing, so
+              // the Windows `"C:\...\node.exe" "...\index.js" …` command — full
+              // of backslashes and double-quotes — survives verbatim.
+              `command = ${tomlLiteralString(String(handler.command))}`,
+              `timeout = ${typeof handler.timeout === 'number' ? handler.timeout : 10}`,
+            );
+          }
         });
       });
     }
-    // Strip any prior origin-managed trusted_hash blocks so re-running
-    // origin enable updates the hashes instead of duplicating them.
+
+    // Emit one [hooks.state."<key>"] entry per (source, event, group, handler).
+    // Single-source policy: on Windows the ONLY source is the inline config.toml
+    // copy (hooks.json is not shipped), so trust just config.toml; off Windows
+    // the sole source is the standalone hooks.json.
+    const trustKeySources = alsoRegisterInlineConfig ? [configTomlPath] : [hooksPath];
+    const trustedHashLines: string[] = [];
+    for (const keySource of trustKeySources) {
+      for (const { eventLabel, groupIndex, handlerIndex, hash } of hashEntries) {
+        const key = `${keySource}:${eventLabel}:${groupIndex}:${handlerIndex}`;
+        // TOML quoted-key with escaped backslashes/quotes inside.
+        const safeKey = key.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        trustedHashLines.push(
+          `\n[hooks.state."${safeKey}"]`,
+          `trusted_hash = "sha256:${hash}"`,
+        );
+      }
+    }
+    // Strip any prior origin-managed blocks so re-running origin enable updates
+    // the hashes/commands in place instead of duplicating them (a TOML
+    // duplicate-key parse failure would brick `codex`).
     next = next.replace(/\n# origin-trusted-hooks-begin[\s\S]*?# origin-trusted-hooks-end\n?/g, '');
+    next = next.replace(/\n# origin-codex-inline-hooks-begin[\s\S]*?# origin-codex-inline-hooks-end\n?/g, '');
     // Older CLI versions wrote the [hooks.state."..."] blocks without the
     // begin/end markers — those won't be caught above. Strip any block whose
-    // TOML key references the hooks.json path we're about to re-trust.
-    // TOML duplicate-key parse failure here would brick `codex` (Error
-    // loading config.toml: duplicate key), so this is fail-closed: if we're
-    // writing trusted_hash entries, we own this slice of the file entirely.
-    const hooksPathEscaped = hooksPath
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const orphanHookStateRe = new RegExp(
-      `\\n\\[hooks\\.state\\."${hooksPathEscaped}:[^"\\n]*"\\]\\s*\\n\\s*trusted_hash\\s*=\\s*"[^"\\n]*"\\s*`,
-      'g',
-    );
-    next = next.replace(orphanHookStateRe, '\n');
+    // TOML key references a source path we're about to re-trust. Fail-closed:
+    // if we're writing trusted_hash entries, we own this slice of the file.
+    for (const keySource of trustKeySources) {
+      const orphanHookStateRe = new RegExp(
+        `\\n\\[hooks\\.state\\."${backslashTolerantPathRe(keySource)}:[^"\\n]*"\\]\\s*\\n\\s*trusted_hash\\s*=\\s*"[^"\\n]*"\\s*`,
+        'g',
+      );
+      next = next.replace(orphanHookStateRe, '\n');
+    }
+    if (inlineHookLines.length > 0) {
+      // The inline hooks MUST precede the [hooks.state.*] trust tables: once a
+      // `[hooks.state."x"]` header opens, subsequent `[[hooks.<Event>]]` arrays
+      // are still valid TOML (distinct sub-keys of `hooks`), but keeping the
+      // array-of-tables definitions together and ahead of the state tables is
+      // the least surprising layout and avoids any header-reopen ambiguity.
+      next = next.trimEnd()
+        + '\n\n# origin-codex-inline-hooks-begin'
+        + '\n# Auto-generated by `origin enable`. Mirrors ~/.codex/hooks.json inline'
+        + '\n# so a Codex build that stopped discovering the standalone hooks.json'
+        + '\n# file still finds Origin\'s hooks here. Duplicate fires are de-duped at'
+        + '\n# runtime by Origin (keyed on Codex\'s turn_id).'
+        + inlineHookLines.join('\n')
+        + '\n# origin-codex-inline-hooks-end\n';
+    }
     if (trustedHashLines.length > 0) {
       next = next.trimEnd()
         + '\n\n# origin-trusted-hooks-begin\n# Auto-generated by `origin enable`. Trusts the hooks above so'
@@ -642,6 +893,9 @@ function installCodexHooks(gitRoot: string): void {
       if (trustedHashLines.length > 0) {
         console.log(chalk.green('  ✓ Auto-trusted Codex hooks (skips `/hooks` review on next launch)'));
       }
+      if (inlineHookLines.length > 0) {
+        console.log(chalk.green('  ✓ Registered Codex hooks inline in ~/.codex/config.toml (single source on Windows)'));
+      }
     } else {
       console.log(chalk.green('  ✓ Codex hooks feature flag already enabled in ~/.codex/config.toml'));
     }
@@ -649,6 +903,24 @@ function installCodexHooks(gitRoot: string): void {
     // Non-fatal — user can still enable manually
     console.log(chalk.yellow('    ⚠ Could not auto-enable Codex hooks. Run: codex -c features.hooks=true'));
   }
+}
+
+// Render a string as a TOML literal (single-quoted) string. Literal strings do
+// NO escape processing, so backslashes and double-quotes pass through verbatim —
+// exactly what Windows hook commands (`"C:\…\node.exe" "…\index.js" …`) need.
+// A literal string cannot contain a single quote or newline; hook commands never
+// do, but we fall back to a double-quoted basic string (with escapes) if one
+// somehow appears, so we never emit invalid TOML.
+function tomlLiteralString(value: string): string {
+  if (!value.includes("'") && !value.includes('\n')) {
+    return `'${value}'`;
+  }
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t');
+  return `"${escaped}"`;
 }
 
 // Recursively sort object keys so JSON.stringify produces canonical output.
@@ -1088,6 +1360,63 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
     console.log(chalk.green(`\n  ✓ Agent slug override: ${toolSlug} → ${opts.agentSlug}`));
   }
 
+  // Hook-independent Codex watcher (Windows-first rollout). Codex Desktop /
+  // v0.145 keep breaking hook discovery/trust/sandbox, so on Windows we ALSO
+  // run a machine-global daemon that captures Codex sessions straight from the
+  // rollout JSONL — no hook required. Gated to Windows via
+  // codexWatchAutoStartEnabled(); enabling macOS/Linux later is a one-line
+  // change there. Idempotent: no-ops if a live watcher already owns the pid
+  // file, and any spawn sets windowsHide so it never pops a console window.
+  if (isConnectedMode()) {
+    try {
+      const { codexWatchAutoStartEnabled, ensureCodexWatchRunning, registerCodexWatchLogonTask } =
+        await import('../codex-watch.js');
+      if (codexWatchAutoStartEnabled()) {
+        const res = ensureCodexWatchRunning();
+        if (res.started) {
+          console.log(chalk.green('  ✓ Codex rollout watcher started (hook-independent capture)'));
+        } else if (res.reason === 'already-running') {
+          console.log(chalk.gray('  ✓ Codex rollout watcher already running'));
+        }
+        // Survive reboots via a logon Scheduled Task (Windows-only, best-effort).
+        const task = registerCodexWatchLogonTask();
+        if (task.registered) {
+          console.log(chalk.green('  ✓ Codex watcher registered to relaunch at logon'));
+        }
+      }
+    } catch { /* never block enable on watcher startup */ }
+  }
+
+  // Hook-independent multi-agent transcript watcher (Windows-first, same
+  // rationale as codex-watch). On Windows the GUI/desktop agents (Claude Code,
+  // Cursor, Antigravity, Gemini, Copilot) frequently never fire their
+  // settings.json lifecycle hooks — the client just doesn't run them — so
+  // hook-based capture silently never triggers. This daemon captures those
+  // sessions straight from each agent's on-disk transcript. Keyed on the agent's
+  // own session id, so on macOS/Linux (where hooks DO fire) a watcher-created
+  // session would merge server-side rather than double-count — but we gate
+  // auto-start to Windows for now via transcriptWatchAutoStartEnabled().
+  // Idempotent: no-ops if a live watcher already owns the pid file; every spawn
+  // sets windowsHide so it never pops a console window.
+  if (isConnectedMode()) {
+    try {
+      const { transcriptWatchAutoStartEnabled, ensureTranscriptWatchRunning, registerTranscriptWatchLogonTask } =
+        await import('../transcript-watch.js');
+      if (transcriptWatchAutoStartEnabled()) {
+        const res = ensureTranscriptWatchRunning();
+        if (res.started) {
+          console.log(chalk.green('  ✓ Transcript watcher started (hook-independent capture for Claude/Cursor/Antigravity/Gemini/Copilot)'));
+        } else if (res.reason === 'already-running') {
+          console.log(chalk.gray('  ✓ Transcript watcher already running'));
+        }
+        const task = registerTranscriptWatchLogonTask();
+        if (task.registered) {
+          console.log(chalk.green('  ✓ Transcript watcher registered to relaunch at logon'));
+        }
+      }
+    } catch { /* never block enable on watcher startup */ }
+  }
+
   console.log(chalk.bold('\n📋 Next steps:\n'));
   const agentNames = agentsToEnable.map(a => AGENTS[a].command);
   const agentList = agentNames.length > 1
@@ -1470,7 +1799,7 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
     // 1. If global core.hooksPath is set to Origin's managed dir, the
     //    global pre-commit fires here too. Nothing to do.
     try {
-      const globalHooksPath = execSync('git config --global --get core.hooksPath', {
+      const globalHooksPath = execSync('git config --global --get core.hooksPath', { windowsHide: true,
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'ignore'],
       }).trim();

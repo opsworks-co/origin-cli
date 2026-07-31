@@ -128,6 +128,29 @@ export function isProcessRunning(pattern: string): boolean {
  * Win32_Process CIM snapshot (ParentProcessId + CommandLine). Returns null when
  * the pid is gone or the lookup fails. Replaces a bare `ps` shell-out (Unix-only).
  */
+/**
+ * True if any ANCESTOR of the current process (walking the parent chain) has a
+ * command line matching `re`. Unlike isProcessRunning (which is machine-global),
+ * this is precise to OUR process tree, so it answers "was this hook spawned BY
+ * <agent>?" — e.g. Devin CLI reuses Claude Code's hooks, so its claude-code hook
+ * runs as a descendant of the `devin` process. A real Claude session, or an
+ * unrelated `devin` running elsewhere, does not put devin in THIS hook's
+ * ancestry. Bounded by maxHops so a pathological/looping table can't hang a hook.
+ */
+export function hasAncestorProcess(re: RegExp, maxHops = 16): boolean {
+  let pid = process.ppid;
+  const seen = new Set<number>();
+  for (let i = 0; i < maxHops && pid > 1 && !seen.has(pid); i++) {
+    seen.add(pid);
+    const info = processInfo(pid);
+    if (!info) break;
+    if (re.test(info.command)) return true;
+    if (!info.ppid || info.ppid === pid) break;
+    pid = info.ppid;
+  }
+  return false;
+}
+
 export function processInfo(pid: number): { ppid: number; command: string } | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (isWindows()) {

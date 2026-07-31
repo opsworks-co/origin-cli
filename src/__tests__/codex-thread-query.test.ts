@@ -27,24 +27,35 @@ describe('codex-thread-query strict builder', () => {
     expect(buildCodexThreadByIdQuery('id', 'has space')).toBeNull();
   });
 
-  it('builds an exact-cwd query — equality, not LIKE', () => {
+  it('builds an exact-cwd query — IN over separator variants, not LIKE', () => {
     const q = buildCodexThreadByCwdQuery('id', '/Users/x/code/origin');
-    expect(q).toBe(
-      "SELECT id FROM threads WHERE cwd = '/Users/x/code/origin' ORDER BY updated_at DESC LIMIT 1;",
-    );
+    expect(q).toMatch(/WHERE cwd IN \(/);
+    expect(q).toContain("'/Users/x/code/origin'");
+    expect(q).toMatch(/ORDER BY updated_at DESC LIMIT 1;$/);
     expect(q).not.toMatch(/LIKE/i);
+    expect(q).not.toContain('%');
   });
 
-  it('escapes single quotes in the cwd', () => {
+  it('matches Codex\'s native backslash cwd on Windows (the empty-session bug)', () => {
+    // Origin normalizes repoPath to forward slashes; Codex (native) stores the
+    // OS-native backslash cwd. The IN list must contain BOTH so the lookup
+    // succeeds on Windows instead of returning zero prompts → empty session.
+    const q = buildCodexThreadByCwdQuery('id', 'C:/soft/origin-demo-1');
+    expect(q).toContain("'C:/soft/origin-demo-1'");
+    expect(q).toContain("'C:\\soft\\origin-demo-1'");
+  });
+
+  it('escapes single quotes in every cwd variant', () => {
     const q = buildCodexThreadByCwdQuery('id', "/Users/x/it's-a-repo");
-    expect(q).toContain("cwd = '/Users/x/it''s-a-repo'");
+    expect(q).toContain("'/Users/x/it''s-a-repo'");
   });
 
-  it('a basename-substring sibling cwd can never match the exact-cwd query', () => {
+  it('a basename-substring sibling cwd can never match (still strict content, no LIKE)', () => {
     // With the old LIKE '%origin%' both '/Users/x/code/origin' and
-    // '/Users/x/code/origin-backup' matched; equality pins exactly one.
+    // '/Users/x/code/origin-backup' matched; exact-content IN pins the path.
     const q = buildCodexThreadByCwdQuery('id', '/Users/x/code/origin');
-    expect(q).toContain("= '/Users/x/code/origin'");
+    expect(q).toContain("'/Users/x/code/origin'");
+    expect(q).not.toContain('origin-backup');
     expect(q).not.toContain('%');
   });
 

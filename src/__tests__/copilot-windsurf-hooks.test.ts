@@ -46,6 +46,11 @@ describe('Copilot + Windsurf hook installers', () => {
     expect(cfg.Stop?.[0]?.hooks?.[0]?.command).toContain('origin hooks devin stop');
     expect(cfg.SessionEnd?.[0]?.hooks?.[0]?.command).toContain('origin hooks devin session-end');
     expect(cfg.SessionStart?.[0]?.hooks?.[0]?.type).toBe('command');
+    // Transition: also writes legacy Cascade hooks for the desktop GUI, pointed
+    // at the same `origin hooks devin` handler (camelCase Cascade event names).
+    const casc = JSON.parse(fs.readFileSync(path.join(dir, '.windsurf', 'hooks.json'), 'utf-8'));
+    expect(casc.hooks.sessionStart?.[0]?.command).toContain('origin hooks devin session-start');
+    expect(casc.hooks.beforeSubmitPrompt?.[0]?.command).toContain('origin hooks devin user-prompt-submit');
   });
 
   it('Devin: re-running is idempotent (no duplicate origin entries)', () => {

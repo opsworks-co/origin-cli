@@ -35,6 +35,7 @@ export function preserveAttributionOnRewrite(repoPath: string, oldSha: string, n
     encoding: 'utf-8' as const,
     stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
     timeout: 10000,
+    windowsHide: true, // no cmd.exe window per git call on Windows
   };
 
   try {
@@ -123,6 +124,7 @@ export function handleCherryPick(repoPath: string): void {
       cwd: repoPath,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     }).trim();
 
     if (newSha && newSha !== originalSha) {
@@ -248,7 +250,7 @@ export function handlePostCheckout(repoPath: string, prevHead: string, newHead: 
   // Check for stash-related refs
   try {
     // If there are stash entries, check if any of them match the transition
-    const stashList = execSync('git stash list --format=%H', {
+    const stashList = execSync('git stash list --format=%H', { windowsHide: true,
       cwd: repoPath,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -270,7 +272,7 @@ export function handlePostCheckout(repoPath: string, prevHead: string, newHead: 
  */
 function getGitDir(repoPath: string): string | null {
   try {
-    const gitDir = execSync('git rev-parse --git-dir', {
+    const gitDir = execSync('git rev-parse --git-dir', { windowsHide: true,
       cwd: repoPath,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],

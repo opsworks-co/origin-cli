@@ -8,6 +8,7 @@ import { api } from '../api.js';
 import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat, isHeartbeatAlive } from '../session-state.js';
 import { git, gitOrNull } from '../utils/exec.js';
 import { currentOwner, isForeignSession, listForeignQueuedSessions, reportForeignSessionCount } from '../session-owner.js';
+import { resolveAgentDisplayName } from '../agents/registry.js';
 import { makeSyncBlock } from '../sync-block.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
@@ -26,6 +27,8 @@ interface LocalSession {
   linesRemoved: number;
   git?: { branch?: string; commitShas?: string[] };
   prompts?: Array<{ index: number; text: string }>;
+  agentSlug?: string;
+  agentName?: string;
 }
 
 function listLocalSessions(repoPath: string): LocalSession[] {
@@ -108,6 +111,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
               linesAdded: 0,
               linesRemoved: 0,
               startedAt: state.startedAt,
+              agentSlug: (state as any).agentSlug || undefined,
               agentName: undefined,
             } as LocalSession);
           }
@@ -144,8 +148,9 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
             durationMs: Date.now() - new Date(state.startedAt).getTime(),
             linesAdded: 0,
             linesRemoved: 0,
-            startedAt: state.startedAt,
-            agentName: undefined,
+              startedAt: state.startedAt,
+              agentSlug: (state as any).agentSlug || undefined,
+              agentName: undefined,
           } as LocalSession);
         }
       }
@@ -267,7 +272,8 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
   // Column headers, aligned to the exact widths used by the data rows below.
   const header = [
     `  ${'ID'.padEnd(8)}`,
-    `${'MODEL / AGENT'.padEnd(25)}`,
+    `${'MODEL'.padEnd(25)}`,
+    `${'AGENT'.padEnd(16)}`,
     `${'STATUS'.padEnd(12)}`,
     `${'FILES'.padEnd(9)}`,
     `${'COST'.padEnd(7)}`,
@@ -288,10 +294,14 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     const id = local?.sessionId?.slice(0, 8) || platform?.id?.slice(0, 8) || '????????';
 
     // Model / agent name
-    let displayModel = local?.model || platform?.model || 'unknown';
-    if (/^(default|unknown|cursor)$/i.test(displayModel) && platform?.agentName) {
-      displayModel = platform.agentName;
-    }
+    const displayModel = local?.model || platform?.model || 'unknown';
+    // Agent name for the AGENT column. The server's linked agent name wins; else
+    // resolve from the session's slug/model. The slug is authoritative — Copilot
+    // and Windsurf run Claude/GPT models, so the model alone can't name the agent.
+    const agentSlug = (local as any)?.agentSlug || (platform as any)?.agentSlug;
+    let agentLabel = platform?.agentName || local?.agentName || resolveAgentDisplayName(displayModel, agentSlug);
+    if (!agentLabel || /^(unknown|ai)$/i.test(agentLabel)) agentLabel = '—';
+    if (agentLabel.length > 16) agentLabel = agentLabel.slice(0, 15) + '…';
 
     // Status — simple: RUNNING / IDLE / ENDED
     let status: string;
@@ -339,6 +349,7 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     const line = [
       `  ${chalk.dim(id.padEnd(8))}`,
       `${chalk.cyan(displayModel.padEnd(25))}`,
+      `${chalk.magenta(agentLabel.padEnd(16))}`,
       `${statusColor(status.padEnd(12))}`,
       `${String(files).padStart(3)} files`,
       `${chalk.dim('$' + cost.toFixed(2).padStart(6))}`,

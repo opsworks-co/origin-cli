@@ -24,6 +24,12 @@ interface TranscriptLine {
   type: 'user' | 'assistant';
   uuid?: string;
   timestamp?: string;
+  // Claude Code marks every turn INSIDE a Task sub-agent with isSidechain=true
+  // (and chains them via parentUuid). Without reading this, a sub-agent's
+  // synthetic dispatch prompt leaks in as a user prompt and its tokens are
+  // folded into the parent under the parent's model. We split them out.
+  isSidechain?: boolean;
+  parentUuid?: string | null;
   message: {
     id?: string;
     role?: string;
@@ -42,6 +48,16 @@ export interface ParsedTranscript {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   toolCalls: number;
+  // Of `tokensUsed`, the portion incurred INSIDE Task sub-agents (isSidechain
+  // turns). The session is still billed for it (it's a subset of the total),
+  // but breaking it out lets the UI show "N tokens (M in sub-agents)" and
+  // avoids pretending all tokens ran on the parent model.
+  subagentTokens: number;
+  // Files edited INSIDE a sub-agent (isSidechain) turn, with the turn's
+  // timestamp — lets the CLI attribute each file to the Task spawn whose
+  // execution window contains it (see buildSubagentSummary). Best-effort:
+  // exact for sequential sub-agents, ambiguous only for truly parallel ones.
+  subagentEdits: Array<{ file: string; ts: number }>;
   // Per-tool-name counts (Read, Edit, Bash, Grep, …) — the structured
   // breakdown the server stores so "Tool calls" doesn't depend on
   // re-parsing the display transcript text later.
@@ -72,6 +88,11 @@ const FILE_MODIFICATION_TOOLS = new Set([
   'apply_diff',
   'insert',
   'patch',
+  // Cursor — Write (with a `contents` key) + StrReplace / search_replace
+  // (old_string/new_string, like Edit).
+  'StrReplace',
+  'str_replace',
+  'search_replace',
 ]);
 
 // Read-style tools — we capture the inspected file path from these so the
@@ -256,6 +277,8 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
     toolCalls: 0,
+    subagentTokens: 0,
+    subagentEdits: [],
     toolBreakdown: [],
     filesRead: [],
     summary: '',
@@ -305,6 +328,9 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
   const filesSet = new Set<string>();
   const toolCounts = new Map<string, number>();
   const readFilesSet = new Set<string>();
+  // Message ids of assistant turns that ran inside a Task sub-agent, so we can
+  // total their tokens separately after the dedup pass.
+  const sidechainMsgIds = new Set<string>();
 
   for (const line of lines) {
     let entry: TranscriptLine;
@@ -323,6 +349,14 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     // Claude Code uses `{"type":"user", "message":{...}}` and an older shape
     // nests it as `message.role`. Check all three so one parser handles all.
     const type = entry.type || (entry as any).role || entry.message?.role;
+
+    // A sub-agent's turns (Task sidechain) are the agent's internal work, not
+    // the user's — its "user" entries are synthetic dispatch prompts and its
+    // assistant tokens ran on the sub-agent's model. Skip sidechain user
+    // prompts entirely; sidechain assistant tokens are tracked separately below.
+    if (entry.isSidechain && type === 'user') {
+      continue;
+    }
 
     if (type === 'user') {
       let prompt = extractUserPrompt(entry);
@@ -412,8 +446,9 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     }
 
     if (type === 'assistant') {
-      // Extract model name
-      if (entry.message?.model && !result.model) {
+      const isSub = !!entry.isSidechain;
+      // Extract model name — never let a sub-agent's model become the session's.
+      if (entry.message?.model && !result.model && !isSub) {
         result.model = entry.message.model;
       }
 
@@ -428,20 +463,31 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
             if (name) toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
             const fp = toolInputPath(block.input);
             // Extract file paths from file modification tools
-            if (fp && FILE_MODIFICATION_TOOLS.has(name)) filesSet.add(fp);
+            if (fp && FILE_MODIFICATION_TOOLS.has(name)) {
+              filesSet.add(fp);
+              // Record sidechain (sub-agent) edits with the turn's timestamp so
+              // the CLI can attribute each file to its Task spawn by time window.
+              if (isSub) {
+                result.subagentEdits.push({ file: fp, ts: entry.timestamp ? Date.parse(entry.timestamp) || 0 : 0 });
+              }
+            }
             if (fp && READ_TOOLS.has(name)) readFilesSet.add(fp);
           }
 
-          // Track last assistant text as summary
-          if (block.type === 'text' && block.text) {
+          // Track last assistant text as summary — but the session summary is
+          // the PARENT agent's last word, not a sub-agent's internal narration.
+          if (block.type === 'text' && block.text && !isSub) {
             result.summary = block.text;
           }
         }
-      } else if (typeof content === 'string' && content) {
+      } else if (typeof content === 'string' && content && !isSub) {
         result.summary = content;
       }
 
-      // Track token usage (deduplicate by message ID — keep highest output_tokens)
+      // Track token usage (deduplicate by message ID — keep highest output_tokens).
+      // Sidechain tokens are still summed into the session total (the session
+      // incurred them), but we remember which ids are sub-agent so we can
+      // report their portion separately.
       const usage = entry.message?.usage;
       if (usage) {
         const msgId = entry.message?.id || entry.uuid || '';
@@ -449,16 +495,20 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
         if (!existing || (usage.output_tokens ?? 0) > (existing.output_tokens ?? 0)) {
           seenMessageIds.set(msgId, usage);
         }
+        if (isSub && msgId) sidechainMsgIds.add(msgId);
       }
     }
   }
 
   // Sum deduplicated token usage (track cache tokens separately for accurate cost)
-  for (const usage of seenMessageIds.values()) {
+  for (const [msgId, usage] of seenMessageIds.entries()) {
     result.inputTokens += usage.input_tokens ?? 0;
     result.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
     result.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
     result.outputTokens += usage.output_tokens ?? 0;
+    if (sidechainMsgIds.has(msgId)) {
+      result.subagentTokens += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+    }
   }
   // Same for Gemini JSONL entries — id-deduped, then summed.
   // `thoughts` is billed at the output rate so it folds into
@@ -547,6 +597,15 @@ function cleanPrompt(text: string): string | null {
     // Codex's session-init envelope (kept here too as belt-and-suspenders).
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
     .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+    // Codex attaches images/files by wrapping the real prompt:
+    //   "# Files mentioned by the user: … ## My request for Codex: <text + <image …>>"
+    // Keep only the request that follows the marker, then drop the <image …>
+    // tags (the image itself is captured separately as a PromptAttachment).
+    // Without this the dashboard showed the whole "Files mentioned by the user
+    // … <image name=[Image #1] path="…">" envelope instead of the user's text.
+    .replace(/^#\s*Files mentioned by the user:[\s\S]*?##\s*My request for Codex:\s*/im, '')
+    .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, '')
+    .replace(/<image\b[^>]*\/?>/gi, '')
     .trim();
 
   if (!cleaned) return null;
@@ -719,6 +778,13 @@ export interface PromptFileMapping {
   // transcript-level edits). Prevents downstream retroactive capture from
   // overwriting an intentionally-empty mapping with pre-existing dirty work.
   chatOnly?: boolean;
+  // The raw edit records behind `diff`, in the shape buildDiffFromEdits consumes.
+  // Surfaced because the rendered diff string alone is lossy: the transcript
+  // watcher needs the actual old/new CONTENT to build PromptChange.editsJson,
+  // which the dashboard treats as the authoritative per-prompt record and from
+  // which it derives line counts. A content-less editsJson makes every turn
+  // report +0 even when the diff was correct.
+  edits?: Array<{ file: string; toolName: string; input: Record<string, any> }>;
 }
 
 /**
@@ -795,6 +861,7 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
             promptText: currentPromptText,
             filesChanged: Array.from(currentFiles),
             diff: buildDiffFromEdits(currentEdits),
+            edits: currentEdits.slice(),
           });
         }
 
@@ -839,6 +906,7 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
       promptText: currentPromptText,
       filesChanged: Array.from(currentFiles),
       diff: buildDiffFromEdits(currentEdits),
+            edits: currentEdits.slice(),
     });
   }
 
@@ -910,7 +978,7 @@ function lineLevelDiff(
   return ops;
 }
 
-function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input: Record<string, any> }>): string {
+export function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input: Record<string, any> }>): string {
   if (edits.length === 0) return '';
 
   const MAX_DIFF_SIZE = 100_000; // 100KB limit
@@ -929,9 +997,13 @@ function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input
     parts.push(`diff --git a/${shortPath} b/${shortPath}`);
 
     for (const edit of fileEdits) {
-      if (edit.toolName === 'Edit' || edit.toolName === 'mcp__acp__Edit' || edit.toolName === 'replace' || edit.toolName === 'edit') {
-        const oldStr = edit.input.old_string || '';
-        const newStr = edit.input.new_string || '';
+      if (edit.toolName === 'Edit' || edit.toolName === 'mcp__acp__Edit' || edit.toolName === 'replace' || edit.toolName === 'edit'
+          || edit.toolName === 'StrReplace' || edit.toolName === 'str_replace' || edit.toolName === 'search_replace') {
+        // Key spelling differs per agent: Claude/Cursor `old_string`/`new_string`,
+        // Copilot (text-editor convention, same family as its `file_text`)
+        // `old_str`/`new_str`.
+        const oldStr = edit.input.old_string ?? edit.input.old_str ?? '';
+        const newStr = edit.input.new_string ?? edit.input.new_str ?? '';
         if (oldStr || newStr) {
           parts.push(`--- a/${shortPath}`);
           parts.push(`+++ b/${shortPath}`);
@@ -945,18 +1017,23 @@ function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input
           }
         }
       } else if (edit.toolName === 'Write' || edit.toolName === 'mcp__acp__Write' || edit.toolName === 'write_file' || edit.toolName === 'WriteFile' || edit.toolName === 'write' || edit.toolName === 'create') {
-        const content = edit.input.content || '';
+        // Whole-file write content lives under a different key per agent:
+        // Claude `content`, Cursor `contents`, Copilot `file_text`.
+        const content = edit.input.file_text || edit.input.contents || edit.input.content || '';
         parts.push(`--- /dev/null`);
         parts.push(`+++ b/${shortPath}`);
         parts.push('@@ @@');
-        // Show first 30 lines of new file content
         const contentLines = content.split('\n');
-        const showLines = contentLines.slice(0, 30);
-        for (const line of showLines) {
+        // Drop the trailing-newline artifact so a 15-row file counts as +15, not +16.
+        if (contentLines.length && contentLines[contentLines.length - 1] === '') contentLines.pop();
+        // Emit EVERY added line. This used to stop at 30 and append a
+        // "+... (N more lines)" marker — which is itself a `+` line, so a 32-row
+        // create was counted as +31 (and a 500-row one as +31). Per-prompt
+        // linesAdded is derived by counting `+` lines, so the cap silently
+        // corrupted every count above 30. Total output is still bounded by the
+        // MAX_DIFF_SIZE guard below.
+        for (const line of contentLines) {
           parts.push(`+${line}`);
-        }
-        if (contentLines.length > 30) {
-          parts.push(`+... (${contentLines.length - 30} more lines)`);
         }
       }
     }
@@ -1004,6 +1081,7 @@ function extractGeminiPromptMappings(raw: string): PromptFileMapping[] {
             promptText: currentPromptText,
             filesChanged: Array.from(currentFiles),
             diff: buildDiffFromEdits(currentEdits),
+            edits: currentEdits.slice(),
           });
         }
 
@@ -1038,6 +1116,7 @@ function extractGeminiPromptMappings(raw: string): PromptFileMapping[] {
         promptText: currentPromptText,
         filesChanged: Array.from(currentFiles),
         diff: buildDiffFromEdits(currentEdits),
+            edits: currentEdits.slice(),
       });
     }
 
@@ -1104,9 +1183,18 @@ export function formatTranscriptForDisplay(
   //  - Gemini (single JSON with messages/history) — older shape.
   //  - Claude JSONL — fallback.
   const firstLines = trimmed.split('\n', 5).join('\n');
+  // `type:"gemini"` and `$set` are unique to Gemini's chats JSONL. `user`/`model`/
+  // `tool` are NOT — Claude Code also writes `{"type":"user",…}` lines — so a bare
+  // match on those mis-routed Claude transcripts (whose first 5 lines contain a
+  // user turn) into the Gemini formatter, which returned 0 messages ⇒ an empty
+  // transcript ⇒ "no response" on the dashboard. Disambiguate by the wrapper:
+  // Gemini's user/model/tool lines carry top-level `content` and NO Claude
+  // `message` object, so only treat user/model/tool as Gemini when no `message`
+  // field appears in the sampled lines.
   const looksLikeGeminiChatsJsonl =
-    /\n?\{[^\n]*"type"\s*:\s*"(gemini|user|model|tool)"/.test(firstLines) ||
-    /\{[^\n]*"\$set"\s*:/.test(firstLines);
+    /\{[^\n]*"type"\s*:\s*"gemini"/.test(firstLines) ||
+    /\{[^\n]*"\$set"\s*:/.test(firstLines) ||
+    (/\{[^\n]*"type"\s*:\s*"(user|model|tool)"/.test(firstLines) && !/"message"\s*:/.test(firstLines));
   if (isCopilot) {
     messages = formatJSONLMessages(raw, verbose);
   } else if (looksLikeGeminiChatsJsonl) {

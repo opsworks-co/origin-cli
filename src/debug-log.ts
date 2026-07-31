@@ -20,6 +20,30 @@ function rotateLogIfNeeded(logPath: string): void {
   }
 }
 
+// Keys already logged by logSkipOnce, for this process's lifetime.
+const loggedSkips = new Set<string>();
+
+/**
+ * Emit a log line the FIRST time a given key is seen, then stay quiet.
+ *
+ * For conditions that repeat on every poll of a long-lived watcher: a session
+ * in a non-git directory is re-examined every few seconds forever, so logging
+ * it unconditionally would bury the log (the unregistered-repo retry did
+ * exactly that — thousands of identical lines). Silence is worse than noise
+ * here, though: an unexplained skip is indistinguishable from a bug. Once is
+ * the right amount.
+ */
+export function logSkipOnce(key: string, emit: () => void): void {
+  if (loggedSkips.has(key)) return;
+  loggedSkips.add(key);
+  emit();
+}
+
+/** Test seam — the dedupe set is module state and leaks between cases. */
+export function __resetLoggedSkips(): void {
+  loggedSkips.clear();
+}
+
 export function debugLog(event: string, message: string, data?: any): void {
   try {
     rotateLogIfNeeded(DEBUG_LOG);

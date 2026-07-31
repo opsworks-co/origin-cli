@@ -119,11 +119,14 @@ describe('pricing regression — Codex rollout', () => {
     // Post-split: inputTokens = 131039 - 97792 = 33247;
     //             outputTokens = 1045 + 73 = 1118;
     //             cacheReadTokens = 97792;
-    //             tokensUsed = 33247 + 97792 + 1118 = 132157.
+    //             tokensUsed = 33247 + 1118 = 34365 — non-cached input + output,
+    //             EXCLUDING cache reads (T1 fix). Cache is tracked separately in
+    //             cacheReadTokens; folding it into tokensUsed made Codex look far
+    //             less token-efficient than an identical Claude session.
     expect(parsed.inputTokens).toBe(33247);
     expect(parsed.outputTokens).toBe(1118);
     expect((parsed as any).cacheReadTokens).toBe(97792);
-    expect(parsed.tokensUsed).toBe(132157);
+    expect(parsed.tokensUsed).toBe(34365);
 
     // Cost: model is gpt-5.x family. Pricing varies by version, but
     // the test asserts that the cached portion is meaningfully

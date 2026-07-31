@@ -4,6 +4,8 @@ import { loginCommand } from './commands/login.js';
 import { statusCommand } from './commands/status.js';
 import { policiesCommand } from './commands/policies.js';
 import { syncCommand } from './commands/sync.js';
+import { codexWatchCommand } from './codex-watch.js';
+import { transcriptWatchCommand } from './transcript-watch.js';
 import { whoamiCommand } from './commands/whoami.js';
 import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanCommand, sessionsSyncCommand, sessionsImportCommand, sessionsForgetCommand } from './commands/sessions.js';
 import { reviewCommand } from './commands/review.js';
@@ -15,8 +17,12 @@ import { reposCommand, repoAddCommand } from './commands/repos.js';
 import { auditCommand } from './commands/audit.js';
 import { statsCommand } from './commands/stats.js';
 import { recapCommand } from './commands/recap.js';
+import { xrayCommand } from './commands/xray.js';
 import { enableCommand } from './commands/enable.js';
 import { disableCommand } from './commands/disable.js';
+import { benchmarkBakeoffCreateCommand } from './commands/benchmark-bakeoff.js';
+import { benchmarkRunnerCommand, benchmarkKeyCommand } from './commands/benchmark-runner.js';
+import { benchmarkSyncCommand } from './commands/benchmark.js';
 import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit,
   handleGitPostCheckout, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync } from './commands/hooks.js';
@@ -24,6 +30,7 @@ import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
 import { promptsCommand } from './commands/prompts.js';
 import { whyCommand } from './commands/why.js';
+import { devinSessionsCommand, devinSyncCommand } from './commands/devin.js';
 import { chatCommand } from './commands/chat.js';
 import { webCommand } from './commands/web.js';
 import { doctorCommand } from './commands/doctor.js';
@@ -137,6 +144,29 @@ program.command('enable')
   .option('-s, --agent-slug <slug>', 'Override agent slug for this tool (e.g. cursor-frontend). Saved to config.')
   .option('--no-chain', 'Replace existing hooks instead of chaining')
   .action(enableCommand);
+const benchmark = program.command('benchmark')
+  .description('Agent benchmarking helpers');
+benchmark.command('bakeoff')
+  .description('Set up a bake-off: run the same prompt through N agents in isolated worktrees')
+  .option('--prompt <text>', 'The task prompt every agent gets (omit when using --id)')
+  .option('--agents <slugs>', 'Comma-separated agent slugs (e.g. claude-code,codex,cursor) (omit when using --id)')
+  .option('--id <shortId>', 'Run an EXISTING bake-off created in the web UI (getorigin.io/benchmarks/bakeoffs) — sets up its worktrees instead of creating a new one')
+  .option('--title <text>', 'Optional bake-off title')
+  .option('--run', 'Drive each agent headless in its worktree automatically (autonomous edits + commits, sandboxed to each worktree)')
+  .action((opts: { prompt?: string; agents?: string; id?: string; title?: string; run?: boolean }) => benchmarkBakeoffCreateCommand(opts));
+benchmark.command('runner')
+  .description('Run queued/scheduled bake-offs for this repo — polls Origin and drives the agents locally')
+  .option('--once', 'Drain one queued bake-off then exit (for cron/CI) instead of polling forever')
+  .option('--interval <seconds>', 'Poll interval when idle (default 15)')
+  .action((opts: { once?: boolean; interval?: string }) => benchmarkRunnerCommand(opts));
+benchmark.command('key <provider> [key]')
+  .description('Set a LOCAL agent API key (anthropic|openai) for the runner — overrides the server-stored key, never uploaded')
+  .option('--clear', 'Remove the local key')
+  .action((provider: string, key: string | undefined, opts: { clear?: boolean }) => benchmarkKeyCommand(provider, key, opts));
+benchmark.command('sync')
+  .description('Measure code-survival for this repo\'s benchmarked sessions and report it to Origin')
+  .action(benchmarkSyncCommand);
+
 program.command('disable')
   .description('Remove Origin hooks')
   .option('-g, --global', 'Remove global hooks from ~/  ')
@@ -381,6 +411,11 @@ program.command('recap')
   .option('-d, --days <n>', 'Number of days to include (default: 1 = today only)', '1')
   .action(recapCommand);
 
+program.command('xray')
+  .description('How much of this repo AI wrote — and how much of it is still alive (code survival)')
+  .option('-d, --days <n>', 'History window in days (default: 90)', '90')
+  .action(xrayCommand);
+
 program.command('log')
   .description('Show git log with Origin session info inline (agent, cost, prompts)')
   .option('-l, --limit <n>', 'Max commits to show', '20')
@@ -477,6 +512,8 @@ program.command('rewind')
   .description('Rewind to a previous AI snapshot (time travel)')
   .option('-i, --interactive', 'Interactive snapshot browser')
   .option('-t, --to <sha>', 'Rewind to specific commit SHA')
+  .option('--soft', 'Restore files into the working tree, leave HEAD alone (default)')
+  .option('--hard', 'git reset --hard: also move HEAD, DISCARDING later commits on this branch')
   .option('--list', 'List snapshots without rewinding')
   .action(rewindCommand);
 
@@ -616,6 +653,10 @@ program.command('upgrade')
 
 // ─── Internal Hook Handlers ──────────────────────────────────────────────
 
+const devin = program.command('devin').description('Devin Desktop capture (read the VS Code state DB)');
+devin.command('sessions').description('List Devin Desktop sessions Origin can read').action(devinSessionsCommand);
+devin.command('sync').description('Push Devin Desktop sessions (metadata) to the Origin dashboard').action(devinSyncCommand);
+
 const hooks = program.command('hooks').description('Internal hook handlers (used by AI agents)');
 hooks.command('claude-code <event>').description('Handle Claude Code hook event').action((event) => hooksCommand(event, 'claude-code'));
 hooks.command('cursor <event>').description('Handle Cursor hook event').action((event) => hooksCommand(event, 'cursor'));
@@ -732,6 +773,18 @@ program.command('repo:add')
   .action(repoAddCommand);
 
 program.command('sync').description('Sync session data from current repo').action(syncCommand);
+
+program.command('codex-watch')
+  .description('Hook-independent Codex session watcher — captures sessions straight from ~/.codex rollout files')
+  .option('--once', 'Run a single poll cycle and exit (testing / cron)')
+  .option('--quiet', 'Suppress status output')
+  .action((opts: { once?: boolean; quiet?: boolean }) => codexWatchCommand(opts));
+
+program.command('transcript-watch')
+  .description('Hook-independent multi-agent watcher — captures Claude/Cursor/Antigravity/Gemini/Copilot sessions straight from their on-disk transcripts')
+  .option('--once', 'Run a single poll cycle and exit (testing / cron)')
+  .option('--quiet', 'Suppress status output')
+  .action((opts: { once?: boolean; quiet?: boolean }) => transcriptWatchCommand(opts));
 
 // ─── Agents ──────────────────────────────────────────────────────────────
 

@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { loadConfig } from './config.js';
 import { fetchWithTimeout } from './fetch-timeout.js';
+import { cliVersion } from './cli-version.js';
 
 function getConfig() {
   const config = loadConfig();
@@ -125,6 +126,9 @@ async function request(path: string, opts: RequestInit = {}, timeoutMs?: number)
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': config.apiKey,
+        // Lets the server record this install's CLI version so the web can
+        // warn when it's out of date (bake-off runners no-op on a stale CLI).
+        'X-Origin-CLI-Version': cliVersion(),
         ...opts.headers as Record<string, string>,
       },
     }, timeoutMs);
@@ -187,6 +191,23 @@ export const api = {
   getMachines: () => request('/api/machines'),
   syncRepo: (id: string) => request(`/api/repos/${id}/sync`, { method: 'POST' }),
   getRepos: () => request('/api/repos'),
+  // Agent bake-off
+  createBakeOff: (data: unknown) => request('/api/mcp/benchmarks/bakeoffs', { method: 'POST', body: JSON.stringify(data) }),
+  // Fetch an EXISTING bake-off (created in the web UI) so `--id` can run it
+  // without creating a duplicate. Keyed by the 8-char shortId.
+  getBakeOff: (shortId: string) => request(`/api/mcp/benchmarks/bakeoffs/${encodeURIComponent(shortId)}`),
+  // Runner daemon: atomically claim the next queued bake-off for this repo.
+  claimBakeOff: (data: unknown) => request('/api/mcp/benchmarks/runner/claim', { method: 'POST', body: JSON.stringify(data) }),
+  // Runner daemon: report a bake-off's run outcome (running → done | error).
+  reportBakeOffRun: (id: string, data: unknown) =>
+    request(`/api/mcp/benchmarks/bakeoffs/${encodeURIComponent(id)}/run-result`, { method: 'POST', body: JSON.stringify(data) }),
+  // Runner daemon: fetch the org's stored agent keys to inject into the agents.
+  getAgentKeys: () => request('/api/mcp/benchmarks/agent-keys'),
+  // Agent benchmarking — code-survival sync (see commands/benchmark.ts).
+  getSurvivalTargets: (repoFullName: string) =>
+    request(`/api/mcp/benchmarks/survival/targets?repoFullName=${encodeURIComponent(repoFullName)}`),
+  postSurvival: (data: unknown) =>
+    request('/api/mcp/benchmarks/survival', { method: 'POST', body: JSON.stringify(data) }),
   // Origin Why: provenance for a single line — which session/prompt authored it.
   getWhy: (repoId: string, q: { sha: string; file?: string; content?: string }) => {
     const params = new URLSearchParams({ sha: q.sha });
@@ -249,6 +270,11 @@ export const api = {
     // repo gate corroborate a moved local-only checkout by SHA overlap, the
     // same proof /commits/ingest offers via commits[] + its advertisement.
     recentShas?: string[];
+    // Optional ISO session start time. The Codex rollout watcher stamps the
+    // rollout's first user-message timestamp so a whole-rollout capture isn't
+    // mis-flagged as joining the session mid-stream. Server validates + ignores
+    // anything unparseable/future; every other caller omits it (defaults now).
+    startedAt?: string;
   }) => {
     // Single-key world: server federates session writes across the user's
     // memberships on read (see /api/me/* on the API). No client-side
@@ -267,6 +293,14 @@ export const api = {
     assertObj(res, 'resumeSession');
     return res;
   },
+  importDevinDesktopSessions: async (sessions: any[], machineId?: string) => {
+    const res = await request('/api/mcp/devin/import-desktop-sessions', {
+      method: 'POST',
+      body: JSON.stringify({ sessions, machineId }),
+    });
+    assertObj(res, 'importDevinDesktopSessions');
+    return res as { imported?: number; skipped?: number; healed?: number; noRepo?: number; disabled?: boolean };
+  },
   endSession: async (data: any) => {
     const res = await request('/api/mcp/session/end', { method: 'POST', body: JSON.stringify(data) });
     assertObj(res, 'endSession');
@@ -274,6 +308,16 @@ export const api = {
   },
   pingSession: (id: string) =>
     request(`/api/mcp/session/${id}/ping`, { method: 'POST' }),
+
+  // Report the outcome of a dashboard-queued command (restore/branch) so the UI
+  // can stop waiting and show the result. Mirrors the heartbeat's reportResult;
+  // exposed here because the transcript watcher also executes these commands
+  // (watcher-captured sessions run no heartbeat).
+  reportCommandResult: (id: string, type: string, status: 'success' | 'failed', message: string) =>
+    request(`/api/mcp/session/${id}/command-result`, {
+      method: 'POST',
+      body: JSON.stringify({ type, status, message }),
+    }),
   // Live, scope-filtered policy set for a running session — lets pre-tool-use
   // pick up a policy created AFTER the session started (the heartbeat refreshes
   // the same data from its ping, but isn't always running for Codex/Cursor).

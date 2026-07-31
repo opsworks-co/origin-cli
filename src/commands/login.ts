@@ -63,7 +63,9 @@ function openInBrowser(url: string) {
         ? 'cmd'
         : 'xdg-open';
     const args = process.platform === 'win32' ? ['/c', 'start', '""', url] : [url];
-    spawn(cmd, args, { stdio: 'ignore', detached: true }).unref();
+    // windowsHide: the `cmd /c start` shim would otherwise flash a console
+    // window (the browser still opens normally). No-op off Windows.
+    spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true }).unref();
   } catch { /* user can copy the URL manually */ }
 }
 

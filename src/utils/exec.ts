@@ -52,6 +52,13 @@ function buildOptions(opts: RunOptions = {}): ExecFileSyncOptions {
     maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER,
     encoding: opts.encoding ?? 'utf-8',
     env: opts.env ? { ...process.env, ...opts.env } as NodeJS.ProcessEnv : process.env,
+    // Windows: git.exe is a console-subsystem program. When the parent has no
+    // console to inherit — exactly the case under a GUI agent like Codex
+    // Desktop, and inside our own detached daemons — each child ALLOCATES one,
+    // i.e. a visible terminal window, per call. Hooks shell out to git
+    // constantly, so that reads as endless popups. CREATE_NO_WINDOW suppresses
+    // it. No-op on macOS/Linux.
+    windowsHide: true,
   };
 }
 
@@ -99,6 +106,7 @@ export function runDetailed(
     encoding: opts.encoding ?? 'utf-8',
     env: opts.env ? { ...process.env, ...opts.env } as NodeJS.ProcessEnv : process.env,
     input: opts.input,
+    windowsHide: true, // see buildOptions — no console window per child on Windows
   };
   const r = spawnSync(file, args, spawnOpts);
   return {
@@ -138,15 +146,29 @@ export function findExecutable(name: string, opts: RunOptions = {}): string | nu
  * Always pass `cwd` for repo-scoped commands. If omitted, runs in
  * `process.cwd()`, which is rarely what you want.
  */
+// Diff-producing subcommands. For these we force submodule pointer changes to
+// always render, so a repo/user `diff.ignoreSubmodules=all` (or a per-submodule
+// `ignore`) can't silently drop the `Subproject commit <sha>` section from
+// capture — which would make a submodule bump invisible in the session/commit.
+// `-c diff.ignoreSubmodules=none` is a no-op for the non-diff cases (log
+// without -p, show of a non-commit), so prepending it broadly is safe.
+const DIFF_SUBCOMMANDS = new Set(['diff', 'show', 'diff-tree', 'diff-index', 'log']);
+
+function withSubmoduleVisibility(args: string[]): string[] {
+  return args.length && DIFF_SUBCOMMANDS.has(args[0])
+    ? ['-c', 'diff.ignoreSubmodules=none', ...args]
+    : args;
+}
+
 export function git(args: string[], opts: RunOptions = {}): string {
-  return run('git', args, opts);
+  return run('git', withSubmoduleVisibility(args), opts);
 }
 
 export function gitDetailed(
   args: string[],
   opts: RunOptions = {},
 ): { stdout: string; stderr: string; status: number } {
-  return runDetailed('git', args, opts);
+  return runDetailed('git', withSubmoduleVisibility(args), opts);
 }
 
 /**

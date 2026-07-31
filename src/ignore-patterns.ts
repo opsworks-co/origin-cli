@@ -45,6 +45,19 @@ const DEFAULT_IGNORE_PATTERNS = [
   'GEMINI.md',
   '.windsurfrules',
   '.devin/rules/origin.md',
+  // Origin's own hook-config files, written by `origin enable`. They are our
+  // bookkeeping, not the agent's work — when enable runs in a repo they land
+  // as untracked additions and would otherwise be attributed to the next
+  // session (this is exactly what showed up as the phantom "+72" on the first
+  // native-Windows session: .devin/hooks.v1.json + .windsurf/hooks.json).
+  // Shared settings files (.claude/settings.json, .gemini/settings.json) are
+  // deliberately NOT here — a user may hand-edit those.
+  '.devin/hooks.v1.json',
+  '.windsurf/hooks.json',
+  '.cursor/hooks.json',
+  '.codex/hooks.json',
+  '.github/hooks/origin.json',
+  '.agents/hooks.json',
   // Claude Code's parallel-branch worktrees. They show up as submodule
   // (160000 mode) entries in git diff when Cursor / other agents run in
   // a repo that previously hosted Claude Code worktrees. They aren't the

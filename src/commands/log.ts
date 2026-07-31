@@ -82,7 +82,7 @@ export async function logCommand(options: { limit?: string; all?: boolean }): Pr
   }
 
   const limit = parseInt(options.limit || '20', 10);
-  const execOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const execOpts = { windowsHide: true, cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
 
   // Get recent commits
   let logOutput: string;

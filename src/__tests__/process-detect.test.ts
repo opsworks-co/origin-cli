@@ -14,6 +14,7 @@ import {
   matchingProcessPids,
   isProcessRunning,
   processInfo,
+  hasAncestorProcess,
   __resetProcessSnapshot,
 } from '../utils/process-detect.js';
 import { __resetPlatformCache } from '../utils/platform.js';
@@ -39,6 +40,18 @@ describe('pgrepPattern', () => {
   it('passes a bare pattern through unchanged', () => {
     expect(pgrepPattern('cursor')).toBe('cursor');
     expect(pgrepPattern('gemini.*cli|/gemini ')).toBe('gemini.*cli|/gemini ');
+  });
+});
+
+describe('hasAncestorProcess (Unix host)', () => {
+  it('detects a real ancestor by command pattern, and rejects one that is absent', () => {
+    if (process.platform === 'win32') return;
+    // The vitest runner is a `node` process, so `node` is somewhere up our
+    // parent chain — this is exactly the signal used to spot a claude-code hook
+    // running under the `devin` binary.
+    expect(hasAncestorProcess(/node/i)).toBe(true);
+    // A pattern no ancestor's command line contains resolves to false.
+    expect(hasAncestorProcess(/this-ancestor-command-does-not-exist-zzz/i)).toBe(false);
   });
 });
 

@@ -43,7 +43,7 @@ export const AGENTS: AgentDefinition[] = [
   { slug: 'junie',    displayName: 'Junie',       modelPattern: /junie|jetbrains/i,              attributionPgrep: 'pgrep -f "junie|jetbrains.*ai"' },
   { slug: 'opencode', displayName: 'Opencode',    modelPattern: /opencode/i,                     attributionPgrep: 'pgrep -f "opencode"',                    standalonePgrep: 'pgrep -f "opencode"' },
   { slug: 'aider',    displayName: 'Aider',       modelPattern: /aider/i,                        attributionPgrep: 'pgrep -f "aider"',                       standalonePgrep: 'pgrep -f "bin/aider|aider.*--model"' },
-  { slug: 'devin',    displayName: 'Devin',       modelPattern: /devin|windsurf|codeium|cascade/i, attributionPgrep: 'pgrep -f "devin"' },
+  { slug: 'devin',    displayName: 'Devin',       modelPattern: /devin|windsurf|codeium|cascade|swe-?\d/i, attributionPgrep: 'pgrep -f "devin"' },
   { slug: 'codex',    displayName: 'Codex',       modelPattern: /codex/i,                        attributionPgrep: 'pgrep -f "codex"',                       standalonePgrep: 'pgrep -f "codex"' },
   { slug: 'gemini',   displayName: 'Gemini CLI',  modelPattern: /gemini|google/i,                attributionPgrep: 'pgrep -f "gemini.*cli|/gemini "',        standalonePgrep: 'pgrep -f "gemini.*cli|bin/gemini"' },
   { slug: 'claude',   displayName: 'Claude Code', modelPattern: /claude|anthropic|sonnet|opus|haiku/i, attributionPgrep: 'pgrep -f "claude.*stream-json"',    standalonePgrep: 'pgrep -f "claude.*stream-json"' },
@@ -131,8 +131,15 @@ export function resolveAgentDisplayName(model: string | undefined, agentSlug?: s
   const slug = (agentSlug || '').toLowerCase();
   if (slug) {
     if (slug === 'antigravity') return 'Antigravity';
-    // Pipeline slugs like 'claude-code' map to the registry's 'claude' entry.
-    const def = BY_SLUG.get(slug === 'claude-code' ? 'claude' : slug);
+    // Pipeline slugs like 'claude-code' map to the registry's 'claude' entry;
+    // the legacy 'windsurf'/'cascade' slugs (pre-Devin rebrand, #766) map to
+    // 'devin' so an old windsurf-slug session still resolves to Devin rather
+    // than falling through to model-based "Claude Code".
+    const canonical =
+      slug === 'claude-code' ? 'claude'
+      : slug === 'windsurf' || slug === 'cascade' ? 'devin'
+      : slug;
+    const def = BY_SLUG.get(canonical);
     if (def) return def.displayName;
   }
   const m = (model || '').toLowerCase();
@@ -141,7 +148,9 @@ export function resolveAgentDisplayName(model: string | undefined, agentSlug?: s
   if (m.includes('junie')) return 'Junie';
   if (m.includes('opencode')) return 'Opencode';
   if (m.includes('aider')) return 'Aider';
-  if (m.includes('devin') || m.includes('windsurf') || m.includes('cascade')) return 'Devin';
+  // Devin CLI's models are SWE-* (e.g. "SWE-1.6"); match them so a captured
+  // Devin model resolves to Devin even if the slug went unrecorded.
+  if (m.includes('devin') || m.includes('windsurf') || m.includes('cascade') || /swe-?\d/.test(m)) return 'Devin';
   if (m.includes('codex')) return 'Codex';
   if (m.includes('gemini')) return 'Gemini CLI';
   if (m.includes('claude') || m.includes('sonnet') || m.includes('opus')) return 'Claude Code';

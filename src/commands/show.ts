@@ -69,7 +69,7 @@ interface FullSession {
 }
 
 function loadLocalSession(sessionId: string, repoPath: string): FullSession | null {
-  const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const execOpts = { windowsHide: true, encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
   // Try to find session dir on origin-sessions branch
   let dir = sessionId;
   if (!readSessionFile(repoPath, sessionId, 'metadata.json')) {
@@ -189,7 +189,7 @@ export async function showCommand(commitSha: string, options: { json?: boolean }
     process.exit(1);
   }
 
-  const execOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  const execOpts = { windowsHide: true, cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
 
   // Resolve short SHA
   let fullSha: string;

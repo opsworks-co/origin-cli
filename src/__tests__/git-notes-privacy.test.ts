@@ -77,6 +77,18 @@ describe('buildNotePayload with prompt text opted out', () => {
     expect(cap.edits[0].newContent).toBe('b');
   });
 
+  it('carries real sub-agent spawns (metadata-only, present even when prompt text is withheld)', () => {
+    const data = noteData();
+    data.subagents = [{ type: 'code-reviewer', promptIndex: 0 }, { type: null, promptIndex: 1 }];
+    const withheld = JSON.parse(buildNotePayload(data, false));
+    expect(withheld.origin.subagents).toEqual([
+      { type: 'code-reviewer', promptIndex: 0 },
+      { type: null, promptIndex: 1 },
+    ]);
+    // Absent (not an empty array) when the session used none.
+    expect(JSON.parse(buildNotePayload(noteData(), true)).origin.subagents).toBeUndefined();
+  });
+
   it('includes prompt text in the default (opted-in) posture', () => {
     const payload = buildNotePayload(noteData(), true);
     const parsed = JSON.parse(payload);

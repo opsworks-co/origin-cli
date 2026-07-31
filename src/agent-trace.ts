@@ -80,6 +80,7 @@ function modelIdToOriginAgent(modelId: string): string {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const execOpts = (cwd: string) => ({
+    windowsHide: true,
   encoding: 'utf-8' as const,
   cwd,
   stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],

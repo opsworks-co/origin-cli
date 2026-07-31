@@ -40,6 +40,18 @@ describe('buildOriginTrailers', () => {
     expect(out[0]).toBe('Origin-Session: abcdef123456 | Claude Code');
   });
 
+  it('appends the sub-agent count when the session spawned Task sub-agents', () => {
+    const one = buildOriginTrailers('abcdef1234567890', 'claude-sonnet-4', 3, undefined, undefined, 1);
+    expect(one[0]).toBe('Origin-Session: abcdef123456 | Claude Code | 3 prompts | 1 sub-agent');
+    const many = buildOriginTrailers('abcdef1234567890', 'claude-sonnet-4', 3, undefined, undefined, 2);
+    expect(many[0]).toBe('Origin-Session: abcdef123456 | Claude Code | 3 prompts | 2 sub-agents');
+  });
+
+  it('omits the sub-agent count when zero', () => {
+    const out = buildOriginTrailers('abcdef1234567890', 'claude-sonnet-4', 2, undefined, undefined, 0);
+    expect(out[0]).toBe('Origin-Session: abcdef123456 | Claude Code | 2 prompts');
+  });
+
   it.each([
     ['claude-sonnet-4', 'Claude Code'],
     ['claude-opus-4-6', 'Claude Code'],
