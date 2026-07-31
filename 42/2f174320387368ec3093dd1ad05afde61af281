@@ -1,0 +1,16 @@
+{
+  "origin": {
+    "version": 1,
+    "sessionId": "detected-copilot-ms8b5vyq",
+    "model": "copilot",
+    "promptCount": 0,
+    "promptSummary": "",
+    "tokensUsed": 0,
+    "costUsd": 0,
+    "durationMs": 0,
+    "linesAdded": 12172,
+    "linesRemoved": 578,
+    "originUrl": "https://getorigin.io/sessions/detected-copilot-ms8b5vyq",
+    "timestamp": "2026-07-31T02:13:15.411Z"
+  }
+}
