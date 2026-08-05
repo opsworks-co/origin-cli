@@ -132,16 +132,35 @@ function writeCache(entry: CacheEntry): void {
 }
 
 /**
- * Compare semver strings. Returns true if `a` is newer than `b`.
+ * Order two dotted version strings. Negative if `a` is older than `b`, 0 if
+ * equal, positive if `a` is newer.
+ *
+ * Components are compared NUMERICALLY, never as strings: Origin's patch
+ * component is a wall-clock `HHmm`, so `.524` vs `.2043` sorts backwards under
+ * string comparison and every early-morning release would look like a
+ * downgrade. Missing or unparseable components count as 0, which keeps the
+ * `0.0.0` fallback (used when the version can't be read) sorting oldest.
+ *
+ * Exported because `origin upgrade` needs the same ordering — it used to test
+ * only `current === latest` and would happily install an OLDER build over a
+ * newer one, reporting it as an upgrade.
  */
-function isNewer(a: string, b: string): boolean {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => String(v || '').split('.').map((p) => parseInt(p, 10) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
+  const len = Math.max(pa.length, pb.length, 3);
+  for (let i = 0; i < len; i++) {
     const va = pa[i] || 0;
     const vb = pb[i] || 0;
-    if (va > vb) return true;
-    if (va < vb) return false;
+    if (va !== vb) return va < vb ? -1 : 1;
   }
-  return false;
+  return 0;
+}
+
+/**
+ * Compare semver strings. Returns true if `a` is newer than `b`.
+ */
+export function isNewer(a: string, b: string): boolean {
+  return compareVersions(a, b) > 0;
 }

@@ -611,9 +611,26 @@ export function buildSessionWriteData(opts: {
   // straight from the commit. (When several prompts share a commit we can't
   // attribute the commit's lines to an individual prompt, so we keep the live
   // per-prompt capture and only fill in when it's empty.)
+  // A prompt's committed SHA: its own commitSha if the stop hook attached one,
+  // else the current HEAD — but ONLY when the prompt actually has COMMITTED
+  // work. A prompt with NO files, or whose edits are still UNCOMMITTED, must not
+  // inherit HEAD: doing so leaked the current commit onto no-change turns and
+  // onto turns whose work wasn't committed yet, and the server's FILL-ONLY rule
+  // then froze that wrong SHA forever (session 34f90cb5: "check repo" (no
+  // changes) and "add 10 (not commit)" both showed an unrelated commit). Leaving
+  // it null lets the correct commit fill in on a later capture, once the work is
+  // actually committed. The immediate-commit case (files touched + committed in
+  // one turn, clean tree) still inherits HEAD via `hasFiles && !hasUncommitted`.
+  const resolvePromptCommitSha = (m: PromptFileMapping): string | null => {
+    if (m.commitSha) return m.commitSha;
+    const hasFiles = Array.isArray(m.filesChanged) && m.filesChanged.length > 0;
+    const hasUncommitted = !!(m.uncommittedDiff && m.uncommittedDiff.trim());
+    return hasFiles && !hasUncommitted ? (gitCapture.headAfter ?? null) : null;
+  };
+
   const promptsPerCommit = new Map<string, number>();
   for (const mm of promptMappings) {
-    const sha = mm.commitSha ?? gitCapture.headAfter ?? null;
+    const sha = resolvePromptCommitSha(mm);
     if (sha) promptsPerCommit.set(sha, (promptsPerCommit.get(sha) ?? 0) + 1);
   }
 
@@ -624,7 +641,7 @@ export function buildSessionWriteData(opts: {
   // from the parallel `promptEditsByIndex` map populated by
   // capturePromptEdits — same shape that ships to the API.
   const changes: PromptChange[] = promptMappings.map(m => {
-    const commitSha = m.commitSha ?? gitCapture.headAfter ?? null;
+    const commitSha = resolvePromptCommitSha(m);
     let diff = m.diff || '';
     let filesChanged = m.filesChanged;
     // Immediate-commit recovery. When a prompt CREATES files and COMMITS them
@@ -1020,6 +1037,30 @@ export function emitVisiblePreamble(agentSlug: string | undefined, systemMsg: st
 const STABLE_SESSION_ID_AGENTS = ['claude-code', 'devin', 'copilot'];
 export function hookLookupSessionId(sessionId: string | undefined, agentSlug?: string): string | undefined {
   return STABLE_SESSION_ID_AGENTS.includes(agentSlug || '') ? sessionId : undefined;
+}
+
+/**
+ * The stable per-chat `agentSessionId` to advertise when a hook AUTO-CREATES a
+ * session (no prior session-start row to anchor on). Resolves EXACTLY as
+ * handleSessionStart does so the server's dedup can match a resumed chat to its
+ * existing session instead of minting a twin:
+ *   • cursor  → conversation_id (stable per chat), falling back to session_id.
+ *               Cursor's session_id ROTATES per turn, so it alone can't anchor a
+ *               resume — omitting the id entirely (the old bug) forked a twin that
+ *               re-copied the chat's prior prompts (prod 3a5328e9 vs e6f72dcc).
+ *   • stable agents (claude-code/devin/copilot) → their session_id is stable.
+ *   • everything else → undefined (no reliable per-chat anchor).
+ */
+export function resolveAutoAgentSessionId(
+  agentSlug: string | undefined,
+  conversationId: unknown,
+  sessionId: unknown,
+): string | undefined {
+  const conv = typeof conversationId === 'string' && conversationId ? conversationId : undefined;
+  const sess = typeof sessionId === 'string' && sessionId ? sessionId : undefined;
+  if (agentSlug === 'cursor') return conv || sess;
+  if (STABLE_SESSION_ID_AGENTS.includes(agentSlug || '')) return sess;
+  return undefined;
 }
 
 // How many recent HEAD SHAs a session-creating call advertises so the
@@ -3301,9 +3342,16 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             // server's session dedup can match this auto-create against the
             // session-start row instead of minting a duplicate that later
             // collides with an unrelated conversation on the same repo+agent.
-            const autoAgentSessionId = stableAgents.includes(agentSlug || '')
-              ? (input.session_id || undefined)
-              : undefined;
+            //
+            // Cursor isn't in STABLE_SESSION_ID_AGENTS (its session_id rotates
+            // per turn), but its conversation_id IS a stable per-chat anchor.
+            // Without it, RESUMING an ended Cursor chat lands here with a null
+            // agentSessionId, so the server's "resume a COMPLETED session via
+            // agentSessionId" rung can't fire → it mints a twin into which
+            // Cursor's replayed transcript re-copies every prior prompt (prod
+            // 3a5328e9 duplicated e6f72dcc's 4 prompts). resolveAutoAgentSessionId
+            // resolves it EXACTLY as session-start does.
+            const autoAgentSessionId = resolveAutoAgentSessionId(agentSlug, input.conversation_id, input.session_id);
             const result = await api.startSession({
               machineId: autoAgentConfig.machineId,
               prompt: input.prompt || '',
@@ -4081,7 +4129,12 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             repoPath: canonicalRepoPath,
             agentSlug: 'cursor',
             branch: branch || undefined,
-            agentSessionId: input.session_id,
+            // Anchor on the STABLE per-chat conversation_id (matching session-start
+            // and the local state written below), NOT the rotating per-turn
+            // session_id — otherwise the next turn's conversation_id-anchored start
+            // can't match this server row and forks a twin that re-copies the
+            // chat's prior prompts.
+            agentSessionId: resolveAutoAgentSessionId('cursor', input.conversation_id, input.session_id),
           } as any);
           const newSessionId = (startRes as any)?.sessionId;
           if (typeof newSessionId === 'string' && newSessionId) {

@@ -1414,7 +1414,9 @@ export function chainWholeFileWrites(turns: PromptCapture[]): void {
 
 // ─── Shared post-processing ───────────────────────────────────────────────
 
-function attributeCommitsToPrompts(turns: PromptCapture[], opts: CaptureInputs): void {
+// Exported for tests — the commit-boundary partition is the core rule and
+// must be validated against a real git repo.
+export function attributeCommitsToPrompts(turns: PromptCapture[], opts: CaptureInputs): void {
   // For transcript-based agents, we know which file an edit touched but
   // not which commit it ended up in. Walk the session's commits in
   // order and mark a commit as belonging to a turn when at least one of
@@ -1425,6 +1427,9 @@ function attributeCommitsToPrompts(turns: PromptCapture[], opts: CaptureInputs):
   const gitOpts = { windowsHide: true, cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000 };
 
   const filesByCommit = new Map<string, Set<string>>();
+  // Additions per commit + commit time, for the boundary partition below.
+  const addsByCommit = new Map<string, number>();
+  const timeByCommit = new Map<string, number>();
   for (const sha of shas) {
     try {
       const names = execFileSync(
@@ -1437,7 +1442,81 @@ function attributeCommitsToPrompts(turns: PromptCapture[], opts: CaptureInputs):
       ).split('\n').map((s) => s.trim()).filter(Boolean);
       filesByCommit.set(sha, new Set(names));
     } catch { /* commit unreachable */ }
+    try {
+      // `%ct` = committer timestamp (chronological order), then numstat lines.
+      const out = execFileSync(
+        'git',
+        ['show', '--root', '--numstat', '--format=%ct', sha],
+        gitOpts,
+      );
+      const lines = out.split('\n');
+      const ct = Number((lines[0] || '').trim());
+      if (Number.isFinite(ct)) timeByCommit.set(sha, ct);
+      let added = 0;
+      for (const l of lines.slice(1)) {
+        const m = /^(\d+)\t(\d+)\t/.exec(l.trim());
+        if (m) added += Number(m[1]);
+      }
+      addsByCommit.set(sha, added);
+    } catch { /* stats unavailable — partition falls back to overlap-only */ }
   }
+  // ── COMMIT BOUNDARY PARTITION ─────────────────────────────────────────
+  // File overlap ALONE cannot tell which commit a turn belongs to once a
+  // session makes more than one commit touching the same file: every turn
+  // that edited `foo` claims every commit containing `foo`. Prod 03a338b8 —
+  // four turns all editing `ninetendo`, two commits — gave all four turns
+  // `commits: [A, B]`, and downstream "highest-index claimant wins" then
+  // collapsed BOTH commits onto the last turn, so the turn that actually ran
+  // `git commit` ("add 10 rows into it and commit") rendered "uncommitted".
+  //
+  // Commits are ordered and each one absorbs a CONTIGUOUS prefix of the
+  // still-uncommitted turns, so the turns partition across commits exactly.
+  // Walk commits oldest-first, accumulating each turn's added lines until the
+  // running total reaches that commit's additions — those turns are its, and
+  // the last of them is its producer. This is arithmetic on git truth, not a
+  // heuristic: A=18 lines = turns 0(+8)+1(+10); B=12 = turns 2(+3)+3(+9).
+  const addedLinesOf = (t: PromptCapture): number => {
+    let n = 0;
+    for (const e of t.edits) {
+      const newN = e.newContent ? e.newContent.split('\n').filter((x) => x !== '').length : 0;
+      const oldN = e.oldContent ? e.oldContent.split('\n').filter((x) => x !== '').length : 0;
+      n += Math.max(0, newN - oldN);
+    }
+    return n;
+  };
+  const chronoShas = [...filesByCommit.keys()].sort(
+    (a, b) => (timeByCommit.get(a) ?? 0) - (timeByCommit.get(b) ?? 0),
+  );
+  // Only attempt the partition when every commit reported real additions;
+  // otherwise fall back to the original overlap behaviour below.
+  const canPartition =
+    chronoShas.length > 1 &&
+    chronoShas.every((s) => (addsByCommit.get(s) ?? 0) > 0) &&
+    turns.some((t) => addedLinesOf(t) > 0);
+
+  if (canPartition) {
+    const ordered = [...turns].sort((a, b) => a.promptIndex - b.promptIndex);
+    let ti = 0;
+    for (const sha of chronoShas) {
+      const target = addsByCommit.get(sha) ?? 0;
+      const names = filesByCommit.get(sha) || new Set<string>();
+      let acc = 0;
+      let claimedAny = false;
+      while (ti < ordered.length) {
+        const turn = ordered[ti];
+        const touches = turn.edits.some((e) => names.has(e.file));
+        // A turn that didn't touch this commit's files can't be part of it —
+        // consume it only if it produced nothing at all (pure chat), so it
+        // never blocks the walk.
+        if (!touches && addedLinesOf(turn) > 0) break;
+        if (touches && !turn.commits.includes(sha)) { turn.commits.push(sha); claimedAny = true; }
+        acc += addedLinesOf(turn);
+        ti++;
+        if (acc >= target && claimedAny) break;
+      }
+    }
+    // Any turns left over (their work is still uncommitted) keep no commit.
+  } else {
   for (const turn of turns) {
     const filesTouched = new Set(turn.edits.map((e) => e.file));
     if (filesTouched.size === 0) continue;
@@ -1448,6 +1527,9 @@ function attributeCommitsToPrompts(turns: PromptCapture[], opts: CaptureInputs):
       }
       if (intersects && !turn.commits.includes(sha)) turn.commits.push(sha);
     }
+  }
+  }
+  for (const turn of turns) {
     // For tool-call edits whose file landed in a commit, mark them as
     // committed by stamping `commitSha`. Edits with no matching commit
     // remain `source: 'tool_call'` without a commitSha → rendered as

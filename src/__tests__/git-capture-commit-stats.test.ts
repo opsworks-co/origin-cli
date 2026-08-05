@@ -86,4 +86,25 @@ describe('captureGitState — per-commit line stats', () => {
       expect(typeof c.linesRemoved).toBe('number');
     }
   }, 30_000);
+
+  it('returns commits OLDEST-first (chronological), not git log default newest-first', () => {
+    // The server's commit→prompt back-attribution assumes SHAs arrive
+    // oldest-first and walks them in reverse. `git log` defaults to newest-first,
+    // which double-reversed and swapped which commit attached to which prompt
+    // (Copilot session bd33346a: "add 5"→"Add 6", "add 6"→"Add 5"). `--reverse`
+    // makes the order chronological so the server attributes correctly.
+    const headBefore = gitIn(dir, ['rev-parse', 'HEAD']).trim();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'x\n');
+    gitIn(dir, ['add', '-A']);
+    gitIn(dir, ['commit', '-q', '-m', 'first']);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'y\n');
+    gitIn(dir, ['add', '-A']);
+    gitIn(dir, ['commit', '-q', '-m', 'second']);
+
+    const res = captureGitState(dir, headBefore);
+    expect(res.commitDetails.map((c) => c.message)).toEqual(['first', 'second']);
+    // commitShas must match the same chronological order.
+    const shaFirst = gitIn(dir, ['rev-list', '--max-parents=1', '--reverse', `${headBefore}..HEAD`]).trim().split('\n')[0];
+    expect(res.commitShas[0]).toBe(shaFirst);
+  }, 30_000);
 });

@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
 import { findExecutable } from '../utils/exec.js';
+import { compareVersions } from '../version-check.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -16,12 +17,12 @@ const TARBALL_URL = `${SERVER_URL}/cli/origin-cli-latest.tgz`;
 // ─── Main Command ──────────────────────────────────────────────────────────
 
 /**
- * `origin upgrade [--check]`
+ * `origin upgrade [--check] [--force]`
  *
  * Check for and install the latest version of the Origin CLI.
  * Downloads directly from the Origin platform server.
  */
-export async function upgradeCommand(opts: { check?: boolean }): Promise<void> {
+export async function upgradeCommand(opts: { check?: boolean; force?: boolean }): Promise<void> {
   const currentVersion = getCurrentVersion();
 
   console.log(chalk.bold('\nOrigin CLI Upgrade\n'));
@@ -36,8 +37,25 @@ export async function upgradeCommand(opts: { check?: boolean }): Promise<void> {
 
   console.log(chalk.gray(`  Latest version:  ${latest.version}`));
 
-  if (currentVersion === latest.version) {
+  // ORDER the versions, don't just test equality. The old `current === latest`
+  // check treated "different" as "newer" and would install an OLDER build over
+  // a newer one while printing "Upgrading: 2043 → 2042". Two everyday ways to
+  // land there: a locally-built CLI (`npm install -g .` from the repo), and the
+  // window between pushing a release tag and its deploy finishing — the
+  // workflow regenerates /cli/version.json only in its last job, so the server
+  // advertises the PREVIOUS version for several minutes after the tag exists.
+  const cmp = compareVersions(currentVersion, latest.version);
+
+  if (cmp === 0) {
     console.log(chalk.green('\n  ✓ Already up to date!\n'));
+    return;
+  }
+
+  if (cmp > 0 && (!opts.force || opts.check)) {
+    console.log(chalk.green(`\n  ✓ Your install is NEWER than the server's (${currentVersion} > ${latest.version}).`));
+    console.log(chalk.gray('    Nothing to do — installing would be a downgrade.'));
+    console.log(chalk.gray('    To roll back to the server version on purpose:'));
+    console.log(chalk.gray('      origin upgrade --force\n'));
     return;
   }
 
@@ -48,7 +66,10 @@ export async function upgradeCommand(opts: { check?: boolean }): Promise<void> {
     return;
   }
 
-  console.log(chalk.cyan(`\n  Upgrading: ${currentVersion} → ${latest.version}\n`));
+  const downgrading = cmp > 0;
+  console.log(chalk[downgrading ? 'yellow' : 'cyan'](
+    `\n  ${downgrading ? 'Downgrading (--force)' : 'Upgrading'}: ${currentVersion} → ${latest.version}\n`,
+  ));
 
   const success = downloadAndInstall(latest.url, latest.sha256);
 
@@ -59,7 +80,7 @@ export async function upgradeCommand(opts: { check?: boolean }): Promise<void> {
     // read itself fell back (e.g. the old Windows 0.0.0 bug).
     const newVersion = getInstalledVersion();
     if (newVersion && newVersion === latest.version) {
-      console.log(chalk.green(`\n  ✓ Successfully upgraded to ${newVersion}!\n`));
+      console.log(chalk.green(`\n  ✓ Now running ${newVersion}!\n`));
       // Restart the Codex rollout watcher so it runs the JUST-INSTALLED code.
       // Without this the old daemon keeps executing its stale in-memory version
       // (upgrade only swaps dist/ on disk), silently mis-capturing sessions

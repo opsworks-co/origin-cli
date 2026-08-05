@@ -647,6 +647,7 @@ proxy.command('status')
 program.command('upgrade')
   .description('Upgrade Origin CLI to latest version')
   .option('--check', 'Only check for updates, do not install')
+  .option('--force', 'Install the server version even if it is OLDER than this one (deliberate rollback)')
   .option('--dry-run', 'Show what would be downloaded and installed without touching anything')
   .option('--rollback', 'Re-install the previous version from the last backup')
   .action(upgradeCommand);

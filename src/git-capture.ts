@@ -43,6 +43,12 @@ export interface CommitInfo {
   // `colors` rendered 14 lines for a 9-line file). Capped like the session
   // diff; omitted when empty or oversize.
   patch?: string;
+  // Committer time (epoch ms). Lets the Codex rollout watcher scope commits to
+  // the thread that actually authored them: its cumulative headShaAtStart..HEAD
+  // walk otherwise sweeps in commits a DIFFERENT concurrent thread made in the
+  // same repo, and an older still-running thread then steals a newer session's
+  // commit (Windows-only — Mac uses hooks). Omitted if git can't report it.
+  committedAt?: number;
 }
 
 export interface GitCaptureResult {
@@ -142,8 +148,18 @@ export function captureGitState(
   let commitShas: string[] = [];
   if (safeBefore !== headAfter) {
     try {
+      // `--reverse` → OLDEST-first (chronological). git log defaults to
+      // newest-first, but the server's commit→prompt back-attribution
+      // (mcp.ts: "insertion order ... mirrors committedAt") assumes the SHAs
+      // arrive oldest-first and walks them in reverse to land the latest commit
+      // on the latest turn. Sending newest-first double-reverses that, swapping
+      // which commit attaches to which prompt whenever a single capture carries
+      // more than one commit (e.g. Copilot's agentStop covering two committed
+      // turns: "add 5"→"Add 6", "add 6"→"Add 5"). The server can't re-sort — it
+      // stamps committedAt=now() and has no real per-commit time — so the
+      // chronological order must come from here.
       const log = git(
-        ['log', '--format=%H', `${safeBefore}..${headAfter}`],
+        ['log', '--reverse', '--format=%H', `${safeBefore}..${headAfter}`],
         gitOpts,
       ).trim();
       commitShas = log ? log.split('\n').filter(Boolean) : [];
@@ -160,6 +176,13 @@ export function captureGitState(
     try {
       const message = git(['log', '-1', '--format=%s', sha], gitOpts).trim();
       const author = git(['log', '-1', '--format=%an', sha], gitOpts).trim();
+      // Committer time in epoch SECONDS (%ct) → ms. Used to scope commits to the
+      // authoring thread (see CommitInfo.committedAt / codex-watch).
+      let committedAt: number | undefined;
+      try {
+        const ct = Number(git(['log', '-1', '--format=%ct', sha], gitOpts).trim());
+        if (Number.isFinite(ct) && ct > 0) committedAt = ct * 1000;
+      } catch { /* leave undefined — scoping falls back to keeping the commit */ }
       const filesRaw = git(
         ['diff-tree', '--no-commit-id', '--name-only', '-r', sha],
         gitOpts,
@@ -202,7 +225,7 @@ export function captureGitState(
         patch = stripIgnoredSectionsFromDiff(raw).trim();
         if (patch.length > MAX_DIFF_SIZE) patch = '';
       } catch { /* show failed — leave patch empty, API falls back */ }
-      commitDetails.push({ sha, message, author, filesChanged, linesAdded: cAdded, linesRemoved: cRemoved, ...(patch && { patch }) });
+      commitDetails.push({ sha, message, author, filesChanged, linesAdded: cAdded, linesRemoved: cRemoved, ...(patch && { patch }), ...(committedAt != null && { committedAt }) });
     } catch {
       // If we can't get details for a commit, include it with minimal info
       commitDetails.push({ sha, message: '', author: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 });
@@ -535,11 +558,20 @@ export function captureAgyDiff(repoPath: string, baselineSha: string | null): Ag
   const curTree = writeWorkingTree(repoPath, gitOpts);
   if (!curTree) return empty;
 
+  return diffTreeToTree(baseTree, curTree, gitOpts);
+}
+
+/** Tree-to-tree delta shared by the working-tree and shadow-range captures. */
+function diffTreeToTree(
+  baseTree: string,
+  targetTree: string,
+  gitOpts: { cwd: string; timeoutMs: number; maxBuffer: number },
+): AgyDiffResult {
   let diff = '';
   const files = new Set<string>();
   try {
-    diff = git(['diff', '--unified=2000', baseTree, curTree], gitOpts).trim();
-    const names = git(['diff', '--name-only', baseTree, curTree], gitOpts).trim();
+    diff = git(['diff', '--unified=2000', baseTree, targetTree], gitOpts).trim();
+    const names = git(['diff', '--name-only', baseTree, targetTree], gitOpts).trim();
     if (names) for (const f of names.split('\n').filter(Boolean)) files.add(f);
   } catch { /* best-effort */ }
 
@@ -559,6 +591,39 @@ export function captureAgyDiff(repoPath: string, baselineSha: string | null): Ag
 }
 
 /**
+ * The delta between two per-prompt shadow baselines — i.e. exactly one
+ * COMPLETED turn's work.
+ *
+ * The per-prompt shadow for prompt N snapshots the tree at the START of prompt
+ * N, so `shadow[i] → shadow[i+1]` brackets turn i precisely. The watcher's other
+ * capture (captureAgyDiff, baseline → CURRENT tree) can only ever describe the
+ * turn still in flight; once a turn is superseded its work is unrecoverable
+ * from the working tree alone, which is why stale/empty captures on earlier
+ * turns used to be permanent (session 1ffc5f67 needed a manual repair).
+ *
+ * Returns empty when either shadow is missing or the two resolve to the SAME
+ * tree — the latter happens when the watcher discovers several prompts in one
+ * poll and stamps them all with the same baseline. Empty means "we genuinely
+ * don't know", and callers must leave existing data alone rather than zero it.
+ */
+export function captureShadowRangeDiff(
+  repoPath: string,
+  fromSha: string | null,
+  toSha: string | null,
+): AgyDiffResult {
+  const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  const empty: AgyDiffResult = { diff: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 };
+  if (!fromSha || !toSha || !HEX.test(fromSha) || !HEX.test(toSha) || fromSha === toSha) return empty;
+
+  const fromTree = gitOrNull(['rev-parse', `${fromSha}^{tree}`], gitOpts);
+  const toTree = gitOrNull(['rev-parse', `${toSha}^{tree}`], gitOpts);
+  if (!fromTree || !toTree || !HEX.test(fromTree) || !HEX.test(toTree)) return empty;
+  if (fromTree === toTree) return empty;
+
+  return diffTreeToTree(fromTree, toTree, gitOpts);
+}
+
+/**
  * Write the current working tree (HEAD + staged + unstaged + untracked) to the
  * git object store as a tree object via a private temp index, WITHOUT touching
  * .git/index or the user's working tree. Returns the tree SHA, or null.
@@ -575,6 +640,33 @@ function writeWorkingTree(repoPath: string, gitOpts: { cwd: string; timeoutMs: n
     return null;
   } finally {
     try { fs.unlinkSync(tmpIndex); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Read a repo-relative file's content as of a commit/tree sha (shadow commits
+ * included — they're ordinary objects kept reachable by a ref).
+ *
+ * Used to anchor Codex `apply_patch` hunks to their real line numbers: Codex's
+ * Update-File sections carry a bare `@@` with no ranges, so the only way to
+ * know where a hunk lands is to look at the file it was applied to. Returns
+ * null on any failure (path absent at that rev, bad sha, binary blowup) —
+ * callers must degrade gracefully rather than emit a guessed position.
+ *
+ * `relPath` must be relative to the repo ROOT and use forward slashes, which is
+ * what `git show <sha>:<path>` expects.
+ */
+export function readFileAtRev(repoPath: string, sha: string, relPath: string): string | null {
+  if (!sha || !HEX.test(sha) || !relPath) return null;
+  // A leading `./` or `../` would make git resolve the path against cwd rather
+  // than the repo root; an absolute path is never valid in this form.
+  if (relPath.startsWith('.') || relPath.startsWith('/') || /^[A-Za-z]:/.test(relPath)) return null;
+  try {
+    return git(['show', `${sha}:${relPath}`], {
+      cwd: repoPath, timeoutMs: 10_000, maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch {
+    return null;
   }
 }
 

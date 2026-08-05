@@ -37,8 +37,10 @@ import {
   readRolloutCwd,
   parseCodexRolloutLive,
   isCodexInternalSubroutine,
+  codexApplyPatchesToDiff,
 } from './agents/codex.js';
-import { createShadowCommit, captureAgyDiff, captureGitState, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import type { CodexBaselineResolver } from './agents/codex.js';
+import { createShadowCommit, captureAgyDiff, captureShadowRangeDiff, captureGitState, readFileAtRev, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha } from './session-state.js';
 import { git } from './utils/exec.js';
 import { isWindows } from './utils/platform.js';
@@ -60,6 +62,48 @@ export const ACTIVE_WINDOW_MS = 6 * 60 * 60 * 1000; // 6h
 export const IDLE_MS = 20 * 60 * 1000; // 20 min
 // Safety net: never let the daemon run forever.
 export const MAX_DAEMON_LIFETIME_MS = 24 * 60 * 60 * 1000; // 24h
+// Grace added to a thread's last-activity time when deciding which commits it
+// authored. A commit is recorded in the rollout moments after it lands, so a
+// commit up to this long after the thread's last rollout write is still plausibly
+// its own; anything later was made by a DIFFERENT concurrent thread (see the
+// commit-scoping in reconcileThread). Wide enough to survive clock skew / FS
+// mtime granularity, tight enough to exclude a session idle for minutes.
+export const COMMIT_SCOPE_GRACE_MS = 2 * 60 * 1000; // 2 min
+
+// How soon after a prompt STARTS its shadow must have been taken for that
+// shadow to be a trustworthy turn boundary. The watcher polls every 8s, so a
+// prompt can be discovered well after the agent already began editing — a
+// shadow taken then has the NEXT turn's work baked in, and using it as a range
+// endpoint over-attributes one turn and starves the other (session 1ffc5f67:
+// 4.7s lag → +29/+0 instead of +10/+19, while a 0.2s lag bracketed its turn
+// exactly). Deliberately tight: failing the check costs nothing (the turn keeps
+// its existing data), while a false pass corrupts two turns at once.
+export const SHADOW_ALIGN_MS = 1000; // 1s
+
+// How stale a prompt's shadow may be and still be trusted as the file state to
+// ANCHOR that turn's apply_patch hunks against (see codexApplyPatchToDiff).
+// Codex's Update-File sections carry a bare `@@` with no line ranges, so the
+// only source of real line numbers is the file as it was when the turn started
+// — which is exactly what the shadow holds, PROVIDED it was taken at the prompt
+// boundary. On the FIRST capture the watcher back-creates shadows for every
+// prompt already in the rollout in one go, so an old prompt's "baseline" is
+// really the current tree; anchoring against that could land a hunk at a
+// plausible but wrong line. This check rejects that case.
+//
+// Deliberately far looser than SHADOW_ALIGN_MS, which gates diff ATTRIBUTION
+// (there, seconds of agent work silently moves lines between turns). Anchoring
+// only needs the content ABOVE the hunk to be unchanged, and every candidate
+// position is additionally verified by exact content match before use — so the
+// cost of a slightly stale baseline is a failed match, not a wrong number.
+export const ANCHOR_MAX_SHADOW_LAG_MS = 60_000; // 1 min
+
+// Terminal status ON THE WIRE. The server's allowlist is
+// {RUNNING, COMPLETED, ERROR} and it silently DROPS anything else (mcp.ts
+// ALLOWED_SESSION_STATUS → coerceStatus returns undefined), so the watcher's
+// old `status: 'ENDED'` PATCH returned success while changing nothing — every
+// watcher-captured Codex session stayed RUNNING forever. 'ENDED' remains the
+// LOCAL state vocabulary (ThreadWatchState.status); only the payload differs.
+export const API_STATUS_ENDED = 'COMPLETED';
 
 // Platforms where `origin enable` auto-starts the watcher. Windows-first
 // rollout: hooks still work on macOS/Linux, so we don't auto-start there yet.
@@ -123,6 +167,11 @@ export interface ThreadWatchState {
   // prompt N>0 — which its mid-stream heuristic would mis-flag as partial (FIX
   // 1). Once the server has prompt 0, later polls send only the latest prompt.
   initialBackfillSent?: boolean;
+  // Prompt indices already SEALED with their final shadow-range diff
+  // (shadow[i] → shadow[i+1]). Once both shadows exist that range is immutable,
+  // so each turn is computed exactly once and never re-diffed on later polls.
+  // Recorded even when the range came back empty — the answer won't change.
+  sealedPrompts?: number[];
 }
 
 export function loadThreadState(threadId: string, dir = watchStateDir()): ThreadWatchState | null {
@@ -240,6 +289,12 @@ export interface WatchDeps {
   captureDiff: (workRoot: string, baselineSha: string | null) => {
     diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
   };
+  // Delta between two per-prompt shadow baselines = exactly one COMPLETED
+  // turn's work. Lets a superseded turn be sealed with its true diff instead of
+  // being frozen at whatever the live capture happened to see.
+  captureRangeDiff: (workRoot: string, fromSha: string | null, toSha: string | null) => {
+    diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
+  };
   // Walk the real git commits made since `headBefore` (session start) so they
   // can be attributed to the session + PR-linked. Wraps captureGitState with a
   // committed-only, full-context capture in production.
@@ -249,15 +304,54 @@ export interface WatchDeps {
     commitShas: string[];
     commitDetails: Array<{
       sha: string; message: string; author: string; filesChanged: string[];
-      linesAdded: number; linesRemoved: number; patch?: string;
+      linesAdded: number; linesRemoved: number; patch?: string; committedAt?: number;
     }>;
     diff: string;
     diffTruncated: boolean;
     linesAdded: number;
     linesRemoved: number;
   };
+  // A repo-relative file's content at a commit/tree sha. Supplies the per-turn
+  // baseline that gives rollout-derived apply_patch hunks their real line
+  // numbers. OPTIONAL: without it the converter keeps its previous sequential
+  // numbering, so an older deps object (or a test that doesn't care) still
+  // produces exactly the pre-existing output.
+  readFileAtRev?: (workRoot: string, sha: string, relPath: string) => string | null;
   loadState: (threadId: string) => ThreadWatchState | null;
   saveState: (s: ThreadWatchState) => void;
+}
+
+// Baseline reader for prompt `promptIndex`: repo-relative path → that file at
+// the prompt's shadow. The turn-level converter drives the rest (it keeps the
+// running per-file view across the turn's patches).
+//
+// Returns undefined when there is no baseline we trust (no dep, no shadow, or a
+// shadow taken too long after the prompt started — see
+// ANCHOR_MAX_SHADOW_LAG_MS), which leaves the converter on its previous
+// behaviour.
+function baselineReaderFor(
+  deps: WatchDeps,
+  workRoot: string,
+  shadows: PromptShadow[],
+  promptIndex: number,
+): CodexBaselineResolver | undefined {
+  const read = deps.readFileAtRev;
+  if (!read) return undefined;
+  const shadow = shadows.find((s) => s.promptIndex === promptIndex);
+  if (!shadow?.baselineSha) return undefined;
+  // No recorded prompt start → no evidence the shadow is stale; the exact
+  // content match inside the converter is still the real guard.
+  const lag = shadow.promptStartedAt
+    ? Date.parse(shadow.capturedAt) - shadow.promptStartedAt
+    : 0;
+  if (!(lag <= ANCHOR_MAX_SHADOW_LAG_MS)) return undefined; // also rejects NaN
+  return (relPath: string): string | null => {
+    try {
+      return read(workRoot, shadow.baselineSha, relPath);
+    } catch {
+      return null;
+    }
+  };
 }
 
 // Process ONE scanned thread: create/reuse its Origin session, push the latest
@@ -275,9 +369,22 @@ export async function reconcileThread(
   // stamp the state ENDED so we don't touch it again.
   if (now - scanned.mtimeMs > deps.idleMs) {
     if (prior && prior.status === 'RUNNING') {
+      let endOk = true;
       if (prior.sessionId) {
-        try { await deps.api.updateSession(prior.sessionId, { status: 'ENDED' }); } catch { /* best-effort */ }
+        endOk = false;
+        try {
+          await deps.api.updateSession(prior.sessionId, { status: API_STATUS_ENDED });
+          endOk = true;
+        } catch (err) {
+          debugLog('codex-watch', 'end updateSession failed', { threadId: scanned.threadId, err: String(err) });
+        }
       }
+      // Only latch ENDED once the SERVER knows. This used to stamp ENDED
+      // unconditionally with the failure swallowed, so a single transient PATCH
+      // failure left the session displaying RUNNING forever — nothing ever
+      // retried it (observed on session 1ffc5f67). Staying RUNNING costs one
+      // retry per poll until the rollout ages out of the active window.
+      if (!endOk) return prior;
       const ended: ThreadWatchState = { ...prior, status: 'ENDED', endedAt: new Date(now).toISOString() };
       deps.saveState(ended);
       return ended;
@@ -395,15 +502,114 @@ export async function reconcileThread(
   const firstCapture = !prior?.initialBackfillSent;
   const promptChanges: any[] = [];
   const latestIndex = newCount - 1;
+  const sealed = new Set<number>(Array.isArray(prior?.sealedPrompts) ? prior!.sealedPrompts! : []);
+  const newlySealed: number[] = [];
   for (let i = 0; i < newCount; i++) {
     const isLatest = i === latestIndex;
+    const patches = parsed.promptPatches?.[i] || [];
+    const promptText = (parsed.userPrompts[i] || '').slice(0, 1000);
+    // ROLLOUT-DERIVED per-turn diff (ground truth). Codex records every edit as
+    // an apply_patch in the rollout; the parser attributes each patch to the
+    // prompt that produced it. This is immune to poll timing — two prompts that
+    // land inside one 8s tick each keep their OWN diff, where a git working-tree
+    // snapshot could only show the latest. Emitted for EVERY patched turn on
+    // EVERY poll (not just latest/new): the server replaces a promptChange diff
+    // whenever the incoming one is non-empty, so a turn that finished right
+    // after it stopped being `latest` still converges to its full diff, and the
+    // re-send is otherwise idempotent.
+    if (patches.length > 0) {
+      // The turn's own shadow is the file state its patches were applied to, so
+      // it's what turns Codex's bare `@@` markers into real line numbers.
+      // Without it every Update-File hunk rendered as starting at line 1 in the
+      // dashboard's "by prompt" view while "by file" (real git diffs) showed the
+      // truth. Converted as a whole turn, not patch by patch: the patches form a
+      // chain against a moving file, and a file patched repeatedly has to be
+      // re-rendered as one diff. undefined reader = previous behaviour.
+      const readBaseline = baselineReaderFor(deps, repo.workRoot, promptShadows, i);
+      const { diff, linesAdded, linesRemoved, filesChanged } =
+        codexApplyPatchesToDiff(patches, repo.workRoot, readBaseline);
+      const files = new Set<string>(filesChanged);
+      // ADDITIVE ONLY — never a downgrade. Codex frequently BUILDS the patch
+      // body at runtime rather than writing it literally:
+      //   const lines = Array.from({length:88}, …);
+      //   const patch = "*** Begin Patch\n*** Add File: x\n"
+      //               + lines.map(x=>"+"+x).join("\n") + "\n*** End Patch";
+      // The rollout then stores the EXPRESSION, not the rows, so the converter
+      // legitimately yields zero lines. Taking that empty result and skipping
+      // the git-snapshot path below lost the turn's diff entirely (session
+      // 1ffc5f67: "create 1 file with 88 rows" and "add 77 more" both went to
+      // +0). A rollout patch is only used when it actually produced content;
+      // otherwise we fall through to exactly the pre-existing behaviour.
+      if (linesAdded + linesRemoved > 0 && diff) {
+        promptChanges.push({
+          promptIndex: i,
+          promptText,
+          filesChanged: [...files],
+          diff: diff.slice(0, MAX_PROMPT_DIFF_LEN),
+          linesAdded,
+          linesRemoved,
+          checkpointType: 'auto',
+        });
+        continue;
+      }
+    }
+    // SEAL a completed turn from its shadow range (shadow[i] → shadow[i+1]).
+    // Without this an earlier turn is frozen at whatever the live capture
+    // happened to see: once superseded, its work is gone from the working tree,
+    // so a bad or empty value could never be corrected and had to be repaired by
+    // hand (session 1ffc5f67). The range is immutable once both shadows exist,
+    // so it's computed exactly ONCE per turn — and we mark the turn sealed even
+    // when the range is empty (identical shadows, e.g. several prompts
+    // discovered in one poll), because that answer will never change either.
+    // Empty never overwrites: we fall through and leave the server's data alone.
+    if (!isLatest && !sealed.has(i)) {
+      const fromShadow = promptShadows.find((s) => s.promptIndex === i);
+      const toShadow = promptShadows.find((s) => s.promptIndex === i + 1);
+      // The range is only turn i's work if the CLOSING shadow was taken at the
+      // prompt boundary. The watcher discovers a prompt up to one poll late, and
+      // Codex is fast enough to have already applied that turn's edits by then —
+      // measured on session 1ffc5f67: a 0.2s-lag shadow bracketed its turn
+      // exactly (+88), while a 4.7s-lag one had already absorbed the NEXT turn's
+      // work (+29 instead of +10, leaving the following turn at +0). An inflated
+      // range is worse than no data, so a late shadow disqualifies the seal and
+      // we leave the turn as-is.
+      const lag = toShadow?.promptStartedAt
+        ? Date.parse(toShadow.capturedAt) - toShadow.promptStartedAt
+        : Number.POSITIVE_INFINITY;
+      const from = fromShadow?.baselineSha;
+      const to = toShadow?.baselineSha;
+      if (from && to && lag <= SHADOW_ALIGN_MS) {
+        newlySealed.push(i);
+        let ranged: { diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number } | null = null;
+        try {
+          ranged = deps.captureRangeDiff(repo.workRoot, from, to);
+        } catch (err) {
+          debugLog('codex-watch', 'captureRangeDiff failed', { threadId: scanned.threadId, promptIndex: i, err: String(err) });
+        }
+        if (ranged && ranged.linesAdded + ranged.linesRemoved > 0) {
+          promptChanges.push({
+            promptIndex: i,
+            promptText,
+            filesChanged: ranged.filesChanged,
+            ...(ranged.diff ? { diff: ranged.diff.slice(0, MAX_PROMPT_DIFF_LEN) } : {}),
+            linesAdded: ranged.linesAdded,
+            linesRemoved: ranged.linesRemoved,
+            checkpointType: 'auto',
+          });
+          continue;
+        }
+      }
+    }
+    // Unpatched turn: keep the original steady-state economy — the latest turn
+    // carries a git working-tree diff (picks up non-apply_patch state), earlier
+    // turns are text-only backfill rows so the server still records the index.
     if (!firstCapture && !isLatest) continue;
     if (isLatest) {
       const baseline = promptShadows.find((s) => s.promptIndex === i)?.baselineSha || null;
       const d = deps.captureDiff(repo.workRoot, baseline);
       promptChanges.push({
         promptIndex: i,
-        promptText: (parsed.userPrompts[i] || '').slice(0, 1000),
+        promptText,
         filesChanged: d.filesChanged,
         // captureAgyDiff returns a single tree-to-tree delta (committed +
         // uncommitted + untracked since the prompt baseline) — the right
@@ -418,7 +624,7 @@ export async function reconcileThread(
       // Backfill row: prompt text only, so the server records the index.
       promptChanges.push({
         promptIndex: i,
-        promptText: (parsed.userPrompts[i] || '').slice(0, 1000),
+        promptText,
         filesChanged: [],
         linesAdded: 0,
         linesRemoved: 0,
@@ -438,16 +644,46 @@ export async function reconcileThread(
   if (headShaAtStart) {
     try {
       const gc = deps.captureGit(repo.workRoot, headShaAtStart);
-      if (gc.commitShas.length > 0) {
+      // Scope commits to the ones THIS thread authored. captureGit walks the
+      // cumulative headShaAtStart..HEAD range, which — with two Codex sessions
+      // live in the same repo — sweeps in commits a DIFFERENT thread made after
+      // HEAD moved. The server links a commit to the FIRST session that claims
+      // it, so an older still-running thread stole a newer session's commit
+      // (session 15234617's turn-3 commit went to the idle d09ee3c8). Drop any
+      // commit whose commit-time is meaningfully AFTER this thread's last
+      // rollout activity — the thread was idle then, so it didn't make it. GRACE
+      // covers the gap between a commit landing and Codex writing the rollout
+      // that records it. Commits with no timestamp are kept (fail-open). Mac
+      // never hits this: it captures per-thread via hooks, not a shared watcher.
+      const cutoff = scanned.mtimeMs + COMMIT_SCOPE_GRACE_MS;
+      const foreignShas = new Set(
+        gc.commitDetails
+          .filter((d) => typeof d.committedAt === 'number' && d.committedAt > cutoff)
+          .map((d) => d.sha),
+      );
+      const ownDetails = foreignShas.size
+        ? gc.commitDetails.filter((d) => !foreignShas.has(d.sha))
+        : gc.commitDetails;
+      const ownShas = foreignShas.size
+        ? gc.commitShas.filter((s) => !foreignShas.has(s))
+        : gc.commitShas;
+      if (foreignShas.size) {
+        debugLog('codex-watch', 'dropped foreign concurrent commits', {
+          threadId: scanned.threadId, dropped: [...foreignShas].map((s) => s.slice(0, 8)),
+        });
+      }
+      if (ownShas.length > 0) {
         gitCapture = {
           headBefore: gc.headBefore,
           headAfter: gc.headAfter,
-          commitShas: gc.commitShas,
-          commitDetails: gc.commitDetails,
+          commitShas: ownShas,
+          commitDetails: ownDetails,
           diff: gc.diff || '',
           diffTruncated: gc.diffTruncated,
-          linesAdded: gc.linesAdded,
-          linesRemoved: gc.linesRemoved,
+          // Re-total from the thread's own commits so the header/line counts
+          // don't include a concurrent thread's work.
+          linesAdded: foreignShas.size ? ownDetails.reduce((s, d) => s + (d.linesAdded || 0), 0) : gc.linesAdded,
+          linesRemoved: foreignShas.size ? ownDetails.reduce((s, d) => s + (d.linesRemoved || 0), 0) : gc.linesRemoved,
         };
       }
     } catch (err) {
@@ -483,6 +719,9 @@ export async function reconcileThread(
     workRoot: repo.workRoot,
     promptCount: newCount,
     promptShadows,
+    // Only latch seals when the PATCH landed — a failed push must be retried on
+    // the next poll, not silently swallowed by the once-per-turn guard.
+    sealedPrompts: updateOk ? [...sealed, ...newlySealed].sort((a, b) => a - b) : [...sealed],
     createdAt: prior?.createdAt || new Date(now).toISOString(),
     lastRolloutMtime: scanned.mtimeMs,
     status: 'RUNNING',
@@ -509,7 +748,7 @@ export async function sweepIdleThreadStates(
     if (seenThreadIds.has(st.threadId)) continue;
     if (now - st.lastRolloutMtime <= deps.idleMs) continue;
     if (st.sessionId) {
-      try { await deps.api.updateSession(st.sessionId, { status: 'ENDED' }); } catch { /* best-effort */ }
+      try { await deps.api.updateSession(st.sessionId, { status: API_STATUS_ENDED }); } catch { /* best-effort */ }
     }
     deps.saveState({ ...st, status: 'ENDED', endedAt: new Date(now).toISOString() });
   }
@@ -699,6 +938,8 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     createShadow: createShadowCommit,
     getHead: (workRoot: string) => getHeadSha(workRoot),
     captureDiff: captureAgyDiff,
+    captureRangeDiff: captureShadowRangeDiff,
+    readFileAtRev,
     // Committed-only, full-context walk of headShaAtStart..HEAD — the session's
     // real commits with per-commit numstat + patch, for server attribution.
     captureGit: (workRoot: string, headBefore: string | null) =>

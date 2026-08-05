@@ -111,3 +111,56 @@ describe('buildSessionWriteData — commit-and-go partial diff', () => {
     expect(out.changes[0].filesChanged.sort()).toEqual(['a.txt', 'b.txt', 'c.txt', 'seed.txt']);
   }, 30_000);
 });
+
+// HEAD-leak regression: a prompt with no commitSha of its own used to inherit
+// gitCapture.headAfter unconditionally, so no-change turns and turns whose work
+// was still uncommitted got stamped with an unrelated commit — which the
+// server's FILL-ONLY rule then froze forever (session 34f90cb5).
+describe('buildSessionWriteData — commitSha only for genuinely committed work', () => {
+  let dir: string;
+  let commitSha: string;
+  beforeEach(() => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-leak-')));
+    gitIn(dir, ['init', '-q']);
+    gitIn(dir, ['config', 'user.email', 't@t.co']);
+    gitIn(dir, ['config', 'user.name', 'T']);
+    gitIn(dir, ['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(dir, 'seed.txt'), 'seed\n');
+    gitIn(dir, ['add', '-A']);
+    gitIn(dir, ['commit', '-q', '-m', 'seed']);
+    commitSha = gitIn(dir, ['rev-parse', 'HEAD']).trim();
+  });
+  afterEach(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  it('does NOT stamp HEAD on a no-change prompt', () => {
+    const opts = {
+      ...baseOpts(dir, commitSha),
+      promptMappings: [
+        { promptIndex: 0, promptText: 'check whats in repo', filesChanged: [], diff: '', commitSha: null } as any,
+      ],
+    };
+    expect(buildSessionWriteData(opts).changes[0].commitSha).toBeNull();
+  }, 30_000);
+
+  it('does NOT stamp HEAD on a prompt whose work is still uncommitted', () => {
+    const opts = {
+      ...baseOpts(dir, commitSha),
+      promptMappings: [
+        { promptIndex: 0, promptText: 'add 10 (not commit)', filesChanged: ['x.txt'], diff: '',
+          uncommittedDiff: 'diff --git a/x.txt b/x.txt\n@@ -0,0 +1,1 @@\n+row\n', commitSha: null } as any,
+      ],
+    };
+    expect(buildSessionWriteData(opts).changes[0].commitSha).toBeNull();
+  }, 30_000);
+
+  it('DOES inherit HEAD for committed work with no explicit commitSha (immediate-commit case preserved)', () => {
+    const opts = {
+      ...baseOpts(dir, commitSha),
+      promptMappings: [
+        { promptIndex: 0, promptText: 'add and commit', filesChanged: ['seed.txt'],
+          diff: 'diff --git a/seed.txt b/seed.txt\n@@ -0,0 +1,1 @@\n+x\n', uncommittedDiff: '', commitSha: null } as any,
+      ],
+    };
+    expect(buildSessionWriteData(opts).changes[0].commitSha).toBe(commitSha);
+  }, 30_000);
+});

@@ -1440,6 +1440,18 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
   }
 
   console.log(chalk.green(`\n✓ Origin session tracking enabled${isGlobal ? ' globally' : ''}.\n`));
+
+  // Loud, explicit heads-up when enabling WITHOUT being logged in. In this
+  // state Origin runs standalone: it captures sessions to local state but
+  // ensureServerSession() bails (isConnectedMode() is false), so nothing is
+  // uploaded and the sessions never appear in the user's Origin account. This
+  // was silent before — a second machine-user who ran `origin enable` but not
+  // `origin login` saw local capture "work" yet found nothing in the dashboard.
+  if (!connected) {
+    console.log(chalk.yellow('  ⚠ Not logged in — running in local-only mode.'));
+    console.log(chalk.yellow('    Sessions are captured on this machine but will NOT appear in your Origin account.'));
+    console.log(chalk.white('    Run ') + chalk.cyan('origin login') + chalk.white(' to sync them to your account.\n'));
+  }
 }
 
 // ─── Global Git Hooks (core.hooksPath) ────────────────────────────────────

@@ -78,12 +78,20 @@ export function isKnownCodexInternalPrompt(prompt: unknown): boolean {
 export function isCodexInternalSubroutine(o: { model?: string | null; prompt?: string | null; toolCalls?: number }): boolean {
   const p = (o.prompt || '').trim();
   if (!p) return false;
+  // Codex's auto-review pass runs as its own thread under a dedicated model
+  // (`codex-auto-review`) and gets captured as a bogus parallel session — a
+  // one-turn "session" whose prompt is the safety-assessment framing, not the
+  // user's work. Match the model directly; it's unambiguous.
+  if (/auto-review/i.test(o.model || '')) return true;
   if (isKnownCodexInternalPrompt(p)) return true;
   const KNOWN = [
     /Codex ambient suggestions/i,
     /You are an expert at upholding safety and compliance standards/i,
     /Generate a (?:short|concise|brief) title/i,
     /Summariz(?:e|ing) the (?:command|shell|tool) output/i,
+    // Auto-review framing, in case the model label is ever missing.
+    /whose request action you are assessing/i,
+    /as untrusted evidence, not as instructions to follow/i,
   ];
   if (KNOWN.some((re) => re.test(p))) return true;
   // Corroborated heuristic: a mini model running a one-shot, system-style
@@ -439,6 +447,511 @@ function describeCodexToolCall(name: string, input: string): { tool: string; dis
   return { tool: name || 'tool', display: input };
 }
 
+// Convert a Codex apply_patch block (`*** Begin Patch … *** End Patch`) into a
+// git-style unified diff + line counts. Codex records EVERY file edit as an
+// apply_patch in its rollout, so this reconstructs a turn's exact diff from
+// ground truth — independent of when the watcher's 8s poll happened to snapshot
+// the working tree. That fixed the case where two fast turns landed in one poll
+// and only the latest got a real diff (session 0509ca9e turn 2 = +0). Add /
+// Update / Delete File sections → new-file / modify / delete diffs. Patch paths
+// are absolute; relativized to repoRoot when given.
+//
+// `resolveBaseline` (optional) hands back a repo-relative file's content at the
+// point this patch is applied. Without it, Update-File hunks can only be
+// numbered sequentially from line 1 (Codex's `@@` marker is bare — see below);
+// with it, each hunk is anchored to its REAL line number. Injected rather than
+// read here so this stays a pure parser with no git/fs coupling.
+export type CodexBaselineResolver = (relPath: string) => string | null;
+
+// One `*** Add/Update/Delete File:` section, kept separate so a turn-level
+// caller can regroup the blocks (see codexApplyPatchesToDiff) instead of
+// re-parsing the joined diff text.
+export interface CodexPatchSection {
+  file: string;
+  kind: 'add' | 'update' | 'delete';
+  diff: string;
+  linesAdded: number;
+  linesRemoved: number;
+  // True when every hunk in this section got a real file line number rather
+  // than the sequential-from-1 fallback.
+  anchored: boolean;
+  // Each hunk's old and new side, markers stripped. Lets the turn-level
+  // converter walk a file's sections BACKWARD to recover its pre-turn content
+  // — the only way to get it when the baseline was captured mid-turn. Empty
+  // for add/delete sections.
+  hunks: Array<{ old: string[]; new: string[] }>;
+}
+
+export interface CodexBaselineAccess {
+  // File content as of this patch.
+  read: CodexBaselineResolver;
+  // How a section reconciled against the caller's current view of the file: the
+  // content immediately BEFORE it (null when the section created the file) and
+  // immediately AFTER. A turn often applies SEVERAL patches to the SAME file —
+  // create it, then append, then append again — each against the result of the
+  // last, so anchoring every one against the start-of-turn file makes the 2nd
+  // onward miss. Feeding the result back keeps the caller's view current.
+  // Only called when the section was reconstructed exactly; a patch we could
+  // not anchor reports nothing rather than a guessed file state.
+  onApplied?: (relPath: string, after: string, before: string | null) => void;
+}
+
+// One classified line of a Codex hunk body, markers stripped. Shared by the
+// counting, anchoring, and replay paths so a line can never be counted as
+// context in one and as an addition in another (which would desync the emitted
+// `,len` from the slice actually matched).
+interface HunkLine { kind: 'add' | 'del' | 'ctx'; text: string }
+
+function classifyHunk(h: string[]): HunkLine[] {
+  return h.map((l) => {
+    if (l.startsWith('+') && !l.startsWith('+++')) return { kind: 'add' as const, text: l.slice(1) };
+    if (l.startsWith('-') && !l.startsWith('---')) return { kind: 'del' as const, text: l.slice(1) };
+    // Git requires context to be space-prefixed; Codex context already is, but
+    // bare/blank lines are not.
+    return { kind: 'ctx' as const, text: l.startsWith(' ') ? l.slice(1) : l };
+  });
+}
+
+const noCr = (s: string) => (s.endsWith('\r') ? s.slice(0, -1) : s);
+
+// Split file content into lines, dropping the phantom empty element a trailing
+// newline produces so indices are the file's real 1-based line numbers.
+function fileLines(content: string): { lines: string[]; trailingNewline: boolean } {
+  const lines = content.split('\n').map(noCr);
+  const trailingNewline = lines.length > 1 && lines[lines.length - 1] === '';
+  if (trailingNewline) lines.pop();
+  return { lines, trailingNewline };
+}
+
+// The single 0-based index where `needle` occurs in `src` at or after `from`,
+// or null when it is absent or occurs more than once. Uniqueness is the whole
+// point: a non-unique match is a guess, and a guessed line number that looks
+// authoritative is worse than an honest best-effort one.
+function findUniqueRun(src: string[], needle: string[], from: number): number | null {
+  if (!needle.length) return null;
+  let found = -1;
+  for (let s = from; s + needle.length <= src.length; s++) {
+    let hit = true;
+    for (let k = 0; k < needle.length; k++) {
+      if (src[s + k] !== needle[k]) { hit = false; break; }
+    }
+    if (!hit) continue;
+    if (found >= 0) return null; // ambiguous
+    found = s;
+  }
+  return found < 0 ? null : found;
+}
+
+// Locate an ordered chain of runs, each after the previous one. All or nothing.
+function matchChain(src: string[], needles: string[][]): number[] | null {
+  const at: number[] = [];
+  let from = 0;
+  for (const n of needles) {
+    const found = findUniqueRun(src, n, from);
+    if (found == null) return null;
+    at.push(found);
+    from = found + n.length;
+  }
+  return at;
+}
+
+const oldSideOf = (h: HunkLine[]) => h.filter((l) => l.kind !== 'add').map((l) => noCr(l.text));
+const newSideOf = (h: HunkLine[]) => h.filter((l) => l.kind !== 'del').map((l) => noCr(l.text));
+
+// Locate `from` runs in `content` and swap each for the matching `to` run,
+// reporting where each landed. Runs one edit — forward when from=old sides,
+// backward (an un-apply) when from=new sides. Null if any run is missing or
+// ambiguous.
+function swapRuns(
+  content: string,
+  from: string[][],
+  to: string[][],
+): { result: string; at: number[] } | null {
+  if (!content || !from.length) return null;
+  const { lines: src, trailingNewline } = fileLines(content);
+  if (!src.length) return null;
+  if (from.some((r) => !r.length)) return null; // nothing to match on
+  const at = matchChain(src, from);
+  if (!at) return null;
+  const built: string[] = [];
+  let cursor = 0;
+  at.forEach((idx, k) => {
+    built.push(...src.slice(cursor, idx));
+    built.push(...to[k]);
+    cursor = idx + from[k].length;
+  });
+  built.push(...src.slice(cursor));
+  return { result: built.join('\n') + (trailingNewline ? '\n' : ''), at };
+}
+
+// Recover the REAL 1-based old-file start line of every Update-File hunk, and
+// reconstruct the file on both sides of the patch.
+//
+// Codex Update-File sections are CONTEXT-ANCHORED: the marker is a bare `@@`
+// with no `-l,s +l,s` ranges, so the patch alone cannot say where a hunk lands.
+// Numbering them sequentially from 1 (the previous behaviour) made the
+// dashboard's per-prompt view render every Codex turn as if it started at line
+// 1 while "by file" — which uses real git diffs — showed the true positions.
+//
+// Given the file, the positions ARE recoverable: a hunk's OLD side (context +
+// removed lines) is by construction a verbatim contiguous slice of the
+// pre-patch file, and its NEW side is one of the post-patch file. `view` may be
+// either, because the watcher's baseline shadow is taken when it NOTICES the
+// prompt and Codex is often already mid-edit by then (measured: a shadow taken
+// 8.2s in already had the turn's first patch baked in). So try the post-patch
+// reading FIRST — if the view already contains this patch's result, the patch
+// is a no-op against it and the file BEFORE it is recovered by swapping each
+// new side back for its old one. Otherwise read the view as pre-patch and
+// replay forward.
+//
+// Returns null if ANY hunk is unmatched or ambiguous under both readings.
+// All-or-nothing per section: mixing anchored and sequential positions inside
+// one file's diff would emit non-monotonic hunk headers.
+function reconcileUpdateHunks(
+  hunks: HunkLine[][],
+  view: string,
+): { positions: number[]; before: string; after: string } | null {
+  if (!view || !hunks.length) return null;
+  const oldSides = hunks.map(oldSideOf);
+  const newSides = hunks.map(newSideOf);
+  if (oldSides.some((s) => !s.length)) return null; // zero-context insertion
+
+  // 1. Already reflected in the view → rebuild the pre-patch file.
+  const undo = swapRuns(view, newSides, oldSides);
+  if (undo) {
+    const positions: number[] = [];
+    let delta = 0; // shift this patch's earlier hunks introduced
+    undo.at.forEach((idx, k) => {
+      positions.push(idx + 1 - delta);
+      delta += newSides[k].length - oldSides[k].length;
+    });
+    return { positions, before: undo.result, after: view };
+  }
+
+  // 2. Not yet reflected → replay it forward.
+  const redo = swapRuns(view, oldSides, newSides);
+  if (!redo) return null;
+  return { positions: redo.at.map((idx) => idx + 1), before: view, after: redo.result };
+}
+
+export function codexApplyPatchToDiff(
+  patch: string,
+  repoRoot?: string,
+  resolveBaseline?: CodexBaselineResolver | CodexBaselineAccess,
+): {
+  diff: string; linesAdded: number; linesRemoved: number; filesChanged: string[];
+  sections: CodexPatchSection[];
+} {
+  const out = {
+    diff: '', linesAdded: 0, linesRemoved: 0,
+    filesChanged: [] as string[],
+    // Per-file blocks in emission order. `out.diff` is just these joined; the
+    // turn-level converter regroups them when one file was patched repeatedly.
+    sections: [] as CodexPatchSection[],
+  };
+  if (!patch || !patch.includes('*** Begin Patch')) return out;
+  // A bare function stays supported — it's the read half of the same contract.
+  const baselines: CodexBaselineAccess | undefined =
+    typeof resolveBaseline === 'function' ? { read: resolveBaseline } : resolveBaseline;
+  const noteApplied = (f: string, after: string, before: string | null) => {
+    try { baselines?.onApplied?.(f, after, before); } catch { /* caller's cache — never fatal */ }
+  };
+  const rel = (p: string): string => {
+    let f = p.trim().replace(/\\/g, '/');
+    if (repoRoot) {
+      const root = repoRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+      if (f.toLowerCase().startsWith(root.toLowerCase() + '/')) f = f.slice(root.length + 1);
+    }
+    return f;
+  };
+  const lines = patch.split('\n');
+  let i = 0;
+  while (i < lines.length && !lines[i].startsWith('*** Begin Patch')) i++;
+  i++; // past Begin Patch
+  const collectBody = (): string[] => {
+    const body: string[] = [];
+    while (i < lines.length && !lines[i].startsWith('*** ')) { body.push(lines[i]); i++; }
+    return body;
+  };
+  while (i < lines.length && !lines[i].startsWith('*** End Patch')) {
+    const line = lines[i];
+    const add = line.match(/^\*\*\* Add File:\s*(.+)$/);
+    const upd = line.match(/^\*\*\* Update File:\s*(.+)$/);
+    const del = line.match(/^\*\*\* Delete File:\s*(.+)$/);
+    if (add) {
+      const f = rel(add[1]); out.filesChanged.push(f); i++;
+      const added = collectBody().filter((l) => l.startsWith('+'));
+      out.linesAdded += added.length;
+      out.sections.push({
+        file: f, kind: 'add', linesAdded: added.length, linesRemoved: 0, anchored: true, hunks: [],
+        diff: `diff --git a/${f} b/${f}\nnew file mode 100644\n--- /dev/null\n+++ b/${f}\n@@ -0,0 +1,${added.length} @@\n${added.join('\n')}`,
+      });
+      // An Add File section states the whole file, so a later patch in the same
+      // turn ("create it with 11 rows" then "append 5 more") can anchor against
+      // it without the file ever existing at the turn's baseline commit.
+      if (added.length) noteApplied(f, added.map((l) => l.slice(1)).join('\n') + '\n', null);
+    } else if (upd) {
+      const f = rel(upd[1]); out.filesChanged.push(f); i++;
+      const body = collectBody();
+      // Codex Update-File sections use a BARE `@@` marker (no `-l,s +l,s`
+      // ranges) — not a valid unified-diff hunk header. Emitting it verbatim
+      // produces a diff no viewer can parse ("no diff captured"). Split the
+      // body at each `@@`, compute real ±/context counts per hunk, and emit a
+      // structurally valid `@@ -old,len +new,len @@` header.
+      const hunks: string[][] = [];
+      let cur: string[] | null = null;
+      for (const l of body) {
+        if (l.startsWith('@@')) { cur = []; hunks.push(cur); continue; }
+        if (!cur) { cur = []; hunks.push(cur); }
+        cur.push(l);
+      }
+      const classified = hunks.map(classifyHunk);
+      // Absolute line numbers aren't in the patch, so recover them from the
+      // file this patch was applied to, when the caller can supply it. `null`
+      // (no resolver, unreadable file, unmatched or ambiguous context) keeps the
+      // old best-effort sequential numbering — never a fabricated position.
+      let anchored: { positions: number[]; before: string; after: string } | null = null;
+      if (baselines && hunks.length) {
+        let view: string | null = null;
+        try { view = baselines.read(f); } catch { view = null; }
+        if (view) anchored = reconcileUpdateHunks(classified, view);
+      }
+      const anchors = anchored?.positions ?? null;
+      let sectionAdded = 0;
+      let sectionRemoved = 0;
+      let oldPos = 1;
+      let newPos = 1;
+      // Running new-side shift from earlier hunks in this file, so anchored
+      // hunks report the post-patch line number on the `+` side.
+      let delta = 0;
+      const rendered: string[] = [];
+      for (let hi = 0; hi < hunks.length; hi++) {
+        const h = classified[hi];
+        let add = 0; let del2 = 0; let ctx = 0;
+        for (const l of h) {
+          if (l.kind === 'add') add++;
+          else if (l.kind === 'del') del2++;
+          else ctx++;
+        }
+        sectionAdded += add;
+        sectionRemoved += del2;
+        const oldLen = ctx + del2;
+        const newLen = ctx + add;
+        // Re-emit with the marker git expects — context space-prefixed even
+        // when Codex left a bare or blank line.
+        const bodyLines = h.map((l) =>
+          `${l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}${l.text}`,
+        );
+        const oldStart = anchors ? anchors[hi] : oldPos;
+        const newStart = anchors ? anchors[hi] + delta : newPos;
+        rendered.push(`@@ -${oldStart},${oldLen} +${newStart},${newLen} @@`);
+        rendered.push(...bodyLines);
+        delta += add - del2;
+        oldPos += oldLen;
+        newPos += newLen;
+      }
+      out.linesAdded += sectionAdded;
+      out.linesRemoved += sectionRemoved;
+      out.sections.push({
+        file: f, kind: 'update', linesAdded: sectionAdded, linesRemoved: sectionRemoved,
+        anchored: !!anchored,
+        hunks: classified.map((h) => ({ old: oldSideOf(h), new: newSideOf(h) })),
+        diff: `diff --git a/${f} b/${f}\n--- a/${f}\n+++ b/${f}\n${rendered.join('\n')}`,
+      });
+      // Only when every hunk matched — an unanchored patch leaves the caller's
+      // view of the file untouched rather than replacing it with a guess.
+      if (anchored) noteApplied(f, anchored.after, anchored.before);
+    } else if (del) {
+      const f = rel(del[1]); out.filesChanged.push(f); i++;
+      const body = collectBody();
+      const removed = body.filter((l) => l.startsWith('-')).length || body.length;
+      out.linesRemoved += removed;
+      out.sections.push({
+        file: f, kind: 'delete', linesAdded: 0, linesRemoved: removed, anchored: true, hunks: [],
+        diff: `diff --git a/${f} b/${f}\ndeleted file mode 100644\n--- a/${f}\n+++ /dev/null`,
+      });
+      // The file is gone; a later patch in this turn must not anchor against
+      // the content it used to hold.
+      noteApplied(f, '', null);
+    } else {
+      i++;
+    }
+  }
+  out.diff = out.sections.map((s) => s.diff).join('\n');
+  return out;
+}
+
+// Diff two full file contents as ONE unified-diff block.
+//
+// Needed because a turn that patches the same file several times cannot simply
+// concatenate its per-patch blocks: each patch is expressed against the file as
+// IT saw it, so the second onward reference lines the original file never had.
+// Rendering the turn's start and end content instead gives one block that is
+// genuinely valid against the baseline — which is what the dashboard needs to
+// show all of a turn's changes to a file rather than only the first patch's.
+//
+// Deliberately simple: trim the common prefix and suffix and emit ONE hunk for
+// the span between them, with up to `context` unchanged lines on each side. Not
+// minimal for edits scattered through a file (git would emit several hunks),
+// but always correct, and it matches git exactly for the append/replace shapes
+// Codex actually produces. Returns null when nothing changed.
+export function renderFileDiff(
+  file: string,
+  before: string | null,
+  after: string,
+  context = 3,
+): { diff: string; linesAdded: number; linesRemoved: number } | null {
+  const oldLines = before ? fileLines(before).lines : [];
+  const newLines = after ? fileLines(after).lines : [];
+  if (!oldLines.length && !newLines.length) return null;
+  if (!oldLines.length) {
+    return {
+      diff: `diff --git a/${file} b/${file}\nnew file mode 100644\n--- /dev/null\n+++ b/${file}\n`
+        + `@@ -0,0 +1,${newLines.length} @@\n${newLines.map((l) => `+${l}`).join('\n')}`,
+      linesAdded: newLines.length,
+      linesRemoved: 0,
+    };
+  }
+  if (!newLines.length) {
+    return {
+      diff: `diff --git a/${file} b/${file}\ndeleted file mode 100644\n--- a/${file}\n+++ /dev/null`,
+      linesAdded: 0,
+      linesRemoved: oldLines.length,
+    };
+  }
+  let pre = 0;
+  while (pre < oldLines.length && pre < newLines.length && oldLines[pre] === newLines[pre]) pre++;
+  let suf = 0;
+  while (
+    suf < oldLines.length - pre && suf < newLines.length - pre
+    && oldLines[oldLines.length - 1 - suf] === newLines[newLines.length - 1 - suf]
+  ) suf++;
+  const oldMid = oldLines.slice(pre, oldLines.length - suf);
+  const newMid = newLines.slice(pre, newLines.length - suf);
+  if (!oldMid.length && !newMid.length) return null; // identical
+  const lead = Math.min(context, pre);
+  const trail = Math.min(context, suf);
+  const start = pre - lead; // 0-based
+  const body = [
+    ...oldLines.slice(start, pre).map((l) => ` ${l}`),
+    ...oldMid.map((l) => `-${l}`),
+    ...newMid.map((l) => `+${l}`),
+    ...oldLines.slice(oldLines.length - suf, oldLines.length - suf + trail).map((l) => ` ${l}`),
+  ];
+  const oldLen = lead + oldMid.length + trail;
+  const newLen = lead + newMid.length + trail;
+  return {
+    diff: `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n`
+      + `@@ -${oldLen ? start + 1 : start},${oldLen} +${newLen ? start + 1 : start},${newLen} @@\n${body.join('\n')}`,
+    linesAdded: newMid.length,
+    linesRemoved: oldMid.length,
+  };
+}
+
+// Convert ALL of one turn's apply_patch blocks together.
+//
+// Two things only work at turn level. First, the patches form a CHAIN — each is
+// applied to the result of the last — so a shared, advancing view of every file
+// is what lets patch 2 onward find its context at all. Second, when a file is
+// patched more than once the per-patch blocks cannot be concatenated: they are
+// each expressed against a different version of the file, and a viewer that
+// merges them by path (as the dashboard does) renders only the first. Those
+// files are re-rendered as a single diff from the turn's start to its end.
+//
+// `read` is optional and failure is never fatal: with no reader, an unreadable
+// file, or context that can't be matched, this degrades to exactly what
+// converting each patch on its own produces.
+export function codexApplyPatchesToDiff(
+  patches: string[],
+  repoRoot?: string,
+  read?: CodexBaselineResolver,
+): { diff: string; linesAdded: number; linesRemoved: number; filesChanged: string[] } {
+  // Per-file running content across the turn, plus how many of the file's
+  // sections we managed to reconcile against it.
+  const view = new Map<string, { tail: string; reconciled: number }>();
+  const cache = new Map<string, string | null>();
+  const access: CodexBaselineAccess | undefined = read
+    ? {
+      read: (p) => {
+        if (view.has(p)) return view.get(p)!.tail;
+        if (!cache.has(p)) {
+          let c: string | null = null;
+          try { c = read(p); } catch { c = null; }
+          cache.set(p, c);
+        }
+        return cache.get(p)!;
+      },
+      onApplied: (p, after) => {
+        const cur = view.get(p);
+        if (cur) { cur.tail = after; cur.reconciled++; }
+        else view.set(p, { tail: after, reconciled: 1 });
+      },
+    }
+    : undefined;
+
+  const all: CodexPatchSection[] = [];
+  const out = { diff: '', linesAdded: 0, linesRemoved: 0, filesChanged: [] as string[] };
+  const files = new Set<string>();
+  for (const p of patches) {
+    const r = codexApplyPatchToDiff(p, repoRoot, access);
+    for (const s of r.sections) { all.push(s); files.add(s.file); }
+    out.linesAdded += r.linesAdded;
+    out.linesRemoved += r.linesRemoved;
+  }
+
+  // Collapse files this turn patched more than once — but only when EVERY one
+  // of their sections reconciled, so the pair we render is the real story and
+  // not a partial replay.
+  const byFile = new Map<string, CodexPatchSection[]>();
+  for (const s of all) {
+    const list = byFile.get(s.file);
+    if (list) list.push(s); else byFile.set(s.file, [s]);
+  }
+  const collapsed = new Map<string, { diff: string; linesAdded: number; linesRemoved: number }>();
+  for (const [f, sections] of byFile) {
+    if (sections.length < 2) continue;
+    if (sections.some((s) => s.kind === 'delete')) continue; // deleted content is unrecoverable
+    const v = view.get(f);
+    if (!v || v.reconciled !== sections.length) continue;
+    // Walk BACKWARD from the final content to recover the file as the turn
+    // found it. Un-applying is the only way that works no matter where the
+    // baseline was captured: the shadow can sit before the turn, between two of
+    // its patches, or after all of them, and only the tail is known for certain.
+    let head: string | null = v.tail;
+    let walkable = true;
+    for (let k = sections.length - 1; k >= 0; k--) {
+      const s = sections[k];
+      if (s.kind === 'add') { head = null; break; } // the turn created it
+      const undone = swapRuns(head!, s.hunks.map((h) => h.new), s.hunks.map((h) => h.old));
+      if (!undone) { walkable = false; break; }
+      head = undone.result;
+    }
+    if (!walkable) continue; // could not walk it back — keep the per-patch blocks
+    const merged = renderFileDiff(f, head, v.tail);
+    if (merged) collapsed.set(f, merged);
+  }
+
+  const emitted = new Set<string>();
+  const blocks: string[] = [];
+  for (const s of all) {
+    const merged = collapsed.get(s.file);
+    if (!merged) { blocks.push(s.diff); continue; }
+    if (emitted.has(s.file)) continue;
+    emitted.add(s.file);
+    blocks.push(merged.diff);
+  }
+  for (const [f, merged] of collapsed) {
+    // The merged diff supersedes the per-patch counts for that file.
+    let addSum = 0; let delSum = 0;
+    for (const s of all) if (s.file === f) { addSum += s.linesAdded; delSum += s.linesRemoved; }
+    out.linesAdded += merged.linesAdded - addSum;
+    out.linesRemoved += merged.linesRemoved - delSum;
+  }
+  out.filesChanged = [...files];
+  out.diff = blocks.join('\n');
+  return out;
+}
+
 // Flatten Codex tool-call output into text. ≥0.145 returns an array of
 // content blocks (`[{ type: 'input_text', text: '…' }]`); older builds use a
 // plain string or `{ content }`.
@@ -486,6 +999,11 @@ export function parseCodexRolloutLive(rolloutFile: string): {
   // Codex has already made commits inside the prompt (then the diff against
   // that "baseline" loses the prompt's real work).
   promptTimestamps: number[];
+  // Per-prompt apply_patch blocks (raw `*** Begin Patch … *** End Patch`), one
+  // array per userPrompts entry, holding the patches Codex applied during that
+  // turn. Lets the watcher reconstruct each turn's exact diff from the rollout
+  // instead of a git working-tree snapshot that can't tell two fast turns apart.
+  promptPatches: string[][];
   transcript: string;
   tokensUsed: number;
   inputTokens: number;
@@ -507,6 +1025,9 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     const lines = content.split('\n').filter(l => l.trim());
     const turns: Array<{ role: string; content: string }> = [];
     const promptTimestamps: number[] = [];
+    // One entry per user prompt (pushed alongside promptTimestamps); apply_patch
+    // tool calls are appended to the current (most recent) prompt's array.
+    const promptPatches: string[][] = [];
     const pendingTools = new Map<string, number>();
     let maxInputTokens = 0, maxOutputTokens = 0, maxTotalTokens = 0, maxCachedInputTokens = 0;
     let model: string | undefined;
@@ -576,6 +1097,7 @@ export function parseCodexRolloutLive(rolloutFile: string): {
                     return 0;
                   })();
                   promptTimestamps.push(ts);
+                  promptPatches.push([]); // start collecting this turn's patches
                 }
               }
             }
@@ -600,6 +1122,10 @@ export function parseCodexRolloutLive(rolloutFile: string): {
           const idx = turns.length;
           turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(display)}` });
           if (callId) pendingTools.set(callId, idx);
+          // Attribute the patch to the current turn for per-prompt diffs.
+          if (tool === 'apply_patch' && typeof display === 'string' && display.includes('*** Begin Patch') && promptPatches.length > 0) {
+            promptPatches[promptPatches.length - 1].push(display);
+          }
         } else if (ptype === 'function_call_output' || ptype === 'local_shell_call_output' || ptype === 'custom_tool_call_output') {
           const callId = payload.call_id || payload.id || '';
           const out = stringifyCodexToolOutput(payload.output);
@@ -633,6 +1159,7 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     return {
       userPrompts,
       promptTimestamps,
+      promptPatches,
       transcript: JSON.stringify(turns),
       tokensUsed: liveNonCachedInput + maxOutputTokens,
       inputTokens: liveNonCachedInput,

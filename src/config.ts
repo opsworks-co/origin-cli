@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import { execFileSync } from 'child_process';
 
 const CONFIG_DIR = path.join(os.homedir(), '.origin');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
@@ -68,6 +69,51 @@ export interface AgentConfig {
   agentSlug?: string; // Default agent slug (selected during init)
 }
 
+// Restrict a path to the current user on Windows, where `chmod 0o600/0o700` is
+// a NO-OP (Node only applies mode on POSIX). Without this the file inherits its
+// parent's ACL — on machines with the OpenAI Codex sandbox that ACL grants
+// `CodexSandboxUsers:(RX)`, so ~/.origin/config.json (which holds the org API
+// key) was readable by other sandbox-user contexts on the same PC. That leaks
+// an org credential across users. icacls fixes it; POSIX relies on chmod above.
+//
+// Ordering is deliberate and fail-safe: we ADD explicit full-control ACEs for
+// the owner + SYSTEM + Administrators FIRST, and only strip inherited ACEs once
+// that succeeds — so a bad principal lookup can never lock the user out of their
+// own config (we just leave the ACL untouched). SYSTEM/Administrators are given
+// by well-known SID so this also works on non-English Windows.
+export function lockdownWindowsPath(targetPath: string, isDir: boolean): void {
+  if (process.platform !== 'win32') return;
+  const user = process.env.USERNAME
+    ? (process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME)
+    : os.userInfo().username;
+  if (!user) return;
+  // Dirs get inheritable ACEs (OI)(CI) so children inherit them; files get a
+  // plain F (inheritance flags on a leaf file are inherit-only and grant no
+  // direct access — that would lock the owner out of their own file).
+  const perm = isDir ? '(OI)(CI)F' : 'F';
+  const run = (args: string[]) => execFileSync('icacls', [targetPath, ...args], {
+    windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'], timeout: 15_000,
+  });
+  try {
+    // For a directory: first reset existing children so they INHERIT from this
+    // dir (drops any explicit ACE an older leaky write left on them); then the
+    // grant/inheritance steps below re-lock the dir and propagate down.
+    if (isDir) {
+      try { run(['/reset', '/T']); } catch { /* non-fatal — the grant below is what matters */ }
+    }
+    // Step 1 — add explicit full-control ACEs BEFORE touching inheritance, so a
+    // failed principal lookup can never strip the owner's access (we bail here).
+    run([
+      '/grant:r', `${user}:${perm}`,
+      '/grant:r', `*S-1-5-18:${perm}`,        // NT AUTHORITY\SYSTEM
+      '/grant:r', `*S-1-5-32-544:${perm}`,    // BUILTIN\Administrators
+    ]);
+    // Step 2 — now safe to remove INHERITED ACEs (drops CodexSandboxUsers:RX).
+    // Children of a dir pick up the restriction via the inheritable ACEs above.
+    run(['/inheritance:r']);
+  } catch { /* best-effort, mirrors the chmod calls — never break a config write */ }
+}
+
 export function ensureConfigDir() {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
@@ -76,6 +122,9 @@ export function ensureConfigDir() {
     // Best-effort: ignore chmod errors on platforms where it's a no-op.
     try { fs.chmodSync(CONFIG_DIR, 0o700); } catch { /* ignore */ }
   }
+  // Windows: chmod above did nothing — lock the dir (and its existing contents)
+  // down via ACL so credentials aren't group-readable.
+  lockdownWindowsPath(CONFIG_DIR, true);
 }
 
 /**
@@ -105,6 +154,9 @@ function writeSecret(filePath: string, data: string): void {
     // Belt-and-suspenders: chmod the final path too, in case rename preserved
     // an older inode's mode on some filesystems.
     try { fs.chmodSync(filePath, 0o600); } catch { /* ignore */ }
+    // Windows: chmod is a no-op — ACL-lock the credential file directly so a
+    // pre-existing file written by an older (leaky) release is fixed on save.
+    lockdownWindowsPath(filePath, false);
   } catch (err) {
     // If rename failed after successful write, clean up the orphan tmp file
     // so `~/.origin/` doesn't accumulate stale writes on repeated failures.
