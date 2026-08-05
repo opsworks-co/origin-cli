@@ -128,7 +128,15 @@ export async function statusCommand(opts: { global?: boolean; all?: boolean } = 
   // marks stale RUNNING rows ENDED (and persists that) but still returns
   // ALL 1200+ archived sessions, so the ENDED ones must be filtered out here
   // or the listing is unusable.
-  const wantGlobal = !!(opts.global || opts.all);
+  //
+  // AUTO-GLOBAL OUTSIDE A REPO: cwd-scoping only means something inside a git
+  // repo, where it reads that repo's git-dir state. Outside one it degrades to
+  // "state files whose md5(cwd) happens to match" — an accident of where an
+  // agent was launched, not a scope a human would ask for. Run from $HOME that
+  // matched two stale `.openclaw/workspace` rows and hid every live session, so
+  // the machine read as idle mid-run. When there's no repo we therefore show
+  // the machine-wide view (what the user meant) unless they're inside a repo.
+  const wantGlobal = !!(opts.global || opts.all) || !repoPath;
   const activeSessions = wantGlobal
     ? listAllActiveSessions()
         .filter((s) => String(s.status || '').toUpperCase() !== 'ENDED')
@@ -137,7 +145,12 @@ export async function statusCommand(opts: { global?: boolean; all?: boolean } = 
 
   if (activeSessions.length > 0) {
     const label = activeSessions.length === 1 ? 'Active Session' : `Active Sessions (${activeSessions.length})`;
-    console.log(chalk.magenta(`\n  ● ${label}`));
+    // Be explicit about scope — a count means nothing without knowing whether
+    // it covers this repo or the whole machine.
+    const scopeNote = wantGlobal
+      ? chalk.gray(repoPath ? '  · all repos on this machine' : '  · all repos on this machine (not in a git repo)')
+      : chalk.gray('  · this repo — use --global for every repo');
+    console.log(chalk.magenta(`\n  ● ${label}`) + scopeNote);
 
     for (const state of activeSessions) {
       const durationMs = Date.now() - new Date(state.startedAt).getTime();

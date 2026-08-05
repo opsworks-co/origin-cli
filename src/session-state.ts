@@ -749,6 +749,12 @@ export function markSessionEnded(state: SessionState): boolean {
  */
 export function listActiveSessions(cwd?: string): SessionState[] {
   const sessions: SessionState[] = [];
+  // A session whose own state file says ENDED is not active. This function
+  // did NO filtering at all, so `origin status` listed sessions that had
+  // already ended — user-reported: two `.openclaw/workspace` rows showing
+  // "Active" at 291h/601h with 0 prompts, both marked status:ENDED on disk,
+  // while genuinely live sessions elsewhere were invisible.
+  const isEnded = (st: any) => String(st?.status || '').toUpperCase() === 'ENDED';
 
   // Check git dir (COMMON dir — matches getStatePath, so a lookup from a
   // worktree and one from the main checkout read the same directory)
@@ -768,6 +774,7 @@ export function listActiveSessions(cwd?: string): SessionState[] {
               const tagMatch = entry.match(/^origin-session-(.+)\.json$/);
               if (tagMatch) state.sessionTag = tagMatch[1];
             }
+            if (isEnded(state)) continue;
             Object.defineProperty(state, '__statePath', { value: fullPath, enumerable: false });
             sessions.push(state);
           } catch { /* skip corrupt files */ }
@@ -789,6 +796,7 @@ export function listActiveSessions(cwd?: string): SessionState[] {
           const fullPath = path.join(sessionsDir, entry);
           const state = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
           if (!state || typeof state !== 'object' || !state.sessionId) continue;
+          if (isEnded(state)) continue;
           Object.defineProperty(state, '__statePath', { value: fullPath, enumerable: false });
           sessions.push(state);
         } catch { /* skip */ }
