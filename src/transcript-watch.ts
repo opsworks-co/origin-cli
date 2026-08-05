@@ -44,7 +44,7 @@ import os from 'os';
 import path from 'path';
 import { spawn, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { createShadowCommit, captureAgyDiff, captureGitState, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { createShadowCommit, captureAgyDiff, captureGitState, commitDiffScopedToPrompt, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha, saveSessionState as writeGitSessionFile, clearSessionState as endGitSessionFile } from './session-state.js';
 import { createSnapshot } from './commands/snapshot.js';
 import { estimateCost } from './transcript.js';
@@ -264,6 +264,16 @@ export interface WatchDeps {
   captureFilesDiff?: (workRoot: string, relFiles: string[]) => {
     diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
   };
+  // A committing turn's OWN contribution: baseline tree → commit tree, scoped to
+  // the commit's files. Recovers turns whose transcript recorded no edits (the
+  // agent worked through the terminal) and which never got the latest-turn
+  // working-tree treatment. Optional; omitted in tests.
+  captureCommitScoped?: (
+    workRoot: string,
+    baselineSha: string | null,
+    commitSha: string,
+    files: string[],
+  ) => { diff: string; linesAdded: number; linesRemoved: number } | null;
   // Canonical per-prompt edit capture — wraps capturePromptEdits. Returns one
   // PromptCapture per prompt (edits[] + commits[]), serialized into editsJson.
   capturePromptEdits?: (opts: {
@@ -690,9 +700,80 @@ export async function reconcileSession(
       if (files.length === 0) files = agentFilesRel;
     }
 
+    // COMMITTING TURN WITH NO RECORDED EDITS. Cursor logs no file-edit when the
+    // agent works through the terminal, so that turn's transcript mapping comes
+    // back empty — and the working-tree recovery above only runs for the LATEST
+    // turn. When two prompts land inside one poll the turn is never latest, so
+    // it stays blank forever: no diff, no files, a grey badge and missing from
+    // the "N with changes" count, even though it demonstrably changed code
+    // (session 7ff68eb7 turn 1, "add 5 more rows and commit").
+    //
+    // If such a turn owns a commit, git still knows what it did: diff its
+    // baseline tree against the commit tree, scoped to that commit's files.
+    // That yields the turn's OWN contribution (+5) rather than the commit's
+    // headline total (+16 — the file was untracked, so the commit adds all of
+    // it, including the 11 lines the previous turn already claims).
+    if (!diff && files.length === 0 && commitShaByIndex.has(i) && deps.captureCommitScoped) {
+      const sha = commitShaByIndex.get(i)!;
+      const baseline = promptShadows.find((s) => s.promptIndex === i)?.baselineSha || null;
+      const commitOwnFiles = commitFiles.get(sha) || [];
+      let scoped: { diff: string; linesAdded: number; linesRemoved: number } | null = null;
+      try {
+        scoped = deps.captureCommitScoped(repo.workRoot, baseline, sha, commitOwnFiles);
+      } catch {
+        scoped = null; // best-effort recovery; never break the poll
+      }
+      // Only adopt a result that actually carries work — an empty one must fall
+      // through and leave the turn as-is rather than cement the blank row.
+      if (scoped && scoped.linesAdded + scoped.linesRemoved > 0) {
+        diff = scoped.diff;
+        linesAdded = scoped.linesAdded;
+        linesRemoved = scoped.linesRemoved;
+        if (commitOwnFiles.length) files = commitOwnFiles;
+      }
+    }
+
+    // Claiming authority over an EMPTY payload is what makes a blank turn
+    // permanent: the server replaces diff/uncommittedDiff/filesChanged wholesale
+    // for an authoritative write, so a poll that recovered nothing would wipe a
+    // good capture from an earlier poll. Assert authority only when we actually
+    // carry content; otherwise let the server's fill-only policy preserve it.
+    // An editsJson only counts as content when it actually holds edits — the
+    // last-resort synthesis above emits `{"edits":[],"commits":[]}` for EVERY
+    // turn, so a bare `.has(i)` would treat an empty turn as authoritative and
+    // defeat the guard. Mirrors the server's own editsJsonHasEdits rule.
+    const editsJsonForTurn = editsJsonByIndex.get(i);
+    const editsJsonHasEdits = (() => {
+      if (!editsJsonForTurn) return false;
+      try {
+        const cap = JSON.parse(editsJsonForTurn);
+        return Array.isArray(cap?.edits) && cap.edits.length > 0;
+      } catch { return false; }
+    })();
+    const carriesContent = !!diff || files.length > 0 || editsJsonHasEdits;
+
+    // The prompt's REAL submit time, straight from the transcript.
+    //
+    // Without this the server has nothing to store and PromptChange.createdAt
+    // defaults to the DB insert time — i.e. whenever this watcher happened to
+    // poll. That is not when the user submitted, and the skew is large enough
+    // to corrupt attribution: prod session 03a338b8 recorded commit 5f6c7a37 at
+    // 19:08:24 while the prompt that produced it was stamped 19:08:58 — the
+    // turn's own commit appearing to predate the turn by 34s. Every
+    // timestamp-based rule downstream (which turn was active at commit time,
+    // intent windows, ordering) then reasons from a fiction.
+    //
+    // The parser already exposes `promptTimestamps` ("epoch-ms per prompt,
+    // aligned") and the code below uses it for session duration; codex-watch
+    // threads it through as promptStartedAt. This watcher simply never sent it.
+    // The server accepts epoch-ms or ISO and validates the range
+    // (parsePromptCreatedAt in routes/mcp.ts), so a 0/absent value is omitted
+    // rather than sent as a bogus epoch.
+    const promptTs = (parsed.promptTimestamps || [])[i];
     promptChanges.push({
       promptIndex: i,
       promptText: (parsed.userPrompts[i] || '').slice(0, 1000),
+      ...(typeof promptTs === 'number' && promptTs > 0 ? { createdAt: promptTs } : {}),
       filesChanged: files,
       ...(diff ? { uncommittedDiff: diff.slice(0, MAX_PROMPT_DIFF_LEN) } : {}),
       linesAdded,
@@ -706,7 +787,7 @@ export async function reconcileSession(
       // server's default "preserve existing / fill-only" policy makes a bad
       // earlier capture permanent: files=[] and an inflated cumulative
       // linesAdded from a pre-fix client could never be corrected.
-      authoritative: true,
+      ...(carriesContent ? { authoritative: true } : {}),
     });
   }
 
@@ -1180,6 +1261,7 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     // Write the `.git/origin-session-<tag>.json` state file the local git hooks
     // read for commit/PR/AI-blame attribution.
     captureFilesDiff: realCaptureFilesDiff,
+    captureCommitScoped: commitDiffScopedToPrompt,
     pingSession: (id) => api.pingSession(id),
     reportCommandResult: (id, type, status, message) => api.reportCommandResult(id, type, status, message),
     capturePromptEdits: (opts) => capturePromptEdits(opts as any) as any,

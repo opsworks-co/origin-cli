@@ -766,6 +766,18 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
 
 // ─── Prompt → File Change Mappings ────────────────────────────────────────
 
+// Did this tool call run `git commit`? Reads the common shell-command fields
+// across agents. Matches the real invocation only — `git commit …` as a word,
+// so `git commit-graph`, a message merely MENTIONING commit, or `git log` after
+// a commit don't count. Deliberately conservative: a false positive mis-pairs a
+// commit with the wrong turn, which is worse than falling back to file overlap.
+export function ranGitCommit(input: Record<string, any>): boolean {
+  const cmd = input?.command ?? input?.cmd ?? input?.script ?? input?.shellCommand;
+  const text = typeof cmd === 'string' ? cmd : Array.isArray(cmd) ? cmd.join(' ') : '';
+  if (!text) return false;
+  return /\bgit\s+(?:-[^\s]+\s+|--[^\s]+(?:=\S+)?\s+)*commit\b/.test(text);
+}
+
 export interface PromptFileMapping {
   promptIndex: number;
   promptText: string;       // Truncated to 1000 chars
@@ -785,6 +797,10 @@ export interface PromptFileMapping {
   // which it derives line counts. A content-less editsJson makes every turn
   // report +0 even when the diff was correct.
   edits?: Array<{ file: string; toolName: string; input: Record<string, any> }>;
+  // This turn provably ran `git commit` in a terminal tool call. Drives
+  // commit→turn pairing for agents whose transcripts record no edit for
+  // terminal-only work (Cursor), where file-overlap matching can't help.
+  ranCommit?: boolean;
 }
 
 /**
@@ -833,6 +849,7 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
   let currentPromptText = '';
   let currentFiles = new Set<string>();
   let currentEdits: Array<{ file: string; toolName: string; input: Record<string, any> }> = [];
+  let currentRanCommit = false;
 
   for (const line of lines) {
     let entry: TranscriptLine;
@@ -862,6 +879,7 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
             filesChanged: Array.from(currentFiles),
             diff: buildDiffFromEdits(currentEdits),
             edits: currentEdits.slice(),
+            ranCommit: currentRanCommit,
           });
         }
 
@@ -870,6 +888,7 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
         currentPromptText = prompt.slice(0, 1000);
         currentFiles = new Set<string>();
         currentEdits = [];
+        currentRanCommit = false;
       }
       // If no prompt text (tool_result entry), continue accumulating files in current turn
     }
@@ -894,6 +913,13 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
               currentEdits.push({ file: filePath, toolName: block.name, input: block.input });
             }
           }
+          // Did this turn run `git commit`? Terminal work leaves no edit record,
+          // so without this a turn that edited via the shell and committed looks
+          // completely empty — and commit→turn pairing falls back to file
+          // overlap, which can never match a turn with no recorded files.
+          if (block.type === 'tool_use' && block.input && ranGitCommit(block.input)) {
+            currentRanCommit = true;
+          }
         }
       }
     }
@@ -906,7 +932,8 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
       promptText: currentPromptText,
       filesChanged: Array.from(currentFiles),
       diff: buildDiffFromEdits(currentEdits),
-            edits: currentEdits.slice(),
+      edits: currentEdits.slice(),
+      ranCommit: currentRanCommit,
     });
   }
 

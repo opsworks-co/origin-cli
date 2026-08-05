@@ -250,6 +250,20 @@ function promptEditsFromTranscript(transcriptPath: string): ParsedSession['promp
   }
 }
 
+// Turns that provably ran `git commit`, from the transcript's own tool calls.
+// Lets commit→turn pairing use the real signal instead of file overlap, which
+// silently skips a turn whose work happened entirely in the terminal (Cursor
+// records no edit for that, so the turn has no files to overlap on).
+function committingPromptsFromTranscript(transcriptPath: string): number[] {
+  try {
+    return extractPromptFileMappings(transcriptPath)
+      .filter((m) => m.ranCommit)
+      .map((m) => m.promptIndex);
+  } catch {
+    return [];
+  }
+}
+
 function uniqueFiles(...lists: string[][]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -307,6 +321,13 @@ function fromParsedTranscript(
     filesChanged: p.filesChanged,
     promptDiffs: promptDiffsFromTranscript(transcriptPath),
     promptEdits: promptEditsFromTranscript(transcriptPath),
+    // NOT wired to promptsThatCommitted yet — committingPromptsFromTranscript
+    // detects `git commit` correctly, but extractPromptFileMappings buckets it
+    // one turn LATE for Cursor (a tool-result entry that looks like a user
+    // prompt opens a phantom turn mid-way, so the commit lands in the next
+    // bucket): measured [2,3] on session 7ff68eb7 where turns 1 and 3 committed.
+    // Feeding that into commit→turn pairing would attach commits to the WRONG
+    // turns — worse than today's file-overlap fallback. Fix the bucketing first.
   };
 }
 

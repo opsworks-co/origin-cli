@@ -147,6 +147,31 @@ describe('reconcileSession', () => {
     expect(start.startedAt).toBe(new Date(1_000).toISOString());
   });
 
+  // Regression: promptChanges carried NO createdAt, so the server fell back to
+  // the DB insert time — whenever this watcher happened to poll. Prod session
+  // 03a338b8 recorded commit 5f6c7a37 at 19:08:24 while the prompt that made it
+  // was stamped 19:08:58: the turn's own commit appeared to predate the turn by
+  // 34s, and every timestamp-based attribution rule then reasoned from that.
+  // The parser already exposes aligned per-prompt epoch-ms.
+  it('sends each prompt\'s REAL transcript timestamp as createdAt', async () => {
+    const api = mockApi();
+    await reconcileSession(scanned(), fakeAdapter(), baseDeps(api));
+    const pcs = api.calls.update[0].data.promptChanges;
+    expect(pcs[0].createdAt).toBe(1_000);
+    expect(pcs[1].createdAt).toBe(2_000);
+  });
+
+  it('omits createdAt rather than sending a bogus epoch when the transcript has no timestamp', async () => {
+    const api = mockApi();
+    await reconcileSession(
+      scanned(),
+      fakeAdapter({ userPrompts: ['only prompt'], promptTimestamps: [0] }),
+      baseDeps(api),
+    );
+    const pcs = api.calls.update[0].data.promptChanges;
+    expect(pcs[0]).not.toHaveProperty('createdAt');
+  });
+
   it('emits a per-turn row for EVERY prompt; the latest carries the diff', async () => {
     const api = mockApi();
     await reconcileSession(scanned(), fakeAdapter(), baseDeps(api));
@@ -313,6 +338,75 @@ describe('reconcileSession', () => {
     expect(pc[0].commitSha).toBeUndefined();
     expect(pc[1].commitSha).toBeUndefined();
     expect(pc[3].commitSha).toBeUndefined();
+  });
+
+  // Cursor records no file-edit when the agent works through the terminal, so
+  // that turn's transcript mapping is empty. The working-tree recovery only
+  // runs for the LATEST turn, so a turn that was never latest (two prompts in
+  // one poll) stayed blank forever — grey badge, missing from "N with changes"
+  // — despite having produced a commit. Session 7ff68eb7 turn 1.
+  const committingTurnNoEdits = (over: Partial<ParsedSession> = {}) => ({
+    ...fakeAdapter({
+      userPrompts: ['create it', 'add 5 more rows and commit', 'add 7 more rows'],
+      promptTimestamps: [1, 2, 3],
+      filesChanged: ['/repo/a/shisha'],
+      promptsThatCommitted: [1],
+      promptDiffs: [
+        { promptIndex: 0, filesChanged: ['/repo/a/shisha'], diff: '+a', linesAdded: 11, linesRemoved: 0 },
+        { promptIndex: 1, filesChanged: [], diff: '', linesAdded: 0, linesRemoved: 0 }, // terminal edit → nothing
+        { promptIndex: 2, filesChanged: ['/repo/a/shisha'], diff: '+c', linesAdded: 12, linesRemoved: 0 },
+      ],
+      ...over,
+    }),
+  });
+  const oneCommit = () => ({
+    headBefore: 'b'.repeat(40), headAfter: 'c'.repeat(40),
+    commitShas: ['e815b214'],
+    commitDetails: [{ sha: 'e815b214', message: 'Add five more rows', author: 'x', filesChanged: ['shisha'], linesAdded: 16, linesRemoved: 0 }],
+    diff: '', diffTruncated: false, linesAdded: 16, linesRemoved: 0,
+  });
+
+  it('recovers a committing turn that recorded no edits, scoped to its own contribution', async () => {
+    const api = mockApi();
+    const captureCommitScoped = vi.fn(() => ({ diff: '+r1\n+r2\n+r3\n+r4\n+r5', linesAdded: 5, linesRemoved: 0 }));
+    const deps = baseDeps(api, { captureGit: oneCommit, captureCommitScoped });
+    await reconcileSession(scanned({ cwd: '/repo/a' }), committingTurnNoEdits() as TranscriptAdapter, deps);
+    const pc = api.calls.update[0].data.promptChanges;
+    // The blank turn now carries its OWN delta (+5), not the commit's headline
+    // +16 (which includes the previous turn's 11 lines).
+    expect(pc[1].linesAdded).toBe(5);
+    expect(pc[1].filesChanged).toEqual(['shisha']);
+    expect(pc[1].uncommittedDiff).toContain('+r5');
+    expect(captureCommitScoped).toHaveBeenCalledWith('/repo/a', expect.any(String), 'e815b214', ['shisha']);
+    // Turns that DID record edits are untouched.
+    expect(pc[0].linesAdded).toBe(11);
+    expect(pc[2].linesAdded).toBe(12);
+  });
+
+  it('leaves the turn alone when the scoped recovery finds nothing', async () => {
+    const api = mockApi();
+    const deps = baseDeps(api, {
+      captureGit: oneCommit,
+      captureCommitScoped: () => ({ diff: '', linesAdded: 0, linesRemoved: 0 }),
+    });
+    await reconcileSession(scanned({ cwd: '/repo/a' }), committingTurnNoEdits() as TranscriptAdapter, deps);
+    const pc = api.calls.update[0].data.promptChanges;
+    expect(pc[1].linesAdded).toBe(0);
+    // An empty payload must NOT claim authority — that is what let a blank poll
+    // wipe a good capture from an earlier one and make the turn permanently grey.
+    expect(pc[1].authoritative).toBeUndefined();
+    // Turns that carry content still assert authority.
+    expect(pc[0].authoritative).toBe(true);
+  });
+
+  it('survives a throwing scoped recovery', async () => {
+    const api = mockApi();
+    const deps = baseDeps(api, {
+      captureGit: oneCommit,
+      captureCommitScoped: () => { throw new Error('git exploded'); },
+    });
+    await reconcileSession(scanned({ cwd: '/repo/a' }), committingTurnNoEdits() as TranscriptAdapter, deps);
+    expect(api.calls.update[0].data.promptChanges[1].linesAdded).toBe(0);
   });
 
   it('ends the .git session-state file when the session goes idle', async () => {
