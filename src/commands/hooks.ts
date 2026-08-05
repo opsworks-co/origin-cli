@@ -1102,6 +1102,50 @@ export function cursorSessionReusable(
   return candidateChatId === incomingChatId;
 }
 
+/**
+ * Pick the best archived session to RECOVER for an incoming user-prompt-submit
+ * whose live `.git` state file is gone (deleted by a stale sweep). Recovery is
+ * Cursor-only (it reuses sessions per chat); other agents create a session per
+ * conversation, so recovering an old one there shows stale diffs.
+ *
+ * CRITICAL: never recover a session belonging to a DIFFERENT Cursor chat. The
+ * user-prompt-submit detach sets `state = null` when the incoming conversation_id
+ * disagrees with the locked one, precisely to force a fresh session for the new
+ * chat. Without the `cursorSessionReusable` guard here, recovery immediately
+ * re-selects that SAME old chat's archived session (it matches repo + recency),
+ * undoing the detach and gluing the new chat's prompt onto the prior session —
+ * the prod symptom on conversation 047e67ca vs 21a72a0e (session 67d97041): the
+ * new chat spawned no session and its prompt landed on the old one.
+ *
+ * Pure over its inputs (caller reads/parses the archive JSON); exported for test.
+ */
+export function selectRecoverableArchiveSession(
+  states: Array<any>,
+  opts: {
+    repoPath: string;
+    canonicalRepoPath: string;
+    agentSlug: string | undefined;
+    incomingChatId: string;
+    nowMs: number;
+    maxAgeMs: number;
+  },
+): any | null {
+  let best: any | null = null;
+  let bestAge = Infinity;
+  for (const s of states) {
+    if (!s?.sessionId || !s?.startedAt) continue;
+    const age = opts.nowMs - new Date(s.startedAt).getTime();
+    if (!(age >= 0) || age > opts.maxAgeMs) continue;
+    if (s.status === 'ENDED' && s.endedAt) continue;
+    if (s.repoPath !== opts.repoPath && s.repoPath !== opts.canonicalRepoPath) continue;
+    if (opts.agentSlug && !sessionMatchesAgent(s, opts.agentSlug)) continue;
+    // Don't recover a different Cursor chat's session (see note above).
+    if (!cursorSessionReusable(opts.agentSlug, opts.incomingChatId, s.agentSessionId)) continue;
+    if (age < bestAge) { best = s; bestAge = age; }
+  }
+  return best;
+}
+
 /** Max age at which an id-less session may still be adopted (see below). */
 export const ADOPT_IDLESS_MAX_AGE_MS = 15 * 60 * 1000; // 15 min
 
@@ -3219,24 +3263,27 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         const archiveDir = path.join(os.homedir(), '.origin', 'sessions');
         const archiveEntries = fs.readdirSync(archiveDir).filter(f => f.endsWith('.json'));
         const MAX_RECOVERY_AGE_MS = 24 * 60 * 60 * 1000;
-        let bestCandidate: SessionState | null = null;
-        let bestAge = Infinity;
+        // The incoming Cursor chat id — recovery must not re-attach this prompt
+        // to a DIFFERENT chat's archived session (which would undo the detach
+        // above). Resolve it exactly as the detach + session-start paths do.
+        const incomingChatId =
+          (typeof input.conversation_id === 'string' && input.conversation_id) ||
+          (typeof input.session_id === 'string' && input.session_id) ||
+          '';
+        const states: any[] = [];
         for (const entry of archiveEntries) {
-          try {
-            const s = JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'));
-            if (!s?.sessionId || !s?.startedAt) continue;
-            const age = Date.now() - new Date(s.startedAt).getTime();
-            if (age > MAX_RECOVERY_AGE_MS) continue;
-            if (s.status === 'ENDED' && s.endedAt) continue;
-            if (s.repoPath !== recoveryRepoPath && s.repoPath !== recoveryCanonical) continue;
-            if (agentSlug && !sessionMatchesAgent(s, agentSlug)) continue;
-            if (age < bestAge) {
-              bestCandidate = s;
-              bestAge = age;
-            }
-          } catch { /* skip */ }
+          try { states.push(JSON.parse(fs.readFileSync(path.join(archiveDir, entry), 'utf-8'))); } catch { /* skip */ }
         }
+        const bestCandidate = selectRecoverableArchiveSession(states, {
+          repoPath: recoveryRepoPath,
+          canonicalRepoPath: recoveryCanonical,
+          agentSlug,
+          incomingChatId,
+          nowMs: Date.now(),
+          maxAgeMs: MAX_RECOVERY_AGE_MS,
+        });
         if (bestCandidate) {
+          const bestAge = Date.now() - new Date(bestCandidate.startedAt).getTime();
           debugLog('user-prompt-submit', 'recovered session from archive', {
             sessionId: bestCandidate.sessionId,
             tag: bestCandidate.sessionTag,

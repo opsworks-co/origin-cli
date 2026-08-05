@@ -48,6 +48,12 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
 
   if (cmp === 0) {
     console.log(chalk.green('\n  ✓ Already up to date!\n'));
+    // The BINARY being current doesn't mean the background daemons are: they
+    // keep running whatever code they loaded at spawn. A daemon left behind by
+    // an `npm install -g` (which never runs this command) or by an upgrade that
+    // happened while it was already up would otherwise keep capturing with old
+    // code until a reboot or its 24h lifetime cap.
+    await syncWatchersToInstalledCode();
     return;
   }
 
@@ -56,6 +62,9 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
     console.log(chalk.gray('    Nothing to do — installing would be a downgrade.'));
     console.log(chalk.gray('    To roll back to the server version on purpose:'));
     console.log(chalk.gray('      origin upgrade --force\n'));
+    // Same reasoning as the up-to-date path: the binary here is the newest
+    // thing on the box, so any daemon not matching it is stale.
+    if (!opts.check) await syncWatchersToInstalledCode();
     return;
   }
 
@@ -117,6 +126,31 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
     console.log(chalk.gray(`    npm i -g ${TARBALL_URL}\n`));
     process.exit(1);
   }
+}
+
+/**
+ * Cycle any watcher daemon that is running code older (or just different) than
+ * the CLI on disk. No-op when a daemon already matches, so repeated
+ * `origin upgrade` runs don't churn a healthy watcher, and no-op when one isn't
+ * running at all — starting watchers is `origin enable`'s job.
+ *
+ * Used on the "already up to date" path. The post-install path below restarts
+ * unconditionally instead: it just replaced dist/, so every daemon is stale by
+ * definition and the sidecar hasn't been rewritten yet.
+ */
+async function syncWatchersToInstalledCode(): Promise<void> {
+  try {
+    const { restartCodexWatchIfStale } = await import('../codex-watch.js');
+    if (restartCodexWatchIfStale().restarted) {
+      console.log(chalk.gray('  ✓ Restarted the Codex watcher — it was running an older build\n'));
+    }
+  } catch { /* non-fatal: the watcher self-restarts at next logon / 24h */ }
+  try {
+    const { restartTranscriptWatchIfStale } = await import('../transcript-watch.js');
+    if (restartTranscriptWatchIfStale().restarted) {
+      console.log(chalk.gray('  ✓ Restarted the transcript watcher — it was running an older build\n'));
+    }
+  } catch { /* non-fatal */ }
 }
 
 // ─── Version Checking ──────────────────────────────────────────────────────

@@ -47,6 +47,7 @@ import { isWindows } from './utils/platform.js';
 import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
+import { writeWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -882,10 +883,34 @@ export function restartCodexWatch(): { restarted: boolean; reason: string } {
       // Clear the pid file so the incumbent's slot is free; the fresh daemon
       // writes its own pid on startup (writeOwnPid).
       try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+      // Drop the incumbent's version sidecar with it, so nothing reads a
+      // dead daemon's version while the fresh one is still coming up.
+      removeWatchMeta(pidFile);
     }
   } catch { /* best-effort: fall through to spawn a fresh watcher regardless */ }
   const res = ensureCodexWatchRunning();
   return { restarted: res.started, reason: res.reason };
+}
+
+// Restart ONLY if the running daemon is on a different build than this one.
+//
+// `origin upgrade` used to reach its restart solely after a successful install,
+// so a daemon left stale by any other route — the CLI installed via npm, or an
+// upgrade that ran while this daemon was already up — was never cycled. The
+// command reported "Already up to date!" and returned while the watcher kept
+// capturing with old code. This is the up-to-date path's counterpart: a no-op
+// when the daemon already matches, so a healthy watcher isn't churned on every
+// `origin upgrade` invocation.
+//
+// Deliberately does NOT start a watcher that isn't running — the user may have
+// stopped it on purpose, and `origin enable` owns starting it.
+export function restartCodexWatchIfStale(
+  installedVersion?: string,
+): { restarted: boolean; reason: string } {
+  if (!codexWatchAutoStartEnabled()) return { restarted: false, reason: 'gated-off' };
+  const freshness = watchFreshness(watchPidFile(), installedVersion);
+  if (freshness !== 'stale') return { restarted: false, reason: freshness };
+  return restartCodexWatch();
 }
 
 // Best-effort: register a Windows Scheduled Task that relaunches the watcher at
@@ -988,6 +1013,9 @@ export async function codexWatchCommand(opts: CodexWatchOptions = {}): Promise<v
     return;
   }
   writeOwnPid();
+  // Record the build this daemon is running so `origin upgrade` can tell a
+  // stale daemon from a current one even when it installs nothing.
+  writeWatchMeta(watchPidFile());
 
   let stopped = false;
   const cleanup = () => {
@@ -995,7 +1023,7 @@ export async function codexWatchCommand(opts: CodexWatchOptions = {}): Promise<v
     // Only remove the pid file if WE still own it.
     try {
       const pid = parseInt(fs.readFileSync(watchPidFile(), 'utf-8').trim(), 10);
-      if (pid === process.pid) fs.unlinkSync(watchPidFile());
+      if (pid === process.pid) { fs.unlinkSync(watchPidFile()); removeWatchMeta(watchPidFile()); }
     } catch { /* ignore */ }
   };
   process.on('SIGINT', () => { cleanup(); process.exit(0); });

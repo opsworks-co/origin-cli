@@ -92,6 +92,31 @@ export async function cleanCommand(opts?: { dryRun?: boolean; force?: boolean })
           const ageMs = Date.now() - new Date(content.startedAt).getTime();
           const ageHours = ageMs / (1000 * 60 * 60);
 
+          // ── NEVER delete work that only exists here ──────────────────────
+          // This deleted ANY state file older than 24h on `startedAt` alone,
+          // which is unsafe twice over:
+          //
+          //  1. A session queued locally because the server was unreachable
+          //     (`local-*` id, no syncedSessionId) exists NOWHERE else. The
+          //     status banner tells the user to run `origin sessions sync`;
+          //     deleting the file first destroys those prompts permanently.
+          //  2. `startedAt` measures age, not liveness. A session running for
+          //     more than a day — routine for a long agent run — was treated
+          //     as orphaned and removed out from under the live agent.
+          //
+          // Skip both, and judge staleness by last WRITE (mtime) rather than
+          // start time so a still-active long session is never a candidate.
+          const sid = String(content.sessionId || '');
+          const isUnsynced = sid.startsWith('local-') && !content.syncedSessionId;
+          const isEnded = String(content.status || '').toUpperCase() === 'ENDED';
+          let idleHours = ageHours;
+          try { idleHours = (Date.now() - fs.statSync(filePath).mtimeMs) / (1000 * 60 * 60); } catch { /* fall back to age */ }
+          if (isUnsynced) {
+            console.log(chalk.gray(`  Keeping unsynced session: ${file} (run \`origin sessions sync\`)`));
+            continue;
+          }
+          if (!isEnded && idleHours < 24) continue; // still live — leave alone
+
           if (ageHours > 24) {
             totalFound++;
             console.log(chalk.yellow(`  Orphaned session: ${file} (${ageHours.toFixed(1)}h old)`));

@@ -55,6 +55,7 @@ import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
 import { ADAPTERS, type TranscriptAdapter, type ScannedTranscript, type ParsedSession } from './transcript-adapters.js';
+import { writeWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 
 export type { TranscriptAdapter, ScannedTranscript, ParsedSession };
 
@@ -1065,10 +1066,24 @@ export function restartTranscriptWatch(): { restarted: boolean; reason: string }
       }
       // Free the incumbent's slot; the fresh daemon writes its own pid on start.
       try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+      // Drop the incumbent's version sidecar with it.
+      removeWatchMeta(pidFile);
     }
   } catch { /* best-effort: spawn a fresh watcher regardless */ }
   const res = ensureTranscriptWatchRunning();
   return { restarted: res.started, reason: res.reason };
+}
+
+// Restart ONLY if the running daemon is on a different build than this one —
+// the up-to-date-path counterpart to restartTranscriptWatch. See
+// restartCodexWatchIfStale for why this exists.
+export function restartTranscriptWatchIfStale(
+  installedVersion?: string,
+): { restarted: boolean; reason: string } {
+  if (!transcriptWatchAutoStartEnabled()) return { restarted: false, reason: 'gated-off' };
+  const freshness = watchFreshness(watchPidFile(), installedVersion);
+  if (freshness !== 'stale') return { restarted: false, reason: freshness };
+  return restartTranscriptWatch();
 }
 
 // Best-effort: register a Windows Scheduled Task that relaunches the watcher at
@@ -1234,13 +1249,16 @@ export async function transcriptWatchCommand(opts: TranscriptWatchOptions = {}):
     return;
   }
   writeOwnPid();
+  // Record the build this daemon is running so `origin upgrade` can tell a
+  // stale daemon from a current one even when it installs nothing.
+  writeWatchMeta(watchPidFile());
 
   let stopped = false;
   const cleanup = () => {
     stopped = true;
     try {
       const pid = parseInt(fs.readFileSync(watchPidFile(), 'utf-8').trim(), 10);
-      if (pid === process.pid) fs.unlinkSync(watchPidFile());
+      if (pid === process.pid) { fs.unlinkSync(watchPidFile()); removeWatchMeta(watchPidFile()); }
     } catch { /* ignore */ }
   };
   process.on('SIGINT', () => { cleanup(); process.exit(0); });

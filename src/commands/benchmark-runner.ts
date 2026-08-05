@@ -18,6 +18,17 @@ import { api } from '../api.js';
 import { deriveRepoFullName } from './benchmark-bakeoff.js';
 import { runBakeOffArms, AGENT_RUNNERS } from './benchmark-bakeoff-run.js';
 import { resolveAgentKeys, readLocalAgentKeys, setLocalAgentKey, clearLocalAgentKey, isAgentKeyProvider, type AgentKeys } from '../agent-keys.js';
+import { getCurrentVersion, isNewer } from '../version-check.js';
+
+/**
+ * True when the long-running runner should exit so KeepAlive respawns it onto a
+ * freshly-installed binary. ONLY when the on-disk version is strictly newer than
+ * the version the process started with — so it never loops (after respawn the two
+ * are equal) and never fires on a missing/equal/older read.
+ */
+export function shouldRestartForUpgrade(startupVersion: string | null, onDiskVersion: string | null): boolean {
+  return !!(startupVersion && onDiskVersion && isNewer(onDiskVersion, startupVersion));
+}
 
 interface ClaimedBakeOff {
   id: string;
@@ -104,6 +115,15 @@ export async function benchmarkRunnerCommand(opts: { once?: boolean; interval?: 
 
   const intervalSec = Math.max(5, Number(opts.interval) || 15);
   const machineId = os.hostname();
+  // The on-disk binary version this process STARTED with. `origin upgrade` does
+  // `npm install -g`, replacing the package files IN PLACE, so a long-running
+  // daemon keeps executing the OLD code (and re-stamps its stale version on every
+  // heartbeat → the "your CLI is out of date" bake-off banner even after the user
+  // upgraded). Between polls we re-read the on-disk version; when it's newer than
+  // what we started with, the user upgraded, so we exit(0) and launchd/systemd
+  // KeepAlive respawns us on the NEW binary. Guarded on isNewer (not just !=) so
+  // it can never loop — after respawn, startup == on-disk.
+  const startupVersion = getCurrentVersion();
   console.log(chalk.bold(`\nBake-off runner — ${fullName}`));
   console.log(chalk.gray(opts.once ? '  single pass (--once)\n' : `  polling every ${intervalSec}s — Ctrl-C to stop\n`));
 
@@ -158,6 +178,17 @@ export async function benchmarkRunnerCommand(opts: { once?: boolean; interval?: 
       }
     } else {
       consecutivePollFailures = 0;
+    }
+    // Self-restart onto a freshly-installed binary. `cycle()` has fully finished
+    // (a bake-off run completes before it returns), so exiting here never
+    // interrupts one. Only fires when the on-disk version is strictly NEWER than
+    // startup — an `origin upgrade` happened — so it can't loop.
+    {
+      const onDisk = getCurrentVersion();
+      if (shouldRestartForUpgrade(startupVersion, onDisk)) {
+        console.log(chalk.cyan(`  CLI upgraded ${startupVersion} → ${onDisk} — restarting onto the new binary.`));
+        process.exit(0); // KeepAlive respawns us running the new code
+      }
     }
     if (res !== 'ran') await new Promise((r) => setTimeout(r, intervalSec * 1000));
   }

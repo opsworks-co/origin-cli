@@ -92,7 +92,7 @@ export function formatUpdateBanner(result: UpdateCheckResult): string {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-function getCurrentVersion(): string | null {
+export function getCurrentVersion(): string | null {
   try {
     // Try reading from package.json relative to this module
     const candidates = [
