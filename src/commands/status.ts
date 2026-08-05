@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { loadConfig, loadAgentConfig, loadRepoConfig, listProfiles } from '../config.js';
 import { api } from '../api.js';
-import { loadSessionState, listActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
+import { loadSessionState, listActiveSessions, listAllActiveSessions, getGitRoot, getBranch, getHeadSha } from '../session-state.js';
 import { currentOwner, isForeignSession } from '../session-owner.js';
 import { describeSyncBlock, type SyncBlockCode } from '../sync-block.js';
 import { processPendingForeignAction } from './sessions.js';
@@ -22,7 +22,7 @@ function formatDuration(ms: number): string {
   return `${h}h ${m % 60}m`;
 }
 
-export async function statusCommand() {
+export async function statusCommand(opts: { global?: boolean; all?: boolean } = {}) {
   const config = loadConfig();
   const agentConfig = loadAgentConfig();
 
@@ -116,7 +116,24 @@ export async function statusCommand() {
   // ── Active Sessions ─────────────────────────────────────────────
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
-  const activeSessions = listActiveSessions(cwd);
+  // `origin status` is CWD-SCOPED by default: inside a repo it reads that
+  // repo's git-dir state files, and outside one it matches only state files
+  // hashed to this exact cwd. Run from $HOME that surfaced two stale
+  // `.openclaw/workspace` rows while every genuinely live session (other
+  // repos) stayed invisible — the machine looked idle while agents were
+  // actively running.
+  //
+  // --global/--all scans every session on the machine instead.
+  // listAllActiveSessions() is a scan-and-HEAL routine, not a filter: it
+  // marks stale RUNNING rows ENDED (and persists that) but still returns
+  // ALL 1200+ archived sessions, so the ENDED ones must be filtered out here
+  // or the listing is unusable.
+  const wantGlobal = !!(opts.global || opts.all);
+  const activeSessions = wantGlobal
+    ? listAllActiveSessions()
+        .filter((s) => String(s.status || '').toUpperCase() !== 'ENDED')
+        .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+    : listActiveSessions(cwd);
 
   if (activeSessions.length > 0) {
     const label = activeSessions.length === 1 ? 'Active Session' : `Active Sessions (${activeSessions.length})`;

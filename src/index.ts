@@ -180,7 +180,11 @@ program.command('link [slug]')
 program.command('attach [agent]')
   .description('Attach Origin tracking to an already-running AI agent session')
   .action(attachCommand);
-program.command('status').description('Show current status (active session, branch, repo info)').action(statusCommand);
+program.command('status')
+  .description('Show current status (active session, branch, repo info)')
+  .option('-g, --global', 'Show active sessions from EVERY repo on this machine, not just the current directory')
+  .option('--all', 'Alias for --global')
+  .action(statusCommand);
 program.command('prompt-status')
   .description('Output a short PS1/prompt string for the current session state (fast, local-only)')
   .action(promptStatusCommand);
