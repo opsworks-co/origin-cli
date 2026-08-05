@@ -58,7 +58,7 @@ import { dbImportCommand, dbStatsCommand } from './commands/db.js';
 import { proxyInstallCommand, proxyUninstallCommand, proxyStatusCommand } from './commands/proxy.js';
 import { verifyCommand } from './commands/verify.js';
 import { verifyInstallCommand } from './commands/verify-install.js';
-import { ignoreListCommand, ignoreAddCommand, ignoreRemoveCommand, ignoreTestCommand } from './commands/ignore.js';
+import { ignoreListCommand, ignoreAddCommand, ignoreRemoveCommand, ignoreTestCommand, ignoreRepoListCommand, ignoreRepoAddCommand, ignoreRepoRemoveCommand } from './commands/ignore.js';
 import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
 import { reworkCommand } from './commands/rework.js';
@@ -474,6 +474,14 @@ ignoreCmd.action(ignoreListCommand);
 ignoreCmd.command('add <pattern>').description('Add an ignore pattern to .origin.json').action(ignoreAddCommand);
 ignoreCmd.command('remove <pattern>').description('Remove an ignore pattern').action(ignoreRemoveCommand);
 ignoreCmd.command('test <filepath>').description('Test if a file would be ignored').action(ignoreTestCommand);
+
+// `origin ignore repo …` — exclude an ENTIRE repo/workspace from tracking
+// (machine-wide, ~/.origin/config.json). No session is created for it.
+const ignoreRepoCmd = ignoreCmd.command('repo').description('Ignore an entire repo/workspace — no sessions created (machine-wide)');
+ignoreRepoCmd.action(ignoreRepoListCommand); // bare `origin ignore repo` → list
+ignoreRepoCmd.command('add [path]').description('Stop tracking a repo (default: current git repo)').action(ignoreRepoAddCommand);
+ignoreRepoCmd.command('remove [path]').description('Resume tracking a repo (default: current git repo)').action(ignoreRepoRemoveCommand);
+ignoreRepoCmd.command('list').description('List ignored repos').action(ignoreRepoListCommand);
 
 // ─── Backfill ─────────────────────────────────────────────────────────────
 

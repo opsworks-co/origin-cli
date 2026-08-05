@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { loadRepoConfig, saveRepoConfig } from '../config.js';
 import { shouldIgnoreFile, DEFAULT_IGNORE_PATTERNS, loadGitattributesPatterns } from '../ignore-patterns.js';
 import { getGitRoot } from '../session-state.js';
+import { addIgnoredRepo, removeIgnoredRepo, listIgnoredRepos, normalizeRepoPath } from '../ignore-repos.js';
 
 export async function ignoreListCommand() {
   const cwd = process.cwd();
@@ -95,6 +96,70 @@ export async function ignoreRemoveCommand(pattern: string) {
   config.ignorePatterns.splice(idx, 1);
   saveRepoConfig(repoPath, config);
   console.log(chalk.green(`  ✓ Removed pattern: ${pattern}`));
+}
+
+// ── Repo-level ignore (machine-wide, ~/.origin/config.json) ─────────────────
+// Unlike the file-pattern commands above (which live in a repo's .origin.json),
+// these exclude an ENTIRE repo/workspace from tracking: no session is created
+// for it, for any agent. Use it for headless scratch workspaces that run a real
+// agent CLI and flood the org (e.g. a Claude Desktop cowork project).
+
+export async function ignoreRepoListCommand() {
+  const repos = listIgnoredRepos();
+  console.log(chalk.bold('\n  Ignored repos (machine-wide — no sessions created)\n'));
+  if (repos.length === 0) {
+    console.log(chalk.gray('  None.'));
+    console.log(chalk.gray('  Add the current repo with:  origin ignore repo add'));
+    console.log(chalk.gray('  Or a specific path with:    origin ignore repo add <path>\n'));
+    return;
+  }
+  for (const r of repos) {
+    const abs = normalizeRepoPath(r);
+    console.log(chalk.white(`    ${abs}`));
+  }
+  console.log(chalk.gray(`\n  ${repos.length} ignored. Resume tracking with: origin ignore repo remove <path>\n`));
+}
+
+export async function ignoreRepoAddCommand(pathArg?: string) {
+  // Default to the current git repo when no path is given, mirroring the
+  // file-pattern commands. An explicit path need NOT be a git repo (the user
+  // may pre-emptively ignore a workspace before it's ever tracked).
+  let target = pathArg;
+  if (!target) {
+    const root = getGitRoot(process.cwd());
+    if (!root) {
+      console.error(chalk.red('  Not in a git repository — pass a path: origin ignore repo add <path>'));
+      return;
+    }
+    target = root;
+  }
+  const res = addIgnoredRepo(target);
+  if (res.alreadyCovered) {
+    console.log(chalk.yellow(`  Already ignored (or covered by a parent entry): ${res.path}`));
+    return;
+  }
+  console.log(chalk.green(`  ✓ Ignoring repo: ${res.path}`));
+  console.log(chalk.gray('    No new sessions will be created for it (or any path under it).'));
+  console.log(chalk.gray('    Existing sessions are unaffected — archive them from the dashboard.'));
+}
+
+export async function ignoreRepoRemoveCommand(pathArg?: string) {
+  const target = pathArg || getGitRoot(process.cwd());
+  if (!target) {
+    console.error(chalk.red('  Not in a git repository — pass a path: origin ignore repo remove <path>'));
+    return;
+  }
+  const removed = removeIgnoredRepo(target);
+  if (!removed) {
+    console.log(chalk.yellow(`  Not on the ignore list: ${normalizeRepoPath(target)}`));
+    const repos = listIgnoredRepos();
+    if (repos.length) {
+      console.log(chalk.gray('  Current entries:'));
+      for (const r of repos) console.log(chalk.gray(`    ${normalizeRepoPath(r)}`));
+    }
+    return;
+  }
+  console.log(chalk.green(`  ✓ Resumed tracking: ${normalizeRepoPath(removed)}`));
 }
 
 export async function ignoreTestCommand(filepath: string) {

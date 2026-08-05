@@ -321,13 +321,15 @@ function fromParsedTranscript(
     filesChanged: p.filesChanged,
     promptDiffs: promptDiffsFromTranscript(transcriptPath),
     promptEdits: promptEditsFromTranscript(transcriptPath),
-    // NOT wired to promptsThatCommitted yet — committingPromptsFromTranscript
-    // detects `git commit` correctly, but extractPromptFileMappings buckets it
-    // one turn LATE for Cursor (a tool-result entry that looks like a user
-    // prompt opens a phantom turn mid-way, so the commit lands in the next
-    // bucket): measured [2,3] on session 7ff68eb7 where turns 1 and 3 committed.
-    // Feeding that into commit→turn pairing would attach commits to the WRONG
-    // turns — worse than today's file-overlap fallback. Fix the bucketing first.
+    // Which turns provably ran `git commit`. Safe to feed into commit→turn
+    // pairing now that extractPromptFileMappings buckets queued Cursor prompts
+    // correctly — it used to report [2,3] on session 7ff68eb7 where turns 1 and
+    // 3 committed (Cursor writes a queued prompt BEFORE the running turn's tool
+    // calls, so everything landed one bucket late), which would have attached
+    // commits to the wrong turns. Now measures [1,3] on that same transcript.
+    // The consumer only uses this when it has no commit mapping of its own and
+    // falls back to file overlap when it's empty, so it can only add signal.
+    promptsThatCommitted: committingPromptsFromTranscript(transcriptPath),
   };
 }
 

@@ -58,6 +58,14 @@ export interface OriginConfig {
   // refreshed on every successful pre-push check. Lets the pre-push hook
   // apply the org's fail policy when it can't reach the API at push time.
   pushBlockMode?: string;
+  // Machine-wide list of repo/workspace paths to EXCLUDE from tracking. A repo
+  // (or any path nested under an entry) on this list creates NO session for any
+  // agent — the session lifecycle is dropped at session-start. This is how a
+  // headless scratch workspace (e.g. a Claude Desktop cowork project at
+  // ~/.openclaw/workspace) stops flooding the org while genuine local repos —
+  // even remote-less ones — keep tracking. Managed via `origin ignore repo`.
+  // Entries are stored as the user typed them; matching normalizes (~, abs).
+  ignoredRepos?: string[];
 }
 
 export interface AgentConfig {

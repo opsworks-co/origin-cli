@@ -479,6 +479,23 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
   if (copilotConverted != null) raw = copilotConverted;
   const lines = raw.split('\n').filter((l) => l.trim());
 
+  // Cursor closes each agent turn with `{"type":"turn_ended"}` and writes a
+  // user prompt the moment it's typed — even while the previous turn is still
+  // running. Two prompts then sit back-to-back BEFORE either turn's tool calls,
+  // and "attribute edits to the most recent prompt" gave the first of the pair
+  // an EMPTY capture and duplicated its edits into the next one (measured on
+  // session 7ff68eb7: turn 1 empty, turn 2 holding both turns' edits). Same fix
+  // and same gate as extractPromptFileMappings in transcript.ts — the marker is
+  // Cursor-only, so Claude/Copilot walks are untouched.
+  const hasTurnMarkers = lines.some((l) => {
+    if (!l.includes('"turn_ended"')) return false;
+    try {
+      return JSON.parse(l)?.type === 'turn_ended';
+    } catch {
+      return false;
+    }
+  });
+
   const turns: PromptCapture[] = [];
   const startTurn = (text: string): PromptCapture => ({
     promptIndex: turns.length,
@@ -488,6 +505,8 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
     commits: [],
   });
 
+  // Prompts waiting for a turn to start (queued-prompt mode only).
+  const pending: string[] = [];
   let current: PromptCapture | null = null;
 
   for (const line of lines) {
@@ -503,17 +522,41 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
       entry.message?.role ||
       '';
 
+    // Agent-turn boundary. A turn that ended without emitting anything still
+    // consumes its prompt, so the NEXT turn's edits don't land on it.
+    if (type === 'turn_ended' && hasTurnMarkers) {
+      if (current) {
+        turns.push(current);
+        current = null;
+      } else if (pending.length > 0) {
+        turns.push(startTurn(pending.shift()!));
+      }
+      continue;
+    }
+
     if (type === 'user') {
       const prompt = extractUserPromptText(entry);
       if (prompt) {
-        if (current) turns.push(current);
-        current = startTurn(prompt);
+        if (hasTurnMarkers) {
+          // A prompt also ends the open turn — Cursor doesn't always write a
+          // turn_ended before the next one.
+          if (current) {
+            turns.push(current);
+            current = null;
+          }
+          pending.push(prompt);
+        } else {
+          if (current) turns.push(current);
+          current = startTurn(prompt);
+        }
       }
       continue;
     }
 
     if (type !== 'assistant') continue;
-    if (!current) current = startTurn('');
+    // First assistant entry after a boundary opens the turn for the oldest
+    // prompt still waiting (empty text when the transcript starts mid-turn).
+    if (!current) current = startTurn(hasTurnMarkers ? (pending.shift() ?? '') : '');
 
     const content = entry.message?.content;
     if (!Array.isArray(content)) continue;
@@ -527,6 +570,9 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
   }
 
   if (current) turns.push(current);
+  // Queued prompts the agent never reached still get an (empty) capture, so
+  // promptIndex stays aligned with the session's prompt list.
+  while (pending.length > 0) turns.push(startTurn(pending.shift()!));
   attributeCommitsToPrompts(turns, opts);
   // Cursor's `Write` tool records only the file PATH in the transcript, not the
   // written CONTENT — so the tool_call edit is content-less. Backfill the

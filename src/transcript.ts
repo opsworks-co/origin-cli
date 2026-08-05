@@ -845,11 +845,55 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
   const lines = raw.split('\n').filter((line) => line.trim());
   const mappings: PromptFileMapping[] = [];
 
+  // Cursor closes every agent turn with `{"type":"turn_ended"}`; no other agent
+  // writes that entry. Its presence switches on the queued-prompt bucketing
+  // below (see the `pending` comment). Only lines that could possibly BE one get
+  // parsed, so a huge Claude transcript isn't JSON.parsed twice.
+  const hasTurnMarkers = lines.some((line) => {
+    if (!line.includes('"turn_ended"')) return false;
+    try {
+      return (JSON.parse(line) as any)?.type === 'turn_ended';
+    } catch {
+      return false;
+    }
+  });
+
   let currentPromptIndex = -1;
   let currentPromptText = '';
   let currentFiles = new Set<string>();
   let currentEdits: Array<{ file: string; toolName: string; input: Record<string, any> }> = [];
   let currentRanCommit = false;
+
+  // Prompts waiting for their turn to start, and whether the accumulator above
+  // belongs to a turn that has actually begun. Only used when `hasTurnMarkers`.
+  //
+  // Cursor writes a user prompt the INSTANT the user hits enter — even while
+  // the agent is still working on the previous one — so two user entries can
+  // sit back-to-back BEFORE either turn's tool calls. Attributing work to "the
+  // most recent user entry" then gave the first of the pair an empty turn and
+  // dumped its edits (and its `git commit`) into the next bucket. Queueing
+  // instead hands each turn's work to the prompt that actually issued it.
+  const pending: string[] = [];
+  let turnOpen = false;
+
+  const flushTurn = () => {
+    mappings.push({
+      promptIndex: currentPromptIndex,
+      promptText: currentPromptText,
+      filesChanged: Array.from(currentFiles),
+      diff: buildDiffFromEdits(currentEdits),
+      edits: currentEdits.slice(),
+      ranCommit: currentRanCommit,
+    });
+  };
+
+  const startTurn = (prompt: string) => {
+    currentPromptIndex++;
+    currentPromptText = prompt.slice(0, 1000);
+    currentFiles = new Set<string>();
+    currentEdits = [];
+    currentRanCommit = false;
+  };
 
   for (const line of lines) {
     let entry: TranscriptLine;
@@ -864,6 +908,21 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
     // nests it as `message.role`. Check all three so one parser handles all.
     const type = entry.type || (entry as any).role || entry.message?.role;
 
+    // Cursor's agent-turn boundary. Closes the open turn; if a turn ended
+    // without ever emitting an assistant entry (aborted/errored run), consume
+    // its prompt into an empty mapping so the NEXT turn's work doesn't get
+    // attributed to it.
+    if ((type as string) === 'turn_ended' && hasTurnMarkers) {
+      if (turnOpen) {
+        flushTurn();
+        turnOpen = false;
+      } else if (pending.length > 0) {
+        startTurn(pending.shift()!);
+        flushTurn();
+      }
+      continue;
+    }
+
     if (type === 'user') {
       // In Claude Code JSONL, "user" entries can be:
       //  1. Actual human prompts (string content or text blocks)
@@ -871,29 +930,36 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
       // Only start a new turn when we find real human text.
       const prompt = extractUserPrompt(entry);
       if (prompt) {
-        // Save previous mapping if it has files
-        if (currentPromptIndex >= 0) {
-          mappings.push({
-            promptIndex: currentPromptIndex,
-            promptText: currentPromptText,
-            filesChanged: Array.from(currentFiles),
-            diff: buildDiffFromEdits(currentEdits),
-            edits: currentEdits.slice(),
-            ranCommit: currentRanCommit,
-          });
-        }
+        if (hasTurnMarkers) {
+          // Queue it. A prompt arriving while a turn is still open also ends
+          // that turn — Cursor doesn't always write a turn_ended before the
+          // next prompt.
+          if (turnOpen) {
+            flushTurn();
+            turnOpen = false;
+          }
+          pending.push(prompt);
+        } else {
+          // Save previous mapping if it has files
+          if (currentPromptIndex >= 0) {
+            flushTurn();
+          }
 
-        // Start new turn
-        currentPromptIndex++;
-        currentPromptText = prompt.slice(0, 1000);
-        currentFiles = new Set<string>();
-        currentEdits = [];
-        currentRanCommit = false;
+          // Start new turn
+          startTurn(prompt);
+        }
       }
       // If no prompt text (tool_result entry), continue accumulating files in current turn
     }
 
     if (type === 'assistant') {
+      // First assistant entry after a boundary opens the turn for the oldest
+      // prompt still waiting. No prompt waiting (transcript starts mid-turn)
+      // → same empty-text synthesis as the legacy path below.
+      if (hasTurnMarkers && !turnOpen) {
+        startTurn(pending.shift() ?? '');
+        turnOpen = true;
+      }
       // If assistant work appears before we've seen any user prompt (e.g.
       // transcript starts mid-session with a tool_result), synthesise
       // prompt-index 0 so file edits don't get discarded under a phantom
@@ -926,15 +992,17 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
   }
 
   // Push final mapping
-  if (currentPromptIndex >= 0) {
-    mappings.push({
-      promptIndex: currentPromptIndex,
-      promptText: currentPromptText,
-      filesChanged: Array.from(currentFiles),
-      diff: buildDiffFromEdits(currentEdits),
-      edits: currentEdits.slice(),
-      ranCommit: currentRanCommit,
-    });
+  if (hasTurnMarkers) {
+    if (turnOpen) flushTurn();
+    // Prompts the agent never got to (still thinking, or the run was cut off)
+    // still deserve a mapping — one per prompt keeps promptIndex aligned with
+    // the session's prompt list, which is what the dashboard indexes by.
+    while (pending.length > 0) {
+      startTurn(pending.shift()!);
+      flushTurn();
+    }
+  } else if (currentPromptIndex >= 0) {
+    flushTurn();
   }
 
   // Don't filter out prompts with zero files — conversational turns are

@@ -1,4 +1,5 @@
 import { loadConfig, saveConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
+import { isRepoIgnored, matchIgnoredRepo } from '../ignore-repos.js';
 import { decidePushBlock } from '../push-block.js';
 import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
@@ -1740,6 +1741,22 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     return;
   }
 
+  // User-configured repo ignore list (`origin ignore repo add`). A repo the user
+  // explicitly excluded — or any path nested under one — creates NO session for
+  // ANY agent. This is how a headless scratch workspace that runs a real agent
+  // CLI (e.g. a Claude Desktop cowork project at ~/.openclaw/workspace, which
+  // trips the global claude-code hooks) stops flooding the org, while genuine
+  // local repos — even remote-less ones — keep tracking. Checked AFTER the
+  // git-repo guard so repoPath is fully resolved; mirrored at every other
+  // session-creation site (auto-create, local→server migration).
+  {
+    const ignoredMatch = matchIgnoredRepo(repoPath, loadConfig()?.ignoredRepos);
+    if (ignoredMatch) {
+      debugLog('session-start', 'skip: repo is on the ignore list (origin ignore repo)', { repoPath, ignoredMatch, agentSlug });
+      return;
+    }
+  }
+
   // Canonical (main-repo) identity for the server: repo naming, session
   // start, commit ingest. For a linked worktree this differs from repoPath
   // (the working root); everywhere git RUNS uses repoPath, everywhere the
@@ -3082,6 +3099,13 @@ export async function ensureServerSession(
 ): Promise<boolean> {
   if (!isConnectedMode()) return false;
   if (!state.sessionId || !state.sessionId.startsWith('local-')) return false;
+  // Never push an ignored repo's local session up to the org (a `local-` session
+  // can exist if it was created before the repo was ignored, or via a path that
+  // skipped session-start). Keep it local-only.
+  if (isRepoIgnored(state.canonicalRepoPath || state.repoPath || saveCwd)) {
+    debugLog(scope, 'skip local→server migration: repo is on the ignore list', { local: state.sessionId, repoPath: state.repoPath });
+    return false;
+  }
   try {
     const agentConfig = loadAgentConfig();
     if (!agentConfig?.machineId) return false;
@@ -3305,6 +3329,15 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     // server payload — same split as the session-start path.
     const repoPath = getWorkingGitRoot(hookCwd) || discoverGitRoot(hookCwd);
     const canonicalRepoPath = repoPath ? getCanonicalRepoPath(repoPath) : repoPath;
+    // Same repo-ignore gate as session-start: a first prompt with no prior state
+    // (session-start skipped, or never fired) must NOT auto-create a session for
+    // an ignored repo. Without this the ignore would leak — the prompt hook would
+    // re-mint exactly the session the user excluded.
+    const autoIgnoredMatch = matchIgnoredRepo(canonicalRepoPath || repoPath, loadConfig()?.ignoredRepos);
+    if (repoPath && autoIgnoredMatch) {
+      debugLog('user-prompt-submit', 'skip auto-create: repo is on the ignore list (origin ignore repo)', { repoPath, ignoredMatch: autoIgnoredMatch });
+      return;
+    }
     if (repoPath) {
       try {
         // Auto-create agent config in standalone mode

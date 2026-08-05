@@ -163,7 +163,18 @@ exit 0
     // core.hooksPath is GLOBAL, so the hook fired for the author repo's own
     // checkouts above. Reset the trace so each test only sees what it caused —
     // otherwise the counts below silently measure the fixture, not the clone.
-    fs.writeFileSync(traceLog, '');
+    //
+    // Clearing SYNCHRONOUSLY isn't enough: the hook backgrounds its work (`&`,
+    // so a slow network never holds up a clone), so the fixture's invocations
+    // can land in the log AFTER the truncate. The counts below then see the
+    // fixture's checkouts plus the clone — on macOS this reliably produced 3
+    // invocations where the test asserts 1, and reported it as "hook never
+    // invoked origin" because the assertion is an equality. Linux CI happened
+    // to win the race, so it only ever failed locally.
+    //
+    // Wait for the log to stop growing before clearing, so the reset is
+    // deterministic instead of timing-dependent.
+    quiesceThenClearTrace();
   });
 
   afterEach(() => {
@@ -199,6 +210,28 @@ exit 0
       sleepSync(25);
     }
     return predicate();
+  }
+
+  /**
+   * Wait until no new hook invocations have appeared for a quiet period, then
+   * truncate the trace. Used to fence off fixture setup from the assertions —
+   * see the note in beforeEach.
+   */
+  function quiesceThenClearTrace(): void {
+    let last = -1;
+    let stableSince = Date.now();
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const n = invocations().length;
+      if (n !== last) {
+        last = n;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= 400) {
+        break; // quiet long enough — nothing else is in flight
+      }
+      sleepSync(50);
+    }
+    fs.writeFileSync(traceLog, '');
   }
 
   /** Nothing should fire — give any stray background job a chance to prove us wrong. */
