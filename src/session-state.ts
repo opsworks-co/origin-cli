@@ -697,12 +697,23 @@ export function isSessionAlive(state: SessionState, statePath?: string): boolean
       if (Date.now() - fs.statSync(gitStateFile).mtimeMs < SESSION_STALE_MS) return true;
     } catch { /* file gone */ }
   }
-  // 2. The heartbeat daemon's PID is still alive.
+  // 2. The heartbeat daemon's PID is alive AND recently active. A bare live PID
+  // is not proof of health: a heartbeat whose ping loop hung (unresolved await,
+  // wedged fs/network) stays alive as a process but stops pinging and stops
+  // writing state — the server then marks the session COMPLETED via its no-ping
+  // sweep, yet this used to keep reporting it "alive" forever (observed: a
+  // bake-off session pinned active 16h after the server ended it). The heartbeat
+  // re-touches its pid file every tick, so require that mtime to be within the
+  // stale window: a healthy daemon stays fresh, a hung one goes stale and reads
+  // as dead. (Older heartbeats that predate the per-tick touch self-heal once
+  // they restart onto the new binary; a connected session's git-state bump in
+  // check #1 covers them meanwhile.)
   try {
     const pidFile = path.join(os.homedir(), '.origin', 'heartbeats', `${state.sessionId}.pid`);
     if (fs.existsSync(pidFile)) {
+      const fresh = Date.now() - fs.statSync(pidFile).mtimeMs < SESSION_STALE_MS;
       const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-      if (pid > 0) { process.kill(pid, 0); return true; }
+      if (pid > 0 && fresh) { process.kill(pid, 0); return true; }
     }
   } catch { /* process dead */ }
   // 3. The state file we loaded from was touched recently.

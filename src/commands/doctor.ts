@@ -372,6 +372,78 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
     console.log(chalk.gray(`    Run ${chalk.white('origin login')} to connect to Origin platform`));
   }
 
+  // Capture daemons. GUI agents (Cursor, Claude Code on Windows, Gemini,
+  // Copilot) fire no hooks, so these watchers ARE the capture path — and when
+  // one dies the only symptom is sessions quietly not appearing. Nothing
+  // surfaced that until now: `origin upgrade` only ever looked at the version,
+  // and a dead daemon looked exactly like a quiet afternoon.
+  console.log(chalk.bold('\n  Capture daemons\n'));
+  try {
+    const { watchHealth, STALLED_AFTER_MS } = await import('../watch-meta.js');
+    const tw = await import('../transcript-watch.js');
+    const cw = await import('../codex-watch.js');
+    const daemons = [
+      {
+        label: 'Transcript watcher (Cursor / Claude / Gemini / Copilot)',
+        pidFile: tw.watchPidFile(),
+        enabled: tw.transcriptWatchAutoStartEnabled(),
+        revive: tw.ensureTranscriptWatchRunning,
+      },
+      {
+        label: 'Codex watcher',
+        pidFile: cw.watchPidFile(),
+        enabled: cw.codexWatchAutoStartEnabled(),
+        revive: cw.ensureCodexWatchRunning,
+      },
+    ];
+
+    for (const d of daemons) {
+      if (!d.enabled) {
+        console.log(chalk.gray(`  – ${d.label}: not auto-started on this platform`));
+        continue;
+      }
+      const h = watchHealth(d.pidFile);
+      const age = (ms?: number) => (ms === undefined ? 'unknown' : ms < 60_000 ? `${Math.round(ms / 1000)}s ago` : `${Math.round(ms / 60_000)}m ago`);
+
+      if (h.state === 'ok') {
+        console.log(chalk.green(`  ✓ ${d.label}`));
+        console.log(chalk.gray(`    pid ${h.pid} · v${h.version} · last poll ${age(h.sinceLastCycleMs)}`));
+        continue;
+      }
+      if (h.state === 'stale-build') {
+        console.log(chalk.yellow(`  ⚠ ${d.label} — running an older build (v${h.version})`));
+        console.log(chalk.gray(`    Capturing fine, but on stale code. ${chalk.white('origin upgrade')} cycles it.`));
+        continue;
+      }
+      if (h.state === 'stopped') {
+        issues++;
+        console.log(chalk.yellow(`  ⚠ ${d.label} — not running`));
+        console.log(chalk.gray(`    No sessions are being captured for those agents. ${chalk.white('origin enable')} starts it.`));
+        continue;
+      }
+
+      // dead / stalled — capture is silently down.
+      issues++;
+      const why = h.state === 'dead'
+        ? `its process is gone (pid ${h.pid})`
+        : `it stopped polling ${age(h.sinceLastCycleMs)} (pid ${h.pid} still up)`;
+      console.log(chalk.red(`  ✗ ${d.label} — DEAD: ${why}`));
+      console.log(chalk.gray(`    Nothing has been captured for those agents since then.`));
+      if (opts?.fix) {
+        const res = d.revive();
+        if (res.started) {
+          fixed++;
+          console.log(chalk.green(`    ✓ Restarted it`));
+        } else {
+          console.log(chalk.yellow(`    Could not restart: ${res.reason}`));
+        }
+      }
+      void STALLED_AFTER_MS;
+    }
+  } catch (err) {
+    console.log(chalk.gray(`  – Could not read watcher health: ${err instanceof Error ? err.message : String(err)}`));
+  }
+
   // Summary
   console.log('');
   if (issues === 0) {

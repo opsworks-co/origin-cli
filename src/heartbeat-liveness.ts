@@ -60,6 +60,28 @@ export function heartbeatSuperseded(i: HeartbeatOwnershipInputs): boolean {
   return i.pidFileOwner !== i.myPid;
 }
 
+// The server's ping response can report a session in a state that is
+// DEFINITIVELY terminal for THIS machine — the user or an admin archived it, or
+// it no longer exists in the org (deleted → status 'NOT_FOUND'). These differ
+// from a plain COMPLETED/ENDED/ABANDONED, which the server sometimes stamps
+// while the agent is still alive (a collapsed sibling conversation, a premature
+// auto-end); those keep the "parent still alive → keep pinging" grace so a live
+// agent's next prompt isn't orphaned.
+//
+// Archived / deleted carry no such ambiguity: the session is intentionally
+// hidden from Origin, so the heartbeat must stop and drop local state
+// immediately, REGARDLESS of whether the agent parent is still alive. Otherwise
+// a still-open IDE window keeps a heartbeat pinging an archived session forever
+// and `origin status` lists a session the web dashboard no longer shows — the
+// exact CLI/web drift users report.
+export function isServerTerminalDefinitive(
+  resp: { status?: string; archived?: boolean } | null | undefined,
+): boolean {
+  if (!resp) return false;
+  if (resp.archived === true) return true;
+  return resp.status === 'NOT_FOUND' || resp.status === 'DELETED';
+}
+
 export function parentLooksDead(i: LivenessInputs): boolean {
   if (i.agentActivelyWriting) return false;
   const processConfirmedAlive = i.recordedParentPid > 0 && i.recordedParentAlive;

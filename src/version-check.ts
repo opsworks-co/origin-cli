@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import { loadConfig } from './config.js';
 
 const CACHE_PATH = path.join(os.homedir(), '.origin', 'last-update-check.json');
@@ -94,10 +95,19 @@ export function formatUpdateBanner(result: UpdateCheckResult): string {
 
 export function getCurrentVersion(): string | null {
   try {
-    // Try reading from package.json relative to this module
+    // Resolve package.json relative to THIS module. The CLI is ESM
+    // (`"type": "module"`), where `__dirname` is undefined — referencing it threw
+    // a ReferenceError caught by the outer catch, so this silently returned
+    // `null` in every built (dist) runtime. That quietly disabled everything
+    // built on it: the update-availability check, and the runner + heartbeat
+    // self-restart-on-upgrade (shouldRestartForUpgrade(null, null) is always
+    // false). Use import.meta.url, the ESM equivalent (same pattern as
+    // cli-version.ts). NOT cached — callers re-read every tick to notice an
+    // `origin upgrade` that replaced package.json underneath a live daemon.
+    const here = path.dirname(fileURLToPath(import.meta.url));
     const candidates = [
-      path.join(__dirname, '..', 'package.json'),
-      path.join(__dirname, '..', '..', 'package.json'),
+      path.join(here, '..', 'package.json'),
+      path.join(here, '..', '..', 'package.json'),
     ];
     for (const candidate of candidates) {
       try {
@@ -163,4 +173,24 @@ export function compareVersions(a: string, b: string): number {
  */
 export function isNewer(a: string, b: string): boolean {
   return compareVersions(a, b) > 0;
+}
+
+/**
+ * True when a long-running daemon should restart onto a freshly-installed
+ * binary: the on-disk version is STRICTLY newer than the version the process
+ * started with. Guarded on `isNewer` (not `!==`) so it can never loop — after a
+ * restart, startup === on-disk — and never fires on a missing/equal/older read.
+ *
+ * Shared by the bake-off runner (`origin benchmark runner`, restarts via
+ * launchd/systemd KeepAlive) and the per-session heartbeat (restarts by
+ * re-spawning its own replacement). `origin upgrade` does `npm install -g`,
+ * which replaces the package files IN PLACE — so a long-lived process keeps
+ * executing the OLD code (and, e.g., re-stamps a stale CLI version, or misses a
+ * capture fix) until it restarts onto the new binary.
+ */
+export function shouldRestartForUpgrade(
+  startupVersion: string | null,
+  onDiskVersion: string | null,
+): boolean {
+  return !!(startupVersion && onDiskVersion && isNewer(onDiskVersion, startupVersion));
 }

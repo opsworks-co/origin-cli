@@ -15,14 +15,15 @@ import fs from 'fs';
 import { assessRestoreSafety } from './restore-safety.js';
 import os from 'os';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
+import { getCurrentVersion, shouldRestartForUpgrade } from './version-check.js';
 import { createShadowCommit, filesChangedSinceShadow, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import { fetchWithTimeout } from './fetch-timeout.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from './codex-thread-query.js';
 import { ensureSqlite, querySqlite } from './utils/sqlite.js';
 import { isCodexInternalSubroutine, findCodexRolloutByCwd, parseCodexRolloutLive } from './agents/codex.js';
-import { parentLooksDead, heartbeatSuperseded } from './heartbeat-liveness.js';
+import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive } from './heartbeat-liveness.js';
 
 // Path of a file inside the git dir governing `repoPath` — worktree-aware
 // (a linked worktree's `.git` is a FILE; naive `<repoPath>/.git/<name>`
@@ -68,6 +69,15 @@ if (!sessionId || !pidFile) {
   process.exit(1);
 }
 const isConnected = !!(apiUrl && apiKey);
+
+// The on-disk CLI version this daemon STARTED with. `origin upgrade`
+// (npm install -g) replaces heartbeat.js in place, but this long-lived process
+// keeps executing the OLD code — so a capture/behavior fix (e.g. the
+// archived-session self-terminate) would never reach a session that outlives
+// the upgrade. Each tick we re-read the on-disk version; when it's strictly
+// newer, we re-spawn our own replacement (the new binary) and exit. Captured
+// once here so the comparison is stable across the daemon's life.
+const startupVersion = getCurrentVersion();
 
 // Write our PID so the main process can kill us
 fs.writeFileSync(pidFile, String(process.pid), { mode: 0o600 });
@@ -1235,6 +1245,41 @@ async function ping() {
       process.exit(0);
     }
 
+    // Self-restart onto a freshly-installed binary. We OWN this session's pid
+    // file (the supersession check above passed), so we're the daemon that must
+    // carry it forward. When the on-disk version is strictly newer than what we
+    // started with, the user ran `origin upgrade` mid-session — spawn a fresh
+    // DETACHED heartbeat with our exact argv (process.argv[1] resolves to the
+    // now-new heartbeat.js on disk) and the same env (carries
+    // ORIGIN_HEARTBEAT_API_KEY), then exit. The replacement re-writes the pid
+    // file on startup, taking ownership cleanly; the brief overlap is the same
+    // race heartbeatSuperseded already handles. Only fires on strictly-newer, so
+    // after the respawn (startup === on-disk) it can never loop. If the spawn
+    // throws, we still exit — the next hook's startHeartbeat respawns us.
+    if (shouldRestartForUpgrade(startupVersion, getCurrentVersion())) {
+      try {
+        spawn(process.execPath, process.argv.slice(1), {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: process.env,
+        }).unref();
+      } catch { /* next hook's startHeartbeat will respawn from the new binary */ }
+      process.exit(0);
+    }
+
+    // Liveness stamp: bump the pid file's mtime every tick. A live PID alone is
+    // NOT proof of health — a heartbeat whose loop hung (an unresolved await, a
+    // wedged fs/network call) stays alive as a PROCESS but stops pinging and
+    // stops writing session state. The server marks such a session COMPLETED via
+    // its no-ping sweep, yet `origin status` still showed it "active" because
+    // isSessionAlive trusted the bare live PID (observed: a bake-off session
+    // pinned "active" 16h after the server ended it). With this touch, a healthy
+    // daemon keeps its pid file fresh each tick and a hung one lets it go stale —
+    // so isSessionAlive's freshness gate can tell them apart. utimes-only (no
+    // content change), so it never disturbs the heartbeatSuperseded owner check.
+    try { const now = new Date(); fs.utimesSync(pidFile, now, now); } catch { /* pidfile gone → superseded check handles it next tick */ }
+
     // Confirm "parent gone" over multiple ticks before ending —
     // see PARENT_DEAD_TICKS_BEFORE_END comment. A single failed
     // check can fire on transient kernel state (process briefly
@@ -1297,6 +1342,7 @@ async function ping() {
       const data = await resp.json() as {
         ok: boolean;
         status?: string;
+        archived?: boolean;
         command?: any;
         budget?: { blocked?: boolean; level?: string; message?: string };
         // Live policy set, recomputed server-side each ping. Persisted into
@@ -1451,40 +1497,50 @@ async function ping() {
         handleBranch(data.command);
       }
 
-      // If server says session is ended/completed, self-terminate — BUT only
-      // when the agent process is genuinely gone. The server occasionally
-      // marks a session COMPLETED while the agent is still alive (a sibling
-      // conversation got collapsed onto the same row, an admin ended it,
-      // server-side auto-end fired prematurely, etc.). If we tore the local
-      // state down in that case the live agent's next prompt would orphan,
-      // and the dashboard would never get to render the session as IDLE.
-      // While the parent is alive we keep pinging — the server can recompute
-      // RUNNING/IDLE from lastActivityAt on subsequent pings.
+      // Self-terminate when the server reports this session terminal. Two tiers:
+      //
+      //   1. DEFINITIVE (archived / deleted → status 'NOT_FOUND') — an explicit,
+      //      irreversible "hide this session" action by the user or an admin.
+      //      Stop and drop local state NOW, regardless of parent liveness, so a
+      //      still-open IDE window can't keep a heartbeat pinging it forever and
+      //      `origin status` stops listing a session the web dashboard doesn't.
+      //   2. SOFT terminal (COMPLETED / ENDED / ABANDONED) — the server
+      //      sometimes stamps these while the agent is STILL alive (a sibling
+      //      conversation got collapsed onto the same row, an admin ended it,
+      //      server-side auto-end fired prematurely). Keep the parent-alive
+      //      grace: only tear down once the agent process is confirmed gone, so
+      //      the live agent's next prompt doesn't orphan and the dashboard can
+      //      still re-derive RUNNING/IDLE from lastActivityAt on later pings.
+      const dropLocalSessionAndExit = (): void => {
+        try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+        if (stateFile) {
+          try {
+            const raw = fs.readFileSync(stateFile, 'utf-8');
+            const state = JSON.parse(raw);
+            state.status = 'ENDED';
+            state.endedAt = new Date().toISOString();
+            const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
+            const archiveDir = `${homeDir}/.origin/sessions`;
+            fs.mkdirSync(archiveDir, { recursive: true });
+            fs.writeFileSync(`${archiveDir}/${(state.sessionId || sessionId).slice(0, 12)}.json`, JSON.stringify(state), { mode: 0o600 });
+          } catch { /* best effort */ }
+          try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
+        }
+        process.exit(0);
+      };
+
+      if (isServerTerminalDefinitive(data)) {
+        // Archived / deleted server-side → stop immediately, parent or not.
+        dropLocalSessionAndExit();
+      }
       if (data.status && data.status !== 'RUNNING' && data.status !== 'IDLE') {
-        // Same multi-tick confirmation as above — a single
-        // process-tree check can't be trusted to decide whether the
-        // agent is really gone. We already incremented
-        // parentDeadTickCount in the loop above; honor the same
-        // threshold here.
+        // Same multi-tick confirmation as the reap loop above — a single
+        // process-tree check can't be trusted to decide the agent is gone.
         const parentDead = parentPid > 0 && !isProcessAlive(parentPid);
         const noParent = parentPid <= 0;
         const confirmed = parentDeadTickCount >= PARENT_DEAD_TICKS_BEFORE_END;
         if (confirmed && (parentDead || (noParent && (isTranscriptStale() || isStateFileStale())))) {
-          try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
-          if (stateFile) {
-            try {
-              const raw = fs.readFileSync(stateFile, 'utf-8');
-              const state = JSON.parse(raw);
-              state.status = 'ENDED';
-              state.endedAt = new Date().toISOString();
-              const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
-              const archiveDir = `${homeDir}/.origin/sessions`;
-              fs.mkdirSync(archiveDir, { recursive: true });
-              fs.writeFileSync(`${archiveDir}/${(state.sessionId || sessionId).slice(0, 12)}.json`, JSON.stringify(state), { mode: 0o600 });
-            } catch { /* best effort */ }
-            try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
-          }
-          process.exit(0);
+          dropLocalSessionAndExit();
         }
         // Parent still alive: don't tear down. Continue pinging so the server
         // can re-derive RUNNING/IDLE from lastActivityAt on the next tick.

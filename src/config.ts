@@ -58,6 +58,16 @@ export interface OriginConfig {
   // refreshed on every successful pre-push check. Lets the pre-push hook
   // apply the org's fail policy when it can't reach the API at push time.
   pushBlockMode?: string;
+  // When to write session memory: 'session-end' (default), 'commit' (also on
+  // every commit — captures commit-and-go sessions that never end cleanly), or
+  // 'both'. Set via `origin config set memoryUpdate <mode>`.
+  memoryUpdate?: 'session-end' | 'commit' | 'both';
+  // Opt-in: generate a cached, LLM-written "what this repo IS" brief (purpose,
+  // architecture, entry points, gotchas) and inject it at session start
+  // alongside session memory. Off by default — it sends curated repo context to
+  // the Anthropic API using the user's own key. Toggle via `origin context brief
+  // --enable` / `--disable`.
+  repoBrief?: boolean;
   // Machine-wide list of repo/workspace paths to EXCLUDE from tracking. A repo
   // (or any path nested under an entry) on this list creates NO session for any
   // agent — the session lifecycle is dropped at session-start. This is how a

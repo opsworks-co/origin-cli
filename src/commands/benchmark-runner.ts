@@ -18,17 +18,11 @@ import { api } from '../api.js';
 import { deriveRepoFullName } from './benchmark-bakeoff.js';
 import { runBakeOffArms, AGENT_RUNNERS } from './benchmark-bakeoff-run.js';
 import { resolveAgentKeys, readLocalAgentKeys, setLocalAgentKey, clearLocalAgentKey, isAgentKeyProvider, type AgentKeys } from '../agent-keys.js';
-import { getCurrentVersion, isNewer } from '../version-check.js';
-
-/**
- * True when the long-running runner should exit so KeepAlive respawns it onto a
- * freshly-installed binary. ONLY when the on-disk version is strictly newer than
- * the version the process started with — so it never loops (after respawn the two
- * are equal) and never fires on a missing/equal/older read.
- */
-export function shouldRestartForUpgrade(startupVersion: string | null, onDiskVersion: string | null): boolean {
-  return !!(startupVersion && onDiskVersion && isNewer(onDiskVersion, startupVersion));
-}
+import { getCurrentVersion, shouldRestartForUpgrade } from '../version-check.js';
+// Shared with the per-session heartbeat — both restart onto a freshly-installed
+// binary. Re-exported so existing importers (and runner-self-restart.test.ts)
+// keep resolving it from here.
+export { shouldRestartForUpgrade };
 
 interface ClaimedBakeOff {
   id: string;

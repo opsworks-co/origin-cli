@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { loginCommand } from './commands/login.js';
 import { statusCommand } from './commands/status.js';
 import { policiesCommand } from './commands/policies.js';
@@ -52,6 +52,7 @@ import { upgradeCommand } from './commands/upgrade.js';
 import { analyzeCommand } from './commands/analyze.js';
 import { handoffShowCommand, handoffClearCommand } from './commands/handoff.js';
 import { memoryShowCommand, memoryClearCommand } from './commands/memory.js';
+import { briefCommand } from './commands/repo-brief.js';
 import { todoListCommand, todoDoneCommand, todoShowCommand, todoAddCommand, todoRemoveCommand } from './commands/todo.js';
 import { explainCompareCommand } from './commands/explain.js';
 import { dbImportCommand, dbStatsCommand } from './commands/db.js';
@@ -959,6 +960,14 @@ context.command('memory')
   .description('Show only accumulated session memory')
   .option('-l, --limit <n>', 'Number of sessions to show', '10')
   .action(memoryShowCommand);
+context.command('brief')
+  .description('Repo brief — a cached, LLM-written summary of what this repo is (opt-in)')
+  .option('--refresh', 'Generate/regenerate the brief now (uses your Anthropic key)')
+  .option('--enable', 'Enable injecting the brief at session start')
+  .option('--disable', 'Disable injection')
+  .option('--clear', 'Remove the cached brief for this repo')
+  .addOption(new Option('--generate', 'internal: background generation worker').hideHelp())
+  .action(briefCommand);
 context.command('clear')
   .description('Clear handoff and memory for this repo')
   .option('--handoff-only', 'Clear only handoff')

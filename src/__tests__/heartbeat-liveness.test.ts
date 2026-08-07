@@ -6,7 +6,7 @@
 // recorded pid is dead.
 
 import { describe, it, expect } from 'vitest';
-import { parentLooksDead, heartbeatSuperseded } from '../heartbeat-liveness.js';
+import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive } from '../heartbeat-liveness.js';
 
 // A healthy terminal agent: recorded pid alive.
 const ALIVE = {
@@ -96,5 +96,34 @@ describe('heartbeatSuperseded', () => {
     expect(heartbeatSuperseded({ pidFileExists: true, pidFileOwner: null, myPid: 4242 })).toBe(false);
     expect(heartbeatSuperseded({ pidFileExists: true, pidFileOwner: NaN, myPid: 4242 })).toBe(false);
     expect(heartbeatSuperseded({ pidFileExists: true, pidFileOwner: 0, myPid: 4242 })).toBe(false);
+  });
+});
+
+describe('isServerTerminalDefinitive', () => {
+  it('archived === true → stop immediately (the CLI/web drift fix)', () => {
+    // A live IDE window keeps the parent alive, so the soft-terminal grace
+    // would keep pinging forever; archived overrides that.
+    expect(isServerTerminalDefinitive({ status: 'COMPLETED', archived: true })).toBe(true);
+    expect(isServerTerminalDefinitive({ status: 'RUNNING', archived: true })).toBe(true);
+    expect(isServerTerminalDefinitive({ archived: true })).toBe(true);
+  });
+
+  it('deleted / cross-org → NOT_FOUND is definitive', () => {
+    expect(isServerTerminalDefinitive({ status: 'NOT_FOUND' })).toBe(true);
+    expect(isServerTerminalDefinitive({ status: 'DELETED' })).toBe(true);
+  });
+
+  it('soft-terminal statuses are NOT definitive (keep the parent-alive grace)', () => {
+    expect(isServerTerminalDefinitive({ status: 'COMPLETED', archived: false })).toBe(false);
+    expect(isServerTerminalDefinitive({ status: 'ENDED' })).toBe(false);
+    expect(isServerTerminalDefinitive({ status: 'ABANDONED' })).toBe(false);
+    expect(isServerTerminalDefinitive({ status: 'IDLE' })).toBe(false);
+    expect(isServerTerminalDefinitive({ status: 'RUNNING' })).toBe(false);
+  });
+
+  it('missing / empty response is not definitive (never tear down on a bad read)', () => {
+    expect(isServerTerminalDefinitive(null)).toBe(false);
+    expect(isServerTerminalDefinitive(undefined)).toBe(false);
+    expect(isServerTerminalDefinitive({})).toBe(false);
   });
 });

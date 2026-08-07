@@ -9,6 +9,14 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/__tests__/**/*.test.ts'],
+    // Redirect HOME to a throwaway per-worker temp dir so tests that touch
+    // ~/.origin (config/agent, heartbeat pids, and the sessions/ GLOBAL MIRROR
+    // saveSessionState writes) never pollute the real home. Without this, on a
+    // machine that also runs Origin, fixture sessions leaked into
+    // ~/.origin/sessions/ and showed up in `origin status --global` forever.
+    // globalSetup removes the scratch homes after the run.
+    setupFiles: ['./src/__tests__/setup/isolate-home.ts'],
+    globalSetup: ['./src/__tests__/setup/global-teardown.ts'],
     // Isolate every test (and every git subprocess tests spawn) from the
     // host's real git configuration. On a machine with Origin installed,
     // global git config points core.hooksPath at Origin's REAL network-

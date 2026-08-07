@@ -33,6 +33,7 @@ import {
   type ToolCallRecord,
 } from '../session-state.js';
 import { captureGitState, captureAgyDiff, getDirtyFiles, createShadowCommit, commitDiffScopedToPrompt, MAX_PROMPT_DIFF_LEN } from '../git-capture.js';
+import { finalHunksForCaptures } from '../final-state-blame.js';
 import { parseAntigravityTranscript, estimateAntigravityUsage } from '../antigravity-transcript.js';
 import { backfillCodexPromptMappings } from '../codex-prompt-mapping.js';
 import { buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
@@ -82,13 +83,15 @@ import { queueDevinBackfill, drainDevinBackfills } from '../devin-backfill.js';
 import { readDevinLiveSession } from '../devin-sessions-db.js';
 import { maybeSyncDevinDesktop } from './devin.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
-import { writeSessionMemory, buildMemoryContext, readRecentMemory } from '../memory.js';
+import { writeSessionMemory, buildMemoryContext, readRecentMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, type SessionMemoryEntry } from '../memory.js';
+import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../repo-brief.js';
 import { backfillAcceptanceForSession } from '../acceptance.js';
 import { addTodosFromSession } from '../todo.js';
 import {
   capturePromptEdits,
   extractEditsFromToolCall,
   anchorEditPositions,
+
   buildCapturesFromLedger,
   mergeLedgerWithTranscript,
 } from '../prompt-capture/index.js';
@@ -2822,6 +2825,22 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       // Non-fatal
     }
 
+    // Inject the repo brief (opt-in) — a cached, LLM-written summary of what
+    // this repo IS. Cache-only read: never generates in the hot path (P0
+    // generation is manual via `origin context brief --refresh`).
+    try {
+      const briefCtx = buildRepoBriefContext(repoPath);
+      if (briefCtx) {
+        systemMsg += '\n\n' + briefCtx;
+        debugLog('session-start', 'repo brief injected', { length: briefCtx.length });
+      }
+      // P1: if the brief is missing/stale, generate it in the BACKGROUND for the
+      // next session (debounced, gated, non-blocking — never runs the LLM here).
+      maybeSpawnBriefGeneration(repoPath);
+    } catch {
+      // Non-fatal — brief is best-effort.
+    }
+
     // Inject session memory (last 3 session summaries for this repo)
     try {
       const memoryCtx = buildMemoryContext(repoPath);
@@ -5369,6 +5388,42 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             if (state.repoPath) anchorEditPositions(cap.edits, state.repoPath);
             promptEditsByIndex.set(cap.promptIndex, JSON.stringify(cap));
           }
+          // Per-turn attribution in FINAL-file coordinates, walked over this
+          // session's own shadow commits. An edit's anchor says where it landed
+          // WHEN IT RAN; these say where those lines are NOW, and drop the ones
+          // a later turn deleted — which is what lets the dashboard render a
+          // whole file's blame instead of one turn's window. Same helper the
+          // transcript watcher uses, so both paths agree.
+          try {
+            const shadows = (state.promptShadows || [])
+              .filter((s) => s && typeof s.shadowSha === 'string' && s.shadowSha)
+              .map((s) => ({ promptIndex: s.promptIndex, baselineSha: s.shadowSha as string }));
+            if (state.repoPath && shadows.length > 0) {
+              const finalByPrompt = finalHunksForCaptures(
+                state.repoPath,
+                shadows,
+                promptEditsByIndex,
+                state.sessionStartShadowSha || state.headShaAtStart || null,
+              );
+              for (const [idx, hunks] of finalByPrompt) {
+                const raw = promptEditsByIndex.get(idx);
+                if (!raw) continue;
+                try {
+                  const withHunks = JSON.stringify({ ...JSON.parse(raw), finalHunks: hunks });
+                  // editsJson is size-capped downstream; losing the real edits to
+                  // make room for line content would be a bad trade.
+                  if (withHunks.length <= 60_000) promptEditsByIndex.set(idx, withHunks);
+                } catch { /* malformed payload — leave it as it was */ }
+              }
+              debugLog('stop', 'final-state hunks', {
+                prompts: finalByPrompt.size, shadows: shadows.length,
+              });
+            }
+          } catch (fhErr: unknown) {
+            debugLog('stop', 'final-state hunks failed (non-fatal)', {
+              message: fhErr instanceof Error ? fhErr.message : String(fhErr),
+            });
+          }
           debugLog('stop', 'capturePromptEdits ok', {
             agent: captureAgent,
             captured: captures.length,
@@ -6261,23 +6316,19 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       debugLog('session-end', 'handoff write error (non-fatal)', { message: err.message });
     }
 
-    // Write session memory entry for repo history
+    // Write session memory entry for repo history (gated by memoryUpdate —
+    // 'session-end'/'both' write here; 'commit' relies on the post-commit hook).
     try {
-      const todos = extractTodosFromPrompts(prompts);
-      writeSessionMemory(state.repoPath, {
-        sessionId: state.sessionId,
-        agentSlug: agentSlug || 'unknown',
+      if (shouldWriteMemoryOnSessionEnd(memoryUpdateTrigger())) writeSessionMemory(state.repoPath, buildMemoryEntry(state, {
+        agentSlug: agentSlug || undefined,
         model,
-        startedAt: state.startedAt,
-        endedAt: new Date().toISOString(),
         branch: getBranch(hookCwd) || state.branch,
-        summary: parsed.summary || prompts[0]?.slice(0, 200) || 'No summary',
         filesChanged,
-        promptCount: prompts.length,
         linesAdded: gitCapture.linesAdded,
         linesRemoved: gitCapture.linesRemoved,
-        openTodos: todos,
-      });
+        summary: parsed.summary || undefined,
+        prompts,
+      }));
       debugLog('session-end', 'session memory written');
     } catch (err: any) {
       debugLog('session-end', 'session memory error (non-fatal)', { message: err.message });
@@ -6529,6 +6580,31 @@ function pickRecentDevinSessionForRepo(repoPath: string, nowMs: number): DevinDe
   } catch {
     return null;
   }
+}
+
+// Build ONE session-memory entry from live session state. Shared by the
+// session-end and per-commit writers (config.memoryUpdate) so both stay in
+// sync; writeSessionMemory upserts by sessionId, so repeated writes collapse to
+// a single, latest entry per session.
+function buildMemoryEntry(
+  state: { sessionId: string; startedAt: string; prompts?: string[]; branch?: string | null; agentSlug?: string },
+  opts: { agentSlug?: string; model: string; branch: string | null; filesChanged: string[]; linesAdded: number; linesRemoved: number; summary?: string | null; prompts?: string[] },
+): SessionMemoryEntry {
+  const prompts = opts.prompts || state.prompts || [];
+  return {
+    sessionId: state.sessionId,
+    agentSlug: opts.agentSlug || state.agentSlug || 'unknown',
+    model: opts.model,
+    startedAt: state.startedAt,
+    endedAt: new Date().toISOString(),
+    branch: opts.branch,
+    summary: opts.summary || prompts[0]?.slice(0, 200) || 'No summary',
+    filesChanged: opts.filesChanged,
+    promptCount: prompts.length,
+    linesAdded: opts.linesAdded,
+    linesRemoved: opts.linesRemoved,
+    openTodos: extractTodosFromPrompts(prompts),
+  };
 }
 
 export async function handlePostCommit(): Promise<void> {
@@ -7102,6 +7178,33 @@ export async function handlePostCommit(): Promise<void> {
       costUsd: writeData.costUsd,
       files: writeData.filesChanged.length,
     });
+
+    // Refresh this session's cross-session memory NOW (config.memoryUpdate =
+    // 'commit'/'both') — commit-and-go agents often never reach a clean session
+    // end, so their work would otherwise never be remembered. Done HERE (not at
+    // commit disambiguation) so we have the parsed transcript + accumulated
+    // session state: summary comes from the transcript when there is one, else
+    // the originating prompt, else the commit message — never a blank "No
+    // summary". Upsert-by-sessionId collapses repeated writes to one entry.
+    if (shouldWriteMemoryOnCommit(memoryUpdateTrigger())) {
+      try {
+        const memPrompts = (parsed.prompts && parsed.prompts.length > 0) ? parsed.prompts : (state.prompts || []);
+        const accFiles: string[] = writeData.filesChanged && writeData.filesChanged.length > 0 ? writeData.filesChanged : filesChanged;
+        writeSessionMemory(repoPath, buildMemoryEntry(state, {
+          agentSlug: state.agentSlug,
+          model: writeData.model || state.model,
+          branch: currentBranch || state.branch || null,
+          filesChanged: accFiles,
+          linesAdded: (state as any).linesAdded || linesAdded,
+          linesRemoved: (state as any).linesRemoved || linesRemoved,
+          summary: parsed.summary || memPrompts[0] || commitMessage || undefined,
+          prompts: memPrompts,
+        }));
+        debugLog('post-commit', 'session memory refreshed (memoryUpdate=commit)', { sessionId: state.sessionId });
+      } catch (err: any) {
+        debugLog('post-commit', 'session memory refresh error (non-fatal)', { message: err.message });
+      }
+    }
   }
 
   // Opportunistically refresh code-survival for the benchmarking scorecard,
@@ -9611,6 +9714,36 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
       }).then((r: any) => debugLog(event, 'antigravity commit ingested', { commitSha: commitSha.slice(0, 8), ingested: r?.ingested }))
         .catch((e: any) => debugLog(event, 'antigravity commit ingest failed (non-fatal)', { message: e?.message }));
       ingestedCommitSha = commitSha;
+
+      // memoryUpdate=commit/both: agy commits routinely bypass the git
+      // post-commit hook (sandbox commits with hooks disabled), so
+      // handlePostCommit — where the normal commit-time memory write lives —
+      // never fires for them. Write memory HERE, attributed to the agy session
+      // itself (correct agentSlug=antigravity + gemini model + the transcript's
+      // real prompts), so this work is actually remembered instead of the write
+      // being missed (or landing on whatever OTHER session the hook picked).
+      // Upsert-by-sessionId collapses the per-turn fires to one latest entry.
+      if (shouldWriteMemoryOnCommit(memoryUpdateTrigger())) {
+        try {
+          const agyStartedAt = loadSessionState(repoPath, `agy-${conversationId.slice(0, 12)}`)?.startedAt || new Date().toISOString();
+          writeSessionMemory(repoPath, buildMemoryEntry(
+            { sessionId, startedAt: agyStartedAt, prompts: parsed.prompts, branch: branch || null, agentSlug: 'antigravity' },
+            {
+              agentSlug: 'antigravity',
+              model,
+              branch: branch || null,
+              filesChanged: cFiles,
+              linesAdded: cAdd,
+              linesRemoved: cDel,
+              summary: parsed.prompts[0] || g('%s') || undefined,
+              prompts: parsed.prompts,
+            },
+          ));
+          debugLog(event, 'antigravity session memory refreshed (memoryUpdate=commit)', { sessionId, commitSha: commitSha.slice(0, 8) });
+        } catch (e: any) {
+          debugLog(event, 'antigravity session memory refresh error (non-fatal)', { message: e?.message });
+        }
+      }
     } catch (e: any) {
       debugLog(event, 'antigravity commit ingest error', { message: e?.message });
     }

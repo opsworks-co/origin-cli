@@ -820,19 +820,39 @@ Accumulated context across sessions. Origin remembers what happened in previous 
 
 ### How It Works
 
-1. **On session-end:** Origin writes a memory entry to git notes (`refs/notes/origin-memory`)
-2. **On next session-start:** Origin reads the last 3 session summaries and injects them into the system prompt
+1. **When work is written:** Origin writes one entry per session to git notes
+   (`refs/notes/origin-memory`) — summary, files touched, open TODOs. Entries
+   upsert by session ID, so a session has exactly one, always-latest entry.
+2. **On the next session-start:** Origin **distills** the substantive sessions
+   into a short brief (it does not dump raw prompt logs) and injects it into the
+   new agent's context.
 
 The new agent gets context like:
 ```
-Session history for this repo:
-- [15m ago] claude-code/claude-sonnet-4: Added JWT auth middleware
-  Files: src/auth/middleware.ts, src/auth/jwt.ts
-- [2h ago] cursor/gpt-4o: Refactored database queries
-  Files: src/db/queries.ts, src/db/pool.ts
-- [1d ago] claude-code/claude-sonnet-4: Set up project structure
-  Files: package.json, tsconfig.json, src/index.ts
+Prior work in this repo — 3 sessions (claude-code, cursor):
+- Most recent: [15m ago] Added JWT auth middleware
+  Files: middleware.ts, jwt.ts
+- Frequently touched: queries.ts, pool.ts, index.ts
+Open TODOs from previous sessions:
+  - wire refresh-token rotation
 ```
+
+Bake-off sandboxes, ignored repos, and trivial/benchmark turns are filtered out
+so real signal isn't buried under noise.
+
+### When memory is written: `memoryUpdate`
+
+By default memory is written once, at session end. Commit-and-go agents that
+never reach a clean session end would be missed — so you can switch the trigger:
+
+```bash
+origin config set memoryUpdate session-end   # default — write at session end
+origin config set memoryUpdate commit         # write/refresh on every commit
+origin config set memoryUpdate both           # commit AND session end
+```
+
+`commit` is what captures agents that make a change, commit, and exit. The entry
+upserts by session ID, so repeated writes collapse to one latest entry.
 
 ### `origin memory show`
 
@@ -852,6 +872,45 @@ origin memory clear
 ```
 
 Memory is stored in git notes and travels with the repo when pushed (`git push origin refs/notes/origin-memory`).
+
+---
+
+## Repo Brief
+
+Session memory captures what past sessions **did**. The repo brief captures what
+the repo **is** — a cached, LLM-written summary of its purpose, architecture,
+entry points, and gotchas — injected at session start so an agent is oriented
+before its first prompt.
+
+Opt-in, because generating it sends repo context to Anthropic.
+
+### How It Works
+
+1. **Enable it** per repo (`origin context brief --enable`).
+2. **Generation** makes one LLM call over a *bounded* bundle — README, package
+   manifests, the tracked-file tree, and recent commit subjects — not your whole
+   codebase. The key is resolved from `ANTHROPIC_API_KEY` /
+   `origin config set anthropicApiKey`, then a local agent-keys file, then (in
+   team mode) your org's stored key.
+3. **Cache** — the result is stored in git notes (`refs/notes/origin-repo-brief`)
+   keyed by a signature of HEAD + manifests + file tree. It's only regenerated
+   when the repo drifts, and (when enabled) can auto-generate in the background
+   for the *next* session so it never blocks the current one.
+4. **Injection** — at session start the cached brief is injected alongside
+   session memory. This path is cache-only; it never runs an LLM in the hot path.
+
+### `origin context brief`
+
+```bash
+origin context brief --enable     # turn on injection for this repo
+origin context brief              # show the cached brief
+origin context brief --refresh    # generate/regenerate now (uses your Anthropic key)
+origin context brief --disable    # stop injecting
+origin context brief --clear      # remove the cached brief for this repo
+```
+
+Session memory is on by default and fully local. The repo brief is the only
+context layer that calls an external service, and only after you enable it.
 
 ---
 

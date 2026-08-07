@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dolobanko/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
+  <a href="https://github.com/opsworks-co/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
   <a href="https://getorigin.io"><img src="https://img.shields.io/badge/web-getorigin.io-6366f1" alt="Website"></a>
 </p>
 
@@ -86,12 +86,52 @@ Nothing leaves your machine. Sessions live in `refs/notes/origin` and the
 `origin-sessions` branch. Clone the repo, clone the history.
 
 ```
-refs/notes/origin          per-commit model / session / cost / tokens
-origin-sessions            transcripts, prompts, file changes
-~/.origin/config.json      CLI config (machine-local)
+refs/notes/origin              per-commit model / session / cost / tokens
+refs/notes/origin-memory       cross-session memory (what past sessions did)
+refs/notes/origin-repo-brief   repo brief (what this repo is) — opt-in
+origin-sessions                transcripts, prompts, file changes
+~/.origin/config.json          CLI config (machine-local)
 ```
 
 No telemetry by default. Opt in with `origin config set telemetry true`.
+
+---
+
+## Memory that follows the repo
+
+Agents forget everything between sessions. Origin gives them a memory that lives
+in the repo — so the next agent (any agent) starts where the last one left off.
+Two layers, both stored as git notes, both travelling with `git clone`:
+
+**Session memory** — *what past sessions did.* On session end (or on every
+commit — your choice), Origin writes a compact entry per session to
+`refs/notes/origin-memory`: summary, files touched, open TODOs. At the next
+session start it distills these into a short brief — recent changes, frequently
+touched files, carried-over TODOs — and injects it into the new agent's context.
+100% local, no LLM, no server.
+
+```bash
+origin context memory                      # what previous sessions did here
+origin config set memoryUpdate commit      # refresh memory on every commit
+                                           #   (default: session-end · also: both)
+origin context clear --memory-only         # wipe it
+```
+
+**Repo brief** — *what this repo is.* Opt-in. A one-time, cached LLM summary of
+the repo's purpose, architecture, entry points, and gotchas, injected at session
+start so an agent is oriented before its first prompt. Generating it sends a
+bounded bundle (README, manifests, file tree, recent commit subjects) to
+Anthropic using your own key; the result is cached in
+`refs/notes/origin-repo-brief` and only regenerated when the repo drifts.
+
+```bash
+origin context brief --enable     # turn it on for this repo
+origin context brief              # show the cached brief
+origin context brief --refresh    # regenerate now (uses your Anthropic key)
+```
+
+Session memory is on by default and never leaves your machine. The repo brief is
+the only piece that calls an external service, and only after you enable it.
 
 ---
 

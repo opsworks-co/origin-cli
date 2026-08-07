@@ -141,16 +141,28 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
 async function syncWatchersToInstalledCode(): Promise<void> {
   try {
     const { restartCodexWatchIfStale } = await import('../codex-watch.js');
-    if (restartCodexWatchIfStale().restarted) {
-      console.log(chalk.gray('  ✓ Restarted the Codex watcher — it was running an older build\n'));
-    }
+    reportWatcherAction('Codex', restartCodexWatchIfStale());
   } catch { /* non-fatal: the watcher self-restarts at next logon / 24h */ }
   try {
     const { restartTranscriptWatchIfStale } = await import('../transcript-watch.js');
-    if (restartTranscriptWatchIfStale().restarted) {
-      console.log(chalk.gray('  ✓ Restarted the transcript watcher — it was running an older build\n'));
-    }
+    reportWatcherAction('transcript', restartTranscriptWatchIfStale());
   } catch { /* non-fatal */ }
+}
+
+/**
+ * Say what actually happened to a watcher. "Restarted — it was running an older
+ * build" was printed for BOTH cases, so a daemon that had crashed and stopped
+ * capturing entirely was reported in the same words as a routine version cycle.
+ * That is the reassuring-but-false line that let a dead watcher go unnoticed for
+ * hours; a revival is worth calling out, not smoothing over.
+ */
+function reportWatcherAction(label: string, res: { restarted: boolean; reason: string }): void {
+  if (!res.restarted) return;
+  if (res.reason === 'revived-dead-watcher') {
+    console.log(chalk.yellow(`  ✓ Revived the ${label} watcher — it had DIED and was capturing nothing\n`));
+    return;
+  }
+  console.log(chalk.gray(`  ✓ Restarted the ${label} watcher — it was running an older build\n`));
 }
 
 // ─── Version Checking ──────────────────────────────────────────────────────

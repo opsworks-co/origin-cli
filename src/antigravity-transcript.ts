@@ -43,6 +43,9 @@ export interface AntigravityTranscript {
   // "which turn edited a file the commit contains" is ambiguous when several
   // turns edit the same file (every commit then resolves to the same turn).
   promptRanCommit: boolean[];
+  // Short SHAs each turn printed from its OWN `git commit` — exact pairing,
+  // so a turn never has to be matched to a commit by counting.
+  promptCommitShas: string[][];
 }
 
 // PascalCase (and a few snake_case) keys agy uses for file arguments across its
@@ -110,6 +113,39 @@ function stepRanGitCommit(step: any): boolean {
     if (/git\s+commit/.test(cmd)) return true;
   }
   return false;
+}
+
+/**
+ * Short SHAs that a `git commit` in this step actually PRINTED, e.g.
+ * `[add-popoka-rows b995dfa] Add 7 rows`.
+ *
+ * Knowing a turn committed isn't enough to say WHICH commit was its. Pairing
+ * N committing turns against N session commits by order breaks the moment the
+ * two counts disagree — and they do: the poll-based watcher takes its
+ * headShaAtStart when it FIRST NOTICES a session, so a commit made before that
+ * is never in its walk. On session dedec2fa turns 2 and 4 both committed, the
+ * watcher only saw the later commit, and the count mismatch collapsed to
+ * "anchor the newest commit to the last committing turn" — leaving turn 2
+ * reading `uncommitted` next to a commit it had made.
+ *
+ * The transcript states the answer outright, so read it instead of inferring.
+ */
+function stepCommitShas(step: any): string[] {
+  const out: string[] = [];
+  const seen = (text: string) => {
+    for (const m of text.matchAll(/\[[^\]\s]+\s+([0-9a-f]{7,40})\]/g)) out.push(m[1]);
+  };
+  for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+    for (const v of Object.values((tc && tc.args) || {})) {
+      if (typeof v === 'string' && v.includes('[')) seen(v);
+    }
+    for (const key of ['output', 'result', 'stdout', 'Output']) {
+      const v = (tc as any)?.[key];
+      if (typeof v === 'string') seen(v);
+    }
+  }
+  if (typeof step?.content === 'string') seen(step.content);
+  return out;
 }
 
 // ABSOLUTE paths from a step's EDIT/WRITE tool_calls only (not reads/greps).
@@ -215,7 +251,7 @@ function plannerStepText(step: any): string {
 // One user turn plus the assistant output assembled under it. Kept together so
 // that when we sort by prompt time, text + response + timestamp move as a unit
 // (see the sort at the end of parseAntigravityTranscript).
-interface AgyTurn { text: string; createdAt: number | null; buf: string[]; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean }
+interface AgyTurn { text: string; createdAt: number | null; buf: string[]; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean; commitShas: string[] }
 
 export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript {
   const turns: AgyTurn[] = [];
@@ -253,7 +289,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         const isReinjection = sawCompaction && turns.length > 0 && turns[turns.length - 1].text === req;
         if (!isReinjection) {
           const ms = typeof step?.created_at === 'string' ? Date.parse(step.created_at) : NaN;
-          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, buf: [], editedFiles: [], editRecords: [], ranCommit: false });
+          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, buf: [], editedFiles: [], editRecords: [], ranCommit: false, commitShas: [] });
           inputChars += req.length;
         }
       }
@@ -273,6 +309,14 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         for (const r of stepEditRecords(step)) turns[turns.length - 1].editRecords.push(r);
         if (stepRanGitCommit(step)) turns[turns.length - 1].ranCommit = true;
       }
+    }
+
+    // Commit SHAs, scanned on EVERY step regardless of source — see
+    // stepCommitShas. agy routes command output through MODEL steps sometimes
+    // and SYSTEM steps other times, and a scan that misses one of them yields a
+    // half-filled map that still reads as authoritative.
+    if (turns.length > 0) {
+      for (const sha of stepCommitShas(step)) turns[turns.length - 1].commitShas.push(sha);
     }
   }
 
@@ -297,9 +341,10 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   const promptFilesEdited = turns.map((t) => [...new Set(t.editedFiles)]);
   const promptEditRecords = turns.map((t) => t.editRecords);
   const promptRanCommit = turns.map((t) => t.ranCommit);
+  const promptCommitShas = turns.map((t) => [...new Set(t.commitShas)]);
   const filesEdited = [...new Set(turns.flatMap((t) => t.editedFiles))];
 
-  return { prompts, responses, promptTimes, model, inputChars, outputChars, filePaths: [...filePathSet], filesEdited, promptFilesEdited, promptEditRecords, promptRanCommit };
+  return { prompts, responses, promptTimes, model, inputChars, outputChars, filePaths: [...filePathSet], filesEdited, promptFilesEdited, promptEditRecords, promptRanCommit, promptCommitShas };
 }
 
 // agy exposes no token counts, so we estimate from text length (~4 chars/token,

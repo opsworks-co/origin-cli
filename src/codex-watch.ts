@@ -47,7 +47,7 @@ import { isWindows } from './utils/platform.js';
 import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
-import { writeWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
+import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -902,13 +902,22 @@ export function restartCodexWatch(): { restarted: boolean; reason: string } {
 // when the daemon already matches, so a healthy watcher isn't churned on every
 // `origin upgrade` invocation.
 //
-// Deliberately does NOT start a watcher that isn't running — the user may have
-// stopped it on purpose, and `origin enable` owns starting it.
+// Does NOT start a watcher the user stopped on purpose — `origin enable` owns
+// starting it. It DOES revive one that died: a pid file with no process behind
+// it is a crash or a kill, not a decision, and leaving it dead means capturing
+// nothing until the next logon.
 export function restartCodexWatchIfStale(
   installedVersion?: string,
 ): { restarted: boolean; reason: string } {
   if (!codexWatchAutoStartEnabled()) return { restarted: false, reason: 'gated-off' };
   const freshness = watchFreshness(watchPidFile(), installedVersion);
+  if (freshness === 'not-running') {
+    let orphanedPidFile = false;
+    try { orphanedPidFile = fs.existsSync(watchPidFile()); } catch { /* treat as absent */ }
+    if (!orphanedPidFile) return { restarted: false, reason: 'not-running' };
+    const res = ensureCodexWatchRunning();
+    return { restarted: res.started, reason: res.started ? 'revived-dead-watcher' : res.reason };
+  }
   if (freshness !== 'stale') return { restarted: false, reason: freshness };
   return restartCodexWatch();
 }
@@ -1033,10 +1042,23 @@ export async function codexWatchCommand(opts: CodexWatchOptions = {}): Promise<v
   const startedAt = Date.now();
   while (!stopped) {
     if (watcherSuperseded()) { log('Superseded by a newer codex-watch instance — exiting.'); break; }
-    if (Date.now() - startedAt > MAX_DAEMON_LIFETIME_MS) { log('Lifetime cap reached — exiting.'); cleanup(); break; }
+    if (Date.now() - startedAt > MAX_DAEMON_LIFETIME_MS) {
+      // Hand off rather than just stop. The cap is there so a daemon can't run
+      // forever on stale code — it was never meant to END capture, but with
+      // nothing spawning a successor that is what it did: every 24h the watcher
+      // exited and nothing captured again until the next logon.
+      cleanup();
+      const handoff = ensureCodexWatchRunning();
+      log(`Lifetime cap reached — ${handoff.started ? 'handed off to a fresh daemon' : `exiting (${handoff.reason})`}.`);
+      debugLog('codex-watch', 'lifetime handoff', handoff);
+      break;
+    }
     try { await runWatchCycle(sessionsDir, deps); } catch (err) {
       debugLog('codex-watch', 'cycle error', { err: String(err) });
     }
+    // Stamp liveness so `origin doctor` can tell a working daemon from one
+    // that is merely still a process.
+    touchWatchMeta(watchPidFile());
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 }

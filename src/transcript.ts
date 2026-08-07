@@ -1029,7 +1029,7 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
 // Bounded at 4000 lines per side — DP is O(m*n), and edit blocks past
 // that size are usually file rewrites where the previous "dump both"
 // representation is more useful than a multi-megabyte DP table.
-function lineLevelDiff(
+export function lineLevelDiff(
   oldLines: string[],
   newLines: string[],
 ): Array<{ type: 'context' | 'add' | 'remove'; line: string }> {
@@ -1753,6 +1753,12 @@ const DEFAULT_MODEL_PRICING: ModelPricing = {
   'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   'gemini-3-pro': { input: 1.25, output: 10 },
   'gemini-3-flash': { input: 0.15, output: 0.60 },
+  // gemini-3.1 generation — same tier rates as 3 / 3.5. Needs explicit keys:
+  // the longest-substring matcher can't reach 'gemini-3-pro' from "gemini-3.1-pro"
+  // (the ".1" breaks the contiguous substring), so without these a real
+  // gemini-3.1-pro session priced to $0 in `origin stats`.
+  'gemini-3.1-pro': { input: 1.25, output: 10 },
+  'gemini-3.1-flash': { input: 0.15, output: 0.60 },
   'gemini-3.5-pro': { input: 1.25, output: 10 },    // Antigravity flagship
   'gemini-3.5-flash': { input: 0.15, output: 0.60 }, // Antigravity default
   'gemini-2.0-flash': { input: 0.10, output: 0.40 },

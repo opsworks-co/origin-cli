@@ -38,6 +38,7 @@ import { discoverCursorTranscript, getCursorModelFromDb } from './agents/cursor.
 import {
   parseAntigravityTranscript,
   estimateAntigravityUsage,
+  type AgyEditRecord,
 } from './antigravity-transcript.js';
 
 // ─── Engine-facing types ───────────────────────────────────────────────────────
@@ -93,6 +94,11 @@ export interface ParsedSession {
   // shell calls). The deterministic anchor for commit→turn attribution when the
   // agent has no canonical extractor — file-overlap guessing is ambiguous.
   promptsThatCommitted?: number[];
+  // Commit SHAs each prompt's OWN `git commit` printed, keyed by promptIndex.
+  // Exact — unlike promptsThatCommitted, which still has to be matched against
+  // the session's commit list by order and silently mis-pairs when the watcher
+  // never saw an early commit.
+  promptCommitShas?: Record<number, string[]>;
 }
 
 export interface TranscriptAdapter {
@@ -663,6 +669,34 @@ function antigravityTranscriptPath(convDir: string): string | null {
   return null;
 }
 
+// A whole-file write records the file's ENTIRE new content with no "before",
+// so every turn after the first claims the whole file: a turn that appended 5
+// rows to a 4-row file reported +9 from line 1, showing the previous turn's
+// rows as its own. Rewrite each such record against the file's prior
+// IN-SESSION content so it becomes the delta it actually was. Done here, at the
+// source, so the per-prompt diffs, the line counts and the edits the server
+// stores all agree — chaining any one of them downstream leaves the others
+// telling a different story.
+function chainAgyWholeFileWrites(records: AgyEditRecord[][]): AgyEditRecord[][] {
+  const lastContent = new Map<string, string>();
+  return records.map((recs) => recs.map((r) => {
+    if (r.toolName === 'Write') {
+      const content = String(r.input.content ?? '');
+      const prev = lastContent.get(r.file);
+      if (content) lastContent.set(r.file, content);
+      if (prev != null && prev.length > 0 && prev !== content) {
+        return { file: r.file, toolName: 'Edit', input: { old_string: prev, new_string: content } };
+      }
+      return r;
+    }
+    const oldS = String(r.input.old_string ?? '');
+    const newS = String(r.input.new_string ?? '');
+    const cur = lastContent.get(r.file);
+    if (cur != null && oldS && cur.includes(oldS)) lastContent.set(r.file, cur.replace(oldS, newS));
+    return r;
+  }));
+}
+
 export const antigravityAdapter: TranscriptAdapter = {
   slug: 'antigravity',
   agentSlugForServer: 'antigravity',
@@ -702,6 +736,8 @@ export const antigravityAdapter: TranscriptAdapter = {
     // could re-map to a neighbouring prompt. Low-impact (agy is edit-path, not
     // the common case) but a known limitation vs. append-only stores.
     const validTimes = t.promptTimes.filter((x): x is number => typeof x === 'number' && x > 0);
+    const chainedRecords = chainAgyWholeFileWrites(t.promptEditRecords);
+
     return {
       userPrompts: t.prompts,
       promptTimestamps: t.promptTimes.map((x) => x || 0),
@@ -720,11 +756,14 @@ export const antigravityAdapter: TranscriptAdapter = {
       // buildDiffFromEdits shape — so each turn gets its own diff + line counts
       // exactly like Claude/Cursor, instead of file names with +0.
       promptDiffs: t.promptFilesEdited.map((files, i) => {
-        const diff = t.promptEditRecords[i]?.length ? buildDiffFromEdits(t.promptEditRecords[i] as any) : '';
+        const diff = chainedRecords[i]?.length ? buildDiffFromEdits(chainedRecords[i] as any) : '';
         return { promptIndex: i, filesChanged: files, diff, ...countDiffLines(diff) };
       }),
       promptsThatCommitted: t.promptRanCommit.map((r, i) => (r ? i : -1)).filter((i) => i >= 0),
-      promptEdits: t.promptEditRecords.map((recs, i) => ({
+      promptCommitShas: Object.fromEntries(
+        t.promptCommitShas.map((shas, i) => [i, shas]).filter(([, shas]) => (shas as string[]).length > 0),
+      ) as Record<number, string[]>,
+      promptEdits: chainedRecords.map((recs, i) => ({
         promptIndex: i,
         edits: recs.map((r) => (r.toolName === 'Write'
           ? { file: r.file, op: 'write', newContent: String(r.input.content ?? '') }

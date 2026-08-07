@@ -55,7 +55,9 @@ import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
 import { ADAPTERS, type TranscriptAdapter, type ScannedTranscript, type ParsedSession } from './transcript-adapters.js';
-import { writeWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
+import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
+import { finalHunksForCaptures, computeFileLineMaps, type FileLineMap } from './final-state-blame.js';
+import { anchorEditPositions, chainWholeFileWrites, type PromptCapture } from './prompt-capture/index.js';
 
 export type { TranscriptAdapter, ScannedTranscript, ParsedSession };
 
@@ -581,14 +583,43 @@ export async function reconcileSession(
   // path falls back to legacy projections and blanks per-prompt files, which is
   // why agy turns showed correct line counts but "0 files".
   if (editsJsonByIndex.size === 0 && Array.isArray(parsed.promptEdits)) {
-    for (const pe of parsed.promptEdits) {
-      const edits = (pe.edits || []).map((e) => ({
+    // Chain whole-file rewrites across the SESSION before anything else looks at
+    // them. Agents on this branch record a write as the file's ENTIRE new
+    // content with no "before", so every turn after the first claims the whole
+    // file: a turn that appended 5 rows to a 4-row file rendered as +9 from line
+    // 1, showing the previous turn's rows as its own. Giving each rewrite the
+    // file's prior in-session content as oldContent turns it back into the
+    // delta it actually was. Must run across all prompts at once — chaining
+    // per prompt has nothing to chain from.
+    const chained: PromptCapture[] = parsed.promptEdits.map((pe) => ({
+      promptIndex: pe.promptIndex,
+      promptText: '',
+      agent: 'claude' as const,
+      edits: (pe.edits || []).map((e) => ({
         file: toRepoRel([e.file])[0] || e.file,
         op: e.op,
-        ...(e.oldContent !== undefined ? { oldContent: e.oldContent } : {}),
-        ...(e.newContent !== undefined ? { newContent: e.newContent } : {}),
+        oldContent: e.oldContent,
+        newContent: e.newContent,
         source: 'tool_call',
-      }));
+      })) as PromptCapture['edits'],
+      commits: [],
+    }));
+    try {
+      chainWholeFileWrites(chained);
+    } catch { /* best-effort: an unchained write is still worth sending */ }
+
+    for (const pe of chained) {
+      const edits = pe.edits;
+      // Stamp the real line each edit starts at. Agents on this branch build
+      // editsJson from their own adapter's records and never pass through the
+      // canonical capture, so their edits reached the server with NO position —
+      // and the By-Prompt view, which synthesizes a diff from editsJson, then
+      // anchors every hunk at line 1. A turn that appended rows 12-16 rendered
+      // as "@@ -1,1 +1,6 @@" with Row 11 shown as line 1, which is also what the
+      // per-line blame reads. The same anchoring the hook path has always done.
+      try {
+        anchorEditPositions(edits as Parameters<typeof anchorEditPositions>[0], repo.workRoot);
+      } catch { /* best-effort: an unanchored edit is still worth sending */ }
       // Empty edits[] is still sent — the "this turn touched nothing" signal.
       editsJsonByIndex.set(pe.promptIndex, JSON.stringify({ edits, commits: [] }));
     }
@@ -611,6 +642,28 @@ export async function reconcileSession(
   // (Antigravity, Copilot): match each commit to the LAST prompt that edited a
   // file the commit contains. Same one-producer rule as above — the turn that
   // ran `git commit` is the latest one whose work the commit carries.
+  // A turn that printed its own commit SHA needs no matching at all. Resolve
+  // the short SHA against the session's commit list (or accept it as-is — the
+  // server stores what git printed) and use it directly. This is the only
+  // source that stays correct when the watcher joined the session late and
+  // never walked the first commit: session dedec2fa committed on turns 2 and 4,
+  // the walk saw only the later commit, and order-based pairing left turn 2
+  // showing "uncommitted" beside the commit it had just made.
+  if (commitShaByIndex.size === 0 && parsed.promptCommitShas) {
+    for (const [idxRaw, shas] of Object.entries(parsed.promptCommitShas)) {
+      const idx = Number(idxRaw);
+      if (!Number.isInteger(idx) || !Array.isArray(shas) || shas.length === 0) continue;
+      const short = shas[shas.length - 1];
+      const full = sessionCommitShas.find((s) => s.startsWith(short)) || short;
+      commitShaByIndex.set(idx, full);
+    }
+    if (commitShaByIndex.size > 0) {
+      debugLog('transcript-watch', 'commit shas read from transcript', {
+        agent: adapter.slug, pairs: [...commitShaByIndex].map(([i, s]) => i + ':' + s.slice(0, 8)),
+      });
+    }
+  }
+
   if (commitShaByIndex.size === 0 && commitFiles.size > 0) {
     // Prefer the transcript's OWN record of which turns ran `git commit`. Pair
     // those turns with the session's commits in chronological order: the Nth
@@ -662,6 +715,60 @@ export async function reconcileSession(
   }
 
   const agentFilesRel = toRepoRel(parsed.filesChanged);
+
+  // Per-turn attribution in FINAL-file coordinates, walked over the session's
+  // own shadow commits (see final-state-blame.ts). A turn's captured diff is
+  // anchored to the file as it looked when that turn ran, so once a later turn
+  // deletes or inserts above, those coordinates describe positions that no
+  // longer exist — and the dashboard, which renders the file as it is now, has
+  // no way to correct for it. These hunks carry only each turn's SURVIVING
+  // lines, all in one coordinate system, so they compose across turns.
+  //
+  // Purely additive: an unverifiable chain yields nothing and every existing
+  // field is untouched.
+  // The authoritative per-line record: every line of every touched file with
+  // the turn that wrote it (or null when it predates the session). The server
+  // renders this directly instead of choosing between six diff sources.
+  let lineMaps: FileLineMap[] = [];
+
+  try {
+    if (promptShadows.length > 0 && editsJsonByIndex.size > 0) {
+      const finalByPrompt = finalHunksForCaptures(
+        repo.workRoot,
+        promptShadows,
+        editsJsonByIndex,
+        prior?.sessionStartShadowSha || headShaAtStart || null,
+      );
+      for (const [idx, hunks] of finalByPrompt) {
+        let payload: Record<string, unknown> = { edits: [], commits: [] };
+        const raw = editsJsonByIndex.get(idx);
+        if (raw) {
+          try { payload = JSON.parse(raw); } catch { /* keep the empty shell */ }
+        }
+        const withHunks = JSON.stringify({ ...payload, finalHunks: hunks });
+        // editsJson is size-capped downstream; a huge file's line content would
+        // push the real edits out of the payload. Better to ship the turn's
+        // edits without final coordinates than to lose both.
+        if (withHunks.length <= 60_000) editsJsonByIndex.set(idx, withHunks);
+      }
+      lineMaps = computeFileLineMaps(
+        repo.workRoot,
+        promptShadows,
+        editsJsonByIndex,
+        prior?.sessionStartShadowSha || headShaAtStart || null,
+      );
+      if (lineMaps.length > 0) {
+        debugLog('transcript-watch', 'line maps', {
+          agent: adapter.slug,
+          files: lineMaps.map((m) => `${m.file}:${m.total}L/${m.runs.length}runs`),
+        });
+      }
+    }
+  } catch (err) {
+    debugLog('transcript-watch', 'final-state hunks failed (non-fatal)', {
+      agent: adapter.slug, sessionId: scanned.sessionId, err: String(err),
+    });
+  }
 
   const promptChanges: any[] = [];
   const latestIndex = newCount - 1;
@@ -840,6 +947,7 @@ export async function reconcileSession(
       durationMs: durationMs > 0 ? durationMs : undefined,
       costUsd: costUsd > 0 ? costUsd : undefined,
       promptChanges: promptChanges.length > 0 ? promptChanges : undefined,
+      lineMaps: lineMaps.length > 0 ? lineMaps : undefined,
       gitCapture,
       status: 'RUNNING',
     });
@@ -1163,6 +1271,23 @@ export function restartTranscriptWatchIfStale(
 ): { restarted: boolean; reason: string } {
   if (!transcriptWatchAutoStartEnabled()) return { restarted: false, reason: 'gated-off' };
   const freshness = watchFreshness(watchPidFile(), installedVersion);
+  // A watcher that isn't running captures NOTHING, and that was the one state
+  // nothing healed: `origin upgrade` reported everything healthy while the
+  // daemon had been dead for hours (observed — pid 9340, ESRCH, sessions
+  // missing). Starting one is still not this function's job in general, so
+  // distinguish the two ways it can be absent:
+  //
+  //   pid file left behind, process gone → it DIED (crash, kill, reboot mid-
+  //     session). Nobody asked for that; bring it back.
+  //   no pid file → it exited cleanly, which is what a deliberate stop looks
+  //     like. Leave it alone — `origin enable` owns starting it.
+  if (freshness === 'not-running') {
+    let orphanedPidFile = false;
+    try { orphanedPidFile = fs.existsSync(watchPidFile()); } catch { /* treat as absent */ }
+    if (!orphanedPidFile) return { restarted: false, reason: 'not-running' };
+    const res = ensureTranscriptWatchRunning();
+    return { restarted: res.started, reason: res.started ? 'revived-dead-watcher' : res.reason };
+  }
   if (freshness !== 'stale') return { restarted: false, reason: freshness };
   return restartTranscriptWatch();
 }
@@ -1350,10 +1475,26 @@ export async function transcriptWatchCommand(opts: TranscriptWatchOptions = {}):
   const startedAt = Date.now();
   while (!stopped) {
     if (watcherSuperseded()) { log('Superseded by a newer transcript-watch instance — exiting.'); break; }
-    if (Date.now() - startedAt > MAX_DAEMON_LIFETIME_MS) { log('Lifetime cap reached — exiting.'); cleanup(); break; }
+    if (Date.now() - startedAt > MAX_DAEMON_LIFETIME_MS) {
+      // Hand off before going. The cap exists so a daemon can't run forever on
+      // stale code — it was never meant to STOP capture, but with nothing
+      // spawning a successor that is exactly what it did: every 24h the watcher
+      // exited and nothing captured again until the next logon (observed: a
+      // dead pid, hours of missing sessions, and `origin upgrade` reporting
+      // everything healthy because it only ever restarted a STALE watcher).
+      // cleanup() first so the successor doesn't see us holding the pid file.
+      cleanup();
+      const handoff = ensureTranscriptWatchRunning();
+      log(`Lifetime cap reached — ${handoff.started ? 'handed off to a fresh daemon' : `exiting (${handoff.reason})`}.`);
+      debugLog('transcript-watch', 'lifetime handoff', handoff);
+      break;
+    }
     try { await runWatchCycle(adapters, deps); } catch (err) {
       debugLog('transcript-watch', 'cycle error', { err: String(err) });
     }
+    // Stamp liveness so `origin doctor` can tell a working daemon from one
+    // that is merely still a process.
+    touchWatchMeta(watchPidFile());
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 }

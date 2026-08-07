@@ -46,6 +46,27 @@ export interface CaptureInputs {
 }
 
 export function capturePromptEdits(opts: CaptureInputs): PromptCapture[] {
+  const turns = extractByAgent(opts);
+  // Stamp each edit with the real 1-based file line it starts at. A tool-call
+  // payload (old_string/new_string, contents) carries no position, and WITHOUT
+  // an anchor the server's synthesized diff puts every hunk at line 1 — so AI
+  // Blame credited a turn that appended rows 13-17 with lines 2-6 of the file.
+  // The hook path already anchored (commands/hooks.ts), but agents captured by
+  // the poll-based transcript watcher never go through a hook — on Windows no
+  // GUI agent fires one — so Cursor/Gemini shipped every edit unanchored.
+  // Anchoring here covers every caller; the hook path's own call then no-ops on
+  // already-anchored edits. Best-effort by design: an edit whose region the
+  // current file no longer contains stays unanchored and the server falls back
+  // to its synthetic cursor, exactly as before.
+  if (opts.repoPath) {
+    for (const t of turns) {
+      try { anchorEditPositions(t.edits, opts.repoPath); } catch { /* never break capture */ }
+    }
+  }
+  return turns;
+}
+
+function extractByAgent(opts: CaptureInputs): PromptCapture[] {
   switch (opts.agent) {
     case 'claude':
     case 'cursor':
@@ -635,6 +656,17 @@ function makeRepoRelative(filePath: string, repoPath: string): string {
   const norm = filePath.replace(/\\/g, '/');
   const repoNorm = repoPath.replace(/\\/g, '/').replace(/\/+$/, '');
   if (norm.startsWith(repoNorm + '/')) return norm.slice(repoNorm.length + 1);
+  // Windows spells the same path both ways, and one Cursor transcript really
+  // does carry both: `c:\repo\file` on some turns, `C:\repo\file` on others.
+  // A case-sensitive prefix test leaves the odd ones ABSOLUTE, so editsJson —
+  // the record the dashboard treats as authoritative — ends up with three
+  // turns claiming `c:/soft/origin-demo-1/shisha` and one claiming `shisha`,
+  // as if they were different files. Only on Windows: POSIX paths really are
+  // case-sensitive and `/Repo` is not `/repo` there.
+  if (process.platform === 'win32') {
+    const prefix = repoNorm.toLowerCase() + '/';
+    if (norm.toLowerCase().startsWith(prefix)) return norm.slice(prefix.length);
+  }
   return norm;
 }
 

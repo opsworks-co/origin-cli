@@ -36,6 +36,11 @@ export interface WatchMeta {
   pid: number;
   version: string;
   startedAt: string;
+  // Stamped as the daemon polls. A live pid only proves the PROCESS exists —
+  // a watcher wedged on a hung git call looks identical to a healthy one from
+  // the outside. This is the difference between "running" and "working".
+  // Absent on daemons from builds before it existed.
+  lastCycleAt?: string;
 }
 
 /** Sidecar path for a watcher's pid file: `<name>.pid` → `<name>.meta.json`. */
@@ -81,6 +86,86 @@ export function readWatchMeta(pidFile: string): WatchMeta | null {
 
 export function removeWatchMeta(pidFile: string): void {
   try { fs.unlinkSync(watchMetaPath(pidFile)); } catch { /* ignore */ }
+}
+
+// Throttle: the daemons poll every 8s and this only feeds a health readout, so
+// a write per 30s is plenty and keeps the disk quiet.
+const TOUCH_THROTTLE_MS = 30_000;
+const lastTouchedAt = new Map<string, number>();
+
+/**
+ * Mark that the daemon owning `pidFile` just finished a poll cycle. Only the
+ * owning process stamps its own sidecar, so a stale file from a dead daemon
+ * can never look fresh.
+ */
+export function touchWatchMeta(pidFile: string, now = Date.now()): void {
+  try {
+    const p = watchMetaPath(pidFile);
+    if (now - (lastTouchedAt.get(p) || 0) < TOUCH_THROTTLE_MS) return;
+    const meta = readWatchMeta(pidFile);
+    if (!meta || meta.pid !== process.pid) return;
+    lastTouchedAt.set(p, now);
+    fs.writeFileSync(p, JSON.stringify({ ...meta, lastCycleAt: new Date(now).toISOString() }), { mode: 0o600 });
+  } catch { /* health telemetry is never worth failing a cycle over */ }
+}
+
+// A daemon that hasn't completed a cycle in this long has stopped working even
+// if its process is still there. Poll is 8s, so this is ~37 missed cycles —
+// far past any plausible slow git call.
+export const STALLED_AFTER_MS = 5 * 60_000;
+
+export type WatchHealthState = 'ok' | 'stale-build' | 'stalled' | 'dead' | 'stopped';
+
+export interface WatchHealth {
+  state: WatchHealthState;
+  pid?: number;
+  version?: string;
+  startedAt?: string;
+  lastCycleAt?: string;
+  sinceLastCycleMs?: number;
+}
+
+/**
+ * What a watcher daemon is actually doing right now.
+ *
+ * Distinguishes the states that matter operationally, which `watchFreshness`
+ * (built for the restart decision) collapses:
+ *
+ *   stopped     no pid file — cleanly stopped, or never started
+ *   dead        pid file, no process — it crashed; NOTHING is being captured
+ *   stalled     process alive but not polling — wedged; also capturing nothing
+ *   stale-build polling fine, but on older code than the installed CLI
+ *   ok          alive and polling on the current build
+ */
+export function watchHealth(
+  pidFile: string,
+  installedVersion = cliVersion(),
+  now = Date.now(),
+): WatchHealth {
+  let pid: number;
+  try {
+    pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+  } catch {
+    return { state: 'stopped' };
+  }
+  const meta = readWatchMeta(pidFile);
+  const base: WatchHealth = {
+    state: 'ok',
+    pid,
+    version: meta?.version,
+    startedAt: meta?.startedAt,
+    lastCycleAt: meta?.lastCycleAt,
+  };
+  if (!pidAlive(pid)) return { ...base, state: 'dead' };
+  if (meta?.lastCycleAt) {
+    const since = now - new Date(meta.lastCycleAt).getTime();
+    if (Number.isFinite(since) && since > STALLED_AFTER_MS) {
+      return { ...base, state: 'stalled', sinceLastCycleMs: since };
+    }
+    base.sinceLastCycleMs = Math.max(0, since);
+  }
+  if (meta && meta.version !== installedVersion) return { ...base, state: 'stale-build' };
+  return base;
 }
 
 function pidAlive(pid: number): boolean {

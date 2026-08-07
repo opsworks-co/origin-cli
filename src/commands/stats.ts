@@ -21,7 +21,32 @@ function renderPercentBar(pct: number, width: number = 20): string {
 
 // ─── Local Stats Display ──────────────────────────────────────────────────
 
-function displayLocalStats(stats: AttributionStats): void {
+// Per-model cost from the SERVER (api.getStats → costByModel). The local
+// per-commit git notes only carry token counts for agents that surface them
+// per-turn (Codex), so non-Codex models (Claude, Gemini/Antigravity, Cursor,
+// Devin) priced to $0 in `origin stats` even though the server had captured
+// their real session cost. When available we prefer the server figure.
+export interface ServerModelCost { model: string; cost: number }
+
+// Resolve a git-note model name to the server's cost. Exact match first; then a
+// brand fallback so a bare-brand git-note model ("claude") reconciles with the
+// server's specific ids ("claude-opus-5", "claude-opus-4-8"), summing every
+// specific model under that brand. Returns undefined when the server has no
+// matching cost (→ caller falls back to the git-note figure / offline).
+export function resolveServerCost(model: string, server: ServerModelCost[] | undefined): number | undefined {
+  if (!server || server.length === 0) return undefined;
+  const m = model.toLowerCase();
+  const exact = server.find((e) => e.model.toLowerCase() === m);
+  if (exact) return exact.cost;
+  const brand = server.filter((e) => {
+    const s = e.model.toLowerCase();
+    return s.startsWith(m + '-') || m.startsWith(s + '-');
+  });
+  if (brand.length) return brand.reduce((sum, e) => sum + (e.cost || 0), 0);
+  return undefined;
+}
+
+function displayLocalStats(stats: AttributionStats, serverCostByModel?: ServerModelCost[]): void {
   console.log(chalk.bold('\n  Local Attribution Stats\n'));
 
   // Overview
@@ -61,8 +86,11 @@ function displayLocalStats(stats: AttributionStats): void {
     // Per-model acceptance + cost (skip if nothing meaningful to show).
     // We only print this block when at least one model has tracked line-level
     // acceptance OR a cost from git notes — otherwise the table is all zeros.
-    const hasPerModelAcceptance = Array.from(stats.byModel.values()).some(
-      (v) => v.acceptedLines + v.overriddenLines + v.deletedLines > 0 || v.costUsd > 0,
+    const hasPerModelAcceptance = Array.from(stats.byModel.entries()).some(
+      ([model, v]) =>
+        v.acceptedLines + v.overriddenLines + v.deletedLines > 0 ||
+        v.costUsd > 0 ||
+        (resolveServerCost(model, serverCostByModel) ?? 0) > 0,
     );
     if (hasPerModelAcceptance) {
       console.log(chalk.bold('\n  Per-Model Acceptance & Cost\n'));
@@ -77,7 +105,11 @@ function displayLocalStats(stats: AttributionStats): void {
       for (const [model, data] of stats.byModel) {
         const denom = data.acceptedLines + data.overriddenLines;
         const rate = denom > 0 ? Math.round(data.acceptanceRate * 100) + '%' : '—';
-        const cost = data.costUsd > 0 ? `$${data.costUsd.toFixed(2)}` : '—';
+        // Prefer the server's per-model cost (covers agents whose per-commit git
+        // notes carry no token counts); fall back to the git-note figure offline.
+        const serverCost = resolveServerCost(model, serverCostByModel);
+        const effectiveCost = serverCost != null && serverCost > 0 ? serverCost : data.costUsd;
+        const cost = effectiveCost > 0 ? `$${effectiveCost.toFixed(2)}` : '—';
         console.log(
           '  ' + chalk.cyan(model.padEnd(24)) +
           chalk.green(String(data.acceptedLines).padStart(8)) +
@@ -120,7 +152,29 @@ export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean
     try {
       const range = opts?.range || undefined;
       const stats = computeAttributionStats(repoPath, range);
-      displayLocalStats(stats);
+      // Reconcile per-model cost against the server when connected: local git
+      // notes only carry per-commit tokens for agents that surface them (Codex),
+      // so other agents priced to $0. Best-effort — any failure falls back to
+      // the git-note cost, keeping `origin stats` fully functional offline.
+      let serverCostByModel: ServerModelCost[] | undefined;
+      if (isConnectedMode()) {
+        try {
+          const params: Record<string, string> = {};
+          const r = gitDetailed(['remote', 'get-url', 'origin'], { cwd: repoPath });
+          if (r.status === 0) {
+            // The stats endpoint scopes on Repo.name, which is the BASENAME
+            // (e.g. "origin-demo-1"), not the "owner/repo" fullName — passing the
+            // fullName silently matched nothing, so the join returned no cost.
+            const m = r.stdout.trim().match(/([^/]+?)(?:\.git)?$/);
+            if (m && m[1]) params.repoName = m[1];
+          }
+          const s = await api.getStats(params) as any;
+          if (Array.isArray(s?.costByModel)) {
+            serverCostByModel = s.costByModel.map((m: any) => ({ model: String(m.model), cost: Number(m.cost) || 0 }));
+          }
+        } catch { /* offline / API error → git-note cost */ }
+      }
+      displayLocalStats(stats, serverCostByModel);
     } catch (err: any) {
       console.error(chalk.red(`Error computing local stats: ${err.message}`));
     }
