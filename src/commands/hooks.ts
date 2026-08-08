@@ -82,8 +82,10 @@ import { discoverDevinCliSessionDataByPrompt, retagDevinFromProcess } from '../d
 import { queueDevinBackfill, drainDevinBackfills } from '../devin-backfill.js';
 import { readDevinLiveSession } from '../devin-sessions-db.js';
 import { maybeSyncDevinDesktop } from './devin.js';
-import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
-import { writeSessionMemory, buildMemoryContext, readRecentMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, type SessionMemoryEntry } from '../memory.js';
+import { writeHandoff, buildHandoffContext, extractTodosFromPrompts, handoffRepresentsWork } from '../handoff.js';
+import { assembleRepoContext } from '../context-injection.js';
+import { synthesizeSessionSummary, memorySummaryMode } from '../session-summary.js';
+import { writeSessionMemory, writeCommitMemory, buildMemoryContext, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, isSubstantiveMemory, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, type SessionMemoryEntry } from '../memory.js';
 import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../repo-brief.js';
 import { backfillAcceptanceForSession } from '../acceptance.js';
 import { addTodosFromSession } from '../todo.js';
@@ -187,6 +189,113 @@ export function filterUncommittedDiff(diffText: string, prePromptDirtyFiles: str
     kept.push(part);
   }
   return kept.join('').trim();
+}
+
+/**
+ * Scope an Antigravity per-prompt capture to files THIS session actually EDITED,
+ * dropping concurrent-agent dirt.
+ *
+ * A read-only agy turn (no tool call) is seen only by the watcher, which is
+ * barred from refreshing the per-prompt baseline — so captureAgyDiff diffs a
+ * STALE end-of-previous-prompt shadow against the live tree. In a working tree
+ * shared with OTHER agents, an untracked file a DIFFERENT agent just created then
+ * surfaces as this turn's work (the "did you commit it?" question showing
+ * "+22 lines, 1 file" of a file it never touched). `filesEditedAbs` are the
+ * ABSOLUTE paths this conversation's transcript records it editing/writing (never
+ * another agent's files); `filesChanged`/`diff` are repo-relative from
+ * captureAgyDiff. Any changed file not in the session's edited set is dropped from
+ * the diff and the line counts are recomputed from what remains.
+ *
+ * No-op when the session recorded no edits (a parser miss must never zero a real
+ * turn) or when nothing foreign is present.
+ */
+export function scopeAgyDiffToSessionEdits(
+  repoPath: string,
+  filesChanged: string[],
+  diff: string,
+  linesAdded: number,
+  linesRemoved: number,
+  filesEditedAbs: string[],
+): { filesChanged: string[]; diff: string; linesAdded: number; linesRemoved: number; dropped: string[] } {
+  const unchanged = { filesChanged, diff, linesAdded, linesRemoved, dropped: [] as string[] };
+  const editedRel = new Set<string>();
+  for (const abs of (filesEditedAbs || [])) {
+    if (typeof abs !== 'string' || !abs) continue;
+    const rel = path.relative(repoPath, abs);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) editedRel.add(rel);
+  }
+  if (editedRel.size === 0 || filesChanged.length === 0) return unchanged;
+  const dropped = filesChanged.filter((f) => !editedRel.has(f));
+  if (dropped.length === 0) return unchanged;
+  const keptFiles = filesChanged.filter((f) => editedRel.has(f));
+  const keptDiff = filterUncommittedDiff(diff, dropped);
+  let a = 0, r = 0;
+  for (const l of keptDiff.split('\n')) {
+    if (l.startsWith('+') && !l.startsWith('+++')) a++;
+    else if (l.startsWith('-') && !l.startsWith('---')) r++;
+  }
+  return { filesChanged: keptFiles, diff: keptDiff, linesAdded: a, linesRemoved: r, dropped };
+}
+
+export interface AgyPromptCorrection {
+  promptIndex: number;
+  promptText: string;
+  filesChanged: string[];
+  diff: string;
+  uncommittedDiff: string;
+  linesAdded: number;
+  linesRemoved: number;
+  authoritative: true;
+  dropped: string[];              // the foreign files removed (for reporting)
+  commitSha?: string;
+  createdAt?: number;
+}
+
+/**
+ * Backfill helper: given a session's STORED promptChanges and the ABSOLUTE paths
+ * this agy conversation actually EDITED (from its transcript), compute the
+ * authoritative per-prompt corrections needed to retroactively drop
+ * concurrent-agent dirt that a stale watcher baseline swept in before the fix
+ * shipped. Applies the same scoping as the live path (scopeAgyDiffToSessionEdits)
+ * to each prompt and returns ONLY the prompts that actually shed a file, so the
+ * caller writes the minimum. PURE (no IO) — the backfill script does the IO.
+ *
+ * `filesChanged` on a stored promptChange may be an array or a JSON string
+ * (the server serializes it), so both are accepted.
+ */
+export function computeAgySessionCorrections(
+  promptChanges: Array<{ promptIndex: number; promptText?: string; filesChanged?: unknown; diff?: string; linesAdded?: number; linesRemoved?: number; commitSha?: string | null; createdAt?: number }>,
+  filesEditedAbs: string[],
+  repoPath: string,
+): AgyPromptCorrection[] {
+  const asArray = (v: unknown): string[] => {
+    if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string');
+    if (typeof v === 'string' && v.trim()) { try { const p = JSON.parse(v); return Array.isArray(p) ? p.filter((x): x is string => typeof x === 'string') : []; } catch { return []; } }
+    return [];
+  };
+  const out: AgyPromptCorrection[] = [];
+  for (const pc of (promptChanges || [])) {
+    const files = asArray(pc.filesChanged);
+    if (files.length === 0) continue;
+    const scoped = scopeAgyDiffToSessionEdits(repoPath, files, pc.diff || '', pc.linesAdded || 0, pc.linesRemoved || 0, filesEditedAbs);
+    if (scoped.dropped.length === 0) continue;   // nothing foreign on this prompt
+    out.push({
+      promptIndex: pc.promptIndex,
+      promptText: pc.promptText || '',
+      filesChanged: scoped.filesChanged,
+      diff: scoped.diff,
+      // A committed prompt is no longer uncommitted; an uncommitted one keeps its
+      // (now-scoped) diff. Mirrors the live path's uncommittedDiff derivation.
+      uncommittedDiff: pc.commitSha ? '' : scoped.diff,
+      linesAdded: scoped.linesAdded,
+      linesRemoved: scoped.linesRemoved,
+      authoritative: true,
+      dropped: scoped.dropped,
+      ...(pc.commitSha ? { commitSha: pc.commitSha } : {}),
+      ...(typeof pc.createdAt === 'number' ? { createdAt: pc.createdAt } : {}),
+    });
+  }
+  return out;
 }
 
 // FIX 3 — SESSION-LEVEL pre-existing-dirt exclusion.
@@ -761,6 +870,20 @@ export function buildSessionWriteData(opts: {
 
 // ─── Stdin Reader ──────────────────────────────────────────────────────────
 
+// Cursor on Windows writes its hook payload as UTF-8 *with BOM*, and JSON.parse
+// rejects a leading U+FEFF outright. Every Cursor hook on this platform was
+// silently no-oping: beforeSubmitPrompt never created the session, so the
+// poll-based transcript watcher noticed it only after the turn ended and took
+// its headShaAtStart from a HEAD that already contained the agent's commit —
+// the commit then fell outside the session walk and the turn read "uncommitted".
+// Strip the BOM (and surrounding whitespace) before parsing. Written as a code
+// point rather than a literal so the character stays visible in this source.
+const BOM = 0xfeff;
+export function stripBom(s: string): string {
+  const t = s.trim();
+  return t.charCodeAt(0) === BOM ? t.slice(1).trim() : t;
+}
+
 async function readStdin(): Promise<Record<string, any>> {
   return new Promise((resolve) => {
     let data = '';
@@ -768,7 +891,7 @@ async function readStdin(): Promise<Record<string, any>> {
     process.stdin.on('data', (chunk: string) => { data += chunk; });
     process.stdin.on('end', () => {
       try {
-        const parsed = JSON.parse(data);
+        const parsed = JSON.parse(stripBom(data));
         debugLog('stdin', 'parsed', { keys: Object.keys(parsed), cwd: parsed.cwd, session_id: parsed.session_id, model: parsed.model });
         resolve(parsed);
       } catch {
@@ -793,7 +916,7 @@ export async function readHookInput(): Promise<Record<string, any>> {
   const file = process.env.ORIGIN_HOOK_INPUT_FILE;
   if (file) {
     try {
-      const input = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      const input = JSON.parse(stripBom(fs.readFileSync(file, 'utf-8')));
       try { fs.unlinkSync(file); } catch { /* ignore */ }
       return input;
     } catch {
@@ -852,64 +975,146 @@ function spawnBackgroundHook(agentSlug: string, event: string, input: Record<str
  */
 // (sessionMatchesAgent moved to agents/registry.ts)
 
-/**
- * Write Origin policies to agent-specific rules/instructions files.
- * Cursor: ~/.cursor/rules/origin.md
- * Codex: AGENTS.md in project root (Codex reads this natively)
- * Claude Code: uses systemMessage from stdout (no file needed)
- */
-function writeAgentRulesFile(agentSlug: string, systemMsg: string, repoPath: string): void {
-  if (!systemMsg || !agentSlug) return;
+export const ORIGIN_MANAGED_MARKER = '<!-- origin-managed -->';
 
-  let target: string | undefined;
-  let useMarker = false;
-  if (agentSlug === 'claude-code') {
-    // Claude Code reads .claude/settings.local.json instructions, but the most
-    // reliable way to inject rules is via the project-level CLAUDE.md file.
-    // Use a marker to manage our section without clobbering user content.
-    target = path.join(repoPath, 'CLAUDE.md');
-    useMarker = true;
-  } else if (agentSlug === 'cursor') {
-    target = path.join(os.homedir(), '.cursor', 'rules', 'origin.md');
-  } else if (agentSlug === 'codex' || agentSlug === 'antigravity') {
-    // Codex and Antigravity both read AGENTS.md from the project root.
-    target = path.join(repoPath, 'AGENTS.md');
-    useMarker = true;
-  } else if (agentSlug === 'devin') {
-    // Devin (formerly Windsurf) reads always-on rules from .devin/rules/.
-    // Devin Desktop has no third-party hooks, so this rules file is Origin's
-    // only context-injection surface there; the Devin CLI reads it too.
-    target = path.join(repoPath, '.devin', 'rules', 'origin.md');
-    useMarker = true;
-  } else if (agentSlug === 'gemini') {
-    target = path.join(repoPath, 'GEMINI.md');
-    useMarker = true;
-  } else if (agentSlug === 'copilot') {
-    // Copilot CLI + VS Code read repo custom instructions from
-    // .github/copilot-instructions.md. Managed-marker section keeps user content.
-    target = path.join(repoPath, '.github', 'copilot-instructions.md');
-    useMarker = true;
+/**
+ * Every repo-resident context file Origin manages with an
+ * `<!-- origin-managed -->` block, relative to the repo root.
+ *
+ * Each agent reads its own file natively (Codex/Antigravity → AGENTS.md,
+ * Gemini → GEMINI.md, …), but the block Origin owns inside each one is
+ * IDENTICAL — it's the same session context rendered for whoever opens the
+ * repo next. So they are refreshed together: see writeAgentRulesFile.
+ *
+ * `.windsurfrules` is legacy (pre-Devin rebrand) and is no longer a write
+ * target for any agent, but repos still carry one — keep it refreshed rather
+ * than leaving a file full of months-old "recent activity" behind.
+ *
+ * Cursor's `~/.cursor/rules/origin.md` is deliberately absent: it lives in
+ * $HOME, not the repo, and Origin owns the whole file (no marker).
+ */
+export const MANAGED_REPO_CONTEXT_PATHS: string[] = [
+  'CLAUDE.md',
+  'AGENTS.md',
+  'GEMINI.md',
+  path.join('.devin', 'rules', 'origin.md'),
+  path.join('.github', 'copilot-instructions.md'),
+  '.windsurfrules',
+];
+
+/**
+ * The context file a given agent reads natively, or null for agents that get
+ * their context over the hook's stdout channel instead.
+ */
+function agentRulesTarget(
+  agentSlug: string,
+  repoPath: string,
+): { target: string; useMarker: boolean } | null {
+  switch (agentSlug) {
+    case 'claude-code':
+      // Claude Code reads .claude/settings.local.json instructions, but the most
+      // reliable way to inject rules is via the project-level CLAUDE.md file.
+      // Use a marker to manage our section without clobbering user content.
+      return { target: path.join(repoPath, 'CLAUDE.md'), useMarker: true };
+    case 'cursor':
+      // Home-dir rules file — Origin owns it outright, so no marker.
+      return { target: path.join(os.homedir(), '.cursor', 'rules', 'origin.md'), useMarker: false };
+    case 'codex':
+    case 'antigravity':
+      // Codex and Antigravity both read AGENTS.md from the project root.
+      return { target: path.join(repoPath, 'AGENTS.md'), useMarker: true };
+    case 'devin':
+      // Devin (formerly Windsurf) reads always-on rules from .devin/rules/.
+      // Devin Desktop has no third-party hooks, so this rules file is Origin's
+      // only context-injection surface there; the Devin CLI reads it too.
+      return { target: path.join(repoPath, '.devin', 'rules', 'origin.md'), useMarker: true };
+    case 'gemini':
+      return { target: path.join(repoPath, 'GEMINI.md'), useMarker: true };
+    case 'copilot':
+      // Copilot CLI + VS Code read repo custom instructions from
+      // .github/copilot-instructions.md. Managed-marker section keeps user content.
+      return { target: path.join(repoPath, '.github', 'copilot-instructions.md'), useMarker: true };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Replace (or append) the `<!-- origin-managed -->` block in `target`,
+ * preserving anything the user wrote outside it. Returns true if the file
+ * changed on disk.
+ */
+function writeManagedBlock(target: string, systemMsg: string): boolean {
+  const content = `${ORIGIN_MANAGED_MARKER}\n${systemMsg}\n${ORIGIN_MANAGED_MARKER}`;
+  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
+  let next: string;
+  if (existing.includes(ORIGIN_MANAGED_MARKER)) {
+    const markerRegex = new RegExp(`${ORIGIN_MANAGED_MARKER}[\\s\\S]*?${ORIGIN_MANAGED_MARKER}`, 'g');
+    next = existing.replace(markerRegex, content);
+  } else if (existing.trim()) {
+    next = existing + '\n\n' + content;
+  } else {
+    next = content;
+  }
+  if (next === existing) return false;
+  fs.writeFileSync(target, next);
+  return true;
+}
+
+/**
+ * Write Origin's session context to the agent rules/instructions files this
+ * repo carries.
+ *
+ * TWO passes, and the second one is the point:
+ *
+ *  1. The RUNNING agent's own file (CLAUDE.md for claude-code, AGENTS.md for
+ *     codex, …) — created when absent, so a first session in a fresh repo
+ *     still gets a context surface.
+ *  2. Every OTHER origin-managed file ALREADY present in the repo. Without
+ *     this the refresh only ever landed on whichever agent happened to be
+ *     running, so a repo that had collected CLAUDE.md + AGENTS.md + GEMINI.md
+ *     ended up with one current block and N frozen at whenever that agent
+ *     last ran — in this very repo, AGENTS.md was 5 months stale and GEMINI.md
+ *     4 months, both still advertising policies and "recent AI activity" that
+ *     no longer existed. Repo-resident context is only worth anything if it's
+ *     true no matter which agent opens the repo.
+ *
+ * Pass 2 only touches files that ALREADY carry the marker — Origin never
+ * creates a context file for an agent this repo doesn't use.
+ */
+export function writeAgentRulesFile(agentSlug: string, systemMsg: string, repoPath: string): void {
+  if (!systemMsg) return;
+
+  const written = new Set<string>();
+
+  const own = agentSlug ? agentRulesTarget(agentSlug, repoPath) : null;
+  if (own) {
+    try {
+      fs.mkdirSync(path.dirname(own.target), { recursive: true });
+      if (own.useMarker) writeManagedBlock(own.target, systemMsg);
+      else fs.writeFileSync(own.target, systemMsg);
+      written.add(path.resolve(own.target));
+      debugLog('session-start', 'agent rules file written', { agent: agentSlug, path: own.target });
+    } catch (err: any) {
+      // Non-fatal — a failure here must not stop the sibling refresh below.
+      debugLog('session-start', 'agent rules file write failed', { path: own.target, message: err?.message });
+    }
   }
 
-  if (target) {
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    if (useMarker) {
-      // Wrap with markers so we only replace our section, preserving user content
-      const marker = '<!-- origin-managed -->';
-      const content = `${marker}\n${systemMsg}\n${marker}`;
-      const existingContent = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
-      const markerRegex = new RegExp(`${marker}[\\s\\S]*?${marker}`, 'g');
-      if (existingContent.includes(marker)) {
-        fs.writeFileSync(target, existingContent.replace(markerRegex, content));
-      } else if (existingContent.trim()) {
-        fs.writeFileSync(target, existingContent + '\n\n' + content);
-      } else {
-        fs.writeFileSync(target, content);
+  for (const rel of MANAGED_REPO_CONTEXT_PATHS) {
+    const target = path.join(repoPath, rel);
+    if (written.has(path.resolve(target))) continue;
+    try {
+      if (!fs.existsSync(target)) continue;
+      if (!fs.readFileSync(target, 'utf-8').includes(ORIGIN_MANAGED_MARKER)) continue;
+      if (writeManagedBlock(target, systemMsg)) {
+        debugLog('session-start', 'refreshed sibling origin-managed file', { agent: agentSlug, path: target });
       }
-    } else {
-      fs.writeFileSync(target, systemMsg);
+      written.add(path.resolve(target));
+    } catch (err: any) {
+      // One unreadable/read-only file must not block the rest.
+      debugLog('session-start', 'sibling refresh failed', { path: target, message: err?.message });
     }
-    debugLog('session-start', 'agent rules file written', { agent: agentSlug, path: target });
   }
 }
 
@@ -2803,54 +3008,33 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       // Non-fatal — attribution below still renders whatever notes are local.
     }
 
-    // Inject AI attribution context so the agent knows what other agents have done
+    // Assemble Origin's repo-context blocks into ONE deduplicated section:
+    // what the repo IS (brief) → AI-authorship % → what past sessions DID
+    // (memory) → in-progress (handoff). Memory supersedes attribution's
+    // commit-level activity/file lists, so the agent no longer has to reconcile
+    // two near-duplicate "recent work" + "hot files" lists. Each builder is
+    // independently non-fatal; the repo brief is a cache-only read (never runs
+    // the LLM in this hot path).
+    const safeCtx = (fn: () => string | null): string | null => { try { return fn(); } catch { return null; } };
     try {
-      const attributionCtx = buildAttributionContext(repoPath);
-      if (attributionCtx) {
-        systemMsg += '\n\n' + attributionCtx;
-        debugLog('session-start', 'attribution context injected', { length: attributionCtx.length });
+      const repoContext = assembleRepoContext({
+        brief: safeCtx(() => buildRepoBriefContext(repoPath)),
+        attribution: safeCtx(() => buildAttributionContext(repoPath)),
+        // Prefer the LLM continuation brief (what recent sessions DID + what's
+        // in flight); fall back to the deterministic distillation offline.
+        memory: safeCtx(() => buildMemoryBriefContext(repoPath)) || safeCtx(() => buildMemoryContext(repoPath)),
+        handoff: safeCtx(() => buildHandoffContext(repoPath)),
+      });
+      if (repoContext) {
+        systemMsg += '\n\n' + repoContext;
+        debugLog('session-start', 'repo context injected (consolidated)', { length: repoContext.length });
       }
     } catch {
-      // Non-fatal — skip attribution context if it fails
+      // Non-fatal — repo context is best-effort.
     }
-
-    // Inject cross-agent handoff context (from previous session, possibly different agent)
-    try {
-      const handoffCtx = buildHandoffContext(repoPath);
-      if (handoffCtx) {
-        systemMsg += '\n\n' + handoffCtx;
-        debugLog('session-start', 'handoff context injected', { length: handoffCtx.length });
-      }
-    } catch {
-      // Non-fatal
-    }
-
-    // Inject the repo brief (opt-in) — a cached, LLM-written summary of what
-    // this repo IS. Cache-only read: never generates in the hot path (P0
-    // generation is manual via `origin context brief --refresh`).
-    try {
-      const briefCtx = buildRepoBriefContext(repoPath);
-      if (briefCtx) {
-        systemMsg += '\n\n' + briefCtx;
-        debugLog('session-start', 'repo brief injected', { length: briefCtx.length });
-      }
-      // P1: if the brief is missing/stale, generate it in the BACKGROUND for the
-      // next session (debounced, gated, non-blocking — never runs the LLM here).
-      maybeSpawnBriefGeneration(repoPath);
-    } catch {
-      // Non-fatal — brief is best-effort.
-    }
-
-    // Inject session memory (last 3 session summaries for this repo)
-    try {
-      const memoryCtx = buildMemoryContext(repoPath);
-      if (memoryCtx) {
-        systemMsg += '\n\n' + memoryCtx;
-        debugLog('session-start', 'memory context injected', { length: memoryCtx.length });
-      }
-    } catch {
-      // Non-fatal
-    }
+    // P1: if the brief is missing/stale, generate it in the BACKGROUND for the
+    // next session (debounced, gated, non-blocking — never runs the LLM here).
+    try { maybeSpawnBriefGeneration(repoPath); } catch { /* best-effort */ }
 
     // Inject the Origin authoring framework — short prompt telling the
     // agent to emit structured `[Origin: …]` markers as it works so the
@@ -5751,8 +5935,8 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     // Update handoff context after each prompt stop (always fresh for next agent)
     try {
       const todos = extractTodosFromPrompts(prompts);
-      writeHandoff(state.repoPath, {
-        version: 1,
+      const handoffData = {
+        version: 1 as const,
         sessionId: state.sessionId,
         agentSlug: agentSlug || 'unknown',
         model: model || state.model || 'unknown',
@@ -5766,7 +5950,13 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         lastPrompt: (prompts[prompts.length - 1] || '').slice(0, 2000),
         lastResponse: null,
         openTodos: todos,
-      });
+      };
+      // Don't let a chat-only turn (no files, no line changes, no TODOs)
+      // overwrite the last real handoff — its "summary" is just echoed context,
+      // which is what fed the memory-about-memory loop.
+      if (handoffRepresentsWork(handoffData) || todos.length > 0) {
+        writeHandoff(state.repoPath, handoffData);
+      }
     } catch {
       // Non-fatal
     }
@@ -6292,26 +6482,85 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
     }
 
+    // The session's commit subjects — feed the LLM (as intent-of-record) AND
+    // power the deterministic no-key fallback below.
+    const sessionCommitSubjects = (gitCapture.commitShas || []).map((sha) => {
+      try { return execFileSync('git', ['log', '-1', '--format=%s', sha], { cwd: state.repoPath, encoding: 'utf-8' }).trim(); } catch { return ''; }
+    }).filter(Boolean);
+
+    // Optionally synthesize a real one-line "what this session did" summary via
+    // the LLM (config.memorySummary='llm'), grounded in the prompts + commit
+    // messages + the actual code diff. Self-gating + never throws: returns null
+    // when disabled, keyless, or no real work — so both the handoff and the
+    // memory entry below fall back to the heuristic exactly as before.
+    let synthesizedSummary: string | null = null;
+    // A bounded diff of the session's code changes, so the model summarizes from
+    // what CHANGED, not just prompts/messages (also fed to the continuation
+    // brief below). Best-effort; only gathered in llm mode. Hoisted so both the
+    // summary and the brief can use it.
+    let sessionDiff = '';
+    if (memorySummaryMode() === 'llm' && state.headShaAtStart) {
+      try { sessionDiff = execFileSync('git', ['diff', `${state.headShaAtStart}..HEAD`], { cwd: state.repoPath, encoding: 'utf-8', maxBuffer: 20 * 1024 * 1024 }); } catch { /* best-effort */ }
+    }
+    let synthesizedFileNotes: Record<string, string> | undefined;
+    // Decisions: explicit [Origin: Decision] markers (ground truth) merged with
+    // the LLM's inferred decisions — the "why" a future agent can't get from code.
+    const sessionDecisions: string[] = [];
+    try {
+      const markerDecisions = parseMarkersFromTranscriptPath(state.transcriptPath)?.decision || [];
+      for (const d of markerDecisions) if (d && !sessionDecisions.includes(d)) sessionDecisions.push(d);
+    } catch { /* best-effort */ }
+    try {
+      const synth = await synthesizeSessionSummary({
+        prompts,
+        filesChanged,
+        linesAdded: gitCapture.linesAdded,
+        linesRemoved: gitCapture.linesRemoved,
+        commitSubjects: sessionCommitSubjects,
+        diff: sessionDiff,
+      });
+      if (synth) {
+        synthesizedSummary = synth.summary;
+        if (synth.fileNotes && Object.keys(synth.fileNotes).length > 0) synthesizedFileNotes = synth.fileNotes;
+        for (const d of (synth.decisions || [])) if (d && !sessionDecisions.includes(d)) sessionDecisions.push(d);
+        debugLog('session-end', 'synthesized session summary', { summary: synthesizedSummary, fileNotes: Object.keys(synth.fileNotes || {}).length, decisions: sessionDecisions.length });
+      }
+    } catch { /* non-fatal — fall back to heuristic */ }
+
+    // Deterministic fallback (no key): summarize from the session's commit
+    // messages — "Add calculator; Add clock" beats a vague opening prompt or an
+    // empty "No summary". Only when nothing better exists.
+    const commitSummary: string | null = (!synthesizedSummary && !parsed.summary)
+      ? summarizeFromCommitSubjects(sessionCommitSubjects)
+      : null;
+
     // Write cross-agent handoff context for next session
     try {
       const todos = extractTodosFromPrompts(prompts);
-      writeHandoff(state.repoPath, {
-        version: 1,
+      const handoffData = {
+        version: 1 as const,
         sessionId: state.sessionId,
         agentSlug: agentSlug || 'unknown',
         model,
         endedAt: new Date().toISOString(),
         branch: getBranch(hookCwd) || state.branch,
         prompts: prompts.map(p => p.slice(0, 500)),
-        summary: parsed.summary || null,
+        summary: synthesizedSummary || parsed.summary || commitSummary || null,
         filesChanged,
         linesAdded: gitCapture.linesAdded,
         linesRemoved: gitCapture.linesRemoved,
         lastPrompt: (prompts[prompts.length - 1] || '').slice(0, 2000),
         lastResponse: null, // Could extract from transcript later
         openTodos: todos,
-      });
-      debugLog('session-end', 'handoff written', { filesCount: filesChanged.length, todosCount: todos.length });
+      };
+      // Skip chat-only turns (no files, no line changes, no TODOs) so a
+      // "what's in my memory?" answer never overwrites the last real handoff.
+      if (handoffRepresentsWork(handoffData) || todos.length > 0) {
+        writeHandoff(state.repoPath, handoffData);
+        debugLog('session-end', 'handoff written', { filesCount: filesChanged.length, todosCount: todos.length });
+      } else {
+        debugLog('session-end', 'handoff skipped (chat-only, no work) — preserving last real handoff');
+      }
     } catch (err: any) {
       debugLog('session-end', 'handoff write error (non-fatal)', { message: err.message });
     }
@@ -6326,13 +6575,19 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         filesChanged,
         linesAdded: gitCapture.linesAdded,
         linesRemoved: gitCapture.linesRemoved,
-        summary: parsed.summary || undefined,
+        summary: synthesizedSummary || parsed.summary || commitSummary || undefined,
         prompts,
+        fileNotes: synthesizedFileNotes,
+        decisions: sessionDecisions,
       }));
       debugLog('session-end', 'session memory written');
     } catch (err: any) {
       debugLog('session-end', 'session memory error (non-fatal)', { message: err.message });
     }
+
+    // Regenerate the cross-session continuation brief for the NEXT agent, using
+    // the just-ended session's code diff to ground it.
+    await maybeRefreshMemoryBrief(state.repoPath, connected, 'session-end', sessionDiff);
 
     // Extract and store TODOs from prompts
     try {
@@ -6588,7 +6843,7 @@ function pickRecentDevinSessionForRepo(repoPath: string, nowMs: number): DevinDe
 // a single, latest entry per session.
 function buildMemoryEntry(
   state: { sessionId: string; startedAt: string; prompts?: string[]; branch?: string | null; agentSlug?: string },
-  opts: { agentSlug?: string; model: string; branch: string | null; filesChanged: string[]; linesAdded: number; linesRemoved: number; summary?: string | null; prompts?: string[] },
+  opts: { agentSlug?: string; model: string; branch: string | null; filesChanged: string[]; linesAdded: number; linesRemoved: number; summary?: string | null; prompts?: string[]; fileNotes?: Record<string, string>; decisions?: string[] },
 ): SessionMemoryEntry {
   const prompts = opts.prompts || state.prompts || [];
   return {
@@ -6604,7 +6859,40 @@ function buildMemoryEntry(
     linesAdded: opts.linesAdded,
     linesRemoved: opts.linesRemoved,
     openTodos: extractTodosFromPrompts(prompts),
+    ...(opts.fileNotes && Object.keys(opts.fileNotes).length > 0 ? { fileNotes: opts.fileNotes } : {}),
+    ...(opts.decisions && opts.decisions.length > 0 ? { decisions: opts.decisions.slice(0, 8) } : {}),
   };
+}
+
+// Regenerate the cross-session continuation brief for the NEXT agent — a handoff
+// of what recent sessions DID + what's in flight — using the org's AI-provider
+// LLM key (server-side; the key never reaches the CLI). `recentDiff` (bounded) is
+// the just-ended / just-committed code so the brief is grounded in real code, not
+// only prior summaries. Gated on memorySummary=llm + connected + the underlying
+// sessions actually changing (signature). Non-fatal — the deterministic
+// distillation is the injection fallback. Shared by session-end AND the commit
+// paths, so commit-and-go agents (memoryUpdate=commit, which never reach a clean
+// session end) get a fresh brief too.
+async function maybeRefreshMemoryBrief(repoPath: string, connected: boolean, source: string, recentDiff?: string): Promise<void> {
+  if (!connected || memorySummaryMode() !== 'llm') return;
+  try {
+    const entries = readAllSessionMemory(repoPath);
+    const sig = memoryBriefSignature(entries);
+    if (readMemoryBrief(repoPath)?.signature === sig) return; // unchanged since the last brief
+    const sessionsForBrief = entries.filter(isSubstantiveMemory).slice(-12).map((e) => ({
+      summary: e.summary, agentSlug: e.agentSlug, filesChanged: e.filesChanged, openTodos: e.openTodos, decisions: e.decisions, endedAt: e.endedAt,
+    }));
+    if (sessionsForBrief.length === 0) return;
+    const boundedDiff = recentDiff ? recentDiff.slice(0, 8000) : undefined;
+    const res = await api.generateMemoryBrief({ sessions: sessionsForBrief, recentDiff: boundedDiff }) as { brief?: string | null };
+    const brief = (res?.brief || '').trim();
+    if (brief) {
+      writeMemoryBrief(repoPath, { version: 1, brief, signature: sig, generatedAt: new Date().toISOString() });
+      debugLog(source, 'memory continuation brief refreshed', { len: brief.length });
+    }
+  } catch (err: any) {
+    debugLog(source, 'memory brief refresh error (non-fatal)', { message: err?.message });
+  }
 }
 
 export async function handlePostCommit(): Promise<void> {
@@ -7187,6 +7475,11 @@ export async function handlePostCommit(): Promise<void> {
     // the originating prompt, else the commit message — never a blank "No
     // summary". Upsert-by-sessionId collapses repeated writes to one entry.
     if (shouldWriteMemoryOnCommit(memoryUpdateTrigger())) {
+      // Explicit [Origin: Decision] markers from the transcript — ground truth,
+      // no LLM call needed. The normal commit path doesn't LLM-synthesize, so
+      // markers are the decision source here.
+      let commitDecisions: string[] = [];
+      try { commitDecisions = parseMarkersFromTranscriptPath(state.transcriptPath)?.decision || []; } catch { /* best-effort */ }
       try {
         const memPrompts = (parsed.prompts && parsed.prompts.length > 0) ? parsed.prompts : (state.prompts || []);
         const accFiles: string[] = writeData.filesChanged && writeData.filesChanged.length > 0 ? writeData.filesChanged : filesChanged;
@@ -7199,11 +7492,27 @@ export async function handlePostCommit(): Promise<void> {
           linesRemoved: (state as any).linesRemoved || linesRemoved,
           summary: parsed.summary || memPrompts[0] || commitMessage || undefined,
           prompts: memPrompts,
+          decisions: commitDecisions,
         }));
-        debugLog('post-commit', 'session memory refreshed (memoryUpdate=commit)', { sessionId: state.sessionId });
+        debugLog('post-commit', 'session memory refreshed (memoryUpdate=commit)', { sessionId: state.sessionId, decisions: commitDecisions.length });
       } catch (err: any) {
         debugLog('post-commit', 'session memory refresh error (non-fatal)', { message: err.message });
       }
+      // Commit-and-go agents may never reach a clean session end, so refresh the
+      // continuation brief here too — grounded in this commit's diff.
+      await maybeRefreshMemoryBrief(repoPath, connected, 'post-commit', diff);
+
+      // Record the IMMUTABLE per-commit memory entry — the granular "what THIS
+      // commit did", frozen forever (add-once by SHA; distinct from the evolving
+      // session rollup above).
+      try {
+        writeCommitMemory(repoPath, {
+          commitSha, sessionId: state.sessionId, agentSlug: state.agentSlug || 'unknown',
+          message: commitMessage || '', filesChanged, linesAdded, linesRemoved,
+          decisions: commitDecisions.length > 0 ? commitDecisions.slice(0, 6) : undefined,
+          branch: currentBranch || state.branch || null, committedAt: new Date().toISOString(),
+        });
+      } catch { /* non-fatal */ }
     }
   }
 
@@ -9172,6 +9481,10 @@ interface AgyRulesCache {
   // post-commit hook), and its post-tool-use hook fires many times per turn —
   // this skips re-ingesting the same commit on every fire.
   ingestedCommitSha?: string;
+  // Subjects of the commits this session has made, accumulated across fires.
+  // The heuristic memory summary is built from these (the commit messages
+  // describe the actual work far better than a vague opening prompt).
+  commitSubjects?: string[];
 }
 function writeAgyRulesCache(conversationId: string, data: AgyRulesCache): void {
   try {
@@ -9661,6 +9974,20 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
     linesRemoved = cap.linesRemoved;
   } catch { /* non-fatal */ }
 
+  // Guard against CONCURRENT-AGENT dirt: a file some OTHER agent created in the
+  // shared working tree, swept into this turn by a stale watcher baseline. Scope
+  // the capture to files THIS conversation actually edited (see the helper).
+  {
+    const scoped = scopeAgyDiffToSessionEdits(repoPath, filesChanged, diff, linesAdded, linesRemoved, parsed.filesEdited);
+    if (scoped.dropped.length > 0) {
+      filesChanged = scoped.filesChanged;
+      diff = scoped.diff;
+      linesAdded = scoped.linesAdded;
+      linesRemoved = scoped.linesRemoved;
+      debugLog(event, 'antigravity capture: dropped concurrent-agent dirt not edited by this session', { dropped: scoped.dropped, keptFiles: filesChanged.length });
+    }
+  }
+
   // Roll the end-of-work snapshot forward so the NEXT prompt diffs against where
   // this one left off (clean tree → anchor on HEAD). Tag per prompt index so
   // each prompt's end-shadow keeps its own ref alive (a shared tag would move,
@@ -9690,6 +10017,9 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
   // dedups by SHA); guarded by ingestedCommitSha so the many per-turn hook
   // fires don't re-send; fire-and-forget so a slow call never blocks capture.
   let ingestedCommitSha = cachedForRepo?.ingestedCommitSha;
+  // Subjects of the session's commits, accumulated across fires — the heuristic
+  // memory summary is built from these (see summarizeFromCommitSubjects).
+  const commitSubjects: string[] = [...(cachedForRepo?.commitSubjects || [])];
   if (commitSha && !isWatcherSync && commitSha !== ingestedCommitSha && /^[a-fA-F0-9]{7,40}$/.test(commitSha)) {
     try {
       const cOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
@@ -9697,6 +10027,8 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
       let cAdd = 0, cDel = 0;
       if (cDiff) for (const l of cDiff.split('\n')) { if (l.startsWith('+') && !l.startsWith('+++')) cAdd++; else if (l.startsWith('-') && !l.startsWith('---')) cDel++; }
       const g = (fmt: string) => { try { return execFileSync('git', ['log', '-1', `--format=${fmt}`, commitSha], cOpts).trim(); } catch { return ''; } };
+      const thisSubject = g('%s');
+      if (thisSubject && !commitSubjects.includes(thisSubject)) commitSubjects.push(thisSubject);
       void api.ingestCommits({
         repoPath,
         repoUrl,
@@ -9725,21 +10057,67 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
       // Upsert-by-sessionId collapses the per-turn fires to one latest entry.
       if (shouldWriteMemoryOnCommit(memoryUpdateTrigger())) {
         try {
-          const agyStartedAt = loadSessionState(repoPath, `agy-${conversationId.slice(0, 12)}`)?.startedAt || new Date().toISOString();
+          const agyState = loadSessionState(repoPath, `agy-${conversationId.slice(0, 12)}`);
+          const agyStartedAt = agyState?.startedAt || new Date().toISOString();
+          // Accumulate the files this SESSION touched, not just this one commit's.
+          // Upsert-by-sessionId would otherwise leave memory showing only the
+          // latest commit's file (a 3-file session collapsing to 1). Union this
+          // commit (cFiles) + this fire's captured edits + every prior prompt's
+          // files recorded on the agy session state.
+          const accSet = new Set<string>(cFiles);
+          for (const f of (filesChanged || [])) if (typeof f === 'string') accSet.add(f);
+          for (const pm of (((agyState as any)?.completedPromptMappings) || [])) for (const f of ((pm?.filesChanged) || [])) if (typeof f === 'string') accSet.add(f);
+          const accFiles = accSet.size > 0 ? Array.from(accSet) : cFiles;
+          // Summary priority: LLM synthesis (if memorySummary='llm' + key) →
+          // the session's COMMIT MESSAGES (deterministic, no key; "Add terminal
+          // digital clock script; Add calculator script" beats a vague opening
+          // prompt like "do whatever you want") → first prompt → commit subject.
+          const commitSummary = summarizeFromCommitSubjects(commitSubjects);
+          let agySummary: string | undefined = commitSummary || parsed.prompts[0] || g('%s') || undefined;
+          const synth = await synthesizeSessionSummary({ prompts: parsed.prompts, filesChanged: accFiles, linesAdded: cAdd, linesRemoved: cDel, commitSubjects, diff: cDiff });
+          if (synth?.summary) agySummary = synth.summary;
+          const agyFileNotes = synth?.fileNotes && Object.keys(synth.fileNotes).length > 0 ? synth.fileNotes : undefined;
+          // Decisions: explicit [Origin: Decision] markers (ground truth) + LLM-inferred.
+          const agyDecisions: string[] = [];
+          try {
+            const md = parseMarkersFromTranscriptPath(transcriptPath)?.decision || [];
+            for (const d of md) if (d && !agyDecisions.includes(d)) agyDecisions.push(d);
+          } catch { /* best-effort */ }
+          for (const d of (synth?.decisions || [])) if (d && !agyDecisions.includes(d)) agyDecisions.push(d);
           writeSessionMemory(repoPath, buildMemoryEntry(
             { sessionId, startedAt: agyStartedAt, prompts: parsed.prompts, branch: branch || null, agentSlug: 'antigravity' },
             {
               agentSlug: 'antigravity',
               model,
               branch: branch || null,
-              filesChanged: cFiles,
+              filesChanged: accFiles,
               linesAdded: cAdd,
               linesRemoved: cDel,
-              summary: parsed.prompts[0] || g('%s') || undefined,
+              summary: agySummary,
               prompts: parsed.prompts,
+              fileNotes: agyFileNotes,
+              decisions: agyDecisions,
             },
           ));
-          debugLog(event, 'antigravity session memory refreshed (memoryUpdate=commit)', { sessionId, commitSha: commitSha.slice(0, 8) });
+          debugLog(event, 'antigravity session memory refreshed (memoryUpdate=commit)', { sessionId, commitSha: commitSha.slice(0, 8), files: accFiles.length, synth: !!synth });
+          // Antigravity commits with hooks off and rarely reaches a clean
+          // session end — refresh the continuation brief here, grounded in this
+          // commit's diff, so its brief doesn't go stale.
+          await maybeRefreshMemoryBrief(repoPath, isConnectedMode(), event, cDiff);
+
+          // Immutable per-commit record for THIS commit (add-once by SHA), with
+          // its own files + per-file notes (filtered to this commit).
+          try {
+            const commitNotes: Record<string, string> = {};
+            for (const f of cFiles) if (agyFileNotes && agyFileNotes[f]) commitNotes[f] = agyFileNotes[f];
+            writeCommitMemory(repoPath, {
+              commitSha, sessionId, agentSlug: 'antigravity', message: g('%s') || '',
+              filesChanged: cFiles, fileNotes: Object.keys(commitNotes).length > 0 ? commitNotes : undefined,
+              decisions: agyDecisions.length > 0 ? agyDecisions.slice(0, 6) : undefined,
+              linesAdded: cAdd, linesRemoved: cDel, branch: branch || null,
+              committedAt: g('%cI') || new Date().toISOString(),
+            });
+          } catch { /* non-fatal */ }
         } catch (e: any) {
           debugLog(event, 'antigravity session memory refresh error (non-fatal)', { message: e?.message });
         }
@@ -9764,6 +10142,7 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
     lastSyncShadow,
     dirtyPromptIndices: [...dirty],
     ingestedCommitSha,
+    commitSubjects,
   });
 
   // Register the agy session as a local SessionState (with the files it touched)

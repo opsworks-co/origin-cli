@@ -184,6 +184,12 @@ const ORIGIN_AUTO_MANAGED_BASENAMES = new Set<string>([
   'GEMINI.md',
   '.windsurfrules',
   '.devin/rules/origin.md',
+  // Copilot's repo custom-instructions file. It only used to churn on
+  // Copilot sessions, but the origin-managed block in it is now refreshed
+  // by EVERY agent (see writeAgentRulesFile), so without this entry Origin's
+  // own bookkeeping would show up as agent-authored lines in every session
+  // of a repo that has one.
+  'copilot-instructions.md',
   // .gitignore is intentionally NOT in this set — see the matching
   // explanation in apps/api/src/utils/auto-managed-files.ts. Hiding
   // user-requested .gitignore changes from the captured diff caused

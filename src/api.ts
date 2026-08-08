@@ -203,6 +203,13 @@ export const api = {
     request(`/api/mcp/benchmarks/bakeoffs/${encodeURIComponent(id)}/run-result`, { method: 'POST', body: JSON.stringify(data) }),
   // Runner daemon: fetch the org's stored agent keys to inject into the agents.
   getAgentKeys: () => request('/api/mcp/benchmarks/agent-keys'),
+  // Memory: ask the server to synthesize a code-grounded session summary using
+  // the org's "AI provider" LLM key (that key never leaves the server). Returns
+  // { summary: string | null }.
+  summarizeSession: (data: unknown) => request('/api/mcp/sessions/summary', { method: 'POST', body: JSON.stringify(data) }),
+  // Memory: synthesize a cross-session continuation brief for the next agent,
+  // using the org's AI-provider LLM key. Returns { brief: string | null }.
+  generateMemoryBrief: (data: unknown) => request('/api/mcp/sessions/memory-brief', { method: 'POST', body: JSON.stringify(data) }),
   // Agent benchmarking — code-survival sync (see commands/benchmark.ts).
   getSurvivalTargets: (repoFullName: string) =>
     request(`/api/mcp/benchmarks/survival/targets?repoFullName=${encodeURIComponent(repoFullName)}`),

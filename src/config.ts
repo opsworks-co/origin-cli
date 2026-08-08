@@ -62,6 +62,12 @@ export interface OriginConfig {
   // every commit — captures commit-and-go sessions that never end cleanly), or
   // 'both'. Set via `origin config set memoryUpdate <mode>`.
   memoryUpdate?: 'session-end' | 'commit' | 'both';
+  // How session-memory summaries are written: 'heuristic' (default — first
+  // prompt / commit message) or 'llm' (synthesize a real one-line "what this
+  // session did" via the Anthropic API using the user's/org's key). LLM mode is
+  // opt-in because it makes an external call per session. `origin config set
+  // memorySummary llm`.
+  memorySummary?: 'heuristic' | 'llm';
   // Opt-in: generate a cached, LLM-written "what this repo IS" brief (purpose,
   // architecture, entry points, gotchas) and inject it at session start
   // alongside session memory. Off by default — it sends curated repo context to

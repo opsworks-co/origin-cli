@@ -57,6 +57,16 @@ import { debugLog, logSkipOnce } from './debug-log.js';
 import { ADAPTERS, type TranscriptAdapter, type ScannedTranscript, type ParsedSession } from './transcript-adapters.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 import { finalHunksForCaptures, computeFileLineMaps, type FileLineMap } from './final-state-blame.js';
+import {
+  writeSessionMemory,
+  memoryUpdateTrigger,
+  shouldWriteMemoryOnSessionEnd,
+  isSubstantiveMemory,
+  summarizeFromCommitSubjects,
+  type SessionMemoryEntry,
+} from './memory.js';
+import { extractTodosFromPrompts } from './handoff.js';
+import { parseMarkersFromTranscriptPath } from './origin-markers.js';
 import { anchorEditPositions, chainWholeFileWrites, type PromptCapture } from './prompt-capture/index.js';
 
 export type { TranscriptAdapter, ScannedTranscript, ParsedSession };
@@ -259,6 +269,9 @@ export interface WatchDeps {
   saveGitState?: (state: Record<string, unknown>, workRoot: string, tag: string) => void;
   // Mark that git state file ENDED when the session goes idle.
   endGitState?: (workRoot: string, tag: string) => void;
+  // Record what this session did into the repo's cross-session memory when it
+  // ends. Optional so tests can omit it; the real impl wraps writeSessionMemory.
+  writeMemory?: (repoPath: string, entry: SessionMemoryEntry) => void;
   // Unified diff of specific repo-relative files against HEAD, including
   // untracked files (rendered fully-added). The diff source for agents whose
   // transcript carries no edit content (Antigravity) and for brand-new files
@@ -316,6 +329,115 @@ export function __resetStartSessionBackoff(): void {
 // transcript state, capture per-prompt shadows + diffs, or end it when idle.
 // Returns the (possibly-updated) state, or null when the session was skipped
 // (noise, non-git cwd, unparseable transcript).
+// Expand a short commit SHA to its full form using the repo itself. Returns
+// null when git cannot resolve it — an ambiguous or unknown prefix must not be
+// guessed at.
+export function resolveFullSha(workRoot: string, short: string): string | null {
+  if (!/^[0-9a-f]{4,40}$/i.test(short)) return null;
+  try {
+    const out = execFileSync('git', ['rev-parse', '--verify', `${short}^{commit}`], {
+      cwd: workRoot, encoding: 'utf-8', windowsHide: true, timeout: 10_000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return /^[0-9a-f]{40}$/i.test(out) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Make a possibly-absolute path repo-relative in a way that works REGARDLESS of
+ * the host OS. `path.isAbsolute` only recognizes the CURRENT platform's format,
+ * so a Windows path like "C:/repo/src/x.ts" looks relative on Linux/macOS and
+ * slips through un-stripped — then isSubstantiveMemory drops it as foreign work
+ * (the watcher runs cross-platform; Cursor/Windows agents emit `C:/…` paths).
+ * Strip the workRoot prefix directly after normalizing slashes, and only fall
+ * back to path.relative for a genuine same-OS absolute path.
+ */
+export function toRepoRelative(workRoot: string, file: string): string {
+  const f = (file || '').replace(/\\/g, '/');
+  const root = (workRoot || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  if (root) {
+    if (f === root) return '.';
+    if (f.startsWith(root + '/')) return f.slice(root.length + 1);
+  }
+  if (root && path.isAbsolute(file)) {
+    const r = path.relative(workRoot, file).replace(/\\/g, '/');
+    if (r && !r.startsWith('..')) return r;
+  }
+  return f;
+}
+
+/**
+ * A memory entry for a session the watcher is ending, in the same shape the
+ * hook path writes. Re-parses the transcript once — this runs a single time per
+ * session, at its end.
+ *
+ * Returns null when the transcript no longer parses or the session touched
+ * nothing; the caller additionally drops non-substantive entries.
+ */
+function buildWatchMemoryEntry(
+  scanned: ScannedTranscript,
+  adapter: TranscriptAdapter,
+  prior: SessionWatchState,
+  now: number,
+): SessionMemoryEntry | null {
+  const parsed = adapter.parse(scanned.transcriptPath);
+  if (!parsed) return null;
+  const prompts = parsed.userPrompts || [];
+  const workRoot = prior.workRoot || prior.repoPath;
+  const rel = (parsed.filesChanged || [])
+    .map((f) => toRepoRelative(workRoot, f))
+    .filter((f) => f && !f.startsWith('..'));
+  // What the session actually landed beats what it was asked to do. The hook
+  // path summarises from commit subjects (or an LLM) and only falls back to the
+  // opening prompt; matching that keeps a 6-turn session from being remembered
+  // as its first sentence.
+  const subjects = commitSubjects(workRoot, prior.sessionCommitShas || []);
+  const summary = summarizeFromCommitSubjects(subjects) || prompts[0]?.slice(0, 200) || '';
+
+  // Explicit [Origin: Decision] markers are ground truth and need no LLM — the
+  // same source the commit path uses.
+  let decisions: string[] = [];
+  try {
+    decisions = parseMarkersFromTranscriptPath(scanned.transcriptPath)?.decision || [];
+  } catch { /* best-effort */ }
+
+  return {
+    sessionId: scanned.sessionId,
+    agentSlug: adapter.agentSlugForServer || adapter.slug,
+    model: parsed.model || adapter.slug,
+    startedAt: prior.createdAt || new Date(now).toISOString(),
+    endedAt: new Date(now).toISOString(),
+    branch: null,
+    summary,
+    filesChanged: [...new Set(rel)],
+    promptCount: prompts.length,
+    // Summed from the per-turn diffs the adapter already computed. The hook
+    // path takes these from its gitCapture; the watcher has no equivalent at
+    // END time, and a per-turn sum is the same number by a different route.
+    linesAdded: (parsed.promptDiffs || []).reduce((n, d) => n + (d.linesAdded || 0), 0),
+    linesRemoved: (parsed.promptDiffs || []).reduce((n, d) => n + (d.linesRemoved || 0), 0),
+    openTodos: extractTodosFromPrompts(prompts),
+    ...(decisions.length > 0 ? { decisions: decisions.slice(0, 8) } : {}),
+  };
+}
+
+/** Subject lines of the commits this session made, oldest→newest. */
+function commitSubjects(workRoot: string | undefined, shas: string[]): string[] {
+  if (!workRoot || shas.length === 0) return [];
+  const out: string[] = [];
+  for (const sha of shas.slice(-10)) {
+    try {
+      out.push(execFileSync('git', ['log', '-1', '--format=%s', sha], {
+        cwd: workRoot, encoding: 'utf-8', windowsHide: true, timeout: 5_000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim());
+    } catch { /* a sha the repo no longer has — skip it */ }
+  }
+  return out.filter(Boolean);
+}
+
 export async function reconcileSession(
   scanned: ScannedTranscript,
   adapter: TranscriptAdapter,
@@ -334,6 +456,26 @@ export async function reconcileSession(
       if (prior.sessionTag) {
         try { deps.endGitState?.(prior.workRoot, prior.sessionTag); } catch { /* best-effort */ }
       }
+      // Cross-session memory. Only the hook path ever wrote this, and GUI
+      // agents fire no hooks on Windows — they are captured HERE — so on a
+      // Windows box `origin context memory` stayed empty forever no matter how
+      // many sessions ran (reported on origin-demo-1, which had dozens). A
+      // session ending is exactly the moment the hook path records one, so the
+      // watcher records one too, in the same shape.
+      try {
+        if (deps.writeMemory && prior.repoPath && shouldWriteMemoryOnSessionEnd(memoryUpdateTrigger())) {
+          const entry = buildWatchMemoryEntry(scanned, adapter, prior, now);
+          if (entry && isSubstantiveMemory(entry)) {
+            deps.writeMemory(prior.repoPath, entry);
+            debugLog('transcript-watch', 'session memory written', {
+              agent: adapter.slug, sessionId: scanned.sessionId, files: entry.filesChanged.length,
+            });
+          }
+        }
+      } catch (err) {
+        debugLog('transcript-watch', 'session memory write failed (non-fatal)', { err: String(err) });
+      }
+
       const ended: SessionWatchState = { ...prior, status: 'ENDED', endedAt: new Date(now).toISOString() };
       deps.saveState(ended);
       return ended;
@@ -574,8 +716,7 @@ export async function reconcileSession(
 
   const toRepoRel = (files: string[]): string[] =>
     files
-      .map((f) => (path.isAbsolute(f) ? path.relative(repo.workRoot, f) : f))
-      .map((f) => f.replace(/\\/g, '/'))
+      .map((f) => toRepoRelative(repo.workRoot, f))
       .filter((f) => f && !f.startsWith('..'));
 
   // editsJson for agents outside the canonical pipeline (Antigravity) that DO
@@ -654,7 +795,26 @@ export async function reconcileSession(
       const idx = Number(idxRaw);
       if (!Number.isInteger(idx) || !Array.isArray(shas) || shas.length === 0) continue;
       const short = shas[shas.length - 1];
-      const full = sessionCommitShas.find((s) => s.startsWith(short)) || short;
+      // Agents print a SHORT sha (`[branch 73df467]`), and the server can only
+      // work with a full one: it matches a prompt's commitSha against the
+      // session's own commit rows, and a 7-char value matches nothing. The row
+      // then looks like it carries a commit from somewhere else, which makes it
+      // eligible for reassignment — so the turn ends up showing `uncommitted`
+      // next to the commit it just made (session f7e315db, turn 2).
+      //
+      // The session's own commit list resolves it when the walk has seen that
+      // commit; it hasn't when the watcher joined after the commit landed,
+      // which is precisely when this path matters. Ask git directly, and if
+      // even git can't resolve it, send nothing — an unusable sha is worse than
+      // an honest blank.
+      const full = sessionCommitShas.find((s) => s.startsWith(short))
+        || resolveFullSha(repo.workRoot, short);
+      if (!full) {
+        debugLog('transcript-watch', 'commit sha unresolvable — sending none', {
+          agent: adapter.slug, promptIndex: idx, short,
+        });
+        continue;
+      }
       commitShaByIndex.set(idx, full);
     }
     if (commitShaByIndex.size > 0) {
@@ -933,6 +1093,18 @@ export async function reconcileSession(
       parsed.cacheCreationTokens || 0,
     );
   } catch { /* pricing unavailable — leave 0 rather than guess */ }
+
+  // What actually goes on the wire, per turn. Inference has been wrong three
+  // times on this: the capture computes a commit SHA, the daemon logs it, the
+  // server updates every other field on the same row, and the SHA still lands
+  // null. Log the payload itself so the next poll settles where it is lost.
+  if (promptChanges.length > 0) {
+    debugLog('transcript-watch', 'payload commit shas', {
+      agent: adapter.slug,
+      sessionId: scanned.sessionId,
+      turns: promptChanges.map((pc: any) => `${pc.promptIndex}:${pc.commitSha ? String(pc.commitSha).slice(0, 8) : 'none'}`),
+    });
+  }
 
   let updateOk = false;
   try {
@@ -1376,6 +1548,7 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     stateDir: watchStateDir(),
     api: { startSession: api.startSession, updateSession: api.updateSession },
     resolveRepo: realResolveRepo,
+    writeMemory: writeSessionMemory,
     createShadow: createShadowCommit,
     getHead: (workRoot: string) => getHeadSha(workRoot),
     captureDiff: captureAgyDiff,

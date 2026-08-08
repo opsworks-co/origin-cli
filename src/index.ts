@@ -251,25 +251,29 @@ program.command('clean')
 
 // ─── Cross-Agent Handoff ─────────────────────────────────────────────────
 
-const handoff = program.command('handoff').description('Cross-agent context handoff');
+// Deprecated aliases — folded under `origin context`. Kept working for muscle
+// memory / scripts but hidden from help and the docs command reference. The
+// `{ hidden: true }` opts form both hides them at runtime AND drops them from
+// the static docs extractor (which only matches `.command('name')`).
+const handoff = program.command('handoff', { hidden: true }).description('Deprecated — use `origin context handoff`');
 handoff.action(handoffShowCommand);
-handoff.command('show')
-  .description('Show handoff context that will be passed to the next agent')
+handoff.command('show', { hidden: true })
+  .description('Deprecated — use `origin context handoff`')
   .action(handoffShowCommand);
-handoff.command('clear')
-  .description('Clear handoff data for this repo')
+handoff.command('clear', { hidden: true })
+  .description('Deprecated — use `origin context clear --handoff-only`')
   .action(handoffClearCommand);
 
 // ─── Session Memory ─────────────────────────────────────────────────────
 
-const memory = program.command('memory').description('Session memory — accumulated context across sessions');
+const memory = program.command('memory', { hidden: true }).description('Deprecated — use `origin context memory`');
 memory.action(memoryShowCommand);
-memory.command('show')
-  .description('Display accumulated session memory for current repo')
+memory.command('show', { hidden: true })
+  .description('Deprecated — use `origin context memory`')
   .option('-l, --limit <n>', 'Number of sessions to show', '10')
   .action(memoryShowCommand);
-memory.command('clear')
-  .description('Clear all session memory for this repo')
+memory.command('clear', { hidden: true })
+  .description('Deprecated — use `origin context clear --memory-only`')
   .action(memoryClearCommand);
 
 // ─── AI TODO Tracker ─────────────────────────────────────────────────────
@@ -931,10 +935,10 @@ program.command('user <id>')
     } catch (e: any) { console.error(chalk.red(e.message)); }
   });
 
-// ─── Convenience command: unified context view ─────────────────────────
-// `context` is a convenience aggregator that shows handoff + memory side by
-// side. It does NOT replace `handoff` or `memory` — both remain primary,
-// top-level commands for users who want just one or the other.
+// ─── Cross-agent context — the single umbrella ──────────────────────────
+// `context` is THE surface for cross-agent context: handoff + accumulated
+// session memory + the repo brief. The former top-level `handoff` and `memory`
+// commands are now deprecated, hidden aliases that delegate here.
 const context = program.command('context')
   .description('Cross-agent context — handoff + accumulated session memory');
 context.action(async () => {
@@ -1010,7 +1014,8 @@ const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   },
   {
     label: 'TRACKING',
-    commands: ['issue', 'todo', 'trail', 'handoff', 'memory', 'context'],
+    // `handoff`/`memory` are deprecated aliases folded under `context` — omitted.
+    commands: ['issue', 'todo', 'trail', 'context'],
   },
   {
     label: 'ANALYTICS',

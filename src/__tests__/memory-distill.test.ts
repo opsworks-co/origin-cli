@@ -5,7 +5,7 @@
 // ignored repos are skipped, trivial benchmark prompts are filtered, and what
 // remains is distilled.
 import { describe, it, expect } from 'vitest';
-import { isBakeoffRepo, isSubstantiveMemory, repoRelativeFiles, type SessionMemoryEntry } from '../memory.js';
+import { isBakeoffRepo, isSubstantiveMemory, repoRelativeFiles, hasFileExtension, summarizeFromCommitSubjects, type SessionMemoryEntry } from '../memory.js';
 
 const entry = (over: Partial<SessionMemoryEntry>): SessionMemoryEntry => ({
   sessionId: 's', agentSlug: 'claude-code', model: 'claude', startedAt: '', endedAt: new Date().toISOString(),
@@ -23,6 +23,36 @@ describe('repoRelativeFiles (cross-platform separators)', () => {
     expect(repoRelativeFiles(['C:\\Users\\x\\.origin\\bakeoff-repos\\repo\\data.txt'])).toEqual([]);
     expect(repoRelativeFiles(['sub\\repo-bakeoff-ab12-codex\\notes.txt'])).toEqual([]);
     expect(repoRelativeFiles(['x\\copilot-worktrees\\repo\\y.txt'])).toEqual([]);
+  });
+});
+
+describe('summarizeFromCommitSubjects (heuristic summary from commit messages)', () => {
+  it('joins real commit subjects; a vague opening prompt is no longer the summary', () => {
+    const subjects = ['Add interactive colorful calculator script', 'Add bouncing ball terminal script', 'Add terminal digital clock script'];
+    expect(summarizeFromCommitSubjects(subjects)).toBe('Add interactive colorful calculator script; Add bouncing ball terminal script; Add terminal digital clock script');
+  });
+  it('caps at 3 with a "+N more" tail', () => {
+    const out = summarizeFromCommitSubjects(['Add a', 'Add b', 'Add c', 'Add d', 'Add e'])!;
+    expect(out).toBe('Add a; Add b; Add c; +2 more');
+  });
+  it('filters Origin shadow/notes commits and dedupes', () => {
+    expect(summarizeFromCommitSubjects([
+      'origin shadow agy-sync-8bd2d1fa-8 2026-08-07', "Notes added by 'git notes add'", 'Add calculator', 'Add calculator',
+    ])).toBe('Add calculator');
+  });
+  it('returns null when nothing real remains', () => {
+    expect(summarizeFromCommitSubjects([])).toBeNull();
+    expect(summarizeFromCommitSubjects(["Notes added by 'git notes add'", 'origin shadow x'])).toBeNull();
+    expect(summarizeFromCommitSubjects(undefined)).toBeNull();
+  });
+});
+
+describe('hasFileExtension (scratch-file de-prioritization)', () => {
+  it('true for real source/config, false for extensionless throwaways', () => {
+    for (const f of ['auth.ts', 'README.md', 'eleven-rows-new.txt', 'package.json']) expect(hasFileExtension(f)).toBe(true);
+    for (const f of ['oneoneone', 'gandon', 'stvol', 'pushlash']) expect(hasFileExtension(f)).toBe(false);
+    // a leading dot alone is not an extension (matches Node path.extname)
+    expect(hasFileExtension('.gitignore')).toBe(false);
   });
 });
 

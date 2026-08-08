@@ -773,12 +773,12 @@ The new agent automatically knows:
 - The last prompt and its context
 - Open TODOs from the previous session
 
-### `origin handoff show`
+### `origin context handoff`
 
 Preview the handoff context that will be passed to the next agent.
 
 ```bash
-origin handoff show
+origin context handoff
 # Output:
 #   Cross-Agent Handoff Context
 #
@@ -802,12 +802,12 @@ origin handoff show
 #     - handle edge case for expired tokens
 ```
 
-### `origin handoff clear`
+### `origin context clear --handoff-only`
 
 Clear handoff data for the current repo.
 
 ```bash
-origin handoff clear
+origin context clear --handoff-only
 ```
 
 **Note:** Handoff data expires after 24 hours automatically.
@@ -820,12 +820,34 @@ Accumulated context across sessions. Origin remembers what happened in previous 
 
 ### How It Works
 
-1. **When work is written:** Origin writes one entry per session to git notes
-   (`refs/notes/origin-memory`) — summary, files touched, open TODOs. Entries
-   upsert by session ID, so a session has exactly one, always-latest entry.
+Memory has two layers, both in `refs/notes/origin-memory`:
+
+- **Session summaries** — one **evolving** rollup per SESSION (upsert by session
+  ID; regenerated as the session works and at session end). A session spans many
+  commits — these IDs are sessions, not commits.
+- **Commit history** — an **immutable** record per commit (frozen when the commit
+  lands, add-once by SHA): the commit message, that commit's files, and per-file
+  change notes. Written on commit when `memoryUpdate` includes `commit`, and
+  pruned to commits whose session is still in the retained window.
+
+Both layers also capture **decisions** — the notable choices and trade-offs a
+session made and *why* (e.g. "used bcrypt over argon2 for broader Node
+compatibility"). These are the reasoning a future agent can't recover by
+re-reading the code. Decisions come from two sources:
+
+- **`[Origin: Decision]` markers** you (or an agent) emit in a response — ground
+  truth, captured verbatim from the transcript, no LLM call needed.
+- **LLM-inferred decisions** — when `memorySummary=llm`, the summarizer also
+  extracts decisions that are *clearly evident* from the diff/commits/prompts
+  (a library or approach picked, something deliberately not done), and writes
+  "none" when nothing real stands out.
+
+1. **When work is written:** the session rollup upserts (summary, files, TODOs,
+   decisions); each commit also appends its immutable record (with the decisions
+   evident in that commit).
 2. **On the next session-start:** Origin **distills** the substantive sessions
-   into a short brief (it does not dump raw prompt logs) and injects it into the
-   new agent's context.
+   into a short brief (it does not dump raw prompt logs) — plus the most recent
+   commits and the key decisions — and injects it into the new agent's context.
 
 The new agent gets context like:
 ```
@@ -833,6 +855,9 @@ Prior work in this repo — 3 sessions (claude-code, cursor):
 - Most recent: [15m ago] Added JWT auth middleware
   Files: middleware.ts, jwt.ts
 - Frequently touched: queries.ts, pool.ts, index.ts
+Key decisions from previous sessions:
+  - Used bcrypt over argon2 for broader Node compatibility
+  - Kept refresh tokens server-side; access tokens stay short-lived
 Open TODOs from previous sessions:
   - wire refresh-token rotation
 ```
@@ -854,21 +879,72 @@ origin config set memoryUpdate both           # commit AND session end
 `commit` is what captures agents that make a change, commit, and exit. The entry
 upserts by session ID, so repeated writes collapse to one latest entry.
 
-### `origin memory show`
+### How summaries are written: `memorySummary`
+
+By default the summary is heuristic (the session's first prompt, or the commit
+message). Opt into an LLM-synthesized one-line "what this session did" — which
+reads better for multi-turn sessions — with:
+
+```bash
+origin config set memorySummary llm     # synthesize via your Anthropic key
+origin config set memorySummary heuristic # default
+```
+
+`llm` mode makes one small LLM call at session end, grounded in the session's
+**prompts + commit messages + a bounded code diff** (so the summary reflects what
+actually changed, not just the opening prompt). Key resolution:
+
+1. A local key (env `ANTHROPIC_API_KEY` / `config.anthropicApiKey` / local
+   agent-keys / bake-off agent key) → the CLI calls Anthropic directly (works
+   offline).
+2. Otherwise, when connected, the CLI asks the **server** to summarize using the
+   org's **"AI provider" key** (Settings → AI Chat — the same key behind PR
+   summaries). That key never leaves the server, and this covers
+   Anthropic/OpenAI/Google.
+
+If neither resolves (offline + no local key, or the org has no LLM key), it falls
+back to the heuristic — commit messages, then the first prompt — so it's safe to
+leave on.
+
+**Per-file change notes.** In `llm` mode the summarizer also records a one-line
+"what changed" per file (`password_generator.py: added length/charset options`),
+stored on the memory entry and shown in `origin context memory` + injected for the
+most recent session — so a future agent knows a file's recent change without
+re-reading the diff.
+
+**Decisions.** Both memory layers also record the notable choices/trade-offs a
+session made and *why* — the reasoning a future agent can't recover from code.
+Sources: explicit `[Origin: Decision] <choice> — <why>` markers in a response
+(ground truth, captured verbatim, no LLM call) and, in `llm` mode, decisions the
+summarizer finds clearly evident in the diff/commits (it writes "none" when
+nothing real stands out). Shown under "Key decisions" in `origin context memory`
+and injected into the next session.
+
+**Continuation brief.** With `memorySummary = llm`, Origin regenerates a short
+cross-session **handoff brief** for the next agent (recent focus, what's in
+flight/unfinished, watch-outs, open TODOs) — synthesized with the org LLM key and
+**grounded in the most recent code diff**, cached in a git note
+(`refs/notes/origin-memory-brief`). It's injected at the next session start in
+place of the deterministic distillation, which remains the offline fallback.
+Regenerated at session end **and on every commit** (so commit-and-go agents under
+`memoryUpdate = commit` get a fresh brief too), only when the underlying sessions
+change.
+
+### `origin context memory`
 
 Display accumulated session memory for the current repo.
 
 ```bash
-origin memory show              # Show last 10 sessions
-origin memory show --limit 20   # Show more
+origin context memory              # Show last 10 sessions
+origin context memory --limit 20   # Show more
 ```
 
-### `origin memory clear`
+### `origin context clear --memory-only`
 
 Clear all session memory for the current repo.
 
 ```bash
-origin memory clear
+origin context clear --memory-only
 ```
 
 Memory is stored in git notes and travels with the repo when pushed (`git push origin refs/notes/origin-memory`).

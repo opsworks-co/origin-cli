@@ -74,7 +74,7 @@ describe('alias resolution', () => {
     expect(text.length, `\`origin ${name} --help\` produced no output`).toBeGreaterThan(0);
   });
 
-  it('top-level --help lists every command (none are hidden)', () => {
+  it('top-level --help lists every command that does unique work', () => {
     const output = execFileSync('node', [distPath, '--help'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 8000,
@@ -89,7 +89,7 @@ describe('alias resolution', () => {
       'stats', 'recap', 'report', 'analyze', 'rework', 'compare',
       'sessions', 'session', 'log', 'show',
       'review', 'review-pr', 'intent-review',
-      'handoff', 'memory', 'todo', 'trail', 'issue',
+      'context', 'todo', 'trail', 'issue',
       'rewind', 'snapshot', 'snapshot',
       'enable', 'disable', 'link', 'attach', 'whoami', 'status',
       'doctor', 'verify', 'verify-install', 'clean', 'reset',
@@ -98,6 +98,24 @@ describe('alias resolution', () => {
     ]) {
       const lineRe = new RegExp(`^\\s+${cmd.replace(/[-]/g, '\\-')}\\b`, 'm');
       expect(output, `\`${cmd}\` missing from --help primary list`).toMatch(lineRe);
+    }
+  });
+
+  it('deprecated handoff/memory aliases are HIDDEN from --help but still resolve', () => {
+    const output = execFileSync('node', [distPath, '--help'], {
+      stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+      env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
+    }).toString();
+    // Not listed as their own top-level command line (folded under `context`).
+    expect(output).not.toMatch(/^\s+handoff\b/m);
+    expect(output).not.toMatch(/^\s+memory\b/m);
+    // …but they still resolve (back-compat): `origin handoff --help` exits 0.
+    for (const alias of ['handoff', 'memory']) {
+      const help = execFileSync('node', [distPath, alias, '--help'], {
+        stdio: ['ignore', 'pipe', 'pipe'], timeout: 8000,
+        env: { ...process.env, ORIGIN_SKIP_VERSION_CHECK: '1' },
+      }).toString();
+      expect(help.toLowerCase()).toContain('deprecated');
     }
   });
 

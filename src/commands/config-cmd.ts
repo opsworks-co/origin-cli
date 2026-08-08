@@ -63,6 +63,7 @@ const CONFIG_KEYS: Record<string, { type: 'string' | 'boolean' | 'enum' | 'map';
   signSnapshots:   { type: 'boolean', description: 'Sign Origin\'s own commits (snapshots, session branch). Honors git signing config; falls back to unsigned if signing fails.' },
   anthropicApiKey: { type: 'string',  description: 'Anthropic API key for `origin pre-review` / `origin chat` / `origin ask` (overridden by ANTHROPIC_API_KEY env var)', secret: true },
   memoryUpdate:    { type: 'enum',    values: ['session-end', 'commit', 'both'], description: 'When to refresh cross-session memory: at session end (default), on every commit, or both' },
+  memorySummary:   { type: 'enum',    values: ['heuristic', 'llm'], description: 'How memory summaries are written: heuristic (default) or llm (synthesize a one-line summary via your Anthropic key)' },
 };
 
 /**
