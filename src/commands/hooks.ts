@@ -72,7 +72,7 @@ import { isProcessRunning } from '../utils/process-detect.js';
 import { ensureSqlite, querySqlite } from '../utils/sqlite.js';
 import { attachOrphanCommitFiles } from '../prompt-completeness.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
-import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, type PromptNoteEntry } from '../git-notes.js';
+import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, pushMemoryNotes, type PromptNoteEntry } from '../git-notes.js';
 import { parseMarkersFromTranscript, parseMarkersFromTranscriptPath } from '../origin-markers.js';
 import { redactSecrets } from '../redaction.js';
 import { makeSyncBlock } from '../sync-block.js';
@@ -85,7 +85,7 @@ import { maybeSyncDevinDesktop } from './devin.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts, handoffRepresentsWork } from '../handoff.js';
 import { assembleRepoContext } from '../context-injection.js';
 import { synthesizeSessionSummary, memorySummaryMode } from '../session-summary.js';
-import { writeSessionMemory, writeCommitMemory, buildMemoryContext, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, isSubstantiveMemory, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, type SessionMemoryEntry } from '../memory.js';
+import { writeSessionMemory, writeCommitMemory, enrichDecisionsForSession, buildMemoryContext, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, isSubstantiveMemory, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, type SessionMemoryEntry } from '../memory.js';
 import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../repo-brief.js';
 import { backfillAcceptanceForSession } from '../acceptance.js';
 import { addTodosFromSession } from '../todo.js';
@@ -6585,6 +6585,20 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       debugLog('session-end', 'session memory error (non-fatal)', { message: err.message });
     }
 
+    // Trailing decisions backfill. Agents that commit BEFORE writing their
+    // response (Cursor, sometimes Codex) emit the [Origin: Decision] marker into
+    // the transcript AFTER the commit-time capture already froze the rollup and
+    // commit records with no decisions. By session-end the transcript is fully
+    // written, so FILL those in — runs regardless of memoryUpdate (a correction,
+    // not a fresh write), and covers the commit records the gated write above
+    // never touches. Fill-only, so it can't clobber agy/LLM-derived decisions.
+    try {
+      if (sessionDecisions.length > 0) {
+        const filled = enrichDecisionsForSession(state.repoPath, state.sessionId, sessionDecisions);
+        if (filled) debugLog('session-end', 'backfilled late decisions', { sessionId: state.sessionId, count: sessionDecisions.length });
+      }
+    } catch { /* non-fatal */ }
+
     // Regenerate the cross-session continuation brief for the NEXT agent, using
     // the just-ended session's code diff to ground it.
     await maybeRefreshMemoryBrief(state.repoPath, connected, 'session-end', sessionDiff);
@@ -9279,6 +9293,18 @@ export async function handlePrePush(): Promise<void> {
         debugLog('pre-push', 'notes push skipped', { message: err.message, retryMessage: retryErr.message });
       }
     }
+  }
+
+  // Memory notes (refs/notes/origin-memory + its continuation brief). Same
+  // trigger, same privacy gate as the attribution notes above — pushMemoryNotes
+  // handles the non-fast-forward retry itself, with a payload-level merge
+  // instead of `notes merge` (the payload is one note on the root commit, so a
+  // git-level strategy would drop the other machine's sessions wholesale).
+  try {
+    pushMemoryNotes(repoPath, 'origin');
+    debugLog('pre-push', 'pushed memory notes');
+  } catch (err: any) {
+    debugLog('pre-push', 'memory notes push skipped', { message: err?.message });
   }
 
   debugLog('pre-push', '=== GIT HOOK COMPLETE ===');

@@ -778,6 +778,48 @@ export function ranGitCommit(input: Record<string, any>): boolean {
   return /\bgit\s+(?:-[^\s]+\s+|--[^\s]+(?:=\S+)?\s+)*commit\b/.test(text);
 }
 
+/**
+ * Commit SHAs a turn REPORTED, read from its text.
+ *
+ * Cursor's transcript records tool CALLS but never tool OUTPUT, so the usual
+ * `[branch 74d04c6]` git banner is nowhere in the file. The only place the sha
+ * survives is the agent's own summary — "committed it (`74d04c6`)". That is
+ * also the only signal there is when the watcher joined the session after the
+ * commit landed, which is the normal case for Cursor: the transcript file is
+ * written at turn end, so a turn that creates a file and commits it is already
+ * finished by the time the session first appears. On session 1a80ae77 the
+ * commit was 20 seconds older than the watcher's first sight of the session,
+ * making it the session's own BASELINE — invisible to the commit walk forever.
+ *
+ * Prose is a WEAK source and this is deliberately narrow. An 8-hex token is
+ * indistinguishable from a session ID, and agents quote those constantly: over
+ * this repo's own Claude transcript an unrestricted version of this function
+ * claimed 35 shas, 31 of them session IDs or history the turn had merely read
+ * about. So:
+ *   - git's own banner form `[main 74d04c6]` is always accepted — it is output,
+ *     not prose, and cannot be a coincidence
+ *   - otherwise the sha must sit in the same sentence as a commit word, and be
+ *     backtick-quoted or carry both a letter and a digit (which rules out prose
+ *     numbers like "1000000 iterations" and hex-only English like "defaced")
+ * Callers gate further still: only turns that really ran `git commit` keep
+ * these, only Cursor consults prose at all, and the watcher drops any sha the
+ * repo cannot resolve or that predates the session. An unresolvable or merely
+ * quoted token must produce no pairing rather than a guessed one.
+ */
+export function reportedCommitShas(text: string): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  for (const m of text.matchAll(/\[[^\]\s]+\s+([0-9a-f]{7,40})\]/g)) out.push(m[1]);
+  for (const sentence of text.split(/(?<=[.!?\n])/)) {
+    if (!/\bcommit(?:ted|s|ing)?\b/i.test(sentence)) continue;
+    for (const m of sentence.matchAll(/`([0-9a-f]{7,40})`/g)) out.push(m[1]);
+    for (const m of sentence.matchAll(/(?<![0-9a-zA-Z`])([0-9a-f]{7,40})(?![0-9a-zA-Z`])/g)) {
+      if (/[a-f]/.test(m[1]) && /[0-9]/.test(m[1])) out.push(m[1]);
+    }
+  }
+  return [...new Set(out)];
+}
+
 export interface PromptFileMapping {
   promptIndex: number;
   promptText: string;       // Truncated to 1000 chars
@@ -801,6 +843,10 @@ export interface PromptFileMapping {
   // commit→turn pairing for agents whose transcripts record no edit for
   // terminal-only work (Cursor), where file-overlap matching can't help.
   ranCommit?: boolean;
+  // Short SHAs this turn reported in its own text, and only when `ranCommit`
+  // (see reportedCommitShas). Lets a turn state which commit it made instead of
+  // the watcher inferring it from a walk that may not contain the commit at all.
+  commitShas?: string[];
 }
 
 /**
@@ -810,7 +856,12 @@ export interface PromptFileMapping {
  * each user message starts a new "turn", and all file modifications
  * until the next user message are attributed to that prompt.
  */
-export function extractPromptFileMappings(transcriptPath: string): PromptFileMapping[] {
+export function extractPromptFileMappings(
+  transcriptPath: string,
+  // Off by default: reading shas out of prose is only sound for transcripts
+  // that record no tool OUTPUT (Cursor). See commitShasFromTranscript.
+  opts: { readReportedShas?: boolean } = {},
+): PromptFileMapping[] {
   if (!fs.existsSync(transcriptPath)) {
     return [];
   }
@@ -863,6 +914,7 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
   let currentFiles = new Set<string>();
   let currentEdits: Array<{ file: string; toolName: string; input: Record<string, any> }> = [];
   let currentRanCommit = false;
+  let currentCommitShas: string[] = [];
 
   // Prompts waiting for their turn to start, and whether the accumulator above
   // belongs to a turn that has actually begun. Only used when `hasTurnMarkers`.
@@ -884,6 +936,13 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
       diff: buildDiffFromEdits(currentEdits),
       edits: currentEdits.slice(),
       ranCommit: currentRanCommit,
+      // Gated on ranCommit: a turn that merely QUOTES a sha (reading history,
+      // explaining a revert) hasn't committed anything, and pairing it to one
+      // would invent attribution. The sha is reported after the commit runs, so
+      // the flag is always already set by the time we get here.
+      commitShas: currentRanCommit && currentCommitShas.length > 0
+        ? [...new Set(currentCommitShas)]
+        : undefined,
     });
   };
 
@@ -893,6 +952,7 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
     currentFiles = new Set<string>();
     currentEdits = [];
     currentRanCommit = false;
+    currentCommitShas = [];
   };
 
   for (const line of lines) {
@@ -986,7 +1046,16 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
           if (block.type === 'tool_use' && block.input && ranGitCommit(block.input)) {
             currentRanCommit = true;
           }
+          // The sha the turn reported for that commit. Collected unconditionally
+          // and filtered at flush — Cursor's summary text arrives in a LATER
+          // assistant entry than the commit call, so gating here would be
+          // ordering-dependent; gating at flush is not.
+          if (opts.readReportedShas && block.type === 'text' && typeof block.text === 'string') {
+            currentCommitShas.push(...reportedCommitShas(block.text));
+          }
         }
+      } else if (opts.readReportedShas && typeof content === 'string') {
+        currentCommitShas.push(...reportedCommitShas(content));
       }
     }
   }

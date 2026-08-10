@@ -63,7 +63,10 @@ import {
   shouldWriteMemoryOnSessionEnd,
   isSubstantiveMemory,
   summarizeFromCommitSubjects,
+  writeCommitMemory,
+  shouldWriteMemoryOnCommit,
   type SessionMemoryEntry,
+  type CommitMemoryEntry,
 } from './memory.js';
 import { extractTodosFromPrompts } from './handoff.js';
 import { parseMarkersFromTranscriptPath } from './origin-markers.js';
@@ -159,6 +162,14 @@ export interface SessionWatchState {
   // persisted into the .git state file so the post-commit hook + timestamp
   // baselines scope to this session's own commits.
   sessionCommitShas?: string[];
+  // Commits this session has already written a per-commit memory record for.
+  // Separate from sessionCommitShas because "seen" and "recorded" are not the
+  // same event and drifted apart in practice: the release that let a Cursor
+  // turn claim its commit stored the sha here-adjacent immediately, so by the
+  // time the recording fix shipped the commit no longer looked new and never
+  // got written. Keyed on what was RECORDED, a missed commit stays pending and
+  // is picked up on the next poll instead of being lost for good.
+  recordedCommitShas?: string[];
 }
 
 export function loadSessionState(agentSlug: string, sessionId: string, dir = watchStateDir()): SessionWatchState | null {
@@ -272,6 +283,8 @@ export interface WatchDeps {
   // Record what this session did into the repo's cross-session memory when it
   // ends. Optional so tests can omit it; the real impl wraps writeSessionMemory.
   writeMemory?: (repoPath: string, entry: SessionMemoryEntry) => void;
+  // Record the immutable per-commit memory entries. Optional, like writeMemory.
+  writeCommitMemoryEntry?: (repoPath: string, entry: CommitMemoryEntry) => void;
   // Unified diff of specific repo-relative files against HEAD, including
   // untracked files (rendered fully-added). The diff source for agents whose
   // transcript carries no edit content (Antigravity) and for brand-new files
@@ -423,6 +436,115 @@ function buildWatchMemoryEntry(
   };
 }
 
+/**
+ * Record the per-commit memory entries for `shas`, plus a refreshed session
+ * rollup. Both are needed together: writeCommitMemory keeps only commits whose
+ * session is present in memory (or is the one being written), so recording a
+ * commit mid-session without its rollup would let a LATER write from a
+ * different session prune it away.
+ *
+ * writeSessionMemory upserts by sessionId and writeCommitMemory is add-once by
+ * sha, so calling this repeatedly is safe.
+ */
+function recordCommitMemory(
+  deps: WatchDeps,
+  adapter: TranscriptAdapter,
+  scanned: ScannedTranscript,
+  prior: SessionWatchState,
+  shas: string[],
+  now: number,
+): string[] {
+  if (!deps.writeCommitMemoryEntry || !prior.repoPath || shas.length === 0) return [];
+  if (!shouldWriteMemoryOnCommit(memoryUpdateTrigger())) return [];
+  const workRoot = prior.workRoot || prior.repoPath;
+  // The shas actually recorded, so the caller can remember them and stop
+  // re-deriving. A sha we could NOT resolve is deliberately absent: it stays
+  // pending and gets another chance next poll.
+  const written: string[] = [];
+  // The rollup first — it is what keeps these commits from being pruned.
+  if (deps.writeMemory) {
+    const entry = buildWatchMemoryEntry(scanned, adapter, prior, now);
+    if (entry && isSubstantiveMemory(entry)) deps.writeMemory(prior.repoPath, entry);
+  }
+  for (const sha of shas.slice(-20)) {
+    const facts = commitFacts(workRoot, sha);
+    if (!facts) continue; // a sha this repo cannot resolve — record nothing
+    deps.writeCommitMemoryEntry(prior.repoPath, {
+      commitSha: sha,
+      sessionId: scanned.sessionId,
+      agentSlug: adapter.agentSlugForServer || adapter.slug,
+      message: facts.message,
+      filesChanged: facts.files,
+      linesAdded: facts.added,
+      linesRemoved: facts.removed,
+      branch: null,
+      committedAt: facts.committedAt,
+    });
+    written.push(sha);
+  }
+  return written;
+}
+
+/**
+ * How much OLDER than the session's start a commit is, in ms. 0 when the commit
+ * is at or after that point. null when either side is unknown, which callers
+ * must treat as "no opinion" rather than as a rejection.
+ *
+ * Negative-looking cases are normal and must stay allowed: a Cursor transcript
+ * is written at turn end, so its first commit is routinely a little older than
+ * the moment the watcher first saw the session.
+ */
+function commitAgeMs(workRoot: string | undefined, sha: string, sessionStart?: string): number | null {
+  if (!workRoot || !sha || !sessionStart) return null;
+  const started = Date.parse(sessionStart);
+  if (!Number.isFinite(started)) return null;
+  try {
+    const out = execFileSync('git', ['log', '-1', '--format=%cI', sha], {
+      cwd: workRoot, encoding: 'utf-8', windowsHide: true, timeout: 10_000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const at = Date.parse(out);
+    if (!Number.isFinite(at)) return null;
+    return Math.max(0, started - at);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Subject, files and line counts for ONE commit, read from the repo. Returns
+ * null when the sha isn't resolvable there.
+ */
+function commitFacts(
+  workRoot: string | undefined,
+  sha: string,
+): { message: string; files: string[]; added: number; removed: number; committedAt: string } | null {
+  if (!workRoot || !sha) return null;
+  const run = (args: string[]) => execFileSync('git', args, {
+    cwd: workRoot, encoding: 'utf-8', windowsHide: true, timeout: 10_000,
+    maxBuffer: 8 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  try {
+    const [message, committedAt] = run(['log', '-1', '--format=%s%x00%cI', sha]).trim().split('\0');
+    if (!message && !committedAt) return null;
+    const files: string[] = [];
+    let added = 0;
+    let removed = 0;
+    // --numstat gives "added<TAB>removed<TAB>path"; a binary file reports "-".
+    for (const line of run(['show', '--numstat', '--format=', sha]).split('\n')) {
+      const parts = line.trim().split('\t');
+      if (parts.length < 3) continue;
+      const [a, d, file] = parts;
+      if (file) files.push(file.replace(/\\/g, '/'));
+      added += Number.isFinite(Number(a)) ? Number(a) : 0;
+      removed += Number.isFinite(Number(d)) ? Number(d) : 0;
+    }
+    return { message: message || '', files, added, removed, committedAt: committedAt || new Date().toISOString() };
+  } catch {
+    return null;
+  }
+}
+
 /** Subject lines of the commits this session made, oldest→newest. */
 function commitSubjects(workRoot: string | undefined, shas: string[]): string[] {
   if (!workRoot || shas.length === 0) return [];
@@ -471,6 +593,27 @@ export async function reconcileSession(
               agent: adapter.slug, sessionId: scanned.sessionId, files: entry.filesChanged.length,
             });
           }
+        }
+
+        // The immutable per-commit records (config memoryUpdate = commit|both).
+        // Their only writer was the post-commit git hook, which does not run for
+        // commits an agent makes from its own sandboxed shell — on this machine
+        // three agent commits in a row left no note and no record, so turning
+        // memoryUpdate on did nothing at all. The watcher already knows exactly
+        // which commits a session produced, so it writes them here.
+        //
+        // Written AFTER the session rollup on purpose: writeCommitMemory prunes
+        // commits whose session isn't in memory yet.
+        // Same rule as the live path: only commits this session can claim. At
+        // END there is no attribution pass, so use the SHAs the agent itself
+        // printed, resolved against the session's list for their full form.
+        const endParsed = adapter.parse(scanned.transcriptPath);
+        const claimed = Object.values(endParsed?.promptCommitShas || {})
+          .flat()
+          .map((short) => (prior.sessionCommitShas || []).find((full) => full.startsWith(short)) || null)
+          .filter((x): x is string => !!x);
+        if (claimed.length > 0) {
+          recordCommitMemory(deps, adapter, scanned, prior, [...new Set(claimed)], now);
         }
       } catch (err) {
         debugLog('transcript-watch', 'session memory write failed (non-fatal)', { err: String(err) });
@@ -633,6 +776,9 @@ export async function reconcileSession(
   // actually landed still saw zero commits, so the turn never got its commitSha.
   let gitCapture: Record<string, unknown> | undefined;
   let sessionCommitShas = Array.isArray(prior?.sessionCommitShas) ? [...prior!.sessionCommitShas] : [];
+  // Commits already written to per-commit memory. Carried forward so the write
+  // further down can tell "recorded" from merely "seen".
+  let recordedCommitShas = Array.isArray(prior?.recordedCommitShas) ? [...prior!.recordedCommitShas] : [];
   // sha → repo-relative files in that commit. Used to attribute a commit to a
   // prompt for agents with no canonical extractor (Antigravity/Copilot).
   const commitFiles = new Map<string, string[]>();
@@ -643,6 +789,11 @@ export async function reconcileSession(
         for (const d of gc.commitDetails || []) {
           if (d?.sha) commitFiles.set(d.sha, (d.filesChanged || []).map((f) => f.replace(/\\/g, '/')));
         }
+        // NOTE: gc.commitShas is a headShaAtStart..HEAD walk, so it contains
+        // every commit made in this repo since the session began — including
+        // ones OTHER sessions made concurrently. It is not "this session's
+        // commits" and must never be treated as such; the per-commit memory
+        // write below keys off attribution, not off this list.
         sessionCommitShas = Array.from(new Set([...sessionCommitShas, ...gc.commitShas]));
         gitCapture = {
           headBefore: gc.headBefore,
@@ -815,7 +966,28 @@ export async function reconcileSession(
         });
         continue;
       }
+      // A resolvable sha still has to be plausibly THIS session's work. Cursor's
+      // shas come from the agent's prose, where an old sha can legitimately
+      // appear ("reverted `abc1234`"), and prose can't distinguish the two. A
+      // commit predating the session by more than a day is not what this turn
+      // just made, so leave it unpaired. The bound is deliberately loose: it
+      // exists to reject history, not to second-guess clock skew, and the
+      // watcher regularly meets commits made minutes BEFORE it saw the session.
+      const age = commitAgeMs(repo.workRoot, full, prior?.createdAt);
+      if (age !== null && age > 24 * 60 * 60 * 1000) {
+        debugLog('transcript-watch', 'commit sha too old for this session — sending none', {
+          agent: adapter.slug, promptIndex: idx, short, ageHours: Math.round(age / 3_600_000),
+        });
+        continue;
+      }
       commitShaByIndex.set(idx, full);
+      // Make the session OWN it. The walk cannot have produced this sha (that is
+      // why we are here), and several consumers key off the session's commit
+      // list rather than off the pairing: the session-end per-commit memory
+      // resolves its claimed shorts against it, and the rollup reads its
+      // subjects. Without this the turn shows the right commit while memory
+      // still records nothing for it.
+      if (!sessionCommitShas.includes(full)) sessionCommitShas.push(full);
     }
     if (commitShaByIndex.size > 0) {
       debugLog('transcript-watch', 'commit shas read from transcript', {
@@ -871,6 +1043,41 @@ export async function reconcileSession(
         }
         if (best >= 0) { commitShaByIndex.set(best, sha); taken.add(best); }
       }
+    }
+  }
+
+  // Per-commit memory (config memoryUpdate = commit|both). Deliberately keyed
+  // off commitShaByIndex — the commits attribution could tie to one of THIS
+  // session's prompts — and not off the commit walk. The walk sweeps up
+  // whatever else landed in the repo meanwhile: with a Cursor and an
+  // Antigravity session running side by side, the walk-based version recorded
+  // Cursor's commit under the Antigravity session, with Antigravity's decisions
+  // attached. A commit nobody can attribute is left unrecorded; a commit
+  // attributed to the wrong agent is worse than a missing one.
+  //
+  // The trigger is "owned but not yet recorded", never the walk. A Cursor
+  // transcript is written at turn end, so its commit is routinely the session's
+  // own headShaAtStart and the walk NEVER reports it — session 5c2973be owned
+  // 21727e6 and a walk-gated write produced nothing. Nor can the trigger be
+  // "newly owned": ownership is persisted the moment it is worked out, so a
+  // commit owned by an older build that never recorded it would stay invisible
+  // forever. Comparing against what was RECORDED makes the write self-healing —
+  // any backlog is caught up on the next poll.
+  if (prior && commitShaByIndex.size > 0) {
+    try {
+      const already = new Set(prior.recordedCommitShas || []);
+      const pending = [...new Set(commitShaByIndex.values())].filter((sha) => !already.has(sha));
+      if (pending.length > 0) {
+        const done = recordCommitMemory(deps, adapter, scanned, prior, pending, now);
+        recordedCommitShas = [...new Set([...recordedCommitShas, ...done])];
+        if (done.length > 0) {
+          debugLog('transcript-watch', 'commit memory written', {
+            agent: adapter.slug, sessionId: scanned.sessionId, commits: done.length,
+          });
+        }
+      }
+    } catch (err) {
+      debugLog('transcript-watch', 'commit memory write failed (non-fatal)', { err: String(err) });
     }
   }
 
@@ -1209,6 +1416,7 @@ export async function reconcileSession(
     sessionTag,
     sessionStartShadowSha,
     sessionCommitShas,
+    recordedCommitShas,
     snapshottedPrompts,
   };
   deps.saveState(next);
@@ -1549,6 +1757,7 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     api: { startSession: api.startSession, updateSession: api.updateSession },
     resolveRepo: realResolveRepo,
     writeMemory: writeSessionMemory,
+    writeCommitMemoryEntry: writeCommitMemory,
     createShadow: createShadowCommit,
     getHead: (workRoot: string) => getHeadSha(workRoot),
     captureDiff: captureAgyDiff,

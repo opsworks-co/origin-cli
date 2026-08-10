@@ -8,6 +8,19 @@
 // watcher records one at the same moment, in the same shape.
 
 import { describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+// memoryUpdate decides whether per-commit records are written, and it comes
+// from the USER's config — which would make these assertions depend on the
+// machine they run on. Pin it.
+vi.mock('../config.js', async (orig) => {
+  const actual = await orig<typeof import('../config.js')>();
+  return { ...actual, loadConfig: () => ({ memoryUpdate: 'both' }) };
+});
+
 import { reconcileSession } from '../transcript-watch.js';
 import type { TranscriptAdapter, ParsedSession, ScannedTranscript } from '../transcript-adapters.js';
 
@@ -114,6 +127,173 @@ describe('transcript watcher records session memory at END', () => {
     };
     await reconcileSession(scanned, chatOnly, depsWith({ writeMemory }));
     expect(writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('writes a per-commit record for each commit the session made', async () => {
+    // Their only writer was the post-commit git hook, which does not run for
+    // commits an agent makes from its own sandboxed shell — three agent commits
+    // in a row left no git note and no record, so memoryUpdate=both did nothing
+    // at all on this machine. Real repo, real commit, real numbers.
+    const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-cmem-')));
+    const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf-8', windowsHide: true });
+    git('init', '-q');
+    git('config', 'user.email', 't@t.co');
+    git('config', 'user.name', 'T');
+    fs.writeFileSync(path.join(repo, 'synth_wave.py'), 'a\nb\nc\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add synth_wave.py retro horizon visualizer script');
+    const sha = git('rev-parse', 'HEAD').trim();
+
+    const writeCommitMemoryEntry = vi.fn();
+    // At END there is no attribution pass, so the session must claim the commit
+    // itself — the SHA its own transcript printed. Without that it stays
+    // unrecorded rather than being claimed off the repo-wide walk.
+    const claiming: TranscriptAdapter = {
+      ...adapter,
+      parse: () => ({ ...parsed, promptCommitShas: { 0: [sha.slice(0, 7)] } }),
+    };
+    await reconcileSession(scanned, claiming, depsWith({
+      writeMemory: vi.fn(),
+      writeCommitMemoryEntry,
+      loadState: () => ({
+        agentSlug: 'cursor', sessionId: 'sess-abc', originSessionId: 'origin-1',
+        repoPath: repo, workRoot: repo, promptCount: 1,
+        createdAt: '2026-08-08T10:00:00.000Z', status: 'RUNNING' as const,
+        lastTranscriptMtime: 0, promptShadows: [], sessionCommitShas: [sha],
+      }),
+    }));
+
+    expect(writeCommitMemoryEntry).toHaveBeenCalledTimes(1);
+    const [repoPath, rec] = writeCommitMemoryEntry.mock.calls[0];
+    expect(repoPath).toBe(repo);
+    expect(rec.commitSha).toBe(sha);
+    expect(rec.message).toBe('add synth_wave.py retro horizon visualizer script');
+    expect(rec.filesChanged).toEqual(['synth_wave.py']);
+    expect(rec.linesAdded).toBe(3);
+    expect(rec.linesRemoved).toBe(0);
+    expect(rec.committedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(rec.sessionId).toBe('sess-abc');
+
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('records a commit as soon as it lands, not at session end', async () => {
+    // memoryUpdate=commit means "record it when it lands". Deferring to session
+    // end defeats the mode, whose whole point is commit-and-go agents that never
+    // reach a clean end — and it made a just-made commit look unrecorded.
+    const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-cmem-live-')));
+    const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf-8', windowsHide: true });
+    git('init', '-q');
+    git('config', 'user.email', 't@t.co');
+    git('config', 'user.name', 'T');
+    fs.writeFileSync(path.join(repo, 'cyber_matrix.py'), 'x\ny\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add cyber_matrix.py digital rain');
+    const sha = git('rev-parse', 'HEAD').trim();
+
+    const writeCommitMemoryEntry = vi.fn();
+    const writeMemory = vi.fn();
+    // The session must have touched THIS repo, or isSubstantiveMemory rightly
+    // treats the rollup as another repo's work and skips it.
+    const localAdapter: TranscriptAdapter = {
+      ...adapter,
+      parse: () => ({
+        ...parsed,
+        filePaths: [path.join(repo, 'cyber_matrix.py')],
+        filesChanged: [path.join(repo, 'cyber_matrix.py')],
+        promptDiffs: [{ promptIndex: 0, filesChanged: [path.join(repo, 'cyber_matrix.py')], diff: '', linesAdded: 2, linesRemoved: 0 }],
+      }),
+    };
+    await reconcileSession(
+      { ...scanned, mtimeMs: Date.now() }, // ACTIVE — not the idle/END path
+      localAdapter,
+      depsWith({
+        writeMemory,
+        writeCommitMemoryEntry,
+        // The walk reports the commit; prior state has never seen it.
+        captureGit: () => ({
+          headBefore: '', headAfter: sha, commitShas: [sha],
+          commitDetails: [{ sha, message: 'add cyber_matrix.py digital rain', author: 'T', filesChanged: ['cyber_matrix.py'], linesAdded: 2, linesRemoved: 0 }],
+          diff: '', diffTruncated: false, linesAdded: 2, linesRemoved: 0,
+        }),
+        getHead: () => sha,
+        resolveRepo: () => ({ repoPath: repo, workRoot: repo }),
+        loadState: () => ({
+          agentSlug: 'cursor', sessionId: 'sess-abc', originSessionId: 'origin-1',
+          repoPath: repo, workRoot: repo, promptCount: 1,
+          createdAt: '2026-08-08T10:00:00.000Z', status: 'RUNNING' as const,
+          lastTranscriptMtime: 0, promptShadows: [], headShaAtStart: sha,
+          sessionCommitShas: [], // has not seen it yet
+        }),
+      }),
+    );
+
+    expect(writeCommitMemoryEntry).toHaveBeenCalledTimes(1);
+    expect(writeCommitMemoryEntry.mock.calls[0][1].commitSha).toBe(sha);
+    // The rollup goes with it, or a later session's write prunes this commit
+    // away (writeCommitMemory keeps only commits whose session it can see).
+    expect(writeMemory).toHaveBeenCalled();
+
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('never records a commit another session made', async () => {
+    // The commit walk is headShaAtStart..HEAD, so it contains everything that
+    // landed in the repo since this session began — including commits from a
+    // session running alongside it. Recording off that list made an Antigravity
+    // session claim a Cursor commit, with Antigravity's decisions attached.
+    const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-cmem-other-')));
+    const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf-8', windowsHide: true });
+    git('init', '-q');
+    git('config', 'user.email', 't@t.co');
+    git('config', 'user.name', 'T');
+    fs.writeFileSync(path.join(repo, 'theirs.py'), 'z\n');
+    git('add', '-A');
+    git('commit', '-qm', 'a commit from the OTHER session');
+    const foreign = git('rev-parse', 'HEAD').trim();
+
+    const writeCommitMemoryEntry = vi.fn();
+    await reconcileSession(
+      { ...scanned, mtimeMs: Date.now() },
+      adapter, // its transcript claims no commits at all
+      depsWith({
+        writeMemory: vi.fn(),
+        writeCommitMemoryEntry,
+        resolveRepo: () => ({ repoPath: repo, workRoot: repo }),
+        getHead: () => foreign,
+        captureGit: () => ({
+          headBefore: '', headAfter: foreign, commitShas: [foreign],
+          commitDetails: [{ sha: foreign, message: 'a commit from the OTHER session', author: 'T', filesChanged: ['theirs.py'], linesAdded: 1, linesRemoved: 0 }],
+          diff: '', diffTruncated: false, linesAdded: 1, linesRemoved: 0,
+        }),
+        loadState: () => ({
+          agentSlug: 'cursor', sessionId: 'sess-abc', originSessionId: 'origin-1',
+          repoPath: repo, workRoot: repo, promptCount: 1,
+          createdAt: '2026-08-08T10:00:00.000Z', status: 'RUNNING' as const,
+          lastTranscriptMtime: 0, promptShadows: [], sessionCommitShas: [],
+        }),
+      }),
+    );
+
+    // The walk saw it; this session cannot claim it, so nothing is recorded.
+    expect(writeCommitMemoryEntry).not.toHaveBeenCalled();
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('invents no record for a commit the repo does not have', async () => {
+    const writeCommitMemoryEntry = vi.fn();
+    await reconcileSession(scanned, adapter, depsWith({
+      writeMemory: vi.fn(),
+      writeCommitMemoryEntry,
+      loadState: () => ({
+        agentSlug: 'cursor', sessionId: 'sess-abc', originSessionId: 'origin-1',
+        repoPath: 'C:/repo', workRoot: 'C:/repo', promptCount: 1,
+        createdAt: '2026-08-08T10:00:00.000Z', status: 'RUNNING' as const,
+        lastTranscriptMtime: 0, promptShadows: [],
+        sessionCommitShas: ['deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'],
+      }),
+    }));
+    expect(writeCommitMemoryEntry).not.toHaveBeenCalled();
   });
 
   it('still ends the session when no memory writer is wired', async () => {

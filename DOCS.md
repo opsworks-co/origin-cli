@@ -947,7 +947,11 @@ Clear all session memory for the current repo.
 origin context clear --memory-only
 ```
 
-Memory is stored in git notes and travels with the repo when pushed (`git push origin refs/notes/origin-memory`).
+Memory is stored in git notes (`refs/notes/origin-memory`) and travels with the repo automatically: it is pushed on the same triggers as attribution notes (session end and the pre-push hook) and pulled down at session start, so a teammate's clone or your second machine picks it up without running anything by hand.
+
+Two machines that both wrote memory are reconciled by unioning the payload — session rollups keyed by `sessionId` (newest write wins), commit records keyed by `commitSha` (frozen, first write wins). A plain `git notes merge` is deliberately **not** used: the whole payload is one note on the root commit, so any git-level strategy resolves the entire blob and would drop one machine's sessions wholesale.
+
+Pushing memory respects the same privacy switch as attribution notes — with `notesIncludePrompts: false` (in `.origin.json` or `~/.origin/config.json`) memory stays local to the machine that wrote it.
 
 ---
 

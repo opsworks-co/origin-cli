@@ -13,7 +13,7 @@ import {
   shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd,
   writeMemoryBrief, readMemoryBrief, buildMemoryBriefContext, memoryBriefSignature, clearSessionMemory,
   buildMemoryContext,
-  writeCommitMemory, readAllCommitMemory,
+  writeCommitMemory, readAllCommitMemory, enrichDecisionsForSession,
   type SessionMemoryEntry, type CommitMemoryEntry,
 } from '../memory.js';
 
@@ -140,6 +140,43 @@ describe('writeSessionMemory upsert-by-sessionId', () => {
     expect(readAllCommitMemory(repo).find((c) => c.commitSha === 'dec1234')?.decisions).toEqual([
       'Use bcrypt over argon2 for broader Node compatibility',
     ]);
+  });
+
+  // A commit record is frozen — EXCEPT a decision that arrived late (Cursor
+  // commits before writing its [Origin: Decision] marker), which fills the
+  // empty slot without touching anything else.
+  it('writeCommitMemory fills empty decisions on a frozen record but never overwrites', () => {
+    writeCommitMemory(repo, commit({ commitSha: 'late111', sessionId: 's1', message: 'Add toy', decisions: undefined }));
+    // late arrival with the same SHA + a decision → filled
+    writeCommitMemory(repo, commit({ commitSha: 'late111', sessionId: 's1', message: 'REWRITTEN', decisions: ['Commit only toy.py — left managed files out'] }));
+    const rec = readAllCommitMemory(repo).find((c) => c.commitSha === 'late111')!;
+    expect(rec.message).toBe('Add toy');                                   // still frozen
+    expect(rec.decisions).toEqual(['Commit only toy.py — left managed files out']); // filled
+    // a THIRD write must NOT overwrite the now-present decision
+    writeCommitMemory(repo, commit({ commitSha: 'late111', sessionId: 's1', decisions: ['DIFFERENT'] }));
+    expect(readAllCommitMemory(repo).find((c) => c.commitSha === 'late111')?.decisions).toEqual(['Commit only toy.py — left managed files out']);
+  });
+
+  it('enrichDecisionsForSession backfills a session rollup AND its commit records (fill-only)', () => {
+    // Simulate the Cursor case: rollup + commit written with NO decisions.
+    writeSessionMemory(repo, entry({ sessionId: 'cur1', summary: 'make a toy and commit' }));
+    writeCommitMemory(repo, commit({ commitSha: 'cur1sha', sessionId: 'cur1', message: 'Add toy' }));
+    expect(readAllSessionMemory(repo).find((e) => e.sessionId === 'cur1')?.decisions ?? []).toEqual([]);
+
+    const late = ['Commit only toy.py — left Origin-managed AGENTS.md out'];
+    expect(enrichDecisionsForSession(repo, 'cur1', late)).toBe(true);
+    expect(readAllSessionMemory(repo).find((e) => e.sessionId === 'cur1')?.decisions).toEqual(late);
+    expect(readAllCommitMemory(repo).find((c) => c.commitSha === 'cur1sha')?.decisions).toEqual(late);
+
+    // Idempotent: nothing empty left to fill → returns false, no overwrite.
+    expect(enrichDecisionsForSession(repo, 'cur1', ['SOMETHING ELSE'])).toBe(false);
+    expect(readAllSessionMemory(repo).find((e) => e.sessionId === 'cur1')?.decisions).toEqual(late);
+  });
+
+  it('enrichDecisionsForSession is a no-op for empty input or unknown session', () => {
+    writeSessionMemory(repo, entry({ sessionId: 'x1', summary: 'work' }));
+    expect(enrichDecisionsForSession(repo, 'x1', [])).toBe(false);
+    expect(enrichDecisionsForSession(repo, 'nope', ['a'])).toBe(false);
   });
 
   it('memory brief: signature is stable, changes with the sessions, round-trips, and clears', () => {

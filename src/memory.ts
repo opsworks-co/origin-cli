@@ -175,6 +175,136 @@ function writeMemoryPayload(repoPath: string, sessions: SessionMemoryEntry[], co
   git(['notes', '--ref=origin-memory', 'add', '-f', '-m', payload, root], { cwd: repoPath, timeoutMs: 10_000 });
 }
 
+// ─── Cross-machine merge ───────────────────────────────────────────────────
+//
+// The memory payload is ONE note on ONE object (the root commit), so two
+// machines that both wrote memory always collide on that object. `git notes
+// merge -s ours` — the strategy that works fine for the per-commit
+// refs/notes/origin — would silently discard the entire other side here,
+// because "ours" resolves the whole blob, not individual sessions. The merge
+// therefore has to happen inside the payload.
+//
+// Session rollups are MUTABLE (upserted as a session progresses), so the
+// newer write wins per sessionId. Commit records are IMMUTABLE (frozen once
+// written), so either copy is equivalent and we keep ours for determinism.
+
+/** Millisecond timestamp for recency comparison; -Infinity when unparseable. */
+function entryTime(e: SessionMemoryEntry): number {
+  const t = Date.parse(e?.endedAt || e?.startedAt || '');
+  return Number.isNaN(t) ? -Infinity : t;
+}
+
+/**
+ * Union two memory payloads. Pure — exported for testing.
+ *
+ * sessions: keyed by sessionId, newer `endedAt` (else `startedAt`) wins; ties
+ *           and unparseable timestamps keep `local` so a merge is idempotent.
+ * commits:  keyed by commitSha, first-seen wins (records are frozen).
+ *
+ * Result is sorted oldest→newest and trimmed to the same window the writers
+ * enforce, with orphaned commit records pruned exactly as writeSessionMemory
+ * does — so a merged payload is indistinguishable from a locally-grown one.
+ */
+export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload): MemoryPayload {
+  const sessions = new Map<string, SessionMemoryEntry>();
+  for (const e of local?.sessions || []) if (e?.sessionId) sessions.set(e.sessionId, e);
+  for (const e of remote?.sessions || []) {
+    if (!e?.sessionId) continue;
+    const mine = sessions.get(e.sessionId);
+    // Strictly-greater: on a tie local wins, which keeps merge(a,b) stable.
+    if (!mine || entryTime(e) > entryTime(mine)) sessions.set(e.sessionId, e);
+  }
+
+  const commits = new Map<string, CommitMemoryEntry>();
+  for (const c of local?.commits || []) if (c?.commitSha) commits.set(c.commitSha, c);
+  for (const c of remote?.commits || []) {
+    if (c?.commitSha && !commits.has(c.commitSha)) commits.set(c.commitSha, c);
+  }
+
+  const mergedSessions = [...sessions.values()]
+    .sort((a, b) => entryTime(a) - entryTime(b))
+    .slice(-MAX_ENTRIES);
+
+  // Same bounded-window rule the writers apply: drop commit records whose
+  // session fell out of the retained window.
+  const keep = new Set(mergedSessions.map((s) => s.sessionId));
+  const mergedCommits = [...commits.values()]
+    .filter((c) => keep.size === 0 || keep.has(c.sessionId))
+    .sort((a, b) => {
+      const ta = Date.parse(a?.committedAt || ''), tb = Date.parse(b?.committedAt || '');
+      return (Number.isNaN(ta) ? 0 : ta) - (Number.isNaN(tb) ? 0 : tb);
+    });
+
+  return { version: 2, sessions: mergedSessions, commits: mergedCommits };
+}
+
+/** Read the memory payload out of an arbitrary notes ref, or null if absent. */
+export function readMemoryPayloadFromRef(repoPath: string, ref: string): MemoryPayload | null {
+  try {
+    const root = memoryRootCommit(repoPath);
+    if (!root) return null;
+    const raw = git(['notes', `--ref=${ref}`, 'show', root], { cwd: repoPath, timeoutMs: 10_000 }).trim();
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    return {
+      version: typeof data.version === 'number' ? data.version : 1,
+      sessions: Array.isArray(data.sessions) ? data.sessions : [],
+      commits: Array.isArray(data.commits) ? data.commits : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fold a fetched remote memory note (staged in `stagingRef`) into local memory.
+ * Returns true when local memory actually changed.
+ */
+export function foldRemoteMemory(repoPath: string, stagingRef: string): boolean {
+  try {
+    const remote = readMemoryPayloadFromRef(repoPath, stagingRef);
+    if (!remote) return false;
+    const local = readMemoryPayload(repoPath);
+    const merged = mergeMemoryPayloads(local, remote);
+    const before = JSON.stringify({ s: local.sessions, c: local.commits });
+    const after = JSON.stringify({ s: merged.sessions, c: merged.commits });
+    if (before === after) return false;
+    writeMemoryPayload(repoPath, merged.sessions, merged.commits);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reconcile local memory onto the remote tip so the next push FAST-FORWARDS.
+ *
+ * foldRemoteMemory alone is not enough before a retry. Two machines that each
+ * created their memory note independently have notes refs with no common
+ * ancestor, so merging the payload fixes the CONTENT but leaves the ref
+ * histories unrelated — every retry is rejected as non-fast-forward, forever,
+ * and the second machine's memory never publishes. (Caught by the two
+ * concurrent-clone cases in memory-notes-transport.test.ts.)
+ *
+ * So: compute the union FIRST, then re-point the local ref at the fetched
+ * remote tip, then write the union on top. The resulting note commit is a
+ * child of what's on the remote, which pushes cleanly, and it carries both
+ * sides' entries. Returns true when the local ref was repositioned.
+ */
+export function reconcileMemoryWithRemote(repoPath: string, stagingRef: string): boolean {
+  try {
+    const remote = readMemoryPayloadFromRef(repoPath, stagingRef);
+    if (!remote) return false;
+    const merged = mergeMemoryPayloads(readMemoryPayload(repoPath), remote);
+    const opts = { cwd: repoPath, timeoutMs: 10_000 };
+    git(['update-ref', MEMORY_REF, stagingRef], opts);
+    writeMemoryPayload(repoPath, merged.sessions, merged.commits);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry): void {
   try {
     // Don't accumulate memory for bake-off arms or repos the user excluded —
@@ -204,7 +334,20 @@ export function writeCommitMemory(repoPath: string, entry: CommitMemoryEntry): v
     if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return;
     if (!entry.commitSha) return;
     const { sessions, commits } = readMemoryPayload(repoPath);
-    if (commits.some((c) => c.commitSha === entry.commitSha)) return; // frozen — never overwrite
+    const existing = commits.find((c) => c.commitSha === entry.commitSha);
+    if (existing) {
+      // Add-once: the record's content is frozen — with ONE exception. An agent
+      // that commits BEFORE writing its response (Cursor, sometimes Codex) emits
+      // its `[Origin: Decision]` marker into the transcript AFTER the post-commit
+      // hook already captured this record, so it froze with no decisions. Fill
+      // (never overwrite) decisions when the frozen record has none and a later
+      // write brings some. Nothing else about the record changes.
+      if ((!existing.decisions || existing.decisions.length === 0) && entry.decisions && entry.decisions.length > 0) {
+        existing.decisions = entry.decisions.slice(0, 6);
+        writeMemoryPayload(repoPath, sessions, commits);
+      }
+      return;
+    }
     commits.push(entry);
     // Keep only commits belonging to sessions still in memory (bounded window).
     const keep = new Set(sessions.map((s) => s.sessionId));
@@ -213,6 +356,43 @@ export function writeCommitMemory(repoPath: string, entry: CommitMemoryEntry): v
     writeMemoryPayload(repoPath, sessions, pruned);
   } catch {
     // Non-fatal
+  }
+}
+
+/**
+ * Fill in decisions that arrived LATE — after the session rollup and commit
+ * records were first written. The trigger is agents that commit before writing
+ * their response (Cursor, sometimes Codex): the `[Origin: Decision]` marker only
+ * lands in the transcript once the turn's response is flushed, moments after the
+ * commit-time capture already ran. A later hook fire re-parses the transcript and
+ * calls this to backfill the session's rollup and its commit records.
+ *
+ * Fill-only: never overwrites decisions already recorded, so it can't clobber an
+ * agy/LLM-derived set or re-run endlessly. No-op when there's nothing to add.
+ */
+export function enrichDecisionsForSession(repoPath: string, sessionId: string, decisions: string[]): boolean {
+  try {
+    if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return false;
+    const clean = (decisions || []).filter((d) => typeof d === 'string' && d.trim());
+    if (!sessionId || clean.length === 0) return false;
+    const { sessions, commits } = readMemoryPayload(repoPath);
+    let changed = false;
+    for (const s of sessions) {
+      if (s.sessionId === sessionId && (!s.decisions || s.decisions.length === 0)) {
+        s.decisions = clean.slice(0, 8);
+        changed = true;
+      }
+    }
+    for (const c of commits) {
+      if (c.sessionId === sessionId && (!c.decisions || c.decisions.length === 0)) {
+        c.decisions = clean.slice(0, 6);
+        changed = true;
+      }
+    }
+    if (changed) writeMemoryPayload(repoPath, sessions, commits);
+    return changed;
+  } catch {
+    return false;
   }
 }
 
@@ -377,6 +557,64 @@ export function readMemoryBrief(repoPath: string): MemoryBrief | null {
     return null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Fold a fetched remote continuation brief into the local one. The brief is a
+ * single regenerated blob (not an accumulation), so "merge" is just: keep
+ * whichever was generated later. Returns true when local memory changed.
+ */
+export function foldRemoteMemoryBrief(repoPath: string, stagingRef: string): boolean {
+  try {
+    const root = briefRootCommit(repoPath);
+    if (!root) return false;
+    let remote: MemoryBrief | null = null;
+    try {
+      const raw = git(['notes', `--ref=${stagingRef}`, 'show', root], { cwd: repoPath, timeoutMs: 10_000 }).trim();
+      const data = raw ? JSON.parse(raw) : null;
+      if (data && data.version === 1 && typeof data.brief === 'string') remote = data as MemoryBrief;
+    } catch { return false; }
+    if (!remote) return false;
+    const local = readMemoryBrief(repoPath);
+    if (local) {
+      const lt = Date.parse(local.generatedAt || ''), rt = Date.parse(remote.generatedAt || '');
+      // Tie or unparseable → keep local, so folding twice is a no-op.
+      if (!(Number.isFinite(rt) && (!Number.isFinite(lt) || rt > lt))) return false;
+    }
+    writeMemoryBrief(repoPath, remote);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Brief counterpart to reconcileMemoryWithRemote — re-point the local brief
+ * ref at the remote tip, then re-apply ours on top if ours is the newer one,
+ * so the retry push fast-forwards. Returns true when the ref was repositioned.
+ */
+export function reconcileMemoryBriefWithRemote(repoPath: string, stagingRef: string): boolean {
+  try {
+    const root = briefRootCommit(repoPath);
+    if (!root) return false;
+    const opts = { cwd: repoPath, timeoutMs: 10_000 };
+    let remote: MemoryBrief | null = null;
+    try {
+      const raw = git(['notes', `--ref=${stagingRef}`, 'show', root], opts).trim();
+      const data = raw ? JSON.parse(raw) : null;
+      if (data && data.version === 1 && typeof data.brief === 'string') remote = data as MemoryBrief;
+    } catch { return false; }
+    if (!remote) return false;
+    const local = readMemoryBrief(repoPath);
+    const lt = Date.parse(local?.generatedAt || ''), rt = Date.parse(remote.generatedAt || '');
+    const localWins = !!local && (!Number.isFinite(rt) || (Number.isFinite(lt) && lt > rt));
+    git(['update-ref', `refs/notes/${MEMORY_BRIEF_REF_NAME}`, stagingRef], opts);
+    // Remote already IS the ref now — only re-apply when ours is newer.
+    if (localWins && local) writeMemoryBrief(repoPath, local);
+    return true;
+  } catch {
+    return false;
   }
 }
 

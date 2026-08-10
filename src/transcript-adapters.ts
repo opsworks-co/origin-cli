@@ -270,6 +270,34 @@ function committingPromptsFromTranscript(transcriptPath: string): number[] {
   }
 }
 
+/**
+ * promptIndex → the short SHAs that turn said it committed. Only turns that
+ * really ran `git commit` contribute (see reportedCommitShas). Empty for
+ * transcripts where no turn reports one, which leaves the existing order-based
+ * pairing exactly as it was.
+ *
+ * ONLY safe for transcripts that record no tool OUTPUT, which is why it is not
+ * in fromParsedTranscript with its siblings. Reading shas out of prose is a
+ * last resort: measured against this repo's own Claude transcript it produced
+ * 35 claims of which 31 were session IDs and quoted history — 8-hex tokens are
+ * indistinguishable from short shas, and tightening to "same sentence as the
+ * word commit" still left 15. Agents whose transcripts carry the real
+ * `[branch 74d04c6]` banner have no need for prose and must not pay its error
+ * rate; Cursor records tool calls but never their output, so for Cursor the
+ * agent's own summary is the only place the sha exists at all.
+ */
+function commitShasFromTranscript(transcriptPath: string): Record<number, string[]> {
+  try {
+    const out: Record<number, string[]> = {};
+    for (const m of extractPromptFileMappings(transcriptPath, { readReportedShas: true })) {
+      if (m.commitShas && m.commitShas.length > 0) out[m.promptIndex] = m.commitShas;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 function uniqueFiles(...lists: string[][]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -642,7 +670,18 @@ export const cursorAdapter: TranscriptAdapter = {
     } catch { /* estimation is best-effort */ }
     let model: string | null = null;
     try { model = getCursorModelFromDb(conversationId); } catch { /* best-effort */ }
-    return fromParsedTranscript(transcriptPath, p, model, tokenOverride);
+    return {
+      ...fromParsedTranscript(transcriptPath, p, model, tokenOverride),
+      // Which commit a turn made, not just that one happened. Cursor's
+      // transcript is written at TURN END, so a turn that edits a file and
+      // commits it is already over when the watcher first sees the session —
+      // the commit becomes the session's own headShaAtStart and no
+      // headShaAtStart..HEAD walk can ever contain it. On session 1a80ae77 the
+      // commit was 20s older than first sight, which left 74d04c6 unattached:
+      // the turn showed "uncommitted" next to the commit it had just made, and
+      // per-commit memory recorded nothing for it.
+      promptCommitShas: commitShasFromTranscript(transcriptPath),
+    };
   },
 };
 

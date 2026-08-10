@@ -7,6 +7,12 @@ import { redactSecrets } from './redaction.js';
 import { api } from './api.js';
 import { loadConfig, loadRepoConfig } from './config.js';
 import type { OriginMarkers } from './origin-markers.js';
+import {
+  foldRemoteMemory,
+  foldRemoteMemoryBrief,
+  reconcileMemoryWithRemote,
+  reconcileMemoryBriefWithRemote,
+} from './memory.js';
 
 function redact(text: string): string {
   return redactSecrets(text || '').redacted;
@@ -333,6 +339,27 @@ export function shouldIncludePromptText(repoPath: string): boolean {
 // or updated.
 export const NOTES_FETCH_REFSPEC = '+refs/notes/origin:refs/notes/origin-remote';
 
+// ─── Memory notes transport ──────────────────────────────────────────────
+//
+// refs/notes/origin-memory (+ its LLM continuation brief) used to be
+// machine-local: no push path and no fetch refspec anywhere in the CLI, so
+// the "memory travels with the repo" promise in DOCS.md only held if a human
+// typed `git push origin refs/notes/origin-memory` by hand. A teammate's
+// clone — or your own second machine — started with an empty payload.
+//
+// Same staging-ref discipline as attribution notes: fetch into a `-remote`
+// ref and fold, never map straight onto the live ref (see
+// LEGACY_CLOBBERING_NOTES_REFSPEC for what that costs). The fold itself is
+// payload-level, not `git notes merge` — see mergeMemoryPayloads.
+export const MEMORY_NOTES_REFS = [
+  { local: 'refs/notes/origin-memory', staging: 'refs/notes/origin-memory-remote' },
+  { local: 'refs/notes/origin-memory-brief', staging: 'refs/notes/origin-memory-brief-remote' },
+] as const;
+
+export const MEMORY_NOTES_FETCH_REFSPECS = MEMORY_NOTES_REFS.map(
+  (r) => `+${r.local}:${r.staging}`,
+);
+
 // A forced refspec that maps the remote's notes STRAIGHT onto local
 // refs/notes/origin. Older `origin enable` releases installed this, and it
 // silently destroys attribution: the leading '+' force-updates the local ref on
@@ -413,40 +440,124 @@ export function syncNotesFromRemote(repoPath: string): boolean {
   //    an already-poisoned repo gets repaired without the user doing anything.
   removeLegacyNotesRefspec(repoPath, remote);
 
-  // 1. Persistent refspec — added once, then every git pull syncs notes into
-  //    the staging ref, which step 3 merges (never clobbers).
-  try {
-    const existing = execFileSync('git', ['config', '--get-all', `remote.${remote}.fetch`], execOpts);
-    if (!existing.includes(NOTES_FETCH_REFSPEC)) {
-      execFileSync('git', ['config', '--add', `remote.${remote}.fetch`, NOTES_FETCH_REFSPEC], execOpts);
-    }
-  } catch {
+  const addRefspec = (spec: string) => {
     try {
-      execFileSync('git', ['config', '--add', `remote.${remote}.fetch`, NOTES_FETCH_REFSPEC], execOpts);
-    } catch { /* config write failed — fetch below still works once */ }
-  }
+      const existing = execFileSync('git', ['config', '--get-all', `remote.${remote}.fetch`], execOpts);
+      if (existing.includes(spec)) return;
+    } catch { /* no fetch config yet — fall through and add */ }
+    try {
+      execFileSync('git', ['config', '--add', `remote.${remote}.fetch`, spec], execOpts);
+    } catch { /* config write failed — the explicit fetch below still works once */ }
+  };
 
-  // 2. Immediate fetch.
+  // 1. Immediate fetch, each refspec in its OWN invocation. Two reasons:
+  //    a remote may carry attribution notes but no memory note (or the
+  //    reverse), and git fails the WHOLE command on the first ref it can't
+  //    find — one absent ref must not stop the others from syncing.
+  let fetchedAny = false;
+  for (const spec of [NOTES_FETCH_REFSPEC, ...MEMORY_NOTES_FETCH_REFSPECS]) {
+    let ok = false;
+    try {
+      execFileSync('git', ['fetch', '--no-tags', remote, spec], execOpts);
+      ok = true;
+      fetchedAny = true;
+    } catch { /* not on the remote, or offline */ }
+
+    // 2. Persist the refspec ONLY for refs the remote actually has, so plain
+    //    `git fetch` / `git pull` keeps them current from here on.
+    //
+    //    Conditioning on a successful fetch is the point. A configured
+    //    refspec naming a ref the remote lacks makes ordinary `git fetch`
+    //    FAIL — "couldn't find remote ref refs/notes/origin" — and this used
+    //    to install the attribution refspec unconditionally, so any repo
+    //    whose notes push never landed (no permission on the remote, the
+    //    common fork//wrong-account case) had its plain `git fetch` broken by
+    //    Origin. Memory would have inherited the same trap and made it far
+    //    more likely, since no remote has a memory note until someone pushes
+    //    the first one.
+    if (ok) addRefspec(spec);
+  }
+  if (!fetchedAny) return false; // offline / nothing upstream
+
+  let changed = false;
+
+  // 3a. Fold attribution notes. Per-commit, so `-s ours` is the right
+  //     strategy: the local machine stays authoritative for commits it
+  //     annotated itself, and distinct commits union naturally.
   const beforeSha = refSha(repoPath, 'refs/notes/origin');
-  try {
-    execFileSync('git', ['fetch', '--no-tags', remote, NOTES_FETCH_REFSPEC], execOpts);
-  } catch {
-    return false; // offline / no notes upstream — nothing to merge
-  }
   const remoteSha = refSha(repoPath, 'refs/notes/origin-remote');
-  if (!remoteSha) return false;
+  if (remoteSha) {
+    try {
+      if (!beforeSha) {
+        execFileSync('git', ['update-ref', 'refs/notes/origin', 'refs/notes/origin-remote'], execOpts);
+        changed = true;
+      } else if (beforeSha !== remoteSha) {
+        execFileSync('git', ['notes', '--ref=refs/notes/origin', 'merge', '-s', 'ours', 'refs/notes/origin-remote'], execOpts);
+        changed = refSha(repoPath, 'refs/notes/origin') !== beforeSha || changed;
+      }
+    } catch { /* leave local notes untouched */ }
+  }
 
-  // 3. Fold into local notes.
+  // 3b. Fold memory notes. NOT `git notes merge` — the whole payload is one
+  //     note on the root commit, so any git-level strategy resolves the entire
+  //     blob and silently drops one side's sessions. mergeMemoryPayloads
+  //     unions them entry-by-entry instead.
   try {
-    if (!beforeSha) {
-      execFileSync('git', ['update-ref', 'refs/notes/origin', 'refs/notes/origin-remote'], execOpts);
-      return true;
+    if (refSha(repoPath, 'refs/notes/origin-memory-remote')) {
+      if (foldRemoteMemory(repoPath, 'refs/notes/origin-memory-remote')) changed = true;
     }
-    if (beforeSha === remoteSha) return false;
-    execFileSync('git', ['notes', '--ref=refs/notes/origin', 'merge', '-s', 'ours', 'refs/notes/origin-remote'], execOpts);
-    return refSha(repoPath, 'refs/notes/origin') !== beforeSha;
-  } catch {
-    return false;
+  } catch { /* non-fatal */ }
+  try {
+    if (refSha(repoPath, 'refs/notes/origin-memory-brief-remote')) {
+      if (foldRemoteMemoryBrief(repoPath, 'refs/notes/origin-memory-brief-remote')) changed = true;
+    }
+  } catch { /* non-fatal */ }
+
+  return changed;
+}
+
+/**
+ * Push Origin's memory notes to `remote`. Gated by the SAME privacy switch
+ * that governs attribution notes and the origin-sessions branch
+ * (notesIncludePrompts): memory holds session summaries, per-file notes and
+ * decision text, so anyone who opted out of sharing prompt-derived content
+ * stays opted out here too.
+ *
+ * Best-effort and silent — a memory push must never fail a commit or a
+ * session end. On a non-fast-forward (another machine pushed since we last
+ * synced) we fetch, payload-merge, and retry ONCE.
+ */
+export function pushMemoryNotes(repoPath: string, remote: string): void {
+  if (!shouldIncludePromptText(repoPath)) return;
+  const execOpts = {
+    windowsHide: true,
+    cwd: repoPath,
+    stdio: 'pipe' as const,
+    timeout: 30_000,
+    encoding: 'utf-8' as const,
+  };
+  for (const { local, staging } of MEMORY_NOTES_REFS) {
+    try {
+      execFileSync('git', ['rev-parse', '--verify', '--quiet', local], execOpts);
+    } catch {
+      continue; // nothing written locally for this ref yet
+    }
+    const push = () => execFileSync('git', ['push', remote, `${local}:${local}`, '--no-verify', '--quiet'], execOpts);
+    try {
+      push();
+    } catch {
+      // Non-fast-forward: another machine advanced the ref. Re-fetch and
+      // RECONCILE — union the payloads, then re-parent our ref onto the remote
+      // tip so the retry actually fast-forwards. Folding alone isn't enough:
+      // two independently-created memory notes share no ancestor, so a merged
+      // payload on an unrelated history is rejected just the same.
+      try {
+        execFileSync('git', ['fetch', '--no-tags', remote, `+${local}:${staging}`], execOpts);
+        if (local.endsWith('origin-memory')) reconcileMemoryWithRemote(repoPath, staging);
+        else reconcileMemoryBriefWithRemote(repoPath, staging);
+        push();
+      } catch { /* give up quietly — memory stays local until next time */ }
+    }
   }
 }
 
@@ -594,6 +705,25 @@ export function writeGitNotes(
     }
   } catch {
     // Push can fail for any number of reasons — never block session-end.
+  }
+
+  // Memory notes ride the same trigger. Separate try/remote-detect so a failed
+  // attribution push (the block above throws before reaching here on e.g. a
+  // rejected non-fast-forward) doesn't also strand memory.
+  try {
+    let remote = '';
+    try {
+      execFileSync('git', ['remote', 'get-url', 'origin'], execOpts);
+      remote = 'origin';
+    } catch {
+      try {
+        const list = execFileSync('git', ['remote'], execOpts).trim();
+        if (list) remote = list.split('\n')[0];
+      } catch { /* no remotes */ }
+    }
+    if (remote) pushMemoryNotes(repoPath, remote);
+  } catch {
+    // Never block session-end.
   }
 }
 

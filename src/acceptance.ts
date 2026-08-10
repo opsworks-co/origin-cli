@@ -4,7 +4,15 @@
 // override it?" — gold for the next agent reading blame.
 //
 // Stored in a separate ref (refs/notes/origin-acceptance) so we never mutate
-// the original session's note. Same push semantics as refs/notes/origin.
+// the original session's note.
+//
+// NOTE: this ref is currently LOCAL-ONLY. Nothing in the CLI pushes or fetches
+// it — every notes push targets refs/notes/origin, and refs/notes/origin-memory
+// got its own transport (see pushMemoryNotes). An earlier version of this
+// comment claimed "same push semantics as refs/notes/origin", which was never
+// true. Acceptance data is per-commit, so wiring it up would reuse the
+// attribution path (fetch into a staging ref, `notes merge -s ours`, push)
+// rather than the payload-level merge memory needs.
 
 import { execFileSync } from 'child_process';
 
