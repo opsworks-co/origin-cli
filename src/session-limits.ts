@@ -152,9 +152,36 @@ export function buildDurationBlockMessage(maxDurationMinutes: number, ageMinutes
 }
 
 /**
+ * A PowerShell script that pops a tray balloon, with title/body embedded as
+ * single-quoted literals. Single-quoting is the only PowerShell string form that
+ * interpolates nothing — no `$var`, no backtick escapes — so a session title
+ * containing `$(...)` is text, not code. The one character that can end the
+ * literal is `'`, escaped by doubling it.
+ *
+ * NotifyIcon rather than the WinRT toast API: toasts need a registered AppUserModelID
+ * to appear at all, and the WinRT projection differs between Windows PowerShell 5.1
+ * and PowerShell 7. The balloon works on both with no registration.
+ */
+export function windowsNotifyScript(title: string, body: string): string {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  return [
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    'Add-Type -AssemblyName System.Drawing;',
+    '$n = New-Object System.Windows.Forms.NotifyIcon;',
+    '$n.Icon = [System.Drawing.SystemIcons]::Information;',
+    '$n.Visible = $true;',
+    `$n.ShowBalloonTip(5000, ${q(title)}, ${q(body)}, [System.Windows.Forms.ToolTipIcon]::Info);`,
+    // The balloon dies with the process, so hold briefly — comfortably inside
+    // the execFile timeout below so the kill is never what dismisses it.
+    'Start-Sleep -Milliseconds 2500;',
+    '$n.Dispose();',
+  ].join(' ');
+}
+
+/**
  * Best-effort desktop notification. macOS: osascript; Linux: notify-send;
- * elsewhere: silently skipped. Fire-and-forget — never throws, never blocks
- * the caller (the heartbeat tick must stay fast).
+ * Windows: a PowerShell tray balloon. Fire-and-forget — never throws, never
+ * blocks the caller (the heartbeat tick must stay fast).
  */
 export function sendDesktopNotification(title: string, body: string): void {
   try {
@@ -168,6 +195,15 @@ export function sendDesktopNotification(title: string, body: string): void {
       );
     } else if (process.platform === 'linux') {
       execFile('notify-send', [title, body], { timeout: 5000 }, () => { /* best effort */ });
+    } else if (process.platform === 'win32') {
+      // -NoProfile so a slow or broken user profile can't stall the heartbeat.
+      // windowsHide so no console window flashes on top of the user's work.
+      execFile(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', windowsNotifyScript(title, body)],
+        { timeout: 8000, windowsHide: true },
+        () => { /* best effort */ },
+      );
     }
   } catch { /* never let a notification failure surface */ }
 }

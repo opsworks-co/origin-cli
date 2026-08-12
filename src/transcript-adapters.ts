@@ -99,6 +99,12 @@ export interface ParsedSession {
   // the session's commit list by order and silently mis-pairs when the watcher
   // never saw an early commit.
   promptCommitShas?: Record<number, string[]>;
+  // The `git commit …` command text each prompt ran, keyed by promptIndex. The
+  // fallback for a turn that committed but never printed its sha: the message is
+  // inside that string, so the repo can be asked which commit carries it. Safe
+  // for every agent — unlike promptCommitShas, this is the command the agent
+  // actually ran, not prose about it.
+  promptCommitCommands?: Record<number, string[]>;
 }
 
 export interface TranscriptAdapter {
@@ -364,7 +370,25 @@ function fromParsedTranscript(
     // The consumer only uses this when it has no commit mapping of its own and
     // falls back to file overlap when it's empty, so it can only add signal.
     promptsThatCommitted: committingPromptsFromTranscript(transcriptPath),
+    promptCommitCommands: commitCommandsFromTranscript(transcriptPath),
   };
+}
+
+/**
+ * promptIndex → the `git commit …` commands that turn ran. Unlike the prose
+ * sha reader this needs no opt-in: it is the command text itself, so there is
+ * nothing to misread. Empty for transcripts that record no shell calls.
+ */
+function commitCommandsFromTranscript(transcriptPath: string): Record<number, string[]> {
+  try {
+    const out: Record<number, string[]> = {};
+    for (const m of extractPromptFileMappings(transcriptPath)) {
+      if (m.commitCommands && m.commitCommands.length > 0) out[m.promptIndex] = m.commitCommands;
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 // ─── Claude Code ────────────────────────────────────────────────────────────

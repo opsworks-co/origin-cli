@@ -130,9 +130,13 @@ describe('git-hook installers: user hook preservation', () => {
     expect(countOccurrences(final, userSentinel)).toBe(1);
     // Origin's marker present exactly once (not duplicated by the re-run).
     expect(countOccurrences(final, marker)).toBe(1);
-    // File is still executable.
-    const mode = fs.statSync(hookPath(repo, hookFile)).mode & 0o777;
-    expect(mode & 0o100, `${hookFile} should still be executable`).not.toBe(0);
+    // File is still executable. POSIX only — NTFS has no execute permission, so
+    // mode & 0o100 is always 0 on Windows and this could never pass there. Git
+    // for Windows does not consult the bit either; it runs hooks through sh.
+    if (process.platform !== 'win32') {
+      const mode = fs.statSync(hookPath(repo, hookFile)).mode & 0o777;
+      expect(mode & 0o100, `${hookFile} should still be executable`).not.toBe(0);
+    }
   });
 });
 
@@ -177,9 +181,12 @@ describe('git-hook installers: partial-failure recovery', () => {
         countOccurrences(final, marker),
         `recovery install should leave ${marker} present once`,
       ).toBe(1);
-      // File should be executable again.
-      const mode = fs.statSync(hookPath(repo, hookFile)).mode & 0o777;
-      expect(mode & 0o100, `${hookFile} should be executable after recovery`).not.toBe(0);
+      // File should be executable again. POSIX only — see the note on the
+      // idempotency test above; NTFS has no execute bit to restore.
+      if (process.platform !== 'win32') {
+        const mode = fs.statSync(hookPath(repo, hookFile)).mode & 0o777;
+        expect(mode & 0o100, `${hookFile} should be executable after recovery`).not.toBe(0);
+      }
     },
   );
 });

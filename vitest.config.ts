@@ -9,6 +9,17 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/__tests__/**/*.test.ts'],
+    // Vitest's 5s default is a Linux number. A large share of this suite shells
+    // out to git — init, commit, clone, push, notes — and on Windows each of
+    // those is a process spawn that Defender inspects, several times slower than
+    // the same call on the Ubuntu runner, and slower again under the parallel
+    // worker load of a full run. Measured on a full local run: 23 of 40 failures
+    // were "Test timed out in 5000ms", and files that failed in the suite passed
+    // 3/3 when run alone. That noise is worse than the wait it saves — it leaves
+    // no green baseline, so a real regression is indistinguishable from the
+    // usual churn. Generous on purpose: this bounds a hang, it is not a budget.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     // Redirect HOME to a throwaway per-worker temp dir so tests that touch
     // ~/.origin (config/agent, heartbeat pids, and the sessions/ GLOBAL MIRROR
     // saveSessionState writes) never pollute the real home. Without this, on a

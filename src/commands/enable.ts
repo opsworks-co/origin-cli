@@ -1038,6 +1038,25 @@ function backupExistingHooks(filePath: string): void {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+// Report whether a watcher got its logon auto-start, and say plainly what a
+// failure costs. This used to print only on success, so when Defender blocked
+// the old `schtasks` registration `origin enable` rendered an all-green wall
+// and the user had no way to know that capture would stop at the next reboot.
+// A persistence mechanism that fails silently is worse than none at all.
+function reportLogonRegistration(
+  label: string,
+  result: { registered: boolean; reason: string },
+): void {
+  if (result.registered) {
+    console.log(chalk.green(`  ✓ ${label} registered to relaunch at logon`));
+    return;
+  }
+  // Not a failure: platforms we deliberately don't auto-start on.
+  if (result.reason === 'not-windows') return;
+  console.log(chalk.yellow(`  ⚠ ${label} could NOT be registered to relaunch at logon (${result.reason})`));
+  console.log(chalk.gray(`     Capture works now, but stops after a reboot until you re-run \`origin enable\`.`));
+}
+
 function filterOriginHooks(entries: any[]): any[] {
   return entries.filter((entry: any) => {
     if (!entry.hooks) return true;
@@ -1369,7 +1388,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
   // file, and any spawn sets windowsHide so it never pops a console window.
   if (isConnectedMode()) {
     try {
-      const { codexWatchAutoStartEnabled, ensureCodexWatchRunning, registerCodexWatchLogonTask } =
+      const { codexWatchAutoStartEnabled, ensureCodexWatchRunning, registerCodexWatchAtLogon } =
         await import('../codex-watch.js');
       if (codexWatchAutoStartEnabled()) {
         const res = ensureCodexWatchRunning();
@@ -1378,11 +1397,8 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
         } else if (res.reason === 'already-running') {
           console.log(chalk.gray('  ✓ Codex rollout watcher already running'));
         }
-        // Survive reboots via a logon Scheduled Task (Windows-only, best-effort).
-        const task = registerCodexWatchLogonTask();
-        if (task.registered) {
-          console.log(chalk.green('  ✓ Codex watcher registered to relaunch at logon'));
-        }
+        // Survive reboots via a Startup-folder entry (Windows-only).
+        reportLogonRegistration('Codex watcher', registerCodexWatchAtLogon());
       }
     } catch { /* never block enable on watcher startup */ }
   }
@@ -1400,7 +1416,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
   // sets windowsHide so it never pops a console window.
   if (isConnectedMode()) {
     try {
-      const { transcriptWatchAutoStartEnabled, ensureTranscriptWatchRunning, registerTranscriptWatchLogonTask } =
+      const { transcriptWatchAutoStartEnabled, ensureTranscriptWatchRunning, registerTranscriptWatchAtLogon } =
         await import('../transcript-watch.js');
       if (transcriptWatchAutoStartEnabled()) {
         const res = ensureTranscriptWatchRunning();
@@ -1409,10 +1425,7 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
         } else if (res.reason === 'already-running') {
           console.log(chalk.gray('  ✓ Transcript watcher already running'));
         }
-        const task = registerTranscriptWatchLogonTask();
-        if (task.registered) {
-          console.log(chalk.green('  ✓ Transcript watcher registered to relaunch at logon'));
-        }
+        reportLogonRegistration('Transcript watcher', registerTranscriptWatchAtLogon());
       }
     } catch { /* never block enable on watcher startup */ }
   }
@@ -1465,6 +1478,82 @@ function resolveOriginBin(): string {
   return originBin;
 }
 
+/**
+ * Every form of the resolved origin binary a `#!/bin/sh` hook could execute,
+ * best first.
+ *
+ * Git hooks are POSIX shell on ALL platforms — on Windows git runs them through
+ * its bundled sh.exe — but `resolveOriginBin()` reports whatever `where` said,
+ * which there is a BACKSLASH path like `C:\Users\me\AppData\Roaming\npm\origin.cmd`.
+ * MSYS `test -x` never matches that form (verified: `[ -x ]` is TRUE for a
+ * forward-slash path and FALSE for the identical file written with backslashes).
+ * So on Windows the primary branch of every git hook always missed, leaving only
+ * `command -v origin` — and when npm's global dir wasn't on the PATH git's hook
+ * shell inherited, ORIGIN_BIN came out empty and the hook exited 0 having done
+ * nothing at all. Silently: no notes on commit, no push on push, no fold on pull,
+ * no sync on clone.
+ *
+ * The `.cmd` shim is deprioritised in favour of its extensionless sibling (npm
+ * installs both). Running the batch shim from sh spawns cmd.exe, which is a
+ * visible console window under GUI agents — the same trap originCmd() documents.
+ */
+export function originBinCandidates(bin: string = resolveOriginBin()): string[] {
+  const out: string[] = [];
+  const add = (p: string) => { if (p && !out.includes(p)) out.push(p); };
+  // A bare 'origin' means resolution failed — nothing absolute to offer.
+  if (!bin || bin === 'origin') return out;
+
+  const fwd = bin.replace(/\\/g, '/');
+  const drive = /^([A-Za-z]):\//.exec(fwd);
+  const msys = drive ? `/${drive[1].toLowerCase()}${fwd.slice(2)}` : '';
+
+  if (/\.cmd$/i.test(fwd)) {
+    add(fwd.replace(/\.cmd$/i, ''));
+    if (msys) add(msys.replace(/\.cmd$/i, ''));
+  }
+  add(bin);
+  add(fwd);
+  if (msys) add(msys);
+  return out;
+}
+
+/**
+ * The PATH + ORIGIN_BIN preamble shared by every global git hook.
+ *
+ * Was copy-pasted into all seven hook bodies, so the Windows defect above had to
+ * be fixed seven times or not at all. Strictly ADDITIVE relative to the old
+ * block: the embedded path and `command -v origin` keep their original
+ * precedence, so nothing changes on macOS/Linux — the Windows candidates are
+ * only consulted after both have missed.
+ */
+function hookShimPreamble(): string {
+  const candidates = originBinCandidates();
+  const embedded = candidates.length
+    ? candidates.map((c) => `  "${c}" \\\n`).join('').replace(/ \\\n$/, '')
+    : '  ""';
+  return `# Ensure PATH includes common npm/node locations. The AppData entries are
+# spelled via $HOME (which Git Bash sets to /c/Users/<user>) rather than
+# %APPDATA%, whose backslash form is unusable as an MSYS path element.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$HOME/AppData/Roaming/npm:$HOME/AppData/Local/npm:$PATH"
+
+# Resolve an origin executable — first match wins. See originBinCandidates().
+ORIGIN_BIN=""
+for _origin_c in \\
+${embedded}; do
+  if [ -n "$_origin_c" ] && [ -x "$_origin_c" ]; then ORIGIN_BIN="$_origin_c"; break; fi
+done
+if [ -z "$ORIGIN_BIN" ] && command -v origin >/dev/null 2>&1; then ORIGIN_BIN="origin"; fi
+if [ -z "$ORIGIN_BIN" ]; then
+  for _origin_c in \\
+    "$HOME/AppData/Roaming/npm/origin" \\
+    "$HOME/.npm-global/bin/origin" \\
+    "/opt/homebrew/bin/origin" \\
+    "/usr/local/bin/origin"; do
+    if [ -x "$_origin_c" ]; then ORIGIN_BIN="$_origin_c"; break; fi
+  done
+fi`;
+}
+
 // Write the global pre-commit hook into an Origin-managed hooks dir.
 // Shared by installGlobalGitHooks (origin enable) and the lazy heal in
 // ensurePolicyHookInstalled — global hooks dirs written by CLI versions
@@ -1483,26 +1572,12 @@ function resolveOriginBin(): string {
 // the entire push-block feature was inert. The pre-commit hook always did this
 // right (capture $?, re-exit); pre-push just wasn't given the same treatment.
 export function writeGlobalPrePushHook(globalHooksDir: string): void {
-  const originBin = resolveOriginBin();
   const prePushPath = path.join(globalHooksDir, 'pre-push');
   const prePushContent = `#!/bin/sh
 # origin-global-pre-push
 # Installed by: origin enable --global
 
-# Ensure PATH includes common npm/node locations
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
-
-# Use full path to origin
-ORIGIN_BIN=""
-if [ -x "${originBin}" ]; then
-  ORIGIN_BIN="${originBin}"
-elif command -v origin >/dev/null 2>&1; then
-  ORIGIN_BIN="origin"
-elif [ -x "/opt/homebrew/bin/origin" ]; then
-  ORIGIN_BIN="/opt/homebrew/bin/origin"
-elif [ -x "/usr/local/bin/origin" ]; then
-  ORIGIN_BIN="/usr/local/bin/origin"
-fi
+${hookShimPreamble()}
 
 if [ -n "$ORIGIN_BIN" ]; then
   "$ORIGIN_BIN" hooks git-pre-push
@@ -1523,26 +1598,13 @@ fi
 }
 
 export function writeGlobalPreCommitHook(globalHooksDir: string): void {
-  const originBin = resolveOriginBin();
   const preCommitPath = path.join(globalHooksDir, 'pre-commit');
   const preCommitContent = `#!/bin/sh
 # origin-global-pre-commit
 # Installed by: origin enable --global
 # Scans staged changes for secrets — blocks commit if found
 
-# Ensure PATH includes common npm/node locations
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
-
-ORIGIN_BIN=""
-if [ -x "${originBin}" ]; then
-  ORIGIN_BIN="${originBin}"
-elif command -v origin >/dev/null 2>&1; then
-  ORIGIN_BIN="origin"
-elif [ -x "/opt/homebrew/bin/origin" ]; then
-  ORIGIN_BIN="/opt/homebrew/bin/origin"
-elif [ -x "/usr/local/bin/origin" ]; then
-  ORIGIN_BIN="/usr/local/bin/origin"
-fi
+${hookShimPreamble()}
 
 if [ -n "$ORIGIN_BIN" ]; then
   "$ORIGIN_BIN" hooks git-pre-commit
@@ -1577,7 +1639,6 @@ fi
 //     node startup on the common path), the real work is backgrounded so the
 //     clone never blocks on the network, and the hook always exits 0.
 export function writeGlobalPostCheckoutHook(globalHooksDir: string): void {
-  const originBin = resolveOriginBin();
   const postCheckoutPath = path.join(globalHooksDir, 'post-checkout');
   const postCheckoutContent = `#!/bin/sh
 # origin-global-post-checkout
@@ -1591,19 +1652,7 @@ export function writeGlobalPostCheckoutHook(globalHooksDir: string): void {
 # hook history-preservation installs.
 if [ "$3" != "1" ]; then exit 0; fi
 
-# Ensure PATH includes common npm/node locations
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
-
-ORIGIN_BIN=""
-if [ -x "${originBin}" ]; then
-  ORIGIN_BIN="${originBin}"
-elif command -v origin >/dev/null 2>&1; then
-  ORIGIN_BIN="origin"
-elif [ -x "/opt/homebrew/bin/origin" ]; then
-  ORIGIN_BIN="/opt/homebrew/bin/origin"
-elif [ -x "/usr/local/bin/origin" ]; then
-  ORIGIN_BIN="/usr/local/bin/origin"
-fi
+${hookShimPreamble()}
 
 # Backgrounded: a slow network must never hold up someone's clone.
 if [ -n "$ORIGIN_BIN" ]; then
@@ -1625,26 +1674,12 @@ exit 0
 // Write the global post-commit hook. Fires the CLI capture in the background,
 // then chains to any local repo post-commit hook.
 export function writeGlobalPostCommitHook(globalHooksDir: string): void {
-  const originBin = resolveOriginBin();
   const postCommitPath = path.join(globalHooksDir, 'post-commit');
   const postCommitContent = `#!/bin/sh
 # origin-global-post-commit
 # Installed by: origin enable --global
 
-# Ensure PATH includes common npm/node locations
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
-
-# Use full path to origin (resolve from common locations)
-ORIGIN_BIN=""
-if [ -x "${originBin}" ]; then
-  ORIGIN_BIN="${originBin}"
-elif command -v origin >/dev/null 2>&1; then
-  ORIGIN_BIN="origin"
-elif [ -x "/opt/homebrew/bin/origin" ]; then
-  ORIGIN_BIN="/opt/homebrew/bin/origin"
-elif [ -x "/usr/local/bin/origin" ]; then
-  ORIGIN_BIN="/usr/local/bin/origin"
-fi
+${hookShimPreamble()}
 
 if [ -n "$ORIGIN_BIN" ]; then
   # Redirect stdout/stderr to /dev/null so the backgrounded child doesn't
@@ -1666,26 +1701,13 @@ fi
 // Write the global post-rewrite hook (rebase/amend). Preserves attribution
 // notes in the background, then chains to any local repo post-rewrite hook.
 export function writeGlobalPostRewriteHook(globalHooksDir: string): void {
-  const originBin = resolveOriginBin();
   const postRewritePath = path.join(globalHooksDir, 'post-rewrite');
   const postRewriteContent = `#!/bin/sh
 # origin-global-post-rewrite
 # Installed by: origin enable --global
 # Preserves AI attribution notes through rebase/amend
 
-# Ensure PATH includes common npm/node locations
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
-
-ORIGIN_BIN=""
-if [ -x "${originBin}" ]; then
-  ORIGIN_BIN="${originBin}"
-elif command -v origin >/dev/null 2>&1; then
-  ORIGIN_BIN="origin"
-elif [ -x "/opt/homebrew/bin/origin" ]; then
-  ORIGIN_BIN="/opt/homebrew/bin/origin"
-elif [ -x "/usr/local/bin/origin" ]; then
-  ORIGIN_BIN="/usr/local/bin/origin"
-fi
+${hookShimPreamble()}
 
 if [ -n "$ORIGIN_BIN" ]; then
   # Redirect so the backgrounded child doesn't hold git's stdout fd open
@@ -1703,6 +1725,49 @@ fi
   fs.chmodSync(postRewritePath, '755');
 }
 
+// Write the global post-merge hook. Git runs this after every `git pull` that
+// results in a merge (including fast-forwards), which is the moment a teammate's
+// Origin metadata actually arrives.
+//
+// The pull itself already fetched the notes — ORIGIN_NOTES_GLOB_REFSPEC is a
+// configured fetchspec, so `git pull` brings refs/notes/origin* down into the
+// staging namespace natively. What's missing is the FOLD: staged notes are
+// invisible to `origin blame`, `origin context memory` and the SessionStart
+// context block until they're merged onto the live refs. Before this hook that
+// only happened on a fresh clone (post-checkout) or at SessionStart behind a 6h
+// throttle, so a mid-session `git pull` left the agent reading stale memory.
+//
+// Deliberately does NO network I/O — `origin hooks git-post-merge` only folds
+// local refs. A pull is an interactive, latency-sensitive command and must not
+// wait on Origin; the work is backgrounded anyway and the hook always exits 0.
+export function writeGlobalPostMergeHook(globalHooksDir: string): void {
+  const postMergePath = path.join(globalHooksDir, 'post-merge');
+  const postMergeContent = `#!/bin/sh
+# origin-global-post-merge
+# Installed by: origin enable --global
+# Folds notes that the pull just fetched onto the live refs.
+
+${hookShimPreamble()}
+
+# Backgrounded with stdout/stderr closed: the child must not inherit git's
+# stdout fd, or a \`git pull | tee\` stalls until origin exits (same trap the
+# post-commit hook documents).
+if [ -n "$ORIGIN_BIN" ]; then
+  "$ORIGIN_BIN" hooks git-post-merge >/dev/null 2>&1 &
+fi
+
+# Chain to local repo hooks if they exist
+LOCAL_HOOK="\$(git rev-parse --git-dir 2>/dev/null)/hooks/post-merge"
+if [ -f "$LOCAL_HOOK" ] && [ -x "$LOCAL_HOOK" ]; then
+  "$LOCAL_HOOK" "$@"
+fi
+
+exit 0
+`;
+  fs.writeFileSync(postMergePath, postMergeContent);
+  fs.chmodSync(postMergePath, '755');
+}
+
 function installGlobalGitHooks(): void {
   const globalHooksDir = path.join(os.homedir(), '.origin', 'git-hooks');
 
@@ -1712,7 +1777,6 @@ function installGlobalGitHooks(): void {
   }
 
   // Resolve full path to origin binary
-  const originBin = resolveOriginBin();
 
   // Pre-commit hook — secret scanning + policy enforcement (blocks commits)
   writeGlobalPreCommitHook(globalHooksDir);
@@ -1722,6 +1786,9 @@ function installGlobalGitHooks(): void {
 
   // Post-commit hook — fires capture in the background, chains local hooks.
   writeGlobalPostCommitHook(globalHooksDir);
+
+  // Post-merge hook — folds notes the pull just fetched onto the live refs.
+  writeGlobalPostMergeHook(globalHooksDir);
 
   // Pre-push hook that also chains to local repo hooks
   writeGlobalPrePushHook(globalHooksDir);
@@ -1739,18 +1806,7 @@ function installGlobalGitHooks(): void {
 #
 # git passes: $1 = path to COMMIT_EDITMSG, $2 = source, $3 = sha
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/*/bin:$HOME/.npm-global/bin:$PATH"
-
-ORIGIN_BIN=""
-if [ -x "${originBin}" ]; then
-  ORIGIN_BIN="${originBin}"
-elif command -v origin >/dev/null 2>&1; then
-  ORIGIN_BIN="origin"
-elif [ -x "/opt/homebrew/bin/origin" ]; then
-  ORIGIN_BIN="/opt/homebrew/bin/origin"
-elif [ -x "/usr/local/bin/origin" ]; then
-  ORIGIN_BIN="/usr/local/bin/origin"
-fi
+${hookShimPreamble()}
 
 # Synchronous — git waits for this to finish before reading the message.
 # Trailer-insertion errors are swallowed internally; never block the commit.
@@ -1815,7 +1871,16 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'ignore'],
       }).trim();
-      if (globalHooksPath && globalHooksPath.includes(path.join('.origin', 'git-hooks'))) {
+      // Compare with separators normalised. path.join('.origin','git-hooks')
+      // yields `.origin\git-hooks` on Windows, so the check only matched a
+      // BACKSLASH value — which is what Origin's own `git config` write happens
+      // to produce there today. Any forward-slash spelling (set by hand, from
+      // git-bash, or carried over from a macOS machine's config) fell through to
+      // "custom-hooks-path-set", and Origin then declined to install the policy
+      // hook at all: no secret scan, silently, on the platform where hooks
+      // already do the least. Matching both spellings costs nothing.
+      const normalisedHooksPath = (globalHooksPath || '').replace(/\\/g, '/');
+      if (normalisedHooksPath.includes('.origin/git-hooks')) {
         // The managed dir only covers this repo if it actually contains
         // a pre-commit hook. Dirs written by CLI versions that predate
         // the global pre-commit (≤ May 2026) carry only post-commit/
@@ -1833,6 +1898,13 @@ export function ensurePolicyHookInstalled(gitRoot: string): { installed: boolean
         const globalPostCheckout = path.join(resolvedDir, 'post-checkout');
         if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPostCheckout)) {
           writeGlobalPostCheckoutHook(resolvedDir);
+        }
+        // And post-merge: without it a `git pull` fetches the teammate's notes
+        // into staging and nothing ever folds them, so `origin context memory`
+        // keeps reporting whatever this machine knew before the pull.
+        const globalPostMerge = path.join(resolvedDir, 'post-merge');
+        if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPostMerge)) {
+          writeGlobalPostMergeHook(resolvedDir);
         }
         const globalPreCommit = path.join(resolvedDir, 'pre-commit');
         if (fs.existsSync(resolvedDir) && !fs.existsSync(globalPreCommit)) {

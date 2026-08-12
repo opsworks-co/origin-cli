@@ -30,7 +30,7 @@
 // Per-agent specifics (transcript location, filename→identity, which parser to
 // reuse, recency window) live in transcript-adapters.ts. This file is the
 // agent-agnostic engine: reconcile, per-prompt shadows/diffs, git capture,
-// single-instance pid, idle sweep, auto-start gating, schtasks logon task.
+// single-instance pid, idle sweep, auto-start gating, logon auto-start.
 //
 // Cross-platform TypeScript. Rolled out Windows-first: `origin enable`
 // auto-starts it on Windows only (the CLI agents' hooks work on macOS/Linux, so
@@ -50,7 +50,7 @@ import { createSnapshot } from './commands/snapshot.js';
 import { estimateCost } from './transcript.js';
 import { capturePromptEdits } from './prompt-capture/index.js';
 import { git } from './utils/exec.js';
-import { isWindows } from './utils/platform.js';
+import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon-autostart.js';
 import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
@@ -64,6 +64,7 @@ import {
   isSubstantiveMemory,
   summarizeFromCommitSubjects,
   writeCommitMemory,
+  enrichDecisionsForSession,
   shouldWriteMemoryOnCommit,
   type SessionMemoryEntry,
   type CommitMemoryEntry,
@@ -285,6 +286,10 @@ export interface WatchDeps {
   writeMemory?: (repoPath: string, entry: SessionMemoryEntry) => void;
   // Record the immutable per-commit memory entries. Optional, like writeMemory.
   writeCommitMemoryEntry?: (repoPath: string, entry: CommitMemoryEntry) => void;
+  // Backfill decisions onto a session's already-written records. The sanctioned
+  // exception to commit-record immutability: it fills EMPTY decisions only, for
+  // agents that emit the marker after the commit has already been frozen.
+  enrichDecisions?: (repoPath: string, sessionId: string, decisions: string[]) => boolean;
   // Unified diff of specific repo-relative files against HEAD, including
   // untracked files (rendered fully-added). The diff source for agents whose
   // transcript carries no edit content (Antigravity) and for brand-new files
@@ -466,6 +471,16 @@ function recordCommitMemory(
     const entry = buildWatchMemoryEntry(scanned, adapter, prior, now);
     if (entry && isSubstantiveMemory(entry)) deps.writeMemory(prior.repoPath, entry);
   }
+  // The same [Origin: Decision] markers the post-commit hook records. Without
+  // these a commit captured on Windows produced a THINNER record than the same
+  // commit captured on macOS, where hooks fire and the hook path writes them —
+  // the granular history a reader actually wants ("why", not just filenames)
+  // was present on one platform and absent on the other.
+  let decisions: string[] = [];
+  try {
+    decisions = parseMarkersFromTranscriptPath(scanned.transcriptPath)?.decision || [];
+  } catch { /* best-effort, exactly as the hook path treats it */ }
+
   for (const sha of shas.slice(-20)) {
     const facts = commitFacts(workRoot, sha);
     if (!facts) continue; // a sha this repo cannot resolve — record nothing
@@ -477,10 +492,21 @@ function recordCommitMemory(
       filesChanged: facts.files,
       linesAdded: facts.added,
       linesRemoved: facts.removed,
-      branch: null,
+      decisions: decisions.length > 0 ? decisions.slice(0, 6) : undefined,
+      branch: facts.branch,
       committedAt: facts.committedAt,
     });
     written.push(sha);
+  }
+
+  // Late markers. Cursor and Codex flush [Origin: Decision] a few seconds AFTER
+  // the commit fires, so the write above can freeze a record with none — and
+  // commit records are add-once, so it would never be revisited. #1007 fixed
+  // this for the hook path only; the watcher is the path that captures Cursor
+  // on Windows, so it needs the same backfill. Fills only empty decisions, so
+  // it can never overwrite what a record already states.
+  if (decisions.length > 0 && deps.enrichDecisions) {
+    try { deps.enrichDecisions(prior.repoPath, scanned.sessionId, decisions); } catch { /* non-fatal */ }
   }
   return written;
 }
@@ -512,13 +538,97 @@ function commitAgeMs(workRoot: string | undefined, sha: string, sessionStart?: s
 }
 
 /**
- * Subject, files and line counts for ONE commit, read from the repo. Returns
- * null when the sha isn't resolvable there.
+ * Which commit a turn made, when the turn ran `git commit` but never printed
+ * the sha.
+ *
+ * The command text is in the transcript and the MESSAGE is inside it, so rather
+ * than parse that message out — agents quote it three different ways, including
+ * PowerShell here-strings and `$(@'…'@)` — ask the question backwards: take the
+ * repo's recent commit subjects and see which one appears verbatim in the
+ * command the turn ran. Quoting style becomes irrelevant.
+ *
+ * Deliberately strict, same bar as the rest of the attribution path:
+ *   - the subject must be long enough to be distinctive (a "wip" or "fix"
+ *     subject matches far too much to be evidence of anything)
+ *   - exactly one candidate may match; two mean we cannot tell, so we say so
+ *     by returning null rather than picking one
+ *   - only commits within the session's window are considered, so a turn that
+ *     happens to quote an old commit's message cannot claim it
+ * Returns null whenever any of that fails — the caller then falls back to the
+ * existing order-based pairing, exactly as before.
+ */
+export function matchCommitByCommand(
+  commands: string[],
+  candidates: Array<{ sha: string; subject: string }>,
+  minSubjectLength = 12,
+): string | null {
+  if (!commands.length || !candidates.length) return null;
+  const haystack = commands.join('\n');
+  const hits = new Set<string>();
+  for (const c of candidates) {
+    const subject = (c.subject || '').trim();
+    if (subject.length < minSubjectLength) continue;
+    if (haystack.includes(subject)) hits.add(c.sha);
+  }
+  return hits.size === 1 ? [...hits][0] : null;
+}
+
+/**
+ * Recent commits in the repo, newest first, as {sha, subject}. Bounded because
+ * this is only ever used to identify a commit a turn just made.
+ */
+function recentCommits(workRoot: string | undefined, limit = 40): Array<{ sha: string; subject: string }> {
+  if (!workRoot) return [];
+  try {
+    const out = execFileSync('git', ['log', `-n${limit}`, '--format=%H%x00%s'], {
+      cwd: workRoot, encoding: 'utf-8', windowsHide: true, timeout: 10_000,
+      maxBuffer: 4 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return out.split('\n').map((line) => {
+      const [sha, subject] = line.split('\0');
+      return sha && subject ? { sha: sha.trim(), subject } : null;
+    }).filter((x): x is { sha: string; subject: string } => !!x);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The branch a commit belongs to, or null when that cannot be answered without
+ * guessing.
+ *
+ * The post-commit hook simply records the branch it was standing on, which is
+ * exact because it runs AT commit time. The watcher can be recording minutes
+ * later — or catching up a backlog — by which point the current branch may have
+ * moved on, so "whatever HEAD says now" would quietly attach the wrong branch.
+ *
+ * Instead ask which local branches actually contain the commit. The current
+ * branch wins when it is one of them (the overwhelmingly common case: the
+ * commit was just made here); a single containing branch is unambiguous; and
+ * anything else — several branches, or none — returns null, because a wrong
+ * branch is worse than an absent one.
+ */
+export function commitBranch(run: (args: string[]) => string, sha: string): string | null {
+  try {
+    const containing = run(['for-each-ref', '--format=%(refname:short)', '--contains', sha, 'refs/heads'])
+      .split('\n').map((s) => s.trim()).filter(Boolean);
+    if (containing.length === 0) return null;
+    const head = run(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    if (head && head !== 'HEAD' && containing.includes(head)) return head;
+    return containing.length === 1 ? containing[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Subject, files, line counts and branch for ONE commit, read from the repo.
+ * Returns null when the sha isn't resolvable there.
  */
 function commitFacts(
   workRoot: string | undefined,
   sha: string,
-): { message: string; files: string[]; added: number; removed: number; committedAt: string } | null {
+): { message: string; files: string[]; added: number; removed: number; committedAt: string; branch: string | null } | null {
   if (!workRoot || !sha) return null;
   const run = (args: string[]) => execFileSync('git', args, {
     cwd: workRoot, encoding: 'utf-8', windowsHide: true, timeout: 10_000,
@@ -539,7 +649,14 @@ function commitFacts(
       added += Number.isFinite(Number(a)) ? Number(a) : 0;
       removed += Number.isFinite(Number(d)) ? Number(d) : 0;
     }
-    return { message: message || '', files, added, removed, committedAt: committedAt || new Date().toISOString() };
+    return {
+      message: message || '',
+      files,
+      added,
+      removed,
+      committedAt: committedAt || new Date().toISOString(),
+      branch: commitBranch(run, sha),
+    };
   } catch {
     return null;
   }
@@ -996,6 +1113,43 @@ export async function reconcileSession(
     }
   }
 
+  // Turns that COMMITTED but never printed the sha. Reading the sha out of the
+  // agent's summary only works when the agent chose to mention it; plenty of
+  // turns just say "done". The command they ran is recorded either way, and the
+  // commit message is inside it, so identify the commit by matching the repo's
+  // recent subjects against that command text (see matchCommitByCommand).
+  //
+  // Runs for turns the reported-sha pass could not resolve, and never
+  // overwrites one it did: an explicit sha beats an inferred match.
+  const unresolvedCommitting = Object.entries(parsed.promptCommitCommands || {})
+    .filter(([idxRaw, commands]) =>
+      Number.isInteger(Number(idxRaw))
+      && !commitShaByIndex.has(Number(idxRaw))
+      && Array.isArray(commands) && commands.length > 0);
+  // Nothing to resolve → no git calls at all. The watcher polls every 8s, and
+  // the common case is that the reported-sha pass already answered.
+  if (unresolvedCommitting.length > 0) {
+    const candidates = recentCommits(repo.workRoot).filter((c) => {
+      // Same window rule as the reported-sha path — a turn quoting an old
+      // commit's message must not be able to claim it.
+      const age = commitAgeMs(repo.workRoot, c.sha, prior?.createdAt);
+      return age === null || age <= 24 * 60 * 60 * 1000;
+    });
+    for (const [idxRaw, commands] of unresolvedCommitting) {
+      const idx = Number(idxRaw);
+      // Don't hand two turns the same commit. A repeated match means the
+      // message is ambiguous, and a duplicate pairing is a wrong pairing.
+      const taken = new Set(commitShaByIndex.values());
+      const full = matchCommitByCommand(commands, candidates.filter((c) => !taken.has(c.sha)));
+      if (!full) continue;
+      commitShaByIndex.set(idx, full);
+      if (!sessionCommitShas.includes(full)) sessionCommitShas.push(full);
+      debugLog('transcript-watch', 'commit matched by its command message', {
+        agent: adapter.slug, promptIndex: idx, sha: full.slice(0, 8),
+      });
+    }
+  }
+
   if (commitShaByIndex.size === 0 && commitFiles.size > 0) {
     // Prefer the transcript's OWN record of which turns ran `git commit`. Pair
     // those turns with the session's commits in chronological order: the Nth
@@ -1379,22 +1533,58 @@ export async function reconcileSession(
   // turn used to accumulate a snapshot per tick — which the UI renders as a rail
   // of green dots under the turn number, and which buries the real restore
   // points. The hook path snapshots at meaningful boundaries; this matches it.
+  // ...and only for a prompt that actually TOUCHED CODE. createSnapshot's dedup
+  // is not the "did anything change?" test it's assumed to be: it returns null
+  // only when the whole working tree is clean, or when the tree is byte-identical
+  // to the previous snapshot. In a repo carrying pre-existing dirt the first can
+  // never fire, so any unrelated tree movement — the user editing a file, another
+  // agent, a sibling session — mints a snapshot that gets stamped with whatever
+  // prompt happens to be current. That is how a chat-only turn ends up wearing a
+  // green dot in the Session view.
+  //
+  // "Touched code" is deliberately NOT just `linesAdded + linesRemoved > 0`. That
+  // was the gate removed from the Stop hook (hooks.ts) for locking out Cursor
+  // mid-turn prompts, and line counts genuinely are unrecoverable sometimes — a
+  // poll whose shadow baseline was captured after the edit lands reports 0 for a
+  // turn that demonstrably wrote a file. So files count as evidence too.
+  //
+  // But only files THIS prompt can claim. promptChanges falls back to the
+  // session-wide edited-file list for the in-flight prompt (see `agentFilesRel`
+  // above), so a chat-only final turn inherits its predecessors' files and looks
+  // like it changed something. Subtract what earlier prompts already claim.
+  //
+  // Deliberately not latched into snapshottedPrompts when it skips: a turn polled
+  // mid-flight legitimately reads empty before the edit lands, and has to stay
+  // eligible for the next poll.
   const snapshottedPrompts = Array.isArray(prior?.snapshottedPrompts) ? [...prior!.snapshottedPrompts] : [];
   if (updateOk && latestIndex >= 0 && !snapshottedPrompts.includes(latestIndex)) {
     const latest = promptChanges.find((c) => c.promptIndex === latestIndex);
-    try {
-      await deps.registerSnapshot?.(repo.workRoot, originSessionId, {
-        sessionTag,
-        model: parsed.model || undefined,
-        promptIndex: latestIndex,
-        transcriptPath: scanned.transcriptPath,
-        filesChanged: latest?.filesChanged || [],
-        linesAdded: latest?.linesAdded || 0,
-        linesRemoved: latest?.linesRemoved || 0,
+    const claimedEarlier = new Set<string>();
+    for (const pd of parsed.promptDiffs) {
+      if (pd.promptIndex >= latestIndex) continue;
+      for (const f of toRepoRel(pd.filesChanged)) claimedEarlier.add(f);
+    }
+    const ownFiles = (latest?.filesChanged || []).filter((f: string) => !claimedEarlier.has(f));
+    const touchedCode = (latest?.linesAdded || 0) + (latest?.linesRemoved || 0) > 0 || ownFiles.length > 0;
+    if (!touchedCode) {
+      debugLog('transcript-watch', 'snapshot skipped: prompt touched no code', {
+        agent: adapter.slug, sessionId: scanned.sessionId, promptIndex: latestIndex,
       });
-      snapshottedPrompts.push(latestIndex);
-    } catch (err) {
-      debugLog('transcript-watch', 'registerSnapshot failed', { agent: adapter.slug, sessionId: scanned.sessionId, err: String(err) });
+    } else {
+      try {
+        await deps.registerSnapshot?.(repo.workRoot, originSessionId, {
+          sessionTag,
+          model: parsed.model || undefined,
+          promptIndex: latestIndex,
+          transcriptPath: scanned.transcriptPath,
+          filesChanged: latest?.filesChanged || [],
+          linesAdded: latest?.linesAdded || 0,
+          linesRemoved: latest?.linesRemoved || 0,
+        });
+        snapshottedPrompts.push(latestIndex);
+      } catch (err) {
+        debugLog('transcript-watch', 'registerSnapshot failed', { agent: adapter.slug, sessionId: scanned.sessionId, err: String(err) });
+      }
     }
   }
 
@@ -1672,26 +1862,17 @@ export function restartTranscriptWatchIfStale(
   return restartTranscriptWatch();
 }
 
-// Best-effort: register a Windows Scheduled Task that relaunches the watcher at
-// logon, so it survives reboots. Windows-only; silently no-ops elsewhere or on
-// any failure. Uses `schtasks /Create /F` (idempotent — /F overwrites).
-export function registerTranscriptWatchLogonTask(): { registered: boolean; reason: string } {
-  if (!isWindows()) return { registered: false, reason: 'not-windows' };
-  const entry = cliEntryScript();
-  if (!entry) return { registered: false, reason: 'no-entry-script' };
-  try {
-    const node = process.execPath;
-    const tr = `\"${node}\" \"${entry}\" transcript-watch`;
-    execFileSync('schtasks', [
-      '/Create', '/F',
-      '/SC', 'ONLOGON',
-      '/TN', 'OriginTranscriptWatch',
-      '/TR', tr,
-    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    return { registered: true, reason: 'schtasks-created' };
-  } catch (err) {
-    return { registered: false, reason: `schtasks-failed: ${String(err)}` };
-  }
+// Register the watcher to relaunch at logon, so it survives reboots. Was a
+// Scheduled Task until Defender started blocking that as malware persistence —
+// utils/logon-autostart.ts has the full story. Windows-only; reports why on
+// every other platform. Callers must SURFACE a failure rather than swallow it:
+// silently losing this means capture stops at the next reboot with no warning.
+export function registerTranscriptWatchAtLogon(): LogonAutoStartResult {
+  return registerLogonAutoStart({
+    name: 'OriginTranscriptWatch',
+    entryScript: cliEntryScript(),
+    subcommand: 'transcript-watch',
+  });
 }
 
 // ─── Real-dependency wiring ──────────────────────────────────────────────────
@@ -1758,6 +1939,7 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     resolveRepo: realResolveRepo,
     writeMemory: writeSessionMemory,
     writeCommitMemoryEntry: writeCommitMemory,
+    enrichDecisions: enrichDecisionsForSession,
     createShadow: createShadowCommit,
     getHead: (workRoot: string) => getHeadSha(workRoot),
     captureDiff: captureAgyDiff,

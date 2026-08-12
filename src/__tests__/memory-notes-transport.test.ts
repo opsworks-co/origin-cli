@@ -23,8 +23,10 @@ import path from 'path';
 import {
   syncNotesFromRemote,
   pushMemoryNotes,
+  foldStagedNotes,
   MEMORY_NOTES_FETCH_REFSPECS,
   NOTES_FETCH_REFSPEC,
+  ORIGIN_NOTES_GLOB_REFSPEC,
 } from '../git-notes.js';
 
 let tmpRoot: string;
@@ -152,26 +154,44 @@ describe('memory notes transport', () => {
     expect(readMemory(alice).sessions.map((s) => s.sessionId).sort()).toEqual(['a1', 'b1']);
   });
 
-  it('persists NO refspec for a ref the remote lacks — plain git fetch must keep working', () => {
-    // A configured refspec naming a ref the remote doesn't have makes ordinary
-    // `git fetch` fail outright ("couldn't find remote ref ..."). This remote
-    // has neither attribution notes nor memory, so sync must install nothing.
+  it('installs the glob refspec even when the remote has NO notes — and git fetch still works', () => {
+    // The invariant this protects: a configured refspec naming a ref the remote
+    // doesn't have makes ordinary `git fetch` fail outright ("couldn't find
+    // remote ref ..."). Explicit refspecs therefore could not be installed
+    // up-front. The glob has no such failure mode, so it goes in unconditionally
+    // — including here, where the remote has neither attribution nor memory.
     syncNotesFromRemote(bob);
     const cfg = (() => { try { return git(bob, 'config', '--get-all', 'remote.origin.fetch'); } catch { return ''; } })();
+    expect(cfg).toContain(ORIGIN_NOTES_GLOB_REFSPEC);
+    // The explicit refspecs remain the thing we must NOT install blind.
     for (const spec of MEMORY_NOTES_FETCH_REFSPECS) expect(cfg).not.toContain(spec);
     expect(cfg).not.toContain(NOTES_FETCH_REFSPEC);
     expect(() => git(bob, 'fetch', '-q', 'origin')).not.toThrow();
   });
 
-  it('persists the memory refspec once the remote HAS memory, and git fetch still works', () => {
+  it('a refspec installed BEFORE the remote had memory still carries it later', () => {
+    // The chicken-and-egg this release fixes. Bob syncs while the remote is
+    // empty (so the old code installed nothing and could only ever install a
+    // refspec once one was no longer needed). Alice then pushes memory, and
+    // Bob's ORDINARY pull has to carry it with no Origin command in between.
+    syncNotesFromRemote(bob);
+
+    writeMemory(alice, [session('a1')]);
+    pushMemoryNotes(alice, 'origin');
+
+    git(bob, 'fetch', '-q', 'origin'); // a plain pull — nothing Origin-aware
+    // Fetched into staging; foldStagedNotes is what post-merge runs.
+    expect(foldStagedNotes(bob)).toBe(true);
+    expect(readMemory(bob).sessions.map((s) => s.sessionId)).toEqual(['a1']);
+  });
+
+  it('folds memory the remote gained, and git fetch still works', () => {
     writeMemory(alice, [session('a1')]);
     pushMemoryNotes(alice, 'origin');
     syncNotesFromRemote(bob);
 
     const cfg = git(bob, 'config', '--get-all', 'remote.origin.fetch');
-    expect(cfg).toContain(MEMORY_NOTES_FETCH_REFSPECS[0]);
-    // The brief was never written, so its refspec must NOT be installed.
-    expect(cfg).not.toContain(MEMORY_NOTES_FETCH_REFSPECS[1]);
+    expect(cfg).toContain(ORIGIN_NOTES_GLOB_REFSPEC);
     expect(() => git(bob, 'fetch', '-q', 'origin')).not.toThrow();
     expect(readMemory(bob).sessions.map((s) => s.sessionId)).toEqual(['a1']);
   });

@@ -28,12 +28,18 @@ describe('installAntigravityHooks', () => {
 
     expect(cfg.origin.enabled).toBe(true);
     // agy only fires Stop / PreToolUse / PostToolUse.
+    //
+    // Command assertions below match the SUBCOMMAND, not a literal "origin …"
+    // prefix: originCmd emits an absolute `"C:\…\node.exe" "…\index.js" hooks …`
+    // invocation on Windows (npm's origin.cmd shim spawns a visible console
+    // window under GUI agents) and `origin hooks …` on POSIX. Pinning the POSIX
+    // spelling made these Windows-failing tests that only ever ran on Linux.
     const events = ['PostToolUse', 'Stop', 'PreToolUse'];
     for (const ev of events) {
       expect(Array.isArray(cfg.origin[ev])).toBe(true);
       const cmd = cfg.origin[ev][0].hooks[0].command as string;
       expect(cfg.origin[ev][0].hooks[0].type).toBe('command');
-      expect(cmd).toContain('origin hooks antigravity');
+      expect(cmd).toContain('hooks antigravity');
     }
     expect(cfg.origin.PostToolUse[0].hooks[0].command).toContain('antigravity post-tool-use');
     expect(cfg.origin.Stop[0].hooks[0].command).toContain('antigravity stop');

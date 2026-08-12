@@ -1,4 +1,4 @@
-import { readAllSessionMemory, readAllCommitMemory, clearSessionMemory, buildMemoryContext } from '../memory.js';
+import { readAllSessionMemory, readAllCommitMemory, clearSessionMemory, buildMemoryContext, sortByDateAsc } from '../memory.js';
 import { getGitRoot } from '../session-state.js';
 
 /**
@@ -18,7 +18,9 @@ export async function memoryShowCommand(options: { limit?: string }): Promise<vo
   }
 
   const limit = parseInt(options.limit || '10', 10);
-  const shown = entries.slice(-limit);
+  // Oldest → newest, and sorted by DATE before slicing so "showing last N" is
+  // really the N most recent rather than the N most recently written.
+  const shown = sortByDateAsc(entries, (e) => e.endedAt).slice(-limit);
 
   // Session rollups — one evolving entry PER SESSION (regenerated as the session
   // works; these IDs are SESSIONS, not commits — a session spans many commits).
@@ -48,7 +50,9 @@ export async function memoryShowCommand(options: { limit?: string }): Promise<vo
   // Immutable per-commit log — frozen when each commit landed, never regenerated.
   const commits = readAllCommitMemory(repoPath);
   if (commits.length > 0) {
-    const shownCommits = commits.slice(-limit).reverse();
+    // Was .slice(-limit).reverse() — newest first, which read backwards next to
+    // the session list above it and made a history hard to follow.
+    const shownCommits = sortByDateAsc(commits, (c) => c.committedAt).slice(-limit);
     console.log(`  Commit history (${commits.length} commit${commits.length !== 1 ? 's' : ''}, immutable — showing last ${shownCommits.length})\n`);
     for (const c of shownCommits) {
       const age = formatAge(Date.now() - new Date(c.committedAt).getTime());

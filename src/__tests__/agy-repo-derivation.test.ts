@@ -21,7 +21,14 @@ describe('deriveAgyRepoPath', () => {
   let repo: string;
 
   beforeEach(() => {
-    repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-demo-1-')));
+    // realpathSync.native, not realpathSync: on Windows the plain version
+    // resolves symlinks but leaves 8.3 SHORT components alone, so a temp dir
+    // under a long user name stays `C:\Users\RUNNER~1\…` while git — which
+    // deriveAgyRepoPath asks — reports the true `C:\Users\runneradmin\…`. The
+    // comparison then failed on a name mismatch that is really the same
+    // directory. Invisible on a dev box whose user name is already 8.3-clean;
+    // it only appeared once CI ran this suite on a real Windows runner.
+    repo = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-demo-1-')));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 'test@origin.dev');
     git(repo, 'config', 'user.name', 'Test');
@@ -62,7 +69,7 @@ describe('deriveAgyRepoPath', () => {
   it('prefers edited-file root even when the workspace path is a different repo', () => {
     // Two real repos: workspace points at one, edits landed in the other. The
     // edits win — that is the whole point (agy reported the wrong workspace).
-    const other = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-other-')));
+    const other = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-other-')));
     try {
       git(other, 'init', '-q', '-b', 'main');
       git(other, 'config', 'user.email', 'test@origin.dev');

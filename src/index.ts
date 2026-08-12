@@ -4,8 +4,8 @@ import { loginCommand } from './commands/login.js';
 import { statusCommand } from './commands/status.js';
 import { policiesCommand } from './commands/policies.js';
 import { syncCommand } from './commands/sync.js';
-import { codexWatchCommand } from './codex-watch.js';
-import { transcriptWatchCommand } from './transcript-watch.js';
+import { codexWatchCommand, ensureCodexWatchRunning } from './codex-watch.js';
+import { transcriptWatchCommand, ensureTranscriptWatchRunning } from './transcript-watch.js';
 import { whoamiCommand } from './commands/whoami.js';
 import { sessionsCommand, sessionDetailCommand, sessionEndCommand, sessionCleanCommand, sessionsSyncCommand, sessionsImportCommand, sessionsForgetCommand } from './commands/sessions.js';
 import { reviewCommand } from './commands/review.js';
@@ -23,9 +23,10 @@ import { disableCommand } from './commands/disable.js';
 import { benchmarkBakeoffCreateCommand } from './commands/benchmark-bakeoff.js';
 import { benchmarkRunnerCommand, benchmarkKeyCommand } from './commands/benchmark-runner.js';
 import { benchmarkSyncCommand } from './commands/benchmark.js';
+import { mcpServeCommand } from './commands/mcp.js';
 import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit,
-  handleGitPostCheckout, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync } from './commands/hooks.js';
+  handleGitPostCheckout, handleGitPostMerge, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
 import { promptsCommand } from './commands/prompts.js';
@@ -710,6 +711,9 @@ hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (reb
   // Also check for cherry-pick context
   handleCherryPick(repoPath);
 });
+hooks.command('git-post-merge')
+  .description('Handle git post-merge hook (fold notes fetched by the pull)')
+  .action(() => handleGitPostMerge());
 hooks.command('git-post-checkout')
   .description('Handle git post-checkout hook (notes on clone; attribution on stash)')
   .action(async () => {
@@ -792,17 +796,34 @@ program.command('repo:add')
 
 program.command('sync').description('Sync session data from current repo').action(syncCommand);
 
+// `--ensure` is the logon-autostart entry point: spawn the daemon detached and
+// exit, rather than becoming the daemon. The Startup .cmd calls this so the
+// watcher ends up with no console attached and survives that .cmd's console
+// closing — running the daemon inline would tie it to a console that is about
+// to be destroyed. See utils/logon-autostart.ts.
+type WatchOpts = { once?: boolean; quiet?: boolean; ensure?: boolean };
+
 program.command('codex-watch')
   .description('Hook-independent Codex session watcher — captures sessions straight from ~/.codex rollout files')
   .option('--once', 'Run a single poll cycle and exit (testing / cron)')
   .option('--quiet', 'Suppress status output')
-  .action((opts: { once?: boolean; quiet?: boolean }) => codexWatchCommand(opts));
+  .option('--ensure', 'Spawn a detached watcher if none is running, then exit (logon auto-start)')
+  .action((opts: WatchOpts) => {
+    if (!opts.ensure) return codexWatchCommand(opts);
+    const res = ensureCodexWatchRunning();
+    if (!opts.quiet) console.log(res.started ? 'codex-watch: spawned' : `codex-watch: ${res.reason}`);
+  });
 
 program.command('transcript-watch')
   .description('Hook-independent multi-agent watcher — captures Claude/Cursor/Antigravity/Gemini/Copilot sessions straight from their on-disk transcripts')
   .option('--once', 'Run a single poll cycle and exit (testing / cron)')
   .option('--quiet', 'Suppress status output')
-  .action((opts: { once?: boolean; quiet?: boolean }) => transcriptWatchCommand(opts));
+  .option('--ensure', 'Spawn a detached watcher if none is running, then exit (logon auto-start)')
+  .action((opts: WatchOpts) => {
+    if (!opts.ensure) return transcriptWatchCommand(opts);
+    const res = ensureTranscriptWatchRunning();
+    if (!opts.quiet) console.log(res.started ? 'transcript-watch: spawned' : `transcript-watch: ${res.reason}`);
+  });
 
 // ─── Agents ──────────────────────────────────────────────────────────────
 
@@ -939,6 +960,12 @@ program.command('user <id>')
 // `context` is THE surface for cross-agent context: handoff + accumulated
 // session memory + the repo brief. The former top-level `handoff` and `memory`
 // commands are now deprecated, hidden aliases that delegate here.
+const mcp = program.command('mcp')
+  .description('Model Context Protocol server — let your agent query Origin directly');
+mcp.command('serve')
+  .description('Run the MCP server over stdio (agents spawn this; not meant to be run by hand)')
+  .action(() => mcpServeCommand());
+
 const context = program.command('context')
   .description('Cross-agent context — handoff + accumulated session memory');
 context.action(async () => {

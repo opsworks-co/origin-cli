@@ -29,7 +29,9 @@ describe('Copilot + Windsurf hook installers', () => {
     for (const [event, sub] of [['sessionStart', 'session-start'], ['userPromptSubmitted', 'user-prompt-submit'], ['agentStop', 'stop'], ['sessionEnd', 'session-end']] as const) {
       const entry = cfg.hooks[event]?.[0];
       expect(entry?.type).toBe('command');
-      expect(entry?.bash).toContain(`origin hooks copilot ${sub}`);
+      // Subcommand only — see the note on the Devin test below for why the
+      // "origin " prefix cannot be asserted on Windows.
+      expect(entry?.bash).toContain(`hooks copilot ${sub}`);
       // Windows variant so the hook also fires under native PowerShell.
       expect(entry?.powershell).toContain(`hooks copilot ${sub}`);
     }
@@ -41,16 +43,22 @@ describe('Copilot + Windsurf hook installers', () => {
     expect(fs.existsSync(p)).toBe(true);
     const cfg = JSON.parse(fs.readFileSync(p, 'utf-8'));
     // Top-level PascalCase event keys, each { hooks: [{ type:'command', command }] }.
-    expect(cfg.SessionStart?.[0]?.hooks?.[0]?.command).toContain('origin hooks devin session-start');
-    expect(cfg.UserPromptSubmit?.[0]?.hooks?.[0]?.command).toContain('origin hooks devin user-prompt-submit');
-    expect(cfg.Stop?.[0]?.hooks?.[0]?.command).toContain('origin hooks devin stop');
-    expect(cfg.SessionEnd?.[0]?.hooks?.[0]?.command).toContain('origin hooks devin session-end');
+    //
+    // Assertions match the SUBCOMMAND rather than a literal "origin …" prefix:
+    // on Windows originCmd emits `"C:\…\node.exe" "…\index.js" hooks devin …`
+    // (npm's origin.cmd shim would pop a console window on every hook fire),
+    // while POSIX gets `origin hooks devin …`. The routing being verified here
+    // is the same on both.
+    expect(cfg.SessionStart?.[0]?.hooks?.[0]?.command).toContain('hooks devin session-start');
+    expect(cfg.UserPromptSubmit?.[0]?.hooks?.[0]?.command).toContain('hooks devin user-prompt-submit');
+    expect(cfg.Stop?.[0]?.hooks?.[0]?.command).toContain('hooks devin stop');
+    expect(cfg.SessionEnd?.[0]?.hooks?.[0]?.command).toContain('hooks devin session-end');
     expect(cfg.SessionStart?.[0]?.hooks?.[0]?.type).toBe('command');
     // Transition: also writes legacy Cascade hooks for the desktop GUI, pointed
     // at the same `origin hooks devin` handler (camelCase Cascade event names).
     const casc = JSON.parse(fs.readFileSync(path.join(dir, '.windsurf', 'hooks.json'), 'utf-8'));
-    expect(casc.hooks.sessionStart?.[0]?.command).toContain('origin hooks devin session-start');
-    expect(casc.hooks.beforeSubmitPrompt?.[0]?.command).toContain('origin hooks devin user-prompt-submit');
+    expect(casc.hooks.sessionStart?.[0]?.command).toContain('hooks devin session-start');
+    expect(casc.hooks.beforeSubmitPrompt?.[0]?.command).toContain('hooks devin user-prompt-submit');
   });
 
   it('Devin: re-running is idempotent (no duplicate origin entries)', () => {

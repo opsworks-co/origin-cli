@@ -282,6 +282,68 @@ describe('reconcileSession', () => {
     expect((registerSnapshot.mock.calls[0] as any[])[2].filesChanged).toEqual(['mumuka']);
   });
 
+  // createSnapshot's dedup only refuses a snapshot when the whole tree is clean
+  // or byte-identical to the last one. On a repo carrying pre-existing dirt that
+  // never fires, so a chat-only turn used to get a snapshot stamped on it and
+  // wear a green dot in the Session view next to an empty diff.
+  it('does not snapshot a chat-only turn that inherits earlier prompts\' files', async () => {
+    const api = mockApi();
+    const registerSnapshot = vi.fn(async () => {});
+    const deps = baseDeps(api, {
+      registerSnapshot,
+      // No tree movement attributable to the latest prompt.
+      captureDiff: () => ({ diff: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 }),
+    });
+    await reconcileSession(
+      scanned({ cwd: '/repo/a' }),
+      fakeAdapter({
+        userPrompts: ['add rows to mumuka', 'thanks, looks good'],
+        promptTimestamps: [1000, 2000],
+        // Session-wide file list — prompt 0 wrote it, prompt 1 only chatted.
+        filesChanged: ['/repo/a/mumuka'],
+        promptDiffs: [
+          { promptIndex: 0, filesChanged: ['/repo/a/mumuka'], diff: '+row', linesAdded: 1, linesRemoved: 0 },
+        ],
+      }),
+      deps,
+    );
+    expect(registerSnapshot).not.toHaveBeenCalled();
+  });
+
+  // The skip must not latch: a turn polled before its edit lands reads empty,
+  // and has to still be eligible once the edit shows up.
+  it('snapshots a prompt on a later poll once its edit lands', async () => {
+    const api = mockApi();
+    const registerSnapshot = vi.fn(async () => {});
+    const emptyDiff = { diff: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 };
+    const deps = baseDeps(api, { registerSnapshot, captureDiff: () => emptyDiff });
+
+    const chatOnly = fakeAdapter({
+      userPrompts: ['add rows to mumuka', 'now add one to cocain'],
+      promptTimestamps: [1000, 2000],
+      filesChanged: ['/repo/a/mumuka'],
+      promptDiffs: [
+        { promptIndex: 0, filesChanged: ['/repo/a/mumuka'], diff: '+row', linesAdded: 1, linesRemoved: 0 },
+      ],
+    });
+    await reconcileSession(scanned({ cwd: '/repo/a' }), chatOnly, deps);
+    expect(registerSnapshot).not.toHaveBeenCalled();
+
+    // Next poll: prompt 1's edit is now in the transcript.
+    const withEdit = fakeAdapter({
+      userPrompts: ['add rows to mumuka', 'now add one to cocain'],
+      promptTimestamps: [1000, 2000],
+      filesChanged: ['/repo/a/mumuka', '/repo/a/cocain'],
+      promptDiffs: [
+        { promptIndex: 0, filesChanged: ['/repo/a/mumuka'], diff: '+row', linesAdded: 1, linesRemoved: 0 },
+        { promptIndex: 1, filesChanged: ['/repo/a/cocain'], diff: '+row', linesAdded: 1, linesRemoved: 0 },
+      ],
+    });
+    await reconcileSession(scanned({ cwd: '/repo/a' }), withEdit, deps);
+    expect(registerSnapshot).toHaveBeenCalledTimes(1);
+    expect((registerSnapshot.mock.calls[0] as any[])[2].promptIndex).toBe(1);
+  });
+
   it('falls back to the transcript-derived diff when the tree diff is empty (uncommitted in-flight prompt)', async () => {
     const api = mockApi();
     // Tree diff empty (baseline captured after the edit), but the transcript

@@ -12,7 +12,7 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { syncNotesFromRemote, syncNotesFromRemoteThrottled, NOTES_FETCH_REFSPEC } from '../git-notes.js';
+import { syncNotesFromRemote, syncNotesFromRemoteThrottled, syncNotesForSessionStart, NOTES_SYNC_BACKOFF_MS, SESSION_START_SYNC_TIMEOUT_MS, ORIGIN_NOTES_GLOB_REFSPEC } from '../git-notes.js';
 
 let tmpRoot: string;
 let upstream: string;
@@ -69,7 +69,7 @@ describe('syncNotesFromRemote', () => {
   it('installs the fetch refspec so plain git fetch keeps notes current', () => {
     syncNotesFromRemote(clone);
     const refspecs = git(clone, 'config', '--get-all', 'remote.origin.fetch');
-    expect(refspecs).toContain(NOTES_FETCH_REFSPEC);
+    expect(refspecs).toContain(ORIGIN_NOTES_GLOB_REFSPEC);
 
     // Author annotates a new commit; the clone's ORDINARY fetch now
     // carries it — no Origin command involved.
@@ -135,5 +135,46 @@ describe('syncNotesFromRemoteThrottled', () => {
 
     // Second call within the backoff window is a no-op (throttled).
     expect(syncNotesFromRemoteThrottled(clone)).toBe(false);
+  });
+
+  it('re-syncs once the window has elapsed', () => {
+    // The window is what makes "fresh at session start" mean anything. At the
+    // old 6h an agent launched 5h59m later started on stale memory with no way
+    // to know; the guarantee is only as good as this backoff.
+    expect(syncNotesFromRemoteThrottled(clone)).toBe(true);
+    expect(syncNotesFromRemoteThrottled(clone)).toBe(false);
+
+    // Age the stamp past the window.
+    const stampDir = path.join(tmpRoot, '.origin', 'notes-sync');
+    const stamp = path.join(stampDir, fs.readdirSync(stampDir)[0]);
+    const past = Date.now() - (NOTES_SYNC_BACKOFF_MS + 60_000);
+    fs.utimesSync(stamp, new Date(past), new Date(past));
+
+    expect(syncNotesFromRemoteThrottled(clone)).toBe(true);
+  });
+
+  it('still throttles just INSIDE the window', () => {
+    expect(syncNotesFromRemoteThrottled(clone)).toBe(true);
+    const stampDir = path.join(tmpRoot, '.origin', 'notes-sync');
+    const stamp = path.join(stampDir, fs.readdirSync(stampDir)[0]);
+    const justInside = Date.now() - (NOTES_SYNC_BACKOFF_MS - 60_000);
+    fs.utimesSync(stamp, new Date(justInside), new Date(justInside));
+
+    expect(syncNotesFromRemoteThrottled(clone)).toBe(false);
+  });
+
+  it('a fleet launching at once produces ONE fetch, not N', () => {
+    // The stamp is written BEFORE the fetch precisely so this holds — it is
+    // what makes the shorter window safe.
+    const results = Array.from({ length: 16 }, () => syncNotesFromRemoteThrottled(clone));
+    expect(results.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('syncNotesForSessionStart shares the throttle but caps network time', () => {
+    // Session start runs this SYNCHRONOUSLY in front of a user waiting for
+    // their agent, so its ceiling has to be tighter than the 15s default.
+    expect(SESSION_START_SYNC_TIMEOUT_MS).toBeLessThan(15_000);
+    expect(syncNotesForSessionStart(clone)).toBe(true);
+    expect(syncNotesForSessionStart(clone)).toBe(false); // same stamp, same window
   });
 });

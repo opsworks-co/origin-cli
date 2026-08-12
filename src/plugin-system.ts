@@ -1,7 +1,8 @@
-import { execSync, spawn } from 'child_process';
+import { execSync, execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { isWindows } from './utils/platform.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -289,19 +290,40 @@ function saveRegistry(registry: PluginRegistry): void {
 
 /**
  * Check if a command is accessible (exists in PATH or is an absolute path).
+ * Exported for tests — the PATH lookup is platform-specific and was silently
+ * wrong on Windows for every plugin dependency.
  */
-function isCommandAccessible(command: string): boolean {
-  const parts = command.split(/\s+/);
-  const cmd = parts[0];
+export function isCommandAccessible(command: string): boolean {
+  const trimmed = (command || '').trim();
+  if (!trimmed) return false;
+
+  // Isolate the executable from any arguments. Splitting on whitespace alone
+  // breaks on Windows, where the usual install location contains a space:
+  // `C:\Program Files\nodejs\node.exe` becomes `C:\Program`, which exists
+  // nowhere, so the plugin's command was reported inaccessible. Try, in order:
+  // a quoted first token (the conventional way to write such a path with
+  // arguments), then the WHOLE string when it is an absolute path that exists
+  // (a bare path with spaces and no arguments), then the first token.
+  const quoted = trimmed.match(/^"([^"]+)"/);
+  const cmd = quoted
+    ? quoted[1]
+    : (path.isAbsolute(trimmed) && fs.existsSync(trimmed) ? trimmed : trimmed.split(/\s+/)[0]);
 
   // Absolute path
   if (path.isAbsolute(cmd)) {
     return fs.existsSync(cmd);
   }
 
-  // Check PATH
+  // Check PATH. `which` is POSIX-only — on Windows it isn't a command at all,
+  // so this used to throw for EVERY dependency and report every plugin's
+  // requirements as unsatisfiable. `where` is the Windows equivalent and, like
+  // `which`, exits non-zero when the command isn't found.
+  //
+  // execFileSync (not execSync) so the command name is an argument rather than
+  // shell text — a plugin's declared dependency is untrusted input and has no
+  // business reaching a shell.
   try {
-    execSync(`which ${cmd}`, { windowsHide: true, stdio: 'pipe' });
+    execFileSync(isWindows() ? 'where' : 'which', [cmd], { windowsHide: true, stdio: 'pipe' });
     return true;
   } catch {
     return false;

@@ -123,6 +123,38 @@ export function isProcessRunning(pattern: string): boolean {
 }
 
 /**
+ * Of several agent process patterns, the ONE that matches — or null when zero
+ * or several do, with the full match list for logging.
+ *
+ * The pgrep sweeps used to take the FIRST match in registry order, which turns
+ * any false positive into a permanent, silent mis-attribution: Copilot sorts
+ * first in AGENTS, and its old pattern matched the vendored git daemon under
+ * `~/Library/Caches/github-copilot-git-*`, so every commit on that machine was
+ * credited to Copilot regardless of which agent did the work — a user saw
+ * "copilot wrote …" for their own Claude Code session.
+ *
+ * Tightening that pattern fixes the instance; refusing to guess fixes the class.
+ * When two agents really are running, nothing here says which one committed, and
+ * an unattributed commit is recoverable (trailers, git notes and session capture
+ * still resolve it) while a confidently wrong one is not.
+ *
+ * `isMatch` is injectable so callers can supply their own probe (and tests can
+ * run without spawning processes).
+ */
+export function uniqueMatchingId(
+  checks: Array<{ cmd: string; id: string }>,
+  isMatch: (cmd: string) => boolean = isProcessRunning,
+): { id: string | null; matched: string[] } {
+  const matched: string[] = [];
+  for (const check of checks) {
+    try {
+      if (isMatch(check.cmd) && !matched.includes(check.id)) matched.push(check.id);
+    } catch { /* a probe that throws is simply not a match */ }
+  }
+  return { id: matched.length === 1 ? matched[0] : null, matched };
+}
+
+/**
  * Parent pid + command line for a single process, cross-platform — the pieces
  * an ancestry walk needs. Unix: `ps -p <pid> -o ppid=,command=`. Windows: the
  * Win32_Process CIM snapshot (ParentProcessId + CommandLine). Returns null when

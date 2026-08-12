@@ -144,6 +144,25 @@ interface MemoryPayload {
   version: number;
   sessions: SessionMemoryEntry[];
   commits: CommitMemoryEntry[];
+  // Commit SHAs deliberately removed, and never to be re-added.
+  //
+  // Commit records are immutable and the cross-machine merge UNIONS them, which
+  // together made a wrong record permanent: a commit recorded under the wrong
+  // agent was deleted locally, and the next sync folded the remote copy — which
+  // still had it — straight back in. Observed exactly that with 74d04c6, filed
+  // under antigravity when Cursor had made it. Immutability is meant to stop
+  // records being rewritten, not to make a mistake unfixable, so removal is
+  // expressed as a fact that merges like any other rather than as an absence,
+  // which merges as nothing.
+  tombstones?: CommitTombstone[];
+}
+
+export interface CommitTombstone {
+  commitSha: string;
+  // Why it was removed. Kept because a bare sha in a deletion list is
+  // unreviewable six months later.
+  reason: string;
+  at: string;
 }
 
 function memoryRootCommit(repoPath: string): string | null {
@@ -155,23 +174,39 @@ function memoryRootCommit(repoPath: string): string | null {
 function readMemoryPayload(repoPath: string): MemoryPayload {
   try {
     const root = memoryRootCommit(repoPath);
-    if (!root) return { version: 2, sessions: [], commits: [] };
+    if (!root) return { version: 2, sessions: [], commits: [], tombstones: [] };
     const raw = git(['notes', '--ref=origin-memory', 'show', root], { cwd: repoPath, timeoutMs: 10_000 }).trim();
     const data = JSON.parse(raw);
     return {
       version: typeof data.version === 'number' ? data.version : 1,
       sessions: Array.isArray(data.sessions) ? data.sessions : [],
       commits: Array.isArray(data.commits) ? data.commits : [], // absent in v1 payloads
+      tombstones: Array.isArray(data.tombstones) ? data.tombstones : [],
     };
   } catch {
-    return { version: 2, sessions: [], commits: [] };
+    return { version: 2, sessions: [], commits: [], tombstones: [] };
   }
 }
 
-function writeMemoryPayload(repoPath: string, sessions: SessionMemoryEntry[], commits: CommitMemoryEntry[]): void {
+function writeMemoryPayload(
+  repoPath: string,
+  sessions: SessionMemoryEntry[],
+  commits: CommitMemoryEntry[],
+  // Optional so the many existing callers stay unchanged: omitting it PRESERVES
+  // whatever tombstones are already recorded. Dropping them on an ordinary write
+  // would quietly resurrect everything they suppress.
+  tombstones?: CommitTombstone[],
+): void {
   const root = memoryRootCommit(repoPath);
   if (!root) return;
-  const payload = JSON.stringify({ version: 2, sessions, commits }, null, 2);
+  const keptTombstones = tombstones ?? readMemoryPayload(repoPath).tombstones ?? [];
+  const suppressed = new Set(keptTombstones.map((t) => t.commitSha));
+  const visibleCommits = commits.filter((c) => !suppressed.has(c.commitSha));
+  const payload = JSON.stringify(
+    { version: 2, sessions, commits: visibleCommits, tombstones: keptTombstones },
+    null,
+    2,
+  );
   git(['notes', '--ref=origin-memory', 'add', '-f', '-m', payload, root], { cwd: repoPath, timeoutMs: 10_000 });
 }
 
@@ -215,11 +250,22 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
     if (!mine || entryTime(e) > entryTime(mine)) sessions.set(e.sessionId, e);
   }
 
+  // Tombstones union like everything else, and a deletion recorded on EITHER
+  // side wins. That asymmetry is deliberate: the whole point is that one machine
+  // can retract a wrong record and have the retraction stick, and a merge where
+  // the un-deleted side wins would restore it on the very next sync — which is
+  // precisely how 74d04c6 kept coming back.
+  const tombstones = new Map<string, CommitTombstone>();
+  for (const t of [...(local?.tombstones || []), ...(remote?.tombstones || [])]) {
+    if (t?.commitSha && !tombstones.has(t.commitSha)) tombstones.set(t.commitSha, t);
+  }
+
   const commits = new Map<string, CommitMemoryEntry>();
   for (const c of local?.commits || []) if (c?.commitSha) commits.set(c.commitSha, c);
   for (const c of remote?.commits || []) {
     if (c?.commitSha && !commits.has(c.commitSha)) commits.set(c.commitSha, c);
   }
+  for (const sha of tombstones.keys()) commits.delete(sha);
 
   const mergedSessions = [...sessions.values()]
     .sort((a, b) => entryTime(a) - entryTime(b))
@@ -235,7 +281,7 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
       return (Number.isNaN(ta) ? 0 : ta) - (Number.isNaN(tb) ? 0 : tb);
     });
 
-  return { version: 2, sessions: mergedSessions, commits: mergedCommits };
+  return { version: 2, sessions: mergedSessions, commits: mergedCommits, tombstones: [...tombstones.values()] };
 }
 
 /** Read the memory payload out of an arbitrary notes ref, or null if absent. */
@@ -250,6 +296,7 @@ export function readMemoryPayloadFromRef(repoPath: string, ref: string): MemoryP
       version: typeof data.version === 'number' ? data.version : 1,
       sessions: Array.isArray(data.sessions) ? data.sessions : [],
       commits: Array.isArray(data.commits) ? data.commits : [],
+      tombstones: Array.isArray(data.tombstones) ? data.tombstones : [],
     };
   } catch {
     return null;
@@ -329,11 +376,46 @@ export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry):
 // Record an IMMUTABLE per-commit memory entry. Add-once by SHA: if a record for
 // this commit already exists, it is left untouched (frozen). Pruned to commits
 // whose session is still in the retained session window.
+/**
+ * Retract a per-commit memory record: remove it AND record why, so it cannot
+ * come back.
+ *
+ * Commit records are immutable and merge by union, which is right for the case
+ * they were designed for — two machines each holding half the history — but it
+ * meant a WRONG record was permanent. 74d04c6 was filed under antigravity when
+ * Cursor had made it; deleting it locally worked until the next sync folded the
+ * remote copy back in. Immutability should stop a record being quietly
+ * rewritten, not stop a mistake being corrected.
+ *
+ * Returns true when something was actually retracted. Idempotent: retracting
+ * the same sha twice leaves one tombstone.
+ */
+export function forgetCommitMemory(repoPath: string, commitSha: string, reason: string): boolean {
+  try {
+    if (!commitSha || !reason) return false;
+    const { sessions, commits, tombstones } = readMemoryPayload(repoPath);
+    const existing = tombstones || [];
+    if (existing.some((t) => t.commitSha === commitSha)) return false;
+    const next = [
+      ...existing,
+      { commitSha, reason, at: new Date().toISOString() },
+    ];
+    writeMemoryPayload(repoPath, sessions, commits.filter((c) => c.commitSha !== commitSha), next);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function writeCommitMemory(repoPath: string, entry: CommitMemoryEntry): void {
   try {
     if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return;
     if (!entry.commitSha) return;
-    const { sessions, commits } = readMemoryPayload(repoPath);
+    const { sessions, commits, tombstones } = readMemoryPayload(repoPath);
+    // A retracted commit stays retracted. Without this the writer that produced
+    // the wrong record in the first place simply writes it again on the next
+    // poll, and the retraction is a no-op with extra steps.
+    if ((tombstones || []).some((t) => t.commitSha === entry.commitSha)) return;
     const existing = commits.find((c) => c.commitSha === entry.commitSha);
     if (existing) {
       // Add-once: the record's content is frozen — with ONE exception. An agent
@@ -403,6 +485,33 @@ export function readAllSessionMemory(repoPath: string): SessionMemoryEntry[] {
 }
 
 // The immutable per-commit records, oldest→newest.
+/**
+ * Chronological order, oldest → newest.
+ *
+ * Insertion order is NOT time order and must not be used as a proxy for it:
+ *   - writeSessionMemory UPSERTS by sessionId, so a long session that ends last
+ *     keeps the slot it took when it FIRST wrote. "the last element" is then
+ *     whichever session was created most recently, not the one that ended most
+ *     recently.
+ *   - writeCommitMemory appends, so a catch-up write — a commit an older build
+ *     never recorded, picked up on a later poll — lands AFTER commits that are
+ *     newer than it.
+ *
+ * Entries whose date will not parse keep their position relative to each other
+ * instead of being flung to one end, and the sort is stable on ties, so equal
+ * timestamps stay in the order they were recorded.
+ */
+export function sortByDateAsc<T>(list: T[], dateOf: (item: T) => string | undefined): T[] {
+  return list
+    .map((item, index) => ({ item, index, at: Date.parse(dateOf(item) || '') }))
+    .sort((a, b) => {
+      const bothParsed = Number.isFinite(a.at) && Number.isFinite(b.at);
+      if (bothParsed && a.at !== b.at) return a.at - b.at;
+      return a.index - b.index;
+    })
+    .map((entry) => entry.item);
+}
+
 export function readAllCommitMemory(repoPath: string): CommitMemoryEntry[] {
   return readMemoryPayload(repoPath).commits;
 }
@@ -446,7 +555,10 @@ export function buildMemoryContext(repoPath: string): string | null {
 
   // The most recent substantive session's focus + its files (repo-relative,
   // basenamed so no absolute worktree paths leak into the prompt).
-  const last = substantive[substantive.length - 1];
+  // By endedAt, not by position — see sortByDateAsc. An upserted long-running
+  // session sits wherever it first wrote, so the array tail is the newest
+  // session to have STARTED, which is not the same thing.
+  const last = sortByDateAsc(substantive, (e) => e.endedAt)[substantive.length - 1];
   const ago = formatAge(Date.now() - new Date(last.endedAt).getTime());
   parts.push(`- Most recent: [${ago} ago] ${last.summary.slice(0, 160)}`);
   const lastFiles = repoRelativeFiles(last.filesChanged).map((f) => path.basename(f));

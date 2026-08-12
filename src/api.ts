@@ -117,7 +117,14 @@ function assertFields(res: unknown, label: string, fields: string[]): asserts re
   }
 }
 
-async function request(path: string, opts: RequestInit = {}, timeoutMs?: number) {
+// Exported for the in-CLI MCP server (src/mcp/), which used to live in its own
+// package with a duplicate fetch + config loader. Sharing this one gets it the
+// CLI's whole auth story for free: profile resolution, the ORIGIN_API_KEY env
+// override, the X-Origin-CLI-Version header the server reads for staleness
+// warnings, timeouts, and the 401 → auth-status/relogin handling. The duplicate
+// had none of that, which is how it sat at 0.1.0 while the CLI shipped ~40
+// releases.
+export async function request(path: string, opts: RequestInit = {}, timeoutMs?: number) {
   const config = getConfig();
   let res: Response;
   try {

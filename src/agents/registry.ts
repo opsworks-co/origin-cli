@@ -38,7 +38,16 @@ export interface AgentDefinition {
 // resolveAgentDisplayName, not here, because it is a fallback, not a match
 // for the cursor slug itself.
 export const AGENTS: AgentDefinition[] = [
-  { slug: 'copilot',  displayName: 'Copilot',     modelPattern: /copilot/i,                      attributionPgrep: 'pgrep -f "copilot.*cli|github-copilot"', standalonePgrep: 'pgrep -f "copilot.*cli|github-copilot"' },
+  // `copilot` must appear as its own command-line TOKEN (start of line, after a
+  // slash, or after a space). The old `github-copilot` alternative matched the
+  // substring anywhere, including inside a PATH segment — and GitHub ships a
+  // vendored git under `~/Library/Caches/github-copilot-git-<ver>/`, whose
+  // fsmonitor--daemon runs permanently. Every commit made with no live Origin
+  // session was therefore tagged `detected-copilot-*` (copilot is first in this
+  // list and the sweeps took the first match), crediting Copilot for other
+  // agents' work. `copilot.*cli` was the same trap by another route: it spans
+  // any distance, so that daemon's path plus any later "cli" matched too.
+  { slug: 'copilot',  displayName: 'Copilot',     modelPattern: /copilot/i,                      attributionPgrep: 'pgrep -f "(^|[ /])(gh-)?copilot( |$)|github-copilot-cli|@github/copilot"', standalonePgrep: 'pgrep -f "(^|[ /])(gh-)?copilot( |$)|github-copilot-cli|@github/copilot"' },
   { slug: 'amp',      displayName: 'Amp',         modelPattern: /amp/i,                          attributionPgrep: 'pgrep -f "amp.*cli|/amp "',              standalonePgrep: 'pgrep -f "amp.*cli|/amp "' },
   { slug: 'junie',    displayName: 'Junie',       modelPattern: /junie|jetbrains/i,              attributionPgrep: 'pgrep -f "junie|jetbrains.*ai"' },
   { slug: 'opencode', displayName: 'Opencode',    modelPattern: /opencode/i,                     attributionPgrep: 'pgrep -f "opencode"',                    standalonePgrep: 'pgrep -f "opencode"' },

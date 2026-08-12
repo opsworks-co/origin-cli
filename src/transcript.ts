@@ -847,6 +847,13 @@ export interface PromptFileMapping {
   // (see reportedCommitShas). Lets a turn state which commit it made instead of
   // the watcher inferring it from a walk that may not contain the commit at all.
   commitShas?: string[];
+  // The raw `git commit …` command text this turn ran. Kept verbatim because
+  // the commit MESSAGE is in there, and a turn that never printed its sha can
+  // still be tied to a commit by matching that message against the repo — see
+  // matchCommitByCommand. Verbatim rather than parsed: agents quote the message
+  // three different ways (double quotes, a PowerShell here-string, `$(@'…'@)`),
+  // and a matcher that searches the whole string is indifferent to all of them.
+  commitCommands?: string[];
 }
 
 /**
@@ -915,6 +922,7 @@ export function extractPromptFileMappings(
   let currentEdits: Array<{ file: string; toolName: string; input: Record<string, any> }> = [];
   let currentRanCommit = false;
   let currentCommitShas: string[] = [];
+  let currentCommitCommands: string[] = [];
 
   // Prompts waiting for their turn to start, and whether the accumulator above
   // belongs to a turn that has actually begun. Only used when `hasTurnMarkers`.
@@ -943,6 +951,7 @@ export function extractPromptFileMappings(
       commitShas: currentRanCommit && currentCommitShas.length > 0
         ? [...new Set(currentCommitShas)]
         : undefined,
+      commitCommands: currentCommitCommands.length > 0 ? currentCommitCommands.slice() : undefined,
     });
   };
 
@@ -953,6 +962,7 @@ export function extractPromptFileMappings(
     currentEdits = [];
     currentRanCommit = false;
     currentCommitShas = [];
+    currentCommitCommands = [];
   };
 
   for (const line of lines) {
@@ -1045,6 +1055,9 @@ export function extractPromptFileMappings(
           // overlap, which can never match a turn with no recorded files.
           if (block.type === 'tool_use' && block.input && ranGitCommit(block.input)) {
             currentRanCommit = true;
+            const cmd = block.input.command ?? block.input.cmd ?? block.input.script ?? block.input.shellCommand;
+            const text = typeof cmd === 'string' ? cmd : Array.isArray(cmd) ? cmd.join(' ') : '';
+            if (text) currentCommitCommands.push(text);
           }
           // The sha the turn reported for that commit. Collected unconditionally
           // and filtered at flush — Cursor's summary text arrives in a LATER

@@ -68,11 +68,11 @@ import {
   isSpecificModel, sessionMatchesAgent, isCodexLikeModel,
   attributionPgrepChecks, standalonePgrepChecks, resolveAgentDisplayName,
 } from '../agents/registry.js';
-import { isProcessRunning } from '../utils/process-detect.js';
+import { isProcessRunning, uniqueMatchingId } from '../utils/process-detect.js';
 import { ensureSqlite, querySqlite } from '../utils/sqlite.js';
 import { attachOrphanCommitFiles } from '../prompt-completeness.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
-import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, pushMemoryNotes, type PromptNoteEntry } from '../git-notes.js';
+import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, syncNotesForSessionStart, pushMemoryNotes, pushAcceptanceNotes, foldStagedNotes, resolvePushRemote, type PromptNoteEntry } from '../git-notes.js';
 import { parseMarkersFromTranscript, parseMarkersFromTranscriptPath } from '../origin-markers.js';
 import { redactSecrets } from '../redaction.js';
 import { makeSyncBlock } from '../sync-block.js';
@@ -172,6 +172,21 @@ const durableEnd = (sessionId: string, data: any) =>
  */
 function safePgrep(pgrepCmd: string): boolean {
   return isProcessRunning(pgrepCmd);
+}
+
+/**
+ * The ONE agent whose process pattern matches, or null when zero or several do.
+ * Abstaining on ambiguity is deliberate — see uniqueMatchingId.
+ */
+function uniquePgrepMatch(
+  checks: Array<{ cmd: string; id: string }>,
+  logScope: string,
+): string | null {
+  const { id, matched } = uniqueMatchingId(checks, safePgrep);
+  if (!id && matched.length > 1) {
+    debugLog(logScope, 'multiple agent processes running — not guessing', { matched });
+  }
+  return id;
 }
 
 // ─── Diff Filtering ─────────────────────────────────────────────────────
@@ -866,6 +881,31 @@ export function buildSessionWriteData(opts: {
     originUrl: `${apiUrl}/sessions/${state.sessionId}`,
     changes,
   };
+}
+
+/**
+ * Should this turn get an auto-snapshot?
+ *
+ * createSnapshot's dedup is NOT the "did anything change?" test it looks like:
+ * it returns null only when the whole working tree is clean, or when the tree is
+ * byte-identical to the previous snapshot. On a repo carrying pre-existing dirt
+ * the first can never fire, so any unrelated tree movement mints a snapshot and
+ * stamps it on whatever prompt is current — a chat-only turn ends up wearing a
+ * green dot in the Session view next to an empty diff.
+ *
+ * Stop already reaches a verdict on exactly this question. `chatOnly` is set on
+ * a prompt mapping only when there were no commits AND no transcript edits AND
+ * no working-tree changes. That last clause is what the old
+ * `linesAdded + linesRemoved > 0` gate lacked, and why that gate had to be
+ * removed: a Cursor mid-turn prompt edits files in the IDE without committing,
+ * so its tree is dirty, so it is never chatOnly and keeps its tree ref.
+ */
+export function shouldAutoSnapshot(
+  promptMappings: Array<{ promptIndex: number; chatOnly?: boolean }>,
+  promptCount: number,
+): boolean {
+  const current = promptMappings.find((pm) => pm.promptIndex === promptCount - 1);
+  return current?.chatOnly !== true;
 }
 
 // ─── Stdin Reader ──────────────────────────────────────────────────────────
@@ -2474,7 +2514,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           existing.activePolicies.map((p: string) => `- ${p}`).join('\n');
       }
       try {
-        syncNotesFromRemoteThrottled(repoPath);
+        syncNotesForSessionStart(repoPath);
       } catch {}
       try {
         const attributionCtx = buildAttributionContext(repoPath);
@@ -3003,7 +3043,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     // context until the user runs `origin link`/`blame`. No-op after the
     // first sync until the backoff window elapses; never fatal.
     try {
-      syncNotesFromRemoteThrottled(repoPath);
+      syncNotesForSessionStart(repoPath);
     } catch {
       // Non-fatal — attribution below still renders whatever notes are local.
     }
@@ -3386,6 +3426,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   const lookupSessionId = hookLookupSessionId(input.session_id, agentSlug);
   const found = findStateForHook(hookCwd, lookupSessionId, agentSlug);
   let state = found?.state || null;
+  // True when THIS turn had to mint the session because no sessionStart hook
+  // ever fired. Such a turn IS the session's start, so the context injection at
+  // the end of this handler owes it the full repo context, not just attribution.
+  let sessionJustAutoCreated = false;
 
   if (state) {
     // Update Claude session ID and transcript path if they changed
@@ -3542,6 +3586,22 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       return;
     }
     if (repoPath) {
+      // Pull the repo's Origin metadata down before minting the session, the
+      // same way handleSessionStart does — this path IS session start for any
+      // agent whose sessionStart hook didn't fire.
+      //
+      // Cursor is the case that forced this: it fires sessionStart roughly once
+      // per app launch, not per chat (measured on a real log: 2 sessionStart
+      // against 10 user-prompt-submit / 10 stop). Every chat after the first
+      // landed here, so an agent could run a whole session on memory that was
+      // hours stale while a teammate's had been on the remote the entire time.
+      // Codex/Devin/Copilot share the shape whenever their start hook is missed.
+      //
+      // Throttled and time-boxed, so the common case is a stat() and the worst
+      // case is a bounded stall rather than an unbounded one.
+      try {
+        syncNotesForSessionStart(repoPath);
+      } catch { /* never block a prompt on the network */ }
       try {
         // Auto-create agent config in standalone mode
         if (!autoAgentConfig) {
@@ -3722,6 +3782,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           enforcementRules,
         };
         saveSessionState(state, repoPath, autoTag);
+        sessionJustAutoCreated = true;
 
         // Start heartbeat for auto-created sessions so they don't get cleaned up as stale
         const connected = isConnectedMode();
@@ -4298,12 +4359,39 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         state.activePolicies.map((p: string) => `- ${p}`).join('\n');
     }
 
-    // Inject repo-level attribution context
+    // Inject repo-level context.
+    //
+    // Normally just attribution — this runs on EVERY prompt, and the memory /
+    // brief / handoff blocks are large enough that repeating them each turn
+    // would burn context for no new information.
+    //
+    // But when this turn auto-created the session, no sessionStart hook fired,
+    // so nothing has EVER injected the full block for this session. Cursor
+    // makes that the common case, not the edge: it fires sessionStart about
+    // once per app launch, so every chat after the first landed here and ran
+    // blind to memory — the agent had the notes on disk and never read them.
+    // Give that turn the same consolidated block handleSessionStart builds.
     const repoPath = state.repoPath || hookCwd;
+    const safeCtx = (fn: () => string | null): string | null => { try { return fn(); } catch { return null; } };
     try {
-      const attributionCtx = buildAttributionContext(repoPath);
-      if (attributionCtx) {
-        systemMsg += '\n\n' + attributionCtx;
+      if (sessionJustAutoCreated) {
+        const repoContext = assembleRepoContext({
+          brief: safeCtx(() => buildRepoBriefContext(repoPath)),
+          attribution: safeCtx(() => buildAttributionContext(repoPath)),
+          memory: safeCtx(() => buildMemoryBriefContext(repoPath)) || safeCtx(() => buildMemoryContext(repoPath)),
+          handoff: safeCtx(() => buildHandoffContext(repoPath)),
+        });
+        if (repoContext) {
+          systemMsg += '\n\n' + repoContext;
+          debugLog('user-prompt-submit', 'full repo context injected (session auto-created, no sessionStart)', {
+            length: repoContext.length,
+          });
+        }
+      } else {
+        const attributionCtx = buildAttributionContext(repoPath);
+        if (attributionCtx) {
+          systemMsg += '\n\n' + attributionCtx;
+        }
       }
     } catch {}
 
@@ -5068,9 +5156,14 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         // count as a code turn. filteredUncommitted is what's actually
         // attributable to THIS turn after the per-prompt exclude list
         // strips prior-turn carryover.
+        // Both diffs filtered — see the note on the safety-net branch below. A
+        // raw workingTreeDiff carries pre-existing dirt when the baseline is not
+        // a shadow, which keeps a genuinely chat-only turn out of this branch.
         const noUncommittedChanges =
           !filteredUncommitted &&
-          !((gitCapture.workingTreeDiff || '').length > 0);
+          !(gitCapture.workingTreeDiff
+            ? filterUncommittedDiff(gitCapture.workingTreeDiff, uncommittedExcludeUnion(state))
+            : '');
         if (noCommits && noTranscriptEdits && noUncommittedChanges) {
           const currentMapping = {
             promptIndex: currentPromptIdx,
@@ -5187,8 +5280,24 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         // edits — without checking uncommittedDiff the turn falls into
         // the chat-only branch below and ends up with treeSha=null,
         // un-restorable in the UI.
-        const noUncommittedChanges = !((gitCapture.uncommittedDiff || '').length > 0)
-          && !((gitCapture.workingTreeDiff || '').length > 0);
+        //
+        // Judge that on the FILTERED diffs — the same ones the else-branch below
+        // builds the mapping from. Reading the raw diffs made the verdict and the
+        // payload disagree: in a repo carrying pre-existing dirt the raw diff is
+        // never empty, so the turn was ruled not-chat-only and then handed a
+        // mapping whose diff filtered down to nothing. A turn with an empty
+        // payload that isn't marked chatOnly is exactly what mints an
+        // auto-snapshot with no diff behind it — the green dot on a turn that
+        // did nothing. Cursor keeps its tree ref regardless: its IDE edits are
+        // new work, not pre-existing dirt, so they survive the filter.
+        const filteredUncommitted = filterUncommittedDiff(
+          gitCapture.uncommittedDiff || '', uncommittedExcludeUnion(state),
+        );
+        const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
+        const filteredWorkingTree = gitCapture.workingTreeDiff
+          ? filterUncommittedDiff(gitCapture.workingTreeDiff, uncommittedExcludeUnion(state))
+          : '';
+        const noUncommittedChanges = !filteredUncommitted && !filteredWorkingTree;
         if (noCommits && noTranscriptEdits && noUncommittedChanges) {
           // Chat-only prompt — same gate as the synthesis branch above.
           promptMappings.push({
@@ -5203,21 +5312,15 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             promptIndex: currentPromptIdx,
           });
         } else {
-          const filteredUncommitted = filterUncommittedDiff(
-            gitCapture.uncommittedDiff || '', uncommittedExcludeUnion(state),
-          );
+          // filteredUncommitted / useWorkingTreeDiff / filteredWorkingTree are
+          // computed above so the chat-only verdict and this payload are derived
+          // from the same numbers.
           const uncommittedFiles: string[] = [];
           if (filteredUncommitted) {
             for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
               if (m[1]) uncommittedFiles.push(m[1]);
             }
           }
-          // Shadow baseline → prefer workingTreeDiff, with the same
-          // pre-existing-dirt exclusion (see note in the synthesis branch above).
-          const useWorkingTreeDiff = gitCapture.baselineIsShadow && gitCapture.workingTreeDiff;
-          const filteredWorkingTree = useWorkingTreeDiff
-            ? filterUncommittedDiff(gitCapture.workingTreeDiff, uncommittedExcludeUnion(state))
-            : '';
           if (useWorkingTreeDiff) {
             for (const m of filteredWorkingTree.matchAll(/^diff --git a\/(.*?) b\//gm)) {
               if (m[1]) uncommittedFiles.push(m[1]);
@@ -5876,32 +5979,62 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     // every code-changing prompt a tree ref — for every agent — without
     // re-introducing the empty-snapshot rows the gate was meant to
     // suppress.
-    try {
-      const cpId = createSnapshot(state.repoPath, {
-        sessionTag: state.sessionTag,
-        prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
-        model: model || state.model,
-        tokensUsed: parsed.tokensUsed || 0,
-        costUsd: costUsd || 0,
-        promptIndex: prompts.length,
-        type: 'auto',
-        linesAdded: gitCapture.linesAdded || 0,
-        linesRemoved: gitCapture.linesRemoved || 0,
-        transcriptPath: state.transcriptPath,
+    //
+    // Except createSnapshot's dedup is NOT that authoritative test. It returns
+    // null only when the whole tree is clean, or when the tree is byte-identical
+    // to the previous snapshot. On a repo carrying pre-existing dirt the first
+    // can never fire, so any unrelated tree movement — the user editing a file,
+    // another agent, a sibling session — mints a snapshot and stamps it on
+    // whatever prompt is current, and a chat-only turn wears a green dot in the
+    // Session view next to an empty diff.
+    //
+    // The fix is NOT to bring the line-count gate back. Stop already reaches its
+    // own verdict on this exact question: `chatOnly` is set (above, in both the
+    // synthesis and safety-net branches) only when there were no commits AND no
+    // transcript edits AND no working-tree changes. That third clause is
+    // precisely what the old gate lacked — a Cursor mid-turn prompt has a dirty
+    // tree from its IDE edits, so it is never chatOnly and keeps its tree ref.
+    // Reuse that verdict instead of inventing a second, weaker one.
+    // 0-based, matching every other promptIndex in the system: the mappings
+    // above (`currentPromptIdx = prompts.length - 1`), the two snapshot
+    // uploaders, and the dashboard's turnIndex. This call used to pass
+    // `prompts.length` — one past the turn it describes. Harmless so far only
+    // because SnapshotMeta.promptIndex is written and never read, and because
+    // Stop's snapshot is local-only (the server's copy comes from the watcher
+    // or pre-tool-use, both already 0-based). Fixed before someone reads it.
+    const snapshotPromptIdx = Math.max(0, prompts.length - 1);
+    if (!shouldAutoSnapshot(promptMappings, prompts.length)) {
+      debugLog('stop', 'auto-snapshot skipped: chat-only prompt', {
+        promptIndex: snapshotPromptIdx,
       });
-      if (cpId) {
-        debugLog('stop', 'auto-snapshot created', {
-          snapshotId: cpId,
-          promptIndex: prompts.length,
-          lines: (gitCapture.linesAdded || 0) + (gitCapture.linesRemoved || 0),
+    } else {
+      try {
+        const cpId = createSnapshot(state.repoPath, {
+          sessionTag: state.sessionTag,
+          prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
+          model: model || state.model,
+          tokensUsed: parsed.tokensUsed || 0,
+          costUsd: costUsd || 0,
+          promptIndex: snapshotPromptIdx,
+          type: 'auto',
+          linesAdded: gitCapture.linesAdded || 0,
+          linesRemoved: gitCapture.linesRemoved || 0,
+          transcriptPath: state.transcriptPath,
         });
-      } else {
-        debugLog('stop', 'auto-snapshot skipped by createSnapshot dedup (clean tree or unchanged from last)', {
-          promptIndex: prompts.length,
-        });
+        if (cpId) {
+          debugLog('stop', 'auto-snapshot created', {
+            snapshotId: cpId,
+            promptIndex: snapshotPromptIdx,
+            lines: (gitCapture.linesAdded || 0) + (gitCapture.linesRemoved || 0),
+          });
+        } else {
+          debugLog('stop', 'auto-snapshot skipped by createSnapshot dedup (clean tree or unchanged from last)', {
+            promptIndex: snapshotPromptIdx,
+          });
+        }
+      } catch (cpErr: any) {
+        debugLog('stop', 'auto-snapshot failed (non-fatal)', { message: cpErr.message });
       }
-    } catch (cpErr: any) {
-      debugLog('stop', 'auto-snapshot failed (non-fatal)', { message: cpErr.message });
     }
 
     // Re-save state with RUNNING status FIRST so it survives any errors below
@@ -6476,6 +6609,14 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
             previousSessionId: state.previousSessionId,
             commitsAnnotated: written,
           });
+          // Push here rather than in writeGitNotes: that runs EARLIER in
+          // session-end, before this backfill exists, so it would ship the
+          // previous run's acceptance and never this one's. Best-effort —
+          // pre-push carries whatever this misses.
+          try {
+            const remote = resolvePushRemote(state.repoPath);
+            if (remote) pushAcceptanceNotes(state.repoPath, remote);
+          } catch { /* never block session-end */ }
         }
       } catch (err: any) {
         debugLog('session-end', 'acceptance backfill error (non-fatal)', { message: err.message });
@@ -7100,13 +7241,14 @@ export async function handlePostCommit(): Promise<void> {
   if (activeSessions.length === 1) {
     state = activeSessions[0];
   } else if (activeSessions.length > 1) {
-    let detectedSlug: string | null = null;
-    const agentChecks = attributionPgrepChecks();
-    for (const check of agentChecks) {
-      try {
-        if (safePgrep(check.cmd)) { detectedSlug = check.slug; break; }
-      } catch { /* no match */ }
-    }
+    // Every matching agent, not the first — see uniquePgrepMatch. A hint that
+    // silently means "whichever agent happens to sort first among the ones
+    // running" is worse than no hint: it steers pickSessionForCommit onto the
+    // wrong session with full confidence.
+    const detectedSlug = uniquePgrepMatch(
+      attributionPgrepChecks().map((c) => ({ cmd: c.cmd, id: c.slug })),
+      'post-commit',
+    );
 
     const picked = pickSessionForCommit(activeSessions, {
       detectedSlug,
@@ -7157,15 +7299,10 @@ export async function handlePostCommit(): Promise<void> {
       try {
         // Use pgrep for targeted process detection — look for CLI binaries only,
         // not desktop apps (Cursor/VS Code have many helper processes that would match)
-        const checks = standalonePgrepChecks();
-        for (const check of checks) {
-          try {
-            if (safePgrep(check.cmd)) {
-              detectedModel = check.model;
-              break;
-            }
-          } catch { /* pgrep exits 1 if no match */ }
-        }
+        detectedModel = uniquePgrepMatch(
+          standalonePgrepChecks().map((c) => ({ cmd: c.cmd, id: c.model })),
+          'post-commit',
+        );
       } catch { /* ignore */ }
     }
 
@@ -8307,6 +8444,45 @@ function isNullRef(ref: string): boolean {
  * Never throws: this runs inside someone's `git clone`/`git checkout`, and a hook
  * that fails or hangs makes git look broken in a repo unrelated to Origin.
  */
+/**
+ * post-merge: fold the Origin metadata that this `git pull` just brought down.
+ *
+ * By the time git runs post-merge, the fetch half of the pull is already done —
+ * and because ORIGIN_NOTES_GLOB_REFSPEC is a configured fetchspec, that fetch
+ * carried every refs/notes/origin* into the staging namespace with it. So this
+ * hook does NOT touch the network; it only merges staging onto the live refs,
+ * which is what makes the data visible to `origin blame`, `origin context
+ * memory` and the SessionStart context block.
+ *
+ * If the glob refspec isn't configured yet (a repo whose last sync predates this
+ * release), fall back to the throttled full sync so the repo self-heals on the
+ * first pull instead of waiting for a SessionStart.
+ *
+ * Never throws: this runs inside someone's `git pull`.
+ */
+export async function handleGitPostMerge(): Promise<void> {
+  try {
+    const repoPath = getGitRoot(process.cwd());
+    if (!repoPath) return;
+
+    // Fold first: purely local, and with the glob fetchspec configured the pull
+    // has already staged everything this needs.
+    const changed = foldStagedNotes(repoPath);
+
+    // Nothing folded? Two cases, both fixed by the throttled sync:
+    //   - The pull NAMED a refspec (`git pull origin main`). Git then uses that
+    //     refspec INSTEAD of the configured fetchspecs, so the glob never ran
+    //     and nothing was staged. Agents write this form constantly.
+    //   - The repo predates this release and has no glob refspec yet.
+    // The sync is 6h-throttled per repo, so the steady state costs one stat().
+    if (!changed) syncNotesFromRemoteThrottled(repoPath);
+
+    debugLog('post-merge', 'notes folded', { repoPath, changed });
+  } catch {
+    // Never fail a pull.
+  }
+}
+
 export async function handleGitPostCheckout(prevHead: string, newHead: string, flag: string): Promise<void> {
   try {
     if (flag !== '1') return; // file checkout — neither job applies
@@ -9307,6 +9483,17 @@ export async function handlePrePush(): Promise<void> {
     debugLog('pre-push', 'memory notes push skipped', { message: err?.message });
   }
 
+  // Acceptance notes (refs/notes/origin-acceptance). Session-end pushes these
+  // too, but only right after a backfill actually wrote something — this is the
+  // catch-all for a machine that annotated commits and then pushed later.
+  // Separate try so a memory failure above doesn't strand them.
+  try {
+    pushAcceptanceNotes(repoPath, 'origin');
+    debugLog('pre-push', 'pushed acceptance notes');
+  } catch (err: any) {
+    debugLog('pre-push', 'acceptance notes push skipped', { message: err?.message });
+  }
+
   debugLog('pre-push', '=== GIT HOOK COMPLETE ===');
 }
 
@@ -9511,6 +9698,17 @@ interface AgyRulesCache {
   // The heuristic memory summary is built from these (the commit messages
   // describe the actual work far better than a vague opening prompt).
   commitSubjects?: string[];
+  // Per-prompt mappings captured while the API was UNREACHABLE, waiting to be
+  // flushed on the next fire that reaches the server.
+  //
+  // Capture is entirely local (git plumbing against a shadow baseline) but the
+  // handler used to `return` the moment startSession threw, so a network blip
+  // meant those turns were never captured AND their baseline never advanced —
+  // the next reachable turn then diffed against the pre-blip tree and claimed
+  // every intervening prompt's work as its own. Observed live: a 15-minute
+  // outage across turn 1 left it empty and credited all 103 of its lines to
+  // turn 2, which had actually changed one line.
+  pendingPromptChanges?: Array<Record<string, any>>;
 }
 function writeAgyRulesCache(conversationId: string, data: AgyRulesCache): void {
   try {
@@ -9521,6 +9719,46 @@ function writeAgyRulesCache(conversationId: string, data: AgyRulesCache): void {
 }
 function readAgyRulesCache(conversationId: string): AgyRulesCache | null {
   try { return JSON.parse(fs.readFileSync(agyRulesCachePath(conversationId), 'utf-8')); } catch { return null; }
+}
+
+// Cap on the offline queue so a long outage can't grow the cache file without
+// bound. 50 turns is far past any realistic blip; beyond it the OLDEST are
+// dropped, since the newest turns are the ones a reviewer is still looking at.
+const MAX_PENDING_PROMPT_CHANGES = 50;
+
+/**
+ * Merge freshly-captured per-prompt mappings into the offline pending queue.
+ *
+ * agy's PostToolUse fires many times within a single turn, so the same
+ * promptIndex gets captured repeatedly while the API is unreachable. The LAST
+ * capture of a turn is the most complete (it has seen the most edits), so
+ * incoming normally wins — except when it is EMPTY and we already hold a real
+ * one. Mid-turn the working tree can momentarily match the baseline (the agent
+ * reverts a file, then rewrites it), and letting that transient empty capture
+ * overwrite a real diff would recreate exactly the gap this queue exists to
+ * close.
+ *
+ * Pure + exported for testing.
+ */
+export function mergePendingPromptChanges(
+  existing: Array<Record<string, any>> | undefined,
+  incoming: Array<Record<string, any>>,
+): Array<Record<string, any>> {
+  const byIndex = new Map<number, Record<string, any>>();
+  for (const pc of existing || []) {
+    if (pc && typeof pc.promptIndex === 'number') byIndex.set(pc.promptIndex, pc);
+  }
+  for (const pc of incoming || []) {
+    if (!pc || typeof pc.promptIndex !== 'number') continue;
+    const prev = byIndex.get(pc.promptIndex);
+    const incomingEmpty = !((pc.filesChanged || []).length);
+    const prevHasWork = !!prev && !!((prev.filesChanged || []).length);
+    if (incomingEmpty && prevHasWork) continue;
+    byIndex.set(pc.promptIndex, pc);
+  }
+  return [...byIndex.values()]
+    .sort((a, b) => (a.promptIndex as number) - (b.promptIndex as number))
+    .slice(-MAX_PENDING_PROMPT_CHANGES);
 }
 
 // agy's Stop event fires only on exit and may carry a minimal payload (no
@@ -9849,7 +10087,10 @@ export function deriveAgyRepoPath(filePaths: string[], workspacePath: string | u
   return cwdRoot || workspacePath || cwd;
 }
 
-async function handleAntigravity(event: string, input: Record<string, any>): Promise<void> {
+// Exported for the offline-capture integration test: the ordering inside this
+// function (local capture BEFORE the first network call) is the whole fix, and
+// only driving the real handler can catch a regression that moves it back.
+export async function handleAntigravity(event: string, input: Record<string, any>): Promise<void> {
   // PreToolUse: agy reads {decision} on stdout. Enforce file-restriction +
   // budget from the locally-cached rule set (no network on the hot path).
   if (event === 'pre-tool-use') {
@@ -9944,26 +10185,15 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
   // the session shows a sensible (clearly-estimated) cost instead of $0.
   const costUsd = estimateCost(model, usage.inputTokens, usage.outputTokens);
 
-  // Ensure/dedup the server session by conversationId.
-  let sessionId: string | undefined;
-  let startRes: any;
-  try {
-    startRes = await api.startSession({
-      machineId: agentConfig.machineId,
-      prompt: parsed.prompts[0],
-      model,
-      repoPath,
-      repoUrl,
-      agentSlug: 'antigravity',
-      agentSessionId: conversationId,
-      branch,
-    } as any);
-    sessionId = (startRes as any)?.sessionId;
-  } catch (err: any) {
-    debugLog(event, 'antigravity startSession failed (non-fatal)', { message: err?.message });
-    return;
-  }
-  if (!sessionId) return;
+  // ── LOCAL CAPTURE — runs BEFORE any network call ────────────────────────
+  //
+  // Everything from here to the end of the commit-detection block is pure git
+  // plumbing and on-disk bookkeeping. It used to sit AFTER startSession, so a
+  // single failed fetch skipped all of it and `return`ed. That lost the turn's
+  // diff outright, and — because `lastSyncShadow` never advanced — silently
+  // handed the whole outage's work to whichever later turn first reached the
+  // server. Capture is local; only the SEND needs the network, so the send is
+  // what degrades now (see the pending queue below).
 
   // Per-prompt diff baseline: prompt i's diff must be ITS OWN changes, not the
   // cumulative session diff — otherwise a read-only prompt (e.g. "what changes
@@ -10032,6 +10262,79 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
   if (commitSha) {
     committedIndices = [...new Set([...dirty, currentIdx])];
     dirty.clear();
+  }
+
+  // ── END LOCAL CAPTURE — the network starts here ─────────────────────────
+
+  // Merge a patch over the cached entry so a partial write never drops a field
+  // we didn't explicitly set (rules/budget survive an offline fire, baselines
+  // survive a rules refresh).
+  const persistAgyCache = (patch: Partial<AgyRulesCache>): void => {
+    if (isWatcherSync) return;
+    writeAgyRulesCache(conversationId, {
+      ...(cachedForRepo || {}),
+      repoPath,
+      transcriptPath,
+      baselineSha: cachedForRepo?.baselineSha,
+      promptBaselines,
+      lastSyncShadow,
+      dirtyPromptIndices: [...dirty],
+      ...patch,
+    });
+  };
+
+  // Persist the local bookkeeping BEFORE the network call. This is the half of
+  // the fix that stops the MIS-attribution: with `lastSyncShadow` already on
+  // disk, the next turn diffs from where this one ended even if everything
+  // below fails, so it can no longer inherit this turn's work.
+  persistAgyCache({});
+
+  // Ensure/dedup the server session by conversationId.
+  let sessionId: string | undefined;
+  let startRes: any;
+  try {
+    startRes = await api.startSession({
+      machineId: agentConfig.machineId,
+      prompt: parsed.prompts[0],
+      model,
+      repoPath,
+      repoUrl,
+      agentSlug: 'antigravity',
+      agentSessionId: conversationId,
+      branch,
+    } as any);
+    sessionId = (startRes as any)?.sessionId;
+  } catch (err: any) {
+    debugLog(event, 'antigravity startSession failed (non-fatal)', { message: err?.message });
+    sessionId = undefined;
+  }
+
+  if (!sessionId) {
+    // Unreachable server (or no session id). Everything below needs one, so
+    // queue what we just captured and let a later fire deliver it — this is the
+    // half of the fix that stops the DATA LOSS. Without the queue an offline
+    // turn's diff would be gone for good: the baseline has already rolled
+    // forward, so no future capture can reproduce it.
+    if (!isWatcherSync) {
+      const ownMapping: Record<string, any> = {
+        promptIndex: currentIdx,
+        promptText: parsed.prompts[currentIdx],
+        diff,
+        uncommittedDiff: (commitSha && treeClean) ? '' : diff,
+        filesChanged,
+        linesAdded,
+        linesRemoved,
+        authoritative: true,
+        ...(parsed.promptTimes[currentIdx] != null ? { createdAt: parsed.promptTimes[currentIdx] } : {}),
+        ...(commitSha ? { commitSha } : {}),
+      };
+      const pending = mergePendingPromptChanges(cachedForRepo?.pendingPromptChanges, [ownMapping]);
+      persistAgyCache({ pendingPromptChanges: pending });
+      debugLog(event, 'antigravity capture queued offline', {
+        promptIndex: currentIdx, queued: pending.length, files: filesChanged.length, linesAdded,
+      });
+    }
+    return;
   }
 
   // Ingest the commit ROW ourselves. Normally the git post-commit hook calls
@@ -10157,18 +10460,17 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
   // plus the per-prompt baselines (preserve the session baselineSha set on the
   // first pre-tool-use). REAL hooks only — the watcher never writes the cache
   // (see isWatcherSync above), so it can't race/corrupt the baselines.
-  if (!isWatcherSync) writeAgyRulesCache(conversationId, {
+  // `pendingPromptChanges` is carried through explicitly: this write happens
+  // BEFORE the send that flushes the queue, so omitting it here would erase
+  // offline captures a moment before they were due to be delivered. It is
+  // cleared only after the send lands (clearFlushedPending).
+  if (!isWatcherSync) persistAgyCache({
     enforcementRules: Array.isArray(startRes?.enforcementRules) ? startRes.enforcementRules : [],
     budgetBlocked: !!startRes?.budget?.blocked,
     budgetMessage: startRes?.budget?.message,
-    repoPath,
-    transcriptPath,
-    baselineSha: cachedForRepo?.baselineSha,
-    promptBaselines,
-    lastSyncShadow,
-    dirtyPromptIndices: [...dirty],
     ingestedCommitSha,
     commitSubjects,
+    pendingPromptChanges: cachedForRepo?.pendingPromptChanges || [],
   });
 
   // Register the agy session as a local SessionState (with the files it touched)
@@ -10203,6 +10505,18 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
   // so they're never linked to the commit.
   const uncommittedDiff = (commitSha && treeClean) ? '' : diff;
   const committedSet = new Set(committedIndices);
+  // Turns captured while the server was unreachable. We're reachable now, so
+  // they ride along on this send and land on their OWN turn — without this the
+  // flush never happens and an offline turn stays permanently blank.
+  const pendingByIndex = new Map<number, Record<string, any>>();
+  for (const pc of (cachedForRepo?.pendingPromptChanges || [])) {
+    if (pc && typeof pc.promptIndex === 'number' && pc.promptIndex !== currentIdx) {
+      pendingByIndex.set(pc.promptIndex, pc);
+    }
+  }
+  if (pendingByIndex.size > 0) {
+    debugLog(event, 'antigravity flushing offline captures', { indices: [...pendingByIndex.keys()] });
+  }
   const promptChanges = parsed.prompts.map((p, i) => {
     // Real prompt time from the transcript. agy has no UserPromptSubmit hook, so
     // without this the server stamps the DB insert time (whenever the first Stop
@@ -10212,6 +10526,19 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
     const createdAt = ts != null ? { createdAt: ts } : {};
     if (i === currentIdx) {
       return { promptIndex: i, promptText: p, diff, uncommittedDiff, filesChanged, linesAdded, linesRemoved, authoritative: true, ...createdAt, ...(commitSha ? { commitSha } : {}) };
+    }
+    const queued = pendingByIndex.get(i);
+    if (queued) {
+      // Replay the offline capture verbatim, re-stamping the text/time from the
+      // current parse, and applying the commit backfill if this turn's work was
+      // swept into a commit that landed later.
+      return {
+        ...queued,
+        promptIndex: i,
+        promptText: p,
+        ...createdAt,
+        ...(commitSha && committedSet.has(i) ? { commitSha, uncommittedDiff: '' } : {}),
+      };
     }
     if (commitSha && committedSet.has(i)) {
       // Backfill the commit link onto an earlier prompt whose work it included;
@@ -10244,7 +10571,22 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
     costUsd,
   };
 
+  // Drop the offline queue only once the send that carried it LANDED. Re-reads
+  // the cache rather than reusing `cachedForRepo`, which is stale by now — the
+  // big write above has already run.
+  const clearFlushedPending = (): void => {
+    if (isWatcherSync || pendingByIndex.size === 0) return;
+    try {
+      const cur = readAgyRulesCache(conversationId);
+      if (cur?.pendingPromptChanges?.length) {
+        writeAgyRulesCache(conversationId, { ...cur, pendingPromptChanges: [] });
+        debugLog(event, 'antigravity offline captures flushed', { count: pendingByIndex.size });
+      }
+    } catch { /* non-fatal — a retry just re-sends them, which is idempotent */ }
+  };
+
   if (event === 'stop') {
+    let sendOk = false;
     try {
       await api.endSession({
         sessionId,
@@ -10257,11 +10599,23 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
         diff,
         ...usagePayload,
       } as any);
+      sendOk = true;
       debugLog('stop', 'antigravity session finalized', { sessionId, prompts: parsed.prompts.length, model, costUsd, files: filesChanged?.length || 0, turns: turns.length });
     } catch (err: any) {
       debugLog('stop', 'antigravity endSession failed (non-fatal)', { message: err?.message });
     }
-    try { fs.rmSync(agyRulesCachePath(conversationId), { force: true }); } catch { /* ignore */ }
+    // Discard the cache only when the final send landed. If the session ends
+    // WHILE the API is unreachable, the cache is the only copy of the offline
+    // captures and their baselines — deleting it there would destroy exactly
+    // the turns the queue exists to protect, and no later capture can re-derive
+    // them because the baselines have already rolled past.
+    if (sendOk) {
+      try { fs.rmSync(agyRulesCachePath(conversationId), { force: true }); } catch { /* ignore */ }
+    } else {
+      debugLog('stop', 'antigravity keeping cache — final send failed, offline captures still queued', {
+        queued: (readAgyRulesCache(conversationId)?.pendingPromptChanges || []).length,
+      });
+    }
     // Signal the long-lived watcher that the session ended so it exits promptly
     // instead of polling out its idle backstop.
     try {
@@ -10272,6 +10626,7 @@ async function handleAntigravity(event: string, input: Record<string, any>): Pro
   } else {
     try {
       await api.updateSession(sessionId, { promptChanges, transcript, model, filesChanged, diff, ...usagePayload });
+      clearFlushedPending();
     } catch (err: any) {
       debugLog('post-tool-use', 'antigravity updateSession failed (non-fatal)', { message: err?.message });
     }

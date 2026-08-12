@@ -6,13 +6,18 @@
 // Stored in a separate ref (refs/notes/origin-acceptance) so we never mutate
 // the original session's note.
 //
-// NOTE: this ref is currently LOCAL-ONLY. Nothing in the CLI pushes or fetches
-// it — every notes push targets refs/notes/origin, and refs/notes/origin-memory
-// got its own transport (see pushMemoryNotes). An earlier version of this
-// comment claimed "same push semantics as refs/notes/origin", which was never
-// true. Acceptance data is per-commit, so wiring it up would reuse the
-// attribution path (fetch into a staging ref, `notes merge -s ours`, push)
-// rather than the payload-level merge memory needs.
+// Transport: this ref used to be LOCAL-ONLY — every notes push targeted
+// refs/notes/origin, and refs/notes/origin-memory got its own transport (see
+// pushMemoryNotes), so acceptance had none. It now travels both ways:
+//   out — pushAcceptanceNotes, from session-end (right after a backfill wrote
+//         something) and from pre-push as the catch-all
+//   in  — ORIGIN_NOTES_GLOB_REFSPEC fetches it, foldStagedNotes merges it
+// Per-commit data, so it reuses the ATTRIBUTION path (staging ref +
+// `notes merge -s ours`), not the payload-level union memory needs.
+//
+// Unlike memory, the push is NOT gated on notesIncludePrompts: an acceptance
+// note is line counts plus a session id, with no prompt-derived text. Adding
+// such a field means moving it behind that gate.
 
 import { execFileSync } from 'child_process';
 

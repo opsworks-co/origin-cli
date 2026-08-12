@@ -77,7 +77,12 @@ describe('ensurePolicyHookInstalled', () => {
     const content = readHook(repo);
     expect(content).not.toBeNull();
     expect(content).toContain('# origin-pre-commit');
-    expect(content).toContain('origin hooks git-pre-commit');
+    // Assert the SUBCOMMAND, not the whole invocation: originCmd deliberately
+    // emits `"C:\…\node.exe" "…\index.js" hooks git-pre-commit` on Windows
+    // (npm's origin.cmd shim pops a console window under GUI agents) and
+    // `origin hooks git-pre-commit` on POSIX. Pinning the POSIX spelling made
+    // this a Linux-only test that failed on the platform the hook matters most.
+    expect(content).toContain('hooks git-pre-commit');
   });
 
   it('is idempotent — second call is a no-op', () => {
@@ -113,7 +118,12 @@ describe('ensurePolicyHookInstalled', () => {
     const content = readHook(repo)!;
     expect(content).toContain('npx lint-staged');
     expect(content).toContain('# origin-pre-commit');
-    expect(content).toContain('origin hooks git-pre-commit');
+    // Assert the SUBCOMMAND, not the whole invocation: originCmd deliberately
+    // emits `"C:\…\node.exe" "…\index.js" hooks git-pre-commit` on Windows
+    // (npm's origin.cmd shim pops a console window under GUI agents) and
+    // `origin hooks git-pre-commit` on POSIX. Pinning the POSIX spelling made
+    // this a Linux-only test that failed on the platform the hook matters most.
+    expect(content).toContain('hooks git-pre-commit');
   });
 
   it('preserves an existing user hook through a re-run', () => {
@@ -155,7 +165,13 @@ describe('ensurePolicyHookInstalled', () => {
     const hooksDir = path.join(base, '.origin', 'git-hooks');
     fs.mkdirSync(hooksDir, { recursive: true });
     const cfgPath = path.join(base, 'gitconfig');
-    fs.writeFileSync(cfgPath, `[core]\n\thooksPath = ${hooksDir}\n`);
+    // Forward slashes, always. git config treats backslash as an ESCAPE
+    // character in values, so a raw Windows path writes `\U`, `\A`, `\T` … and
+    // git rejects the whole file with "fatal: bad config line 2" — which on
+    // Windows failed five tests in this file deterministically, while Linux
+    // (forward-slash paths) never noticed. git accepts forward slashes on
+    // Windows, so this is portable rather than platform-specific.
+    fs.writeFileSync(cfgPath, `[core]\n\thooksPath = ${hooksDir.replace(/\\/g, '/')}\n`);
     process.env.GIT_CONFIG_GLOBAL = cfgPath;
     return { hooksDir, cleanup: [base] };
   }
@@ -198,8 +214,16 @@ describe('ensurePolicyHookInstalled', () => {
     // The hook resolves the binary into $ORIGIN_BIN, so assert on the
     // subcommand invocation rather than a literal "origin" prefix.
     expect(healed).toContain('hooks git-pre-commit');
-    // Executable bit set — git silently skips non-executable hooks.
-    expect(fs.statSync(path.join(hooksDir, 'pre-commit')).mode & 0o111).not.toBe(0);
+    // Executable bit set — git silently skips non-executable hooks. POSIX only:
+    // NTFS has no execute permission, so mode & 0o111 is always 0 on Windows and
+    // this asserted something that cannot be true there. Git for Windows does not
+    // consult the bit either — it runs the hook through sh via the shebang.
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(path.join(hooksDir, 'pre-commit')).mode & 0o111).not.toBe(0);
+    }
+    // The hook exists and is readable on every platform, which is the part that
+    // actually differs between "healed" and "not healed".
+    expect(fs.existsSync(path.join(hooksDir, 'pre-commit'))).toBe(true);
     // Still no per-repo hook — the global one covers the repo.
     expect(readHook(repo)).toBeNull();
   });

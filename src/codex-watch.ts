@@ -31,7 +31,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { spawn, execFileSync } from 'child_process';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import {
   readRolloutCwd,
@@ -43,7 +43,7 @@ import type { CodexBaselineResolver } from './agents/codex.js';
 import { createShadowCommit, captureAgyDiff, captureShadowRangeDiff, captureGitState, readFileAtRev, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha } from './session-state.js';
 import { git } from './utils/exec.js';
-import { isWindows } from './utils/platform.js';
+import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon-autostart.js';
 import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
@@ -922,28 +922,18 @@ export function restartCodexWatchIfStale(
   return restartCodexWatch();
 }
 
-// Best-effort: register a Windows Scheduled Task that relaunches the watcher at
-// logon, so it survives reboots (the spawn above only covers the current login
-// session). Windows-only; silently no-ops elsewhere or on any failure. Uses
-// `schtasks /Create /F` (idempotent — /F overwrites an existing task).
-export function registerCodexWatchLogonTask(): { registered: boolean; reason: string } {
-  if (!isWindows()) return { registered: false, reason: 'not-windows' };
-  const entry = cliEntryScript();
-  if (!entry) return { registered: false, reason: 'no-entry-script' };
-  try {
-    const node = process.execPath;
-    // schtasks needs the whole command as one quoted /TR string.
-    const tr = `\"${node}\" \"${entry}\" codex-watch`;
-    execFileSync('schtasks', [
-      '/Create', '/F',
-      '/SC', 'ONLOGON',
-      '/TN', 'OriginCodexWatch',
-      '/TR', tr,
-    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    return { registered: true, reason: 'schtasks-created' };
-  } catch (err) {
-    return { registered: false, reason: `schtasks-failed: ${String(err)}` };
-  }
+// Register the watcher to relaunch at logon, so it survives reboots (the spawn
+// above only covers the current login session). Windows-only; reports why on
+// every other platform. This used to create a Scheduled Task, which Defender
+// blocks as malware persistence — see utils/logon-autostart.ts for the whole
+// story. The caller is expected to SURFACE a failure here rather than swallow
+// it: a silent failure means capture quietly stops at the next reboot.
+export function registerCodexWatchAtLogon(): LogonAutoStartResult {
+  return registerLogonAutoStart({
+    name: 'OriginCodexWatch',
+    entryScript: cliEntryScript(),
+    subcommand: 'codex-watch',
+  });
 }
 
 // ─── Real-dependency wiring ──────────────────────────────────────────────────

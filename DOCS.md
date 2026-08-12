@@ -947,7 +947,23 @@ Clear all session memory for the current repo.
 origin context clear --memory-only
 ```
 
-Memory is stored in git notes (`refs/notes/origin-memory`) and travels with the repo automatically: it is pushed on the same triggers as attribution notes (session end and the pre-push hook) and pulled down at session start, so a teammate's clone or your second machine picks it up without running anything by hand.
+Memory is stored in git notes (`refs/notes/origin-memory`) and travels with the repo automatically, in both directions, without anyone running anything by hand.
+
+**Out** — pushed on the same triggers as attribution notes: session end, and the `pre-push` hook alongside your own push.
+
+**In** — three paths, because no single one covers every case:
+
+| when | what happens |
+|---|---|
+| any `git fetch` / `git pull` | The fetch refspec `+refs/notes/origin*:refs/notes/origin-remote*` carries every Origin notes ref into a staging namespace. Pure git — Origin isn't running. |
+| `post-merge` hook | Merges staging onto the live refs, so the pull's result is immediately readable. Local only, no network. |
+| session start | Fetch + merge, throttled to once per 10 minutes per repo, with a 6s network ceiling. Covers clones that haven't been pulled and repos whose git hooks aren't installed. |
+
+The refspec is a **glob** on purpose. An explicit refspec naming a ref the remote doesn't have makes ordinary `git fetch` fail outright, so it could only be installed *after* a successful fetch — which is exactly when it was no longer needed. A glob matching nothing is a clean no-op, so it can be installed on the first sync and starts carrying notes the moment the remote gains them.
+
+Staging is also deliberate: notes are never mapped straight onto a live ref. See the warning in [AI_FEATURES.md](../../docs/AI_FEATURES.md#how-notes-travel).
+
+A plain `git pull` therefore *stages* memory; it becomes readable once something folds it (post-merge, session start, or `origin link` / `origin blame`).
 
 Two machines that both wrote memory are reconciled by unioning the payload — session rollups keyed by `sessionId` (newest write wins), commit records keyed by `commitSha` (frozen, first write wins). A plain `git notes merge` is deliberately **not** used: the whole payload is one note on the root commit, so any git-level strategy resolves the entire blob and would drop one machine's sessions wholesale.
 
@@ -1396,9 +1412,10 @@ Origin uses a multi-layer hook system:
 | `pre-tool-use` | AI about to use a tool | Tool name, input |
 | `post-tool-use` | AI finished using a tool | Tool result, subagent tracking |
 | `git-post-commit` | After every git commit | Commit SHA, message, files, diff |
-| `git-pre-push` | Before git push | Pushes origin-sessions branch alongside |
+| `git-pre-push` | Before git push | Pushes origin-sessions branch + attribution/memory/acceptance notes alongside |
 | `git-post-rewrite` | After rebase/amend | Copies attribution notes to new SHAs |
-| `git-post-checkout` | After branch checkout/stash | Preserves attribution through stash ops |
+| `git-post-checkout` | After branch checkout/stash | Preserves attribution through stash ops; syncs notes into a fresh clone |
+| `git-post-merge` | After a `git pull` that merges | Folds fetched notes onto the live refs (local only, no network) |
 
 ### Data Flow
 

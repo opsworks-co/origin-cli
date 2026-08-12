@@ -1,6 +1,6 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260810.1159",
+  "version": "0.20260811.1926",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -16,6 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^12.1.0",
     "fzstd": "^0.1.1",

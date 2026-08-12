@@ -83,11 +83,13 @@ origin search "auth bug"     # full-text search across prompts
 ### 04 — In your git repo.
 
 Nothing leaves your machine. Sessions live in `refs/notes/origin` and the
-`origin-sessions` branch. Clone the repo, clone the history.
+`origin-sessions` branch — the history moves with the repo, not through a server.
 
 ```
 refs/notes/origin              per-commit model / session / cost / tokens
 refs/notes/origin-memory       cross-session memory (what past sessions did)
+refs/notes/origin-memory-brief distilled continuation brief for the next session
+refs/notes/origin-acceptance   how much of a past agent's output survived
 refs/notes/origin-repo-brief   repo brief (what this repo is) — opt-in
 origin-sessions                transcripts, prompts, file changes
 ~/.origin/config.json          CLI config (machine-local)
@@ -101,7 +103,11 @@ No telemetry by default. Opt in with `origin config set telemetry true`.
 
 Agents forget everything between sessions. Origin gives them a memory that lives
 in the repo — so the next agent (any agent) starts where the last one left off.
-Two layers, both stored as git notes, both travelling with `git clone`:
+Two layers, both stored as git notes. Git itself never clones or pulls
+`refs/notes/*`, so Origin installs a fetch refspec the first time it syncs a
+repo; after that your ordinary `git pull` carries memory down with it, and the
+`post-merge` hook makes it readable. A clone on a machine without the Origin
+CLI won't see it.
 
 **Session memory** — *what past sessions did.* On session end (or on every
 commit — your choice), Origin writes a compact entry per session to

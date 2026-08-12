@@ -32,6 +32,13 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
   const latest = await getLatestVersion();
   if (!latest) {
     console.log(chalk.yellow('\n  Could not check for updates. Try again later.'));
+    // Cycle the daemons anyway. Restarting them is a purely LOCAL operation —
+    // it compares the running daemon's build to the installed one and respawns
+    // — so tying it to a network round-trip meant a transient fetch failure
+    // left both watchers capturing on stale code with no way to fix it short of
+    // calling the restart helpers by hand. Observed twice in a row on a working
+    // machine; an offline machine could never cycle its own daemons at all.
+    if (!opts.check) await syncWatchersToInstalledCode();
     return;
   }
 

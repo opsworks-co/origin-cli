@@ -19,6 +19,7 @@ import path from 'path';
 import {
   LEGACY_CLOBBERING_NOTES_REFSPEC,
   NOTES_FETCH_REFSPEC,
+  ORIGIN_NOTES_GLOB_REFSPEC,
   removeLegacyNotesRefspec,
   syncNotesFromRemote,
 } from '../git-notes.js';
@@ -122,7 +123,7 @@ describe('notes survive an ordinary git pull', () => {
 
     // Healed: the clobbering spec is gone, the staging one is in place.
     expect(fetchspecs(local)).not.toContain(LEGACY_CLOBBERING_NOTES_REFSPEC);
-    expect(fetchspecs(local)).toContain(NOTES_FETCH_REFSPEC);
+    expect(fetchspecs(local)).toContain(ORIGIN_NOTES_GLOB_REFSPEC);
 
     // And now the same sequence that destroyed the note above is survivable.
     writeUnpushedLocalNote();
