@@ -24,6 +24,7 @@ import { benchmarkBakeoffCreateCommand } from './commands/benchmark-bakeoff.js';
 import { benchmarkRunnerCommand, benchmarkKeyCommand } from './commands/benchmark-runner.js';
 import { benchmarkSyncCommand } from './commands/benchmark.js';
 import { mcpServeCommand } from './commands/mcp.js';
+import { mcpInstallCommand, mcpStatusCommand } from './commands/mcp-install.js';
 import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit,
   handleGitPostCheckout, handleGitPostMerge, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync } from './commands/hooks.js';
@@ -965,6 +966,15 @@ const mcp = program.command('mcp')
 mcp.command('serve')
   .description('Run the MCP server over stdio (agents spawn this; not meant to be run by hand)')
   .action(() => mcpServeCommand());
+mcp.command('install')
+  .description('Register the MCP server with your agents so they can query Origin')
+  .option('--agent <slugs>', 'Comma-separated subset (claude, codex, cursor, gemini)')
+  .option('--uninstall', 'Remove Origin\'s MCP registration instead')
+  .option('--force', 'Register even if the resolved binary reports no `mcp serve` support')
+  .action((opts: { agent?: string; uninstall?: boolean; force?: boolean }) => mcpInstallCommand(opts));
+mcp.command('status')
+  .description('Show which agents have the Origin MCP server registered')
+  .action(() => mcpStatusCommand());
 
 const context = program.command('context')
   .description('Cross-agent context — handoff + accumulated session memory');

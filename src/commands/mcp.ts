@@ -1,5 +1,4 @@
 import { runMcpServer } from '../mcp/server.js';
-
 /**
  * `origin mcp serve` — speak MCP over stdio so the agent can query Origin.
  *

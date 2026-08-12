@@ -59,6 +59,16 @@ describe('origin mcp serve — wiring', () => {
     expect(server).toMatch(/console\.error\(/);
   });
 
+  it('keeps the printing commands in a SEPARATE file from serve', () => {
+    // `mcp install` / `mcp status` are ordinary commands that print to stdout.
+    // They lived in commands/mcp.ts briefly and immediately tripped the rule
+    // above — which is the point: the no-stdout invariant is only checkable if
+    // the serve path stays in a file that contains nothing else.
+    expect(fs.existsSync(path.join(SRC, 'commands/mcp-install.ts'))).toBe(true);
+    expect(read('commands/mcp-install.ts')).toMatch(/console\.log\(/);
+    expect(read('commands/mcp.ts')).not.toContain('mcpInstallCommand');
+  });
+
   it('starts even with no Origin config — the git-notes half works offline', () => {
     const server = read('mcp/server.ts');
     // runMcpServer must connect the transport regardless of loadConfig();
