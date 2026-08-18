@@ -930,6 +930,43 @@ Regenerated at session end **and on every commit** (so commit-and-go agents unde
 `memoryUpdate = commit` get a fresh brief too), only when the underlying sessions
 change.
 
+### The memory pointer
+
+What Origin injects is a **digest**, not the store: a capped number of sessions,
+five decisions, five TODOs, file lists trimmed to basenames. The full record is
+much larger, and it lives somewhere no agent looks unprompted — a JSON note
+hanging off the repo's root commit, on a ref `git log` never surfaces. An agent
+asked "is there memory from previous sessions?" checks the things it knows about,
+finds nothing, and truthfully answers no.
+
+So every injected digest is followed by a short pointer saying where the rest is
+and — more usefully — **how to query it**. Injected context is a fixed slice
+chosen for the *last* task; these let an agent go and get what the *current* one
+needs:
+
+```bash
+origin why <file>:<line>     # the session + prompt that wrote a specific line
+origin ask "<question>"      # find the session and prompts behind a file or change
+origin prompts <file>        # every prompt that touched a file
+origin todo list             # open TODOs carried across sessions
+```
+
+To read the whole record instead — every session rollup, the decisions, the open
+TODOs, the per-file notes and the per-commit log:
+
+```bash
+origin context memory
+git notes --ref=origin-memory show $(git rev-list --max-parents=0 HEAD | tail -1)
+```
+
+The `get_repo_memory` MCP tool returns the same record to agents with Origin's
+MCP server connected. The pointer is suppressed entirely when a repo has no
+memory yet, so an agent is never sent chasing an empty ref.
+
+Anything truncated for injection is cut on a word boundary and marked
+`… (truncated — run 'origin context memory')`, so a shortened summary is never
+mistaken for a complete one.
+
 ### `origin context memory`
 
 Display accumulated session memory for the current repo.
