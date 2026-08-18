@@ -1084,18 +1084,65 @@ function agentRulesTarget(
  * preserving anything the user wrote outside it. Returns true if the file
  * changed on disk.
  */
-function writeManagedBlock(target: string, systemMsg: string): boolean {
+/**
+ * Compute the new contents of an origin-managed context file. Pure + exported
+ * for testing; writeManagedBlock does the IO around it.
+ *
+ * The managed region is delimited by a PAIR of `<!-- origin-managed -->`
+ * markers. Three shapes have to be handled, and the third is the one that used
+ * to fail silently:
+ *
+ *  - No marker → append the block (or become the file, when it is empty).
+ *  - Two or more markers → replace from the FIRST to the LAST, so the file
+ *    always converges on exactly one well-formed block. The old code replaced
+ *    each lazily-matched PAIR instead, which left a third marker in place
+ *    indefinitely.
+ *  - Exactly ONE marker → the block was damaged (a user deleting half of it, or
+ *    a torn write — this file is written whole, not atomically). The old code
+ *    took the replace branch, the pair regex matched nothing, the result was
+ *    byte-identical to the input, and writeManagedBlock returned false. Nothing
+ *    logged it, because the sibling-refresh loop only reports a `true`. That
+ *    file's Origin context was then frozen forever: never refreshed, never
+ *    repaired, and reporting no error while the agent read stale memory.
+ *
+ * Repairing the one-marker case means deciding what the text after the orphan
+ * is. If it carries Origin's own preamble it is unambiguously ours, so we
+ * replace from the orphan to end-of-file. If it does not, it may be the user's
+ * prose and must not be touched: drop the orphan marker line alone and append a
+ * fresh block. Deleting a user's notes to fix our own bookkeeping would be a
+ * far worse failure than the stale block we are repairing.
+ */
+export function renderManagedFile(existing: string, systemMsg: string): string {
   const content = `${ORIGIN_MANAGED_MARKER}\n${systemMsg}\n${ORIGIN_MANAGED_MARKER}`;
-  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
-  let next: string;
-  if (existing.includes(ORIGIN_MANAGED_MARKER)) {
-    const markerRegex = new RegExp(`${ORIGIN_MANAGED_MARKER}[\\s\\S]*?${ORIGIN_MANAGED_MARKER}`, 'g');
-    next = existing.replace(markerRegex, content);
-  } else if (existing.trim()) {
-    next = existing + '\n\n' + content;
-  } else {
-    next = content;
+  const first = existing.indexOf(ORIGIN_MANAGED_MARKER);
+
+  if (first < 0) return existing.trim() ? existing + '\n\n' + content : content;
+
+  const last = existing.lastIndexOf(ORIGIN_MANAGED_MARKER);
+  if (last !== first) {
+    // Well-formed (or over-marked): everything between the outermost markers is
+    // the managed region.
+    return existing.slice(0, first) + content + existing.slice(last + ORIGIN_MANAGED_MARKER.length);
   }
+
+  // Exactly one marker — damaged block.
+  const tail = existing.slice(first + ORIGIN_MANAGED_MARKER.length);
+  if (tail.includes(PREAMBLE_VISIBLE_ANCHOR)) {
+    // The tail is demonstrably Origin's own text; reclaim it.
+    return existing.slice(0, first) + content;
+  }
+  // Ambiguous: keep every line the user might have written, drop only the
+  // orphan marker, and append a fresh block.
+  const withoutOrphan = existing
+    .split('\n')
+    .filter((line) => line.trim() !== ORIGIN_MANAGED_MARKER)
+    .join('\n');
+  return withoutOrphan.trim() ? withoutOrphan.trimEnd() + '\n\n' + content : content;
+}
+
+function writeManagedBlock(target: string, systemMsg: string): boolean {
+  const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
+  const next = renderManagedFile(existing, systemMsg);
   if (next === existing) return false;
   fs.writeFileSync(target, next);
   return true;
