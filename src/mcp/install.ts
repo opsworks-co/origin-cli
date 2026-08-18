@@ -1,10 +1,20 @@
 // Register `origin mcp serve` with the agents on this machine.
 //
-// Phase 1 covers the four agents whose MCP config location is verified against
-// a real install: Claude Code, Codex, Cursor and Gemini CLI. The rest of the
-// catalogue (Copilot, Devin, Antigravity, Aider) is deliberately absent —
-// writing a config file an agent never reads is worse than writing nothing,
-// because it looks installed.
+// Covers Claude Code, Cursor, Codex, Gemini CLI, Antigravity and Copilot CLI.
+// Two agents are absent, for opposite reasons:
+//
+//   DEVIN reads the project-scoped .mcp.json the `claude` writer already
+//   produces, so a devin entry would duplicate an existing registration.
+//   (`devin mcp list` reports the origin server from a repo with that file and
+//   nothing from a repo without one.)
+//
+//   AIDER has no MCP client at all as of v0.86 — the integration PRs were
+//   closed unmerged and its config reference lists no MCP options. Nothing to
+//   write, and nothing to wait for until that changes.
+//
+// The bar for inclusion is a config location we can point at, not a guess:
+// writing a file an agent never reads is worse than writing nothing, because
+// it looks installed.
 //
 // Every writer here obeys the same three rules, learned from the hook
 // installers next door:
@@ -21,21 +31,66 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
-import { findExecutable } from '../utils/exec.js';
+import { findExecutables } from '../utils/exec.js';
 
-export type McpAgentSlug = 'claude' | 'codex' | 'cursor' | 'gemini';
+export type McpAgentSlug = 'claude' | 'codex' | 'cursor' | 'gemini' | 'antigravity' | 'copilot';
 
 export interface McpInstallResult {
   agent: McpAgentSlug;
   file: string;
   status: 'installed' | 'updated' | 'unchanged' | 'skipped' | 'failed';
   detail?: string;
+  /** Set when a superseded config from an older CLI was cleaned up alongside. */
+  legacy?: LegacyCleanupResult;
+}
+
+export interface LegacyCleanupResult {
+  file: string;
+  action: 'removed-file' | 'removed-entry' | 'none';
+}
+
+// Extensions Windows' CreateProcess will actually launch, best first. Anything
+// outside this set is a POSIX shim: npm installs `origin` as BOTH an
+// extensionless `#!/bin/sh` script and an `origin.cmd`, and `where` lists the
+// sh script FIRST. Handing that path to an agent is the "looks installed, does
+// nothing" failure this module exists to avoid — the agent spawns it and gets
+// ENOENT, because a shebang means nothing to Windows.
+const WINDOWS_SPAWNABLE = ['.exe', '.cmd', '.bat', '.com'];
+
+/**
+ * Pick the path an agent can actually spawn out of everything `where` reported.
+ *
+ * POSIX has no such problem — one name, one file, already executable — so this
+ * only reorders on Windows. If none of the candidates carries a runnable
+ * extension, try appending one: `where` can report just the shim when the .cmd
+ * sits in a directory it already matched.
+ */
+export function preferSpawnableBin(
+  candidates: string[],
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  if (!candidates.length) return null;
+  if (platform !== 'win32') return candidates[0];
+
+  // Rank by extension, not by the order `where` printed: `where` leads with the
+  // literal-name match (the shim), and among real executables Windows itself
+  // resolves in PATHEXT order, which puts .exe ahead of .cmd.
+  const rank = (p: string) => WINDOWS_SPAWNABLE.indexOf(path.extname(p).toLowerCase());
+  const direct = candidates.filter((p) => rank(p) >= 0).sort((a, b) => rank(a) - rank(b))[0];
+  if (direct) return direct;
+
+  for (const base of candidates) {
+    for (const ext of WINDOWS_SPAWNABLE) {
+      if (fs.existsSync(base + ext)) return base + ext;
+    }
+  }
+  return candidates[0];
 }
 
 /** Absolute path to the origin binary, or the bare name if it can't be found. */
 export function originBinForMcp(): string {
   try {
-    const found = findExecutable('origin');
+    const found = preferSpawnableBin(findExecutables('origin'));
     if (found) return found;
   } catch { /* fall through */ }
   return 'origin';
@@ -102,7 +157,20 @@ function writeJson(file: string, value: unknown): void {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 }
 
-/** Shared shape for the three agents that use a JSON `mcpServers` map. */
+/**
+ * The server entry each agent expects under `mcpServers`.
+ *
+ * Copilot CLI additionally requires a transport `type` ("local" for a stdio
+ * subprocess) — omit it and the entry is rejected. Note also that Copilot CLI
+ * uses `mcpServers` while Copilot in VS Code uses `servers`; these are
+ * different files with different schemas, and only the CLI one is written here.
+ */
+function serverEntry(agent: McpAgentSlug, command: string, args: string[]): Record<string, unknown> {
+  if (agent === 'copilot') return { type: 'local', command, args, tools: ['*'] };
+  return { command, args };
+}
+
+/** Shared shape for the agents that use a JSON `mcpServers` map. */
 function installJsonMcpServers(
   agent: McpAgentSlug,
   file: string,
@@ -113,7 +181,7 @@ function installJsonMcpServers(
   const parsed = existed ? readJson(file) : {};
   const before = JSON.stringify(parsed.mcpServers?.[entryName] ?? null);
 
-  const next = { command, args };
+  const next = serverEntry(agent, command, args);
   if (before === JSON.stringify(next)) {
     return { agent, file, status: 'unchanged' };
   }
@@ -166,8 +234,8 @@ function installCodex(file: string): McpInstallResult {
 /**
  * Where each agent reads its MCP server list.
  *
- * Scope note: Claude Code and Cursor are registered PROJECT-scoped (a small
- * file we own at the repo root) rather than user-scoped. `~/.claude.json` in
+ * Scope note: Claude Code is registered PROJECT-scoped (a small file we own at
+ * the repo root) rather than user-scoped. `~/.claude.json` in
  * particular is large, live Claude Code state — 108 project entries, OAuth
  * account, feature caches on the machine this was written against — and a
  * malformed merge there breaks the user's whole install. A project `.mcp.json`
@@ -178,44 +246,182 @@ function installCodex(file: string): McpInstallResult {
 export function mcpConfigPath(agent: McpAgentSlug, gitRoot: string): string {
   switch (agent) {
     case 'claude':  return path.join(gitRoot, '.mcp.json');
-    case 'cursor':  return path.join(gitRoot, '.cursor', 'mcp.json');
+    // Cursor reads its user-level server list from ~/.cursor/mcp.json. The
+    // project-scoped <repo>/.cursor/mcp.json is documented, and Cursor's own
+    // bundle references both, but the agent runtime that powers its current
+    // UI does NOT pick the project one up: verified on a real install where
+    // Cursor restarted 30 minutes AFTER that file appeared, re-scanned, and
+    // still listed only its two built-in servers. Writing the global path and
+    // restarting produced `user-origin` (status ready, all tools) in the
+    // agent's own registry at ~/.cursor/projects/<proj>/mcps/.
+    case 'cursor':  return path.join(os.homedir(), '.cursor', 'mcp.json');
     case 'codex':   return path.join(os.homedir(), '.codex', 'config.toml');
     case 'gemini':  return path.join(os.homedir(), '.gemini', 'settings.json');
+    // Antigravity keeps MCP separate from the settings file Gemini CLI uses —
+    // a sibling of the hooks.json Origin already writes for it. Schema
+    // confirmed against the shipped `agy` binary, which carries
+    // `struct { McpServers map[string]common.MCPServerConfig "json:\"mcpServers\"" }`
+    // and a troubleshooting string naming mcp_config.json by path.
+    case 'antigravity': return path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
+    // GitHub Copilot CLI. Documented at ~/.copilot/mcp-config.json (overridable
+    // via COPILOT_HOME). NOT the same as Copilot in VS Code, which uses
+    // .vscode/mcp.json with a `servers` key — different file, different schema.
+    case 'copilot': return path.join(os.homedir(), '.copilot', 'mcp-config.json');
   }
 }
 
-export const MCP_PHASE1_AGENTS: McpAgentSlug[] = ['claude', 'codex', 'cursor', 'gemini'];
+// Agents whose MCP config location AND schema are verified against a real
+// install. Copilot and Aider are absent on purpose: neither could be verified
+// (no binary on the machine this was built against), and a config written
+// where nothing reads it reports success while changing nothing.
+//
+// Devin is absent because it needs NO entry — it reads the project-scoped
+// `.mcp.json` that the `claude` writer already produces. Verified: from a repo
+// containing that file `devin mcp list` reports the origin server with the
+// right command; from a directory without one it reports none.
+export const MCP_SUPPORTED_AGENTS: McpAgentSlug[] = ['claude', 'codex', 'cursor', 'gemini', 'antigravity', 'copilot'];
+
+/** @deprecated Old name from the phased rollout — kept so callers don't break. */
+export const MCP_PHASE1_AGENTS = MCP_SUPPORTED_AGENTS;
+
+/**
+ * Remove the per-repo Cursor config written by CLI versions before the move to
+ * the global path.
+ *
+ * Those files are inert — the whole reason for the move is that Cursor's agent
+ * runtime never reads them — so this is tidiness, not a fix. That makes the
+ * conservative choices the right ones: only ever touch OUR entry, and only
+ * delete the FILE when Origin is demonstrably the one that created it.
+ *
+ * "Created by us" is decided by the backup sibling, not by guesswork:
+ * backupOnce writes `<file>.origin-backup` only when the file ALREADY existed,
+ * so its absence means we wrote the file from nothing and removing it restores
+ * the pre-Origin state exactly. If a backup IS present the file predates us —
+ * drop our entry and leave the rest alone, whatever else it holds.
+ *
+ * Never throws: cleanup is a courtesy running inside install, and a read-only
+ * checkout or a permission error must not fail the registration it rides along
+ * with.
+ */
+export function cleanupLegacyCursorProjectConfig(gitRoot: string): LegacyCleanupResult {
+  const file = path.join(gitRoot, '.cursor', 'mcp.json');
+  const none: LegacyCleanupResult = { file, action: 'none' };
+  try {
+    if (!fs.existsSync(file)) return none;
+    const parsed = readJson(file);
+    if (!parsed.mcpServers?.origin) return none; // someone else's file — hands off
+
+    delete parsed.mcpServers.origin;
+    const otherServers = Object.keys(parsed.mcpServers).length > 0;
+    const otherKeys = Object.keys(parsed).filter((k) => k !== 'mcpServers').length > 0;
+    const weCreatedIt = !fs.existsSync(`${file}.origin-backup`);
+
+    if (!otherServers && !otherKeys && weCreatedIt) {
+      fs.rmSync(file);
+      // Take the directory too if it was only ever a wrapper for this file.
+      // rmdir fails on a non-empty dir, which is exactly the guard we want —
+      // .cursor commonly also holds rules/, and that is the user's.
+      try { fs.rmdirSync(path.dirname(file)); } catch { /* not empty — leave it */ }
+      return { file, action: 'removed-file' };
+    }
+
+    if (!otherServers) delete parsed.mcpServers;
+    writeJson(file, parsed);
+    return { file, action: 'removed-entry' };
+  } catch {
+    return none;
+  }
+}
 
 export function installMcpForAgent(agent: McpAgentSlug, gitRoot: string): McpInstallResult {
   const file = mcpConfigPath(agent, gitRoot);
   try {
     if (agent === 'codex') return installCodex(file);
-    return installJsonMcpServers(agent, file);
+    // Everything else is a JSON file keyed by `mcpServers`.
+    const result = installJsonMcpServers(agent, file);
+    // Registering Cursor globally leaves any pre-move project file orphaned.
+    // Sweep it here rather than in a one-off command, so the fix reaches
+    // everyone who upgrades instead of only those who read the release note.
+    if (agent === 'cursor') {
+      const legacy = cleanupLegacyCursorProjectConfig(gitRoot);
+      if (legacy.action !== 'none') result.legacy = legacy;
+    }
+    return result;
   } catch (err: any) {
     return { agent, file, status: 'failed', detail: err?.message || String(err) };
   }
 }
 
+// ── `origin enable` / `origin disable` integration ──────────────────────────
+
+/** Pipeline agent slugs (AgentType in enable.ts) → the MCP agents we support. */
+const AGENT_TYPE_TO_MCP: Record<string, McpAgentSlug> = {
+  'claude-code': 'claude',
+  claude: 'claude',
+  cursor: 'cursor',
+  codex: 'codex',
+  gemini: 'gemini',
+  antigravity: 'antigravity',
+  copilot: 'copilot',
+};
+
+/**
+ * Claude Code is registered PROJECT-scoped (see mcpConfigPath), so it only
+ * means anything when `enable` is run inside a repo. Under `enable --global`
+ * the base path is the home directory, where a `.mcp.json` would sit unread —
+ * Claude Code looks for it in the PROJECT root. Registering there would be the
+ * "writes a file nothing reads" failure this module exists to avoid, so global
+ * enable covers only the genuinely global configs.
+ *
+ * Cursor used to be in this set and no longer is: it reads a global config
+ * (see mcpConfigPath), so `enable --global` registers it like any other.
+ */
+export function isProjectScopedMcpAgent(agent: McpAgentSlug): boolean {
+  return agent === 'claude';
+}
+
+/**
+ * Which MCP agents `enable` should register, given the agents it just wired
+ * hooks for. Deduped, order-stable, and filtered to the verified Phase 1 set.
+ */
+export function mcpAgentsForEnable(agentTypes: string[], isGlobal: boolean): McpAgentSlug[] {
+  const out: McpAgentSlug[] = [];
+  for (const t of agentTypes) {
+    const slug = AGENT_TYPE_TO_MCP[t];
+    if (!slug || out.includes(slug)) continue;
+    if (isGlobal && isProjectScopedMcpAgent(slug)) continue;
+    out.push(slug);
+  }
+  return out;
+}
+
 /** Remove Origin's MCP registration — the `origin disable` counterpart. */
 export function uninstallMcpForAgent(agent: McpAgentSlug, gitRoot: string): McpInstallResult {
   const file = mcpConfigPath(agent, gitRoot);
+  // Runs before the exists() check below: "remove Origin" has to clear the
+  // pre-move project file even when the global one was never written.
+  const legacy = agent === 'cursor'
+    ? cleanupLegacyCursorProjectConfig(gitRoot)
+    : { file, action: 'none' as const };
+  const withLegacy = (r: McpInstallResult): McpInstallResult =>
+    (legacy.action !== 'none' ? { ...r, legacy } : r);
   try {
-    if (!fs.existsSync(file)) return { agent, file, status: 'unchanged' };
+    if (!fs.existsSync(file)) return withLegacy({ agent, file, status: 'unchanged' });
     if (agent === 'codex') {
       const current = fs.readFileSync(file, 'utf-8');
-      if (!current.includes('[mcp_servers.origin]')) return { agent, file, status: 'unchanged' };
+      if (!current.includes('[mcp_servers.origin]')) return withLegacy({ agent, file, status: 'unchanged' });
       backupOnce(file);
       fs.writeFileSync(file, current.replace(CODEX_BLOCK_RE, '\n').replace(/\n{3,}/g, '\n\n'));
-      return { agent, file, status: 'updated' };
+      return withLegacy({ agent, file, status: 'updated' });
     }
     const parsed = readJson(file);
-    if (!parsed.mcpServers?.origin) return { agent, file, status: 'unchanged' };
+    if (!parsed.mcpServers?.origin) return withLegacy({ agent, file, status: 'unchanged' });
     backupOnce(file);
     delete parsed.mcpServers.origin;
     if (Object.keys(parsed.mcpServers).length === 0) delete parsed.mcpServers;
     writeJson(file, parsed);
-    return { agent, file, status: 'updated' };
+    return withLegacy({ agent, file, status: 'updated' });
   } catch (err: any) {
-    return { agent, file, status: 'failed', detail: err?.message || String(err) };
+    return withLegacy({ agent, file, status: 'failed', detail: err?.message || String(err) });
   }
 }

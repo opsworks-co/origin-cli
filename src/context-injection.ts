@@ -32,11 +32,13 @@ export function assembleRepoContext(blocks: {
   brief?: string | null;
   attribution?: string | null;
   memory?: string | null;
+  memoryPointer?: string | null;
   handoff?: string | null;
 }): string | null {
   const brief = (blocks.brief || '').trim();
   let attribution = (blocks.attribution || '').trim();
   const memory = (blocks.memory || '').trim();
+  const memoryPointer = (blocks.memoryPointer || '').trim();
   const handoff = (blocks.handoff || '').trim();
 
   // Memory (session-level) supersedes attribution's commit-level activity/file
@@ -46,7 +48,13 @@ export function assembleRepoContext(blocks: {
     attribution = attributionHeadline(attribution);
   }
 
-  const ordered = [brief, attribution, memory, handoff].filter(Boolean);
+  // The pointer follows the digest it describes ("…and here is how to read the
+  // rest"), so it is meaningless on its own. Drop it when no memory block
+  // rendered rather than emitting a standalone "read the full memory" line
+  // above nothing.
+  const pointer = memory ? memoryPointer : '';
+
+  const ordered = [brief, attribution, memory, pointer, handoff].filter(Boolean);
   if (ordered.length === 0) return null;
   return ordered.join('\n\n');
 }

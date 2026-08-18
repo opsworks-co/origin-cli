@@ -26,7 +26,10 @@ import {
 import { loadConfig, loadAgentConfig } from '../config.js';
 import { cliVersion } from '../cli-version.js';
 import { fetchPolicies, startSession, endSession, updateSession, reportViolation, logToolCall, listSessions, getSession, reviewSession, listAgents, listRepos, getStats, listAuditLogs, getPolicyVersions, getAgentVersions, listNotifications, getUnreadCount, listUsers } from './api.js';
+import { getGitRoot } from '../session-state.js';
+import { gitOrNull } from '../utils/exec.js';
 import { getFileContext } from './file-context.js';
+import { getRepoMemory } from './repo-memory.js';
 
 interface PolicyData {
   id: string;
@@ -96,6 +99,25 @@ function checkFileAgainstPolicies(filepath: string, _action: string): { allowed:
   return { allowed: true, policy: null, requiresReview: false };
 }
 
+
+// ── Self-review gate ────────────────────────────────────────────────────────
+//
+// `review_session` marks a session APPROVED / REJECTED / FLAGGED. Handing that
+// to the agent whose work is being judged is the one tool here that undermines
+// the record rather than enriching it: Origin is worth reading because its
+// account comes from git truth, not from the agent's own telling. (The session
+// that started this line of work claimed to have created two files it never
+// touched — the record contradicted it.)
+//
+// Off unless `mcpAllowSelfReview` is set. Deliberately NOT gated: start/end/
+// update_session and log_tool_call, which are how MCP-driven agents get
+// captured at all — gating those would break tracking, not protect it.
+const SELF_REVIEW_TOOLS = new Set(['review_session']);
+
+function selfReviewAllowed(): boolean {
+  try { return loadConfig()?.mcpAllowSelfReview === true; } catch { return false; }
+}
+
 // Create the server
 const server = new Server(
   // Report the CLI's version, not a second one. The old standalone package
@@ -138,7 +160,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 // -- Tools --
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+  tools: ([
     {
       name: 'check_file_access',
       description: 'Check if a file path is restricted by any Origin governance policy',
@@ -261,11 +283,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           paths: { type: 'array', items: { type: 'string' }, description: 'Repo-relative file paths to look up (e.g. ["src/auth.ts"])' },
           repo_path: { type: 'string', description: 'Path to the git repository (defaults to the server\'s working directory)' },
-          per_path_limit: { type: 'number', description: 'Most-recent commits to inspect per path (default 3, max 20)' },
+          per_path_limit: { type: 'number', description: 'Scan depth: most-recent commits to INSPECT per path (default 10, max 20). Not a result count — max_commits bounds what comes back. Raise it on repos where many recent commits are unannotated (e.g. squash merges).' },
           max_commits: { type: 'number', description: 'Cap on commits returned after de-duping across paths (default 8, max 30)' },
           include_detail: { type: 'boolean', description: 'Pull the token-heavy detail: full prompts (≤8KB each), the full [Origin: …] markers (decisions/open/verify text), and the prior agent\'s filesRead list. Default false → summaries + the compact signals headline only.' },
         },
         required: ['paths'],
+      },
+    },
+    {
+      name: 'get_repo_memory',
+      description: "What has been happening in THIS REPO — the accumulated session and commit memory Origin keeps in git notes. Use it when you need project-level state rather than one file's history: what recent sessions were working on, what they decided, what they left unfinished, and which files are churning. Complements get_file_context (that answers \"what happened in this FILE\"; this answers \"what is the state of this PROJECT\"). Reads local git notes — no network, works offline, no account needed. Token-frugal by default: returns a digest (summary, file list, and COUNTS of decisions/open TODOs) so you can triage cheaply; pass include_detail to pull the decision text, open TODOs and per-file notes. Filter with paths to get only the memory touching files you care about.",
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          repo_path: { type: 'string', description: "Path to the git repository (defaults to the server's working directory)" },
+          session_limit: { type: 'number', description: 'Most recent session rollups to return (default 5, max 20)' },
+          commit_limit: { type: 'number', description: 'Most recent commit entries to return (default 10, max 50)' },
+          include_detail: { type: 'boolean', description: 'Pull the token-heavy detail: decision text, open TODOs, per-file notes. Default false → digest + counts only.' },
+          paths: { type: 'array', items: { type: 'string' }, description: 'Only return memory touching these files (suffix match, e.g. ["auth.ts"])' },
+        },
       },
     },
     {
@@ -368,11 +404,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {},
       },
     },
-  ],
+  ] as Array<{ name: string; description: string; inputSchema: unknown }>)
+    // Hide the self-review tool unless explicitly enabled. Hiding is only
+    // half the control — the call handler rejects it too, since a client can
+    // invoke a tool it was never advertised.
+    .filter((t) => !SELF_REVIEW_TOOLS.has(t.name) || selfReviewAllowed()),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+
+  // Enforce the gate at CALL time, not just in the advertised list. Filtering
+  // tools/list hides the tool from a well-behaved client; it does not stop one
+  // from invoking the name directly.
+  if (SELF_REVIEW_TOOLS.has(name) && !selfReviewAllowed()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: 'review_session is disabled: an agent should not approve its own work.',
+          hint: 'A human reviews in the Origin dashboard. To override: origin config set mcpAllowSelfReview true',
+        }),
+      }],
+    };
+  }
 
   switch (name) {
     case 'check_file_access': {
@@ -396,11 +451,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case 'start_session': {
       try {
+        // Resolve the checkout to its git ROOT and read its remote before
+        // calling. The agent hands us whatever path it happens to be in, and a
+        // bare path is the thinnest possible identity: the server's resolver
+        // needs `repoUrl` to match a row the UI's GitHub import registered as
+        // "github.com/owner/repo", and without it session/start auto-registers
+        // a SECOND row keyed by the local path — one repo, two rows, sessions
+        // split across them (prod: `vodka` held both, and the two sessions for
+        // a single turn anchored to different rows).
+        const rawRepoPath = args?.repoPath as string;
+        const repoRoot = getGitRoot(rawRepoPath) || rawRepoPath;
+        const repoUrl = gitOrNull(['config', '--get', 'remote.origin.url'], { cwd: repoRoot })?.trim() || undefined;
         const result = await startSession({
           machineId,
           prompt: args?.prompt as string,
           model: args?.model as string,
-          repoPath: args?.repoPath as string,
+          repoPath: repoRoot,
+          repoUrl,
         }) as any;
         currentSessionId = result.sessionId;
         return { content: [{ type: 'text', text: JSON.stringify({ sessionId: result.sessionId }) }] };
@@ -503,6 +570,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // include_full_prompts kept as a back-compat alias for the older
           // tool signature; include_detail is the current name.
           includeDetail: args?.include_detail === true || args?.include_full_prompts === true,
+        });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: err.message }) }] };
+      }
+    }
+
+    case 'get_repo_memory': {
+      try {
+        const result = getRepoMemory({
+          repoPath: (args?.repo_path as string) || process.cwd(),
+          sessionLimit: args?.session_limit as number | undefined,
+          commitLimit: args?.commit_limit as number | undefined,
+          includeDetail: args?.include_detail as boolean | undefined,
+          paths: (args?.paths as string[] | undefined) || [],
         });
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       } catch (err: any) {

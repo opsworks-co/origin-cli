@@ -8,7 +8,7 @@ import chalk from 'chalk';
 import fs from 'fs';
 import { execFileSync } from 'child_process';
 import {
-  MCP_PHASE1_AGENTS,
+  MCP_SUPPORTED_AGENTS,
   installMcpForAgent,
   uninstallMcpForAgent,
   mcpConfigPath,
@@ -28,12 +28,12 @@ function gitRootOrCwd(): string {
 }
 
 function parseAgents(raw?: string): McpAgentSlug[] {
-  if (!raw) return MCP_PHASE1_AGENTS;
+  if (!raw) return MCP_SUPPORTED_AGENTS;
   const wanted = raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  const unknown = wanted.filter((w) => !MCP_PHASE1_AGENTS.includes(w as McpAgentSlug));
+  const unknown = wanted.filter((w) => !MCP_SUPPORTED_AGENTS.includes(w as McpAgentSlug));
   if (unknown.length) {
     throw new Error(
-      `Unknown agent(s): ${unknown.join(', ')}. Supported: ${MCP_PHASE1_AGENTS.join(', ')}`,
+      `Unknown agent(s): ${unknown.join(', ')}. Supported: ${MCP_SUPPORTED_AGENTS.join(', ')}`,
     );
   }
   return wanted as McpAgentSlug[];
@@ -107,9 +107,20 @@ export async function mcpInstallCommand(opts: { agent?: string; uninstall?: bool
       default:
         console.log(`  ${chalk.gray('-')} ${agent.padEnd(7)} ${chalk.gray('skipped')}`);
     }
+    if (r.legacy) {
+      const lw = r.legacy.file.replace(process.env.HOME || '~', '~');
+      const what = r.legacy.action === 'removed-file' ? 'removed' : 'entry removed';
+      console.log(`  ${chalk.gray(' ')} ${''.padEnd(7)} ${chalk.gray(`↳ ${what} superseded ${lw}`)}`);
+    }
   }
 
   if (!opts.uninstall && changed > 0) {
+    // Devin reads the SAME project-scoped .mcp.json Claude Code does, so the
+    // claude writer covers it with no entry of its own. Say so — otherwise a
+    // Devin user sees no `devin` row and hand-adds a duplicate.
+    if (agents.includes('claude')) {
+      console.log(chalk.gray('\n  .mcp.json also serves Devin (`devin mcp list` to confirm).'));
+    }
     console.log(chalk.gray('\n  Restart the agent to pick this up. Claude Code and Cursor will'));
     console.log(chalk.gray('  ask you to approve the server before its tools become available.'));
   }
@@ -123,7 +134,7 @@ export async function mcpStatusCommand(): Promise<void> {
   console.log(chalk.bold('\n  Origin MCP registration\n'));
   console.log(chalk.gray(`  server: ${command} ${args.join(' ')}\n`));
 
-  for (const agent of MCP_PHASE1_AGENTS) {
+  for (const agent of MCP_SUPPORTED_AGENTS) {
     const file = mcpConfigPath(agent, gitRoot);
     const where = file.replace(process.env.HOME || '~', '~');
     if (!fs.existsSync(file)) {

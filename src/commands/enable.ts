@@ -10,6 +10,7 @@ import { isWindows } from '../utils/platform.js';
 import { loadConfig, saveConfig, saveRepoConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
+import { mcpAgentsForEnable, installMcpForAgent, mcpServerCommand, mcpCapable } from '../mcp/install.js';
 
 // ─── PATH Resolution ─────────────────────────────────────────────────────
 // Hooks run in a minimal shell environment where `origin` may not be in PATH.
@@ -1189,7 +1190,7 @@ function detectAgents(gitRoot: string): AgentType[] {
 // Windsurf/Aider coming soon
 const GLOBAL_CAPABLE_AGENTS: AgentType[] = ['claude-code', 'cursor', 'gemini', 'codex', 'antigravity', 'devin', 'copilot'];
 
-export async function enableCommand(opts: { agent?: string; global?: boolean; local?: boolean; link?: string; agentSlug?: string; standalone?: boolean }): Promise<void> {
+export async function enableCommand(opts: { agent?: string; global?: boolean; local?: boolean; link?: string; agentSlug?: string; standalone?: boolean; mcp?: boolean }): Promise<void> {
   // Standalone mode doesn't require login
   const config = loadConfig();
 
@@ -1326,6 +1327,42 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
     console.log(chalk.gray('    • Session start/end — lifecycle tracking'));
     console.log(chalk.gray('    • Prompt capture — real user prompts'));
     console.log(chalk.gray('    • Turn end — files, tokens, tool calls'));
+  }
+
+  // Register the MCP server so the agent can QUERY Origin, not just be
+  // recorded by it. Best-effort by design: a failure here must never take down
+  // hook installation, which is what `enable` actually exists to do.
+  if (opts.mcp !== false) {
+    const mcpAgents = mcpAgentsForEnable(agentsToEnable, isGlobal);
+    if (mcpAgents.length > 0) {
+      const { command } = mcpServerCommand();
+      if (!mcpCapable(command)) {
+        // An older installed binary can't serve MCP. Recording it would hand
+        // the agent a server that dies on spawn, so say so and move on.
+        console.log(chalk.gray('\n  MCP: skipped — installed origin has no `mcp serve` (run `origin upgrade`)'));
+      } else {
+        console.log(chalk.cyan('\n  MCP server:'));
+        for (const agent of mcpAgents) {
+          try {
+            const r = installMcpForAgent(agent, basePath);
+            const where = r.file.replace(os.homedir(), '~');
+            if (r.status === 'failed') {
+              console.log(chalk.gray(`    ⚠ ${agent} — ${r.detail}`));
+            } else {
+              console.log(chalk.gray(`    • ${agent} → ${where}`));
+            }
+          } catch (err: any) {
+            console.log(chalk.gray(`    ⚠ ${agent} — ${err?.message || err}`));
+          }
+        }
+        if (isGlobal) {
+          // Claude Code ONLY. Cursor reads a global config as of the move in
+          // #1058, so it is already registered above — naming it here sent
+          // people to run a per-repo install that does nothing.
+          console.log(chalk.gray('    (Claude Code is per-repo: run `origin mcp install` there)'));
+        }
+      }
+    }
   }
 
   // Install git hooks

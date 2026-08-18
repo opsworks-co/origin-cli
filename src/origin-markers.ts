@@ -19,10 +19,20 @@
 
 import * as fs from 'fs';
 
-// Tolerant: case-insensitive marker name, optional surrounding whitespace,
-// optional leading bullet/quote prefix (handled by the caller stripping
-// clutter). Captures the marker name and the content tail.
-const MARKER_RE = /\[Origin:\s*(Intent|Decision|Open|Verify)\s*\]\s*(.+?)\s*$/i;
+// Case-insensitive marker name, optional surrounding whitespace, optional
+// leading bullet/quote prefix (the caller strips that clutter first).
+// Captures the marker name and the content tail.
+//
+// ANCHORED at line start (^) on purpose. An emitted marker always opens its
+// line — the guidance says so — whereas text that merely *mentions* the
+// marker has it mid-sentence: source comments ("explicit [Origin: Decision]
+// markers and/or the LLM summary"), docs HTML ("<code>[Origin: Decision]
+// </code>"), and the guidance's own "Filled example: [Origin: Decision] used
+// bcrypt over argon2 …" line. Unanchored, all of those were harvested as real
+// decisions and written to git notes, where a later agent pulled them in as
+// prior context. Trading a little recall for precision is the right call: a
+// missed marker is invisible, a fabricated one actively misleads.
+const MARKER_RE = /^\[Origin:\s*(Intent|Decision|Open|Verify)\s*\]\s*(.+?)\s*$/i;
 
 // Keep notes push-friendly: cap items per bucket and content length.
 const MAX_PER_BUCKET = 12;
@@ -49,7 +59,11 @@ export function hasMarkers(m: OriginMarkers | undefined): m is OriginMarkers {
 // Mirrors self-reported-brief.ts on the server so both surfaces agree.
 function isPlaceholderMarker(content: string): boolean {
   const withoutPlaceholders = content.replace(/<[^>]*>/g, '');
-  return withoutPlaceholders.replace(/[\s—–\-:.,;/|()]+/g, '').length === 0;
+  // Quotes/brackets/emphasis count as glue too. The template also reaches us
+  // as a SOURCE line — `'  [Origin: Decision] <choice you made> — <why>',` in
+  // hooks.ts — whose trailing `',` left one non-glue char behind and let the
+  // placeholder through.
+  return withoutPlaceholders.replace(/[\s—–\-:.,;/|()"'`[\]{}*_]+/g, '').length === 0;
 }
 
 // Light cleanup — mirrors the server's cleanContent: strip wrapping
@@ -57,7 +71,16 @@ function isPlaceholderMarker(content: string): boolean {
 function cleanContent(raw: string): string {
   let s = raw.trim();
   if (!s) return '';
-  s = s.replace(/^["'`]+|["'`]+$/g, '').trim();
+  // Strip wrapping quotes only when they PAIR. Stripping any leading quote
+  // ate the opening backtick of content that starts with an inline-code span
+  // (`` `parseMarkers…` appears to match … ``), storing a mangled sentence.
+  while (s.length > 1 && /["'`]/.test(s[0]) && s[0] === s[s.length - 1]) {
+    s = s.slice(1, -1).trim();
+  }
+  // A bold-wrapped marker (`**[Origin: Decision]** chose X`) leaves the
+  // closing emphasis at the head of the content once the opening `*`s are
+  // stripped as line clutter.
+  s = s.replace(/^[*_]+\s*/, '').trim();
   s = s.replace(/\s+/g, ' ');
   if (s.length > CONTENT_MAX) s = s.slice(0, CONTENT_MAX - 1).trimEnd() + '…';
   s = s.replace(/\.\s*$/, '');
@@ -107,10 +130,18 @@ export function parseOriginMarkers(text: string | null | undefined): OriginMarke
 // all of them to newline-joined text so the line-based marker regex sees
 // each marker on its own line:
 //   - DisplayMessage[] JSON  → join each message's string content
-//   - JSONL (one JSON/line)  → deep-collect every string leaf per line
+//   - JSONL (one JSON/line)  → collect the authored string leaves per line
 //   - anything else          → the raw line, unchanged
 // JSON.parse turns escaped "\n" inside a content string into real
 // newlines, so a marker embedded mid-message still lands on its own line.
+//
+// Scoped to what the AGENT AUTHORED. A marker only means something when the
+// agent wrote it about its own work; the same characters appearing in a file
+// it read, a command's output, a user prompt, or the framework guidance the
+// CLI itself injects are somebody else's words. Collecting every string leaf
+// meant the guidance template — which carries a worked example — was scraped
+// back out of the transcript as if the agent had decided it, so notes filled
+// with "used bcrypt over argon2" from repos that never touched bcrypt.
 export function extractTranscriptText(transcript: string | null | undefined): string {
   if (!transcript) return '';
   const trimmed = transcript.trim();
@@ -118,41 +149,101 @@ export function extractTranscriptText(transcript: string | null | undefined): st
   // DisplayMessage[] / [{role,content}] form.
   if (trimmed.startsWith('[')) {
     try {
-      const arr = JSON.parse(trimmed) as Array<{ content?: unknown }>;
+      const arr = JSON.parse(trimmed) as unknown[];
       if (Array.isArray(arr)) {
-        return arr
-          .map((m) => (typeof m?.content === 'string' ? m.content : collectStrings(m)))
-          .join('\n');
+        return joinAuthored(
+          arr.map((m) => ({
+            authored: isAssistantAuthored(m),
+            text:
+              typeof (m as { content?: unknown })?.content === 'string'
+                ? ((m as { content: string }).content)
+                : collectAuthoredStrings(m),
+          })),
+        );
       }
     } catch { /* fall through to line mode */ }
   }
 
-  // JSONL / mixed. Parse each line; deep-collect strings on success.
-  const chunks: string[] = [];
+  // JSONL / mixed. Parse each line; collect authored strings on success.
+  const rows: AuthoredChunk[] = [];
   for (const line of transcript.split('\n')) {
     const t = line.trim();
     if (!t) continue;
     if (t.startsWith('{') || t.startsWith('[')) {
       try {
-        chunks.push(collectStrings(JSON.parse(t)));
+        const rec = JSON.parse(t);
+        rows.push({ authored: isAssistantAuthored(rec), text: collectAuthoredStrings(rec) });
         continue;
       } catch { /* not JSON — use raw */ }
     }
-    chunks.push(line);
+    rows.push({ authored: false, text: line });
   }
-  return chunks.join('\n');
+  return joinAuthored(rows);
 }
 
-// Depth-limited collection of all string leaves in a parsed JSON value,
-// joined with newlines. Agent-agnostic: wherever the marker text lives in
-// the object tree, it ends up on its own line for the regex.
-function collectStrings(value: unknown, depth = 0): string {
+interface AuthoredChunk { authored: boolean; text: string }
+
+// Prefer agent-authored chunks; fall back to everything when the transcript
+// shape carries no authorship at all (plain-text logs, unknown agents). The
+// fallback is why the anchored MARKER_RE matters — it's the only guard left
+// when we can't tell who wrote a line.
+function joinAuthored(rows: AuthoredChunk[]): string {
+  const authored = rows.filter((r) => r.authored);
+  return (authored.length ? authored : rows).map((r) => r.text).join('\n');
+}
+
+// Keys whose values are tool payloads rather than agent prose: file contents
+// the agent read or wrote, command output, and the context Origin's own hooks
+// inject. Markers inside these are never self-reports — an agent that reads
+// hooks.ts (which contains the template) must not thereby "decide" it.
+const TOOL_PAYLOAD_KEYS = new Set([
+  'input', 'args', 'arguments', 'command', 'cmd',
+  'toolUseResult', 'tool_result', 'toolResult', 'output', 'stdout', 'stderr',
+  'attachment', 'additionalContext', 'hookAdditionalContext', 'hookInfos', 'hookErrors',
+]);
+
+// Content-block types that carry tool traffic rather than authored text.
+// `custom_tool_call` is the Codex 0.145+ exec wrapper.
+const TOOL_BLOCK_TYPES = new Set([
+  'tool_use', 'tool_result', 'custom_tool_call', 'custom_tool_call_output',
+  'function_call', 'function_call_output',
+]);
+
+// True when a record was authored by the agent. Deep — Codex nests the role
+// under `payload`, Gemini tags its turns `type:"gemini"` — but bounded, and
+// paired with collectAuthoredStrings' key skipping so a tool result that
+// happens to embed a sub-agent's assistant message still contributes no text.
+function isAssistantAuthored(value: unknown, depth = 0): boolean {
+  if (depth > 6 || !value || typeof value !== 'object') return false;
+  const o = value as Record<string, unknown>;
+  const role = typeof o.role === 'string' ? o.role.toLowerCase() : '';
+  const type = typeof o.type === 'string' ? o.type.toLowerCase() : '';
+  if (role === 'assistant' || role === 'model' || role === 'agent') return true;
+  if (type === 'assistant' || type === 'gemini') return true;
+  for (const [k, v] of Object.entries(o)) {
+    if (TOOL_PAYLOAD_KEYS.has(k)) continue;
+    if (v && typeof v === 'object' && isAssistantAuthored(v, depth + 1)) return true;
+  }
+  return false;
+}
+
+// Depth-limited collection of the string leaves a record's author actually
+// wrote, joined with newlines. Agent-agnostic: wherever the marker text lives
+// in the object tree it ends up on its own line for the regex, minus the tool
+// payloads.
+function collectAuthoredStrings(value: unknown, depth = 0): string {
   if (depth > 8) return '';
   if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.map((v) => collectStrings(v, depth + 1)).join('\n');
+  if (Array.isArray(value)) {
+    return value.map((v) => collectAuthoredStrings(v, depth + 1)).join('\n');
+  }
   if (value && typeof value === 'object') {
-    return Object.values(value as Record<string, unknown>)
-      .map((v) => collectStrings(v, depth + 1))
+    const o = value as Record<string, unknown>;
+    const type = typeof o.type === 'string' ? o.type.toLowerCase() : '';
+    if (TOOL_BLOCK_TYPES.has(type)) return '';
+    return Object.entries(o)
+      .filter(([k]) => !TOOL_PAYLOAD_KEYS.has(k))
+      .map(([, v]) => collectAuthoredStrings(v, depth + 1))
       .join('\n');
   }
   return '';

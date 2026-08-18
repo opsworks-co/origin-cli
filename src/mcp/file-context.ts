@@ -74,7 +74,13 @@ export interface FileContextResult {
 }
 
 export interface FileContextOptions {
-  /** Most-recent commits to inspect per queried path (default 3). */
+  /**
+   * Most-recent commits to inspect per queried path (default 10). This is
+   * SCAN DEPTH, not result count — `maxCommits` bounds what comes back. The
+   * default is deep enough to see past the unannotated squash commits that
+   * sit on top of every path in a squash-merge repo; at 3 the tool reported
+   * "no attribution" on repos with a full notes history.
+   */
   perPathLimit?: number;
   /** Hard cap on commits returned after de-duping across paths (default 8). */
   maxCommits?: number;
@@ -184,7 +190,7 @@ export function getFileContext(
   paths: string[],
   opts: FileContextOptions = {},
 ): FileContextResult {
-  const perPathLimit = Math.max(1, Math.min(opts.perPathLimit ?? 3, 20));
+  const perPathLimit = Math.max(1, Math.min(opts.perPathLimit ?? 10, 20));
   const maxCommits = Math.max(1, Math.min(opts.maxCommits ?? 8, 30));
   const includeDetail = opts.includeDetail === true;
 
@@ -204,17 +210,24 @@ export function getFileContext(
   for (const p of cleanPaths) {
     let out = '';
     try {
-      // %H<NUL>%cI, one commit per record, NUL-terminated so paths/newlines
-      // in commit metadata can never corrupt parsing.
+      // One commit per record. `-z` NUL-TERMINATES each record, so the
+      // separator between fields must NOT also be a NUL: the old format
+      // (`%H%x00%cI`) produced `sha<NUL>date<NUL>sha<NUL>date…` with no
+      // double-NUL anywhere, so splitting records on `\0\0` matched nothing
+      // and collapsed the whole log into ONE record — only the newest commit
+      // per path was ever inspected and `per_path_limit` did nothing. On a
+      // squash-merge repo the newest commit is the squash (never annotated),
+      // so the tool reported "no attribution found" against thousands of
+      // notes. A space is unambiguous here: %cI is strict ISO-8601, no spaces.
       out = git(repoPath, [
         'log', `-n${perPathLimit}`, '--no-merges', '-z',
-        '--format=%H%x00%cI', '--', p,
+        '--format=%H %cI', '--', p,
       ]);
     } catch {
       continue; // unknown path, or file predates history — skip it
     }
-    for (const record of out.split('\0\0')) {
-      const [sha, date] = record.split('\0');
+    for (const record of out.split('\0')) {
+      const [sha, date] = record.trim().split(' ');
       if (!sha || !/^[0-9a-f]{7,40}$/.test(sha.trim())) continue;
       const key = sha.trim();
       const entry = byCommit.get(key) || { date: date?.trim(), touched: new Set<string>() };
@@ -223,13 +236,19 @@ export function getFileContext(
     }
   }
 
-  // Newest first, then cap.
+  // Newest first. NOT capped here: `maxCommits` bounds the commits we
+  // RETURN, not the candidates we inspect. Slicing candidates up front threw
+  // away annotated commits sitting behind unannotated ones — and on a
+  // squash-merge repo the newest commits on a path are exactly that (the
+  // squash is a fresh sha the CLI never annotated), so a small max_commits
+  // returned nothing against a full notes history. The walk is bounded by
+  // perPathLimit × paths regardless, and we stop as soon as the cap fills.
   const ordered = Array.from(byCommit.entries())
-    .sort((a, b) => (b[1].date || '').localeCompare(a[1].date || ''))
-    .slice(0, maxCommits);
+    .sort((a, b) => (b[1].date || '').localeCompare(a[1].date || ''));
 
   const commits: FileContextCommit[] = [];
   for (const [sha, meta] of ordered) {
+    if (commits.length >= maxCommits) break;
     const note = readOriginNote(repoPath, sha);
     if (!note || !note.sessionId) continue; // non-Origin commit — nothing to say
 

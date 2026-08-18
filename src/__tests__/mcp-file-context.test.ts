@@ -147,6 +147,48 @@ describe('getFileContext', () => {
     expect(res.message).toMatch(/No Origin attribution/i);
   });
 
+  // Regression: `-z` NUL-TERMINATES each log record, so a NUL between the
+  // fields too (the old `%H%x00%cI`) left no double-NUL to split records on.
+  // The whole log collapsed into ONE record — only the newest commit per path
+  // was inspected, and per_path_limit silently did nothing. This bites hardest
+  // on squash-merge repos, where the newest commit is the unannotated squash
+  // and the tool reports "no attribution" against a full notes history.
+  it('reaches PAST the newest commit when that commit has no note', () => {
+    const older = commitFile('layered.ts', 'v1\n');
+    addOriginNote(older, { version: 1, sessionId: 'sess-older', promptSummary: 'the annotated one' });
+    commitFile('layered.ts', 'v2\n'); // newest, deliberately NOT annotated
+
+    const res = getFileContext(repo, ['layered.ts'], { perPathLimit: 5 });
+    expect(res.commits).toHaveLength(1);
+    expect(res.commits[0].prompt).toBe('the annotated one');
+  });
+
+  it('returns MULTIPLE annotated commits for one path, newest first', () => {
+    const first = commitFile('multi.ts', 'a\n');
+    addOriginNote(first, { version: 1, sessionId: 'sess-1', promptSummary: 'first' });
+    const second = commitFile('multi.ts', 'b\n');
+    addOriginNote(second, { version: 1, sessionId: 'sess-2', promptSummary: 'second' });
+
+    const res = getFileContext(repo, ['multi.ts'], { perPathLimit: 5 });
+    expect(res.commits.map((c) => c.prompt)).toEqual(['second', 'first']);
+  });
+
+  // Regression: max_commits used to slice CANDIDATES before checking which
+  // carried notes, so annotated commits behind unannotated ones were dropped
+  // — the squash-merge shape again. It must bound the RESULT set.
+  it('caps on annotated results, not on candidates inspected', () => {
+    const a = commitFile('capped.ts', '1\n');
+    addOriginNote(a, { version: 1, sessionId: 'cap-1', promptSummary: 'oldest' });
+    const b = commitFile('capped.ts', '2\n');
+    addOriginNote(b, { version: 1, sessionId: 'cap-2', promptSummary: 'middle' });
+    commitFile('capped.ts', '3\n'); // newest two carry no note
+    commitFile('capped.ts', '4\n');
+
+    // Only 2 annotated commits exist and they sit behind 2 bare ones.
+    const res = getFileContext(repo, ['capped.ts'], { perPathLimit: 10, maxCommits: 2 });
+    expect(res.commits.map((c) => c.prompt)).toEqual(['middle', 'oldest']);
+  });
+
   it('errors cleanly on a non-git path', () => {
     const res = getFileContext(os.tmpdir(), ['whatever.ts']);
     expect(res.error).toMatch(/Not a git repository/);

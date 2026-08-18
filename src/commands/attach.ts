@@ -7,6 +7,7 @@ import { getGitRoot, getGitDir, getHeadSha, getBranch, saveSessionState, loadSes
 import type { SessionState } from '../session-state.js';
 import { api } from '../api.js';
 import { matchingProcessPids } from '../utils/process-detect.js';
+import { repoRemoteUrl } from './hooks.js';
 
 // ─── Agent Detection ──────────────────────────────────────────────────────
 
@@ -162,6 +163,9 @@ export async function attachCommand(agent?: string) {
         prompt: '(attached mid-session)',
         model: hookSlug,
         repoPath,
+        // Without this the server can't match an already-registered row and
+        // auto-registers a duplicate keyed by the local path — see repoRemoteUrl.
+        repoUrl: repoRemoteUrl(repoPath),
         agentSlug: hookSlug,
         branch: branch || undefined,
         hostname: agentConfig.hostname,

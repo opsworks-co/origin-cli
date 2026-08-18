@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import chalk from 'chalk';
 import { getGitRoot, clearSessionState } from '../session-state.js';
+import { MCP_SUPPORTED_AGENTS, uninstallMcpForAgent } from '../mcp/install.js';
 
 function removeOriginHooksFromFile(
   filePath: string,
@@ -199,6 +200,22 @@ export async function disableCommand(opts?: { global?: boolean }): Promise<void>
     : path.join(basePath, '.agents', 'hooks.json');
   const antigravityLabel = isGlobal ? '~/.gemini/config/hooks.json' : '.agents/hooks.json';
   removedCount += removeOriginHooksFromFile(antigravityPath, antigravityLabel, filterAntigravityHooks);
+
+  // Un-register the MCP server. Without this, disabling leaves every agent
+  // pointing at `origin mcp serve` — a live tracking surface the user just
+  // asked us to remove, and a server that breaks outright if they later
+  // uninstall the binary. Sweeps ALL supported agents rather than the detected
+  // set: `enable` may have registered under a different detection outcome, and
+  // removing an entry that isn't there is a no-op.
+  for (const agent of MCP_SUPPORTED_AGENTS) {
+    try {
+      const r = uninstallMcpForAgent(agent, basePath);
+      if (r.status === 'updated') {
+        removedCount++;
+        console.log(chalk.gray(`  ✓ MCP server removed from ${r.file.replace(os.homedir(), '~')}`));
+      }
+    } catch { /* best effort — never block disable */ }
+  }
 
   if (removedCount === 0) {
     console.log(chalk.gray('  No Origin hooks found in any agent config.'));

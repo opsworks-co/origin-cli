@@ -103,6 +103,35 @@ export function findCursorTranscriptJsonl(conversationId?: string): string | nul
 }
 
 /**
+ * Sibling transcripts for the forked subagents a "Multitask" turn spawns.
+ *
+ * When Cursor forks a background agent it writes that agent's work to
+ *   agent-transcripts/<conversationId>/subagents/<subagentSessionId>.jsonl
+ * — a file the main `<id>/<id>.jsonl` never references. The subagent also runs
+ * under a fresh per-turn `session_id` and fires no stop hook of its own, so if
+ * we don't read these files its tool calls, edits and tokens are invisible:
+ * the parent transcript parse simply ends at the fork point. Observed on a real
+ * karamba session where the subagent's 4 StrReplace edits and its commit landed
+ * exclusively in subagents/620d986f-….jsonl.
+ *
+ * Returns [] when there is no subagents dir (the common single-agent case).
+ */
+export function findCursorSubagentJsonls(mainJsonlPath: string): string[] {
+  try {
+    const subagentsDir = path.join(path.dirname(mainJsonlPath), 'subagents');
+    if (!fs.existsSync(subagentsDir)) return [];
+    const found = fs.readdirSync(subagentsDir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => path.join(subagentsDir, f))
+      .sort();
+    if (found.length) debugLog('cursor', 'found subagent transcripts', { count: found.length, subagentsDir });
+    return found;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Cursor stores agent conversation transcripts as JSONL at:
  *   ~/.cursor/projects/<workspace>/agent-transcripts/<id>/<id>.jsonl
  *
@@ -120,9 +149,16 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
     const transcriptFileFinal = findCursorTranscriptJsonl(conversationId);
     if (!transcriptFileFinal) return null;
 
-    // Parse the JSONL
-    const raw = fs.readFileSync(transcriptFileFinal, 'utf-8');
-    const lines = raw.split('\n').filter(l => l.trim());
+    // Parse the JSONL — main conversation first, then any forked-subagent
+    // transcripts so a Multitask turn's background work is counted too.
+    const readLines = (p: string) => {
+      try { return fs.readFileSync(p, 'utf-8').split('\n').filter(l => l.trim()); }
+      catch { return [] as string[]; }
+    };
+    const lines = [
+      ...readLines(transcriptFileFinal),
+      ...findCursorSubagentJsonls(transcriptFileFinal).flatMap(readLines),
+    ];
 
     const TRUNC = opts.verbose ? Number.MAX_SAFE_INTEGER : 2000;
     const truncate = (s: string) => s.length > TRUNC ? s.slice(0, TRUNC) + `… [+${s.length - TRUNC} chars]` : s;

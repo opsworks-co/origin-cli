@@ -27,7 +27,7 @@ import { mcpServeCommand } from './commands/mcp.js';
 import { mcpInstallCommand, mcpStatusCommand } from './commands/mcp-install.js';
 import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit,
-  handleGitPostCheckout, handleGitPostMerge, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync } from './commands/hooks.js';
+  handleGitPostCheckout, handleGitPostMerge, handlePrePush, handlePreCommit, handlePrepareCommitMsg, handleHistorySync, handleMemoryBriefBackfill } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
 import { promptsCommand } from './commands/prompts.js';
@@ -43,6 +43,7 @@ import { resumeCommand } from './commands/resume.js';
 import { shareCommand } from './commands/share.js';
 import { blameCommand } from './commands/blame.js';
 import { scrubNotesCommand } from './commands/scrub-notes.js';
+import { notesRepairCommand } from './commands/notes-repair.js';
 import { commitCommand } from './commands/commit.js';
 import { diffCommand } from './commands/diff.js';
 import { searchCommand } from './commands/search.js';
@@ -146,6 +147,7 @@ program.command('enable')
   .option('-l, --link <slug>', 'Link this repo to an Origin agent by slug (writes .origin.json)')
   .option('-s, --agent-slug <slug>', 'Override agent slug for this tool (e.g. cursor-frontend). Saved to config.')
   .option('--no-chain', 'Replace existing hooks instead of chaining')
+  .option('--no-mcp', 'Skip registering the MCP server with detected agents')
   .action(enableCommand);
 const benchmark = program.command('benchmark')
   .description('Agent benchmarking helpers');
@@ -384,6 +386,16 @@ program.command('session-compare <id1> <id2>')
   .action(explainCompareCommand);
 
 // ─── Attribution & Blame ─────────────────────────────────────────────────
+
+const notes = program.command('notes')
+  .description('Maintain this repo\'s Origin git notes');
+notes.command('repair')
+  .description('Drop junk [Origin: …] markers written by the old unanchored parser (dry run by default)')
+  .option('--apply', 'Actually rewrite the notes (default is a dry run)')
+  .option('--push', 'Force-push the repaired notes ref after applying')
+  .option('--remote <name>', 'Remote to push to (default: origin)')
+  .option('--ref <name>', 'Only repair one notes ref (origin | origin-memory)')
+  .action((opts: { apply?: boolean; push?: boolean; remote?: string; ref?: string }) => notesRepairCommand(opts));
 
 program.command('scrub-notes')
   .description('Remove prompt text from this repo\'s Origin git notes (metadata stays)')
@@ -694,6 +706,7 @@ hooks.command('git-post-commit').description('Handle git post-commit hook').acti
 // Detached child spawned by the session-start hook — runs the local-history
 // advertise-and-backfill round without holding the session start open.
 hooks.command('git-history-sync').description('Internal: backfill local commit history to Origin').action(() => handleHistorySync());
+hooks.command('memory-brief-backfill').description('Internal: generate the continuation brief for a repo that has none').action(() => handleMemoryBriefBackfill());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
 hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (rebase/amend)').action(async () => {
   const { preserveAttributionBatch, parseRewriteInput, handleCherryPick } = await import('./history-preservation.js');
@@ -1102,9 +1115,25 @@ program.addHelpText('after', () => {
     const entries = group.commands
       .map((name) => allRegistered.get(name))
       .filter((cmd): cmd is Command => !!cmd)
-      .map((cmd) => {
+      .flatMap((cmd) => {
         const desc = (cmd.description() || '').split('\n')[0];
-        return `    ${cmd.name().padEnd(18)} ${desc}`;
+        const row = `    ${cmd.name().padEnd(18)} ${desc}`;
+        // Name the subcommands of a parent command.
+        //
+        // `origin context memory` is the command Origin's own generated
+        // CLAUDE.md tells agents to run, and it appeared NOWHERE in
+        // `origin --help` — commander only lists subcommands under
+        // `origin context --help`, which you have to already suspect exists.
+        // An undocumented command in generated instructions is a support
+        // burden; worse, an agent that can't find it concludes the memory
+        // isn't reachable. Names only (no descriptions) and capped, so this
+        // stays one line per parent.
+        const subs = cmd.commands
+          .filter((sc: Command) => !(sc as unknown as { _hidden?: boolean })._hidden)
+          .map((sc: Command) => sc.name());
+        if (subs.length === 0) return [row];
+        const shown = subs.slice(0, 8).join(', ') + (subs.length > 8 ? ', …' : '');
+        return [row, `    ${' '.repeat(18)} \u2514 ${shown}`];
       });
     if (entries.length === 0) continue;
     lines.push('');

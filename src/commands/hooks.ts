@@ -73,7 +73,7 @@ import { ensureSqlite, querySqlite } from '../utils/sqlite.js';
 import { attachOrphanCommitFiles } from '../prompt-completeness.js';
 import { writeSessionFiles, pushSessionBranch, type PromptEntry, type PromptChange, type SessionWriteData } from '../local-entrypoint.js';
 import { writeGitNotes, shouldIncludePromptText, syncNotesFromRemoteThrottled, syncNotesForSessionStart, pushMemoryNotes, pushAcceptanceNotes, foldStagedNotes, resolvePushRemote, type PromptNoteEntry } from '../git-notes.js';
-import { parseMarkersFromTranscript, parseMarkersFromTranscriptPath } from '../origin-markers.js';
+import { parseMarkersFromTranscript, parseMarkersFromTranscriptPath, type OriginMarkers } from '../origin-markers.js';
 import { redactSecrets } from '../redaction.js';
 import { makeSyncBlock } from '../sync-block.js';
 import { buildAttributionContext, buildFileAttributionContext } from '../attribution.js';
@@ -85,7 +85,7 @@ import { maybeSyncDevinDesktop } from './devin.js';
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts, handoffRepresentsWork } from '../handoff.js';
 import { assembleRepoContext } from '../context-injection.js';
 import { synthesizeSessionSummary, memorySummaryMode } from '../session-summary.js';
-import { writeSessionMemory, writeCommitMemory, enrichDecisionsForSession, buildMemoryContext, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, isSubstantiveMemory, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, type SessionMemoryEntry } from '../memory.js';
+import { writeSessionMemory, writeCommitMemory, enrichDecisionsForSession, buildMemoryContext, buildMemoryPointerContext, readRecentMemory, readAllSessionMemory, memoryUpdateTrigger, shouldWriteMemoryOnCommit, shouldWriteMemoryOnSessionEnd, summarizeFromCommitSubjects, isSubstantiveMemory, buildMemoryBriefContext, readMemoryBrief, writeMemoryBrief, memoryBriefSignature, type SessionMemoryEntry } from '../memory.js';
 import { buildRepoBriefContext, maybeSpawnBriefGeneration } from '../repo-brief.js';
 import { backfillAcceptanceForSession } from '../acceptance.js';
 import { addTodosFromSession } from '../todo.js';
@@ -1122,17 +1122,52 @@ function writeManagedBlock(target: string, systemMsg: string): boolean {
  * Pass 2 only touches files that ALREADY carry the marker — Origin never
  * creates a context file for an agent this repo doesn't use.
  */
-export function writeAgentRulesFile(agentSlug: string, systemMsg: string, repoPath: string): void {
+/**
+ * True when this agent receives the session-start repo-context block over the
+ * hook's stdout channel, AND reads a rules file on every turn — i.e. writing
+ * the block into that file duplicates what the hook already delivered.
+ *
+ * Observed on one Claude Code turn: the same ~450-word digest arrived three
+ * times — once in the SessionStart hook payload, once in the UserPromptSubmit
+ * payload, and once more as the CLAUDE.md the harness loads into every
+ * request. Three copies of one fact, on every turn, is the single most
+ * expensive thing Origin does to a context window.
+ *
+ * Deliberately a short allowlist rather than `payload !== null`. Getting this
+ * wrong in the other direction is much worse than a duplicate: for Devin
+ * Desktop the rules file is the ONLY surface Origin has (no third-party
+ * hooks), and Copilot/Antigravity vary by host. Those keep the full text.
+ */
+export function agentReadsContextFromHook(agentSlug: string | undefined): boolean {
+  return agentSlug === 'claude-code' || agentSlug === 'cursor' || agentSlug === 'gemini';
+}
+
+export function writeAgentRulesFile(
+  agentSlug: string,
+  systemMsg: string,
+  repoPath: string,
+  ownFileMsg?: string,
+): void {
   if (!systemMsg) return;
 
   const written = new Set<string>();
 
+  // `ownFileMsg` is what the RUNNING agent's own file gets, when that differs
+  // from what the siblings get. It exists to stop double-delivery: an agent
+  // that already receives the repo-context block over the hook channel would
+  // otherwise read the very same block again out of its own always-loaded
+  // rules file (CLAUDE.md et al), paying twice for one copy of the
+  // information. Siblings keep the FULL text — those files are the ONLY
+  // delivery channel for the file-driven agents that read them (Codex reads
+  // AGENTS.md and gets no hook payload at all), so trimming them would be a
+  // real loss rather than a dedupe.
   const own = agentSlug ? agentRulesTarget(agentSlug, repoPath) : null;
   if (own) {
+    const ownMsg = ownFileMsg || systemMsg;
     try {
       fs.mkdirSync(path.dirname(own.target), { recursive: true });
-      if (own.useMarker) writeManagedBlock(own.target, systemMsg);
-      else fs.writeFileSync(own.target, systemMsg);
+      if (own.useMarker) writeManagedBlock(own.target, ownMsg);
+      else fs.writeFileSync(own.target, ownMsg);
       written.add(path.resolve(own.target));
       debugLog('session-start', 'agent rules file written', { agent: agentSlug, path: own.target });
     } catch (err: any) {
@@ -1156,6 +1191,32 @@ export function writeAgentRulesFile(agentSlug: string, systemMsg: string, repoPa
       debugLog('session-start', 'sibling refresh failed', { path: target, message: err?.message });
     }
   }
+}
+
+/**
+ * The rules-file copy of the session preamble, with the volatile repo-context
+ * block removed — the durable half (tracking notice, active policies, the
+ * authoring framework) that a rules file is actually for.
+ *
+ * Separated out and exported because this subtraction is the whole dedupe: get
+ * it wrong by a newline and the block stays in the file, and the digest keeps
+ * arriving twice per turn with nothing to show it failed.
+ *
+ * Returns undefined when there is nothing to subtract (no block was injected,
+ * or this agent reads its context from the file rather than the hook), which
+ * tells writeAgentRulesFile to write the full text as before.
+ */
+export function durableRulesFileMessage(
+  systemMsg: string,
+  injectedRepoContext: string | null,
+  agentSlug: string | undefined,
+): string | undefined {
+  if (!injectedRepoContext || !agentReadsContextFromHook(agentSlug)) return undefined;
+  const without = systemMsg.split('\n\n' + injectedRepoContext).join('');
+  // If the block wasn't found verbatim, leave the message alone rather than
+  // writing something subtly different from what the hook delivered.
+  if (without === systemMsg) return undefined;
+  return without.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // ─── Origin authoring framework guidance ──────────────────────────────────
@@ -1251,6 +1312,52 @@ export function emitVisiblePreamble(agentSlug: string | undefined, systemMsg: st
   const bold = '\x1b[1m', indigo = '\x1b[38;5;111m', dim = '\x1b[2m', reset = '\x1b[0m';
   const body = block.split('\n').map((l) => `${dim}│${reset} ${l}`).join('\n');
   process.stderr.write(`\n${bold}${indigo}◆ Origin${reset}\n${body}\n\n`);
+}
+
+// ─── Full-context injection dedupe ───────────────────────────────────────────
+//
+// The consolidated repo-context block (brief + AI% + memory digest + handoff)
+// has TWO writers: handleSessionStart, and handleUserPromptSubmit for the turn
+// that had to auto-create the session because no sessionStart ever fired
+// (Cursor's common case — it fires sessionStart about once per app launch).
+//
+// Both firing for the SAME conversation delivers the identical ~450-word digest
+// twice in one turn, which is what it does today whenever sessionStart ran but
+// its state wasn't found by the time the first prompt arrived.
+//
+// Dedupe on the CONVERSATION, not on elapsed time. A time window would have to
+// choose between re-injecting into the same conversation (waste) and staying
+// silent on a second chat opened moments later (the exact blindness the
+// auto-create path exists to fix). The conversation anchor — Cursor's
+// conversation_id, else the hook session_id — separates those two cases
+// exactly: same anchor means the block is already in this context window and
+// will stay there; a different anchor is a fresh context that needs its own copy.
+function contextInjectionStampPath(repoPath: string): string {
+  const key = crypto.createHash('sha256').update(repoPath).digest('hex').slice(0, 16);
+  return path.join(os.homedir(), '.origin', 'context-injection', `${key}.json`);
+}
+
+/** Record that the full repo-context block reached `conversationKey`'s context. */
+export function recordFullContextInjection(repoPath: string, conversationKey: string | undefined): void {
+  if (!repoPath || !conversationKey) return;
+  try {
+    const stamp = contextInjectionStampPath(repoPath);
+    fs.mkdirSync(path.dirname(stamp), { recursive: true });
+    fs.writeFileSync(stamp, JSON.stringify({ conversationKey, at: new Date().toISOString() }));
+  } catch {
+    // Best-effort: a missing stamp costs a duplicate injection, never a miss.
+  }
+}
+
+/** True when this conversation already received the full block. */
+export function fullContextAlreadyInjected(repoPath: string, conversationKey: string | undefined): boolean {
+  if (!repoPath || !conversationKey) return false;
+  try {
+    const raw = JSON.parse(fs.readFileSync(contextInjectionStampPath(repoPath), 'utf-8'));
+    return raw?.conversationKey === conversationKey;
+  } catch {
+    return false;
+  }
 }
 
 // ─── Concurrent Session State Lookup ──────────────────────────────────────
@@ -1811,6 +1918,54 @@ function maybeSpawnHistorySync(repoPath: string, workRoot: string): void {
   }
 }
 
+/**
+ * Self-heal the continuation brief for a repo that has session memory but no
+ * cached brief.
+ *
+ * maybeRefreshMemoryBrief only runs at session-END and post-COMMIT, and
+ * buildMemoryBriefContext is cache-only by design ("never generates here").
+ * A repo whose sessions all pre-date the brief feature therefore has no cached
+ * brief and no event that would ever mint one: every future session silently
+ * falls back to the deterministic commit-list digest, forever. That is exactly
+ * what a reviewing agent saw in the `oseledec` repo — it judged the brief
+ * "missing" as a product when it simply had never been generated there.
+ *
+ * Spawned detached from session-start so it costs the hook nothing: the LLM
+ * call lands out-of-band and the NEXT session picks the brief up from cache.
+ * Gated on connected + llm mode + memory-exists + brief-absent, so the common
+ * case is a couple of cheap local reads and no spawn at all.
+ */
+function maybeSpawnMemoryBriefBackfill(repoPath: string): void {
+  try {
+    if (!isConnectedMode() || memorySummaryMode() !== 'llm') return;
+    // bake-off / ignored repos are already refused inside write/readMemoryBrief
+    if (readMemoryBrief(repoPath)) return;               // already cached — the refresh path owns it
+    if (!readAllSessionMemory(repoPath).some(isSubstantiveMemory)) return; // nothing to summarize yet
+    const bin = process.argv[1];
+    if (!bin) return;
+    const child = spawn(process.execPath, [bin, 'hooks', 'memory-brief-backfill'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,                                  // no stray console window on Windows
+      env: { ...process.env, ORIGIN_BRIEF_REPO: repoPath },
+    });
+    child.unref();
+    debugLog('session-start', 'memory brief backfill child spawned', { repoPath });
+  } catch (err: any) {
+    debugLog('session-start', 'memory brief backfill spawn failed (non-fatal)', { message: err?.message });
+  }
+}
+
+// Entrypoint for the detached child (`origin hooks memory-brief-backfill`).
+// Re-checks the cache before calling out: concurrent session starts race to
+// spawn, and the first one home makes the rest a no-op.
+export async function handleMemoryBriefBackfill(): Promise<void> {
+  const repoPath = process.env.ORIGIN_BRIEF_REPO || getGitRoot(process.cwd());
+  if (!repoPath || !isConnectedMode()) return;
+  if (readMemoryBrief(repoPath)) return;
+  await maybeRefreshMemoryBrief(repoPath, true, 'memory-brief-backfill');
+}
+
 // Entrypoint for the detached child (`origin hooks git-history-sync`).
 // Re-checks the gate via syncRepoHistory (concurrent session starts race to
 // spawn; the backfill lock serializes them) and runs the full
@@ -2048,6 +2203,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     // where git reads run, so a worktree session advertises its own HEAD.
     if (connected) {
       maybeSpawnHistorySync(canonicalRepoPath, repoPath);
+      maybeSpawnMemoryBriefBackfill(canonicalRepoPath);
     }
   } else if (allRepoPaths) {
     // Multi-repo workspace — install in each discovered repo so
@@ -3056,6 +3212,9 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     // independently non-fatal; the repo brief is a cache-only read (never runs
     // the LLM in this hot path).
     const safeCtx = (fn: () => string | null): string | null => { try { return fn(); } catch { return null; } };
+    // Held outside the try so the rules-file write below can subtract it — see
+    // agentReadsContextFromHook.
+    let injectedRepoContext: string | null = null;
     try {
       const repoContext = assembleRepoContext({
         brief: safeCtx(() => buildRepoBriefContext(repoPath)),
@@ -3063,10 +3222,19 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         // Prefer the LLM continuation brief (what recent sessions DID + what's
         // in flight); fall back to the deterministic distillation offline.
         memory: safeCtx(() => buildMemoryBriefContext(repoPath)) || safeCtx(() => buildMemoryContext(repoPath)),
+        // Both of the above are capped digests. Tell the agent where the rest
+        // lives so it can PULL detail instead of assuming the digest is all
+        // there is — or, worse, that there is no memory at all.
+        memoryPointer: safeCtx(() => buildMemoryPointerContext(repoPath)),
         handoff: safeCtx(() => buildHandoffContext(repoPath)),
       });
       if (repoContext) {
         systemMsg += '\n\n' + repoContext;
+        injectedRepoContext = repoContext;
+        // Tell the user-prompt-submit path this conversation already has it, so
+        // the first prompt doesn't deliver a second copy — see
+        // fullContextAlreadyInjected.
+        recordFullContextInjection(repoPath, hookLookupSessionId(input.session_id, agentSlug) || input.session_id);
         debugLog('session-start', 'repo context injected (consolidated)', { length: repoContext.length });
       }
     } catch {
@@ -3104,10 +3272,24 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     emitVisiblePreamble(agentSlug, systemMsg);
     debugLog('session-start', 'system prompt injected', { agent: agentSlug, length: systemMsg.length, budgetBanner: !!budgetRefusedReason, budgetWarnBanner: !!budgetWarnReason });
 
-    // Write rules files so agents natively see Origin policies
+    // Write rules files so agents natively see Origin policies.
+    //
+    // For an agent that already got the repo-context block over the hook
+    // channel, its OWN rules file gets everything EXCEPT that block — the
+    // durable half (tracking notice, active policies, the authoring
+    // framework), which is what a rules file is for. The volatile half
+    // (memory digest, brief, attribution, handoff) is per-session and was
+    // already delivered this turn; repeating it in an always-loaded file is
+    // what made the digest arrive three times per turn. Sibling files still
+    // get the full text — see writeAgentRulesFile.
     if (systemMsg) {
       try {
-        writeAgentRulesFile(finalAgentSlug || '', systemMsg, repoPath);
+        writeAgentRulesFile(
+          finalAgentSlug || '',
+          systemMsg,
+          repoPath,
+          durableRulesFileMessage(systemMsg, injectedRepoContext, finalAgentSlug || ''),
+        );
       } catch {
         // Non-fatal
       }
@@ -3334,14 +3516,64 @@ function enforceSessionDurationLimit(
 // state. Idempotent: no-op for server-id sessions, when disconnected, or
 // when the call fails again (stays local, retried on the next hook).
 // Returns true when a migration succeeded this call.
+/**
+ * Does this API error mean "the server no longer has that session row"?
+ *
+ * The PATCH scope check in the API (`where: { id, commit: { repo: { orgId } } }`)
+ * answers a missing row with the literal string below — distinct from the
+ * router's generic `Not found`. A session can genuinely vanish under a live
+ * agent: `/session/end`'s empty-session cleanup HARD-DELETES a row that still
+ * has zero prompts/tokens server-side, which is exactly the state of a session
+ * whose turn is captured locally but whose first PATCH hasn't landed yet.
+ *
+ * This is NOT retriable (update-queue correctly refuses to queue it — the id is
+ * dead forever), but it must not be terminal either: the payload in hand is a
+ * fully-captured turn. Callers re-register via ensureServerSession({ remintGone })
+ * and send it to a fresh row instead of throwing the work away.
+ */
+/**
+ * The checkout's `origin` remote URL, or undefined when it has none.
+ *
+ * Every session/start MUST carry this when it can. The server's repo resolver
+ * reaches its GitHub-identity rung only via repoUrl (matching a row the UI's
+ * import registered as "github.com/owner/repo"), and the row it auto-registers
+ * stamps `fullName`/`provider` from it. Omit it and you get BOTH failure modes
+ * at once: the existing row isn't found, so a duplicate keyed by the local path
+ * is created, and that duplicate lands with `fullName: null` — which then
+ * defeats the GitHub import's own dedup, so the split persists. Prod held two
+ * rows each for `vodka`, `karamba` and `origin-test-repo` exactly this way.
+ */
+export function repoRemoteUrl(repoPath: string | undefined | null): string | undefined {
+  if (!repoPath) return undefined;
+  try {
+    const url = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return url || undefined;
+  } catch {
+    return undefined; // local-only checkout, or not a repo — both fine
+  }
+}
+
+export function isSessionGoneError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /(^|\b)Session not found\b/i.test(msg);
+}
+
 export async function ensureServerSession(
   state: SessionState,
   saveCwd: string,
   agentSlug: string | undefined,
   scope: string,
+  opts: { remintGone?: boolean } = {},
 ): Promise<boolean> {
   if (!isConnectedMode()) return false;
-  if (!state.sessionId || !state.sessionId.startsWith('local-')) return false;
+  // Normally this only promotes a `local-` session to the server. With
+  // `remintGone` the caller has just been told the CURRENT server id is gone,
+  // so a real (non-local) id is re-minted instead of being left to 404.
+  const needsMint = state.sessionId
+    && (state.sessionId.startsWith('local-') || opts.remintGone === true);
+  if (!needsMint) return false;
   // Never push an ignored repo's local session up to the org (a `local-` session
   // can exist if it was created before the repo was ignored, or via a path that
   // skipped session-start). Keep it local-only.
@@ -3352,12 +3584,17 @@ export async function ensureServerSession(
   try {
     const agentConfig = loadAgentConfig();
     if (!agentConfig?.machineId) return false;
-    debugLog(scope, 'migrating local session to server', { local: state.sessionId });
+    debugLog(
+      scope,
+      opts.remintGone ? 're-minting session the server no longer has' : 'migrating local session to server',
+      { previous: state.sessionId },
+    );
     const startRes = await api.startSession({
       machineId: agentConfig.machineId,
       prompt: (state.prompts && state.prompts[0]) || '',
       model: isSpecificModel(state.model) ? state.model : 'claude',
       repoPath: state.canonicalRepoPath || state.repoPath || saveCwd,
+      repoUrl: repoRemoteUrl(state.repoPath || state.canonicalRepoPath || saveCwd),
       agentSlug,
       branch: state.branch || undefined,
       agentSessionId: (state as any).agentSessionId || state.claudeSessionId,
@@ -4374,15 +4611,26 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     const repoPath = state.repoPath || hookCwd;
     const safeCtx = (fn: () => string | null): string | null => { try { return fn(); } catch { return null; } };
     try {
-      if (sessionJustAutoCreated) {
+      const conversationKey = lookupSessionId || input.session_id;
+      if (sessionJustAutoCreated && fullContextAlreadyInjected(repoPath, conversationKey)) {
+        // sessionStart already injected the full block into THIS conversation
+        // (its state just wasn't found above, so this turn auto-created a
+        // session). Re-sending it would put the same digest in the same context
+        // window twice in one turn. Attribution still goes out below.
+        const attributionCtx = buildAttributionContext(repoPath);
+        if (attributionCtx) systemMsg += '\n\n' + attributionCtx;
+        debugLog('user-prompt-submit', 'full repo context SKIPPED (already injected this conversation)', { conversationKey });
+      } else if (sessionJustAutoCreated) {
         const repoContext = assembleRepoContext({
           brief: safeCtx(() => buildRepoBriefContext(repoPath)),
           attribution: safeCtx(() => buildAttributionContext(repoPath)),
           memory: safeCtx(() => buildMemoryBriefContext(repoPath)) || safeCtx(() => buildMemoryContext(repoPath)),
+          memoryPointer: safeCtx(() => buildMemoryPointerContext(repoPath)),
           handoff: safeCtx(() => buildHandoffContext(repoPath)),
         });
         if (repoContext) {
           systemMsg += '\n\n' + repoContext;
+          recordFullContextInjection(repoPath, conversationKey);
           debugLog('user-prompt-submit', 'full repo context injected (session auto-created, no sessionStart)', {
             length: repoContext.length,
           });
@@ -4498,6 +4746,7 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
             prompt: '',
             model: (typeof input.model === 'string' && input.model !== 'cursor' && input.model !== 'default' && input.model !== 'unknown') ? input.model : 'cursor',
             repoPath: canonicalRepoPath,
+            repoUrl: repoRemoteUrl(repoPath) || undefined,
             agentSlug: 'cursor',
             branch: branch || undefined,
             // Anchor on the STABLE per-chat conversation_id (matching session-start
@@ -5723,7 +5972,14 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         });
       }
 
-      const updateRes = await durableUpdate(state.sessionId, {
+      // The server can HARD-DELETE this row out from under us between the
+      // session's creation and this PATCH (see isSessionGoneError). The payload
+      // below is the whole turn — transcript, prompts, per-prompt diffs — so a
+      // 404 here used to throw straight to the handler's catch and discard a
+      // fully-captured turn (observed live: a Cursor turn on `vodka` whose row
+      // was deleted 420ms after session/start; every later write 404'd and the
+      // work never reached the dashboard). Re-mint a session and send it there.
+      const stopUpdatePayload = {
         prompt: joinedPrompt || undefined,
         transcript: displayTranscript || undefined,
         // The RESOLVED agent. Without this the Devin re-tag above never reaches
@@ -5780,7 +6036,27 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
                 : {}),
             }))
           : undefined,
-      });
+      };
+
+      const sendStopUpdate = (id: string) => durableUpdate(id, stopUpdatePayload);
+      let updateRes: any;
+      try {
+        updateRes = await sendStopUpdate(state.sessionId);
+      } catch (updErr: unknown) {
+        if (!isSessionGoneError(updErr)) throw updErr;
+        debugLog('stop', 'session gone server-side — re-minting and resending', {
+          lostSessionId: state.sessionId,
+        });
+        const reminted = await ensureServerSession(
+          state, found?.saveCwd || state.repoPath || hookCwd, agentSlug, 'stop', { remintGone: true },
+        );
+        if (!reminted) {
+          debugLog('stop', 'session gone and re-mint failed — capture kept local', {});
+          throw updErr;
+        }
+        updateRes = await sendStopUpdate(state.sessionId);
+        debugLog('stop', 'resent capture to re-minted session', { sessionId: state.sessionId });
+      }
       debugLog('stop', 'update complete');
 
       // Persist the budget lockout signal the PATCH response carried, so
@@ -6647,9 +6923,14 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     // Decisions: explicit [Origin: Decision] markers (ground truth) merged with
     // the LLM's inferred decisions — the "why" a future agent can't get from code.
     const sessionDecisions: string[] = [];
+    // Keep the WHOLE marker set: intent/open/verify are parsed here too and
+    // used to be dropped on the floor, which is why the memory digest could
+    // only ever answer "what changed" and never "what for / what's left / how
+    // to check".
+    let sessionMarkers: OriginMarkers | undefined;
     try {
-      const markerDecisions = parseMarkersFromTranscriptPath(state.transcriptPath)?.decision || [];
-      for (const d of markerDecisions) if (d && !sessionDecisions.includes(d)) sessionDecisions.push(d);
+      sessionMarkers = parseMarkersFromTranscriptPath(state.transcriptPath);
+      for (const d of sessionMarkers?.decision || []) if (d && !sessionDecisions.includes(d)) sessionDecisions.push(d);
     } catch { /* best-effort */ }
     try {
       const synth = await synthesizeSessionSummary({
@@ -6670,8 +6951,17 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
 
     // Deterministic fallback (no key): summarize from the session's commit
     // messages — "Add calculator; Add clock" beats a vague opening prompt or an
-    // empty "No summary". Only when nothing better exists.
-    const commitSummary: string | null = (!synthesizedSummary && !parsed.summary)
+    // empty "No summary".
+    //
+    // Computed whenever there's no LLM summary, and preferred OVER
+    // `parsed.summary` below. `parsed.summary` is just the last assistant
+    // message off the transcript, capped at 500 chars — on a short session
+    // that is the agent's opening PLAN ("I'll look at the existing scripts so
+    // the new one matches, then add it and commit"), i.e. what it meant to do,
+    // not what it did. Commit subjects are the session's own record of what
+    // actually landed, so they win; assistant prose stays as the fallback for
+    // sessions that committed nothing.
+    const commitSummary: string | null = !synthesizedSummary
       ? summarizeFromCommitSubjects(sessionCommitSubjects)
       : null;
 
@@ -6686,7 +6976,7 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         endedAt: new Date().toISOString(),
         branch: getBranch(hookCwd) || state.branch,
         prompts: prompts.map(p => p.slice(0, 500)),
-        summary: synthesizedSummary || parsed.summary || commitSummary || null,
+        summary: synthesizedSummary || commitSummary || parsed.summary || null,
         filesChanged,
         linesAdded: gitCapture.linesAdded,
         linesRemoved: gitCapture.linesRemoved,
@@ -6716,10 +7006,11 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         filesChanged,
         linesAdded: gitCapture.linesAdded,
         linesRemoved: gitCapture.linesRemoved,
-        summary: synthesizedSummary || parsed.summary || commitSummary || undefined,
+        summary: synthesizedSummary || commitSummary || parsed.summary || undefined,
         prompts,
         fileNotes: synthesizedFileNotes,
         decisions: sessionDecisions,
+        markers: sessionMarkers,
       }));
       debugLog('session-end', 'session memory written');
     } catch (err: any) {
@@ -6996,11 +7287,26 @@ function pickRecentDevinSessionForRepo(repoPath: string, nowMs: number): DevinDe
 // session-end and per-commit writers (config.memoryUpdate) so both stay in
 // sync; writeSessionMemory upserts by sessionId, so repeated writes collapse to
 // a single, latest entry per session.
-function buildMemoryEntry(
+export function buildMemoryEntry(
   state: { sessionId: string; startedAt: string; prompts?: string[]; branch?: string | null; agentSlug?: string },
-  opts: { agentSlug?: string; model: string; branch: string | null; filesChanged: string[]; linesAdded: number; linesRemoved: number; summary?: string | null; prompts?: string[]; fileNotes?: Record<string, string>; decisions?: string[] },
+  opts: { agentSlug?: string; model: string; branch: string | null; filesChanged: string[]; linesAdded: number; linesRemoved: number; summary?: string | null; prompts?: string[]; fileNotes?: Record<string, string>; decisions?: string[]; markers?: OriginMarkers },
 ): SessionMemoryEntry {
   const prompts = opts.prompts || state.prompts || [];
+  const dedupe = (xs: string[]) => Array.from(new Set(xs.map((x) => x.trim()).filter(Boolean)));
+  // INTENT = what the user asked for. Prefer explicit [Origin: Intent] markers;
+  // otherwise fall back to the user's own first prompt VERBATIM. Deliberately
+  // not `summary` — that is the agent's account of what it did, and on the
+  // sessions we inspected it was literally the agent's plan ("I'll wire
+  // constellations into the oracle, then commit"), which reads as intent and
+  // misleads the next agent.
+  const intent = dedupe([
+    ...(opts.markers?.intent || []),
+    ...((opts.markers?.intent || []).length === 0 && prompts[0] ? [prompts[0].slice(0, 200)] : []),
+  ]);
+  // [Origin: Open] is the agent's own "didn't finish / unsure" note; merge it
+  // with the TODOs mined from prompts so both reach openTodos.
+  const openTodos = dedupe([...extractTodosFromPrompts(prompts), ...(opts.markers?.open || [])]);
+  const verify = dedupe(opts.markers?.verify || []);
   return {
     sessionId: state.sessionId,
     agentSlug: opts.agentSlug || state.agentSlug || 'unknown',
@@ -7009,13 +7315,20 @@ function buildMemoryEntry(
     endedAt: new Date().toISOString(),
     branch: opts.branch,
     summary: opts.summary || prompts[0]?.slice(0, 200) || 'No summary',
-    filesChanged: opts.filesChanged,
+    // Deduped: the same path lands here repeatedly (once per edit, plus once
+    // per commit that touched it), so an untouched list ships the digest lines
+    // like "wisdom.py, oracle.py, .gitignore, constellations.py,
+    // constellations.py, oracle.py, wisdom.py" — 7 entries, 4 unique, in the
+    // payload whose whole job is to be compact.
+    filesChanged: dedupe(opts.filesChanged),
     promptCount: prompts.length,
     linesAdded: opts.linesAdded,
     linesRemoved: opts.linesRemoved,
-    openTodos: extractTodosFromPrompts(prompts),
+    openTodos,
     ...(opts.fileNotes && Object.keys(opts.fileNotes).length > 0 ? { fileNotes: opts.fileNotes } : {}),
-    ...(opts.decisions && opts.decisions.length > 0 ? { decisions: opts.decisions.slice(0, 8) } : {}),
+    ...(opts.decisions && opts.decisions.length > 0 ? { decisions: dedupe(opts.decisions).slice(0, 8) } : {}),
+    ...(intent.length > 0 ? { intent: intent.slice(0, 3) } : {}),
+    ...(verify.length > 0 ? { verify: verify.slice(0, 5) } : {}),
   };
 }
 
@@ -7036,6 +7349,7 @@ async function maybeRefreshMemoryBrief(repoPath: string, connected: boolean, sou
     if (readMemoryBrief(repoPath)?.signature === sig) return; // unchanged since the last brief
     const sessionsForBrief = entries.filter(isSubstantiveMemory).slice(-12).map((e) => ({
       summary: e.summary, agentSlug: e.agentSlug, filesChanged: e.filesChanged, openTodos: e.openTodos, decisions: e.decisions, endedAt: e.endedAt,
+      intent: e.intent, verify: e.verify,
     }));
     if (sessionsForBrief.length === 0) return;
     const boundedDiff = recentDiff ? recentDiff.slice(0, 8000) : undefined;
@@ -7048,6 +7362,39 @@ async function maybeRefreshMemoryBrief(repoPath: string, connected: boolean, sou
   } catch (err: any) {
     debugLog(source, 'memory brief refresh error (non-fatal)', { message: err?.message });
   }
+}
+
+/**
+ * A commit's own committer date (ISO 8601), or null when git can't answer.
+ *
+ * Memory records used `Date.now()` for `committedAt`, which is only correct
+ * when the hook fires immediately. Backfills, queued/offline writes and
+ * rebase-replayed commits all land later — sometimes hours — and the record
+ * then places a commit inside a session window that never contained it.
+ */
+function gitCommitDate(repoPath: string, commitSha: string): string | null {
+  try {
+    const out = execFileSync('git', ['log', '-1', '--format=%cI', commitSha], {
+      cwd: repoPath, encoding: 'utf-8', windowsHide: true, timeout: 5_000,
+    }).trim();
+    return out && !Number.isNaN(new Date(out).getTime()) ? new Date(out).toISOString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Elapsed ms since a session's start, or undefined when that can't be known.
+ *
+ * Never returns NaN: the git note omits fields it didn't measure, and NaN
+ * survives a `typeof === 'number'` guard to serialize as `null`, which a
+ * reader coerces straight back to the fabricated 0 this replaced.
+ */
+export function sessionDurationMs(startedAt: string | undefined): number | undefined {
+  if (!startedAt) return undefined;
+  const started = new Date(startedAt).getTime();
+  if (!Number.isFinite(started)) return undefined;
+  return Math.max(0, Date.now() - started);
 }
 
 export async function handlePostCommit(): Promise<void> {
@@ -7436,9 +7783,16 @@ export async function handlePostCommit(): Promise<void> {
       // the session's transcript file. Matters for Codex, which routes its
       // note writes through this path.
       markers: parseMarkersFromTranscriptPath(state?.transcriptPath),
-      tokensUsed: 0,
-      costUsd: 0,
-      durationMs: 0,
+      // Tokens/cost are NOT known here — this hook runs before the transcript
+      // is parsed (that happens further down, for the session write). They were
+      // hardcoded to 0, so every commit note claimed a real session had spent
+      // nothing; omitted now, which readers can tell apart from a measurement.
+      // Duration IS known: the session's start is in state. Guarded on
+      // finiteness — an unparseable startedAt (older/truncated recovered state)
+      // yields NaN, which passes a `typeof === 'number'` check and serializes
+      // as JSON null, i.e. exactly the fabricated non-measurement this is
+      // removing.
+      durationMs: sessionDurationMs(state?.startedAt),
       linesAdded,
       linesRemoved,
       originUrl: state ? `${apiUrl}/sessions/${state.sessionId}` : '',
@@ -7630,7 +7984,11 @@ export async function handlePostCommit(): Promise<void> {
       // no LLM call needed. The normal commit path doesn't LLM-synthesize, so
       // markers are the decision source here.
       let commitDecisions: string[] = [];
-      try { commitDecisions = parseMarkersFromTranscriptPath(state.transcriptPath)?.decision || []; } catch { /* best-effort */ }
+      let commitMarkers: OriginMarkers | undefined;
+      try {
+        commitMarkers = parseMarkersFromTranscriptPath(state.transcriptPath);
+        commitDecisions = commitMarkers?.decision || [];
+      } catch { /* best-effort */ }
       try {
         const memPrompts = (parsed.prompts && parsed.prompts.length > 0) ? parsed.prompts : (state.prompts || []);
         const accFiles: string[] = writeData.filesChanged && writeData.filesChanged.length > 0 ? writeData.filesChanged : filesChanged;
@@ -7641,9 +7999,21 @@ export async function handlePostCommit(): Promise<void> {
           filesChanged: accFiles,
           linesAdded: (state as any).linesAdded || linesAdded,
           linesRemoved: (state as any).linesRemoved || linesRemoved,
-          summary: parsed.summary || memPrompts[0] || commitMessage || undefined,
+          // Commit message first: it is this session's own record of what
+          // LANDED. `parsed.summary` is the last assistant message, which on a
+          // commit-and-go turn is the agent's plan or its sign-off chatter, and
+          // `memPrompts[0]` is the raw opening prompt — both describe intent
+          // rather than outcome.
+          //
+          // Through summarizeFromCommitSubjects, not raw, so this shares ONE
+          // noise filter with the session-end path: a merge-resolution commit
+          // ("Merge branch 'main' into feature") is not a summary of anything,
+          // and for a commit-and-go session — which never reaches session end —
+          // whatever lands here is what the next agent reads permanently.
+          summary: summarizeFromCommitSubjects([commitMessage]) || parsed.summary || memPrompts[0] || undefined,
           prompts: memPrompts,
           decisions: commitDecisions,
+          markers: commitMarkers,
         }));
         debugLog('post-commit', 'session memory refreshed (memoryUpdate=commit)', { sessionId: state.sessionId, decisions: commitDecisions.length });
       } catch (err: any) {
@@ -7661,7 +8031,13 @@ export async function handlePostCommit(): Promise<void> {
           commitSha, sessionId: state.sessionId, agentSlug: state.agentSlug || 'unknown',
           message: commitMessage || '', filesChanged, linesAdded, linesRemoved,
           decisions: commitDecisions.length > 0 ? commitDecisions.slice(0, 6) : undefined,
-          branch: currentBranch || state.branch || null, committedAt: new Date().toISOString(),
+          // The COMMIT's own timestamp, not the hook's wall clock. They differ
+          // whenever the hook runs late (backfill, a deferred/queued write, a
+          // rebase-replayed commit) and the drift is what makes a session
+          // window disagree with the commits it claims — see
+          // reconcileSessionWindow. Falls back to now only if git can't answer.
+          branch: currentBranch || state.branch || null,
+          committedAt: gitCommitDate(repoPath, commitSha) || new Date().toISOString(),
         });
       } catch { /* non-fatal */ }
     }
@@ -8252,6 +8628,55 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
   }
 }
 
+/**
+ * Resolve the repo cwd for an `afterFileEdit` payload.
+ *
+ * Cursor's afterFileEdit stdin carries NO `cwd` key (unlike beforeSubmitPrompt
+ * / stop) — only `file_path` + `workspace_roots`. The old
+ * `input.cwd || process.cwd()` therefore always fell through to process.cwd(),
+ * which for a Cursor-spawned hook is `~/.cursor`. findStateForHook then scanned
+ * `~/.cursor` for active sessions, found none, and every single edit aborted
+ * with "no session state" — a 100% drop rate, measured 10/10 on a real
+ * karamba session. That silently blanked the very case this hook exists for,
+ * and it hurt worst on multitask/background-agent turns: a forked Cursor
+ * subagent gets a fresh per-turn `session_id` and fires NO stop hook, so
+ * afterFileEdit is the ONLY signal its edits ever produce.
+ *
+ * The edited file itself is the most precise anchor available (it is correct
+ * even in multi-root workspaces, where workspace_roots[0] may be a different
+ * project than the one being edited), so prefer its git root — the same
+ * derive-the-repo-from-the-edited-file rule the Antigravity adapter uses.
+ *
+ * WORKING root, not canonical: getWorkingGitRoot keeps a linked worktree as
+ * itself, where getGitRoot would collapse it to the main repo — and a session
+ * running in a worktree stores its state under the worktree path, so
+ * collapsing here would abort the hook all over again for that case.
+ * handleSessionStart resolves in exactly this order.
+ */
+export function resolveAfterFileEditCwd(input: Record<string, any>): string {
+  const rootOf = (dir: string): string | null => {
+    try { return getWorkingGitRoot(dir) || getGitRoot(dir); } catch { return null; }
+  };
+
+  const filePath = normalizeWorkspaceRoot(input.file_path || input.path);
+  if (filePath) {
+    const fileRoot = rootOf(path.dirname(filePath));
+    if (fileRoot) return fileRoot;
+  }
+
+  if (Array.isArray(input.workspace_roots)) {
+    for (const raw of input.workspace_roots) {
+      const wsRoot = normalizeWorkspaceRoot(raw);
+      if (wsRoot) {
+        const wsGitRoot = rootOf(wsRoot);
+        if (wsGitRoot) return wsGitRoot;
+      }
+    }
+  }
+
+  return normalizeWorkspaceRoot(input.cwd) || process.cwd();
+}
+
 // ─── Cursor: afterFileEdit ───────────────────────────────────────────────
 //
 // Fires after every Cursor edit (StrReplace / Write / etc.). Cursor's git
@@ -8265,10 +8690,10 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
 async function handleAfterFileEdit(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('after-file-edit', 'begin', { cwd: input.cwd, file: input.file_path || input.path });
 
-  const hookCwd = input.cwd || process.cwd();
+  const hookCwd = resolveAfterFileEditCwd(input);
   const found = findStateForHook(hookCwd, hookLookupSessionId(input.session_id, agentSlug), agentSlug);
   if (!found) {
-    debugLog('after-file-edit', 'ABORT: no session state');
+    debugLog('after-file-edit', 'ABORT: no session state', { hookCwd });
     return;
   }
   const { state, saveCwd } = found;
@@ -10408,9 +10833,10 @@ export async function handleAntigravity(event: string, input: Record<string, any
           const agyFileNotes = synth?.fileNotes && Object.keys(synth.fileNotes).length > 0 ? synth.fileNotes : undefined;
           // Decisions: explicit [Origin: Decision] markers (ground truth) + LLM-inferred.
           const agyDecisions: string[] = [];
+          let agyMarkers: OriginMarkers | undefined;
           try {
-            const md = parseMarkersFromTranscriptPath(transcriptPath)?.decision || [];
-            for (const d of md) if (d && !agyDecisions.includes(d)) agyDecisions.push(d);
+            agyMarkers = parseMarkersFromTranscriptPath(transcriptPath);
+            for (const d of agyMarkers?.decision || []) if (d && !agyDecisions.includes(d)) agyDecisions.push(d);
           } catch { /* best-effort */ }
           for (const d of (synth?.decisions || [])) if (d && !agyDecisions.includes(d)) agyDecisions.push(d);
           writeSessionMemory(repoPath, buildMemoryEntry(
@@ -10426,6 +10852,7 @@ export async function handleAntigravity(event: string, input: Record<string, any
               prompts: parsed.prompts,
               fileNotes: agyFileNotes,
               decisions: agyDecisions,
+              markers: agyMarkers,
             },
           ));
           debugLog(event, 'antigravity session memory refreshed (memoryUpdate=commit)', { sessionId, commitSha: commitSha.slice(0, 8), files: accFiles.length, synth: !!synth });
@@ -10637,6 +11064,53 @@ export async function handleAntigravity(event: string, input: Record<string, any
   }
 }
 
+/**
+ * Dual-hook collision guard: is THIS payload from a different agent than the
+ * slug the hook was invoked with?
+ *
+ * Cursor fires Claude-Code-compatible hooks out of ~/.claude/settings.json IN
+ * ADDITION to its own ~/.cursor/hooks.json, so one Cursor turn runs BOTH
+ * `origin hooks cursor <event>` and `origin hooks claude-code <event>` with the
+ * SAME stdin payload ~100ms apart (observed live: one session-start logged
+ * agentSlug "cursor" and "claude-code" back-to-back on identical inputKeys).
+ * That twin can never resolve the Cursor session state — `sessionMatchesAgent`
+ * rejects it on the slug, and claude-code being in STABLE_SESSION_ID_AGENTS
+ * forces an exact match on Cursor's PER-TURN-ROTATING session_id, which fails
+ * ("no exact match for stable claudeSessionId — new session needed"). So the
+ * tool-use events ABORT with "no session state" and Stop mints a WHOLE NEW
+ * session tagged agentSlug "claude-code" while carrying a Cursor model
+ * ("cursor-grok-4.6-high-fast"). Six of those accumulated in
+ * ~/.origin/sessions on the reporting machine. They landed there with `local-`
+ * ids only because that machine's session/start calls were falling back — on a
+ * healthy connected machine the twin gets a REAL server session and reaches the
+ * dashboard as a duplicate turn-for-turn Cursor chat mislabeled "Claude Code".
+ *
+ * `cursor_version` is the discriminator: Cursor stamps it on every hook payload
+ * and Claude Code never sends it. Note this is the OPPOSITE move from the
+ * Devin/Windsurf dual-hook fix (retagDevinFromProcess), which RE-TAGS the
+ * claude-code fire as devin — correct there because Devin CLI has no separate
+ * hook of its own to capture the run. Cursor does: `origin enable cursor` writes
+ * ~/.cursor/hooks.json, and that fire already captures the turn correctly, so
+ * the claude-code twin is pure duplicate and must be dropped. Re-tagging it
+ * instead would risk double-capturing onto the REAL Cursor session (the existing
+ * dual-hook dedup keys on prompt_id/turn_id, neither of which Cursor sends).
+ *
+ * Returns the real agent's slug when a foreign payload is detected, else null.
+ */
+export function detectForeignHookPayload(
+  agentSlug: string | undefined,
+  input: Record<string, any> | null | undefined,
+): { foreignSlug: string; discriminator: string } | null {
+  // Only the Claude-Code hook is hijacked this way (it's the config surface
+  // other agents re-implement); never second-guess any other slug.
+  if (agentSlug !== 'claude-code' && agentSlug !== 'claude') return null;
+  if (!input || typeof input !== 'object') return null;
+  if (typeof input.cursor_version === 'string' && input.cursor_version) {
+    return { foreignSlug: 'cursor', discriminator: 'cursor_version' };
+  }
+  return null;
+}
+
 export async function hooksCommand(event: string, agentSlug?: string): Promise<void> {
   // FIX 1 — Codex capture hooks must ALWAYS exit 0.
   //
@@ -10729,6 +11203,22 @@ async function runHookEvent(event: string, agentSlug?: string): Promise<void> {
   // no self-heal branch here.
 
   const input = await readHookInput();
+
+  // ── Dual-hook collision guard ───────────────────────────────────────────
+  // Bail BEFORE any handler runs (and before the queue drains below touch the
+  // network) when this claude-code invocation is really another agent's turn
+  // arriving through ~/.claude/settings.json. The agent's own hook captures it.
+  const foreign = detectForeignHookPayload(agentSlug, input);
+  if (foreign) {
+    debugLog(event, `ABORT: ${foreign.foreignSlug} payload on the ${agentSlug} hook (dual-hook collision)`, {
+      discriminator: foreign.discriminator,
+      sessionId: input.session_id,
+      model: input.model,
+      cwd: process.cwd(),
+    });
+    debugLog(event, '=== HOOK COMPLETE ===');
+    return;
+  }
 
   // The Copilot CLI delivers its hook payload in camelCase (sessionId,
   // transcriptPath, stopReason); the rest of this pipeline is Claude-Code-shaped

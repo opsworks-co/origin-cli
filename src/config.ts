@@ -23,6 +23,15 @@ export interface OriginConfig {
   secretRedaction?: boolean;
   secretScan?: boolean;        // Pre-commit secret scanning (default: true)
   hookChaining?: boolean;
+  // Let an agent APPROVE/REJECT/FLAG its own session through the MCP server's
+  // review_session tool. Off by default: Origin's record is worth reading
+  // because it is derived from git truth rather than the agent's own account
+  // of its work (a Codex session claimed two files it never touched; the
+  // record caught it). A tool that lets the author render the verdict spends
+  // exactly the independence that makes it worth reading. Capture tools
+  // (start/end/update_session, log_tool_call) are NOT gated by this — they are
+  // how MCP-driven agents get recorded at all.
+  mcpAllowSelfReview?: boolean;
   mode?: 'standalone' | 'auto'; // Force standalone even when logged in
   snapshotRepo?: string; // External git remote URL for origin-sessions branch
   // Where session files are stored (see session-store.ts).

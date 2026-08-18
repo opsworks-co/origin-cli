@@ -12,7 +12,14 @@ export async function fetchPolicies() {
   return originRequest('/api/mcp/policies');
 }
 
-export async function startSession(data: { machineId: string; prompt: string; model: string; repoPath: string }) {
+// `repoUrl` is what lets the server's shared resolver reach its
+// GitHub-identity rung (repo.path recorded as "github.com/owner/repo" by the
+// UI's GitHub import). Without it the ladder falls through to the corroborated
+// basename fallback, finds nothing to corroborate, and AUTO-REGISTERS a second
+// row keyed by the local checkout path — the org then holds two rows for one
+// repo and sessions split across them. Optional so callers that genuinely have
+// no remote (local-only checkout) still work.
+export async function startSession(data: { machineId: string; prompt: string; model: string; repoPath: string; repoUrl?: string; agentSlug?: string }) {
   return originRequest('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) });
 }
 

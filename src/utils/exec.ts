@@ -128,13 +128,24 @@ export function runDetailed(
  * exist on native Windows, so those calls silently failed there.
  */
 export function findExecutable(name: string, opts: RunOptions = {}): string | null {
+  return findExecutables(name, opts)[0] ?? null;
+}
+
+/**
+ * Every path `where`/`which` reports for a name, in the order the OS resolves
+ * them. On Windows a single npm-installed name routinely resolves twice — an
+ * extensionless `#!/bin/sh` shim AND a `.cmd` — and only the `.cmd` is
+ * spawnable by CreateProcess. Callers that hand the path to another program
+ * need the whole list so they can pick a runnable one; `findExecutable` alone
+ * hands back the sh shim.
+ */
+export function findExecutables(name: string, opts: RunOptions = {}): string[] {
   const r = runDetailed(whichCommand(), [name], { timeoutMs: 2_000, ...opts });
-  if (r.status !== 0) return null;
-  const first = r.stdout
+  if (r.status !== 0) return [];
+  return r.stdout
     .split(/\r?\n/)
     .map((s) => s.trim())
-    .find(Boolean);
-  return first || null;
+    .filter(Boolean);
 }
 
 // ─── Git ───────────────────────────────────────────────────────────────────

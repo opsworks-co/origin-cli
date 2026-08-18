@@ -29,6 +29,17 @@ export interface SessionMemoryEntry {
   // explicit [Origin: Decision] markers and/or the LLM summary. The "why" a
   // future agent can't recover from code alone.
   decisions?: string[];
+  // What the session was FOR, in the user's terms — from [Origin: Intent]
+  // markers, falling back to the user's first prompt. Distinct from `summary`,
+  // which records what the agent DID (and is often the agent's own narration,
+  // e.g. "I'll wire constellations into the oracle, then commit"). A resuming
+  // agent needs the ask, not the plan: reviewers of the memory digest called
+  // out "intent of the last change — what the user asked for, not just the
+  // commit title" as the single biggest gap.
+  intent?: string[];
+  // Reviewer/run checks surfaced this session — from [Origin: Verify] markers.
+  // "How do I run and confirm this?" is otherwise unrecoverable from the diff.
+  verify?: string[];
 }
 
 // An IMMUTABLE record of a single commit — frozen when the commit lands and
@@ -352,6 +363,55 @@ export function reconcileMemoryWithRemote(repoPath: string, stagingRef: string):
   }
 }
 
+/**
+ * Keep a session rollup's [startedAt, endedAt] window consistent with what the
+ * record itself claims the session did.
+ *
+ * Two ways the window used to end up lying. (1) A re-homed / resumed session
+ * keeps its id but re-stamps startedAt, so the upsert SHRANK the window and the
+ * entry's own earlier commits fell outside it. (2) The commit records reference
+ * a session whose window never contained their commit time. Observed live: a
+ * session claiming an 89-second window (15:52:10Z–15:53:39Z) credited with a
+ * commit made 14 hours earlier. A reader cannot tell which half is wrong, so
+ * both stop being usable evidence — and this record is what `origin why` and
+ * the PR surface reason from.
+ *
+ * So the window only ever GROWS: back to the earliest of (previous startedAt,
+ * new startedAt, the earliest commit attributed to this session) and forward to
+ * the latest endedAt. The times themselves are never invented — every candidate
+ * is something the record already asserted.
+ *
+ * Pure + exported for testing.
+ */
+export function reconcileSessionWindow(
+  entry: SessionMemoryEntry,
+  previous: SessionMemoryEntry | undefined,
+  commits: CommitMemoryEntry[],
+): SessionMemoryEntry {
+  const ms = (iso: string | undefined): number => {
+    const t = iso ? new Date(iso).getTime() : NaN;
+    return Number.isFinite(t) ? t : NaN;
+  };
+  const earliest = (...isos: Array<string | undefined>): string | undefined => {
+    const dated = isos.filter((i): i is string => Number.isFinite(ms(i)));
+    return dated.length ? dated.reduce((a, b) => (ms(a) <= ms(b) ? a : b)) : undefined;
+  };
+  const latest = (...isos: Array<string | undefined>): string | undefined => {
+    const dated = isos.filter((i): i is string => Number.isFinite(ms(i)));
+    return dated.length ? dated.reduce((a, b) => (ms(a) >= ms(b) ? a : b)) : undefined;
+  };
+
+  const ownCommitTimes = (commits || [])
+    .filter((c) => c && c.sessionId === entry.sessionId)
+    .map((c) => c.committedAt);
+
+  return {
+    ...entry,
+    startedAt: earliest(entry.startedAt, previous?.startedAt, ...ownCommitTimes) || entry.startedAt,
+    endedAt: latest(entry.endedAt, previous?.endedAt, ...ownCommitTimes) || entry.endedAt,
+  };
+}
+
 export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry): void {
   try {
     // Don't accumulate memory for bake-off arms or repos the user excluded —
@@ -362,8 +422,9 @@ export function writeSessionMemory(repoPath: string, entry: SessionMemoryEntry):
     // commit AND at session end, per `memoryUpdate`), and we want ONE entry per
     // session that reflects its latest state, not a duplicate per write.
     const idx = sessions.findIndex((e) => e.sessionId === entry.sessionId);
-    if (idx >= 0) sessions[idx] = entry;
-    else sessions.push(entry);
+    const merged = reconcileSessionWindow(entry, idx >= 0 ? sessions[idx] : undefined, commits);
+    if (idx >= 0) sessions[idx] = merged;
+    else sessions.push(merged);
     const trimmed = sessions.slice(-MAX_ENTRIES);
     // Prune commit records whose session dropped out of the retained window.
     const keep = new Set(trimmed.map((s) => s.sessionId));
@@ -527,6 +588,41 @@ export function readRecentMemory(repoPath: string, count: number = 3): SessionMe
 // ─── Build Memory Context for System Prompt ────────────────────────────────
 
 /**
+ * Truncate text for INJECTION without cutting mid-word, and say that you did.
+ *
+ * The old `.slice(0, n)` cuts landed wherever the byte budget ran out — a
+ * digest ended "The branch is two commits a", which reads as a complete
+ * thought that happens to be gibberish, and drops exactly the fact worth
+ * carrying. Two problems, both fixed here: land the cut on a sentence (else a
+ * word) boundary, and append an explicit marker so a truncated summary is
+ * distinguishable from a complete one and the reader knows where the rest is.
+ *
+ * Pure + exported for testing.
+ */
+export function truncateAtBoundary(text: string, max: number, hint?: string): string {
+  const s = (text || '').trim();
+  if (s.length <= max) return s;
+  const head = s.slice(0, max);
+  // Prefer a sentence end, but only in the last 40% of the budget: backing off
+  // further to land on a period throws away more than the ragged edge costs.
+  const sentenceEnd = Math.max(
+    head.lastIndexOf('. '), head.lastIndexOf('.\n'),
+    head.lastIndexOf('! '), head.lastIndexOf('? '),
+  );
+  let cut = sentenceEnd >= max * 0.6 ? sentenceEnd + 1 : -1;
+  if (cut < 0) {
+    const space = head.lastIndexOf(' ');
+    cut = space > 0 ? space : max;
+  }
+  const marker = hint ? ` \u2026 (truncated \u2014 ${hint})` : ' \u2026 (truncated)';
+  return s.slice(0, cut).replace(/[\s,;:\-\u2014]+$/, '') + marker;
+}
+
+// What to tell a reader who hit a truncation marker — the command that shows
+// the untruncated record. Kept next to the helper so the two never drift.
+export const MEMORY_FULL_RECORD_HINT = "run `origin context memory`";
+
+/**
  * Build the cross-session context injected into a NEW session's system prompt.
  * Returns null when there's nothing worth injecting.
  *
@@ -560,7 +656,13 @@ export function buildMemoryContext(repoPath: string): string | null {
   // session to have STARTED, which is not the same thing.
   const last = sortByDateAsc(substantive, (e) => e.endedAt)[substantive.length - 1];
   const ago = formatAge(Date.now() - new Date(last.endedAt).getTime());
-  parts.push(`- Most recent: [${ago} ago] ${last.summary.slice(0, 160)}`);
+  parts.push(`- Most recent: [${ago} ago] ${truncateAtBoundary(last.summary, 160, MEMORY_FULL_RECORD_HINT)}`);
+  // What the user actually ASKED for, above what the agent said it would do.
+  // `summary` is frequently the agent's own first-person plan, which reads as
+  // intent but isn't; without this line a resuming agent inherits the plan and
+  // never learns the goal.
+  const lastIntent = (last.intent || []).filter(Boolean);
+  if (lastIntent.length) parts.push(`  Goal: ${truncateAtBoundary(lastIntent.slice(0, 2).join(' / '), 200, MEMORY_FULL_RECORD_HINT)}`);
   const lastFiles = repoRelativeFiles(last.filesChanged).map((f) => path.basename(f));
   if (lastFiles.length) {
     parts.push(`  Files: ${lastFiles.slice(0, 8).join(', ')}${lastFiles.length > 8 ? ' …' : ''}`);
@@ -605,6 +707,16 @@ export function buildMemoryContext(repoPath: string): string | null {
     for (const t of todos.slice(0, 5)) parts.push(`  - ${t}`);
   }
 
+  // How to run/confirm the recent work. Bounded to the most recent sessions and
+  // reversed (newest first) because verify steps go stale fastest of anything
+  // in this digest — an old repo's setup command is worse than none.
+  const verify: string[] = [];
+  for (const e of [...substantive].reverse()) for (const v of e.verify || []) if (!verify.includes(v)) verify.push(v);
+  if (verify.length) {
+    parts.push('How to verify (from previous sessions):');
+    for (const v of verify.slice(0, 4)) parts.push(`  - ${v}`);
+  }
+
   // The immutable per-commit log — the granular "what each commit did", distinct
   // from the evolving session rollup above. Most recent few, bounded.
   const commits = readAllCommitMemory(repoPath);
@@ -612,11 +724,65 @@ export function buildMemoryContext(repoPath: string): string | null {
     parts.push('Recent commits (newest first):');
     for (const c of commits.slice(-5).reverse()) {
       const files = repoRelativeFiles(c.filesChanged).map((f) => path.basename(f)).slice(0, 4).join(', ');
-      parts.push(`  - ${c.commitSha.slice(0, 7)} ${c.message.slice(0, 80)}${files ? ` (${files})` : ''}`);
+      parts.push(`  - ${c.commitSha.slice(0, 7)} ${truncateAtBoundary(c.message, 80)}${files ? ` (${files})` : ''}`);
     }
   }
 
   return parts.join('\n');
+}
+
+// ─── Memory pointer (discoverability) ────────────────────────────────────────
+//
+// Everything above is a DIGEST: a capped session count, five decisions, five
+// TODOs, basenamed and truncated file lists. The full store is much larger, and
+// it lives somewhere no agent looks unprompted — a JSON note hanging off the
+// repo's ROOT commit, on a ref that `git clone` does not fetch and that `git
+// log` never surfaces. An agent asked "is there any memory from previous
+// agents?" checks the things it knows about (log, CLAUDE.md/AGENTS.md, the
+// worktree), finds nothing, and answers no — truthfully, as far as it can tell.
+//
+// Observed live on a fresh clone 2026-08-14: the agent reported it had no
+// access to prior-session memory, then recovered the entire history one turn
+// later once it was simply told the notes were there. The data had been sitting
+// in .git the whole time; the only thing missing was the pointer.
+//
+// So say where it is and how to read all of it. Gated on there actually BEING
+// something to point at — an empty repo must never send an agent chasing a ref
+// that holds nothing, which would be a worse failure than saying nothing.
+export function buildMemoryPointerContext(repoPath: string): string | null {
+  // Same exclusions as the digest: bake-off arms and user-ignored repos get no
+  // memory injected, so they must not be told memory exists either.
+  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+
+  const substantive = readAllSessionMemory(repoPath).filter(isSubstantiveMemory);
+  const commits = readAllCommitMemory(repoPath);
+  if (substantive.length === 0 && commits.length === 0) return null;
+
+  // Three routes on purpose, cheapest-to-reach first. The raw git command is
+  // the one that always works: it needs no MCP server, no `origin` on PATH and
+  // no network, and it is what the agent in the case above ended up running.
+  //
+  // The QUERY list below matters more than the dump list. Everything Origin
+  // injects is a fixed slice chosen for the LAST task; the query commands let
+  // an agent go and get what THIS task needs. Without them the agent only
+  // learns three ways to re-read the same blob — so it never asks a question
+  // the digest didn't already answer, and the strongest part of the product
+  // (per-line provenance) stays invisible. Retrievable beats resident.
+  return [
+    `Repo memory (${substantive.length} session${substantive.length !== 1 ? 's' : ''}, ` +
+      `${commits.length} commit record${commits.length !== 1 ? 's' : ''}) is stored in this repo's git notes — ` +
+      'the summary above is only a capped digest of it.',
+    'Query it for what THIS task needs, rather than assuming the digest is all there is:',
+    '  - `origin why <file>:<line>` — the session + prompt that wrote a specific line',
+    '  - `origin ask "<question>"` — find the session and prompts behind a file or change',
+    '  - `origin prompts <file>` — every prompt that touched a file',
+    '  - `origin todo list` — open TODOs carried across sessions',
+    'To read the whole record instead — every session rollup, the decisions, the open TODOs, ' +
+      'the per-file notes and the per-commit log — use any of:',
+    '  - the `get_repo_memory` MCP tool, if Origin\'s MCP server is connected',
+    '  - `origin context memory`',
+    '  - `git notes --ref=origin-memory show $(git rev-list --max-parents=0 HEAD | tail -1)`',
+  ].join('\n');
 }
 
 // ─── Memory continuation brief (LLM, cached in a git note) ───────────────────

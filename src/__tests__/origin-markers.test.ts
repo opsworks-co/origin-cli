@@ -48,6 +48,34 @@ describe('parseOriginMarkers (plain text)', () => {
     expect(parseOriginMarkers('')).toBeUndefined();
     expect(parseOriginMarkers(null)).toBeUndefined();
   });
+
+  // Every string below was pulled verbatim out of refs/notes/origin-memory,
+  // where the unanchored regex had stored it as a real decision.
+  it('ignores markers mentioned mid-sentence rather than emitted', () => {
+    const prose = [
+      '// explicit [Origin: Decision] markers and/or the LLM summary. The "why" a',
+      'Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.',
+      'two sources — explicit [Origin: Decision] markers via parseMarkersFromTranscriptPath (ground truth)',
+      '<code>[Origin: Decision]</code>, <code>[Origin: Open]</code>,',
+      "  '  [Origin: Decision] <choice you made> — <why>',",
+    ].join('\n');
+    expect(parseOriginMarkers(prose)).toBeUndefined();
+  });
+
+  it('keeps an opening inline-code span (only PAIRED quotes are wrapping)', () => {
+    const m = parseOriginMarkers('[Origin: Verify] `parseMarkers` matches quoted text — confirm')!;
+    expect(m.verify).toEqual(['`parseMarkers` matches quoted text — confirm']);
+  });
+
+  it('still reads a marker that opens the line, however it is decorated', () => {
+    const text = [
+      '[Origin: Decision] Anchored the regex — mid-sentence mentions were being stored',
+      '**[Origin: Verify]** Confirm the notes no longer carry the template example',
+    ].join('\n');
+    const m = parseOriginMarkers(text)!;
+    expect(m.decision).toEqual(['Anchored the regex — mid-sentence mentions were being stored']);
+    expect(m.verify).toEqual(['Confirm the notes no longer carry the template example']);
+  });
 });
 
 describe('extractTranscriptText', () => {
@@ -89,5 +117,72 @@ describe('extractTranscriptText', () => {
     const raw = 'plain line\n[Origin: Intent] Ship the thing\nanother plain line';
     const m = parseMarkersFromTranscript(raw)!;
     expect(m.intent).toEqual(['Ship the thing']);
+  });
+
+  it('ignores markers in the framework guidance the CLI injects into prompts', () => {
+    // The SessionStart/UserPromptSubmit hooks paste the marker template —
+    // worked example and all — into the transcript as user-side context.
+    const guidance = [
+      '  [Origin: Decision] <choice you made> — <why>',
+      'Filled example: [Origin: Decision] used bcrypt over argon2 — broader Node compatibility.',
+    ].join('\n');
+    const jsonl = [
+      JSON.stringify({ type: 'attachment', attachment: { content: guidance } }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: guidance } }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: '[Origin: Decision] Chose JWT over sessions — stateless' },
+      }),
+    ].join('\n');
+    const m = parseMarkersFromTranscript(jsonl)!;
+    expect(m.decision).toEqual(['Chose JWT over sessions — stateless']);
+  });
+
+  it('ignores markers inside tool payloads — files read, files written, output', () => {
+    // Reading (or editing) a file that documents the template must not make
+    // the template a decision. This is how hooks.ts's own source line landed
+    // in git notes.
+    const templateSource = "  '  [Origin: Decision] <choice you made> — <why>',";
+    const jsonl = [
+      JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: 'fix it' },
+        toolUseResult: { stdout: `[Origin: Intent] Ship the thing\n${templateSource}` },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: '[Origin: Open] Notes written before this fix still carry junk' },
+            { type: 'tool_use', name: 'Write', input: { file_path: 'hooks.ts', content: templateSource } },
+          ],
+        },
+      }),
+    ].join('\n');
+    const m = parseMarkersFromTranscript(jsonl)!;
+    expect(m.open).toEqual(['Notes written before this fix still carry junk']);
+    expect(m.intent).toBeUndefined();
+    expect(m.decision).toBeUndefined();
+  });
+
+  it('reads Codex-shaped records, where the role is nested under payload', () => {
+    const jsonl = [
+      JSON.stringify({
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: '[Origin: Decision] Prefix-strip — path.relative is host-only' }],
+        },
+      }),
+      JSON.stringify({
+        type: 'response_item',
+        payload: { type: 'custom_tool_call', name: 'exec', input: '[Origin: Intent] not mine' },
+      }),
+    ].join('\n');
+    const m = parseMarkersFromTranscript(jsonl)!;
+    expect(m.decision).toEqual(['Prefix-strip — path.relative is host-only']);
+    expect(m.intent).toBeUndefined();
   });
 });

@@ -82,9 +82,15 @@ export interface GitNoteData {
   // Origin web URL where the full session can be inspected (for users in
   // the same org).
   originUrl: string;
-  tokensUsed: number;
-  costUsd: number;
-  durationMs: number;
+  // Session telemetry. OPTIONAL because not every writer knows it: the
+  // post-commit hook writes the note before the transcript is parsed, and it
+  // used to hardcode `tokensUsed: 0, costUsd: 0, durationMs: 0` — a note that
+  // asserted a real session cost nothing and took no time. An absent field
+  // reads as "not measured here"; a zero reads as a measurement. Omitted from
+  // the serialized note when undefined.
+  tokensUsed?: number;
+  costUsd?: number;
+  durationMs?: number;
   linesAdded: number;
   linesRemoved: number;
   aiPercentage?: number;
@@ -229,9 +235,9 @@ export function buildNotePayload(data: GitNoteData, includePromptText: boolean):
         // Markers are the agent's own commentary — gate them behind the
         // same prompt-text privacy switch as promptSummary/fullPrompt.
         markers: includePromptText ? sanitizeMarkersForNote(data.markers) : undefined,
-        tokensUsed: data.tokensUsed,
-        costUsd: parseFloat(data.costUsd.toFixed(4)),
-        durationMs: data.durationMs,
+        tokensUsed: typeof data.tokensUsed === 'number' ? data.tokensUsed : undefined,
+        costUsd: typeof data.costUsd === 'number' ? parseFloat(data.costUsd.toFixed(4)) : undefined,
+        durationMs: typeof data.durationMs === 'number' ? data.durationMs : undefined,
         linesAdded: data.linesAdded,
         linesRemoved: data.linesRemoved,
         originUrl: data.originUrl,
@@ -407,6 +413,56 @@ export const STAGED_NOTES = {
   brief: { staging: 'refs/notes/origin-remote-memory-brief', legacy: 'refs/notes/origin-memory-brief-remote' },
   acceptance: { staging: 'refs/notes/origin-remote-acceptance', legacy: null },
 } as const;
+
+/** The live ref each staging entry folds onto. */
+export const LIVE_NOTES_REFS: Record<keyof typeof STAGED_NOTES, string> = {
+  attribution: 'refs/notes/origin',
+  memory: 'refs/notes/origin-memory',
+  brief: 'refs/notes/origin-memory-brief',
+  acceptance: 'refs/notes/origin-acceptance',
+};
+
+/**
+ * Cheap precondition for the session-start fold: does some staging ref hold
+ * notes whose LIVE counterpart does not exist at all?
+ *
+ * foldStagedNotes is not cheap enough to run unconditionally in front of a
+ * launching agent — measured 117ms on a small repo and 259ms on this one, on
+ * macOS, because the memory path reads, parses and merges both whole payloads
+ * before it can discover there was nothing to do (and process spawns cost
+ * several times more on Windows). The answer is almost always "nothing to
+ * do", so pay ONE `git for-each-ref` to find out instead.
+ *
+ * "Live ref missing entirely" is deliberately narrower than "staging differs
+ * from live". It is the state that is permanently stuck — a fresh clone whose
+ * post-checkout fetched but never folded reads its memory as absent, forever,
+ * with no user-visible sign the data is right there — and it is decidable from
+ * ref names alone. Ordinary staleness (live exists, staging is newer) is not
+ * stuck: the post-merge hook folds on every pull and the throttled sync folds
+ * within the backoff window, so it does not need to be bought at the cost of a
+ * quarter-second on every agent launch.
+ */
+export function hasUnfoldedStagedNotes(repoPath: string): boolean {
+  let present: Set<string>;
+  try {
+    const out = execFileSync('git', ['for-each-ref', '--format=%(refname)', 'refs/notes/'], {
+      windowsHide: true,
+      cwd: repoPath,
+      stdio: 'pipe' as const,
+      timeout: 5_000,
+      encoding: 'utf-8' as const,
+    }).trim();
+    present = new Set(out ? out.split('\n').map((l) => l.trim()).filter(Boolean) : []);
+  } catch {
+    return false; // not a repo, or git unavailable — nothing we can fold anyway
+  }
+  for (const key of Object.keys(STAGED_NOTES) as Array<keyof typeof STAGED_NOTES>) {
+    const entry = STAGED_NOTES[key];
+    const isStaged = present.has(entry.staging) || (!!entry.legacy && present.has(entry.legacy));
+    if (isStaged && !present.has(LIVE_NOTES_REFS[key])) return true;
+  }
+  return false;
+}
 
 // A forced refspec that maps the remote's notes STRAIGHT onto local
 // refs/notes/origin. Older `origin enable` releases installed this, and it
@@ -790,7 +846,33 @@ export function syncNotesFromRemoteThrottled(repoPath: string, timeoutMs?: numbe
 export const SESSION_START_SYNC_TIMEOUT_MS = 6_000;
 
 export function syncNotesForSessionStart(repoPath: string): boolean {
-  return syncNotesFromRemoteThrottled(repoPath, SESSION_START_SYNC_TIMEOUT_MS);
+  const fetched = syncNotesFromRemoteThrottled(repoPath, SESSION_START_SYNC_TIMEOUT_MS);
+
+  // Throttled out is NOT the same as "nothing to do". The staging refs can hold
+  // notes an earlier sync fetched but never folded, and on a fresh clone that is
+  // the norm rather than the exception: `git clone` fires post-checkout, which
+  // stamps the throttle BEFORE fetching and then does its work BACKGROUNDED, so
+  // anything that kills or times out that child (the 6s/15s budget, a closed
+  // terminal, a slow network) leaves refs/notes/origin-remote-memory populated
+  // and refs/notes/origin-memory absent. The agent then starts inside the
+  // backoff window, skips the sync entirely, and buildMemoryContext reads the
+  // LIVE ref — finding nothing. The repo's memory is sitting in .git the whole
+  // time, invisible until the window elapses.
+  //
+  // The throttle exists to budget NETWORK round trips, and folding needs none,
+  // so gate the fold on whether there is actually something stuck rather than on
+  // the network backoff. hasUnfoldedStagedNotes is one `git for-each-ref`; the
+  // fold itself is far too expensive to run unconditionally here (see its
+  // comment), and this way the stuck state repairs itself on the next agent
+  // launch instead of the next backoff window.
+  if (!fetched && hasUnfoldedStagedNotes(repoPath)) {
+    try {
+      foldStagedNotes(repoPath);
+    } catch {
+      // Non-fatal — a session start must never fail on notes bookkeeping.
+    }
+  }
+  return fetched;
 }
 
 function refSha(repoPath: string, ref: string): string | null {
