@@ -29,6 +29,7 @@ import {
   stopHeartbeat,
   isHeartbeatAlive,
   getStatePath,
+  reconcilePromptHistory,
   type SessionState,
   type ToolCallRecord,
 } from '../session-state.js';
@@ -108,6 +109,7 @@ import {
 } from '../budget-breach.js';
 import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync, spawn } from 'child_process';
+import { toRepoRelative } from '../transcript-watch.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -429,7 +431,20 @@ function buildPromptNoteEntries(
   return out.sort((a, b) => a.index - b.index);
 }
 
-function uncommittedExcludeUnion(state: SessionState): string[] {
+/**
+ * How recently another session must have been seen for its files to subtract
+ * from ours. A state file is rewritten on every hook fire, so its mtime is a
+ * live-ness proxy.
+ *
+ * Bounded because `listActiveSessions` returns everything not explicitly
+ * ENDED — in a long-lived repo that includes months of sessions whose agent is
+ * long gone. Letting those subtract would be worse than the bug being fixed:
+ * a turn that edits through the SHELL leaves no tool-call mapping to protect
+ * it, so any file some dead session once touched would vanish from it.
+ */
+const CONCURRENT_SESSION_WINDOW_MS = 30 * 60 * 1000;
+
+export function uncommittedExcludeUnion(state: SessionState): string[] {
   const set = new Set<string>();
   for (const f of state.prePromptDirtyFiles || []) set.add(f);
   for (const f of state.sessionStartDirtyFiles || []) set.add(f);
@@ -437,19 +452,41 @@ function uncommittedExcludeUnion(state: SessionState): string[] {
   // this repo, gather their filesChanged / commit-derived filename lists,
   // and add any file we ourselves haven't touched. "Touched by us" is
   // defined as appearing in one of OUR completedPromptMappings.
+  //
+  // Paths are normalized to repo-relative FIRST. Mappings hold a mix: a tool
+  // call records the absolute path it was handed, a git capture records the
+  // repo-relative one. `filterUncommittedDiff` keys on
+  // `diff --git a/<repo-relative>`, so every absolute entry added here matched
+  // nothing and this exclusion quietly did half its job — the half covering
+  // git-derived names, never the tool-derived ones that make up most agent
+  // edits. Prod 0a8e2164 shared a checkout with a second Claude session and
+  // was credited with its PublicLayout.tsx and Landing.tsx while this code was
+  // already "excluding" them.
   try {
     const repoPath = state.repoPath;
     if (repoPath) {
-      const others = listActiveSessions(repoPath).filter((s) => s.sessionId !== state.sessionId);
+      const rel = (f: string) => toRepoRelative(repoPath, f);
+      const now = Date.now();
+      const others = listActiveSessions(repoPath).filter((s) => {
+        if (s.sessionId === state.sessionId) return false;
+        // Only a session seen recently is plausibly editing the tree we are
+        // about to diff.
+        const p = (s as any).__statePath;
+        if (!p) return false;
+        try {
+          return now - fs.statSync(p).mtimeMs <= CONCURRENT_SESSION_WINDOW_MS;
+        } catch { return false; }
+      });
       if (others.length > 0) {
         const ours = new Set<string>();
         for (const m of state.completedPromptMappings || []) {
-          for (const f of m.filesChanged || []) ours.add(f);
+          for (const f of m.filesChanged || []) ours.add(rel(f));
         }
         for (const other of others) {
           for (const m of other.completedPromptMappings || []) {
             for (const f of m.filesChanged || []) {
-              if (!ours.has(f)) set.add(f);
+              const r = rel(f);
+              if (!ours.has(r)) set.add(r);
             }
           }
         }
@@ -700,7 +737,9 @@ export function buildSessionWriteData(opts: {
 }): SessionWriteData {
   const { state, parsed, promptMappings, gitCapture, status, apiUrl, extraFiles, promptEditsByIndex } = opts;
 
-  const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
+  // Reconciled, never shrinking — see reconcilePromptHistory. A rolled
+  // transcript otherwise renumbers every turn under it.
+  const prompts = reconcilePromptHistory(state.prompts, parsed.prompts);
   const model = parsed.model || state.model;
   const durationMs = Date.now() - new Date(state.startedAt).getTime();
   const branch = resolveSessionBranch(state) || state.branch || '';
@@ -5342,8 +5381,11 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     // didn't fire). Mark it accordingly.
     if (agentSlug === 'cursor' && parsed.tokensUsed > 0) tokensEstimated = true;
 
-    // Use prompts from transcript if we captured them, else from state
-    const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
+    // Prompt history, reconciled so the index space only ever grows. Taking
+    // the transcript's list outright renumbered every turn once Claude Code
+    // rolled the transcript out from under a long session (0a8e2164).
+    const prompts = reconcilePromptHistory(state.prompts, parsed.prompts);
+    if (prompts.length > (state.prompts?.length || 0)) state.prompts = [...prompts];
 
     // F9: Redact secrets before sending to API
     const config_ = loadConfig();
@@ -6583,7 +6625,8 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
     }
 
-    const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
+    const prompts = reconcilePromptHistory(state.prompts, parsed.prompts);
+    if (prompts.length > (state.prompts?.length || 0)) state.prompts = [...prompts];
 
     // For agents without transcripts (Codex, Gemini, etc.): synthesize
     // displayTranscript from captured prompts AND any assistant replies

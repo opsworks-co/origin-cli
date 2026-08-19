@@ -262,6 +262,54 @@ export interface SessionState {
 
 // ─── Git Directory ─────────────────────────────────────────────────────────
 
+/**
+ * The session's prompt history, reconciled against what the transcript can
+ * still see.
+ *
+ * A turn's promptIndex is its POSITION in this list, and the server keys
+ * PromptChange rows on that index. So the list may only ever GROW: if it
+ * shrinks, index N silently starts meaning a different turn than the row
+ * already stored under N, and each turn's diff lands on some earlier turn's
+ * row. That is not hypothetical — prod session 0a8e2164 ran long enough for
+ * Claude Code to roll its transcript, which left the CLI parsing 5 prompts
+ * against 7 stored mappings: the turn that verified a number rendered the
+ * previous turn's +327/−20, and three turns that really did edit files
+ * rendered empty.
+ *
+ * Reading `parsed.prompts.length > 0 ? parsed.prompts : state.prompts` is what
+ * allowed the shrink — a truncated transcript is non-empty, so it won.
+ *
+ * Rules, in order:
+ *   - nothing stored yet → take the transcript's view
+ *   - stored is a prefix of parsed → ordinary growth, take parsed
+ *   - parsed overlaps the TAIL of stored → the transcript lost its head; keep
+ *     our numbering and append only what is genuinely new
+ *   - no overlap → keep stored and append parsed. Renumbering is the one
+ *     outcome that corrupts already-written rows, so never do it.
+ */
+export function reconcilePromptHistory(
+  stored: string[] | undefined | null,
+  parsed: string[] | undefined | null,
+): string[] {
+  const prev = Array.isArray(stored) ? stored : [];
+  const next = Array.isArray(parsed) ? parsed : [];
+  if (prev.length === 0) return [...next];
+  if (next.length === 0) return [...prev];
+
+  // Ordinary growth: everything we already recorded is still at the head.
+  if (next.length >= prev.length && prev.every((p, i) => p === next[i])) return [...next];
+
+  // Transcript dropped earlier turns: find where its first surviving prompt
+  // sits in our history, and append only the tail beyond the overlap.
+  for (let start = 0; start < prev.length; start++) {
+    let k = 0;
+    while (start + k < prev.length && k < next.length && prev[start + k] === next[k]) k++;
+    if (k > 0 && start + k === prev.length) return [...prev, ...next.slice(k)];
+  }
+
+  return [...prev, ...next];
+}
+
 export function getGitDir(cwd?: string): string | null {
   try {
     return execSync('git rev-parse --git-dir', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();

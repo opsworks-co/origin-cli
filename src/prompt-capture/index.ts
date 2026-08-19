@@ -96,7 +96,9 @@ function extractByAgent(opts: CaptureInputs): PromptCapture[] {
 
 /**
  * Map one agent tool call (Edit / Write / MultiEdit / apply_patch …) to the
- * PromptEdit list it represents. Pure: no IO, no side effects beyond the
+ * PromptEdit list it represents. Side-effect-free, and the only IO is the
+ * memoized `.git` stat walk that recognizes a linked worktree (see
+ * makeRepoRelative) — plus the
  * once-per-unknown-tool stderr note. Recognizes the same tool-name
  * allow-lists as the transcript extractor (extendable via
  * ~/.origin/tool-aliases.json).
@@ -652,10 +654,81 @@ function pickFilePath(input: Record<string, any>): string | null {
   return null;
 }
 
+// Directory → containing linked-worktree root (or null), memoized. An agent
+// working in a worktree hits the same few directories thousands of times.
+const worktreeRootCache = new Map<string, string | null>();
+
+/**
+ * Root of the linked git worktree holding `filePath`, when that worktree
+ * belongs to `repoPath`'s repository — else null.
+ *
+ * A linked worktree's root carries a `.git` FILE reading
+ * `gitdir: <repo>/.git/worktrees/<name>`, which is what ties it back to the
+ * session's checkout. Cheap fs walk, no subprocess: this runs per tool call.
+ */
+function linkedWorktreeRoot(filePath: string, repoPath: string): string | null {
+  const repoNorm = repoPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!repoNorm) return null;
+  let dir = path.dirname(filePath);
+  const seen: string[] = [];
+  for (let depth = 0; depth < 40; depth++) {
+    const cached = worktreeRootCache.get(dir);
+    if (cached !== undefined) {
+      for (const d of seen) worktreeRootCache.set(d, cached);
+      return cached;
+    }
+    seen.push(dir);
+    let resolved: string | null | undefined;
+    try {
+      const dotGit = path.join(dir, '.git');
+      const st = fs.statSync(dotGit);
+      if (st.isFile()) {
+        const m = fs.readFileSync(dotGit, 'utf-8').match(/^gitdir:\s*(.+)$/m);
+        const gitdir = m ? m[1].trim().replace(/\\/g, '/') : '';
+        // Case-insensitive on Windows for the same reason makeRepoRelative is
+        // below: one machine spells the same path `c:\repo` and `C:\repo`.
+        const marker = repoNorm + '/.git/worktrees/';
+        const ours = process.platform === 'win32'
+          ? gitdir.toLowerCase().startsWith(marker.toLowerCase())
+          : gitdir.startsWith(marker);
+        resolved = ours ? dir : null;
+      } else if (st.isDirectory()) {
+        // Its own main checkout — a different repository, not our worktree.
+        resolved = null;
+      }
+    } catch { /* no .git here; keep walking up */ }
+    if (resolved !== undefined) {
+      for (const d of seen) worktreeRootCache.set(d, resolved);
+      return resolved;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  for (const d of seen) worktreeRootCache.set(d, null);
+  return null;
+}
+
 function makeRepoRelative(filePath: string, repoPath: string): string {
   const norm = filePath.replace(/\\/g, '/');
   const repoNorm = repoPath.replace(/\\/g, '/').replace(/\/+$/, '');
   if (norm.startsWith(repoNorm + '/')) return norm.slice(repoNorm.length + 1);
+
+  // An edit made in a linked worktree of this same repo. Left absolute, it
+  // reaches the server as `/private/tmp/.../wt-x/apps/api/foo.ts`, which
+  // resolves against no repo root, so the turn renders as having changed
+  // nothing — prod 0a8e2164 had three such turns, every edit captured and
+  // none displayable. Same commits, same repo: the path is repo-relative to
+  // the worktree root.
+  const wtRoot = linkedWorktreeRoot(filePath, repoPath);
+  if (wtRoot) {
+    const wtNorm = wtRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (norm.startsWith(wtNorm + '/')) return norm.slice(wtNorm.length + 1);
+    if (process.platform === 'win32') {
+      const wtPrefix = wtNorm.toLowerCase() + '/';
+      if (norm.toLowerCase().startsWith(wtPrefix)) return norm.slice(wtPrefix.length);
+    }
+  }
   // Windows spells the same path both ways, and one Cursor transcript really
   // does carry both: `c:\repo\file` on some turns, `C:\repo\file` on others.
   // A case-sensitive prefix test leaves the odd ones ABSOLUTE, so editsJson —
