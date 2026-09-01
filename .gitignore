@@ -11,3 +11,21 @@ src/build-info.ts
 # pre-built JavaScript silently drift from the source, which is a real
 # supply-chain footgun.
 origin-cli-*.tgz
+
+# Origin's OWN managed context files. Origin refreshes the
+# `<!-- origin-managed -->` block in these on every session start, in
+# whatever repo it is running in — including this one, while a maintainer is
+# syncing it. Two of them (CLAUDE.md, AGENTS.md) were committed here that
+# way and carried this repo's AI-commit statistics on a public repo for
+# months. They are generated bookkeeping, not source, exactly like
+# src/build-info.ts above.
+#
+# This list is ORIGIN_AUTHORED_CONTEXT_PATHS in src/ignore-patterns.ts.
+# Cursor's rules file is deliberately absent from it: it lives in $HOME and
+# can never appear in a repo.
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.windsurfrules
+.devin/rules/origin.md
+.github/copilot-instructions.md
