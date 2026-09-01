@@ -308,13 +308,19 @@ export interface WatchDeps {
   // Walk the real git commits made since `headBefore` (session start) so they
   // can be attributed to the session + PR-linked. Wraps captureGitState with a
   // committed-only, full-context capture in production.
-  captureGit: (workRoot: string, headBefore: string | null) => {
+  // `preSessionBaseline` is the session's first shadow — the tree as this
+  // session found it, dirt included. It is measured against, never walked:
+  // the commit range stays headBefore..HEAD exactly as before.
+  captureGit: (workRoot: string, headBefore: string | null, preSessionBaseline?: string | null) => {
     headBefore: string;
     headAfter: string;
     commitShas: string[];
     commitDetails: Array<{
       sha: string; message: string; author: string; filesChanged: string[];
       linesAdded: number; linesRemoved: number; patch?: string; committedAt?: number;
+      // Named here so the payload carries them: the details are forwarded whole,
+      // and a field the type does not know about is a field the next edit drops.
+      preSessionLinesAdded?: number; preSessionLinesRemoved?: number;
     }>;
     diff: string;
     diffTruncated: boolean;
@@ -674,7 +680,16 @@ export async function reconcileThread(
   let gitCapture: Record<string, unknown> | undefined;
   if (headShaAtStart) {
     try {
-      const gc = deps.captureGit(repo.workRoot, headShaAtStart);
+      // The FIRST prompt's shadow is the only record of what the tree held when
+      // this session opened — `headShaAtStart` is a commit, and a commit knows
+      // nothing about the dirt sitting on top of it. #1387 measures how much of
+      // a commit was already uncommitted then, and measuring that against a
+      // bare HEAD answers "nothing" every time: the commit's own parent IS that
+      // HEAD. kotleta f20f04c5 read +0/-0 that way against +83/-15 of inherited
+      // work its own session had not written. Absent (no shadow yet), the
+      // measurement falls back to exactly its previous behaviour.
+      const baselineShadow = promptShadows.find((s) => s.promptIndex === 0)?.baselineSha || null;
+      const gc = deps.captureGit(repo.workRoot, headShaAtStart, baselineShadow);
       // Scope commits to the ones THIS thread authored. captureGit walks the
       // cumulative headShaAtStart..HEAD range, which — with two Codex sessions
       // live in the same repo — sweeps in commits a DIFFERENT thread made after
@@ -1003,8 +1018,10 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     readFileAtRev,
     // Committed-only, full-context walk of headShaAtStart..HEAD — the session's
     // real commits with per-commit numstat + patch, for server attribution.
-    captureGit: (workRoot: string, headBefore: string | null) =>
-      captureGitState(workRoot, headBefore, { committedOnly: true, fullContext: true }),
+    captureGit: (workRoot: string, headBefore: string | null, preSessionBaseline?: string | null) =>
+      captureGitState(workRoot, headBefore, {
+        committedOnly: true, fullContext: true, preSessionBaseline,
+      }),
     loadState: (threadId: string) => loadThreadState(threadId),
     saveState: (s: ThreadWatchState) => saveThreadState(s),
   };

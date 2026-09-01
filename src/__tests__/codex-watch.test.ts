@@ -592,8 +592,12 @@ describe('reconcileThread — FIX 2: git commit capture', () => {
       diff: 'diff --git a/x b/x\n+a\n+b\n+c\n+d\n+e\n', diffTruncated: false, linesAdded: 5, linesRemoved: 0,
     }));
     await reconcileThread(scan(file, tid, '/repo/a'), baseDeps(api, { captureGit }));
-    // Baseline is the HEAD recorded at session creation (getHead → 'b'*40).
-    expect(captureGit).toHaveBeenCalledWith('/repo/a', 'b'.repeat(40));
+    // Two different baselines, for two different jobs. The commit WALK still
+    // runs from the HEAD recorded at session creation (getHead → 'b'*40); the
+    // first prompt's shadow ('a'*40) rides alongside it only so a commit can be
+    // measured against the tree this session actually found — a HEAD sha cannot
+    // answer that for a commit sitting directly on it.
+    expect(captureGit).toHaveBeenCalledWith('/repo/a', 'b'.repeat(40), 'a'.repeat(40));
     const update = api.calls.update.at(-1);
     expect(update.data.gitCapture).toBeDefined();
     expect(update.data.gitCapture.commitShas).toEqual([commitSha]);

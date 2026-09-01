@@ -286,12 +286,17 @@ export function mergeMemoryPayloads(local: MemoryPayload, remote: MemoryPayload)
   // Same bounded-window rule the writers apply: drop commit records whose
   // session fell out of the retained window.
   const keep = new Set(mergedSessions.map((s) => s.sessionId));
-  const mergedCommits = [...commits.values()]
-    .filter((c) => keep.size === 0 || keep.has(c.sessionId))
-    .sort((a, b) => {
-      const ta = Date.parse(a?.committedAt || ''), tb = Date.parse(b?.committedAt || '');
-      return (Number.isNaN(ta) ? 0 : ta) - (Number.isNaN(tb) ? 0 : tb);
-    });
+  // The union is what makes this necessary: a machine that folded a rebase copy
+  // away gets it handed straight back by one that hasn't, so the fold has to
+  // happen again on the merged result or it never sticks.
+  const mergedCommits = dedupeRebasedCommits(
+    [...commits.values()]
+      .filter((c) => keep.size === 0 || keep.has(c.sessionId))
+      .sort((a, b) => {
+        const ta = Date.parse(a?.committedAt || ''), tb = Date.parse(b?.committedAt || '');
+        return (Number.isNaN(ta) ? 0 : ta) - (Number.isNaN(tb) ? 0 : tb);
+      }),
+  );
 
   return { version: 2, sessions: mergedSessions, commits: mergedCommits, tombstones: [...tombstones.values()] };
 }
@@ -497,7 +502,13 @@ export function writeCommitMemory(repoPath: string, entry: CommitMemoryEntry): v
     const keep = new Set(sessions.map((s) => s.sessionId));
     // A commit whose session isn't recorded yet (write ordering) is kept too.
     const pruned = commits.filter((c) => keep.size === 0 || keep.has(c.sessionId) || c.sessionId === entry.sessionId);
-    writeMemoryPayload(repoPath, sessions, pruned);
+    // A rebase records the rewritten commit as a new one. Replace the copy it
+    // supersedes rather than growing the note by one record per rebase — see
+    // dedupeRebasedCommits. Deliberately NOT a tombstone: those are permanent
+    // and un-re-addable by design, which is far too strong a commitment to make
+    // on a heuristic. Should a merge from another machine hand the superseded
+    // record back, mergeMemoryPayloads folds it again.
+    writeMemoryPayload(repoPath, sessions, dedupeRebasedCommits(pruned));
   } catch {
     // Non-fatal
   }
@@ -574,8 +585,96 @@ export function sortByDateAsc<T>(list: T[], dateOf: (item: T) => string | undefi
     .map((entry) => entry.item);
 }
 
+/**
+ * The identity a rebase copy shares with the commit it rewrote.
+ *
+ * `git rebase` replaces sha A with a new sha B carrying the same change, and
+ * the post-commit hook records B as a brand-new commit — so a session that
+ * rebases before merging remembers its own work twice. On this repo that is
+ * every session on a busy main: of 209 records, 20 were rebase copies, and the
+ * digest injected into every new session opened with a commit count 11% too
+ * high and the same fix listed two or three times over.
+ *
+ * The key is sessionId + subject + changed-path set — deliberately NOT the line
+ * counts, and deliberately not the sha. It mirrors `isRewriteOf`'s fallback in
+ * hooks.ts, and for the same reason: a rebase here is rarely pure. Resolving
+ * the version-file conflict re-bumps `packages/cli/package.json`, so the
+ * rewritten commit is the same work carrying two or three extra lines
+ * (`6ca2ef79` +408/-26 → `474d5310` +411/-29). Requiring the subject AND the
+ * full path set to match is what keeps that from collapsing two genuinely
+ * different commits — they would have to share a subject and touch exactly the
+ * same files, within one session.
+ *
+ * Null — meaning "never fold this record" — when anything the key rests on is
+ * missing. The empty-`filesChanged` case is the one that matters: merge commits
+ * record no files, so without that guard seven distinct `Merge main` commits
+ * (+215/-35, +601/-21, +574/-8 …) collapse into one on subject alone.
+ */
+export function rebasedCommitKey(c: CommitMemoryEntry | null | undefined): string | null {
+  const subject = (c?.message || '').split('\n')[0].trim();
+  const files = (c?.filesChanged || []).filter(Boolean).slice().sort().join(' ');
+  if (!c?.sessionId || !subject || !files) return null;
+  return `${c.sessionId} ${subject} ${files}`;
+}
+
+/**
+ * Collapse rebase copies to the surviving commit. Pure — exported for testing.
+ *
+ * The survivor is the one committed LAST: the rewrite is created when the
+ * rebase runs, after the commit it replaces. Both shas are usually orphaned by
+ * the time anyone reads this (the PR squash-merges, so neither branch commit
+ * reaches main), which is exactly why reachability can't pick the survivor and
+ * the stored record data has to.
+ *
+ * Records keep their original positions — insertion order is not time order
+ * here (see sortByDateAsc) and callers that care already sort for themselves,
+ * so reordering as a side effect of deduping would be a second, unasked-for
+ * change. `decisions` and `fileNotes` are carried forward fill-only, so a
+ * decision captured against the pre-rebase sha isn't lost with it.
+ */
+export function dedupeRebasedCommits(commits: CommitMemoryEntry[]): CommitMemoryEntry[] {
+  const list = commits || [];
+  const at = (c: CommitMemoryEntry) => {
+    const t = Date.parse(c?.committedAt || '');
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  // Winner per key: latest committedAt, ties broken by the later position —
+  // the same "recorded after" ordering the append gives us when timestamps are
+  // equal or unparseable.
+  const winner = new Map<string, number>();
+  list.forEach((c, i) => {
+    const key = rebasedCommitKey(c);
+    if (!key) return;
+    const held = winner.get(key);
+    if (held === undefined || at(c) >= at(list[held])) winner.set(key, i);
+  });
+
+  return list.flatMap((c, i) => {
+    const key = rebasedCommitKey(c);
+    if (!key || winner.get(key) === i) {
+      if (!key) return [c];
+      const superseded = list.filter((o, j) => j !== i && rebasedCommitKey(o) === key);
+      if (superseded.length === 0) return [c];
+      const merged = { ...c };
+      if (!merged.decisions?.length) {
+        const from = superseded.reverse().find((o) => o.decisions?.length);
+        if (from) merged.decisions = from.decisions!.slice(0, 6);
+      }
+      const notes = superseded.reduce<Record<string, string>>(
+        (acc, o) => ({ ...o.fileNotes, ...acc }), { ...merged.fileNotes },
+      );
+      if (Object.keys(notes).length > 0) merged.fileNotes = notes;
+      return [merged];
+    }
+    return [];
+  });
+}
+
 export function readAllCommitMemory(repoPath: string): CommitMemoryEntry[] {
-  return readMemoryPayload(repoPath).commits;
+  // Folded on READ as well as on write: notes already carrying rebase copies
+  // are on every machine that has pulled them, and the write-side fix only
+  // reaches records made from here on.
+  return dedupeRebasedCommits(readMemoryPayload(repoPath).commits);
 }
 
 /**

@@ -65,6 +65,14 @@ export interface CommitInfo {
   // Sending them here lets the API populate the row at ingest time.
   linesAdded: number;
   linesRemoved: number;
+  // The part of linesAdded/linesRemoved that was ALREADY uncommitted in the
+  // working tree when this session started — work a previous session (or the
+  // user) left behind and this commit swept up. Absent when it could not be
+  // proven; see the computation for what "proven" means. Never a guess: the
+  // number exists to explain a commit total that exceeds what the session
+  // authored, and an invented one would explain it wrongly.
+  preSessionLinesAdded?: number;
+  preSessionLinesRemoved?: number;
   // Per-commit unified patch (`git show <sha>`). The API stores this on the
   // Commit row so blame + the Full Session Diff can source committed lines
   // from git truth. Without it, LOCAL-repo commits (never pushed, so the
@@ -211,6 +219,26 @@ export function captureGitState(
     // callers should only opt in for session-level snapshots, not the
     // per-prompt deltas that fire on every heartbeat.
     fullContext?: boolean;
+    /**
+     * The tree to measure a commit's INHERITED work against, when that is not
+     * `headBefore`.
+     *
+     * The pre-session split (#1387) asks what a commit swept up that was
+     * already dirty when the session began, so it has to be measured against a
+     * tree that HELD that dirt — a baseline shadow commit. The hook path passes
+     * exactly that as `headBefore`, so it needed no second argument. The Codex
+     * watcher does not: it passes the session's HEAD sha, and a commit sitting
+     * directly on that HEAD measures its own parent against itself, which is
+     * empty by construction. Every Codex session therefore recorded +0/-0 —
+     * "this session started clean" — no matter how dirty the tree was.
+     *
+     * kotleta f20f04c5 measured 0/0 from `369f4a82` (the session's HEAD) and
+     * +83/-15 from `d8de1d6c` (its first prompt's shadow), against a commit
+     * whose total exceeded the session's own work by exactly that.
+     *
+     * Only ever narrows what is measured; when absent, behaviour is unchanged.
+     */
+    preSessionBaseline?: string | null;
   },
 ): GitCaptureResult {
   const gitOpts = {
@@ -306,6 +334,66 @@ export function captureGitState(
           if (Number.isFinite(r)) cRemoved += r;
         }
       } catch { /* numstat failed (e.g. root commit edge) — leave 0 */ }
+      // How much of this commit was ALREADY in the working tree when the
+      // session started.
+      //
+      // `git commit -a` sweeps up whatever is dirty, including work a PREVIOUS
+      // session left uncommitted, and the commit's own total then describes two
+      // sessions at once. Session 38bcb56c committed +223/-16 while authoring
+      // +97/-20; the other +144/-14 was the previous Codex session's last turn,
+      // never committed, sitting in the tree when this one opened. The page had
+      // no way to say so — the read side can compare a turn against the commit,
+      // but only the CLI can see what the tree held before either.
+      //
+      // Measured against the SESSION BASELINE (a shadow commit when the tree
+      // started dirty, which is exactly when this happens): the part of the
+      // commit's own files that had already changed between its parent and that
+      // baseline. Proven, never inferred — computed ONLY when the commit sits
+      // directly on pre-session history (its parent is an ancestor of the
+      // baseline). A later commit in the same session has a parent the baseline
+      // never saw, and diffing across that pair reports reversals as though
+      // they were inherited, so those report nothing at all.
+      let preAdded: number | null = null;
+      let preRemoved: number | null = null;
+      // The pathspec is the commit's file list; a commit touching hundreds of
+      // files would build a command line Windows rejects outright, and a
+      // silently truncated pathspec would UNDER-report the inherited part —
+      // the direction that makes a session look like it wrote more than it did.
+      const pathspecBytes = filesChanged.reduce((n, f) => n + f.length + 1, 0);
+      // The baseline is the tree the session STARTED from, which is only
+      // `safeBefore` when the caller had nothing better. A caller holding a
+      // shadow of the dirty tree passes it; measuring against a bare HEAD sha
+      // can only ever answer "clean", because a commit on that HEAD has it as
+      // its own parent. See opts.preSessionBaseline.
+      const preBase = opts?.preSessionBaseline && HEX.test(opts.preSessionBaseline)
+        ? opts.preSessionBaseline
+        : safeBefore;
+      if (preBase !== headAfter && filesChanged.length > 0 && pathspecBytes <= 8000) {
+        try {
+          const parent = gitOrNull(['rev-parse', `${sha}^`], gitOpts);
+          if (parent && HEX.test(parent)
+            && gitDetailed(['merge-base', '--is-ancestor', parent, preBase], gitOpts).status === 0) {
+            const pre = git(
+              ['diff', '--numstat', parent, preBase, '--', ...filesChanged],
+              gitOpts,
+            ).trim();
+            let pa = 0;
+            let pr = 0;
+            for (const ln of pre.split('\n')) {
+              const parts = ln.split('\t');
+              if (parts.length < 2) continue;
+              const a = Number(parts[0]);
+              const r = Number(parts[1]);
+              if (Number.isFinite(a)) pa += a;
+              if (Number.isFinite(r)) pr += r;
+            }
+            // A clean start legitimately measures zero, and that is worth
+            // saying — "nothing was inherited" is an answer, not a gap.
+            preAdded = pa;
+            preRemoved = pr;
+          }
+        } catch { /* unprovable — report nothing rather than a guess */ }
+      }
       // Per-commit unified patch — git truth for the committed lines, so the
       // API doesn't have to reconstruct them. `git show --format=` prints only
       // the diff (no commit header); `-m --first-parent` gives a merge commit a
@@ -318,7 +406,13 @@ export function captureGitState(
         patch = stripIgnoredSectionsFromDiff(raw).trim();
         if (patch.length > MAX_DIFF_SIZE) patch = '';
       } catch { /* show failed — leave patch empty, API falls back */ }
-      commitDetails.push({ sha, message, author, filesChanged, linesAdded: cAdded, linesRemoved: cRemoved, ...(patch && { patch }), ...(committedAt != null && { committedAt }) });
+      commitDetails.push({
+        sha, message, author, filesChanged, linesAdded: cAdded, linesRemoved: cRemoved,
+        ...(patch && { patch }),
+        ...(committedAt != null && { committedAt }),
+        ...(preAdded != null && preRemoved != null
+          && { preSessionLinesAdded: preAdded, preSessionLinesRemoved: preRemoved }),
+      });
     } catch {
       // If we can't get details for a commit, include it with minimal info
       commitDetails.push({ sha, message: '', author: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 });

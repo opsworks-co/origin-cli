@@ -1206,32 +1206,135 @@ function commitOwnDiff(repoPath: string, sha: string): string {
   } catch { return ''; /* commit may have been removed by a rebase */ }
 }
 
+/**
+ * Which of these commits are MERGES, from one git process instead of one per
+ * commit.
+ *
+ * Every caller below has to ask that question before it can render a commit,
+ * because a merge takes the `mergeOwnDiff` path and everything else takes
+ * `git show`. Asking it per commit — which is what `mergeOwnDiff` ->
+ * `commitParents` does — is a `git rev-list` spawn per sha, and these walks run
+ * over the session's WHOLE commit list on every post-commit, and paid again on
+ * the next commit. Batching both halves takes that walk from 781ms to 442ms at
+ * 30 commits on this repo, and from 1572ms to 955ms at 60.
+ *
+ * `--no-walk=unsorted` is what keeps the answer addressable: it emits one line
+ * per named commit, in the order asked, and nothing else. The plain `--no-walk`
+ * would re-sort by commit date, and a walk would print ancestors we never asked
+ * about.
+ *
+ * `--ignore-missing` matters more than it looks. `sessionCommitShas` can hold a
+ * sha a rebase rewrote away, and without it ONE such entry makes git exit
+ * non-zero and the whole list goes unclassified. The map is therefore allowed
+ * to be PARTIAL: a sha with no entry falls through to the per-commit path,
+ * which is what it needs anyway — that path already answers '' for a commit
+ * that no longer exists.
+ */
+function commitParentCounts(repoPath: string, shas: string[]): Map<string, number> | null {
+  if (shas.length === 0) return new Map();
+  let out: string;
+  try {
+    out = execFileSync(
+      'git',
+      ['rev-list', '--ignore-missing', '--no-walk=unsorted', '--parents', ...shas],
+      { windowsHide: true, cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 },
+    ).toString();
+  } catch { return null; /* git unusable here; caller keeps the per-sha path */ }
+  // "<full sha> <parent>…" per line. Callers hold ABBREVIATED shas, so pair by
+  // prefix in both directions — the same match `sessionScopedCommittedDiff`
+  // uses against rev-list output a few lines down.
+  const rows: Array<{ full: string; parents: number }> = [];
+  for (const line of out.split('\n')) {
+    const parts = line.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0 || !/^[a-fA-F0-9]{40}$/.test(parts[0])) continue;
+    rows.push({ full: parts[0].toLowerCase(), parents: parts.length - 1 });
+  }
+  const counts = new Map<string, number>();
+  for (const sha of shas) {
+    const s = sha.toLowerCase();
+    const row = rows.find((r) => r.full === s || r.full.startsWith(s));
+    if (row) counts.set(sha, row.parents);
+  }
+  return counts;
+}
+
+/**
+ * `git show` over many commits in one process — exactly what git does with
+ * several revs, so the content is the per-commit outputs concatenated.
+ *
+ * It is not quite byte-identical to the loop it replaces, and the difference is
+ * worth naming. That loop `.trim()`ed EACH commit's output before joining, so a
+ * commit whose diff ended on a blank CONTEXT line (a bare " ") lost that line.
+ * Batched, it survives. Over 30 commits of this repo's own history that is the
+ * whole of the difference: 2 lines, both blank context, with the +/- counts and
+ * all 160 `diff --git` sections identical and in the same order. Keeping them is
+ * the more faithful rendering — a trimmed hunk is one context line short of
+ * what git wrote — and nothing downstream counts or splits on them.
+ *
+ * Returns null if the batch fails, so the caller can retry the run one sha at a
+ * time and still skip only the sha a rebase removed.
+ */
+function showCommitsBatched(repoPath: string, shas: string[], extraArgs: string[]): string | null {
+  try {
+    return execFileSync(
+      'git',
+      ['show', ...extraArgs, '--format=', '--no-color', ...shas],
+      {
+        windowsHide: true, cwd: repoPath, encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'], timeout: 20000, maxBuffer: 64 * 1024 * 1024,
+      },
+    ).toString();
+  } catch { return null; }
+}
+
 /** Every path the given commits touch, BOTH sides of a rename included.
  *  `--no-renames` is what makes a rename list as delete+add here; the caller's
  *  `git diff` then has both paths in its pathspec and re-detects the rename
  *  itself, instead of reporting the new path as a whole-file insertion.
  *  A merge contributes only the paths it resolved — `--name-only` on one lists
- *  nothing at all, which used to leave the pathspec silently short. */
+ *  nothing at all, which used to leave the pathspec silently short.
+ *
+ *  The result is a SET, so the non-merges are batched into one `git show`
+ *  without any ordering concern. */
 function ownedCommitPaths(repoPath: string, shas: string[]): string[] {
   const paths = new Set<string>();
-  for (const sha of shas) {
-    if (!/^[a-fA-F0-9]{7,40}$/.test(sha)) continue;
-    const merge = mergeOwnDiff(repoPath, sha);
-    if (merge) {
-      for (const p of merge.filesChanged) paths.add(p);
+  const valid = shas.filter((sha) => /^[a-fA-F0-9]{7,40}$/.test(sha));
+  const counts = commitParentCounts(repoPath, valid);
+  const plain: string[] = [];
+  const addNames = (out: string) => {
+    for (const line of out.split('\n')) {
+      const p = line.trim();
+      if (p) paths.add(p);
+    }
+  };
+  const showOne = (sha: string) => {
+    const out = showCommitsBatched(repoPath, [sha], ['--no-renames', '--name-only']);
+    if (out) addNames(out);
+    /* else: commit may have been removed by a rebase; skip */
+  };
+  for (const sha of valid) {
+    // No classification (batch failed) means asking mergeOwnDiff itself, which
+    // is the pre-batching behaviour for that sha and nothing more.
+    const parents = counts?.get(sha);
+    if (parents === undefined) {
+      const merge = mergeOwnDiff(repoPath, sha);
+      if (merge) { for (const p of merge.filesChanged) paths.add(p); continue; }
+      showOne(sha);
       continue;
     }
-    try {
-      const out = execFileSync(
-        'git',
-        ['show', '--no-renames', '--name-only', '--format=', sha],
-        { windowsHide: true, cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 },
-      ).toString();
-      for (const line of out.split('\n')) {
-        const p = line.trim();
-        if (p) paths.add(p);
-      }
-    } catch { /* commit may have been removed by a rebase; skip */ }
+    if (parents >= 2) {
+      const merge = mergeOwnDiff(repoPath, sha);
+      if (merge) for (const p of merge.filesChanged) paths.add(p);
+      continue;
+    }
+    plain.push(sha);
+  }
+  if (plain.length > 0) {
+    const out = showCommitsBatched(repoPath, plain, ['--no-renames', '--name-only']);
+    // One sha a rebase removed fails the whole batch. Retry per sha so the
+    // survivors still land — the old loop skipped only the missing one.
+    if (out !== null) addNames(out);
+    else for (const sha of plain) showOne(sha);
   }
   return [...paths];
 }
@@ -1326,13 +1429,98 @@ function sessionScopedCommittedDiff(
       } catch { /* fall through to the per-commit walk */ }
     }
   }
+  // ── Per-commit walk ───────────────────────────────────────────────────
+  // Consecutive non-merges go to git in ONE `git show`; git concatenates them
+  // itself, which is what the old per-sha loop was joining by hand (see
+  // showCommitsBatched for the one blank-context-line difference). Runs —
+  // rather than a partition — are what keep a merge in its place in the
+  // sequence, which matters because every downstream consumer (the byte budget
+  // above all) cuts this text in order.
+  const valid = shas.filter((sha) => /^[a-fA-F0-9]{7,40}$/.test(sha));
+  const counts = commitParentCounts(repoPath, valid);
   const parts: string[] = [];
-  for (const sha of shas) {
-    if (!/^[a-fA-F0-9]{7,40}$/.test(sha)) continue;
-    const out = commitOwnDiff(repoPath, sha);
-    if (out) parts.push(out);
+  let run: string[] = [];
+  const flushRun = () => {
+    if (run.length === 0) return;
+    const batched = run.length > 1 ? showCommitsBatched(repoPath, run, []) : null;
+    if (batched !== null) {
+      const out = batched.trim();
+      if (out) parts.push(out);
+    } else {
+      // A sha a rebase removed fails the whole batch; per-sha skips only it.
+      for (const sha of run) {
+        const out = commitOwnDiff(repoPath, sha);
+        if (out) parts.push(out);
+      }
+    }
+    run = [];
+  };
+  for (const sha of valid) {
+    const parents = counts?.get(sha);
+    if (parents === undefined || parents >= 2) {
+      // Unclassified or a merge: both are exactly the old single-sha path.
+      flushRun();
+      const out = commitOwnDiff(repoPath, sha);
+      if (out) parts.push(out);
+      continue;
+    }
+    run.push(sha);
   }
+  flushRun();
   return parts.join('\n').trim();
+}
+
+/**
+ * The session-to-date COMMITTED diff for the post-commit snapshot.
+ *
+ * post-commit sends this with `snapshot: true`, which makes the server REPLACE
+ * the stored sessionDiff — so whatever this measures becomes the session
+ * header. It used to be `captureGitState(headShaAtStart).committedDiff`, i.e.
+ * the raw `session-start..HEAD` range, and that range is not the session's
+ * work:
+ *
+ *  - a MERGE brings the whole absorbed branch into it. Prod f7881a6e is the
+ *    case on record: the per-turn row was fixed to credit only what the merge
+ *    RESOLVED, but the session header kept counting everything it absorbed —
+ *    including a file the session never opened.
+ *  - in a shared checkout it also holds whatever a CONCURRENT agent committed
+ *    while this session was running, which is the whole reason
+ *    `sessionScopedCommittedDiff` exists.
+ *
+ * handleStop already answers this correctly, from the same two primitives:
+ * commits this session OWNS, each rendered by `commitOwnDiff` so a merge
+ * contributes only its resolution. post-commit was the last caller still on
+ * the raw range — and the one that matters most, because a commit-and-go agent
+ * never reaches Stop, so for those sessions the inflated header was permanent
+ * rather than merely shown until session end.
+ *
+ * Cumulative rather than net, for the same reason Stop is: a session that
+ * commits A then reverts it in B reports +1/-1, not 0/0. That is the existing
+ * churn-not-net accounting, and matching Stop is the point — the two used
+ * different algorithms, so the header visibly jumped when Stop landed.
+ *
+ * Falls back to the caller's raw range when the owned walk yields nothing.
+ * Codex bypasses .git/hooks/post-commit on some installs, so
+ * `sessionCommitShas` can be empty for a session that really did commit, and
+ * an empty snapshot would BLANK the session diff rather than merely inflate
+ * it — strictly worse than the bug being fixed.
+ */
+export function sessionToDateCommittedSnapshot(
+  repoPath: string,
+  state: SessionState,
+  fallback: { diff: string; linesAdded: number; linesRemoved: number },
+): { diff: string; linesAdded: number; linesRemoved: number; scoped: boolean } {
+  let owned = '';
+  try {
+    owned = sessionScopedCommittedDiff(repoPath, state);
+  } catch { /* range unreadable — the raw one is still better than nothing */ }
+  if (!owned) return { ...fallback, scoped: false };
+  return {
+    diff: owned,
+    linesAdded: countDiffSignLines(owned, '+'),
+    linesRemoved: countDiffSignLines(owned, '-'),
+    scoped: true,
+  };
 }
 
 /** Test seam for the shell-window capture. The turn-0 erasure it guards
@@ -1373,6 +1561,86 @@ export function __testRescueCommitShas(repoPath: string, state: any): string[] {
  * diff would be a no-op at best, and at worst would drop a file that a
  * concurrent commit and our own turn both touched.
  */
+/**
+ * The files a diff actually describes, in the order it names them.
+ *
+ * The point of reading the list off the diff rather than being handed one is
+ * that the two can then never disagree: a row that says four files over three
+ * `diff --git` blocks is unexplainable to anyone reading it later, and it is
+ * what session 798de196 turn 2 stored. See the post-commit `pFiles` comment.
+ *
+ * De-duplicated, because a diff assembled from more than one capture can name
+ * the same path twice.
+ */
+export function filesNamedInDiff(diff: string | null | undefined): string[] {
+  const out = new Set<string>();
+  for (const m of (diff || '').matchAll(/^diff --git a\/(.*?) b\//gm)) {
+    if (m[1]) out.add(m[1]);
+  }
+  return [...out];
+}
+
+/**
+ * The post-commit payload's CONTENT UNIT — files, diff and line counts, decided
+ * together so they can never describe three different things.
+ *
+ * `scoped` is the commit rendered from THIS turn's baseline shadow rather than
+ * from the commit's parent, which is what answers "what did this turn write"
+ * instead of "what is in this commit" (#1332). It is null when the commit
+ * cannot be scoped — a merge, or no usable baseline — and then the commit's own
+ * view is all there is.
+ *
+ * `filesChanged` used to ignore all of that. The lines followed `scoped` and
+ * the file list was `turnFiles`, the whole commit's paths. Session 798de196
+ * turn 2 ran `git add`, `git commit`, `git push`, `gh pr create` and authored
+ * nothing; both halves are in one pair of hooks.log lines a millisecond apart:
+ *
+ *   01:41:35.694  scoped commit to prompt baseline
+ *                 {promptIndex:1, commitLines:"+328/-11", promptLines:"+0/-0"}
+ *   01:41:35.695  sending incremental update
+ *                 {payload:[{i:1, f:4, a:0, r:0, d:0, c:"30e527c5"}]}
+ *
+ * The scoping was RIGHT — `+0/-0` is the truth for that turn, because the
+ * baseline shadow already held turn 1's uncommitted work. It then shipped the
+ * commit's four files beside that zero.
+ *
+ * A file list alone was enough to corrupt the row because of how the server
+ * merges (mcp.ts, "CONTENT UNIT"): a non-empty `filesChanged` lands on its own,
+ * while an empty `diff` and zero counts are skipped in favour of whatever the
+ * row already holds. The four files grafted onto a diff and a +326/-1 from a
+ * different capture — the stored row claims four files over three `diff --git`
+ * blocks, and its `linesRemoved` of 1 recounts to 9 against its own diff.
+ *
+ * Reading the list off the diff being sent closes it at the source: an empty
+ * scoped diff yields `[]`, the server skips the field, and the turn is left as
+ * the chat-only turn it was.
+ *
+ * NOT a truncation concern: when the scoped diff is capped, the counts are
+ * taken from the same capped text, so the three stay consistent with each other
+ * — which is the property that matters here. A list that describes more than
+ * the diff does is the failure being fixed.
+ */
+export function commitTurnContentUnit(
+  scoped: { diff: string; linesAdded: number; linesRemoved: number } | null | undefined,
+  turnFiles: string[],
+  turnDiff: string,
+): { filesChanged: string[]; diff: string; linesAdded: number; linesRemoved: number } {
+  if (scoped) {
+    return {
+      filesChanged: filesNamedInDiff(scoped.diff),
+      diff: scoped.diff,
+      linesAdded: scoped.linesAdded,
+      linesRemoved: scoped.linesRemoved,
+    };
+  }
+  return {
+    filesChanged: turnFiles,
+    diff: turnDiff,
+    linesAdded: countDiffSignLines(turnDiff, '+'),
+    linesRemoved: countDiffSignLines(turnDiff, '-'),
+  };
+}
+
 export function retroactiveTurnFiles(
   sessionCommitted: string,
   rawRangeDiff: string,
@@ -11041,11 +11309,57 @@ export async function handlePostCommit(): Promise<void> {
       try {
         // hookCwd, not repoPath: the session-to-date diff must read the
         // committing working tree's HEAD (worktree-safe, see execOpts above).
-        const snap = captureGitState(hookCwd, state.headShaAtStart, { fullContext: true });
-        if (snap.committedDiff) {
-          sessionToDateDiff = snap.committedDiff;
-          sessionLinesAdded = snap.linesAdded || linesAdded;
-          sessionLinesRemoved = snap.linesRemoved || linesRemoved;
+        //
+        // The owned walk runs FIRST and the raw capture is computed only when
+        // it comes back empty, because the raw capture is the expensive half:
+        // `captureGitState` re-reads metadata for EVERY commit in the session
+        // range — five git spawns each — and then renders the range at
+        // `--unified=2000`, up to three times as the byte ladder steps down.
+        // Measured on this repo: 1.6s over a 10-commit range, 4.0s over 30,
+        // 7.2s over 60 — paid on every `git commit`, growing for the length of
+        // the session, and in the common case thrown away unlooked-at because
+        // the owned walk answered. post-commit runs before git returns, so it
+        // is latency a person sits through.
+        //
+        // `--name-only` reproduces the old `if (snap.committedDiff)` gate for
+        // a few ms: an empty committed range still sends nothing, so a session
+        // whose commits are all somebody else's does not get a snapshot.
+        let rangeHasContent = false;
+        try {
+          rangeHasContent = !!execFileSync(
+            'git', ['diff', '--name-only', state.headShaAtStart, commitSha],
+            { ...execOpts, timeout: 10000 },
+          ).trim();
+        } catch { rangeHasContent = true; /* unreadable range — let the old path decide */ }
+        if (rangeHasContent) {
+          // Scope it to the commits this session OWNS before it becomes the
+          // session header. The raw range holds a merge's absorbed branch and
+          // a concurrent agent's commits — see
+          // sessionToDateCommittedSnapshot.
+          let owned = sessionToDateCommittedSnapshot(hookCwd, state, {
+            diff: '', linesAdded: 0, linesRemoved: 0,
+          });
+          if (!owned.scoped) {
+            const snap = captureGitState(hookCwd, state.headShaAtStart, { fullContext: true });
+            owned = {
+              diff: snap.committedDiff,
+              linesAdded: snap.linesAdded || linesAdded,
+              linesRemoved: snap.linesRemoved || linesRemoved,
+              scoped: false,
+            };
+          }
+          sessionToDateDiff = owned.diff;
+          sessionLinesAdded = owned.linesAdded;
+          sessionLinesRemoved = owned.linesRemoved;
+          if (owned.scoped) {
+            // No `raw:` counterpart any more — producing it meant running the
+            // capture this branch exists to avoid.
+            debugLog('post-commit', 'session-to-date diff scoped to owned commits', {
+              owned: `+${owned.linesAdded}/-${owned.linesRemoved}`,
+              ownedCommits: (state.sessionCommitShas || []).length,
+              rawCaptureSkipped: true,
+            });
+          }
         }
       } catch (err: any) {
         debugLog('post-commit', 'fullContext snapshot failed (non-fatal)', { message: err?.message });
@@ -11199,7 +11513,8 @@ export async function handlePostCommit(): Promise<void> {
             try { saveSessionState(state, state.repoPath || hookCwd, state.sessionTag!); } catch { /* non-fatal */ }
           }
         }
-        const pDiff = scoped ? scoped.diff : turnDiff;
+        const unit = commitTurnContentUnit(scoped, turnFiles, turnDiff);
+        const pDiff = unit.diff;
         const perPromptUpdate = {
           promptIndex: latestPromptIdx,
           // Key the row on IDENTITY, like every other sender does. This one
@@ -11210,13 +11525,12 @@ export async function handlePostCommit(): Promise<void> {
           ...(turnIdFor(s, latestPromptIdx) && { turnId: turnIdFor(s, latestPromptIdx) }),
           ...captureStamp(),
           promptText: latestPromptText.slice(0, 1000),
-          filesChanged: turnFiles,
+          // Files, diff and line counts all come from commitTurnContentUnit, so
+          // they cannot describe three different things.
+          filesChanged: unit.filesChanged,
           diff: pDiff.length > MAX_PROMPT_DIFF_LEN ? pDiff.slice(0, MAX_PROMPT_DIFF_LEN) : pDiff,
-          // Counted off the diff actually being sent, so the lines and the
-          // files can never describe two different things — the shape that
-          // shipped `filesChanged: 0` alongside `+84/-20`.
-          linesAdded: scoped ? scoped.linesAdded : countDiffSignLines(pDiff, '+'),
-          linesRemoved: scoped ? scoped.linesRemoved : countDiffSignLines(pDiff, '-'),
+          linesAdded: unit.linesAdded,
+          linesRemoved: unit.linesRemoved,
           commitSha,
           // The SUBJECT travels with the stamp, not only inside gitCapture.
           //
@@ -11263,7 +11577,15 @@ export async function handlePostCommit(): Promise<void> {
           // and line 8598 drains the queue here; only the send itself was
           // never converted.
           await durableUpdateSession(s.sessionId, {
-            filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
+            // `turnFiles`, not the commit's raw list. This one is the SESSION's
+            // file list, and the session's list is a union that only ever
+            // grows — so a merge putting every file the absorbed branch
+            // touched into it is not something a later capture can take back.
+            // The COMMIT row keeps the full list: it travels separately, in
+            // `gitCapture.commitDetails[].filesChanged`, which is what the
+            // server reads to build it. Identical to the old value for every
+            // non-merge commit.
+            filesChanged: turnFiles.length > 0 ? turnFiles : undefined,
             branch: currentBranch || undefined,
             gitCapture,
             promptChanges: latestPromptText ? [perPromptUpdate] : undefined,

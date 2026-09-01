@@ -308,13 +308,16 @@ export interface WatchDeps {
   captureDiff: (workRoot: string, baselineSha: string | null) => {
     diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
   };
-  captureGit: (workRoot: string, headBefore: string | null) => {
+  // `preSessionBaseline` is the session's first shadow — measured against for
+  // the inherited-work split, never walked. See codex-watch's copy.
+  captureGit: (workRoot: string, headBefore: string | null, preSessionBaseline?: string | null) => {
     headBefore: string;
     headAfter: string;
     commitShas: string[];
     commitDetails: Array<{
       sha: string; message: string; author: string; filesChanged: string[];
       linesAdded: number; linesRemoved: number; patch?: string;
+      preSessionLinesAdded?: number; preSessionLinesRemoved?: number;
     }>;
     diff: string;
     diffTruncated: boolean;
@@ -1371,7 +1374,15 @@ export async function reconcileSession(
   const commitFiles = new Map<string, string[]>();
   if (headShaAtStart) {
     try {
-      const gc = deps.captureGit(repo.workRoot, headShaAtStart);
+      // Same pair as codex-watch: HEAD to walk commits from, the first
+      // prompt's shadow to measure inherited work against. A commit sitting on
+      // headShaAtStart has it as its own parent, so measuring there answers
+      // "the session started clean" however dirty the tree really was.
+      const gc = deps.captureGit(
+        repo.workRoot,
+        headShaAtStart,
+        promptShadows.find((s) => s.promptIndex === 0)?.baselineSha || null,
+      );
       if (gc.commitShas.length > 0) {
         for (const d of gc.commitDetails || []) {
           if (d?.sha) commitFiles.set(d.sha, (d.filesChanged || []).map((f) => f.replace(/\\/g, '/')));
@@ -2946,8 +2957,10 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     createShadow: createShadowCommit,
     getHead: (workRoot: string) => getHeadSha(workRoot),
     captureDiff: captureAgyDiff,
-    captureGit: (workRoot: string, headBefore: string | null) =>
-      captureGitState(workRoot, headBefore, { committedOnly: true, fullContext: true }),
+    captureGit: (workRoot: string, headBefore: string | null, preSessionBaseline?: string | null) =>
+      captureGitState(workRoot, headBefore, {
+        committedOnly: true, fullContext: true, preSessionBaseline,
+      }),
     loadState: (agentSlug: string, sessionId: string) => loadSessionState(agentSlug, sessionId),
     saveState: (s: SessionWatchState) => saveSessionState(s),
     // Write the `.git/origin-session-<tag>.json` state file the local git hooks

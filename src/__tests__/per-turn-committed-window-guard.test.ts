@@ -98,7 +98,8 @@ describe('sessionScopedCommittedDiff — per-turn windowing', () => {
 /**
  * The window parameter is optional, so a caller that forgets it compiles, runs,
  * and silently over-claims — exactly how three of four sites ended up wrong.
- * Only the SESSION-level diff in handleStop may go unwindowed.
+ * Only a SESSION-level diff may go unwindowed, and every such site is named
+ * below so a new one has to be added here deliberately rather than by counting.
  */
 describe('every per-turn caller passes a window', () => {
   const HOOKS = path.resolve(
@@ -122,9 +123,16 @@ describe('every per-turn caller passes a window', () => {
       if (argc < 3) offenders.push(`${i + 1}: ${lines[i].trim()}`);
     }
 
-    // handleStop builds the SESSION diff (feeding sessionDiff and AI Blame),
-    // which is session-scoped on purpose. Exactly one such site may exist.
-    expect(offenders).toHaveLength(1);
-    expect(offenders[0]).toMatch(/let sessionCommitted = sessionScopedCommittedDiff/);
+    // Two sites build a SESSION-level diff and are session-scoped on purpose:
+    //   1. handleStop's snapshot, which feeds sessionDiff and AI Blame;
+    //   2. sessionToDateCommittedSnapshot, which post-commit sends as the
+    //      session-to-date snapshot — the same question, asked every commit so
+    //      a commit-and-go agent that never reaches Stop still gets it right.
+    // Asserted BY NAME, not by count, so a third site or a per-turn caller
+    // that forgot its window still fails here.
+    const named = offenders.join('\n');
+    expect(named).toMatch(/let sessionCommitted = sessionScopedCommittedDiff/);
+    expect(named).toMatch(/owned = sessionScopedCommittedDiff/);
+    expect(offenders).toHaveLength(2);
   });
 });
