@@ -20,6 +20,7 @@ import {
 function gitRootOrCwd(): string {
   try {
     return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      windowsHide: true,
       encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
     }).trim() || process.cwd();
   } catch {

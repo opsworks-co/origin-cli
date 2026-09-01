@@ -44,19 +44,27 @@ import os from 'os';
 import path from 'path';
 import { spawn, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { createShadowCommit, captureAgyDiff, captureGitState, commitDiffScopedToPrompt, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
-import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha, saveSessionState as writeGitSessionFile, clearSessionState as endGitSessionFile } from './session-state.js';
+import { createShadowCommit, captureAgyDiff, captureGitState, commitDiffScopedToPrompt, captureShadowRangeDiff, filesChangedSinceShadow, readFileAtRev, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { shellWindowEdits, SHELL_WINDOW_SOURCE } from './shell-write-capture.js';
+import { isOriginAutoManagedPath, shouldIgnoreFile } from './ignore-patterns.js';
+import { isInsideRepo, outOfRepoWrites, scopeDiffPathsToRepo } from './paths.js';
+import { newCaptureStamp } from './capture-stamp.js';
+import { promptKey } from './session-state.js';
+import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha, saveSessionState as writeGitSessionFile, loadSessionState as readGitSessionFile, clearSessionState as endGitSessionFile } from './session-state.js';
 import { createSnapshot } from './commands/snapshot.js';
 import { estimateCost } from './transcript.js';
 import { capturePromptEdits } from './prompt-capture/index.js';
+import { timeoutForPayload } from './fetch-timeout.js';
+import { transcriptWriterTurns, filesRecordedForOtherTurns, reconcileWindowAttribution, type AttributedTurn } from './transcript-attribution.js';
 import { git } from './utils/exec.js';
 import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon-autostart.js';
 import { api } from './api.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
-import { ADAPTERS, type TranscriptAdapter, type ScannedTranscript, type ParsedSession } from './transcript-adapters.js';
+import { ADAPTERS, countDiffLines, type TranscriptAdapter, type ScannedTranscript, type ParsedSession } from './transcript-adapters.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
 import { finalHunksForCaptures, computeFileLineMaps, type FileLineMap } from './final-state-blame.js';
+import { syncNotesForSessionStart } from './git-notes.js';
 import {
   writeSessionMemory,
   memoryUpdateTrigger,
@@ -71,7 +79,7 @@ import {
 } from './memory.js';
 import { extractTodosFromPrompts } from './handoff.js';
 import { parseMarkersFromTranscriptPath } from './origin-markers.js';
-import { anchorEditPositions, chainWholeFileWrites, type PromptCapture } from './prompt-capture/index.js';
+import { anchorEditPositions, backfillWriteBaselines, chainWholeFileWrites, type PromptCapture } from './prompt-capture/index.js';
 
 export type { TranscriptAdapter, ScannedTranscript, ParsedSession };
 
@@ -137,6 +145,41 @@ export interface SessionWatchState {
   promptShadows: PromptShadow[];
   createdAt: string;
   lastTranscriptMtime: number;
+  // Stable per-turn identity, minted once per prompt and persisted.
+  //
+  // `promptIndex` is a POSITION. The hook path learned this the hard way and
+  // mints a `turnId` at submission (see currentTurnIndex in session-state.ts);
+  // the watcher never did, so every row it wrote was identified by its loop
+  // index alone. It re-sends EVERY prompt on EVERY poll, so once the
+  // transcript renumbers — a lost middle prompt, a resume, a mid-turn
+  // interjection, all of which have shipped fixes — position i addresses a
+  // different turn and the server writes there via @@unique([sessionId,
+  // promptIndex]). That is the mechanism behind "a resumed conversation wrote
+  // its turns onto turn one's row".
+  //
+  // Keyed by promptKey rather than by position, because for the WATCHER the
+  // transcript owns numbering: re-parsing is the only way it sees prompts, so
+  // if the transcript drops one, a positional array silently re-points every
+  // id after it. Matching on the text means a renumber shifts indices without
+  // moving identity.
+  promptTurns?: Array<{ turnId: string; promptKey: string }>;
+  // Transcript size in bytes at the last reconcile. #1289 added the prompt
+  // count to the skip guard, which catches a new PROMPT landing inside an mtime
+  // tick. A turn's WORK — tool calls, edits, the assistant's reply — moves
+  // neither mtime nor that count, and is the likelier last write of a session.
+  // Transcripts are append-only, so size moves whenever content does. Absent
+  // (state written before this field) means unknown, which does not permit a
+  // skip.
+  lastTranscriptSize?: number;
+  // Fingerprint of the working tree at the last poll. The transcript, the
+  // prompt count and HEAD can all sit still while an agent is still writing
+  // files, so this is the fourth signal the idle-skip needs to be sound.
+  lastTreeFingerprint?: string | null;
+  // Repo HEAD the last time this session was reconciled. Paired with
+  // lastTranscriptMtime it answers "did anything happen since?" — the transcript
+  // covers what the agent did, HEAD covers a commit made outside it. Both
+  // unchanged → the poll has nothing to recompute and skips the whole pass.
+  lastHeadSha?: string;
   status: 'RUNNING' | 'ENDED';
   endedAt?: string;
   // Repo HEAD sha at session creation — baseline for the session-level commit
@@ -171,6 +214,12 @@ export interface SessionWatchState {
   // got written. Keyed on what was RECORDED, a missed commit stays pending and
   // is picked up on the next poll instead of being lost for good.
   recordedCommitShas?: string[];
+  // Commits this session has already delivered to /commits/ingest. Separate
+  // from the two lists above for the same reason they are separate from each
+  // other: "attributed", "recorded in memory" and "sent to the server" are
+  // three different events. Keyed on what was SENT, a failed ingest stays
+  // pending and is retried on the next poll instead of being lost.
+  ingestedCommitShas?: string[];
 }
 
 export function loadSessionState(agentSlug: string, sessionId: string, dir = watchStateDir()): SessionWatchState | null {
@@ -245,13 +294,17 @@ export interface WatchDeps {
   stateDir: string;
   api: {
     startSession: (data: any) => Promise<any>;
-    updateSession: (id: string, data: any) => Promise<any>;
+    updateSession: (id: string, data: any, reqOpts?: { timeoutMs?: number }) => Promise<any>;
   };
   // cwd → { repoPath (canonical), workRoot, repoUrl?, branch? }; null when the
   // cwd is not inside a git repo.
   resolveRepo: (cwd: string) => { repoPath: string; workRoot: string; repoUrl?: string; branch?: string } | null;
   createShadow: (workRoot: string, tag: string) => string | null;
   getHead: (workRoot: string) => string | null;
+  // Cheap "has anything in the working tree moved" signal for the idle-skip
+  // guard — porcelain status, untracked included. Optional: omitted, the guard
+  // keeps its previous behaviour exactly.
+  treeFingerprint?: (workRoot: string) => string | null;
   captureDiff: (workRoot: string, baselineSha: string | null) => {
     diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
   };
@@ -279,6 +332,9 @@ export interface WatchDeps {
   // shape) so the local git hooks attribute commits/PRs/AI-blame to this
   // session. Optional so tests can omit it; the real impl wraps saveSessionState.
   saveGitState?: (state: Record<string, unknown>, workRoot: string, tag: string) => void;
+  // Read that same file back, so a rewrite can carry the fields this writer
+  // does not own instead of erasing them. See the carry block at the call site.
+  loadGitState?: (workRoot: string, tag: string) => Record<string, unknown> | null;
   // Mark that git state file ENDED when the session goes idle.
   endGitState?: (workRoot: string, tag: string) => void;
   // Record what this session did into the repo's cross-session memory when it
@@ -294,6 +350,24 @@ export interface WatchDeps {
   // untracked files (rendered fully-added). The diff source for agents whose
   // transcript carries no edit content (Antigravity) and for brand-new files
   // the shadow-baseline tree diff misses. Optional; omitted in tests.
+  /**
+   * Sync + fold git notes for a repo the watcher is about to open a session in.
+   * Injected so tests can assert it runs without touching a real remote.
+   */
+  syncNotes?: (workRoot: string) => void;
+  // Deliver a commit this session owns to /commits/ingest — sha, subject,
+  // numstat totals and the patch. The post-commit hook has always done this;
+  // for an agent that fires no hooks the watcher is the only path, and without
+  // it the commit exists server-side only as a reconstruction with null stats
+  // and no subject. Optional so tests can omit it.
+  ingestCommits?: (data: {
+    repoPath: string;
+    repoUrl?: string;
+    commits: Array<Record<string, unknown>>;
+  }) => Promise<unknown>;
+  // Read one commit out of the checkout for the call above. Injected so tests
+  // can supply commits without a real repo.
+  readCommitForIngest?: (workRoot: string, sha: string) => Record<string, unknown> | null;
   captureFilesDiff?: (workRoot: string, relFiles: string[]) => {
     diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number;
   };
@@ -310,12 +384,26 @@ export interface WatchDeps {
   // Canonical per-prompt edit capture — wraps capturePromptEdits. Returns one
   // PromptCapture per prompt (edits[] + commits[]), serialized into editsJson.
   capturePromptEdits?: (opts: {
-    agent: 'claude' | 'cursor' | 'codex' | 'gemini';
+    agent: 'claude' | 'cursor' | 'codex' | 'gemini' | 'copilot';
     repoPath: string;
     transcriptPath?: string;
     sessionCommitShas?: string[];
+    // Which turn each commit belongs to, and how firmly — see
+    // SessionState.commitTurns. Lets the extractor use an observation instead of
+    // guessing "the highest-index turn that claims the sha".
+    commitTurns?: Array<{ sha: string; turnId: string; via?: 'post-commit' | 'transcript' }>;
+    promptTurnIds?: string[];
     headShaAtStart?: string;
-  }) => Array<{ promptIndex: number; edits: unknown[]; commits?: string[] }>;
+  }) => Array<{
+    promptIndex: number;
+    edits: unknown[];
+    commits?: string[];
+    // Paths the turn wrote OUTSIDE the repo (home collapsed to `~`), peeled
+    // off edits[] by dropOutOfRepoEdits. Declared here so reconcileSession can
+    // put them on the wire — a turn with an empty edits[] has to be able to
+    // say why it is empty.
+    outOfRepoFiles?: string[];
+  }>;
   // Create a local snapshot and register it on the server (createSnapshot +
   // api.uploadSnapshot). Optional; no-op in tests.
   registerSnapshot?: (
@@ -331,6 +419,29 @@ const REPO_REJECTED_RE = /not registered in Origin|Ask your admin to add it/i;
 const REPO_REJECTED_BACKOFF_MS = 30 * 60_000; // 30 min
 const TRANSIENT_BACKOFF_MIN_MS = 30_000;      // 30s, doubling
 const TRANSIENT_BACKOFF_MAX_MS = 5 * 60_000;  // capped at 5 min
+
+// The server telling us the id we hold is not a session it knows (deleted,
+// pruned, or created against another account). Unlike a transient failure this
+// answer never changes, so the id must be dropped rather than retried.
+const SESSION_GONE_RE = /session not found|\b404\b/i;
+
+
+/**
+ * Transcript size in bytes, or null when it cannot be read.
+ *
+ * null means UNKNOWN, never "unchanged" — it must not satisfy a freshness
+ * check. Size is what mtime and the prompt count both miss: mtime is
+ * millisecond-truncated so two writes can share it, and the count only moves
+ * for a new prompt, not for the work a turn does.
+ */
+function transcriptSize(transcriptPath: string): number | null {
+  try {
+    const st = fs.statSync(transcriptPath);
+    return st.isFile() ? st.size : null;
+  } catch {
+    return null;
+  }
+}
 
 // Per (agent, repo) cooloff after a failed startSession. Module-level rather
 // than persisted: the daemon is long-lived, and a restart re-asking once is
@@ -387,6 +498,80 @@ export function toRepoRelative(workRoot: string, file: string): string {
 }
 
 /**
+ * For the in-flight turn: does the transcript's own diff beat the working-tree
+ * window?
+ *
+ * The window is `git diff HEAD -- <files>` measured against the turn's shadow
+ * baseline, and that baseline is created on a POLL. An agent that fires no
+ * lifecycle hooks — Antigravity — can be several edits into a turn before the
+ * watcher first sees it, and everything written before the baseline lands is
+ * already IN the baseline: it shows up as context, not as this turn's work.
+ *
+ * Session a4d0708a turn 3 is the shape. Its window reported `monitor.html`
+ * +126/-12 and `monitor_server.py` +33/-8; the commit it produced is +150/-12
+ * and +44/-8. Hunk for hunk the two agree — same 16 hunks, same deletions,
+ * same structure — with 24 added lines simply absent from the early hunks,
+ * which is what a baseline taken mid-turn looks like. 35 lines of real work
+ * were reported as pre-existing.
+ *
+ * The transcript diff has no baseline to race: it is built from the content the
+ * agent recorded writing. So when it measures MORE than the window, the window
+ * missed something and the transcript is the better record. Monotonic toward
+ * truth — it can only ever recover work, never shrink a correct capture.
+ *
+ * Gated on `transcriptDiffIsDelta`, and that gate is load-bearing. For every
+ * other adapter a whole-file write counts the entire file as added, so "more"
+ * is routine and meaningless there: preferring it would report a one-line
+ * change to a 400-row file as +401. Only an adapter that chains whole-file
+ * writes against their prior in-session content produces a comparable number.
+ */
+export function transcriptDiffBeatsWindow(
+  transcript: { diff: string; linesAdded: number; linesRemoved: number },
+  window: { diff: string; linesAdded: number; linesRemoved: number },
+  transcriptIsDelta: boolean,
+): boolean {
+  if (!transcriptIsDelta) return false;
+  if (!transcript.diff.trim()) return false;
+  const t = (transcript.linesAdded || 0) + (transcript.linesRemoved || 0);
+  const w = (window.linesAdded || 0) + (window.linesRemoved || 0);
+  return t > w;
+}
+
+/**
+ * The session's line totals for its memory entry, counting only work that
+ * landed INSIDE the repo.
+ *
+ * The adapter's own per-turn counts cover every section of the diff it built,
+ * including files the agent wrote outside the repo — which the entry's
+ * `filesChanged` has already dropped. Antigravity writes an implementation plan
+ * and a walkthrough into its brain dir on most turns, so a session's remembered
+ * total ran well above what its own file list could account for.
+ *
+ * A turn whose diff scoping did not change keeps the adapter's numbers. Those
+ * counts are authoritative for the diff the adapter produced and need not be
+ * derivable from its body — an agent that reports totals without a full patch
+ * is a real shape, and recounting it would replace good numbers with whatever
+ * the body happened to contain.
+ */
+export function scopedMemoryLineCounts(
+  workRoot: string,
+  promptDiffs: Array<{ diff?: string; linesAdded?: number; linesRemoved?: number }> | undefined,
+): { linesAdded: number; linesRemoved: number } {
+  let linesAdded = 0;
+  let linesRemoved = 0;
+  for (const d of promptDiffs || []) {
+    const raw = d.diff || '';
+    const scoped = scopeDiffPathsToRepo(workRoot, raw);
+    const counts = scoped === raw
+      ? { linesAdded: d.linesAdded || 0, linesRemoved: d.linesRemoved || 0 }
+      : countDiffLines(scoped);
+    linesAdded += counts.linesAdded;
+    linesRemoved += counts.linesRemoved;
+  }
+  return { linesAdded, linesRemoved };
+}
+
+/**
  * A memory entry for a session the watcher is ending, in the same shape the
  * hook path writes. Re-parses the transcript once — this runs a single time per
  * session, at its end.
@@ -404,7 +589,12 @@ function buildWatchMemoryEntry(
   if (!parsed) return null;
   const prompts = parsed.userPrompts || [];
   const workRoot = prior.workRoot || prior.repoPath;
+  // toRepoRelative hands the path BACK when it cannot relativise, so an
+  // out-of-repo absolute (the agent's own memory notes under ~/.claude, a
+  // scratch file in /tmp) is not caught by the `..` check — it does not start
+  // with `..`, it starts with `/`. Ask the membership question directly.
   const rel = (parsed.filesChanged || [])
+    .filter((f) => isInsideRepo(workRoot, f))
     .map((f) => toRepoRelative(workRoot, f))
     .filter((f) => f && !f.startsWith('..'));
   // What the session actually landed beats what it was asked to do. The hook
@@ -434,8 +624,13 @@ function buildWatchMemoryEntry(
     // Summed from the per-turn diffs the adapter already computed. The hook
     // path takes these from its gitCapture; the watcher has no equivalent at
     // END time, and a per-turn sum is the same number by a different route.
-    linesAdded: (parsed.promptDiffs || []).reduce((n, d) => n + (d.linesAdded || 0), 0),
-    linesRemoved: (parsed.promptDiffs || []).reduce((n, d) => n + (d.linesRemoved || 0), 0),
+    //
+    // Scoped first, for the same reason `filesChanged` above is: the adapter's
+    // counts include every section of the raw diff, and an agent that writes
+    // outside the repo (Antigravity keeps its plan and walkthrough notes in its
+    // own brain dir) had those lines summed in as repo work — so the remembered
+    // total disagreed with the file list sitting beside it.
+    ...scopedMemoryLineCounts(workRoot, parsed.promptDiffs),
     openTodos: extractTodosFromPrompts(prompts),
     ...(decisions.length > 0 ? { decisions: decisions.slice(0, 8) } : {}),
   };
@@ -663,6 +858,107 @@ function commitFacts(
 }
 
 /** Subject lines of the commits this session made, oldest→newest. */
+/**
+ * A cheap signal that says whether anything in the working tree has moved.
+ *
+ * `git status --porcelain -uall` names every modified and untracked path with
+ * its status letters, so any write, delete or rename changes the string. It is
+ * one spawn — the same order of cost as the `getHead` call the idle-skip guard
+ * already makes — and it is the only way that guard can see the input the
+ * transcript does not describe.
+ *
+ * Returns null when git cannot answer. The guard treats unknown as "changed",
+ * so a failure costs a redundant capture rather than a lost one.
+ */
+export function realTreeFingerprint(workRoot: string): string | null {
+  try {
+    return execFileSync('git', ['status', '--porcelain', '-uall'], {
+      cwd: workRoot, encoding: 'utf-8', windowsHide: true, timeout: 10_000,
+      maxBuffer: 16 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Upper bound on a per-commit patch we ship. Beyond it the row still gets its
+ *  subject and its numstat totals — only the body is dropped. */
+const MAX_INGEST_PATCH = 2 * 1024 * 1024;
+
+/**
+ * Commits this session owns that the server has not been told about yet.
+ *
+ * `sessionCommitShas` is ownership (#1306) — anything outside it belongs to
+ * another session and must never be ingested under this one. Bounded so a
+ * long-running session cannot turn one poll into a hundred round trips; the
+ * remainder is picked up on the polls after it.
+ */
+export function pendingCommitIngests(
+  sessionCommitShas: string[] | undefined,
+  alreadyIngested: string[] | undefined,
+  limit = 5,
+): string[] {
+  const done = new Set(alreadyIngested || []);
+  return (sessionCommitShas || []).filter((sha) => sha && !done.has(sha)).slice(0, limit);
+}
+
+/**
+ * A commit as /commits/ingest wants it, read straight from git.
+ *
+ * The post-commit hook has always sent this; the WATCHER never did, and the
+ * watcher is the only capture path for agents that fire no hooks. So an
+ * Antigravity commit only ever existed as the reconstruction the server builds
+ * from per-prompt captures — deliberately `additions: null, deletions: null`
+ * because a turn's scoped counts are not the commit's — and nothing ever
+ * arrived to fill them in. Session 4aa080fa commit c3a29ffe is +239/-0 in git
+ * and rendered with no "commit total" chip and "subject not captured".
+ *
+ * Returns null when the sha is not in this checkout: a commit on a branch the
+ * worktree no longer has is not ours to describe.
+ */
+export function realReadCommitForIngest(
+  workRoot: string,
+  sha: string,
+): {
+  sha: string; message: string; author: string; committedAt?: string;
+  filesChanged: string[]; additions: number; deletions: number; diff?: string;
+} | null {
+  const g = (args: string[]): string => execFileSync('git', args, {
+    cwd: workRoot, encoding: 'utf-8', windowsHide: true, timeout: 15_000,
+    maxBuffer: 64 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  try {
+    const [message = '', author = '', committedAt = ''] =
+      g(['log', '-1', '--format=%s%n%an%n%aI', sha]).split('\n');
+    const filesChanged: string[] = [];
+    let additions = 0;
+    let deletions = 0;
+    for (const line of g(['show', '--numstat', '--format=', sha]).split('\n')) {
+      // `-\t-\tpath` is git's marker for a binary file: it contributes a file
+      // but no line counts, and Number('-') would poison the totals with NaN.
+      const m = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+      if (!m) continue;
+      if (m[1] !== '-') additions += Number(m[1]);
+      if (m[2] !== '-') deletions += Number(m[2]);
+      filesChanged.push(m[3]);
+    }
+    let diff = '';
+    try { diff = g(['show', '--format=', '--patch', sha]); } catch { /* stats still stand */ }
+    return {
+      sha,
+      message,
+      author,
+      committedAt: committedAt || undefined,
+      filesChanged,
+      additions,
+      deletions,
+      ...(diff && diff.length <= MAX_INGEST_PATCH ? { diff } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function commitSubjects(workRoot: string | undefined, shas: string[]): string[] {
   if (!workRoot || shas.length === 0) return [];
   const out: string[] = [];
@@ -675,6 +971,71 @@ function commitSubjects(workRoot: string | undefined, shas: string[]): string[] 
     } catch { /* a sha the repo no longer has — skip it */ }
   }
   return out.filter(Boolean);
+}
+
+/**
+ * Stable turn ids for this session's prompts, minted once and carried across
+ * polls.
+ *
+ * Mirrors what the hook path does in currentTurnIndex: a random id, minted the
+ * first time a prompt is seen and then never re-minted. NOT derived from the
+ * prompt text — text repeats ("try again"), so a content hash would give two
+ * genuinely different turns the same identity.
+ *
+ * Matching is by promptKey (the hook path's own normalizer, shared rather than
+ * re-implemented) and each key is consumed once, so a session that asks the
+ * same thing twice gets two ids in prompt order rather than one id reused.
+ *
+ * A prompt that disappears from the transcript therefore shifts later
+ * POSITIONS without moving their identity, which is the whole point: the
+ * server keys on turnId when present, so the row follows the prompt instead of
+ * the slot.
+ */
+/**
+ * The hook path's turn identities, in the shape assignTurnIds consumes.
+ *
+ * `promptTurnIds[i]` belongs to the prompt the hook path stored at
+ * `prompts[i]`, so the pairing is read from ITS OWN list and re-keyed by
+ * promptKey. Never zipped against the watcher's prompts by index — the two
+ * paths do not always see the same set (an agent-injected follow-up prompt
+ * lands in one and not the other), and a positional zip would hand a turn its
+ * neighbour's identity.
+ *
+ * Returns [] for any state that doesn't carry both arrays, so a hook-less agent
+ * and a state file written before promptTurnIds existed both behave as today.
+ */
+export function hookMintedTurns(
+  gitState: Record<string, unknown> | null,
+): Array<{ turnId: string; promptKey: string }> {
+  const ids = gitState?.promptTurnIds;
+  const texts = gitState?.prompts;
+  if (!Array.isArray(ids) || !Array.isArray(texts)) return [];
+  const out: Array<{ turnId: string; promptKey: string }> = [];
+  for (let i = 0; i < Math.min(ids.length, texts.length); i++) {
+    const id = ids[i];
+    if (typeof id === 'string' && id) out.push({ turnId: id, promptKey: promptKey(String(texts[i] ?? '')) });
+  }
+  return out;
+}
+
+export function assignTurnIds(
+  prior: Array<{ turnId: string; promptKey: string }> | undefined,
+  prompts: string[],
+  newId: () => string = () => `w_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`,
+): Array<{ turnId: string; promptKey: string }> {
+  const unclaimed = [...(prior || [])];
+  const out: Array<{ turnId: string; promptKey: string }> = [];
+  for (const text of prompts) {
+    const key = promptKey(text || '');
+    const at = unclaimed.findIndex((e) => e.promptKey === key);
+    if (at >= 0) {
+      out.push(unclaimed[at]);
+      unclaimed.splice(at, 1);   // consume, so a repeated prompt gets its own id
+    } else {
+      out.push({ turnId: newId(), promptKey: key });
+    }
+  }
+  return out;
 }
 
 export async function reconcileSession(
@@ -746,6 +1107,75 @@ export async function reconcileSession(
   const parsed = adapter.parse(scanned.transcriptPath);
   if (!parsed || parsed.userPrompts.length === 0) return prior;
 
+  // Nothing changed since the last pass → nothing to recompute.
+  //
+  // Every poll used to redo the FULL reconcile for every live session — per-prompt
+  // shadows, working-tree and commit-scoped git windows, line maps, an
+  // updateSession — every 8 seconds, for the whole 20-minute idle window AFTER
+  // the agent had gone quiet. The result was identical each time (same turns,
+  // same shas, same files), so all of it was wasted; the log shows the same
+  // Antigravity session re-sending `turns: 0:none,1:none` minute after minute
+  // with the transcript untouched since the first one.
+  //
+  // On Windows that waste is visible: the daemon has no console, so every git
+  // child it spawns gets its own console window. A finished session still
+  // flashed black windows every 8s until it aged out.
+  //
+  // The PROMPT COUNT is part of the test, and not for symmetry — mtime alone is
+  // unsound here. It has finite resolution (a whole second on some filesystems),
+  // so a turn appended within the same tick as the previous poll's reading is
+  // invisible to an mtime comparison, and this guard would skip it. If that turn
+  // is the session's last, nothing ever bumps mtime again and the turn is
+  // dropped permanently — which is exactly what happened: a 3-prompt session
+  // reported turns 0 and 1 and silently lost the newest one.
+  //
+  // Placed AFTER the parse for the same reason: the count cannot be known
+  // without it. That is the cheap half of the work — reading a JSONL file,
+  // spawning nothing — while the git pass below is what costs real time and what
+  // opens the console windows. Skipping that half is the whole point, and it
+  // still happens for a genuinely idle session.
+  //
+  // SIZE covers what the count cannot. The count moves only for a new PROMPT,
+  // and a turn's work — tool calls, file edits, the assistant's reply — appends
+  // to the turn already counted. That is the likelier final write of a session,
+  // so on an mtime tie it is the likelier thing to lose. An append-only
+  // transcript's size moves whenever its content does.
+  //
+  // Unknown size — unreadable path, or state written before the field existed —
+  // does NOT qualify as unchanged. Skipping is the optimisation; doing the work
+  // is the correct answer, so anything unconfirmed falls through.
+  // The WORKING TREE is the input this guard could not see, and it is a second
+  // source of change, not a mirror of the first. An agent writes its files and
+  // THEN summarises, so the last transcript write can precede the last file
+  // write; and a turn whose work is never committed never moves HEAD either. So
+  // all four signals above can sit still while real work lands on disk.
+  //
+  // Session 65014e0b: turn 1 captured at 17:45:45Z as one file, +37/-37. The
+  // agent went on to write three files, +1352/-41 — verified by re-running the
+  // same window against the same worktree, which reports +1347/-41 across all
+  // three. The transcript never changed again, so every later poll skipped and
+  // the session stayed frozen on the partial capture for over an hour.
+  //
+  // Unknown fingerprint does NOT qualify as unchanged, matching the size rule
+  // right above: skipping is the optimisation, doing the work is the correct
+  // answer, so anything unconfirmed falls through. A caller that supplies no
+  // fingerprint at all keeps exactly today's behaviour.
+  const transcriptSizeNow = transcriptSize(scanned.transcriptPath);
+  const treeNow = prior?.workRoot ? (deps.treeFingerprint?.(prior.workRoot) ?? null) : null;
+  const treeUnchanged = !deps.treeFingerprint
+    || (treeNow !== null && treeNow === prior?.lastTreeFingerprint);
+  if (prior && prior.status === 'RUNNING' && prior.originSessionId && prior.workRoot
+      && typeof prior.lastHeadSha === 'string'
+      && typeof prior.lastTranscriptSize === 'number'
+      && transcriptSizeNow !== null
+      && transcriptSizeNow === prior.lastTranscriptSize
+      && scanned.mtimeMs === prior.lastTranscriptMtime
+      && parsed.userPrompts.length === prior.promptCount
+      && treeUnchanged
+      && deps.getHead(prior.workRoot) === prior.lastHeadSha) {
+    return prior;
+  }
+
   // Per-agent noise filter (e.g. a sidechain-only Claude session, an
   // Antigravity re-injection). Optional; most adapters don't define one.
   if (adapter.isNoise?.(parsed)) return null;
@@ -758,11 +1188,16 @@ export async function reconcileSession(
   // on the dashboard looked identical to a bug — nothing anywhere said why.
   // Logged once per (agent, path) so a permanently-skipped session doesn't
   // repeat every poll.
-  const cwd = scanned.cwd || deriveRepoFromFilePaths(parsed.filePaths);
+  // adapter.fallbackCwd is the third and last source, for a turn that edited
+  // nothing at all: no cwd in the transcript AND no path to derive one from is
+  // the ordinary shape of a chat-only turn (a clarifying question, a refusal, a
+  // plan awaiting approval), and skipping it dropped the whole conversation
+  // rather than just its diff. It runs last on purpose — see fallbackCwd's note.
+  const cwd = scanned.cwd || deriveRepoFromFilePaths(parsed.filePaths) || adapter.fallbackCwd?.(scanned) || null;
   if (!cwd) {
     logSkipOnce(`nocwd|${adapter.slug}|${scanned.sessionId}`, () => debugLog('transcript-watch', 'skipped: no cwd for session', {
       agent: adapter.slug, sessionId: scanned.sessionId,
-      hint: 'transcript records no cwd and no absolute file paths to recover one from',
+      hint: 'transcript records no cwd, no absolute file paths to recover one from, and no adapter fallback resolved a workspace',
     }));
     return prior;
   }
@@ -777,7 +1212,10 @@ export async function reconcileSession(
 
   // Repo HEAD at session start — the baseline for the session-level commit walk.
   // Recorded once at creation and persisted; migrated onto older state rows.
-  const headShaAtStart = prior?.headShaAtStart || deps.getHead(repo.workRoot) || undefined;
+  // `headNow` is also what the next poll compares against to decide whether a
+  // commit landed while the transcript stood still (see the skip above).
+  const headNow = deps.getHead(repo.workRoot);
+  const headShaAtStart = prior?.headShaAtStart || headNow || undefined;
 
   // Short tag for the `.git/origin-session-<tag>.json` state file (matches the
   // lifecycle-hook convention: agentSessionId.slice(0,12)).
@@ -792,6 +1230,23 @@ export async function reconcileSession(
   // a hook-created session for the same conversation merges server-side.
   let originSessionId = prior?.originSessionId || null;
   if (!originSessionId) {
+    // Fold staged notes before the session opens.
+    //
+    // syncNotesForSessionStart carries the self-repair for a repo whose notes
+    // fetched but never folded — and it was wired ONLY into hooks.ts. GUI
+    // agents on Windows fire no hooks at all, which is the entire reason this
+    // watcher exists, so for exactly the agents it covers nothing ever folded:
+    // refs/notes/origin-remote* stayed populated, refs/notes/origin-memory
+    // never appeared, and `origin context memory` reported "No session memory
+    // yet" while the payload sat in .git (reproduced on a Cursor-written repo
+    // whose 2 sessions and 3 commit records were invisible to every later
+    // agent).
+    //
+    // Here rather than in the poll loop: this runs once, when the watcher first
+    // adopts a session, so it costs one throttled sync per session instead of
+    // one per 8s tick. Best-effort — capture must never fail on notes.
+    try { deps.syncNotes?.(repo.workRoot); } catch { /* non-fatal */ }
+
     const backoffKey = `${adapter.slug}|${repo.repoPath}`;
     const backoff = startSessionBackoff.get(backoffKey);
     if (backoff && now < backoff.until) return prior; // still cooling off — don't call, don't log
@@ -896,6 +1351,21 @@ export async function reconcileSession(
   // Commits already written to per-commit memory. Carried forward so the write
   // further down can tell "recorded" from merely "seen".
   let recordedCommitShas = Array.isArray(prior?.recordedCommitShas) ? [...prior!.recordedCommitShas] : [];
+  // Commits SEEN in the session's window, owned or not. Deliberately not
+  // persisted and never treated as ownership — see the walk below.
+  let rangeCommitShas: string[] = [];
+  /**
+   * Shas the PAIRING passes may consider: this session's own, plus everything
+   * seen in the window.
+   *
+   * Safe here and nowhere else. Every pass that uses this list tests the
+   * candidate commit's files against files THIS session edited before pairing
+   * it to a turn, so a foreign commit that touched nothing we touched cannot
+   * win. Ownership, commit memory and persisted state must NOT use it — that
+   * conflation is what put another session's commit on this one's turn.
+   */
+  const commitCandidates = (): string[] =>
+    Array.from(new Set([...sessionCommitShas, ...rangeCommitShas]));
   // sha → repo-relative files in that commit. Used to attribute a commit to a
   // prompt for agents with no canonical extractor (Antigravity/Copilot).
   const commitFiles = new Map<string, string[]>();
@@ -906,12 +1376,21 @@ export async function reconcileSession(
         for (const d of gc.commitDetails || []) {
           if (d?.sha) commitFiles.set(d.sha, (d.filesChanged || []).map((f) => f.replace(/\\/g, '/')));
         }
-        // NOTE: gc.commitShas is a headShaAtStart..HEAD walk, so it contains
-        // every commit made in this repo since the session began — including
-        // ones OTHER sessions made concurrently. It is not "this session's
-        // commits" and must never be treated as such; the per-commit memory
-        // write below keys off attribution, not off this list.
-        sessionCommitShas = Array.from(new Set([...sessionCommitShas, ...gc.commitShas]));
+        // gc.commitShas is a headShaAtStart..HEAD walk: every commit made in
+        // this repo since the session began, INCLUDING ones other sessions made
+        // concurrently. It is not "this session's commits".
+        //
+        // It used to be merged straight into sessionCommitShas one line below
+        // this very warning, which made the name a lie and carried the lie into
+        // persisted state. Session fdf299d3 turn 10 is what that produces: its
+        // 17 files are exactly commit 9f811c65f, made by a concurrent session,
+        // while its own three edited files appear nowhere on the row.
+        //
+        // Kept separate now. The pairing heuristics below still see it — they
+        // each test file overlap against this session's own edits before using
+        // a sha, which is what makes a range list safe THERE — but ownership,
+        // commit memory and everything persisted read the owned list only.
+        rangeCommitShas = Array.from(new Set([...rangeCommitShas, ...gc.commitShas]));
         gitCapture = {
           headBefore: gc.headBefore,
           headAfter: gc.headAfter,
@@ -934,8 +1413,75 @@ export async function reconcileSession(
   // legacy diff projections (whose defensive heuristics blank files/diffs when a
   // poll re-sends similar content). Only for agents the extractor understands.
   let editsJsonByIndex = new Map<number, string>();
+  const outOfRepoByIndex = new Map<number, string[]>();
   // Commit SHA the capture attributes to each prompt — sent as PromptChange
   // .commitSha so the UI can render the turn's commit row + total-diff badge.
+  // Stable identity for every prompt this session has, carried from the prior
+  // pass so an id is minted once and then reused. Computed HERE, ahead of the
+  // capture call, because that call resolves commit ownership and needs the
+  // identity to key it to.
+  //
+  // ADOPT the hook path's identities where it already has them. The two paths
+  // used to mint independently — the hook `t_…` in currentTurnIndex, the
+  // watcher `w_…` here — so on a dual-path agent ONE turn existed under TWO
+  // identities and the server had no way to tell "the same turn, re-reported"
+  // from "a different turn". Both rows then competed for the same slot and the
+  // last writer won.
+  //
+  // Prod b46ec40f (Cursor) stores exactly that, alternating by which writer got
+  // there last:
+  //
+  //   row 0  t_ebe0674b658b4cae   +0/-0
+  //   row 1  w_8p1nmx3rmtg543d1   +534/-0     <- the watcher's row won
+  //   row 2  t_97aa68bef20047d2   +134/-34
+  //   row 3  w_yqny8h47mtg5k119   +0/-0
+  //
+  // The hook path had sent +604/-0 for row 1. Neither number reached the page
+  // by being merged; the watcher's poll-derived one simply overwrote the row a
+  // few seconds later, which is why a turn looked right and then changed.
+  //
+  // Matched by promptKey against the hook's OWN prompt list, never by position:
+  // the two paths do not always see the same prompts (Cursor injects a
+  // follow-up prompt that grew this very session's list mid-flight), so
+  // zipping the id array against our prompts by index would pair ids to the
+  // wrong turns — the exact failure turnId exists to prevent.
+  //
+  // The watcher's own prior ids are offered FIRST so an id it already
+  // published keeps its row; adoption changes identity only for a prompt the
+  // watcher has not yet named.
+  // Guarded: an unreadable state file must not take down the poll. Adoption is
+  // an improvement on the identity we would otherwise mint, never a dependency.
+  const hookTurns = (() => {
+    try { return hookMintedTurns(deps.loadGitState?.(repo.workRoot, sessionTag) || null); } catch { return []; }
+  })();
+  const promptTurns = assignTurnIds([...(prior?.promptTurns || []), ...hookTurns], parsed.userPrompts || []);
+
+  // DISCOVERY attestation: shas the agent disclosed in its own output
+  // ("[branch 73df467]"), bound to the turn they appeared under BY IDENTITY.
+  //
+  // Weaker than post-commit and labelled so (`via: transcript`). The hook
+  // watches a commit land; this is the agent SAYING it committed, in prose that
+  // can carry an old sha ("reverted abc1234") — which is why the pairing below
+  // still resolves the short form and bounds it by age.
+  //
+  // It exists because for Cursor there is no alternative. Across this machine's
+  // entire log history its worktree fired after-file-edit 30x,
+  // user-prompt-submit 29x and post-tool-use 9x — and post-commit ZERO times,
+  // with core.hooksPath set correctly and the hook executable. Its commits do
+  // not invoke git hooks at all, so commit-time attestation can never exist for
+  // it. Naming discovery honestly lets a reader rank it below proof rather than
+  // mistake one for the other.
+  const discoveredCommitTurns: Array<{ sha: string; turnId: string; at: string; via: "transcript" }> = [];
+  for (const [idxRaw, shas] of Object.entries(parsed.promptCommitShas || {})) {
+    const idx = Number(idxRaw);
+    const turnId = promptTurns[idx]?.turnId;
+    if (!Number.isInteger(idx) || !turnId || !Array.isArray(shas) || shas.length === 0) continue;
+    const short = shas[shas.length - 1];
+    const full = commitCandidates().find((c) => c.startsWith(short)) || resolveFullSha(repo.workRoot, short);
+    if (!full) continue;
+    discoveredCommitTurns.push({ sha: full, turnId, at: new Date(now).toISOString(), via: "transcript" });
+  }
+
   const commitShaByIndex = new Map<number, string>();
   if (adapter.promptCaptureAgent && deps.capturePromptEdits) {
     try {
@@ -943,8 +1489,16 @@ export async function reconcileSession(
         agent: adapter.promptCaptureAgent,
         repoPath: repo.workRoot,
         transcriptPath: scanned.transcriptPath,
-        // Freshly-walked list (includes a commit made THIS cycle), not just prior state.
+        // This session's OWN commits. Was the freshly-walked range list, which
+        // also carried concurrent sessions' commits; the extractor is handed
+        // ownership, not "what landed in the repo lately".
         sessionCommitShas,
+        // Discovery-grade attestation + the identity it is keyed to. Lets the
+        // extractor attribute a commit to the turn the transcript disclosed it
+        // under instead of falling back to "the highest-index turn that claims
+        // the sha" — which for a late-surfacing commit names the wrong turn.
+        commitTurns: discoveredCommitTurns,
+        promptTurnIds: promptTurns.map((t) => t.turnId),
         headShaAtStart: headShaAtStart || undefined,
       });
       // Send a capture for EVERY prompt the extractor produced — including ones
@@ -954,7 +1508,16 @@ export async function reconcileSession(
       // a phantom file from the previous turn's legacy diff projection.
       for (const cap of captures) {
         if (Array.isArray(cap.edits)) {
-          editsJsonByIndex.set(cap.promptIndex, JSON.stringify({ edits: cap.edits, commits: cap.commits || [] }));
+          editsJsonByIndex.set(cap.promptIndex, JSON.stringify({
+            edits: cap.edits,
+            commits: cap.commits || [],
+            ...(cap.outOfRepoFiles && cap.outOfRepoFiles.length > 0
+              ? { outOfRepoFiles: cap.outOfRepoFiles }
+              : {}),
+          }));
+        }
+        if (cap.outOfRepoFiles && cap.outOfRepoFiles.length > 0) {
+          outOfRepoByIndex.set(cap.promptIndex, cap.outOfRepoFiles);
         }
         // The commit this turn produced. Newest wins when a turn somehow carries
         // several — the UI shows one commit row per turn.
@@ -982,8 +1545,13 @@ export async function reconcileSession(
     }
   }
 
+  // isInsideRepo first: toRepoRelative returns the input unchanged for a file
+  // outside the root, and an absolute path does not start with `..`, so the
+  // filter alone let ~/.claude memory notes and /tmp scratch through as repo
+  // files. See scopeCapturedPath.
   const toRepoRel = (files: string[]): string[] =>
     files
+      .filter((f) => isInsideRepo(repo.workRoot, f))
       .map((f) => toRepoRelative(repo.workRoot, f))
       .filter((f) => f && !f.startsWith('..'));
 
@@ -1004,15 +1572,26 @@ export async function reconcileSession(
       promptIndex: pe.promptIndex,
       promptText: '',
       agent: 'claude' as const,
-      edits: (pe.edits || []).map((e) => ({
-        file: toRepoRel([e.file])[0] || e.file,
-        op: e.op,
-        oldContent: e.oldContent,
-        newContent: e.newContent,
-        source: 'tool_call',
-      })) as PromptCapture['edits'],
+      // `|| e.file` used to be the fallback here, which handed the raw path
+      // back the moment toRepoRel rejected it — exactly the out-of-repo files
+      // it had just filtered out. A file that isn't this repo's is dropped.
+      edits: (pe.edits || []).flatMap((e) => {
+        const file = toRepoRel([e.file])[0];
+        if (!file) return [];
+        return [{
+          file,
+          op: e.op,
+          oldContent: e.oldContent,
+          newContent: e.newContent,
+          source: 'tool_call',
+        }];
+      }) as PromptCapture['edits'],
       commits: [],
     }));
+    for (const pe of parsed.promptEdits) {
+      const outside = outOfRepoWrites(repo.workRoot, (pe.edits || []).map((e) => e.file));
+      if (outside.length > 0) outOfRepoByIndex.set(pe.promptIndex, outside);
+    }
     try {
       chainWholeFileWrites(chained);
     } catch { /* best-effort: an unchained write is still worth sending */ }
@@ -1027,6 +1606,23 @@ export async function reconcileSession(
       // as "@@ -1,1 +1,6 @@" with Row 11 shown as line 1, which is also what the
       // per-line blame reads. The same anchoring the hook path has always done.
       try {
+        // Recover the before-state of any whole-file write first, so a rewrite
+        // synthesizes as a real replace instead of a whole-file insertion (all
+        // adds, zero deletes — see backfillWriteBaselines). This path had NO
+        // coverage: it serves every agent that fires no hooks, which on Windows
+        // is every GUI agent. `promptShadows` here is captured per prompt at
+        // the moment the prompt is NOTICED — which on a poll is up to one poll
+        // interval AFTER it was submitted, so a fast agent's first writes are
+        // already in that "baseline". The session-start baseline is passed as
+        // the fallback so those writes recover a real before-state instead of
+        // collapsing to no-ops (see backfillWriteBaselines; agy 65953fe2 lost
+        // 5 files / +422 lines to exactly this).
+        backfillWriteBaselines(
+          edits as Parameters<typeof backfillWriteBaselines>[0],
+          repo.workRoot,
+          promptShadows.find((sh) => sh.promptIndex === pe.promptIndex)?.baselineSha || null,
+          sessionStartShadowSha || headShaAtStart || null,
+        );
         anchorEditPositions(edits as Parameters<typeof anchorEditPositions>[0], repo.workRoot);
       } catch { /* best-effort: an unanchored edit is still worth sending */ }
       // Empty edits[] is still sent — the "this turn touched nothing" signal.
@@ -1044,6 +1640,142 @@ export async function reconcileSession(
     for (const pd of parsed.promptDiffs) {
       const edits = toRepoRel(pd.filesChanged).map((file) => ({ file, op: 'edit', source: 'tool_call' }));
       editsJsonByIndex.set(pd.promptIndex, JSON.stringify({ edits, commits: [] }));
+    }
+  }
+
+  // Read a repo-relative file as it stands on disk (the LAST turn's end state).
+  const readWorkingFile = (root: string, file: string): string | null => {
+    try {
+      const abs = path.join(root, file);
+      return fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
+    } catch { return null; }
+  };
+
+  // Which turns the TRANSCRIPT records writing each file. This is the authority
+  // the window sweep below is checked against — see transcript-attribution.ts.
+  // Built even when `promptEdits` produced no editsJson (another path may have
+  // won that race); an empty map disables both halves of the check, which is
+  // the correct behaviour when the parser saw nothing.
+  const transcriptWriters = transcriptWriterTurns(
+    parsed.promptEdits,
+    (f) => toRepoRel([f])[0] || null,
+  );
+
+  // ─── Shell writes → real edits (watcher path) ─────────────────────────
+  // The hook path records a write-shaped shell command live at PostToolUse and
+  // resolves it at Stop. Agents that fire NO hooks (Gemini, Antigravity,
+  // hookless Cursor) only have the transcript, so the same turns arrived here
+  // with `edits: []` — indistinguishable from chat-only, which is what every
+  // read surface then has to guess about.
+  //
+  // The window must be bounded by the NEXT turn's baseline, not by the working
+  // tree: the watcher polls and routinely processes several finished turns at
+  // once, so diffing turn N to the tree in front of us would hand it every
+  // later turn's work — the exact mis-attribution this whole area keeps
+  // producing. The last turn has no successor, so it alone reads the tree.
+  if ((parsed.promptsThatWroteViaShell || []).length > 0 && promptShadows.length > 0) {
+    for (const idx of parsed.promptsThatWroteViaShell || []) {
+      try {
+        const from = promptShadows.find((sh) => sh.promptIndex === idx)?.baselineSha;
+        if (!from) continue;
+        const next = promptShadows
+          .filter((sh) => sh.promptIndex > idx && sh.baselineSha)
+          .sort((a, b) => a.promptIndex - b.promptIndex)[0];
+        const to = next?.baselineSha || null;
+        const files = to
+          ? captureShadowRangeDiff(repo.workRoot, from, to).filesChanged
+          : filesChangedSinceShadow(repo.workRoot, from);
+        if (files.length === 0) continue;
+        // Files this turn already carries from a real tool call — never
+        // re-derive those; the agent's own payload is the precise record.
+        const covered: string[] = [];
+        try {
+          const existing = JSON.parse(editsJsonByIndex.get(idx) || '{"edits":[]}');
+          for (const e of existing.edits || []) {
+            if (e && typeof e.file === 'string' && (!e.source || e.source === 'tool_call')) covered.push(e.file);
+          }
+        } catch { /* unparseable — treat as nothing covered */ }
+        // …and files the transcript says ANOTHER turn wrote. The window runs to
+        // the next turn's baseline, which the poll takes late, so a fast turn's
+        // first writes sit inside its predecessor's window (session 376cc22f:
+        // turn 2's README.md landed on turn 1 this way). A file the transcript
+        // attributes elsewhere is never this turn's to claim.
+        covered.push(...filesRecordedForOtherTurns(transcriptWriters, idx));
+        const { edits } = shellWindowEdits(
+          {
+            listChangedFiles: () => files,
+            readAtRev: (sha, file) => readFileAtRev(repo.workRoot, sha, file),
+            readWorking: (file) => (to
+              ? readFileAtRev(repo.workRoot, to, file)
+              : readWorkingFile(repo.workRoot, file)),
+          },
+          {
+            baselineSha: from,
+            coveredFiles: covered,
+            isIgnored: (file) => isOriginAutoManagedPath(file) || shouldIgnoreFile(file),
+          },
+        );
+        if (edits.length === 0) continue;
+        let payload: { edits: unknown[]; commits: unknown[] } = { edits: [], commits: [] };
+        try {
+          const existing = editsJsonByIndex.get(idx);
+          if (existing) payload = JSON.parse(existing);
+        } catch { /* start from an empty shell */ }
+        if (!Array.isArray(payload.edits)) payload.edits = [];
+        if (!Array.isArray(payload.commits)) payload.commits = [];
+        payload.edits.push(...edits);
+        editsJsonByIndex.set(idx, JSON.stringify(payload));
+        debugLog('transcript-watch', 'shell window edits captured', {
+          agent: adapter.slug, promptIndex: idx, files: edits.length,
+          bounded: to ? 'next-turn baseline' : 'working tree',
+          source: SHELL_WINDOW_SOURCE,
+        });
+      } catch (err) {
+        debugLog('transcript-watch', 'shell window capture failed (non-fatal)', {
+          agent: adapter.slug, promptIndex: idx, err: String(err),
+        });
+      }
+    }
+  }
+
+  // ─── Transcript-vs-attribution check ──────────────────────────────────
+  // Prevention above stops a window from claiming another turn's file, but only
+  // for windows assembled HERE. An inferred edit can still arrive from a path
+  // that never consulted `coveredFiles`, and a turn's payload can be re-sent
+  // after the fact. So verify the assembled result against the transcript and
+  // re-parent (or drop) anything the window put on the wrong turn.
+  if (transcriptWriters.size > 0 && editsJsonByIndex.size > 0) {
+    try {
+      const payloads = new Map<number, { edits: unknown[]; [k: string]: unknown }>();
+      const turnsToCheck: AttributedTurn[] = [];
+      for (const [idx, raw] of editsJsonByIndex) {
+        let cap: { edits?: unknown[] };
+        try { cap = JSON.parse(raw); } catch { continue; }
+        if (!Array.isArray(cap.edits)) continue;
+        payloads.set(idx, cap as { edits: unknown[] });
+        turnsToCheck.push({ promptIndex: idx, edits: cap.edits as AttributedTurn['edits'] });
+      }
+      const findings = reconcileWindowAttribution(turnsToCheck, transcriptWriters);
+      if (findings.length > 0) {
+        // Write back only the turns the check actually touched — a turn whose
+        // edits are unchanged keeps its existing serialization byte for byte.
+        const touched = new Set(findings.flatMap((f) => [f.heldBy, f.recordedBy]));
+        for (const turn of turnsToCheck) {
+          if (!touched.has(turn.promptIndex)) continue;
+          const payload = payloads.get(turn.promptIndex);
+          if (!payload) continue;
+          payload.edits = turn.edits;
+          editsJsonByIndex.set(turn.promptIndex, JSON.stringify(payload));
+        }
+        debugLog('transcript-watch', 'transcript-attribution corrections', {
+          agent: adapter.slug,
+          corrections: findings.map((f) => `${f.file}: ${f.heldBy}→${f.recordedBy} (${f.action})`),
+        });
+      }
+    } catch (err) {
+      debugLog('transcript-watch', 'transcript-attribution check failed (non-fatal)', {
+        agent: adapter.slug, err: String(err),
+      });
     }
   }
 
@@ -1075,7 +1807,7 @@ export async function reconcileSession(
       // which is precisely when this path matters. Ask git directly, and if
       // even git can't resolve it, send nothing — an unusable sha is worse than
       // an honest blank.
-      const full = sessionCommitShas.find((s) => s.startsWith(short))
+      const full = commitCandidates().find((s) => s.startsWith(short))
         || resolveFullSha(repo.workRoot, short);
       if (!full) {
         debugLog('transcript-watch', 'commit sha unresolvable — sending none', {
@@ -1162,13 +1894,13 @@ export async function reconcileSession(
     // the real committing turns showed none, and the answer changed between
     // polls (a turn would flip committed → uncommitted).
     const committingTurns = (parsed.promptsThatCommitted || []).slice().sort((a, b) => a - b);
-    // Chronological commit order: sessionCommitShas is accumulated oldest-first.
+    // Chronological commit order: the candidate list is accumulated oldest-first.
     // Keep only commits that actually touch a file THIS session edited — the
     // headShaAtStart..HEAD walk also picks up commits made by other sessions (or
     // by the user) in the same repo during the window, and an unrelated commit in
     // the list shifts the pairing so every turn gets the wrong sha.
     const sessionFiles = new Set(toRepoRel(parsed.filesChanged));
-    const orderedShas = sessionCommitShas.filter((sha) => {
+    const orderedShas = commitCandidates().filter((sha) => {
       const files = commitFiles.get(sha);
       return !!files && files.some((f) => sessionFiles.has(f));
     });
@@ -1185,7 +1917,7 @@ export async function reconcileSession(
       // No transcript commit signal at all: fall back to file overlap, but keep
       // it deterministic by walking commits oldest-first and never reusing a turn.
       const taken = new Set<number>();
-      for (const sha of sessionCommitShas) {
+      for (const sha of commitCandidates()) {
         const files = commitFiles.get(sha);
         if (!files) continue;
         const inCommit = new Set(files);
@@ -1292,40 +2024,152 @@ export async function reconcileSession(
   }
 
   const promptChanges: any[] = [];
+  // ONE stamp for the whole pass: every row this pass writes describes the
+  // same capture, which is exactly what the server needs to order them.
+  const captureStamp = newCaptureStamp('w');
+  // Stable identity for every prompt this session has, carried from the prior
+  // pass so an id is minted once and then reused. Persisted below with the
+  // rest of the watch state.
   const latestIndex = newCount - 1;
+
+  // Files EARLIER prompts already claim.
+  //
+  // The in-flight prompt falls back to the session-wide edited-file list when
+  // its own transcript mapping is empty (`agentFilesRel`), and captureFilesDiff
+  // measures those files against HEAD rather than against this turn's baseline.
+  // Without this subtraction a turn that only chatted re-reports every
+  // uncommitted line the session has accumulated, and an UNTRACKED file is
+  // re-counted in full every time (captureFilesDiff renders untracked files as
+  // entirely added).
+  //
+  // Observed on session 4308e5b5: three consecutive chat-only turns each
+  // duplicated their predecessor exactly (+9/-0, +31/-1, +337/-6), summing to
+  // +1278/-31 per-turn against a true session diff of +179/-0. The session and
+  // commit diffs were right throughout — only the per-turn split was wrong,
+  // which is why the headline totals never looked alarming.
+  //
+  // This is the same rule the snapshot gate below already applied to decide
+  // whether a turn touched code; it just never reached the payload itself.
+  const claimedByEarlier = new Set<string>();
+  for (const pd of parsed.promptDiffs) {
+    if (pd.promptIndex >= latestIndex) continue;
+    for (const f of toRepoRel(pd.filesChanged)) claimedByEarlier.add(f);
+  }
+  const unclaimedSessionFiles = agentFilesRel.filter((f) => !claimedByEarlier.has(f));
   for (let i = 0; i < newCount; i++) {
     const mapping = parsed.promptDiffs.find((pd) => pd.promptIndex === i);
     let files = mapping ? toRepoRel(mapping.filesChanged) : [];
-    let diff = mapping?.diff || '';
+    // Put the transcript diff in the SAME path space as `files` above. The
+    // adapter builds it from the agent's own edit records, which for an agent
+    // with no cwd on disk (Antigravity) carry absolute paths — so the body
+    // named `.../worktrees/repo/branch/app.py` while `files` said `app.py`, and
+    // it also still carried sections for files `toRepoRel` had just dropped as
+    // out-of-repo. Recount afterwards: dropping a section changes the totals,
+    // and a diff whose body disagrees with its own +/- is worse than either.
+    const rawDiff = mapping?.diff || '';
+    let diff = scopeDiffPathsToRepo(repo.workRoot, rawDiff);
     let linesAdded = mapping?.linesAdded || 0;
     let linesRemoved = mapping?.linesRemoved || 0;
+    if (diff !== rawDiff) {
+      // Only when scoping actually removed something. The adapter's counts are
+      // authoritative for the diff it produced and need not be derivable from
+      // its body — an agent that reports totals without a full patch is a real
+      // shape, so recounting unconditionally would overwrite good numbers with
+      // whatever the body happened to contain.
+      const counts = countDiffLines(diff);
+      linesAdded = counts.linesAdded;
+      linesRemoved = counts.linesRemoved;
+    }
 
     if (i === latestIndex) {
       // For the IN-FLIGHT prompt the WORKING TREE is authoritative for still-
       // uncommitted files — it has the real current content, whereas a
       // transcript's edit content can be partial (Cursor reports a summary, so
-      // its line counts are wrong) or absent (Antigravity). So prefer a
-      // working-tree diff of the edited files; keep the transcript diff only
-      // when the tree shows nothing (already committed / clean); then the
-      // shadow-baseline tree diff as a last resort.
-      const candidateFiles = files.length ? files : agentFilesRel;
+      // its line counts are wrong) or absent. So prefer a working-tree diff of
+      // the edited files; keep the transcript diff only when the tree shows
+      // nothing (already committed / clean); then the shadow-baseline tree diff
+      // as a last resort.
+      const candidateFiles = files.length ? files : unclaimedSessionFiles;
       if (candidateFiles.length && deps.captureFilesDiff) {
         const wd = deps.captureFilesDiff(repo.workRoot, candidateFiles);
-        if (wd.diff) {
+        if (wd.diff && !transcriptDiffBeatsWindow(
+          { linesAdded, linesRemoved, diff },
+          wd,
+          adapter.transcriptDiffIsDelta === true,
+        )) {
           diff = wd.diff; linesAdded = wd.linesAdded; linesRemoved = wd.linesRemoved;
           files = wd.filesChanged.length ? wd.filesChanged : candidateFiles;
         }
       }
       if (!diff) {
+        // LAST-RESORT WINDOW: everything that changed between this turn's
+        // baseline and the working tree. It catches work no transcript records
+        // — shell writes, an editor the agent drove indirectly — which is why
+        // it is unscoped.
+        //
+        // Unscoped also means it catches whatever ELSE landed in the checkout.
+        // A `git pull` or a sibling agent's merge during the turn moves files
+        // this session never touched, and the window reports them as the turn's
+        // work. Prod fdf299d3 turn 10: 17 files, exactly commit 9f811c65f from
+        // a concurrent session, and none of the three files the turn actually
+        // edited.
         const baseline = promptShadows.find((s) => s.promptIndex === i)?.baselineSha || null;
         const d = deps.captureDiff(repo.workRoot, baseline);
         if (d.diff || d.filesChanged.length) {
-          diff = d.diff; linesAdded = d.linesAdded; linesRemoved = d.linesRemoved;
-          files = files.length ? files : d.filesChanged;
+          // Files that moved only because a commit we do NOT own landed in the
+          // window. `sessionCommitShas` is ownership (#1306); anything in the
+          // range walk beyond it belongs to somebody else.
+          const ownedSet = new Set(sessionCommitShas.map((sha) => sha.toLowerCase()));
+          const foreignFiles = new Set<string>();
+          for (const sha of rangeCommitShas) {
+            if (ownedSet.has(sha.toLowerCase())) continue;
+            for (const f of (commitFiles.get(sha) || [])) foreignFiles.add(f);
+          }
+          // A file the agent itself edited stays even when a foreign commit
+          // also touched it — our change is really in the tree, and dropping it
+          // would lose real work to fix an over-report.
+          const agentEdited = new Set(agentFilesRel);
+          const dFiles = toRepoRel(d.filesChanged);
+          const kept = dFiles.filter((f) => !foreignFiles.has(f) || agentEdited.has(f));
+
+          if (kept.length === dFiles.length) {
+            // Nothing foreign in the window — the common case, untouched.
+            diff = d.diff; linesAdded = d.linesAdded; linesRemoved = d.linesRemoved;
+            files = files.length ? files : d.filesChanged;
+          } else if (kept.length > 0 && deps.captureFilesDiff) {
+            // Re-measure the survivors. Filtering the file list without
+            // recomputing the diff would leave the row's files and line counts
+            // describing different sets — the mosaic shape this whole area
+            // exists to prevent.
+            const rescoped = deps.captureFilesDiff(repo.workRoot, kept);
+            diff = rescoped.diff;
+            linesAdded = rescoped.linesAdded;
+            linesRemoved = rescoped.linesRemoved;
+            files = files.length ? files : (rescoped.filesChanged.length ? rescoped.filesChanged : kept);
+            debugLog('transcript-watch', 'dropped foreign-commit files from turn window', {
+              agent: adapter.slug, promptIndex: i,
+              dropped: dFiles.length - kept.length, kept: kept.length,
+            });
+          } else if (kept.length === 0) {
+            // Every file in the window came from someone else's commit. The
+            // turn gets nothing here rather than another session's work; the
+            // fallbacks below still run.
+            debugLog('transcript-watch', 'turn window was entirely foreign — attributing none', {
+              agent: adapter.slug, promptIndex: i, dropped: dFiles.length,
+            });
+          } else {
+            // Cannot re-measure (captureFilesDiff not wired). Keeping the
+            // unfiltered result is wrong, and a filtered list with unfiltered
+            // counts is worse, so take neither.
+            debugLog('transcript-watch', 'foreign files in window but no re-measure available', {
+              agent: adapter.slug, promptIndex: i,
+            });
+          }
         }
       }
-      // Report the session's edited-file list if nothing else surfaced files.
-      if (files.length === 0) files = agentFilesRel;
+      // Report the session's edited-file list if nothing else surfaced files —
+      // minus what earlier turns already claim, so a chat-only turn stays empty.
+      if (files.length === 0) files = unclaimedSessionFiles;
     }
 
     // COMMITTING TURN WITH NO RECORDED EDITS. Cursor logs no file-edit when the
@@ -1400,6 +2244,10 @@ export async function reconcileSession(
     const promptTs = (parsed.promptTimestamps || [])[i];
     promptChanges.push({
       promptIndex: i,
+      // Identity, as distinct from position. The server prefers turnId when
+      // present, so this row lands on the turn it describes even after the
+      // transcript renumbers underneath us.
+      ...(promptTurns[i]?.turnId ? { turnId: promptTurns[i].turnId } : {}),
       promptText: (parsed.userPrompts[i] || '').slice(0, 1000),
       ...(typeof promptTs === 'number' && promptTs > 0 ? { createdAt: promptTs } : {}),
       filesChanged: files,
@@ -1407,7 +2255,11 @@ export async function reconcileSession(
       linesAdded,
       linesRemoved,
       checkpointType: 'auto',
+      // Provenance for THIS pass. Without it the server cannot order this
+      // payload against the hook path's, and treats it as always-newer.
+      ...captureStamp,
       ...(editsJsonByIndex.has(i) ? { editsJson: editsJsonByIndex.get(i) } : {}),
+      ...(outOfRepoByIndex.has(i) ? { outOfRepoFiles: outOfRepoByIndex.get(i) } : {}),
       ...(commitShaByIndex.has(i) ? { commitSha: commitShaByIndex.get(i) } : {}),
       // The watcher re-reads the WHOLE transcript every poll and recomputes each
       // turn from scratch, so this payload IS the ground truth for the prompt —
@@ -1468,8 +2320,10 @@ export async function reconcileSession(
   }
 
   let updateOk = false;
+  // Set when the server says the session id we hold no longer exists.
+  let sessionGone = false;
   try {
-    await deps.api.updateSession(originSessionId, {
+    const updatePayload = {
       prompt: joinedPrompt || undefined,
       transcript: parsed.transcript || undefined,
       model: parsed.model || undefined,
@@ -1477,16 +2331,36 @@ export async function reconcileSession(
       inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
       outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
       toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
+      // Per-tool chips. Sent alongside the total so the two can't disagree;
+      // omitted when the adapter can't break its count down.
+      toolBreakdown: parsed.toolBreakdown?.length ? parsed.toolBreakdown : undefined,
       durationMs: durationMs > 0 ? durationMs : undefined,
       costUsd: costUsd > 0 ? costUsd : undefined,
       promptChanges: promptChanges.length > 0 ? promptChanges : undefined,
       lineMaps: lineMaps.length > 0 ? lineMaps : undefined,
       gitCapture,
       status: 'RUNNING',
+    };
+    // Size the timeout to the payload. This PATCH carries the session's whole
+    // state and grows all session long, so on the 8s default it eventually
+    // aborts at exactly 8s EVERY poll — the watcher rebuilds the same payload
+    // each time, so the server's copy freezes while local capture keeps working
+    // (session 1271f66c: four consecutive 8.0s aborts, 35 minutes stale, the
+    // turn captured correctly with its 7 files and commit the whole time).
+    await deps.api.updateSession(originSessionId, updatePayload, {
+      timeoutMs: timeoutForPayload(JSON.stringify(updatePayload).length),
     });
     updateOk = true;
   } catch (err) {
     debugLog('transcript-watch', 'updateSession failed', { agent: adapter.slug, sessionId: scanned.sessionId, err: String(err) });
+    // A server that says the session is GONE will say it again every poll: the
+    // id we hold is dead and re-sending it can never start working. Observed on
+    // this machine as the same "Session not found" every 8 seconds for hours —
+    // and each of those polls did a full git pass first, which is exactly the
+    // console-window flapping. Drop the id so the next poll re-creates the
+    // session (startSession keys on agentSessionId, so it re-attaches to the
+    // same conversation rather than forking it).
+    if (SESSION_GONE_RE.test(String(err))) sessionGone = true;
     // Fall through — persist state so we don't re-create shadows next poll.
   }
 
@@ -1498,8 +2372,55 @@ export async function reconcileSession(
   // active session by scanning these files and attribute the commit, stamp the
   // Origin-Session trailer, and write+push refs/notes/origin. Rewritten every
   // poll so the file's mtime keeps the session "alive" (no heartbeat needed).
+  //
+  // CARRY what this writer does not own. saveSessionState serializes the whole
+  // object, so every field missing from the literal below is not "left alone" —
+  // it is ERASED. The hook path's re-attach literal carries these four for
+  // exactly that reason (#1341); this literal never did, and it is rewritten
+  // every POLL_INTERVAL_MS, so on any agent where both paths run (Cursor,
+  // Antigravity) the watcher wiped the hook path's turn identities within
+  // 8 seconds of them being minted.
+  //
+  // Measured on prod session b46ec40f (Cursor): the first Stop hook sent
+  // `t:"t_ebe0674b"`, the watcher polled 4 seconds later, and all 15 payloads
+  // after it sent `t:null`. With no turnId every writer falls back to POSITION,
+  // and position is not stable — Cursor injected a follow-up prompt mid-session
+  // and the watcher's own log shows the commit moving from turn 1 to turn 2
+  // twenty seconds apart. Rows written before the shift kept their old index,
+  // so one turn's diff landed on another turn's row: the page ended up showing
+  // +534/-0 and +134/-34 for turns nothing had ever sent those numbers for.
+  //
+  // The same session shows the second symptom. This literal also wrote
+  // `prePromptSha: null`, and handleAfterFileEdit bails on a state with no
+  // prePromptSha — `ABORT: missing repoPath or prePromptSha`, 34 times, every
+  // Cursor file edit in that session. With no edit evidence the turn's diff
+  // falls back to a source that has no "before" content, so a whole-file
+  // rewrite reads as pure additions: turn 2 was captured `a:604, r:0` while the
+  // agent itself reported -97 and -14, and the commit says -116 against the
+  // session's -34.
+  //
+  // So this carries the prior file WHOLESALE rather than a hand-picked list.
+  // A list is what failed here: #1341 named four fields for the hook path's
+  // literal and this one was never updated, and any field a future hook starts
+  // writing would be silently erased again. The prior file IS this session's
+  // own state; the watcher's fields below are the ones it actually observed.
+  const carried = (() => {
+    try {
+      const prev = deps.loadGitState?.(repo.workRoot, sessionTag) || null;
+      if (!prev) return {} as Record<string, unknown>;
+      // activeTurn is the one field that must NOT survive: a turn left open by
+      // a missed close attests the next commit to a turn that ended long ago
+      // (#1334). Same rule the hook path's re-attach applies.
+      const { activeTurn: _dropped, ...rest } = prev as Record<string, unknown>;
+      return rest;
+    } catch {
+      return {} as Record<string, unknown>;
+    }
+  })();
+
   try {
     deps.saveGitState?.({
+      ...carried,
       sessionId: originSessionId,             // the SERVER session id
       claudeSessionId: scanned.sessionId,     // required by loadSessionState
       agentSessionId: scanned.sessionId,
@@ -1514,8 +2435,12 @@ export async function reconcileSession(
       lastCwd: cwd,
       branch: repo.branch || null,
       headShaAtStart: headShaAtStart || null,
-      headShaAtLastStop: null,
-      prePromptSha: null,
+      // These two are the hook path's to set, and the watcher does not observe
+      // them — so it must not write null OVER a real value. `prePromptSha` is
+      // the per-turn baseline handleAfterFileEdit requires; nulling it every
+      // poll is what silently disabled Cursor's edit capture (see above).
+      headShaAtLastStop: (carried.headShaAtLastStop as string | null | undefined) ?? null,
+      prePromptSha: (carried.prePromptSha as string | null | undefined) ?? null,
       sessionStartShadowSha,
       sessionCommitShas,
       promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha, capturedAt: s.capturedAt })),
@@ -1548,23 +2473,51 @@ export async function reconcileSession(
   // poll whose shadow baseline was captured after the edit lands reports 0 for a
   // turn that demonstrably wrote a file. So files count as evidence too.
   //
-  // But only files THIS prompt can claim. promptChanges falls back to the
-  // session-wide edited-file list for the in-flight prompt (see `agentFilesRel`
-  // above), so a chat-only final turn inherits its predecessors' files and looks
-  // like it changed something. Subtract what earlier prompts already claim.
+  // But only files THIS prompt can claim. The payload above already subtracts
+  // what earlier prompts claim before using the session-wide list, so `latest`
+  // no longer arrives pre-inflated; this filter still stands because a turn's
+  // OWN mapping can legitimately name a file an earlier turn also touched, and
+  // re-editing a file someone else already claimed is not new evidence of work.
   //
   // Deliberately not latched into snapshottedPrompts when it skips: a turn polled
   // mid-flight legitimately reads empty before the edit lands, and has to stay
   // eligible for the next poll.
+  // Deliver this session's commits. Without it the server only ever sees the
+  // reconstruction it builds from per-prompt captures, which leaves
+  // additions/deletions null ON PURPOSE (a turn's scoped counts are not the
+  // commit's) — so the "commit total" chip never renders and the subject stays
+  // empty. The hook path has always ingested; the watcher, the only capture
+  // path for an agent that fires no hooks, never did.
+  //
+  // After the update, and best-effort: a commit we fail to send stays out of
+  // `ingestedCommitShas` and is retried next poll, and nothing here may take
+  // down the capture that already succeeded.
+  const ingestedCommitShas = Array.isArray(prior?.ingestedCommitShas) ? [...prior!.ingestedCommitShas] : [];
+  if (updateOk && deps.ingestCommits && deps.readCommitForIngest) {
+    for (const sha of pendingCommitIngests(sessionCommitShas, ingestedCommitShas)) {
+      const commit = deps.readCommitForIngest(repo.workRoot, sha);
+      if (!commit) continue;
+      try {
+        await deps.ingestCommits({
+          repoPath: repo.repoPath,
+          ...(repo.repoUrl ? { repoUrl: repo.repoUrl } : {}),
+          commits: [commit],
+        });
+        ingestedCommitShas.push(sha);
+      } catch (err) {
+        debugLog('transcript-watch', 'commit ingest failed — will retry', {
+          agent: adapter.slug, sessionId: scanned.sessionId, sha: sha.slice(0, 8), err: String(err),
+        });
+      }
+    }
+  }
+
   const snapshottedPrompts = Array.isArray(prior?.snapshottedPrompts) ? [...prior!.snapshottedPrompts] : [];
   if (updateOk && latestIndex >= 0 && !snapshottedPrompts.includes(latestIndex)) {
     const latest = promptChanges.find((c) => c.promptIndex === latestIndex);
-    const claimedEarlier = new Set<string>();
-    for (const pd of parsed.promptDiffs) {
-      if (pd.promptIndex >= latestIndex) continue;
-      for (const f of toRepoRel(pd.filesChanged)) claimedEarlier.add(f);
-    }
-    const ownFiles = (latest?.filesChanged || []).filter((f: string) => !claimedEarlier.has(f));
+    // Shares `claimedByEarlier` with the payload above — two copies of this rule
+    // is how the payload kept inflating while the snapshot gate stayed correct.
+    const ownFiles = (latest?.filesChanged || []).filter((f: string) => !claimedByEarlier.has(f));
     const touchedCode = (latest?.linesAdded || 0) + (latest?.linesRemoved || 0) > 0 || ownFiles.length > 0;
     if (!touchedCode) {
       debugLog('transcript-watch', 'snapshot skipped: prompt touched no code', {
@@ -1591,13 +2544,25 @@ export async function reconcileSession(
   const next: SessionWatchState = {
     agentSlug: adapter.slug,
     sessionId: scanned.sessionId,
-    originSessionId,
+    // Dropped when the server disowned it, so the next poll starts a session
+    // instead of PATCHing a dead id forever.
+    originSessionId: sessionGone ? null : originSessionId,
     repoPath: repo.repoPath,
     workRoot: repo.workRoot,
     promptCount: newCount,
     promptShadows,
     createdAt: startedAtIso,
     lastTranscriptMtime: scanned.mtimeMs,
+    promptTurns,
+    // Re-stat rather than reuse the value read above: the agent may have
+    // appended during this pass, and recording the pre-pass size would let the
+    // next poll call that append "unchanged".
+    lastTranscriptSize: transcriptSize(scanned.transcriptPath) ?? undefined,
+    // Re-read AFTER the capture, not reused from the guard: the agent may have
+    // written more while we worked, and storing the pre-capture value would
+    // make the next poll believe it had already measured those writes.
+    lastTreeFingerprint: deps.treeFingerprint?.(repo.workRoot) ?? null,
+    lastHeadSha: headNow || prior?.lastHeadSha || undefined,
     status: 'RUNNING',
     headShaAtStart,
     // We now send ALL prompts' per-turn diffs every poll, so the backfill is
@@ -1607,6 +2572,7 @@ export async function reconcileSession(
     sessionStartShadowSha,
     sessionCommitShas,
     recordedCommitShas,
+    ingestedCommitShas,
     snapshottedPrompts,
   };
   deps.saveState(next);
@@ -1882,7 +2848,7 @@ export function registerTranscriptWatchAtLogon(): LogonAutoStartResult {
 // show them). Repo-relative paths in, bounded diff out. This is how we capture
 // uncommitted work for agents whose transcript has no edit content, and new
 // files the poll-based shadow baseline captured too late to see.
-function realCaptureFilesDiff(
+export function realCaptureFilesDiff(
   workRoot: string,
   relFiles: string[],
 ): { diff: string; filesChanged: string[]; linesAdded: number; linesRemoved: number } {
@@ -1896,13 +2862,35 @@ function realCaptureFilesDiff(
       else if (line.startsWith('-') && !line.startsWith('---')) linesRemoved++;
     }
   };
-  for (const rel of relFiles) {
-    if (!rel || rel.startsWith('..')) continue;
-    let tracked = true;
-    try { git(['ls-files', '--error-unmatch', '--', rel], { cwd: workRoot }); } catch { tracked = false; }
-    if (tracked) {
-      let d = '';
-      try { d = git(['diff', '--unified=2000', 'HEAD', '--', rel], { cwd: workRoot }); } catch { d = ''; }
+  // Both git questions asked ONCE for the whole file list instead of twice per
+  // file. A spawn costs ~80ms on Windows, so a 10-file turn was ~20 spawns and
+  // ~3.0s; batched it is 2 spawns and ~0.2s. `ls-files` prints the paths it
+  // knows, and `diff` labels each file with its own `diff --git` header, so
+  // neither answer loses per-file resolution.
+  const wanted = relFiles.filter((rel) => rel && !rel.startsWith('..'));
+  const trackedSet = new Set<string>();
+  if (wanted.length) {
+    try {
+      for (const line of git(['ls-files', '--', ...wanted], { cwd: workRoot }).split('\n')) {
+        const p = line.trim();
+        if (p) trackedSet.add(p);
+      }
+    } catch { /* leave empty — every file then takes the untracked path below */ }
+  }
+  const trackedDiffs = new Map<string, string>();
+  if (trackedSet.size) {
+    try {
+      const all = git(['diff', '--unified=2000', 'HEAD', '--', ...trackedSet], { cwd: workRoot });
+      for (const section of all.split(/^(?=diff --git )/m)) {
+        const m = section.match(/^diff --git a\/(\S+) b\/(\S+)/);
+        if (m && section.trim()) trackedDiffs.set(m[2], section);
+      }
+    } catch { /* no diff readable — tracked files simply report no change */ }
+  }
+
+  for (const rel of wanted) {
+    if (trackedSet.has(rel)) {
+      const d = trackedDiffs.get(rel) || '';
       if (d.trim()) { parts.push(d); changed.push(rel); countHunk(d); }
     } else {
       let content = '';
@@ -1910,7 +2898,22 @@ function realCaptureFilesDiff(
       const lines = content.split('\n');
       if (lines.length && lines[lines.length - 1] === '') lines.pop(); // drop trailing-newline artifact
       const body = lines.map((l) => '+' + l).join('\n');
-      parts.push(`diff --git a/${rel} b/${rel}\nnew file\n--- /dev/null\n+++ b/${rel}\n${body}`);
+      // WITH a real `@@` hunk header. The canonical counter (countDiffAddRemove)
+      // is hunk-aware — it ignores everything before the first `@@`, because in
+      // the file-header section a `+`/`-` is not a diff op. A block without one
+      // therefore scores +0/-0 on every server surface that measures this diff,
+      // while the tracked-file blocks beside it (real `git diff` output, hunks
+      // included) count normally.
+      //
+      // agy session 65953fe2: the capture held 8 untracked new files (+1922)
+      // and 2 modified tracked ones (+59/-77). The session header read exactly
+      // +59/-77 — the tracked half — because the untracked half was invisible
+      // to the counter. Emitting a well-formed block costs one line and makes
+      // this diff parseable by every consumer, not just the ones that scan for
+      // a leading `+`.
+      parts.push(
+        `diff --git a/${rel} b/${rel}\nnew file mode 100644\n--- /dev/null\n+++ b/${rel}\n@@ -0,0 +1,${lines.length} @@\n${body}`,
+      );
       changed.push(rel);
       linesAdded += lines.length;
     }
@@ -1950,11 +2953,16 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     // Write the `.git/origin-session-<tag>.json` state file the local git hooks
     // read for commit/PR/AI-blame attribution.
     captureFilesDiff: realCaptureFilesDiff,
+    treeFingerprint: realTreeFingerprint,
+    ingestCommits: (data) => api.ingestCommits(data as any),
+    readCommitForIngest: (workRoot, sha) => realReadCommitForIngest(workRoot, sha),
+    syncNotes: (workRoot: string) => { syncNotesForSessionStart(workRoot); },
     captureCommitScoped: commitDiffScopedToPrompt,
     pingSession: (id) => api.pingSession(id),
     reportCommandResult: (id, type, status, message) => api.reportCommandResult(id, type, status, message),
     capturePromptEdits: (opts) => capturePromptEdits(opts as any) as any,
     saveGitState: (state, workRoot, tag) => writeGitSessionFile(state as any, workRoot, tag),
+    loadGitState: (workRoot, tag) => readGitSessionFile(workRoot, tag) as any,
     endGitState: (workRoot, tag) => { try { endGitSessionFile(workRoot, tag); } catch { /* best-effort */ } },
     registerSnapshot: async (workRoot, originSessionId, opts) => {
       const snapshotId = createSnapshot(workRoot, {

@@ -18,6 +18,7 @@ function gitRemoteFor(repoPath: string): string {
   let url = '';
   try {
     url = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      windowsHide: true,
       cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
   } catch { /* no remote / not a git dir — server falls back to path match */ }

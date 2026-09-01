@@ -186,6 +186,99 @@ describe('reconcileSession', () => {
     expect(st?.originSessionId).toBe('sess-1');
   });
 
+  it('skips the git pass when nothing changed since the last poll', async () => {
+    // #1281's optimization, which had no test of its own. An idle session used to
+    // redo the whole reconcile every 8s and — on Windows, where the daemon has no
+    // console — flash a black window for every git child it spawned. Same
+    // transcript, same prompt count, same HEAD: there is nothing to recompute.
+    const api = mockApi();
+    const deps = baseDeps(api);
+    // A REAL file: the guard also compares the transcript's SIZE, and a size it
+    // cannot read is unknown rather than unchanged, so it declines to skip.
+    // Every live session has a transcript on disk — this is the production shape.
+    const file = path.join(tmp, 'idle.jsonl');
+    fs.writeFileSync(file, '{"role":"user","content":"first prompt"}\n');
+    const fixed = scanned({ transcriptPath: file, mtimeMs: fs.statSync(file).mtimeMs });
+    await reconcileSession(fixed, fakeAdapter(), deps);
+    const updatesAfterFirst = api.calls.update.length;
+    await reconcileSession(fixed, fakeAdapter(), deps);   // identical poll
+    expect(api.calls.update.length).toBe(updatesAfterFirst);
+  });
+
+  it('does NOT skip when the WORKING TREE moved but the transcript did not', async () => {
+    // Session 65014e0b. An agent writes its files and then summarises, so the
+    // last transcript write can precede the last file write; and a turn whose
+    // work is never committed never moves HEAD either. Every signal the guard
+    // watched sat still while three files worth +1352/-41 landed on disk, so
+    // the session stayed frozen on a one-file, +37/-37 capture for over an hour.
+    const api = mockApi();
+    let fingerprint = '?? styles.css\n';
+    const deps = { ...baseDeps(api), treeFingerprint: () => fingerprint };
+    const file = path.join(tmp, 'tree-moved.jsonl');
+    fs.writeFileSync(file, '{"role":"user","content":"first prompt"}\n');
+    const fixed = scanned({ transcriptPath: file, mtimeMs: fs.statSync(file).mtimeMs });
+
+    await reconcileSession(fixed, fakeAdapter(), deps);
+    const afterFirst = api.calls.update.length;
+    // Identical transcript, identical HEAD — only the tree moved.
+    fingerprint = '?? styles.css\n?? app.js\n M index.html\n';
+    await reconcileSession(fixed, fakeAdapter(), deps);
+    expect(api.calls.update.length).toBeGreaterThan(afterFirst);
+  });
+
+  it('still skips when the tree is quiet too', async () => {
+    // The optimisation has to survive: an idle session must not spawn git every
+    // poll just because the guard grew a fourth signal.
+    const api = mockApi();
+    const deps = { ...baseDeps(api), treeFingerprint: () => 'stable\n' };
+    const file = path.join(tmp, 'tree-quiet.jsonl');
+    fs.writeFileSync(file, '{"role":"user","content":"first prompt"}\n');
+    const fixed = scanned({ transcriptPath: file, mtimeMs: fs.statSync(file).mtimeMs });
+
+    await reconcileSession(fixed, fakeAdapter(), deps);
+    const afterFirst = api.calls.update.length;
+    await reconcileSession(fixed, fakeAdapter(), deps);
+    expect(api.calls.update.length).toBe(afterFirst);
+  });
+
+  it('treats an unreadable tree as CHANGED rather than unchanged', async () => {
+    // Same rule the transcript-size check follows: skipping is the optimisation,
+    // doing the work is the correct answer, so anything unconfirmed falls
+    // through. A git failure must cost a redundant capture, never a lost one.
+    const api = mockApi();
+    const deps = { ...baseDeps(api), treeFingerprint: () => null };
+    const file = path.join(tmp, 'tree-unknown.jsonl');
+    fs.writeFileSync(file, '{"role":"user","content":"first prompt"}\n');
+    const fixed = scanned({ transcriptPath: file, mtimeMs: fs.statSync(file).mtimeMs });
+
+    await reconcileSession(fixed, fakeAdapter(), deps);
+    const afterFirst = api.calls.update.length;
+    await reconcileSession(fixed, fakeAdapter(), deps);
+    expect(api.calls.update.length).toBeGreaterThan(afterFirst);
+  });
+
+  it('does NOT skip a new prompt that landed within the same mtime tick', async () => {
+    // The regression #1281 shipped. The skip keyed on mtime alone, and mtime has
+    // finite resolution — a whole second on some filesystems — so a turn appended
+    // within the same tick as the previous poll's reading was invisible to it and
+    // got skipped. If that turn is the session's last, nothing ever bumps mtime
+    // again and it is dropped for good: a 3-prompt session reported turns 0 and 1
+    // and silently lost the newest.
+    //
+    // Same `scanned` object BOTH times, so the mtime is provably identical rather
+    // than incidentally so — the count is what has to catch it.
+    const api = mockApi();
+    const deps = baseDeps(api);
+    const fixed = scanned();
+    await reconcileSession(fixed, fakeAdapter(), deps);
+    await reconcileSession(fixed, fakeAdapter({
+      userPrompts: ['first prompt', 'second prompt', 'third'],
+      promptTimestamps: [1000, 2000, 3000],
+    }), deps);
+    const last = api.calls.update[api.calls.update.length - 1].data;
+    expect(last.promptChanges.map((c: any) => c.promptIndex)).toEqual([0, 1, 2]);
+  });
+
   it('sends per-turn rows for ALL prompts every poll (not just the latest)', async () => {
     const api = mockApi();
     const deps = baseDeps(api);
@@ -364,6 +457,149 @@ describe('reconcileSession', () => {
     expect(latest.filesChanged).toEqual(['cocain']);
   });
 
+  it('a turn window polluted by a foreign merge reports only its OWN files', async () => {
+    // Prod fdf299d3 turn 10. A sibling session merged during the turn, and the
+    // baseline..worktree window — which exists to catch work no transcript
+    // records — swept the whole merge in. The row showed 17 files, exactly that
+    // commit's, and none of the files the turn had actually edited.
+    //
+    // Here the window sees both `mine.ts` (ours) and `theirs.ts` (from a commit
+    // we do not own). Only ours may survive, and the counts must be re-measured
+    // for the survivors: a filtered file list with the window's original counts
+    // is the mosaic shape, not a fix.
+    const api = mockApi();
+    const deps = baseDeps(api, {
+      captureGit: () => ({
+        headBefore: 'b'.repeat(40), headAfter: 'c'.repeat(40),
+        commitShas: ['s1bl1ng'],
+        commitDetails: [
+          { sha: 's1bl1ng', message: 'their merge', author: 'other', filesChanged: ['theirs.ts'], linesAdded: 177, linesRemoved: 37 },
+        ],
+        diff: '', diffTruncated: false, linesAdded: 177, linesRemoved: 37,
+      }),
+      captureDiff: () => ({
+        diff: 'diff --git a/theirs.ts\n+++', filesChanged: ['theirs.ts', 'mine.ts'],
+        linesAdded: 178, linesRemoved: 37,
+      }),
+      captureFilesDiff: (_root, files) => ({
+        diff: files.includes('mine.ts') ? 'diff --git a/mine.ts\n+x' : '',
+        filesChanged: files, linesAdded: 1, linesRemoved: 0,
+      }),
+    });
+    // No transcript file list — a shell-write turn. That is what makes the
+    // unscoped window run at all; with candidate files the branch above it
+    // answers first and the window is never consulted.
+    await reconcileSession(scanned(), fakeAdapter({
+      userPrompts: ['do my edit'],
+      promptTimestamps: [1],
+      filesChanged: [],
+      promptDiffs: [{ promptIndex: 0, filesChanged: [], diff: '', linesAdded: 0, linesRemoved: 0 }],
+    }), deps);
+
+    const pc = (api.calls.update[api.calls.update.length - 1]?.data?.promptChanges || [])[0];
+    expect(pc.filesChanged).not.toContain('theirs.ts');
+    expect(pc.linesAdded).toBe(1);
+    expect(pc.linesRemoved).toBe(0);
+  });
+
+  it('keeps a file the agent edited even when a foreign commit also touched it', async () => {
+    // Overlap is the dangerous direction: our change really is in the tree, and
+    // dropping the file to fix an over-report would lose real work.
+    const api = mockApi();
+    const deps = baseDeps(api, {
+      captureGit: () => ({
+        headBefore: 'b'.repeat(40), headAfter: 'c'.repeat(40),
+        commitShas: ['s1bl1ng'],
+        commitDetails: [
+          { sha: 's1bl1ng', message: 'theirs', author: 'other', filesChanged: ['shared.ts'], linesAdded: 9, linesRemoved: 0 },
+        ],
+        diff: '', diffTruncated: false, linesAdded: 9, linesRemoved: 0,
+      }),
+      captureDiff: () => ({
+        diff: 'diff --git a/shared.ts\n+x', filesChanged: ['shared.ts'],
+        linesAdded: 10, linesRemoved: 0,
+      }),
+      // Declines, so the unscoped window below is the one that answers.
+      captureFilesDiff: () => ({ diff: '', filesChanged: [], linesAdded: 0, linesRemoved: 0 }),
+    });
+    await reconcileSession(scanned(), fakeAdapter({
+      userPrompts: ['edit the shared file'],
+      promptTimestamps: [1],
+      filesChanged: ['/repo/a/shared.ts'],
+      promptDiffs: [{ promptIndex: 0, filesChanged: [], diff: '', linesAdded: 0, linesRemoved: 0 }],
+    }), deps);
+
+    const pc = (api.calls.update[api.calls.update.length - 1]?.data?.promptChanges || [])[0];
+    expect(pc.filesChanged).toContain('shared.ts');
+  });
+  it('does not record a CONCURRENT session\'s commit as this session\'s own', async () => {
+    // The headShaAtStart..HEAD walk sees every commit made in the repo during
+    // the session, including other agents'. It used to be merged straight into
+    // `sessionCommitShas` — one line below a comment saying it must never be
+    // treated as this session's commits — and then persisted, handed to the
+    // extractor, and read by the per-commit memory writer.
+    //
+    // Prod fdf299d3 turn 10 is the result: its 17 files are exactly commit
+    // 9f811c65f, made by a concurrent session, while its own three edited files
+    // appear nowhere on the row.
+    //
+    // `foreign.ts` is touched by no prompt here, so nothing in this session can
+    // legitimately claim that commit.
+    const api = mockApi();
+    const deps = baseDeps(api, {
+      captureGit: () => ({
+        headBefore: 'b'.repeat(40), headAfter: 'c'.repeat(40),
+        commitShas: ['f0re1gn'],
+        commitDetails: [
+          { sha: 'f0re1gn', message: 'someone else\'s work', author: 'other', filesChanged: ['foreign.ts'], linesAdded: 177, linesRemoved: 37 },
+        ],
+        diff: '', diffTruncated: false, linesAdded: 177, linesRemoved: 37,
+      }),
+    });
+    await reconcileSession(scanned(), fakeAdapter({
+      userPrompts: ['edit mine'],
+      promptTimestamps: [1],
+      filesChanged: ['/repo/a/mine.ts'],
+      promptDiffs: [{ promptIndex: 0, filesChanged: ['/repo/a/mine.ts'], diff: '+x', linesAdded: 1, linesRemoved: 0 }],
+    }), deps);
+
+    const st = loadSessionState('fake', 'conv-123', stateDir);
+    expect(st?.sessionCommitShas || []).not.toContain('f0re1gn');
+    // And it must not be pinned to the turn either — the pairing passes test
+    // file overlap, and this commit touches nothing this session edited.
+    const sent = api.calls.update[api.calls.update.length - 1]?.data;
+    const shas = (sent?.promptChanges || []).map((pc: any) => pc.commitSha).filter(Boolean);
+    expect(shas).not.toContain('f0re1gn');
+  });
+
+  it('still pairs a commit that DOES touch this session\'s files', async () => {
+    // The other direction: the pairing passes legitimately consider commits
+    // seen in the window, so a real commit must still land. Losing this is how
+    // a fix for the above would silently break commit attribution.
+    const api = mockApi();
+    const deps = baseDeps(api, {
+      captureGit: () => ({
+        headBefore: 'b'.repeat(40), headAfter: 'c'.repeat(40),
+        commitShas: ['m1ne'],
+        commitDetails: [
+          { sha: 'm1ne', message: 'mine', author: 'me', filesChanged: ['mine.ts'], linesAdded: 1, linesRemoved: 0 },
+        ],
+        diff: '', diffTruncated: false, linesAdded: 1, linesRemoved: 0,
+      }),
+    });
+    await reconcileSession(scanned(), fakeAdapter({
+      userPrompts: ['edit and commit'],
+      promptTimestamps: [1],
+      filesChanged: ['/repo/a/mine.ts'],
+      promptsThatCommitted: [0],
+      promptDiffs: [{ promptIndex: 0, filesChanged: ['/repo/a/mine.ts'], diff: '+x', linesAdded: 1, linesRemoved: 0 }],
+    }), deps);
+
+    const sent = api.calls.update[api.calls.update.length - 1]?.data;
+    const shas = (sent?.promptChanges || []).map((pc: any) => pc.commitSha).filter(Boolean);
+    expect(shas).toContain('m1ne');
+  });
+
   it('pairs commits with the turns that actually ran git commit (deterministic, stable)', async () => {
     const api = mockApi();
     // Two commits; turns 2 and 4 (0-based) ran `git commit`. Every turn edited
@@ -478,6 +714,107 @@ describe('reconcileSession', () => {
     await reconcileSession(scanned({ cwd: '/repo/a' }), fakeAdapter(), deps);        // running
     await reconcileSession(scanned({ cwd: '/repo/a', mtimeMs: Date.now() - 25 * 60 * 1000 }), fakeAdapter(), deps); // idle
     expect(endGitState).toHaveBeenCalledWith('/repo/a', 'conv-123');
+  });
+
+  // Regression: the watcher redid the FULL pass for every live session on every
+  // 8s poll — including the ~20 minutes after the agent had gone quiet, where
+  // the transcript is untouched and the answer is byte-identical. On Windows the
+  // daemon has no console, so each git child of that wasted pass opened its own
+  // console window: a finished Antigravity session kept flashing black windows
+  // until it aged out.
+  it('does no work at all when neither the transcript nor HEAD moved', async () => {
+    const api = mockApi();
+    const captureDiff = vi.fn(() => ({ diff: 'diff --git', filesChanged: ['src/x.ts'], linesAdded: 3, linesRemoved: 1 }));
+    const deps = baseDeps(api, { captureDiff });
+    // Real file, same reason as above: an unreadable transcript has an unknown
+    // size, and unknown never satisfies the guard.
+    const file = path.join(tmp, 'unmoved.jsonl');
+    fs.writeFileSync(file, '{"role":"user","content":"first prompt"}\n');
+    const s = scanned({ transcriptPath: file, mtimeMs: fs.statSync(file).mtimeMs });
+    await reconcileSession(s, fakeAdapter(), deps);
+    expect(api.updateSession).toHaveBeenCalledTimes(1);
+    const diffCalls = captureDiff.mock.calls.length;
+    expect(diffCalls).toBeGreaterThan(0); // the first pass really did git work
+
+    // Same transcript, same HEAD — the identical poll, 8 seconds later.
+    const again = await reconcileSession(s, fakeAdapter(), deps);
+    expect(api.updateSession).toHaveBeenCalledTimes(1);   // nothing re-sent
+    expect(captureDiff.mock.calls.length).toBe(diffCalls); // no git children spawned
+    expect(again?.originSessionId).toBe('sess-1');         // state preserved
+  });
+
+  it('still reconciles when a turn WROTE inside one mtime tick, adding no prompt', async () => {
+    // #1289 closed the mtime tie for a new PROMPT, by adding the prompt count to
+    // the guard. A turn's WORK is the other half and does not move that count:
+    // tool calls, file edits and the assistant's reply all append to the same
+    // turn. That is also the likelier shape — a session's final write is almost
+    // always assistant/tool content, not a new user prompt — and if it lands in
+    // the tick the last poll read, the guard skips it and nothing ever bumps
+    // mtime again.
+    //
+    // Same mtime, same prompt count, same HEAD, more bytes. Only the size term
+    // can tell these two polls apart.
+    const api = mockApi();
+    const deps = baseDeps(api);
+    const file = path.join(tmp, 'grew-same-turn.jsonl');
+    fs.writeFileSync(file, '{"role":"user","content":"first prompt"}\n');
+    const frozen = scanned({ transcriptPath: file, mtimeMs: fs.statSync(file).mtimeMs });
+
+    await reconcileSession(frozen, fakeAdapter(), deps);
+    expect(api.updateSession).toHaveBeenCalledTimes(1);
+
+    // The turn does its work: appended content, no new prompt, mtime pinned.
+    fs.appendFileSync(file, '{"role":"assistant","tool":"Edit","file":"src/x.ts"}\n');
+    await reconcileSession(frozen, fakeAdapter(), deps);
+    expect(api.updateSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('still reconciles when the transcript grew', async () => {
+    const api = mockApi();
+    const deps = baseDeps(api);
+    const s = scanned();
+    await reconcileSession(s, fakeAdapter(), deps);
+    await reconcileSession({ ...s, mtimeMs: s.mtimeMs + 1 }, fakeAdapter(), deps);
+    expect(api.updateSession).toHaveBeenCalledTimes(2);
+  });
+
+  // A commit made outside the agent's own transcript (the user committing in a
+  // terminal) is the one thing that changes what we'd send without touching the
+  // file — so HEAD moving has to break the skip.
+  it('still reconciles when HEAD moved under an untouched transcript', async () => {
+    const api = mockApi();
+    let head = 'b'.repeat(40);
+    const deps = baseDeps(api, { getHead: () => head });
+    const s = scanned();
+    await reconcileSession(s, fakeAdapter(), deps);
+    head = 'd'.repeat(40);
+    await reconcileSession(s, fakeAdapter(), deps);
+    expect(api.updateSession).toHaveBeenCalledTimes(2);
+  });
+
+  // Regression: a session the server had disowned kept being PATCHed under the
+  // same dead id every poll — "Session not found" every 8 seconds for hours,
+  // each one preceded by a full git pass that could never be delivered.
+  it('drops a session id the server no longer knows and re-creates it', async () => {
+    const api = mockApi();
+    api.updateSession.mockRejectedValueOnce(new Error('Session not found'));
+    const deps = baseDeps(api);
+    const s = scanned();
+    const first = await reconcileSession(s, fakeAdapter(), deps);
+    expect(first?.originSessionId).toBeNull();
+
+    // Next poll starts a session again rather than retrying the dead id.
+    await reconcileSession({ ...s, mtimeMs: s.mtimeMs + 1 }, fakeAdapter(), deps);
+    expect(api.startSession).toHaveBeenCalledTimes(2);
+    expect(loadSessionState('fake', 'conv-123', stateDir)?.originSessionId).toBe('sess-2');
+  });
+
+  it('keeps the session id when the update fails for any other reason', async () => {
+    const api = mockApi();
+    api.updateSession.mockRejectedValueOnce(new Error('socket hang up'));
+    const deps = baseDeps(api);
+    const st = await reconcileSession(scanned(), fakeAdapter(), deps);
+    expect(st?.originSessionId).toBe('sess-1');
   });
 
   it('skips when the cwd is not resolvable to a repo', async () => {

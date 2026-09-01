@@ -34,15 +34,19 @@ describe('installAntigravityHooks', () => {
     // invocation on Windows (npm's origin.cmd shim spawns a visible console
     // window under GUI agents) and `origin hooks …` on POSIX. Pinning the POSIX
     // spelling made these Windows-failing tests that only ever ran on Linux.
-    const events = ['PostToolUse', 'Stop', 'PreToolUse'];
-    for (const ev of events) {
+    // Tool-scoped events are GROUPED: { matcher, hooks: [...] }.
+    for (const ev of ['PostToolUse', 'PreToolUse']) {
       expect(Array.isArray(cfg.origin[ev])).toBe(true);
-      const cmd = cfg.origin[ev][0].hooks[0].command as string;
       expect(cfg.origin[ev][0].hooks[0].type).toBe('command');
-      expect(cmd).toContain('hooks antigravity');
+      expect(cfg.origin[ev][0].hooks[0].command as string).toContain('hooks antigravity');
     }
+    // Stop is FLAT: handler objects sit directly in the array.
+    expect(Array.isArray(cfg.origin.Stop)).toBe(true);
+    expect(cfg.origin.Stop[0].type).toBe('command');
+    expect(cfg.origin.Stop[0].command as string).toContain('hooks antigravity');
+
     expect(cfg.origin.PostToolUse[0].hooks[0].command).toContain('antigravity post-tool-use');
-    expect(cfg.origin.Stop[0].hooks[0].command).toContain('antigravity stop');
+    expect(cfg.origin.Stop[0].command).toContain('antigravity stop');
     expect(cfg.origin.PreToolUse[0].hooks[0].command).toContain('antigravity pre-tool-use');
     // The events agy doesn't support must NOT be written.
     expect(cfg.origin.SessionStart).toBeUndefined();
@@ -56,6 +60,43 @@ describe('installAntigravityHooks', () => {
     // The origin group is replaced wholesale, so still exactly one hook each.
     expect(cfg.origin.PostToolUse).toHaveLength(1);
     expect(cfg.origin.PostToolUse[0].hooks).toHaveLength(1);
+  });
+
+  // Regression: agy validates hooks.json as a whole. A PreToolUse/PostToolUse
+  // group with no `matcher`, or a Stop entry wrapped in { hooks: [...] } (which
+  // leaves the handler with no `command` — a required field), makes agy discard
+  // the ENTIRE file and run no hooks at all. The failure is silent: no error
+  // surfaces anywhere, Origin's hook binary is simply never executed, and every
+  // Antigravity session goes uncaptured.
+  it('gives the tool-scoped events a matcher so agy accepts the file', () => {
+    installAntigravityHooks(dir);
+    const cfg = readHooks();
+    for (const ev of ['PreToolUse', 'PostToolUse']) {
+      expect(cfg.origin[ev][0].matcher).toBe('*');
+      expect(Array.isArray(cfg.origin[ev][0].hooks)).toBe(true);
+    }
+  });
+
+  it('writes Stop FLAT — no matcher/hooks wrapper', () => {
+    installAntigravityHooks(dir);
+    const cfg = readHooks();
+    const stop = cfg.origin.Stop[0];
+    // The wrapped shape is the bug: `command` would be undefined here.
+    expect(typeof stop.command).toBe('string');
+    expect(stop.hooks).toBeUndefined();
+    expect(stop.matcher).toBeUndefined();
+  });
+
+  it('every handler agy will run carries a command string', () => {
+    installAntigravityHooks(dir);
+    const cfg = readHooks();
+    const handlers = [
+      ...cfg.origin.PreToolUse.flatMap((g: any) => g.hooks),
+      ...cfg.origin.PostToolUse.flatMap((g: any) => g.hooks),
+      ...cfg.origin.Stop,
+    ];
+    expect(handlers).toHaveLength(3);
+    for (const h of handlers) expect(typeof h.command).toBe('string');
   });
 
   it('preserves a pre-existing unrelated hook group', () => {

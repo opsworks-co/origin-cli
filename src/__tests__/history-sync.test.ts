@@ -19,7 +19,26 @@ import {
   releaseBackfillLock,
   writeAttemptStamp,
   hasFreshFailedAttempt,
+  markerNeedsRevalidation,
+  MARKER_REVALIDATE_MS,
 } from '../history-backfill.js';
+import crypto from 'crypto';
+
+/**
+ * Backdate a marker's syncedAt — writeSyncMarker always stamps "now".
+ *
+ * Resolves the home via `os.homedir()`, exactly as history-backfill.ts does.
+ * Reading `process.env.HOME` instead passes on POSIX and fails on Windows,
+ * where os.homedir() reads USERPROFILE — the module wrote the marker under
+ * the real profile while this helper looked under the suite's fake HOME.
+ */
+function ageMarker(repoPath: string, ms: number): void {
+  const key = crypto.createHash('sha256').update(repoPath).digest('hex').slice(0, 16);
+  const p = path.join(os.homedir(), '.origin', 'history-sync', `${key}.json`);
+  const marker = JSON.parse(fs.readFileSync(p, 'utf-8'));
+  marker.syncedAt = new Date(Date.now() - ms).toISOString();
+  fs.writeFileSync(p, JSON.stringify(marker));
+}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8' }).trim();
@@ -223,6 +242,27 @@ describe('syncRepoHistory', () => {
       expect(shouldSyncStandalone(dir, dir).sync).toBe(true);
     });
 
+    // A marker is local memory of one server answer. Nothing re-checks that
+    // the server still HAS the history it acknowledged, so a repo row that is
+    // dropped and re-created server-side leaves the client permanently quiet.
+    // Prod `baton`: marker written 2026-07-07 at 12 commits, repo row
+    // re-created 2026-08-21 holding 1, HEAD exactly +1 since the marker —
+    // the steady state this gate skips. The 12 commits behind it (8 AI, with
+    // Origin-Session trailers) stayed invisible, and every line they wrote
+    // read "human" in AI Blame.
+    it('re-syncs a marker older than the revalidation window, unchanged git state and all', () => {
+      writeSyncMarker(dir, shas[2], 3);
+      expect(shouldSyncStandalone(dir, dir).sync).toBe(false);
+      ageMarker(dir, MARKER_REVALIDATE_MS + 60_000);
+      expect(shouldSyncStandalone(dir, dir).sync).toBe(true);
+    });
+
+    it('stays quiet for a marker still inside the window', () => {
+      writeSyncMarker(dir, shas[2], 3);
+      ageMarker(dir, MARKER_REVALIDATE_MS - 60_000);
+      expect(shouldSyncStandalone(dir, dir).sync).toBe(false);
+    });
+
     it('reports no head outside a git repo', () => {
       const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-nogit-'));
       try {
@@ -230,6 +270,26 @@ describe('syncRepoHistory', () => {
       } finally {
         fs.rmSync(empty, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe('markerNeedsRevalidation', () => {
+    const at = (ms: number) => ({ head: 'h', count: 1, syncedAt: new Date(ms).toISOString() });
+
+    it('revalidates when there is no marker at all', () => {
+      expect(markerNeedsRevalidation(null)).toBe(true);
+    });
+
+    it('trusts a fresh marker and expires an old one', () => {
+      const now = Date.UTC(2026, 7, 22);
+      expect(markerNeedsRevalidation(at(now - MARKER_REVALIDATE_MS + 1000), now)).toBe(false);
+      expect(markerNeedsRevalidation(at(now - MARKER_REVALIDATE_MS), now)).toBe(true);
+    });
+
+    it('revalidates a marker with a missing or unparseable timestamp', () => {
+      // Markers written before this field existed, and corrupt ones.
+      expect(markerNeedsRevalidation({ head: 'h', count: 1, syncedAt: '' })).toBe(true);
+      expect(markerNeedsRevalidation({ head: 'h', count: 1, syncedAt: 'not-a-date' })).toBe(true);
     });
   });
 

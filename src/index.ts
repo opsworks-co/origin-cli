@@ -62,6 +62,7 @@ import { dbImportCommand, dbStatsCommand } from './commands/db.js';
 import { proxyInstallCommand, proxyUninstallCommand, proxyStatusCommand } from './commands/proxy.js';
 import { verifyCommand } from './commands/verify.js';
 import { verifyInstallCommand } from './commands/verify-install.js';
+import { repairHooksCommand } from './commands/repair-hooks.js';
 import { ignoreListCommand, ignoreAddCommand, ignoreRemoveCommand, ignoreTestCommand, ignoreRepoListCommand, ignoreRepoAddCommand, ignoreRepoRemoveCommand } from './commands/ignore.js';
 import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
@@ -70,6 +71,8 @@ import { reportCommand } from './commands/report.js';
 import { logCommand } from './commands/log.js';
 import { showCommand } from './commands/show.js';
 import { attachCommand } from './commands/attach.js';
+import { recaptureCommand } from './commands/recapture.js';
+import { repairMergesCommand } from './commands/repair-merges.js';
 import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
 import { promptStatusCommand } from './commands/prompt-status.js';
@@ -504,6 +507,24 @@ ignoreRepoCmd.command('list').description('List ignored repos').action(ignoreRep
 
 // ─── Backfill ─────────────────────────────────────────────────────────────
 
+program.command('recapture [sessionId]')
+  .description('Re-send a session\'s turns from its transcript to remove edits that were rejected but captured as work')
+  .option('--apply', 'Actually send the corrected turns (default: dry run)')
+  .option('--transcript <path>', 'Transcript to read, when the local state file is gone')
+  .option('--turn <n>', 'Repair only this prompt index')
+  .action(recaptureCommand);
+
+program.command('repair-merges [sessionId]')
+  .description('Heal turns a merge commit corrupted — the merging turn gets what it resolved, and a turn wearing the merge\'s fallout is cleared')
+  .option('--apply', 'Actually send the corrected turns (default: dry run)')
+  .option('--repo <path>', 'Repo to read the merges from, when the local state file is gone')
+  .option('--header-only', 'Correct only the session aggregate, leaving every turn row untouched')
+  // NOT `--no-turn-rules`: commander reads a `--no-x` flag as negating `x`, so
+  // it would set `turnRules: false` and leave the option this code reads
+  // undefined — an inert flag that silently runs the rules it promises to skip.
+  .option('--skip-turn-rules', 'Clean stored captures and the aggregate, but never rewrite a row from inference')
+  .action(repairMergesCommand);
+
 program.command('backfill')
   .description('Retroactively tag old commits with AI attribution by matching against agent history and heuristics')
   .option('-d, --days <n>', 'How far back to scan', '90')
@@ -690,6 +711,11 @@ devin.command('sessions').description('List Devin Desktop sessions Origin can re
 devin.command('sync').description('Push Devin Desktop sessions (metadata) to the Origin dashboard').action(devinSyncCommand);
 
 const hooks = program.command('hooks').description('Internal hook handlers (used by AI agents)');
+hooks.command('repair')
+  .description('Rewrite agent hook configs that no longer match this CLI (run automatically by `origin upgrade`)')
+  .option('--check', 'Report drift without rewriting anything')
+  .option('--quiet', 'Print nothing')
+  .action(repairHooksCommand);
 hooks.command('claude-code <event>').description('Handle Claude Code hook event').action((event) => hooksCommand(event, 'claude-code'));
 hooks.command('cursor <event>').description('Handle Cursor hook event').action((event) => hooksCommand(event, 'cursor'));
 hooks.command('gemini <event>').description('Handle Gemini CLI hook event').action((event) => hooksCommand(event, 'gemini'));
@@ -705,7 +731,23 @@ hooks.command('git-prepare-commit-msg <msgFile> [source] [sha]')
 hooks.command('git-post-commit').description('Handle git post-commit hook').action(() => handlePostCommit());
 // Detached child spawned by the session-start hook — runs the local-history
 // advertise-and-backfill round without holding the session start open.
+program
+  .command('isolate')
+  .description('Create a git worktree for this session so its file attribution is exact')
+  .option('-b, --branch <name>', 'Branch for the new worktree')
+  .option('--at <path>', 'Where to create it')
+  .action(async (opts) => {
+    const { isolateCommand } = await import('./commands/isolate.js');
+    await isolateCommand(opts);
+  });
+
 hooks.command('git-history-sync').description('Internal: backfill local commit history to Origin').action(() => handleHistorySync());
+// The detached write-journal watcher. Records WHEN each file changed, which is
+// the only evidence available to agents that expose no tool hooks at all.
+hooks.command('journal-watch').description('Internal: watch the repo and journal file writes').action(async () => {
+  const { runJournalWatcher } = await import('./commands/hooks.js');
+  await runJournalWatcher();
+});
 hooks.command('memory-brief-backfill').description('Internal: generate the continuation brief for a repo that has none').action(() => handleMemoryBriefBackfill());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
 hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (rebase/amend)').action(async () => {
@@ -1145,7 +1187,16 @@ program.addHelpText('after', () => {
 
 // ─── Version Check (post-action) ────────────────────────────────────────
 
-program.hook('postAction', async () => {
+program.hook('postAction', async (thisCommand, actionCommand) => {
+  // A hook invocation's stdout is a PROTOCOL, not a console. agy parses it as a
+  // single JSON object and a PreToolUse reply decides whether the tool may run,
+  // so appending a human notice makes the parse fail and every tool call in the
+  // session errors out — the agent breaks, it does not merely go uncaptured.
+  // Claude Code tolerates the extra bytes, which is why this hid for so long:
+  // it only bites on a strict reader, and only while an update happens to be
+  // available. Stay silent for `origin hooks …` on stdout AND stderr — agy
+  // surfaces hook stderr to the user as an error.
+  if (isMachineReadableInvocation(actionCommand)) return;
   try {
     const result = await checkForUpdate();
     if (result?.updateAvailable) {
@@ -1155,6 +1206,21 @@ program.hook('postAction', async () => {
     }
   } catch { /* never fail */ }
 });
+
+// True when this invocation's stdout is consumed by a machine rather than read
+// by a person, so nothing may be appended to it.
+export function isMachineReadableInvocation(actionCommand?: { name(): string; parent?: unknown } | null): boolean {
+  // Walk to the root command name (`origin hooks antigravity pre-tool-use`
+  // dispatches the leaf `pre-tool-use`, whose ancestor is `hooks`).
+  let cmd: any = actionCommand;
+  while (cmd) {
+    if (typeof cmd.name === 'function' && cmd.name() === 'hooks') return true;
+    cmd = cmd.parent;
+  }
+  // Fall back to argv: a subcommand registered outside the walked chain, or a
+  // dispatch path that never populated `parent`, still must not print.
+  return process.argv.slice(2).includes('hooks');
+}
 
 // ─── Output: write help/errors synchronously ───────────────────────────────
 //

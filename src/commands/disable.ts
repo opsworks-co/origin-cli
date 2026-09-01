@@ -4,6 +4,7 @@ import path from 'path';
 import chalk from 'chalk';
 import { getGitRoot, clearSessionState } from '../session-state.js';
 import { MCP_SUPPORTED_AGENTS, uninstallMcpForAgent } from '../mcp/install.js';
+import { forgetEnabledRepo } from '../enabled-repos.js';
 
 function removeOriginHooksFromFile(
   filePath: string,
@@ -140,6 +141,10 @@ export async function disableCommand(opts?: { global?: boolean }): Promise<void>
     basePath = gitRoot;
     console.log(chalk.bold('\n🔌 Disabling Origin session tracking\n'));
   }
+
+  // Drop it from the repo registry `origin upgrade` walks — its hooks are
+  // about to be gone, so there is nothing left to keep in sync.
+  if (!isGlobal) forgetEnabledRepo(basePath);
 
   let removedCount = 0;
 

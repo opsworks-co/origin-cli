@@ -275,7 +275,11 @@ describe('reconcileThread — anchoring per-prompt patch diffs to real line numb
     const read = vi.fn(() => FIKUS);
     await reconcileThread(scan(file, tid, '/repo/a'), baseDeps(api, { now: () => ALIGNED_NOW, readFileAtRev: read }));
     expect(read).toHaveBeenCalledWith('/repo/a', 'a'.repeat(40), 'fikus');
-    expect(promptDiff(api)).toContain('@@ -11,1 +11,6 @@');
+    // Anchored sections are rendered from the file on both sides of the patch,
+    // so the header matches what `git diff -U3` prints for the same edit — the
+    // old `@@ -11,1 +11,6 @@` carried Codex's single context line and no
+    // trailing context, which `git apply` rejects outright.
+    expect(promptDiff(api)).toContain('@@ -9,3 +9,8 @@');
   });
 
   it('keeps the old sequential numbering when no baseline reader is injected', async () => {

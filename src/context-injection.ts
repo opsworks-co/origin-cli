@@ -34,12 +34,14 @@ export function assembleRepoContext(blocks: {
   memory?: string | null;
   memoryPointer?: string | null;
   handoff?: string | null;
+  startupCheck?: string | null;
 }): string | null {
   const brief = (blocks.brief || '').trim();
   let attribution = (blocks.attribution || '').trim();
   const memory = (blocks.memory || '').trim();
   const memoryPointer = (blocks.memoryPointer || '').trim();
   const handoff = (blocks.handoff || '').trim();
+  const startupCheck = (blocks.startupCheck || '').trim();
 
   // Memory (session-level) supersedes attribution's commit-level activity/file
   // lists. Keep only attribution's AI-authorship headline to avoid two
@@ -54,7 +56,19 @@ export function assembleRepoContext(blocks: {
   // above nothing.
   const pointer = memory ? memoryPointer : '';
 
-  const ordered = [brief, attribution, memory, pointer, handoff].filter(Boolean);
+  // The startup check is an INSTRUCTION about the blocks above it, so it is
+  // meaningless without them and goes last — both because it reads as the
+  // conclusion of the section ("…and here is what to do about it") and because
+  // models weight tail context more heavily, which is the same reason the
+  // authoring framework is appended after this whole section.
+  //
+  // Gated on the pointer rather than on memory: the pointer is what establishes
+  // that a queryable record exists, and telling an agent to "go read the memory"
+  // in a repo where none of the query routes resolve is worse than saying
+  // nothing — it spends a tool call to discover an empty ref.
+  const check = pointer ? startupCheck : '';
+
+  const ordered = [brief, attribution, memory, pointer, handoff, check].filter(Boolean);
   if (ordered.length === 0) return null;
   return ordered.join('\n\n');
 }

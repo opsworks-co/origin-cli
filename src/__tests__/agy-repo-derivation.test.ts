@@ -66,6 +66,35 @@ describe('deriveAgyRepoPath', () => {
     expect(deriveAgyRepoPath([], repo, '/nonexistent')).toBe(repo);
   });
 
+  // Regression for the GLOBAL hooks install: agy runs a hook with cwd set to the
+  // directory holding hooks.json, so cwd is ~/.gemini/config — never a repo. On
+  // agy's first steps the transcript has no absolute file path yet and agy sends
+  // `workspacePaths: []`, so the raw-cwd fallback handed back ~/.gemini/config
+  // as the repo identity. The server rejected it ("not registered in Origin")
+  // and the capture was queued offline against a path no repo can ever match.
+  it('refuses the agent config dir as a repo identity', () => {
+    const geminiConfig = path.join(os.homedir(), '.gemini', 'config');
+    expect(deriveAgyRepoPath([], undefined, geminiConfig)).toBe('');
+    expect(deriveAgyRepoPath([], '', geminiConfig)).toBe('');
+    // ~/.gemini itself, and anything deeper, are equally not the user's repo.
+    expect(deriveAgyRepoPath([], undefined, path.join(os.homedir(), '.gemini'))).toBe('');
+    expect(deriveAgyRepoPath([], undefined, path.join(os.homedir(), '.gemini', 'antigravity', 'brain'))).toBe('');
+  });
+
+  it('still resolves a real repo even when cwd is the agent config dir', () => {
+    // The fallback is only refused when it is ALL that is on offer — a genuine
+    // edited-file root must still win from under the same bad cwd.
+    const geminiConfig = path.join(os.homedir(), '.gemini', 'config');
+    expect(deriveAgyRepoPath([path.join(repo, 'file1.txt')], undefined, geminiConfig)).toBe(repo);
+    expect(deriveAgyRepoPath([], repo, geminiConfig)).toBe(repo);
+  });
+
+  it('does not refuse a repo that merely has .gemini in its name', () => {
+    // The guard is a path-boundary check, not a substring match.
+    const sibling = path.join(os.homedir(), '.gemini-notes');
+    expect(deriveAgyRepoPath([], undefined, sibling)).toBe(sibling);
+  });
+
   it('prefers edited-file root even when the workspace path is a different repo', () => {
     // Two real repos: workspace points at one, edits landed in the other. The
     // edits win — that is the whole point (agy reported the wrong workspace).

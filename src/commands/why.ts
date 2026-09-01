@@ -176,8 +176,20 @@ async function showLineWhy(repoPath: string, filePath: string, lineNum: number):
         // Find which prompt's diff contains this line
         const matchingPrompt = findPromptForLine(session.promptChanges, relPath, lineNum, lineContent);
 
+        // What KIND of change this was, from the server's frozen taxonomy.
+        // Printed only when the server had an opinion — roughly one turn in
+        // ten legitimately has none, and "Changed: unknown" would read as a
+        // failure rather than as silence.
+        const printKinds = (pc: { changeKinds?: string[] } | undefined) => {
+          const kinds = pc?.changeKinds;
+          if (kinds && kinds.length > 0) {
+            console.log(chalk.gray(`  Changed: ${kinds.join(', ')}`));
+          }
+        };
+
         if (matchingPrompt) {
           console.log(chalk.green(`  Prompt: "${matchingPrompt.promptText}"`));
+          printKinds(matchingPrompt);
           if (matchingPrompt.filesChanged?.length) {
             console.log(chalk.gray(`  Files: ${matchingPrompt.filesChanged.join(', ')}`));
           }
@@ -185,6 +197,7 @@ async function showLineWhy(repoPath: string, filePath: string, lineNum: number):
           // Show the session's prompt if only one
           if (session.promptChanges.length === 1) {
             console.log(chalk.green(`  Prompt: "${session.promptChanges[0].promptText}"`));
+            printKinds(session.promptChanges[0]);
           } else {
             console.log(chalk.gray(`  Session had ${session.promptChanges.length} prompts (couldn't determine which wrote this line)`));
           }

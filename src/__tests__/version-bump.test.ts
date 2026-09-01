@@ -9,9 +9,15 @@
  */
 import { describe, it, expect } from 'vitest';
 import { createRequire } from 'module';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+import { execFileSync } from 'child_process';
 
 const require = createRequire(import.meta.url);
-const { computeNextVersion, isGreater, parts } = require('../../scripts/version-bump.cjs');
+const { computeNextVersion, isGreater, parts, syncLockVersion } = require('../../scripts/version-bump.cjs');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const gt = (a: string, b: string) => isGreater(parts(a), parts(b));
 
@@ -76,5 +82,81 @@ describe('computeNextVersion — monotonicity', () => {
   it('advances cleanly across a day boundary', () => {
     expect(computeNextVersion('0.20260813.2360', new Date('2026-08-14T08:30:00Z')))
       .toBe('0.20260814.830');
+  });
+});
+
+// The bump used to write package.json only, so every release left the lockfile
+// on the previous version — the exact drift version-collision-guard.test.ts
+// keeps catching. npm records the package's own version in TWO places.
+describe('syncLockVersion — the lockfile moves with the manifest', () => {
+  it('updates both places npm records the version', () => {
+    const lock = {
+      name: '@origin/cli',
+      version: '0.20260825.2247',
+      lockfileVersion: 3,
+      packages: { '': { name: '@origin/cli', version: '0.20260825.2247' } },
+    };
+    syncLockVersion(lock, '0.20260826.0');
+    expect(lock.version).toBe('0.20260826.0');
+    expect(lock.packages[''].version).toBe('0.20260826.0');
+  });
+
+  it('leaves dependency pins alone', () => {
+    const lock = {
+      version: '1.0.0',
+      packages: {
+        '': { version: '1.0.0' },
+        'node_modules/chalk': { version: '1.0.0' },
+      },
+    };
+    syncLockVersion(lock, '2.0.0');
+    expect(lock.packages['node_modules/chalk'].version).toBe('1.0.0');
+  });
+
+  it('tolerates a lockfile with no packages map rather than throwing', () => {
+    const lock: any = { version: '1.0.0' };
+    expect(() => syncLockVersion(lock, '2.0.0')).not.toThrow();
+    expect(lock.version).toBe('2.0.0');
+  });
+});
+
+// End-to-end: run the real script against a scratch copy and assert the two
+// files agree afterwards — the property version-collision-guard asserts.
+describe('version-bump.cjs writes both files', () => {
+  it('leaves package.json and package-lock.json on the same version', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-bump-'));
+    const scripts = path.join(dir, 'scripts');
+    fs.mkdirSync(scripts);
+    fs.copyFileSync(
+      path.join(__dirname, '../../scripts/version-bump.cjs'),
+      path.join(scripts, 'version-bump.cjs'),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: '@origin/cli', version: '0.20260101.1' }, null, 2) + '\n',
+    );
+    fs.writeFileSync(
+      path.join(dir, 'package-lock.json'),
+      JSON.stringify(
+        {
+          name: '@origin/cli',
+          version: '0.20260101.1',
+          lockfileVersion: 3,
+          packages: { '': { name: '@origin/cli', version: '0.20260101.1' } },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+
+    execFileSync(process.execPath, [path.join(scripts, 'version-bump.cjs')], { cwd: dir });
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));
+    expect(pkg.version).not.toBe('0.20260101.1');
+    expect(lock.version).toBe(pkg.version);
+    expect(lock.packages[''].version).toBe(pkg.version);
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

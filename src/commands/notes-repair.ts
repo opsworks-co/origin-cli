@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { gitIdentityEnv } from '../utils/exec.js';
 import chalk from 'chalk';
 import { repairNoteObject } from '../marker-repair.js';
 
@@ -94,7 +95,9 @@ export async function notesRepairCommand(
           execFileSync(
             'git',
             ['notes', `--ref=${ref}`, 'add', '-f', '-m', JSON.stringify(result.note, null, 2), sha],
-            execOpts(),
+            // `notes add` builds an object and needs a git identity; without
+            // one --apply repairs nothing. Defers to real config.
+            { ...execOpts(), env: { ...process.env, ...gitIdentityEnv(process.cwd()) } },
           );
           changedRefs.add(ref);
         } catch (err) {

@@ -148,6 +148,69 @@ export function findExecutables(name: string, opts: RunOptions = {}): string[] {
     .filter(Boolean);
 }
 
+// ─── Git identity ──────────────────────────────────────────────────────────
+
+/**
+ * A committer identity for Origin's own git objects, used ONLY when the box
+ * has none of its own.
+ *
+ * `git notes add` writes an object and therefore needs an identity, exactly
+ * like `git commit-tree`. A machine with no user.name/user.email fails every
+ * note write with "unable to auto-detect email address" — and because every
+ * notes caller swallows its error (a note must never fail a commit or a
+ * session end), the failure is completely silent. Symptom: the memory payload
+ * fetches into staging, the fold reads it, merges it, and then cannot write
+ * it, so `origin context memory` reports "No session memory yet" while the
+ * data sits in .git the whole time (observed on a repo with no identity,
+ * while the neighbouring repo had a LOCAL one and worked fine).
+ *
+ * git-capture.ts already learned this for shadow commits — see `shadowIdentity`
+ * and the "+91 should be +2" bug it cites. This is the same fix for the notes
+ * half, which was never covered.
+ */
+export const ORIGIN_FALLBACK_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Origin',
+  GIT_AUTHOR_EMAIL: 'notes@origin.local',
+  GIT_COMMITTER_NAME: 'Origin',
+  GIT_COMMITTER_EMAIL: 'notes@origin.local',
+} as const;
+
+// One probe per repo per process. Note writes come in bursts at session end,
+// and this would otherwise add a spawn to each one — the cost that made the
+// fold too expensive to run unconditionally in the first place.
+const identityProbe = new Map<string, boolean>();
+
+/** Test seam — the probe cache outlives a repo across tests otherwise. */
+export function __resetGitIdentityProbe(): void {
+  identityProbe.clear();
+}
+
+/**
+ * Env for a git command that writes an object.
+ *
+ * Returns `{}` when the machine already has an identity, so a real user's name
+ * stays on their notes — GIT_AUTHOR_* would OVERRIDE their config, not defer to
+ * it, so this must not be set unconditionally. `git var GIT_COMMITTER_IDENT` is
+ * the canonical probe: it exits non-zero exactly when git would refuse to build
+ * the object.
+ */
+export function gitIdentityEnv(repoPath?: string): Record<string, string> {
+  const key = repoPath || '';
+  let has = identityProbe.get(key);
+  if (has === undefined) {
+    try {
+      execFileSync('git', ['var', 'GIT_COMMITTER_IDENT'], {
+        cwd: repoPath, stdio: 'pipe', timeout: 5_000, windowsHide: true,
+      });
+      has = true;
+    } catch {
+      has = false;
+    }
+    identityProbe.set(key, has);
+  }
+  return has ? {} : { ...ORIGIN_FALLBACK_IDENTITY };
+}
+
 // ─── Git ───────────────────────────────────────────────────────────────────
 
 /**

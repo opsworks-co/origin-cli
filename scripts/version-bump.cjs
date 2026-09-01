@@ -25,6 +25,14 @@
  * the next day: every release on Aug 13 sorts below it and falls back to
  * counter arithmetic. UTC for both keeps the stamp internally consistent and
  * makes the result identical whether a release is cut from CI or a laptop.
+ *
+ * The bump writes package.json AND package-lock.json. It used to write only
+ * package.json, so every release left the lockfile on the previous version —
+ * `version-collision-guard.test.ts` exists solely to catch that drift, and it
+ * kept firing because the one tool that changes the version never fixed both
+ * files. npm records the package's own version in TWO places in a lockfile
+ * (top-level `version` and `packages[''].version`); both must move together or
+ * `npm ci` installs a tree that disagrees with the manifest.
  */
 const fs = require('fs');
 const path = require('path');
@@ -70,7 +78,22 @@ function computeNextVersion(currentVersion, now) {
   return nextVersion;
 }
 
-module.exports = { computeNextVersion, isGreater, parts };
+/**
+ * Set the package's own version everywhere npm records it in a lockfile.
+ * Mutates and returns `lock`. Pure otherwise — no clock, no filesystem — so the
+ * shape handling is testable. Tolerates a lockfile with no `packages` map
+ * (lockfileVersion 1) rather than throwing mid-release.
+ */
+function syncLockVersion(lock, version) {
+  if (!lock || typeof lock !== 'object') return lock;
+  lock.version = version;
+  if (lock.packages && typeof lock.packages === 'object' && lock.packages['']) {
+    lock.packages[''].version = version;
+  }
+  return lock;
+}
+
+module.exports = { computeNextVersion, isGreater, parts, syncLockVersion };
 
 if (require.main === module) {
   const pkgPath = path.join(__dirname, '..', 'package.json');
@@ -85,5 +108,18 @@ if (require.main === module) {
   const before = pkg.version;
   pkg.version = nextVersion;
   fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-  console.log(`[version-bump] ${before} -> ${nextVersion}`);
+
+  // Keep the lockfile in lockstep. npm writes it with 2-space indent and a
+  // trailing newline, so re-serialising that way keeps the diff to the version
+  // lines instead of reformatting the whole file.
+  const lockPath = path.join(__dirname, '..', 'package-lock.json');
+  if (fs.existsSync(lockPath)) {
+    const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    syncLockVersion(lock, nextVersion);
+    fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n');
+  } else {
+    console.warn('[version-bump] no package-lock.json next to package.json — skipped');
+  }
+
+  console.log(`[version-bump] ${before} -> ${nextVersion} (package.json + package-lock.json)`);
 }

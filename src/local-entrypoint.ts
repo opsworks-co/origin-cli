@@ -77,6 +77,15 @@ export interface PromptChange {
   linesRemoved?: number;
   aiPercentage?: number;
   checkpointType?: string;
+  /**
+   * Paths this turn wrote outside the repo (home collapsed to `~`) — a Cursor
+   * canvas, an agent scratch dir, a sibling checkout. Set by the same
+   * Stop/session-end builder that sends the field on the API wire, so it also
+   * rides along in changes.json and a re-imported turn with an empty edits[]
+   * can still say WHY it is empty. Home is already collapsed upstream
+   * (abbreviateHome), so this carries no account name.
+   */
+  outOfRepoFiles?: string[];
 }
 
 /** Bump to 2 when shipping editsJson / commit refs; importers gate richer
@@ -122,6 +131,10 @@ export interface SessionWriteData {
   outputTokens: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  // Subset of cacheCreationTokens on Anthropic's 1-hour cache tier (2x input,
+  // vs the 5-minute tier's 1.25x). Carried through the offline write path too
+  // so a session captured while disconnected reprices identically on sync.
+  cacheCreation1hTokens?: number;
   toolCalls: number;
   linesAdded: number;
   linesRemoved: number;

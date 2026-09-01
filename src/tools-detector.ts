@@ -63,14 +63,14 @@ export function detectTools(): string[] {
   for (const { name, cmd } of CLI_CHECKS) {
     try {
       const parts = cmd.split(' ');
-      execFileSync(parts[0], parts.slice(1), { stdio: 'ignore', timeout: 3000 });
+      execFileSync(parts[0], parts.slice(1), { windowsHide: true, stdio: 'ignore', timeout: 3000 });
       found.add(name);
     } catch { /* not installed */ }
   }
 
   // Also check `gh copilot` sub-command (GitHub CLI extension)
   try {
-    execFileSync('gh', ['copilot', '--help'], { stdio: 'ignore', timeout: 3000 });
+    execFileSync('gh', ['copilot', '--help'], { windowsHide: true, stdio: 'ignore', timeout: 3000 });
     found.add('copilot');
   } catch { /* not installed */ }
 
@@ -121,6 +121,7 @@ export function detectIDEExtensions(): string[] {
   for (const cli of ideCLIs) {
     try {
       const output = execFileSync(cli, ['--list-extensions'], {
+        windowsHide: true,
         encoding: 'utf-8',
         timeout: 5000,
         stdio: ['ignore', 'pipe', 'ignore'],

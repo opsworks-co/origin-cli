@@ -4,6 +4,7 @@
 // lookup, rollout file resolution/decompression, the per-turn prompt
 // timeline, and the rollout parser that recovers prompts/tokens/commit
 // markers. hooks.ts orchestrates; this module knows where Codex keeps things.
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -447,6 +448,31 @@ function describeCodexToolCall(name: string, input: string): { tool: string; dis
   return { tool: name || 'tool', display: input };
 }
 
+// Did an apply_patch call actually change the working tree?
+//
+// Codex retries a patch it gets wrong — a stale context block, or two
+// operations on one file in a single patch — and each REJECTED attempt is
+// recorded in the rollout exactly like a successful one. Attributing those to
+// the turn double-counted work that never happened: a turn Codex itself
+// reported as +48/-118 was captured as +79/-154, because a failed
+// Delete-then-Add of a file counted the whole file twice.
+//
+// Only an affirmative failure withdraws a patch. A call whose result has not
+// arrived yet (the live parser runs mid-turn) is assumed good, so a turn in
+// flight still shows its work.
+const CODEX_PATCH_FAILURE = /apply_patch verification failed|failed to apply patch|invalid patch|^\s*script failed\b|\bscript error:/im;
+
+// Ceiling on a single deleted file's recorded content. The rollout is re-read
+// on every poll, so this is held per prompt for the life of the thread; a
+// deleted 50MB generated blob is not worth that, and the count it would buy is
+// the one number in a turn nobody reads to the line.
+const MAX_DELETED_CONTENT_BYTES = 2 * 1024 * 1024;
+
+export function codexPatchCallFailed(output: string | null | undefined): boolean {
+  if (!output) return false;
+  return CODEX_PATCH_FAILURE.test(output);
+}
+
 // Convert a Codex apply_patch block (`*** Begin Patch … *** End Patch`) into a
 // git-style unified diff + line counts. Codex records EVERY file edit as an
 // apply_patch in its rollout, so this reconstructs a turn's exact diff from
@@ -485,6 +511,15 @@ export interface CodexPatchSection {
 export interface CodexBaselineAccess {
   // File content as of this patch.
   read: CodexBaselineResolver;
+  // Last-resort content for a file a `*** Delete File:` section removes, when
+  // `read` cannot see it. A file the turn created OUTSIDE apply_patch — a
+  // script it ran, a server it started — exists in neither the turn's baseline
+  // nor any Add section, so the deletion had nothing to count and reported -0.
+  // Codex itself records the removed content in the rollout's FileChange event,
+  // which is where this comes from. Consulted ONLY for deletions: it describes
+  // the file as it stood at the moment it was removed, which is not a baseline
+  // an Update hunk may be anchored against.
+  deleted?: CodexBaselineResolver;
   // How a section reconciled against the caller's current view of the file: the
   // content immediately BEFORE it (null when the section created the file) and
   // immediately AFTER. A turn often applies SEVERAL patches to the SAME file —
@@ -514,6 +549,18 @@ function classifyHunk(h: string[]): HunkLine[] {
 
 const noCr = (s: string) => (s.endsWith('\r') ? s.slice(0, -1) : s);
 
+// Git's object id for a file's content — sha1 over `blob <bytes>\0<content>`,
+// the same value `git hash-object` prints. Computed from the content we
+// actually rendered the diff between, so a section's `index` line is a claim we
+// can stand behind: two captures that agree on a blob id agree on the bytes.
+// A file we normalized (CR stripped) hashes to something git's own blob for the
+// working copy won't match, which costs a chained-window exemption but can
+// never manufacture one.
+function blobId(content: string): string {
+  const body = Buffer.from(content, 'utf8');
+  return crypto.createHash('sha1').update(`blob ${body.length}\0`).update(body).digest('hex');
+}
+
 // Split file content into lines, dropping the phantom empty element a trailing
 // newline produces so indices are the file's real 1-based line numbers.
 function fileLines(content: string): { lines: string[]; trailingNewline: boolean } {
@@ -523,31 +570,45 @@ function fileLines(content: string): { lines: string[]; trailingNewline: boolean
   return { lines, trailingNewline };
 }
 
-// The single 0-based index where `needle` occurs in `src` at or after `from`,
-// or null when it is absent or occurs more than once. Uniqueness is the whole
-// point: a non-unique match is a guess, and a guessed line number that looks
-// authoritative is worse than an honest best-effort one.
-function findUniqueRun(src: string[], needle: string[], from: number): number | null {
+// The first 0-based index where `needle` occurs in `src` at or after `from`,
+// or null when it does not occur there at all.
+function findRunFrom(src: string[], needle: string[], from: number): number | null {
   if (!needle.length) return null;
-  let found = -1;
   for (let s = from; s + needle.length <= src.length; s++) {
     let hit = true;
     for (let k = 0; k < needle.length; k++) {
       if (src[s + k] !== needle[k]) { hit = false; break; }
     }
-    if (!hit) continue;
-    if (found >= 0) return null; // ambiguous
-    found = s;
+    if (hit) return s;
   }
-  return found < 0 ? null : found;
+  return null;
 }
 
 // Locate an ordered chain of runs, each after the previous one. All or nothing.
+//
+// Resolution is FIRST match at or after the previous run's end, which is how
+// Codex's own apply_patch resolves a bare `@@`: the hunks are applied in file
+// order against a moving cursor. It is also why Codex emits context-ONLY hunks
+// (no `+` or `-` lines at all) — they are pure position markers, there to make
+// the following hunk's anchor well defined.
+//
+// This used to demand that each run be UNIQUE in the whole remaining file,
+// which is much stricter than the format, and it rejected the common case
+// outright: a stylesheet hunk anchors on a bare `}`, of which session
+// be030630's styles.css had 33. One such hunk failed the whole section — 0 of
+// 2 sections reconciled in both turns — so the file kept its duplicate
+// per-patch blocks and its hunks fell back to sequential-from-1 numbering.
+// Verified against that session: the first `}` after the `#title:focus {` hunk
+// and the first after the `.task-title {` marker are exactly where the rules it
+// added actually sit in the file (lines 112 and 234).
+//
+// A run that is genuinely absent still returns null, so a patch that does not
+// belong to this content is rejected as before.
 function matchChain(src: string[], needles: string[][]): number[] | null {
   const at: number[] = [];
   let from = 0;
   for (const n of needles) {
-    const found = findUniqueRun(src, n, from);
+    const found = findRunFrom(src, n, from);
     if (found == null) return null;
     at.push(found);
     from = found + n.length;
@@ -632,6 +693,41 @@ function reconcileUpdateHunks(
   const redo = swapRuns(view, oldSides, newSides);
   if (!redo) return null;
   return { positions: redo.at.map((idx) => idx + 1), before: view, after: redo.result };
+}
+
+/**
+ * Look up a deleted file's recorded content by the repo-relative path the patch
+ * parser uses.
+ *
+ * Codex keys its FileChange events by ABSOLUTE path (`C:\repo\.smoke.json`)
+ * while a patch section resolves to `.smoke.json` relative to the repo root, so
+ * for the case this exists to serve an exact match never fires. Falls back to a
+ * path-segment suffix
+ * match — an entry covers `f` when it ends in `/f` — and only then, so a
+ * sibling repo's identically-named file can never answer for this one.
+ *
+ * Returns undefined when there is nothing recorded, so callers can leave the
+ * converter on its existing behaviour rather than hand it a resolver that only
+ * ever says null.
+ */
+export function codexDeletedContentReader(
+  changes: Record<string, string> | undefined | null,
+): CodexBaselineResolver | undefined {
+  const entries = Object.entries(changes || {}).filter(([p, c]) => p && typeof c === 'string' && c.length > 0);
+  if (!entries.length) return undefined;
+  const norm = (p: string) => p.replace(/\\/g, '/');
+  const byPath = new Map<string, string>(entries.map(([p, c]) => [norm(p), c]));
+  const lower = new Map<string, string>(entries.map(([p, c]) => [norm(p).toLowerCase(), c]));
+  return (relPath: string): string | null => {
+    const f = norm(String(relPath || ''));
+    if (!f) return null;
+    const exact = byPath.get(f) ?? lower.get(f.toLowerCase());
+    if (exact !== undefined) return exact;
+    for (const [p, c] of byPath) if (p.endsWith(`/${f}`)) return c;
+    const lf = f.toLowerCase();
+    for (const [p, c] of lower) if (p.endsWith(`/${lf}`)) return c;
+    return null;
+  };
 }
 
 export function codexApplyPatchToDiff(
@@ -750,13 +846,30 @@ export function codexApplyPatchToDiff(
         oldPos += oldLen;
         newPos += newLen;
       }
-      out.linesAdded += sectionAdded;
-      out.linesRemoved += sectionRemoved;
+      // Once the section is anchored we hold the file on BOTH sides of it, so
+      // render the diff from those rather than transcribing Codex's hunks.
+      //
+      // Transcribing carries Codex's context through verbatim, and Codex gives
+      // as little as ONE leading line with nothing after it — which `git apply`
+      // rejects outright (`@@ -8,1 +8,2 @@` over a single context line fails
+      // even though the line is exactly where the header says). Session
+      // be030630's app.js block was unusable for that reason while every line
+      // in it matched the file. Rendering from content instead produces the
+      // context git expects on both sides, and the counts become the ones git
+      // itself would report.
+      const fromContent = anchored ? renderFileDiff(f, anchored.before, anchored.after) : null;
+      const sectionDiff = fromContent
+        ? fromContent.diff
+        : `diff --git a/${f} b/${f}\n--- a/${f}\n+++ b/${f}\n${rendered.join('\n')}`;
+      const addedOut = fromContent ? fromContent.linesAdded : sectionAdded;
+      const removedOut = fromContent ? fromContent.linesRemoved : sectionRemoved;
+      out.linesAdded += addedOut;
+      out.linesRemoved += removedOut;
       out.sections.push({
-        file: f, kind: 'update', linesAdded: sectionAdded, linesRemoved: sectionRemoved,
+        file: f, kind: 'update', linesAdded: addedOut, linesRemoved: removedOut,
         anchored: !!anchored,
         hunks: classified.map((h) => ({ old: oldSideOf(h), new: newSideOf(h) })),
-        diff: `diff --git a/${f} b/${f}\n--- a/${f}\n+++ b/${f}\n${rendered.join('\n')}`,
+        diff: sectionDiff,
       });
       // Only when every hunk matched — an unanchored patch leaves the caller's
       // view of the file untouched rather than replacing it with a guess.
@@ -764,11 +877,32 @@ export function codexApplyPatchToDiff(
     } else if (del) {
       const f = rel(del[1]); out.filesChanged.push(f); i++;
       const body = collectBody();
-      const removed = body.filter((l) => l.startsWith('-')).length || body.length;
+      // A `*** Delete File:` section names the file and stops — the content it
+      // is removing is NOT in the patch. Counting the (empty) body therefore
+      // reported every deletion as -0, and the deleted lines simply vanished
+      // from the turn: session fb457e3f dropped `_verify_tasks.json` entirely.
+      // The content IS available from the caller's view of the file, which for
+      // a file this same turn created is the text of its own Add section — and
+      // failing that, from what Codex recorded it removing (`deleted`), which
+      // is the only evidence for a file the turn created through the SHELL.
+      let held: string | null = null;
+      if (baselines) {
+        try { held = baselines.read(f); } catch { held = null; }
+        if (!held) {
+          try { held = baselines.deleted?.(f) ?? null; } catch { held = null; }
+        }
+      }
+      const heldLines = held ? fileLines(held).lines : null;
+      const removed = heldLines?.length
+        ? heldLines.length
+        : (body.filter((l) => l.startsWith('-')).length || body.length);
       out.linesRemoved += removed;
       out.sections.push({
         file: f, kind: 'delete', linesAdded: 0, linesRemoved: removed, anchored: true, hunks: [],
-        diff: `diff --git a/${f} b/${f}\ndeleted file mode 100644\n--- a/${f}\n+++ /dev/null`,
+        diff: heldLines?.length
+          ? `diff --git a/${f} b/${f}\ndeleted file mode 100644\n--- a/${f}\n+++ /dev/null\n`
+            + `@@ -1,${heldLines.length} +0,0 @@\n${heldLines.map((l) => `-${l}`).join('\n')}`
+          : `diff --git a/${f} b/${f}\ndeleted file mode 100644\n--- a/${f}\n+++ /dev/null`,
       });
       // The file is gone; a later patch in this turn must not anchor against
       // the content it used to hold.
@@ -781,7 +915,94 @@ export function codexApplyPatchToDiff(
   return out;
 }
 
-// Diff two full file contents as ONE unified-diff block.
+// Longest-common-subsequence line diff: the ops, in file order, that turn `a`
+// into `b`. Deletions come before additions at a tie so the output matches how
+// git orders a replacement.
+//
+// O(n·m) time and memory, which is fine only because the caller trims the
+// common prefix and suffix first and bails out above LCS_CELL_LIMIT.
+type DiffOp = { kind: 'ctx' | 'del' | 'add'; text: string };
+
+// (n+1)·(m+1) Uint32 cells ≈ 16MB at the limit. Real source files sit orders of
+// magnitude below it; a generated blob that doesn't falls back to the old
+// single-span rendering rather than eating the watcher's heap.
+const LCS_CELL_LIMIT = 4_000_000;
+
+function lcsOps(a: string[], b: string[]): DiffOp[] {
+  const n = a.length;
+  const m = b.length;
+  // dp[i][j] = LCS length of a[i:] and b[j:], filled backward so the forward
+  // walk below can pick the branch that keeps the most common lines.
+  const dp: Uint32Array[] = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    const row = dp[i];
+    const next = dp[i + 1];
+    for (let j = m - 1; j >= 0; j--) {
+      row[j] = a[i] === b[j] ? next[j + 1] + 1 : Math.max(next[j], row[j + 1]);
+    }
+  }
+  const ops: DiffOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push({ kind: 'ctx', text: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push({ kind: 'del', text: a[i] }); i++; }
+    else { ops.push({ kind: 'add', text: b[j] }); j++; }
+  }
+  while (i < n) ops.push({ kind: 'del', text: a[i++] });
+  while (j < m) ops.push({ kind: 'add', text: b[j++] });
+  return ops;
+}
+
+// Group changed ops into hunks and render them, git-style: each hunk carries up
+// to `context` unchanged lines on either side, and two change runs share a hunk
+// when the unchanged gap between them is no wider than the context they'd both
+// print anyway.
+function renderHunks(ops: DiffOp[], context: number): string[] {
+  const changed: number[] = [];
+  ops.forEach((o, k) => { if (o.kind !== 'ctx') changed.push(k); });
+  if (!changed.length) return [];
+  const groups: Array<[number, number]> = [];
+  for (const k of changed) {
+    const last = groups[groups.length - 1];
+    if (last && k - last[1] <= context * 2) last[1] = k;
+    else groups.push([k, k]);
+  }
+  // How many old / new lines each op index is preceded by, so a hunk header can
+  // state real 1-based file positions without re-walking the op list.
+  const oldBefore = new Array<number>(ops.length + 1);
+  const newBefore = new Array<number>(ops.length + 1);
+  let o = 0;
+  let n = 0;
+  for (let k = 0; k < ops.length; k++) {
+    oldBefore[k] = o;
+    newBefore[k] = n;
+    if (ops[k].kind !== 'add') o++;
+    if (ops[k].kind !== 'del') n++;
+  }
+  oldBefore[ops.length] = o;
+  newBefore[ops.length] = n;
+
+  const out: string[] = [];
+  for (const [gs, ge] of groups) {
+    const ws = Math.max(0, gs - context);
+    const we = Math.min(ops.length - 1, ge + context);
+    const oldLen = oldBefore[we + 1] - oldBefore[ws];
+    const newLen = newBefore[we + 1] - newBefore[ws];
+    // git prints `-N,0` — the line the insertion follows — for a hunk that
+    // consumes no old lines, and likewise on the new side.
+    const oldStart = oldLen ? oldBefore[ws] + 1 : oldBefore[ws];
+    const newStart = newLen ? newBefore[ws] + 1 : newBefore[ws];
+    out.push(`@@ -${oldStart},${oldLen} +${newStart},${newLen} @@`);
+    for (let k = ws; k <= we; k++) {
+      const op = ops[k];
+      out.push(`${op.kind === 'add' ? '+' : op.kind === 'del' ? '-' : ' '}${op.text}`);
+    }
+  }
+  return out;
+}
+
+// Diff two full file contents as a unified-diff block.
 //
 // Needed because a turn that patches the same file several times cannot simply
 // concatenate its per-patch blocks: each patch is expressed against the file as
@@ -790,11 +1011,28 @@ export function codexApplyPatchToDiff(
 // genuinely valid against the baseline — which is what the dashboard needs to
 // show all of a turn's changes to a file rather than only the first patch's.
 //
-// Deliberately simple: trim the common prefix and suffix and emit ONE hunk for
-// the span between them, with up to `context` unchanged lines on each side. Not
-// minimal for edits scattered through a file (git would emit several hunks),
-// but always correct, and it matches git exactly for the append/replace shapes
-// Codex actually produces. Returns null when nothing changed.
+// This used to trim the common prefix/suffix and emit ONE hunk for everything
+// between them. Always structurally valid, but for edits scattered through a
+// file it reports the whole span as removed and re-added: session be030630
+// turn 1 stored server.py at +154/-133 where the real edit was +26/-5, and the
+// same inflation reached the session header (+328/-153). Every changed file
+// larger than its edits was overstated, so a real LCS diff is the fix — the
+// counts a reviewer reads come straight out of the ops it emits.
+// Returns null when nothing changed.
+//
+// The emitted section carries a real `index <old>..<new>` line, and that line
+// is load-bearing rather than decoration. A Codex turn's diff is a WINDOW: it
+// runs from the file as the turn found it to the file as the turn left it, so
+// consecutive turns chain end-to-start. The server's cross-prompt
+// first-author-wins filter (isChainedWindowSection) exempts a section it can
+// PROVE is such a window, and the proof it looks for is exactly this: an old
+// blob an earlier prompt's capture produced. Without the line there is no
+// proof, and the filter falls back to matching by text — which confiscates any
+// row a previous turn happens to have written verbatim. Measured on Codex
+// thread 01a059cc (kotleta): turn 2 lost `border: 1px solid var(--line);` and
+// turn 3 lost `try {`, each to an identical row in turn 1, and each turn was
+// billed one line short (35→34, 32→31). Turn 3's rendered patch was left with
+// a `} catch {` whose `try {` had been taken — code that never existed.
 export function renderFileDiff(
   file: string,
   before: string | null,
@@ -829,22 +1067,28 @@ export function renderFileDiff(
   const oldMid = oldLines.slice(pre, oldLines.length - suf);
   const newMid = newLines.slice(pre, newLines.length - suf);
   if (!oldMid.length && !newMid.length) return null; // identical
-  const lead = Math.min(context, pre);
-  const trail = Math.min(context, suf);
-  const start = pre - lead; // 0-based
-  const body = [
-    ...oldLines.slice(start, pre).map((l) => ` ${l}`),
-    ...oldMid.map((l) => `-${l}`),
-    ...newMid.map((l) => `+${l}`),
-    ...oldLines.slice(oldLines.length - suf, oldLines.length - suf + trail).map((l) => ` ${l}`),
+
+  // Only the trimmed middle needs diffing; the prefix and suffix are context by
+  // construction and rejoin the op list unchanged.
+  const tooBig = (oldMid.length + 1) * (newMid.length + 1) > LCS_CELL_LIMIT;
+  const middle: DiffOp[] = tooBig
+    ? [
+      ...oldMid.map((t) => ({ kind: 'del' as const, text: t })),
+      ...newMid.map((t) => ({ kind: 'add' as const, text: t })),
+    ]
+    : lcsOps(oldMid, newMid);
+  const ops: DiffOp[] = [
+    ...oldLines.slice(0, pre).map((t) => ({ kind: 'ctx' as const, text: t })),
+    ...middle,
+    ...oldLines.slice(oldLines.length - suf).map((t) => ({ kind: 'ctx' as const, text: t })),
   ];
-  const oldLen = lead + oldMid.length + trail;
-  const newLen = lead + newMid.length + trail;
+  const body = renderHunks(ops, context);
+  if (!body.length) return null;
   return {
-    diff: `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n`
-      + `@@ -${oldLen ? start + 1 : start},${oldLen} +${newLen ? start + 1 : start},${newLen} @@\n${body.join('\n')}`,
-    linesAdded: newMid.length,
-    linesRemoved: oldMid.length,
+    diff: `diff --git a/${file} b/${file}\nindex ${blobId(before!)}..${blobId(after)} 100644\n`
+      + `--- a/${file}\n+++ b/${file}\n${body.join('\n')}`,
+    linesAdded: ops.filter((op) => op.kind === 'add').length,
+    linesRemoved: ops.filter((op) => op.kind === 'del').length,
   };
 }
 
@@ -865,15 +1109,20 @@ export function codexApplyPatchesToDiff(
   patches: string[],
   repoRoot?: string,
   read?: CodexBaselineResolver,
+  // Content Codex reported removing, per file — see CodexBaselineAccess.deleted.
+  // Supplied on its own is enough: a turn whose only unreadable file is one it
+  // deleted still needs its removed lines counted.
+  deleted?: CodexBaselineResolver,
 ): { diff: string; linesAdded: number; linesRemoved: number; filesChanged: string[] } {
   // Per-file running content across the turn, plus how many of the file's
   // sections we managed to reconcile against it.
   const view = new Map<string, { tail: string; reconciled: number }>();
   const cache = new Map<string, string | null>();
-  const access: CodexBaselineAccess | undefined = read
+  const access: CodexBaselineAccess | undefined = (read || deleted)
     ? {
       read: (p) => {
         if (view.has(p)) return view.get(p)!.tail;
+        if (!read) return null;
         if (!cache.has(p)) {
           let c: string | null = null;
           try { c = read(p); } catch { c = null; }
@@ -881,6 +1130,7 @@ export function codexApplyPatchesToDiff(
         }
         return cache.get(p)!;
       },
+      ...(deleted ? { deleted } : {}),
       onApplied: (p, after) => {
         const cur = view.get(p);
         if (cur) { cur.tail = after; cur.reconciled++; }
@@ -907,8 +1157,30 @@ export function codexApplyPatchesToDiff(
     const list = byFile.get(s.file);
     if (list) list.push(s); else byFile.set(s.file, [s]);
   }
+  // Files this turn created and then removed again. An agent that writes a
+  // throwaway script, runs it and cleans up has changed NOTHING by the end of
+  // the turn, but the Add section's lines were still counted and the file was
+  // still rendered as created — session fb457e3f reported `_verify_api.py` as a
+  // new 28-line file that does not exist, inflating the turn from +39 to +65.
+  // Dropped outright rather than collapsed: there is no before and no after.
+  const transient = new Set<string>();
+  for (const [f, sections] of byFile) {
+    if (sections[0]?.kind === 'add' && sections[sections.length - 1]?.kind === 'delete') {
+      transient.add(f);
+    }
+  }
+  for (const f of transient) {
+    for (const s of all) {
+      if (s.file !== f) continue;
+      out.linesAdded -= s.linesAdded;
+      out.linesRemoved -= s.linesRemoved;
+    }
+    files.delete(f);
+  }
+
   const collapsed = new Map<string, { diff: string; linesAdded: number; linesRemoved: number }>();
   for (const [f, sections] of byFile) {
+    if (transient.has(f)) continue;
     if (sections.length < 2) continue;
     if (sections.some((s) => s.kind === 'delete')) continue; // deleted content is unrecoverable
     const v = view.get(f);
@@ -934,6 +1206,7 @@ export function codexApplyPatchesToDiff(
   const emitted = new Set<string>();
   const blocks: string[] = [];
   for (const s of all) {
+    if (transient.has(s.file)) continue; // created and removed again — nothing to show
     const merged = collapsed.get(s.file);
     if (!merged) { blocks.push(s.diff); continue; }
     if (emitted.has(s.file)) continue;
@@ -1004,6 +1277,13 @@ export function parseCodexRolloutLive(rolloutFile: string): {
   // turn. Lets the watcher reconstruct each turn's exact diff from the rollout
   // instead of a git working-tree snapshot that can't tell two fast turns apart.
   promptPatches: string[][];
+  // Per-prompt `absolute path → content` for files the turn DELETED, taken from
+  // the rollout's FileChange events. A `*** Delete File:` section carries only
+  // the name, so the removed lines can only be counted against the file as it
+  // stood — and when the turn itself created that file through the shell, this
+  // event is the only place that content survives. Optional so a test double
+  // that predates it still satisfies the shape.
+  promptDeletedFiles?: Array<Record<string, string>>;
   transcript: string;
   tokensUsed: number;
   inputTokens: number;
@@ -1028,6 +1308,11 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     // One entry per user prompt (pushed alongside promptTimestamps); apply_patch
     // tool calls are appended to the current (most recent) prompt's array.
     const promptPatches: string[][] = [];
+    // Deleted-file content per prompt, same indexing as promptPatches.
+    const promptDeletedFiles: Array<Record<string, string>> = [];
+    // apply_patch call id → where its body sits in promptPatches, so a patch
+    // Codex rejected can be blanked out when the failure result arrives.
+    const patchByCallId = new Map<string, { prompt: number; at: number }>();
     const pendingTools = new Map<string, number>();
     let maxInputTokens = 0, maxOutputTokens = 0, maxTotalTokens = 0, maxCachedInputTokens = 0;
     let model: string | undefined;
@@ -1098,14 +1383,18 @@ export function parseCodexRolloutLive(rolloutFile: string): {
                   })();
                   promptTimestamps.push(ts);
                   promptPatches.push([]); // start collecting this turn's patches
+                  promptDeletedFiles.push({});
                 }
               }
             }
           }
         } else if (ptype === 'reasoning') {
           const summary = Array.isArray(payload.summary) ? payload.summary : [];
-          const t = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n\n');
-          if (t.trim()) turns.push({ role: 'assistant', content: `[Reasoning] ${t}` });
+          const t = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n');
+          // Collapse internal blank lines: the web's reasoning parser ends the
+          // dimmed block at the first empty line, so a multi-paragraph summary
+          // used to spill its tail out as plain body text.
+          if (t.trim()) turns.push({ role: 'assistant', content: `[Reasoning] ${t.trim().replace(/\n{2,}/g, '\n')}` });
         } else if (ptype === 'function_call' || ptype === 'local_shell_call' || ptype === 'custom_tool_call') {
           // Codex ≥0.145 (gpt-5.6-sol/terra) records every tool call as a
           // `custom_tool_call` (name "exec"/"apply_patch") whose `input` is
@@ -1122,13 +1411,24 @@ export function parseCodexRolloutLive(rolloutFile: string): {
           const idx = turns.length;
           turns.push({ role: 'assistant', content: `[Tool: ${tool}] ${truncate(display)}` });
           if (callId) pendingTools.set(callId, idx);
-          // Attribute the patch to the current turn for per-prompt diffs.
+          // Attribute the patch to the current turn for per-prompt diffs. The
+          // call id is remembered so a patch Codex REJECTS can be withdrawn
+          // when its result arrives — see codexPatchCallFailed.
           if (tool === 'apply_patch' && typeof display === 'string' && display.includes('*** Begin Patch') && promptPatches.length > 0) {
-            promptPatches[promptPatches.length - 1].push(display);
+            const bucket = promptPatches[promptPatches.length - 1];
+            bucket.push(display);
+            if (callId) patchByCallId.set(callId, { prompt: promptPatches.length - 1, at: bucket.length - 1 });
           }
         } else if (ptype === 'function_call_output' || ptype === 'local_shell_call_output' || ptype === 'custom_tool_call_output') {
           const callId = payload.call_id || payload.id || '';
           const out = stringifyCodexToolOutput(payload.output);
+          // A rejected patch never reached the working tree, so it must not
+          // count toward the turn's diff.
+          const patchRef = callId ? patchByCallId.get(callId) : undefined;
+          if (patchRef) {
+            patchByCallId.delete(callId);
+            if (codexPatchCallFailed(out)) promptPatches[patchRef.prompt][patchRef.at] = '';
+          }
           if (out) {
             const idx = callId ? pendingTools.get(callId) : undefined;
             if (idx !== undefined) {
@@ -1136,6 +1436,27 @@ export function parseCodexRolloutLive(rolloutFile: string): {
               pendingTools.delete(callId);
             } else {
               turns.push({ role: 'assistant', content: `[Output] ${truncate(out)}` });
+            }
+          }
+        } else if (ptype === 'item_completed' && payload?.item?.type === 'FileChange') {
+          // Codex reports each applied file change with the content it moved —
+          // and for a DELETE that content is the only record of what the file
+          // held, since the patch names the file and stops and the file itself
+          // is gone by the time anything reads the tree. Kept for deletions
+          // only: an add/update's content is already recoverable from the patch
+          // and the working tree, so storing it would cost memory for nothing.
+          const changes = payload.item.changes;
+          if (changes && typeof changes === 'object' && promptDeletedFiles.length > 0) {
+            const bucket = promptDeletedFiles[promptDeletedFiles.length - 1];
+            for (const [file, change] of Object.entries(changes as Record<string, any>)) {
+              if (!file || change?.type !== 'delete') continue;
+              const content = change.content;
+              if (typeof content !== 'string' || !content) continue;
+              // A generated blob can be arbitrarily large and we only need it to
+              // count lines; past the cap the deletion falls back to -0 rather
+              // than holding the whole file in the watcher's heap every poll.
+              if (content.length > MAX_DELETED_CONTENT_BYTES) continue;
+              bucket[file] = content;
             }
           }
         }
@@ -1159,7 +1480,9 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     return {
       userPrompts,
       promptTimestamps,
-      promptPatches,
+      // Drop the withdrawn (rejected) patches.
+      promptPatches: promptPatches.map((list) => list.filter(Boolean)),
+      promptDeletedFiles,
       transcript: JSON.stringify(turns),
       tokensUsed: liveNonCachedInput + maxOutputTokens,
       inputTokens: liveNonCachedInput,
@@ -1350,9 +1673,11 @@ export function parseCodexRollout(
           // Chain-of-thought summary — show as assistant reasoning so reviewers
           // can see the agent's plan, not just its actions.
           const summary = Array.isArray(payload.summary) ? payload.summary : [];
-          const text = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n\n');
+          const text = summary.map((s: any) => s?.text || '').filter(Boolean).join('\n');
           if (text.trim()) {
-            turns.push({ role: 'assistant', content: `[Reasoning] ${text}` });
+            // Blank lines end the web's reasoning block — collapse them so the
+            // whole summary stays inside it (mirrors the live parser above).
+            turns.push({ role: 'assistant', content: `[Reasoning] ${text.trim().replace(/\n{2,}/g, '\n')}` });
           }
         } else if (payloadType === 'function_call' || payloadType === 'local_shell_call' || payloadType === 'custom_tool_call') {
           toolCalls++;

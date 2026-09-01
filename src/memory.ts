@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { git, gitOrNull } from './utils/exec.js';
+import { git, gitOrNull, gitIdentityEnv } from './utils/exec.js';
 import { getGitRoot } from './session-state.js';
 import { isRepoIgnored } from './ignore-repos.js';
 import { loadConfig } from './config.js';
@@ -218,7 +218,8 @@ function writeMemoryPayload(
     null,
     2,
   );
-  git(['notes', '--ref=origin-memory', 'add', '-f', '-m', payload, root], { cwd: repoPath, timeoutMs: 10_000 });
+  git(['notes', '--ref=origin-memory', 'add', '-f', '-m', payload, root],
+    { cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath) });
 }
 
 // ─── Cross-machine merge ───────────────────────────────────────────────────
@@ -821,7 +822,8 @@ export function writeMemoryBrief(repoPath: string, brief: MemoryBrief): void {
     if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return;
     const root = briefRootCommit(repoPath);
     if (!root) return;
-    git(['notes', `--ref=${MEMORY_BRIEF_REF_NAME}`, 'add', '-f', '-m', JSON.stringify(brief, null, 2), root], { cwd: repoPath, timeoutMs: 10_000 });
+    git(['notes', `--ref=${MEMORY_BRIEF_REF_NAME}`, 'add', '-f', '-m', JSON.stringify(brief, null, 2), root],
+      { cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath) });
   } catch { /* non-fatal */ }
 }
 
@@ -964,4 +966,425 @@ function formatAge(ms: number): string {
   if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
   return `${days}d`;
+}
+
+// ─── Startup check: the imperative half of the memory pointer ────────────────
+//
+// buildMemoryPointerContext tells the agent memory EXISTS and how to query it.
+// That is a capability description, and agents treat it as one — they reach for
+// it when a prompt happens to mention prior work, and otherwise never. Observed
+// verbatim from an Antigravity session asked why it hadn't looked: deeper
+// commands "are not executed unless … an explicit workspace or global rule
+// instructs the agent to run those startup checks automatically."
+//
+// So this block states the rule the model said was missing. Three properties
+// matter and each is deliberate:
+//
+//   1. It names a FIRST ACTION with an ordering constraint ("before your first
+//      substantive action"), not a capability. "You may query X" and "run X
+//      before you start" produce very different compliance.
+//   2. It offers the three routes in cheapest-reachable order, same as the
+//      pointer — the raw git command needs no MCP server, no `origin` on PATH
+//      and no network, and is what an agent actually falls back to.
+//   3. It requires a one-line ACK. That is not politeness: the ack is the only
+//      externally visible evidence the check happened, which is what lets
+//      buildMemoryEscalationContext below notice silence and escalate. A
+//      directive with no observable outcome cannot be enforced, only hoped for.
+//
+// Returns null under exactly the same exclusions as the pointer — a repo with
+// no memory must not be told to go read memory.
+export function buildStartupCheckContext(repoPath: string): string | null {
+  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+
+  const substantive = readAllSessionMemory(repoPath).filter(isSubstantiveMemory);
+  const commits = readAllCommitMemory(repoPath);
+  if (substantive.length === 0 && commits.length === 0) return null;
+
+  return [
+    'Origin startup check — do this BEFORE your first substantive action in this session. ' +
+      'Do not wait for a prompt to mention prior work: the digest above is a fixed slice chosen ' +
+      'for the LAST task, not yours.',
+    '',
+    '  1. Read this repo\'s Origin memory, by any route that works here:',
+    '     `origin context memory` · the `get_repo_memory` MCP tool · ' +
+      '`git notes --ref=origin-memory show $(git rev-list --max-parents=0 HEAD | tail -1)`',
+    '  2. Before editing a file the task names, check who wrote it and why: ' +
+      '`origin why <file>:<line>` or `origin prompts <file>`.',
+    '  3. State in ONE line what you found and whether it changes your plan — e.g. ' +
+      '"Origin memory: 19 sessions; the notes-refspec work is unfinished and touches this file." ' +
+      'If nothing in it bears on this task, say that instead.',
+    '',
+    'Step 3 is not optional. It is the only signal a human reviewer — and Origin — has that the ' +
+      'check actually happened; a session that skips it is indistinguishable from one that ran blind.',
+  ].join('\n');
+}
+
+// Second-turn escalation. Injected once, on the turn AFTER a session that was
+// given the startup check above produced no evidence of running it (no memory
+// read command, no MCP memory tool call, see isMemoryReadCommand).
+//
+// Deliberately shorter and blunter than the checklist rather than a re-send of
+// it: the long form demonstrably did not land for this session, and repeating
+// an instruction verbatim after it was ignored mostly buys a second copy of the
+// same tokens. This one names the omission, which the first block cannot do
+// because at that point there is nothing to name.
+export function buildMemoryEscalationContext(repoPath: string): string | null {
+  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return null;
+
+  const substantive = readAllSessionMemory(repoPath).filter(isSubstantiveMemory);
+  const commits = readAllCommitMemory(repoPath);
+  if (substantive.length === 0 && commits.length === 0) return null;
+
+  return [
+    `Origin: this repo carries ${substantive.length} session record${substantive.length !== 1 ? 's' : ''} ` +
+      `and ${commits.length} commit record${commits.length !== 1 ? 's' : ''} in its git notes, and this ` +
+      'session has not read any of it yet.',
+    'Run `origin context memory` (or the `get_repo_memory` MCP tool) now, before continuing, and say in ' +
+      'one line what it changes about your plan. Prior sessions in this repo have left work unfinished ' +
+      'and decisions recorded that are not visible from the code alone.',
+  ].join('\n');
+}
+
+// ─── Compliance detection ────────────────────────────────────────────────────
+//
+// Did this session actually go and read the memory? The only trustworthy
+// evidence is a tool call we can see, so match the commands that read the
+// record — every route the two blocks above offer, plus the query commands the
+// pointer advertises, since an agent that ran `origin why` on the file it is
+// about to edit has demonstrably consulted the record and does not need a nudge.
+//
+// Matching is intentionally loose on the surrounding shell (pipes, `&&`, a
+// leading `cd … &&`, `pnpm origin …`) and strict on the verb. A false NEGATIVE
+// costs one redundant nudge; a false POSITIVE silently disables the escalation
+// for the whole session, which is the failure this exists to prevent — so
+// prefer matching too little over too much.
+const MEMORY_READ_PATTERNS: RegExp[] = [
+  // `origin context memory`, `origin memory`, `origin recap`
+  /\borigin\s+context\s+memory\b/,
+  /\borigin\s+memory\b/,
+  /\borigin\s+recap\b/,
+  // Per-line / per-file provenance queries
+  /\borigin\s+why\b/,
+  /\borigin\s+ask\b/,
+  /\borigin\s+prompts\b/,
+  /\borigin\s+todo\s+list\b/,
+  // The no-dependency fallback route: raw git notes against Origin's refs
+  /\bgit\s+notes\b[^\n]*\borigin-(memory|sessions)\b/,
+];
+
+/** True when a shell command reads this repo's Origin memory. Pure. */
+export function isMemoryReadCommand(cmd: string | undefined | null): boolean {
+  if (typeof cmd !== 'string' || !cmd) return false;
+  return MEMORY_READ_PATTERNS.some((re) => re.test(cmd));
+}
+
+/**
+ * True when a TOOL NAME is Origin's memory MCP tool. Hosts namespace MCP tools
+ * differently (`get_repo_memory`, `mcp__origin__get_repo_memory`,
+ * `origin.get_repo_memory`), so match on the bare tool name anywhere in the
+ * string rather than on one host's spelling of it.
+ */
+export function isMemoryReadToolName(toolName: string | undefined | null): boolean {
+  if (typeof toolName !== 'string' || !toolName) return false;
+  return /\bget_repo_memory\b/.test(toolName) || toolName.endsWith('get_repo_memory');
+}
+
+// ─── Prompt-scoped memory retrieval ──────────────────────────────────────────
+//
+// Everything Origin injects at session start is a FIXED slice chosen before the
+// task was known: the last N sessions, the hottest files, the newest brief. It
+// answers "what happened here recently", which is only accidentally the same
+// question as "what does THIS task need to know".
+//
+// The startup directive asks the agent to close that gap itself by querying the
+// record. That works when the agent complies, and the escalation exists because
+// it often does not. This path removes compliance from the loop for the agents
+// that fire a prompt hook: take the user's prompt, search the notes with it, and
+// hand over the hits. An agent cannot fail to consult what is already in its
+// context window.
+//
+// Deterministic and local on purpose — no LLM, no network. It runs on every
+// prompt, in front of a user waiting for their agent to answer.
+
+// Words that carry no retrieval signal. Prompts are imperative and
+// conversational ("can you fix the thing where…"), so without this the top
+// terms are all verbs and pronouns and every entry matches equally.
+const MEMORY_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'this', 'that', 'these', 'those',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'do', 'does', 'did', 'doing',
+  'have', 'has', 'had', 'can', 'could', 'should', 'would', 'will', 'shall', 'may',
+  'for', 'from', 'with', 'without', 'into', 'onto', 'about', 'over', 'under', 'out',
+  'you', 'your', 'yours', 'we', 'our', 'ours', 'they', 'them', 'their', 'it', 'its',
+  'me', 'my', 'mine', 'him', 'her', 'his', 'hers', 'who', 'what', 'when', 'where',
+  'why', 'how', 'all', 'any', 'both', 'each', 'more', 'most', 'other', 'some', 'such',
+  'not', 'only', 'same', 'than', 'too', 'very', 'just', 'now', 'also', 'let', 'lets',
+  'please', 'thanks', 'thank', 'ok', 'okay', 'yes', 'no', 'sure', 'here', 'there',
+  'run', 'make', 'made', 'get', 'got', 'use', 'used', 'using', 'add', 'added', 'new',
+  'need', 'needs', 'want', 'like', 'look', 'see', 'try', 'go', 'going', 'done',
+  'file', 'files', 'code', 'change', 'changes', 'changed', 'fix', 'fixed', 'work',
+]);
+
+/** A term the search actually uses, and how much a hit on it is worth. */
+interface MemoryTerm { term: string; weight: number }
+
+/**
+ * Pull the retrievable terms out of a prompt.
+ *
+ * Three weights, because three very different kinds of evidence get flattened
+ * into "the prompt mentioned it":
+ *   - a PATH-like token (`src/memory.ts`, `hooks.ts`) is near-conclusive — if a
+ *     past session touched the file this task names, that session is relevant
+ *     almost regardless of what either of them said about it.
+ *   - an IDENTIFIER (camelCase, snake_case, dotted) is strong: shared jargon
+ *     between a prompt and a summary is rarely coincidence.
+ *   - a plain word is weak on its own and only adds up in aggregate: at weight
+ *     2 against a threshold of 8, four distinct non-stopword terms must
+ *     co-occur in ONE record before it is retrieved.
+ *
+ * That last weight was 1 originally, which quietly made the whole feature
+ * path-only: no prose prompt could reach 8 without eight separate matching
+ * words, so anything phrased in English retrieved nothing. Measured over this
+ * repo's own notes (19 sessions, 160 commits), weight 1 scored 0/6 on prompts
+ * whose subject is demonstrably IN the corpus. Weight 2 scores 4/4 on the ones
+ * actually present, with zero false fires across seven conversational prompts
+ * ("ok thanks continue", "looks good ship it", …). Weight 3 raises recall by
+ * one but matches 69 of 179 records on a single prompt — at which point the
+ * threshold has stopped filtering and the top-3 cut is close to arbitrary.
+ *
+ * Exported for testing: the scoring above is the whole quality of this feature,
+ * and it is far easier to get wrong than to notice going wrong.
+ */
+export function extractMemoryTerms(promptText: string): MemoryTerm[] {
+  if (typeof promptText !== 'string' || !promptText.trim()) return [];
+  const seen = new Map<string, number>();
+  const add = (raw: string, weight: number) => {
+    const term = raw.toLowerCase();
+    if (!term) return;
+    // Keep the STRONGEST weight a term earned: `hooks.ts` reaching us both as a
+    // path and as a bare word must not be demoted by the second sighting.
+    if ((seen.get(term) || 0) < weight) seen.set(term, weight);
+  };
+
+  // Path-like: contains a slash, or looks like <name>.<ext>.
+  //
+  // The bare-filename half requires an alphabetic stem AND an alphabetic
+  // extension. Allowing digits on either side makes a version number a path:
+  // `1.2` scored as high as `memory.ts` and matched every note that happened to
+  // contain the string, which is the worst failure this search has — a
+  // top-weighted hit on a coincidence.
+  for (const m of promptText.matchAll(/[A-Za-z0-9_@.\-]*\/[A-Za-z0-9_/.\-]+|\b[A-Za-z][A-Za-z0-9_\-]*\.[A-Za-z]{1,6}\b/g)) {
+    const raw = m[0].replace(/[.,;:)\]]+$/, '');
+    if (raw.length < 3) continue;
+    add(raw, 10);
+    // Also index the basename, so a prompt naming `src/memory.ts` still matches
+    // a note that recorded the file as `packages/cli/src/memory.ts`.
+    const base = raw.split('/').pop() || '';
+    if (base && base !== raw) add(base, 8);
+  }
+
+  // Identifier-like: camelCase, snake_case, or dotted — shared jargon.
+  for (const m of promptText.matchAll(/\b[A-Za-z][A-Za-z0-9]*(?:[A-Z][A-Za-z0-9]*|_[A-Za-z0-9]+)+\b/g)) {
+    if (m[0].length >= 4) add(m[0], 4);
+  }
+
+  // Plain words.
+  for (const m of promptText.matchAll(/\b[A-Za-z][A-Za-z0-9\-]{2,}\b/g)) {
+    const w = m[0].toLowerCase();
+    if (MEMORY_STOPWORDS.has(w)) continue;
+    add(w, 2);
+  }
+
+  return [...seen.entries()].map(([term, weight]) => ({ term, weight }));
+}
+
+/** One retrieved record, with the reason it was retrieved. */
+export interface MemoryHit {
+  /** Stable identity, so the same record is not injected twice in one session. */
+  key: string;
+  kind: 'session' | 'commit';
+  score: number;
+  /** The terms that matched — shown to the agent so a bad hit is visibly bad. */
+  matched: string[];
+  /** Rendered lines for injection. */
+  lines: string[];
+}
+
+/**
+ * One line, always.
+ *
+ * A memory summary is often a full commit message — subject, blank line, body —
+ * and dropping that into a `- [session …] …` list breaks the list: the body
+ * renders as unindented prose that reads like the surrounding instructions
+ * rather than like a retrieved record. Collapse first, truncate second, or the
+ * budget is spent on whitespace.
+ */
+function oneLine(text: string | undefined | null, max: number): string {
+  return truncateAtBoundary((text || '').replace(/\s+/g, ' ').trim(), max);
+}
+
+/** Everything about an entry a term could match, lowercased once. */
+function searchableText(parts: Array<string | undefined | null | string[]>): string {
+  const flat: string[] = [];
+  for (const p of parts) {
+    if (!p) continue;
+    if (Array.isArray(p)) flat.push(...p.filter((x) => typeof x === 'string'));
+    else flat.push(p);
+  }
+  return flat.join('\n').toLowerCase();
+}
+
+function scoreEntry(text: string, files: string[], terms: MemoryTerm[]): { score: number; matched: string[] } {
+  let score = 0;
+  const matched: string[] = [];
+  const fileText = files.join('\n').toLowerCase();
+  for (const { term, weight } of terms) {
+    // A path term is checked against the FILE LIST as well as the prose, and
+    // scores double when it lands there: "this session edited that exact file"
+    // is a different class of evidence from "this session mentioned it".
+    const inFiles = weight >= 8 && fileText.includes(term);
+    if (inFiles) {
+      score += weight * 2;
+      matched.push(term);
+      continue;
+    }
+    if (text.includes(term)) {
+      score += weight;
+      matched.push(term);
+    }
+  }
+  return { score, matched };
+}
+
+// Below this, a "hit" is one or two incidental common words and injecting it
+// teaches the agent that this block is noise. One path match (10, doubled to 20
+// on a file-list hit) clears it alone; a pile of ordinary words does not.
+//
+// 10 rather than 8, because at 8 that last sentence was false: plain words are
+// weight 2, so FOUR of them scored exactly the bar. "is checking origin memory
+// on every prompt expensive or not?" matched `origin, memory, every, expensive`
+// — 4 x 2 = 8 — and retrieved a record about the daily brief blocking on an
+// LLM. A different performance problem, presented as though it were the answer.
+//
+// Two of those four are near-worthless here by construction: `origin` is the
+// repo's own name and `memory` is what the feature is called, so both appear in
+// a large share of records. A coincidence assembled from words like those is
+// the worst failure this search has — not a miss, which costs nothing, but a
+// confident-looking hit. Once the block reads as noise the agent skims past it,
+// and the real retrievals go with it.
+//
+// Deliberately NOT an "only paths and identifiers count" rule: prose-only
+// recall is a tested, intentional capability ("so a fresh clone fetches the
+// notes refspec" — five distinctive words, no symbol, and it must still find
+// the session about exactly that). Five such words score 10 and still clear;
+// four common ones no longer do. The floor moved by one word, not by a class.
+const MEMORY_HIT_MIN_SCORE = 10;
+
+
+/**
+ * Search this repo's memory for records relevant to `promptText`.
+ *
+ * Ranked, thresholded, and capped. Returns [] rather than a weak best-effort
+ * list when nothing clears the bar — an empty result is a correct answer here,
+ * and padding it with the newest records would just re-inject the digest the
+ * agent already has.
+ */
+export function searchMemoryForPrompt(repoPath: string, promptText: string, limit = 3): MemoryHit[] {
+  if (isBakeoffRepo(repoPath) || isRepoIgnored(repoPath)) return [];
+  const terms = extractMemoryTerms(promptText);
+  if (terms.length === 0) return [];
+  // Bail before touching git when no entry COULD clear the threshold.
+  //
+  // This runs on the user's keystroke path, once per prompt, and the reads
+  // below shell out to `git notes show`. Without this, "ok thanks, continue"
+  // paid the full cost — read the entire payload, score every record — to
+  // return the empty list its one weight-1 term made inevitable. Conversational
+  // turns are a large share of all prompts, so this is the common case, not an
+  // edge one.
+  //
+  // Sound rather than heuristic: an entry's score is the sum of the weights it
+  // matches, so the best any entry can do is match everything. Path terms count
+  // double because scoreEntry doubles them on a file-list hit — overstating the
+  // ceiling is what keeps this from ever discarding a prompt that had a chance.
+  const ceiling = terms.reduce((n, t) => n + (t.weight >= 8 ? t.weight * 2 : t.weight), 0);
+  if (ceiling < MEMORY_HIT_MIN_SCORE) return [];
+
+  // ONE payload read, not two. readAllSessionMemory and readAllCommitMemory are
+  // each a thin wrapper over readMemoryPayload, which is uncached — so calling
+  // both made every prompt pay for the same `git notes show` twice.
+  const payload = readMemoryPayload(repoPath);
+  const hits: MemoryHit[] = [];
+
+  for (const s of payload.sessions.filter(isSubstantiveMemory)) {
+    const files = s.filesChanged || [];
+    const text = searchableText([
+      s.summary, s.intent, s.decisions, s.openTodos, s.verify, files,
+      s.fileNotes ? Object.keys(s.fileNotes) : [], s.fileNotes ? Object.values(s.fileNotes) : [],
+    ]);
+    const { score, matched } = scoreEntry(text, files, terms);
+    if (score < MEMORY_HIT_MIN_SCORE) continue;
+    const lines: string[] = [];
+    const when = (s.endedAt || s.startedAt || '').slice(0, 10);
+    lines.push(`- [session ${s.sessionId.slice(0, 8)}${when ? `, ${when}` : ''}] ${oneLine(s.summary || '(no summary)', 220)}`);
+    if (s.intent?.length) lines.push(`  Asked for: ${oneLine(s.intent[0], 160)}`);
+    if (s.decisions?.length) lines.push(`  Decision: ${oneLine(s.decisions[0], 160)}`);
+    if (s.openTodos?.length) lines.push(`  Still open: ${oneLine(s.openTodos[0], 160)}`);
+    if (files.length) lines.push(`  Files: ${files.slice(0, 6).join(', ')}${files.length > 6 ? ` (+${files.length - 6})` : ''}`);
+    hits.push({ key: `s:${s.sessionId}`, kind: 'session', score, matched, lines });
+  }
+
+  for (const c of payload.commits) {
+    const files = c.filesChanged || [];
+    const text = searchableText([
+      c.message, c.decisions, files,
+      c.fileNotes ? Object.keys(c.fileNotes) : [], c.fileNotes ? Object.values(c.fileNotes) : [],
+    ]);
+    const { score, matched } = scoreEntry(text, files, terms);
+    if (score < MEMORY_HIT_MIN_SCORE) continue;
+    const lines: string[] = [];
+    lines.push(`- [commit ${c.commitSha.slice(0, 8)}${c.committedAt ? `, ${c.committedAt.slice(0, 10)}` : ''}] ${oneLine(c.message || '', 180)}`);
+    if (c.decisions?.length) lines.push(`  Decision: ${oneLine(c.decisions[0], 160)}`);
+    if (files.length) lines.push(`  Files: ${files.slice(0, 6).join(', ')}${files.length > 6 ? ` (+${files.length - 6})` : ''}`);
+    hits.push({ key: `c:${c.commitSha}`, kind: 'commit', score, matched, lines });
+  }
+
+  // Sessions before commits at equal score: a session rollup carries intent,
+  // decisions and open TODOs, where a commit record carries a subject line.
+  hits.sort((a, b) => (b.score - a.score) || (a.kind === b.kind ? 0 : a.kind === 'session' ? -1 : 1));
+  return hits.slice(0, limit);
+}
+
+/**
+ * Render the prompt-scoped hits for injection, skipping any already delivered to
+ * this session.
+ *
+ * `alreadySeen` is what keeps a multi-turn conversation about one file from
+ * re-injecting the same three records every prompt — which costs real context
+ * and, worse, trains the agent to skim past this block.
+ */
+export function buildPromptScopedMemoryContext(
+  repoPath: string,
+  promptText: string,
+  alreadySeen: string[] = [],
+): { block: string; keys: string[] } | null {
+  const seen = new Set(alreadySeen);
+  const hits = searchMemoryForPrompt(repoPath, promptText).filter((h) => !seen.has(h.key));
+  if (hits.length === 0) return null;
+
+  const body = hits.map((h) => h.lines.join('\n')).join('\n');
+  // Strongest evidence first: a reader scanning "(matched: …)" should see the
+  // path that earned the hit, not the three common words that came along with
+  // it. Unordered, this line made a good retrieval look like a coincidence.
+  const weights = new Map(extractMemoryTerms(promptText).map((t) => [t.term, t.weight]));
+  const terms = [...new Set(hits.flatMap((h) => h.matched))]
+    .sort((a, b) => (weights.get(b) || 0) - (weights.get(a) || 0))
+    .slice(0, 4);
+  return {
+    block: [
+      `Origin memory — records matching THIS request${terms.length ? ` (matched: ${terms.join(', ')})` : ''}:`,
+      body,
+      'This is retrieved from the repo\'s git notes, not a guess. Treat an open TODO or a recorded ' +
+        'decision above as binding prior context: if you are about to contradict one, say so and why.',
+    ].join('\n'),
+    keys: hits.map((h) => h.key),
+  };
 }

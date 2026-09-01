@@ -4,9 +4,41 @@ import { getGitRoot } from '../session-state.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
 import { isConnectedMode } from '../config.js';
 import path from 'path';
+import fs from 'fs';
 import { git, runDetailed } from '../utils/exec.js';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
+
+/** A session ID in the three shapes users actually paste: the full UUID that
+ *  `origin explain`, `origin status` and the dashboard URL all print, the
+ *  12-char session tag, and a bare hex prefix. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HEX_ID = /^[0-9a-f]{8,}$/i;
+
+/**
+ * Does this argument name a session rather than a file?
+ *
+ * The old test was `/^[a-f0-9]{8,}$/` — hyphens excluded — so a full UUID
+ * failed it and fell through to the file branch, which answered
+ * `No commits found for 92e45049-a542-46b0-95c1-77b4c21b0039`. Every surface
+ * that hands a user an ID hands them that form, so the one string most likely
+ * to be pasted was the one shape the command could not read.
+ *
+ * A path that EXISTS on disk still wins: a repo may legitimately hold a file
+ * named like an ID, and showing the wrong file is visible to whoever asked,
+ * while quietly querying a session they didn't name is not.
+ */
+export function looksLikeSessionId(
+  arg: string,
+  fileExists: (p: string) => boolean = (p) => fs.existsSync(p),
+): boolean {
+  if (!arg || arg.includes('/') || arg.includes('\\')) return false;
+  if (!UUID.test(arg) && !HEX_ID.test(arg)) return false;
+  try {
+    if (fileExists(path.resolve(process.cwd(), arg))) return false;
+  } catch { /* unreadable cwd — treat it as an ID, the API call is harmless */ }
+  return true;
+}
 
 interface CommitPromptInfo {
   sha: string;
@@ -70,10 +102,9 @@ function getPromptsForSession(sessionId: string, cwd: string): string[] {
 }
 
 export async function promptsCommand(filePath: string, opts: { expand?: boolean; limit?: string }) {
-  // If the argument looks like a session ID (hex, 8+ chars, no path separators),
-  // show prompts for that session from the platform API
-  const isSessionId = /^[a-f0-9]{8,}$/i.test(filePath) && !filePath.includes('/') && !filePath.includes('.');
-  if (isSessionId) {
+  // A session ID (full UUID, session tag, or hex prefix) goes to the platform
+  // API; anything else is a path in this repo.
+  if (looksLikeSessionId(filePath)) {
     return showSessionPrompts(filePath);
   }
 

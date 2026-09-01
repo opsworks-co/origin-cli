@@ -2,6 +2,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { shouldIgnoreFile } from './ignore-patterns.js';
+import { isShellTool, shellCommandText, commandWritesFiles } from './shell-write-capture.js';
+import { isInsideRepo, toRepoRelativePath , abbreviateHome, MAX_OUT_OF_REPO_FILES } from './paths.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -18,6 +20,14 @@ interface MessageUsage {
   output_tokens?: number;
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
+  // Per-TTL breakdown of cache_creation_input_tokens. Anthropic bills the
+  // 1-hour tier at 2x input against the 5-minute tier's 1.25x, and Claude Code
+  // writes 1-hour cache exclusively — so without this the write side of every
+  // Claude Code session is priced at the wrong rate.
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number;
+    ephemeral_1h_input_tokens?: number;
+  };
 }
 
 interface TranscriptLine {
@@ -29,6 +39,13 @@ interface TranscriptLine {
   // synthetic dispatch prompt leaks in as a user prompt and its tokens are
   // folded into the parent under the parent's model. We split them out.
   isSidechain?: boolean;
+  // Claude Code's flag for content IT injected into the user role: a Skill's
+  // body, a slash-command expansion, `Continue from where you left off.` on
+  // resume, a cross-session message, a `<local-command-caveat>`. None of it
+  // was typed by the user. Unlike the `<system-reminder>` / `<task-notification>`
+  // envelopes cleanPrompt strips, these carry NO tag — a skill body is plain
+  // markdown — so this field is the only signal there is.
+  isMeta?: boolean;
   parentUuid?: string | null;
   message: {
     id?: string;
@@ -47,6 +64,16 @@ export interface ParsedTranscript {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  // Of `cacheCreationTokens`, the portion written to the 1-hour cache tier —
+  // a SUBSET, not an addition. 0 when the transcript predates the per-TTL
+  // usage fields or the provider has only one tier.
+  cacheCreation1hTokens: number;
+  // How many real prompts `since` dropped — i.e. the NATIVE transcript index of
+  // `prompts[0]`. 0 without a cutoff. The CLI adds this to a session-relative
+  // turn number to get the index extractPromptFileMappings numbers rows by, so
+  // an adopted session's turns append after the rows it never saw instead of
+  // overwriting them.
+  promptIndexBase: number;
   toolCalls: number;
   // Of `tokensUsed`, the portion incurred INSIDE Task sub-agents (isSidechain
   // turns). The session is still billed for it (it's a subset of the total),
@@ -123,6 +150,38 @@ function buildToolFields(
   };
 }
 
+/**
+ * Copilot's own envelope blocks, removed from a prompt so what we store is what
+ * the user typed.
+ *
+ * Copilot Desktop (the Tauri app) wraps the FIRST prompt of every chat in a
+ * workspace preamble — `<copilot_tauri_workspace>` / `<copilot_working_context>`
+ * / `<copilot_artifacts>` / `<branch_rename_request>` — with the user's actual
+ * sentence buried in the middle, and appends `<system_notification>` reminders
+ * to later ones. The CLI adds `<current_datetime>` on the transcript side.
+ *
+ * Leaving the preamble in is not merely cosmetic. It is stored as prompt #0, and
+ * the transcript records the clean text, so the two never match again: from the
+ * next Stop onward reconcilePromptHistory() can find no overlap and falls back
+ * to concatenating both lists, re-appending the whole history every turn. Two
+ * real prompts rendered as five rows (prod copilot sessions 8b25cb05 / 2f31a7fe,
+ * 2026-08-25), in the give-away order [A, blob, B, A, B].
+ *
+ * Matches `<copilot_*>` by prefix so a block Copilot adds later is stripped too;
+ * every other name is listed explicitly, because a blanket "strip any XML-ish
+ * block" would eat a user pasting real markup.
+ */
+export function stripCopilotEnvelopes(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/<(copilot_[a-z0-9_]+)>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<current_datetime>[\s\S]*?<\/current_datetime>/gi, '')
+    .replace(/<system_notification>[\s\S]*?<\/system_notification>/gi, '')
+    .replace(/<branch_rename_request>[\s\S]*?<\/branch_rename_request>/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 // ─── GitHub Copilot events.jsonl → Claude-Code JSONL ─────────────────────────
 // The Copilot CLI records its transcript as `events.jsonl` under
 // `~/.copilot/session-state/<id>/` — one event per line with a dotted `type`
@@ -165,13 +224,10 @@ export function convertCopilotEventsToClaude(raw: string): string | null {
 
     if (ev?.type === 'user.message') {
       // `content` is the clean user text; `transformedContent` is the same
-      // wrapped in <current_datetime>/<system_notification> envelopes.
+      // wrapped in Copilot's own envelope blocks.
       let content = typeof d.content === 'string' ? d.content : '';
       if (!content && typeof d.transformedContent === 'string') {
-        content = d.transformedContent
-          .replace(/<current_datetime>[\s\S]*?<\/current_datetime>/gi, '')
-          .replace(/<system_notification>[\s\S]*?<\/system_notification>/gi, '')
-          .trim();
+        content = stripCopilotEnvelopes(d.transformedContent);
       }
       if (content) {
         out.push({ type: 'user', message: { role: 'user', content }, timestamp: ts });
@@ -256,18 +312,90 @@ export function readCopilotModel(transcriptPath: string): string | null {
   return null;
 }
 
+/**
+ * How close the transcript's first entry has to sit to `since` for Origin to
+ * count as having been there from the agent session's first turn.
+ *
+ * Adoption — the case `since` exists for — is measured in minutes or hours: a
+ * resumed Claude Code transcript replays its parent's history, an `origin
+ * enable` mid-session joins a conversation already under way. A gap of a few
+ * seconds is not adoption, it is start-up latency.
+ */
+const SESSION_JOIN_GRACE_MS = 60_000;
+
+/** Epoch-ms of the first entry in a JSONL transcript that carries a timestamp. */
+function firstEntryTimestampMs(raw: string): number {
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    let entry: any;
+    try {
+      entry = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    const ts = entry?.timestamp;
+    if (typeof ts !== 'string') continue;
+    const ms = Date.parse(ts);
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+  return 0;
+}
+
+/**
+ * The cutoff `since` should ACTUALLY use, given what the transcript looks like.
+ *
+ * Callers pass `since: state.startedAt` — the moment Origin's session row was
+ * created — and every user entry older than it is treated as a turn that ran
+ * before Origin joined (it still consumes a native prompt index, see
+ * `promptIndexBase`). That rule assumes Origin's row predates the agent's first
+ * prompt, which holds only for agents whose session-start hook lands first.
+ *
+ * It does not hold for Copilot. Its session row is auto-created by the FIRST
+ * user-prompt-submit, so `startedAt` is a second or two AFTER the prompt that
+ * created it — and that prompt, the session's own turn one, was counted as
+ * pre-session. `promptIndexBase` became 1, every turn was written one row past
+ * itself, and the gap-filler manufactured a placeholder for the index the shift
+ * vacated: prod session fb2d9b62 stored THREE promptChange rows for two
+ * prompts, the last two carrying the same text (one holding the work, one
+ * empty). That is the duplicate-row shape on the session page.
+ *
+ * So: when the transcript itself begins within `SESSION_JOIN_GRACE_MS` of
+ * `since`, Origin was present from the session's start and NOTHING in the file
+ * predates it — drop the cutoff. A genuinely adopted transcript starts far
+ * earlier and keeps it.
+ */
+function effectiveSinceMs(raw: string, since?: Date | string | null): number {
+  const sinceMs = since
+    ? (typeof since === 'string' ? new Date(since) : since).getTime()
+    : 0;
+  if (!Number.isFinite(sinceMs) || sinceMs <= 0) return 0;
+  const firstMs = firstEntryTimestampMs(raw);
+  if (firstMs <= 0) return sinceMs;
+  return sinceMs - firstMs <= SESSION_JOIN_GRACE_MS ? 0 : sinceMs;
+}
+
 // ─── Parser ────────────────────────────────────────────────────────────────
 
-export function parseTranscript(transcriptPath: string, opts: { since?: Date | string | null } = {}): ParsedTranscript {
+export function parseTranscript(
+  transcriptPath: string,
+  opts: {
+    since?: Date | string | null;
+    // The repo root(s) this session owns. Supplied, `filesChanged` is scoped to
+    // them the same way per-prompt mappings are (see scopeCapturedPath): files
+    // written outside the repo are dropped, in-repo absolutes become
+    // repo-relative. Omitted, paths travel verbatim.
+    repoRoots?: string[];
+  } = {},
+): ParsedTranscript {
   // Resumed Claude Code sessions write the full conversation history into the
   // new transcript file, so summing every line double-counts the parent
   // session's tokens (we saw cache reads ~200M show up identically on a
   // chained child, inflating cost by ~2×). When `since` is provided, drop
   // entries whose `timestamp` predates it so each session reports only the
-  // tokens it actually produced.
-  const sinceMs = opts.since
-    ? (typeof opts.since === 'string' ? new Date(opts.since) : opts.since).getTime()
-    : 0;
+  // tokens it actually produced. Resolved once `raw` is in hand — see
+  // effectiveSinceMs for why the cutoff can't be taken at face value.
+  let sinceMs = 0;
   const result: ParsedTranscript = {
     prompts: [],
     filesChanged: [],
@@ -276,6 +404,8 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
+    cacheCreation1hTokens: 0,
+    promptIndexBase: 0,
     toolCalls: 0,
     subagentTokens: 0,
     subagentEdits: [],
@@ -296,19 +426,20 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
   const copilotConverted = convertCopilotEventsToClaude(raw);
   if (copilotConverted != null) raw = copilotConverted;
   result.transcript = raw;
+  sinceMs = effectiveSinceMs(raw, opts.since);
 
   // Detect format: Gemini uses a single JSON object { "messages": [...] }, Claude/Cursor use JSONL.
   // JSONL also starts with '{' so we can't just check the first char.
   // Instead, try parsing as a single JSON object — if it has a messages/history array, it's Gemini.
   const trimmed = raw.trim();
   if (trimmed.startsWith('{') && !trimmed.includes('\n')) {
-    return parseGeminiTranscript(raw, result);
+    return parseGeminiTranscript(raw, result, opts.repoRoots);
   }
   if (trimmed.startsWith('{')) {
     try {
       const singleObj = JSON.parse(trimmed);
       if (singleObj.messages || singleObj.history) {
-        return parseGeminiTranscript(raw, result);
+        return parseGeminiTranscript(raw, result, opts.repoRoots);
       }
     } catch {
       // Not a single JSON object — fall through to JSONL parsing
@@ -342,7 +473,15 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
 
     if (sinceMs > 0 && entry.timestamp) {
       const t = Date.parse(entry.timestamp);
-      if (Number.isFinite(t) && t < sinceMs) continue;
+      if (Number.isFinite(t) && t < sinceMs) {
+        // Dropped from this session's totals, but still counted: it occupies a
+        // native prompt index that the mapping rows keep using.
+        if ((entry.type || (entry as any).role || entry.message?.role) === 'user'
+            && extractUserPrompt(entry)) {
+          result.promptIndexBase++;
+        }
+        continue;
+      }
     }
 
     // Cursor's JSONL puts the role at the top level (`{"role":"user", ...}`);
@@ -505,6 +644,7 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
     result.inputTokens += usage.input_tokens ?? 0;
     result.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
     result.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
+    result.cacheCreation1hTokens += usage.cache_creation?.ephemeral_1h_input_tokens ?? 0;
     result.outputTokens += usage.output_tokens ?? 0;
     if (sidechainMsgIds.has(msgId)) {
       result.subagentTokens += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
@@ -524,8 +664,15 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
   // headline number (cache reads are volumetrically huge but charged at 10%).
   result.tokensUsed = result.inputTokens + result.outputTokens;
 
-  // Deduplicated file list, filtered through ignore patterns
-  result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
+  // Deduplicated file list, scoped to the repo, then filtered through ignore
+  // patterns. Scoping FIRST because the ignore patterns are written
+  // repo-relative — and because an agent's own memory notes under ~/.claude and
+  // a scratch file in /tmp are not this repo's changed files at all. Same rule
+  // the per-prompt mappings got; this is the SESSION-level list, which is what
+  // renders as "N files changed" in the header.
+  result.filesChanged = Array.from(filesSet)
+    .map((f) => scopeCapturedPath(opts.repoRoots, f))
+    .filter((f): f is string => !!f && !shouldIgnoreFile(f));
   Object.assign(result, buildToolFields(toolCounts, readFilesSet));
 
   // Truncate summary to 500 chars
@@ -538,7 +685,37 @@ export function parseTranscript(transcriptPath: string, opts: { since?: Date | s
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
+/**
+ * Did the AGENT put this user-role entry here, rather than the user?
+ *
+ * Claude Code flags its own injections with `isMeta`: a Skill's body, a
+ * slash-command expansion, `Continue from where you left off.` on resume, a
+ * cross-session message, a `<local-command-caveat>`. None of it was typed.
+ *
+ * Dropped BEFORE the text is looked at, because there is nothing in the text
+ * to recognise — a skill body is ordinary markdown, so `cleanPrompt`, which
+ * strips envelopes by tag, cannot see it. #1136 fixed the tagged half of this
+ * and predicted the rest: "the injected-message vocabulary grows over time".
+ * It grew. This is the structural answer, and it needs no vocabulary.
+ *
+ * Measured over 40 local transcripts, every `isMeta` user message was an
+ * injection (a 690KB skill body among them, stored as prompt text), and each
+ * FOLLOWED the real prompt that triggered it — so dropping them removes
+ * phantom turns without orphaning a real one.
+ *
+ * EXPORTED because the per-prompt EDIT pipeline must apply the identical test.
+ * It counts prompts independently, and when the two disagree every prompt
+ * after the first is looked up at the wrong index — the 6-prompts-vs-18-
+ * captures failure. `cleanPrompt` is the other half of the same shared rule;
+ * a caller needs BOTH, since `<task-notification>` arrives with isMeta false.
+ */
+export function isAgentInjectedEntry(entry: { isMeta?: boolean } | null | undefined): boolean {
+  return entry?.isMeta === true;
+}
+
 function extractUserPrompt(entry: TranscriptLine): string | null {
+  if (isAgentInjectedEntry(entry)) return null;
+
   const content = entry.message?.content;
 
   if (typeof content === 'string') {
@@ -560,7 +737,15 @@ function extractUserPrompt(entry: TranscriptLine): string | null {
   return null;
 }
 
-function cleanPrompt(text: string): string | null {
+/**
+ * Strip the envelopes an agent injects into the user role and decide whether
+ * anything the USER actually typed remains. Null means "not a prompt".
+ *
+ * Exported because the per-prompt EDIT pipeline needs the identical rule: it
+ * counts prompts independently, and when the two disagree every prompt after
+ * the first is looked up at the wrong index.
+ */
+export function cleanPrompt(text: string): string | null {
   // Drop entirely if this is our own AGENTS.md / CLAUDE.md echoing back from
   // the agent (Codex reads AGENTS.md natively and bundles it into the first
   // user turn — looked like a real prompt in the dashboard).
@@ -650,7 +835,7 @@ interface GeminiMessage {
   model?: string;
 }
 
-function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTranscript {
+function parseGeminiTranscript(raw: string, result: ParsedTranscript, repoRoots?: string[]): ParsedTranscript {
   try {
     const data = JSON.parse(raw);
     const messages: GeminiMessage[] = data.messages || data.history || [];
@@ -750,7 +935,9 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
     // huge — rolling them into `tokensUsed` inflated dashboard totals
     // 10x+ (same bug we fixed for Claude transcripts at line 184).
     result.tokensUsed = result.inputTokens + result.outputTokens;
-    result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
+    result.filesChanged = Array.from(filesSet)
+      .map((f) => scopeCapturedPath(repoRoots, f))
+      .filter((f): f is string => !!f && !shouldIgnoreFile(f));
     Object.assign(result, buildToolFields(toolCounts, readFilesSet));
     if (!result.model) result.model = data.model || 'gemini';
 
@@ -824,6 +1011,18 @@ export interface PromptFileMapping {
   promptIndex: number;
   promptText: string;       // Truncated to 1000 chars
   filesChanged: string[];   // Files modified after this prompt
+  /**
+   * Absolute paths this turn wrote that landed OUTSIDE the repo — Origin's own
+   * memory notes under ~/.claude, a scratch file in /tmp, a sibling project.
+   * Home is collapsed to `~`.
+   *
+   * scopeCapturedPath drops those from `filesChanged`, correctly: they are not
+   * this repo's diff. But a turn whose writes ALL landed outside then renders
+   * as "0 files changed", which is indistinguishable from a capture that
+   * broke. Recording what was dropped is what lets the turn say why it is
+   * empty. Absent when the turn wrote nothing outside the repo.
+   */
+  outOfRepoFiles?: string[];
   diff: string;             // Unified diff of committed edits from this prompt
   uncommittedDiff?: string; // Unified diff of uncommitted changes from this prompt
   commitSha?: string | null;
@@ -854,6 +1053,55 @@ export interface PromptFileMapping {
   // three different ways (double quotes, a PowerShell here-string, `$(@'…'@)`),
   // and a matcher that searches the whole string is indifferent to all of them.
   commitCommands?: string[];
+  // This turn ran a shell command that could have written files (a heredoc,
+  // `sed -i`, an interpreter…). The watcher turns this into real edits from the
+  // turn's git window — without it a shell-writing turn ships `edits: []`,
+  // which is indistinguishable from a chat-only turn. Same signal the hook path
+  // records live at PostToolUse; agents with no hooks only have the transcript.
+  wroteViaShell?: boolean;
+}
+
+/**
+ * A path a transcript reports the agent writing, expressed the way the rest of
+ * capture keys on it — or `null` when the file is not this repo's work at all.
+ *
+ * Agents write plenty of files that are nobody's diff: their own memory notes
+ * under `~/.claude/projects/**`, scratch files in /tmp, a sibling checkout.
+ * The live (PostToolUse) ledger has dropped those since `isInsideRepo` landed,
+ * but the TRANSCRIPT pass never did — it took `tool_input.file_path` verbatim.
+ * Prod 97c78829's turn 1 ended up with exactly one "changed file":
+ * `/Users/…/.claude/projects/…/memory/multi-account-discover-import.md`, a
+ * note Origin's own memory step wrote, rendered as a file of the repo — while
+ * the five source files the turn actually committed were nowhere.
+ *
+ * The same pass also left IN-repo paths absolute, so they matched nothing in a
+ * git diff and rendered as `/Users/…/worktrees/…/apps/api/src/x.test.ts`.
+ * Relativising is the other half of the same fix.
+ *
+ * With no roots supplied the path travels unchanged — every existing caller
+ * that has no repo context behaves exactly as before.
+ */
+
+/**
+ * Record an absolute write that landed outside every known repo root.
+ *
+ * scopeCapturedPath returning null means one of two things: the path was
+ * RELATIVE (already repo-scoped, nothing to say) or it was absolute and
+ * outside. Only the second is evidence. Home is collapsed to `~` so the
+ * account name never reaches a plaintext column, matching the agy path.
+ */
+function noteOutOfRepoWrite(sink: Set<string>, rawPath: string): void {
+  if (!rawPath || !path.isAbsolute(rawPath)) return;
+  if (sink.size >= MAX_OUT_OF_REPO_FILES) return;
+  sink.add(abbreviateHome(rawPath));
+}
+
+export function scopeCapturedPath(roots: string[] | undefined, file: string): string | null {
+  if (!roots || roots.length === 0) return file;
+  for (const root of roots) {
+    if (root && isInsideRepo(root, file)) return toRepoRelativePath(root, file);
+  }
+  return null;
 }
 
 /**
@@ -862,12 +1110,31 @@ export interface PromptFileMapping {
  * Partitions file-modifying tool calls by the preceding user prompt:
  * each user message starts a new "turn", and all file modifications
  * until the next user message are attributed to that prompt.
+ *
+ * `since` must be passed the SAME value handed to parseTranscript, and for the
+ * same reason. A promptIndex is a position in a list, so the two functions only
+ * agree if they enumerate the same prompts. parseTranscript has always scoped
+ * to the session (`since: state.startedAt`); this one used to enumerate the
+ * whole file from 0, which is invisible until Origin adopts a transcript that
+ * already has history — installing mid-conversation, or `--resume` copying a
+ * prior conversation forward. Then the mappings run in whole-file space while
+ * `prompts` runs in session space, and every turn's diff is written to the row
+ * that many positions earlier: prod ff3ac057 owned 33 prompts, shipped 44
+ * mappings whose first 12 were the PREVIOUS day's conversation, and rendered
+ * "no code changes captured" on the turns it had actually watched.
  */
 export function extractPromptFileMappings(
   transcriptPath: string,
   // Off by default: reading shas out of prose is only sound for transcripts
   // that record no tool OUTPUT (Cursor). See commitShasFromTranscript.
-  opts: { readReportedShas?: boolean } = {},
+  opts: {
+    readReportedShas?: boolean;
+    since?: Date | string | null;
+    // The repo root(s) this session owns. Supplied, every captured path is
+    // scoped to them (see scopeCapturedPath): out-of-repo files are dropped and
+    // in-repo absolutes become repo-relative. Omitted, paths travel verbatim.
+    repoRoots?: string[];
+  } = {},
 ): PromptFileMapping[] {
   if (!fs.existsSync(transcriptPath)) {
     return [];
@@ -886,13 +1153,13 @@ export function extractPromptFileMappings(
   // Detect format: Gemini uses a single JSON object { "messages": [...] }, Claude/Cursor use JSONL.
   // JSONL also starts with '{' so we can't just check the first char.
   if (trimmed.startsWith('{') && !trimmed.includes('\n')) {
-    return extractGeminiPromptMappings(raw);
+    return extractGeminiPromptMappings(raw, opts.repoRoots);
   }
   if (trimmed.startsWith('{')) {
     try {
       const singleObj = JSON.parse(trimmed);
       if (singleObj.messages || singleObj.history) {
-        return extractGeminiPromptMappings(raw);
+        return extractGeminiPromptMappings(raw, opts.repoRoots);
       }
     } catch {
       // Not a single JSON object — fall through to JSONL parsing
@@ -919,10 +1186,13 @@ export function extractPromptFileMappings(
   let currentPromptIndex = -1;
   let currentPromptText = '';
   let currentFiles = new Set<string>();
+  // Absolute writes this turn made OUTSIDE the repo — see PromptFileMapping.
+  let currentOutOfRepo = new Set<string>();
   let currentEdits: Array<{ file: string; toolName: string; input: Record<string, any> }> = [];
   let currentRanCommit = false;
   let currentCommitShas: string[] = [];
   let currentCommitCommands: string[] = [];
+  let currentWroteViaShell = false;
 
   // Prompts waiting for their turn to start, and whether the accumulator above
   // belongs to a turn that has actually begun. Only used when `hasTurnMarkers`.
@@ -936,11 +1206,37 @@ export function extractPromptFileMappings(
   const pending: string[] = [];
   let turnOpen = false;
 
+  // `since` drops the ROWS that belong to turns before the session, but never
+  // renumbers the ones that survive: promptIndex stays the turn's NATIVE
+  // position in the transcript.
+  //
+  // Renumbering from 0 was the obvious move and it is wrong twice over. A
+  // resumed session keeps its server row set, so restarting at 0 writes the new
+  // turns onto rows another session already filled — measured on prod 3bfa24e6,
+  // whose three fresh turns would have landed on rows holding "Why AI blame…"
+  // (+49) and "now fix the capture side…" (7 files, +239), replacing both. And
+  // the server reads the smallest incoming index to stamp
+  // `partialCapture`/`firstCapturedPromptIndex` (the "the first N prompts ran
+  // before it joined" banner), which a 0 silently disables.
+  const sinceMs = effectiveSinceMs(raw, opts.since);
+  const isBeforeSession = (entry: TranscriptLine): boolean => {
+    if (sinceMs <= 0 || !entry.timestamp) return false;
+    const t = Date.parse(entry.timestamp);
+    return Number.isFinite(t) && t < sinceMs;
+  };
+  // Whether the turn currently accumulating began before the cutoff. Adoption
+  // almost always lands MID-TURN, so the first entries past `since` are the
+  // previous turn's trailing tool_results — that turn keeps its native number
+  // and is simply not emitted.
+  let currentTurnBeforeSession = false;
+
   const flushTurn = () => {
+    if (currentTurnBeforeSession) return;
     mappings.push({
       promptIndex: currentPromptIndex,
       promptText: currentPromptText,
       filesChanged: Array.from(currentFiles),
+      ...(currentOutOfRepo.size > 0 ? { outOfRepoFiles: Array.from(currentOutOfRepo) } : {}),
       diff: buildDiffFromEdits(currentEdits),
       edits: currentEdits.slice(),
       ranCommit: currentRanCommit,
@@ -952,17 +1248,21 @@ export function extractPromptFileMappings(
         ? [...new Set(currentCommitShas)]
         : undefined,
       commitCommands: currentCommitCommands.length > 0 ? currentCommitCommands.slice() : undefined,
+      wroteViaShell: currentWroteViaShell || undefined,
     });
   };
 
-  const startTurn = (prompt: string) => {
+  const startTurn = (prompt: string, beforeSession = false) => {
     currentPromptIndex++;
+    currentTurnBeforeSession = beforeSession;
     currentPromptText = prompt.slice(0, 1000);
     currentFiles = new Set<string>();
+    currentOutOfRepo = new Set<string>();
     currentEdits = [];
     currentRanCommit = false;
     currentCommitShas = [];
     currentCommitCommands = [];
+    currentWroteViaShell = false;
   };
 
   for (const line of lines) {
@@ -1015,8 +1315,10 @@ export function extractPromptFileMappings(
             flushTurn();
           }
 
-          // Start new turn
-          startTurn(prompt);
+          // Start new turn. The turn inherits the scope of the entry that
+          // opened it, so a pre-session turn still consumes its native index
+          // (keeping later turns correctly numbered) but emits no row.
+          startTurn(prompt, isBeforeSession(entry));
         }
       }
       // If no prompt text (tool_result entry), continue accumulating files in current turn
@@ -1038,21 +1340,40 @@ export function extractPromptFileMappings(
       if (currentPromptIndex < 0) {
         currentPromptIndex = 0;
         currentPromptText = currentPromptText || '';
+        // Only reachable when the file itself opens mid-turn, so there is no
+        // user entry to inherit scope from. Under a cutoff that work belongs to
+        // whatever ran before the session — emit nothing for it.
+        currentTurnBeforeSession = sinceMs > 0;
       }
       const content = entry.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
           if (block.type === 'tool_use' && block.name && FILE_MODIFICATION_TOOLS.has(block.name) && block.input) {
-            const filePath = block.input.file_path || block.input.notebook_path || block.input.path;
-            if (filePath && typeof filePath === 'string') {
+            const rawPath = block.input.file_path || block.input.notebook_path || block.input.path;
+            const filePath = (rawPath && typeof rawPath === 'string')
+              ? scopeCapturedPath(opts.repoRoots, rawPath)
+              : null;
+            if (filePath) {
               currentFiles.add(filePath);
               currentEdits.push({ file: filePath, toolName: block.name, input: block.input });
+            } else if (typeof rawPath === 'string') {
+              // Dropped as out-of-repo. Keep it as the REASON this turn may
+              // otherwise render "0 files changed".
+              noteOutOfRepoWrite(currentOutOfRepo, rawPath);
             }
           }
           // Did this turn run `git commit`? Terminal work leaves no edit record,
           // so without this a turn that edited via the shell and committed looks
           // completely empty — and commit→turn pairing falls back to file
           // overlap, which can never match a turn with no recorded files.
+          // Did this turn write files through the SHELL? Terminal writes leave
+          // no edit record either, so the turn looks chat-only to every read
+          // surface. Recorded here so the watcher can recover the content from
+          // git (the hook path gets the same signal live at PostToolUse).
+          if (block.type === 'tool_use' && block.input && !currentWroteViaShell
+              && isShellTool(String(block.name || '')) && commandWritesFiles(shellCommandText(block.input))) {
+            currentWroteViaShell = true;
+          }
           if (block.type === 'tool_use' && block.input && ranGitCommit(block.input)) {
             currentRanCommit = true;
             const cmd = block.input.command ?? block.input.cmd ?? block.input.script ?? block.input.shellCommand;
@@ -1155,6 +1476,66 @@ export function lineLevelDiff(
   return ops;
 }
 
+// Tool names that write a whole file at once (as opposed to a region replace).
+// Kept in one place because buildDiffFromEdits needs it twice: once to decide
+// the file's old-side marker, once per edit.
+function isWholeFileWriteTool(toolName: string): boolean {
+  return toolName === 'Write' || toolName === 'mcp__acp__Write' || toolName === 'write_file'
+    || toolName === 'WriteFile' || toolName === 'write' || toolName === 'create';
+}
+
+/** The edit-tool spellings buildDiffFromEdits understands, in one place. */
+function isRegionEditTool(name: string): boolean {
+  return name === 'Edit' || name === 'mcp__acp__Edit' || name === 'replace' || name === 'edit'
+    || name === 'StrReplace' || name === 'str_replace' || name === 'search_replace';
+}
+
+/** The whole-file content a write-shaped record carried, under any agent's key. */
+function wholeFileContent(input: Record<string, any>): string {
+  return String(input.file_text ?? input.contents ?? input.content ?? '');
+}
+
+/**
+ * Replay a file's edits into the single result the turn produced, for a file the
+ * turn CREATED.
+ *
+ * Returns one synthetic whole-file write carrying the final content, or null
+ * when the sequence cannot be replayed faithfully — a file that already
+ * existed, or a region edit whose `old_string` is not in the content we have.
+ * Null means "render it the old way": a wrong reconstruction would be far worse
+ * than an inflated count, so anything uncertain declines.
+ */
+function collapseCreatedFileEdits(
+  fileEdits: Array<{ toolName: string; input: Record<string, any> }>,
+): Array<{ toolName: string; input: Record<string, any> }> | null {
+  const first = fileEdits[0];
+  if (!first || !isWholeFileWriteTool(first.toolName)) return null;
+  if (fileEdits.length === 1) return null; // nothing to collapse — keep the original record
+
+  let content = wholeFileContent(first.input);
+  if (!content) return null;
+
+  for (const edit of fileEdits.slice(1)) {
+    if (isWholeFileWriteTool(edit.toolName)) {
+      const next = wholeFileContent(edit.input);
+      if (!next) return null;
+      content = next;
+      continue;
+    }
+    if (!isRegionEditTool(edit.toolName)) return null;
+    const oldStr = String(edit.input.old_string ?? edit.input.old_str ?? '');
+    const newStr = String(edit.input.new_string ?? edit.input.new_str ?? '');
+    if (!oldStr && !newStr) continue;
+    // An insertion with no anchor, or an anchor we cannot find, means our copy
+    // of the content has already diverged from the agent's. Stop rather than
+    // invent.
+    if (!oldStr || !content.includes(oldStr)) return null;
+    content = content.replace(oldStr, newStr);
+  }
+
+  return [{ toolName: first.toolName, input: { content } }];
+}
+
 export function buildDiffFromEdits(edits: Array<{ file: string; toolName: string; input: Record<string, any> }>): string {
   if (edits.length === 0) return '';
 
@@ -1169,11 +1550,38 @@ export function buildDiffFromEdits(edits: Array<{ file: string; toolName: string
     byFile.set(edit.file, existing);
   }
 
-  for (const [filePath, fileEdits] of byFile) {
-    const shortPath = shortenFilePath(filePath);
-    parts.push(`diff --git a/${shortPath} b/${shortPath}`);
+  for (const [filePath, rawFileEdits] of byFile) {
+    // A file the turn CREATED and then kept editing is one result, not a
+    // transcript of the typing. Concatenating the create with every later
+    // touch-up counted the rewritten lines twice — once as created, once as
+    // replaced — so a new 709-line file read `+779/-70` (session 61abc51d,
+    // rectify.py) where the agent itself, and git, say `+709/-0`. The net was
+    // always right; the two halves were inflated by the churn between them.
+    //
+    // Only when the turn created the file: then the "before" state is nothing
+    // and the "after" state is the final content, both of which we know. A file
+    // that already existed has a base we cannot reconstruct from the records,
+    // so it keeps the existing per-edit rendering.
+    const fileEdits = collapseCreatedFileEdits(rawFileEdits) ?? rawFileEdits;
+    const shortPath = diffHeaderPath(filePath);
+    // A whole-file write as the file's FIRST edit means the turn created it, so
+    // the old side is /dev/null — git's marker for "no previous content".
+    const isCreate = isWholeFileWriteTool(fileEdits[0]?.toolName || '');
+    // Synthetic line cursors. We have no way to know where in the real file an
+    // edit landed (the tool payload carries content, not position), so hunks are
+    // numbered from the top of the file and advance monotonically — the same
+    // approach the server's synthesizePromptDiff takes. The numbers are not the
+    // file's true positions; they exist so the diff is well-formed and the
+    // gutter reads sensibly. A create starts its old side at 0 to match git's
+    // `@@ -0,0 +1,N @@` for a new file.
+    let oldCursor = isCreate ? 0 : 1;
+    let newCursor = 1;
+    // Buffer per file so a file whose every edit turns out to be empty (or an
+    // unrecognized tool) doesn't emit a header with no hunks under it.
+    const fileHunks: string[] = [];
 
     for (const edit of fileEdits) {
+      const body: string[] = [];
       if (edit.toolName === 'Edit' || edit.toolName === 'mcp__acp__Edit' || edit.toolName === 'replace' || edit.toolName === 'edit'
           || edit.toolName === 'StrReplace' || edit.toolName === 'str_replace' || edit.toolName === 'search_replace') {
         // Key spelling differs per agent: Claude/Cursor `old_string`/`new_string`,
@@ -1181,25 +1589,18 @@ export function buildDiffFromEdits(edits: Array<{ file: string; toolName: string
         // `old_str`/`new_str`.
         const oldStr = edit.input.old_string ?? edit.input.old_str ?? '';
         const newStr = edit.input.new_string ?? edit.input.new_str ?? '';
-        if (oldStr || newStr) {
-          parts.push(`--- a/${shortPath}`);
-          parts.push(`+++ b/${shortPath}`);
-          parts.push('@@ @@');
-          // LCS-based line diff so unchanged lines surrounding the actual
-          // edit emit as ` ` context, not `-`/`+`. Matches what `git diff`
-          // would have produced on the file pair.
-          for (const op of lineLevelDiff(oldStr.split('\n'), newStr.split('\n'))) {
-            const prefix = op.type === 'add' ? '+' : op.type === 'remove' ? '-' : ' ';
-            parts.push(`${prefix}${op.line}`);
-          }
+        if (!oldStr && !newStr) continue;
+        // LCS-based line diff so unchanged lines surrounding the actual
+        // edit emit as ` ` context, not `-`/`+`. Matches what `git diff`
+        // would have produced on the file pair.
+        for (const op of lineLevelDiff(oldStr.split('\n'), newStr.split('\n'))) {
+          const prefix = op.type === 'add' ? '+' : op.type === 'remove' ? '-' : ' ';
+          body.push(`${prefix}${op.line}`);
         }
-      } else if (edit.toolName === 'Write' || edit.toolName === 'mcp__acp__Write' || edit.toolName === 'write_file' || edit.toolName === 'WriteFile' || edit.toolName === 'write' || edit.toolName === 'create') {
+      } else if (isWholeFileWriteTool(edit.toolName)) {
         // Whole-file write content lives under a different key per agent:
         // Claude `content`, Cursor `contents`, Copilot `file_text`.
         const content = edit.input.file_text || edit.input.contents || edit.input.content || '';
-        parts.push(`--- /dev/null`);
-        parts.push(`+++ b/${shortPath}`);
-        parts.push('@@ @@');
         const contentLines = content.split('\n');
         // Drop the trailing-newline artifact so a 15-row file counts as +15, not +16.
         if (contentLines.length && contentLines[contentLines.length - 1] === '') contentLines.pop();
@@ -1209,11 +1610,40 @@ export function buildDiffFromEdits(edits: Array<{ file: string; toolName: string
         // linesAdded is derived by counting `+` lines, so the cap silently
         // corrupted every count above 30. Total output is still bounded by the
         // MAX_DIFF_SIZE guard below.
-        for (const line of contentLines) {
-          parts.push(`+${line}`);
-        }
+        for (const line of contentLines) body.push(`+${line}`);
+      } else {
+        continue;
       }
+      if (body.length === 0) continue;
+
+      // Count the hunk's two sides from the body we just built, so the header
+      // always agrees with what follows it.
+      let oldCount = 0;
+      let newCount = 0;
+      for (const b of body) {
+        if (b.startsWith('+')) newCount++;
+        else if (b.startsWith('-')) oldCount++;
+        else { oldCount++; newCount++; }
+      }
+      fileHunks.push(`@@ -${oldCursor},${oldCount} +${newCursor},${newCount} @@`);
+      for (const b of body) fileHunks.push(b);
+      oldCursor += oldCount;
+      newCursor += newCount;
     }
+
+    if (fileHunks.length === 0) continue;
+    parts.push(`diff --git a/${shortPath} b/${shortPath}`);
+    // `new file mode` is what tells git this is a creation. Without it `git
+    // apply` reads the `--- /dev/null` marker as a literal path, strips the
+    // leading component under its default -p1, and fails with
+    // "error: dev/null: No such file or directory". Caught by the git-apply
+    // test — the marker alone looks right and is not enough.
+    if (isCreate) parts.push('new file mode 100644');
+    // ONE pair of file markers per file, not one per hunk. Repeating them
+    // before every hunk (the old shape) is not a valid unified diff.
+    parts.push(isCreate ? '--- /dev/null' : `--- a/${shortPath}`);
+    parts.push(`+++ b/${shortPath}`);
+    for (const l of fileHunks) parts.push(l);
   }
 
   let result = parts.join('\n');
@@ -1223,22 +1653,40 @@ export function buildDiffFromEdits(edits: Array<{ file: string; toolName: string
   return result;
 }
 
-function shortenFilePath(filePath: string): string {
-  // Strip common home directory prefixes to keep paths readable
-  const home = '/Users/';
-  const idx = filePath.indexOf(home);
-  if (idx >= 0) {
-    const afterHome = filePath.slice(idx + home.length);
-    // Find the third slash to get user/project/rest
-    const parts = afterHome.split('/');
-    if (parts.length > 3) {
-      return parts.slice(1).join('/'); // Drop username
-    }
-  }
-  return filePath;
+/**
+ * The path to write into a diff's `diff --git a/X b/X` and `---`/`+++` lines.
+ *
+ * Callers hand us whatever their capture recorded. Where they scope paths to
+ * the repo first (extractPromptFileMappings and extractGeminiPromptMappings both
+ * run every edit through scopeCapturedPath), the path arrives already
+ * repo-relative and is used verbatim — which is what git wants and what makes
+ * the diff header agree with the same turn's `filesChanged`.
+ *
+ * This used to be `shortenFilePath`, a DISPLAY heuristic that dropped the
+ * username from a `/Users/...` path and returned everything else untouched. It
+ * broke two ways:
+ *
+ *   - an unscoped absolute path came through with its leading slash, so the
+ *     header read `diff --git a//abs/path b//abs/path` — a double slash no diff
+ *     parser accepts;
+ *   - for a `/Users/...` path it produced `Documents/Coding/repo/src/x.ts`,
+ *     which is neither absolute nor repo-relative, so the header DISAGREED with
+ *     the turn's own filesChanged for every caller that had scoped those.
+ *
+ * So: normalize separators, then strip anything that makes the path absolute —
+ * a leading slash, or a Windows drive prefix. An absolute path still cannot be
+ * made truly repo-relative here (this function is never told the repo root);
+ * the result is well-formed and consistent, not applicable. Scoping remains the
+ * caller's job.
+ */
+function diffHeaderPath(filePath: string): string {
+  return String(filePath || '')
+    .replace(/\\/g, '/')
+    .replace(/^[A-Za-z]:\//, '')
+    .replace(/^\/+/, '');
 }
 
-function extractGeminiPromptMappings(raw: string): PromptFileMapping[] {
+function extractGeminiPromptMappings(raw: string, repoRoots?: string[]): PromptFileMapping[] {
   try {
     const data = JSON.parse(raw);
     const messages: GeminiMessage[] = data.messages || data.history || [];
@@ -1275,8 +1723,11 @@ function extractGeminiPromptMappings(raw: string): PromptFileMapping[] {
           if (part.functionCall) {
             const name = part.functionCall.name || '';
             if (FILE_MODIFICATION_TOOLS.has(name) && part.functionCall.args) {
-              const fp = part.functionCall.args.file_path || part.functionCall.args.path;
-              if (fp && typeof fp === 'string') {
+              const rawFp = part.functionCall.args.file_path || part.functionCall.args.path;
+              const fp = (rawFp && typeof rawFp === 'string')
+                ? scopeCapturedPath(repoRoots, rawFp)
+                : null;
+              if (fp) {
                 currentFiles.add(fp);
                 currentEdits.push({ file: fp, toolName: name, input: part.functionCall.args || {} });
               }
@@ -1975,24 +2426,30 @@ export function resolveModelPricing(
 }
 
 // Cache discount/premium varies by provider:
-//   • Anthropic   — read 0.10×, write 1.25× (cache writes are billed)
+//   • Anthropic   — read 0.10×, write 1.25× (5-minute) / 2.00× (1-hour)
 //   • Google      — read 0.25×, no write surcharge
 //   • OpenAI      — read 0.50×, no write surcharge
 // Mirrors cacheMultipliersFor() in apps/api/src/utils/pricing.ts.
-function cacheMultipliersFor(modelKey: string): { read: number; write: number } {
-  if (modelKey.startsWith('gemini')) return { read: 0.25, write: 1.00 };
+function cacheMultipliersFor(modelKey: string): { read: number; write: number; write1h: number } {
+  if (modelKey.startsWith('gemini')) return { read: 0.25, write: 1.00, write1h: 1.00 };
   if (modelKey.startsWith('gpt-') || modelKey.startsWith('o1') ||
       modelKey.startsWith('o3') || modelKey.startsWith('o4') ||
-      modelKey === 'codex' || modelKey === 'composer') return { read: 0.50, write: 1.00 };
-  return { read: 0.10, write: 1.25 };
+      modelKey === 'codex' || modelKey === 'composer') return { read: 0.50, write: 1.00, write1h: 1.00 };
+  return { read: 0.10, write: 1.25, write1h: 2.00 };
 }
 
+// `cacheCreation1hTokens` is the portion of `cacheCreationTokens` written to
+// Anthropic's 1-hour tier — a subset, not an addition. Claude Code writes 1h
+// cache exclusively, so this is the normal case, not an edge one; see the note
+// on CacheMultipliers in apps/api/src/utils/pricing.ts. Callers that don't know
+// the split leave it at 0 and get the previous flat-rate behaviour.
 export function estimateCost(
   model: string,
   inputTokens: number,
   outputTokens: number,
   cacheReadTokens: number = 0,
   cacheCreationTokens: number = 0,
+  opts: { cacheCreation1hTokens?: number } = {},
 ): number {
   const { input, output, cachedInput, key } = resolveModelPricing(model);
   const m = cacheMultipliersFor(key);
@@ -2000,9 +2457,18 @@ export function estimateCost(
   // one — gpt-5.5's 90% discount doesn't match the OpenAI family
   // default of 50% the multiplier would give.
   const effectiveCacheReadRate = cachedInput ?? input * m.read;
+  // Clamp: the 1h portion can never exceed the total it is drawn from, so a
+  // bad caller shifts rate but never invents tokens.
+  const oneHourTokens = Math.min(
+    Math.max(opts.cacheCreation1hTokens ?? 0, 0),
+    Math.max(cacheCreationTokens, 0),
+  );
+  const fiveMinTokens = Math.max(cacheCreationTokens, 0) - oneHourTokens;
   const inputCost = (inputTokens / 1_000_000) * input;
   const cacheReadCost = (cacheReadTokens / 1_000_000) * effectiveCacheReadRate;
-  const cacheCreationCost = (cacheCreationTokens / 1_000_000) * (input * m.write);
+  const cacheCreationCost =
+    (fiveMinTokens / 1_000_000) * (input * m.write) +
+    (oneHourTokens / 1_000_000) * (input * m.write1h);
   const outputCost = (outputTokens / 1_000_000) * output;
 
   return parseFloat((inputCost + cacheReadCost + cacheCreationCost + outputCost).toFixed(4));

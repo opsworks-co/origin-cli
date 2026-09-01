@@ -36,6 +36,7 @@ interface NoteOrigin {
 function readNote(repoPath: string, sha: string): string | null {
   try {
     return execFileSync('git', ['notes', '--ref=origin', 'show', sha], {
+      windowsHide: true,
       cwd: repoPath,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -49,6 +50,7 @@ function readNote(repoPath: string, sha: string): string | null {
 function resolveSha(repoPath: string, ref: string): string | null {
   try {
     return execFileSync('git', ['rev-parse', ref], {
+      windowsHide: true,
       cwd: repoPath,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -62,6 +64,7 @@ function resolveSha(repoPath: string, ref: string): string | null {
 function readCommitSubject(repoPath: string, sha: string): string {
   try {
     return execFileSync('git', ['log', '-1', '--format=%s', sha], {
+      windowsHide: true,
       cwd: repoPath,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],

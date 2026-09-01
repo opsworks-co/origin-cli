@@ -2,9 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { execSync, spawn } from 'child_process';
+// execFileSync, not execSync: a shell string makes Windows launch cmd.exe just
+// to interpret it, so every `git rev-parse` here was two processes instead of
+// one. These are the hottest git calls in the CLI — the watcher runs them for
+// every live session on every poll, and every hook fire runs them too.
+import { execFileSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { processInfo } from './utils/process-detect.js';
+import { samePath } from './paths.js';
 import type { PromptEdit } from './prompt-capture/types.js';
 import { ensureOwnerStamp } from './session-owner.js';
 
@@ -111,6 +116,23 @@ export interface SessionState {
   // so this is their only signal for matching a worktree commit to the
   // session that made it when several sessions share one repo.
   lastCwd?: string;
+  // Did this session actually READ the repo's Origin memory? Set at
+  // pre-tool-use the first time a tool call matches isMemoryReadCommand /
+  // isMemoryReadToolName. Session-start injects a directive to do so; without
+  // an observed tool call there is no way to tell a session that followed it
+  // from one that ran blind, and the escalation below has nothing to trigger on.
+  memoryChecked?: boolean;
+  // Whether the one-time escalation (buildMemoryEscalationContext) has already
+  // been injected. Once per session, not once per turn: an agent that has
+  // decided memory is irrelevant to its task should not be told again on every
+  // prompt for the rest of the session.
+  memoryNudged?: boolean;
+  // Keys of the memory records already retrieved into THIS session's context by
+  // the prompt-scoped search (`s:<sessionId>` / `c:<sha>`). A conversation that
+  // stays on one file would otherwise be handed the same three records on every
+  // prompt — real context spent to tell the agent something it was told a turn
+  // ago, and the fastest way to train it to skim past this block.
+  memoryHitsInjected?: string[];
   headShaAtStart: string | null; // HEAD commit SHA when session started (null if no git)
   // Shadow commit (created by createShadowCommit at session start) that
   // snapshots the FULL working tree — tracked mods + untracked — as it was
@@ -129,15 +151,155 @@ export interface SessionState {
   // promptShadows[N] → promptShadows[N+1]` (or → working tree for the
   // latest prompt). Lets us isolate per-turn work even when no hook fires
   // at prompt boundaries.
+  // Baseline for the CURRENT turn, snapshotted in the working tree the
+  // session is actually writing in (a linked worktree), when that differs
+  // from repoPath.
+  //
+  // prePromptSha is deliberately NOT repointed: other paths diff it against
+  // repoPath's tree, and a shadow taken in a different tree would report the
+  // whole branch delta as the turn's work. So the worktree pair is carried
+  // alongside and consumed only by the shell-window capture, which uses both
+  // halves together. See session-worktree.ts.
+  prePromptWorkTree?: { path: string; sha: string; promptIndex: number } | null;
+  // Worktrees discovered from a shell command's own text mid-turn, each with a
+  // baseline snapshotted at the moment of discovery (pre-tool-use, before that
+  // command ran). Covers the agent that does `cd <worktree> && …` inside one
+  // Bash call, which never moves lastCwd. See session-worktree.ts.
+  discoveredWorkTrees?: Array<{ path: string; sha: string; promptIndex: number }>;
+  // Fingerprints of each probed tree's dirty files, taken by pre-tool-use just
+  // BEFORE a write-shaped shell command runs. post-tool-use re-probes and the
+  // difference is what that command actually wrote — evidence, as opposed to
+  // the turn window's inference. Cleared once resolved.
+  // Path of this session's write journal, and the epoch-ms start of the turn
+  // in flight. Together they let a turn claim the files WRITTEN during it,
+  // which is the only evidence available for agents that expose no tool hooks
+  // at all (Codex, Devin, Copilot). See write-journal.ts.
+  // Session ids seen writing into this same working tree while this session
+  // ran. Attribution between sessions sharing one checkout cannot be proven,
+  // so a turn captured under contention is a weaker claim than one captured
+  // alone — recorded rather than hidden. See checkout-contention.ts.
+  contendingSessionIds?: string[];
+  writeJournalPath?: string;
+  currentTurnStartedAt?: number;
+  shellProbes?: Array<{
+    // The tool call that armed this probe, so post-tool-use resolves ITS OWN
+    // window. Parallel tool calls interleave begin/end freely, and without an
+    // id the list was overwritten by whichever began last and drained by
+    // whichever ended first — see beginShellProbe. Absent for agents that do
+    // not propagate an id through both hooks; those keep the drain-all path.
+    toolCallId?: string;
+    promptIndex: number;
+    tree: string;
+    baselineSha?: string;
+    stamps: Array<{ file: string; mtimeMs: number; size: number }>;
+    skipped?: boolean;
+    // The command text that is about to run, clamped. Kept so the
+    // post-tool-use side can tell a file OUR command named apart from one a
+    // sibling happened to write inside the same window — see
+    // fileNamedInCommand. Without it every probe edit is equally weak and a
+    // contested file (13 sessions claim packages/cli/src/commands/hooks.ts)
+    // gets excluded from the turn that really wrote it.
+    command?: string;
+  }>;
+
+
   promptShadows?: Array<{
     promptIndex: number;
     shadowSha: string;
     capturedAt: string; // ISO timestamp
   }>;
+  // The turn currently EXECUTING, bound when that turn STARTS rather than
+  // derived from list position when an edit lands.
+  //
+  // Ownership used to be `prompts.length - 1`, resolved at capture time. That
+  // is the same thing as "the turn that made this edit" only while nobody
+  // types mid-turn: user-prompt-submit fires the instant the user hits enter,
+  // including for a message QUEUED behind the running turn, so from that
+  // moment every edit the still-running turn made resolved to the queued
+  // prompt's index. User-reported: "I put prompt 5 in the middle of work of
+  // prompt 4, all output went to prompt 4, prompt 5 is empty."
+  //
+  // A queued prompt appends to `prompts` but must NOT move this. Stop closes
+  // the turn; the next capture opens the following one.
+  // Commits this session made, bound to the turn that was ACTIVE when each
+  // landed. Written by post-commit, which is the one moment the answer is
+  // known rather than reconstructed.
+  //
+  // `sessionCommitShas` records WHICH commits are ours; it has never recorded
+  // WHOSE TURN. post-commit had `activeTurn` in hand the whole time and threw
+  // it away, so turn ownership was re-derived afterwards — twice, independently
+  // and differently:
+  //
+  //   CLI     supplementUncoveredCommittedFiles picks "the highest-promptIndex
+  //           turn that claims it", calling that the most defensible owner.
+  //   server  commit-attribution.ts runs 9 time windows and 10 promptIntent()
+  //           text checks over the prompt wording.
+  //
+  // Both are guesses at a fact that was observed. That is why the server ranks
+  // its own guess ABOVE the capture's carrier ("a capture's commits[] is a
+  // claim, not attestation") and why the same fix keeps being made: no amount
+  // of tuning reconstructs something nobody wrote down.
+  //
+  // Keyed by turnId, not promptIndex: a position moves (a resume, a rolled
+  // transcript, a mid-turn interjection), and a commit re-homed onto whatever
+  // turn now holds that slot is the exact failure this attests against.
+  //
+  // `via` grades the observation, because the two sources are not equally
+  // strong and the reader must be able to tell them apart:
+  //
+  //   post-commit  the hook fired as the commit landed and read activeTurn.
+  //                Proof of WHEN and WHOSE.
+  //   transcript   the agent printed the sha in its own output ("[branch
+  //                73df467]") and the watcher paired it to the turn whose
+  //                region it appeared in. Weaker: the sha is resolved and
+  //                age-bounded, but it is the agent SAYING it committed rather
+  //                than us watching it happen, and prose can carry an old sha
+  //                ("reverted abc1234").
+  //
+  // Cursor needs the second one. Across this machine's whole log history its
+  // worktree fired after-file-edit 30x, user-prompt-submit 29x and post-tool-use
+  // 9x — and post-commit ZERO times, ever, with core.hooksPath correctly set and
+  // the hook executable. Its commits do not invoke git hooks at all, so
+  // commit-time attestation can never exist for it; discovery is the only
+  // evidence available.
+  commitTurns?: Array<{ sha: string; turnId: string; at: string; via: 'post-commit' | 'transcript' }>;
+  activeTurn?: {
+    index: number;
+    turnId: string;
+    // The prompt text as it read when the turn opened. Re-checked at capture
+    // so a list that renumbered underneath us is caught instead of silently
+    // moving this turn's diff onto another row.
+    promptText: string;
+    openedAt: string;
+  } | null;
+  // Highest turn index Stop has closed. Lets the next open pick index+1
+  // rather than the list tail, so two prompts queued back-to-back run in
+  // order instead of the first being skipped.
+  lastClosedTurnIndex?: number;
+  // How many turns of this conversation predate `prompts` — i.e. the offset
+  // between our LOCAL turn numbering (always from 0) and the SERVER row a turn
+  // belongs to (its native position in the transcript). 0 / absent on an
+  // ordinary session, where the two spaces coincide.
+  //
+  // Non-zero after a resume, compaction or adoption, and that is exactly when
+  // a hook that writes a raw local index aims at row 0 — a row that already
+  // holds turn ONE. Stop derives the same number as `parsed.promptIndexBase`
+  // every turn and refreshes this; it is cached here for the hooks that cannot
+  // afford a transcript parse (see serverRowForLocalTurn in hooks.ts).
+  promptIndexBase?: number;
+  // Stable per-prompt identity, assigned at submit and never renumbered.
+  // `promptTurnIds[i]` belongs to the turn stored at index i. The server keys
+  // PromptChange rows on it, so a later renumbering of the list cannot slide
+  // one turn's diff onto another turn's row.
+  promptTurnIds?: string[];
   completedPromptMappings?: Array<{  // Accumulated per-prompt file change mappings
     promptIndex: number;
     promptText: string;
     filesChanged: string[];
+    // Absolute paths the turn wrote OUTSIDE the repo (home collapsed to `~`).
+    // Carried so a turn whose writes all landed elsewhere can explain its
+    // empty filesChanged instead of reading as a broken capture.
+    outOfRepoFiles?: string[];
     diff: string;
     uncommittedDiff?: string;
     commitSha?: string | null;
@@ -161,6 +323,28 @@ export interface SessionState {
     capturedAt: string;
     edits: PromptEdit[];
   }>;
+  // Files this session is ABOUT to write, claimed by the PRE-tool-use hook
+  // before the tool runs.
+  //
+  // liveEdits is written AFTER the write lands, which leaves a window where a
+  // file is already dirty in the shared tree but no state file says whose it
+  // is — and a concurrent session diffing in that window attributes it to
+  // itself. Measured: session b629d2cb's row for "take it yourself" picked up
+  // 97ad4482's `routes/sessions.ts` this way, seconds before 97ad4482's own
+  // ledger recorded it. Claiming at pre-tool-use closes the ordering gap: the
+  // claim is on disk before the bytes are.
+  //
+  // Pruned by age on read (PENDING_WRITE_TTL_MS) so a blocked or crashed tool
+  // call cannot leave a permanent claim, and capped so a long session cannot
+  // grow it without bound.
+  pendingWrites?: Array<{ file: string; at: string }>;
+  // Prompt indexes whose turn ran a WRITE-SHAPED shell command (a heredoc,
+  // `sed -i`, `cp`, an interpreter invocation…). The post-tool-use hook sets
+  // this; Stop reads it to decide whether to derive that turn's shell writes
+  // from its git window (see shell-write-capture.ts). A turn that only ran
+  // read-only commands is never in here, so it can never claim a file the
+  // user changed in their editor while the agent was talking.
+  shellWriteTurns?: number[];
   branch: string | null;      // Git branch at session start
   sessionTag?: string;        // Tag for concurrent session support
   // Ring buffer of tool-call pre/post records. Field kept as `subagents` for
@@ -280,13 +464,183 @@ export interface SessionState {
  * allowed the shrink — a truncated transcript is non-empty, so it won.
  *
  * Rules, in order:
+ * The mirror image is just as damaging and was the one left unhandled: the
+ * stored list starting LATE. A resumed session builds a fresh state file, a
+ * duplicate state file gets created mid-session, or the first
+ * user-prompt-submit simply never fires — and then stored holds only the TAIL
+ * of the conversation. It is not a prefix of parsed and parsed does not
+ * overlap its tail, so the last rule fired and CONCATENATED the two: prod
+ * session 3bfa24e6 stored 4 prompts against a 6-prompt transcript and got a
+ * 10-entry list with every prompt twice, reporting the current turn as index 9
+ * when it was index 5. Every index derived from it pointed at some earlier
+ * turn's row — which is how a read-only investigation turn came to own +665
+ * lines and a commit from a different session's branch, and how upplabs
+ * session c5c94af7 turn 1 (eight read-only commands) ended up holding turn 5's
+ * 81KB article-editor diff and a commit made 88 minutes later.
+ *
+ * Rules, in order:
  *   - nothing stored yet → take the transcript's view
  *   - stored is a prefix of parsed → ordinary growth, take parsed
+ *   - every stored prompt still appears in parsed, IN ORDER → the transcript
+ *     holds the complete history (we started late, or it records turns we
+ *     never saw, like an interrupt marker). Take parsed: it owns the
+ *     numbering. A subsequence test, not a contiguous one, because the
+ *     transcript legitimately carries entries the hook never recorded.
+ *   - all but the newest stored prompt appear in parsed → same, plus the
+ *     prompt the transcript has not flushed yet, appended so it keeps the
+ *     next index rather than overwriting the last one
  *   - parsed overlaps the TAIL of stored → the transcript lost its head; keep
  *     our numbering and append only what is genuinely new
  *   - no overlap → keep stored and append parsed. Renumbering is the one
  *     outcome that corrupts already-written rows, so never do it.
  */
+/**
+ * Normalize a prompt for comparison across the places it is recorded.
+ *
+ * Exported so the transcript watcher compares turn identity the SAME way the
+ * hook path does. Two normalizers would be two definitions of "the same
+ * prompt", and the paths would then disagree about which turn a capture
+ * belongs to — which is the class of bug this mechanism exists to stop.
+ */
+export function promptKey(text: string): string {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+/**
+ * Confirm the index we are about to write actually belongs to the prompt we
+ * think we are capturing — and re-home it, or refuse, when it does not.
+ *
+ * The transcript owns prompt NUMBERING: its mappings are parsed from the whole
+ * ordered conversation, while the hook's index is a length counter over a list
+ * that can start late or miss turns. `reconcilePromptHistory` realigns the
+ * common shapes, but duplicate state files and repeated prompt text can still
+ * put the counter out of step — and writing at a wrong index does not lose a
+ * turn's diff, it hands that diff to a DIFFERENT turn, which reads as a
+ * confident lie rather than missing data.
+ *
+ * Returns the index to write at, or null meaning "don't write": the transcript
+ * says this index belongs to some other prompt and no row matches ours. The
+ * turn's own capture is retried on the next Stop; an overwritten row is not
+ * recoverable.
+ */
+export function homePromptIndexByText(
+  idx: number,
+  text: string,
+  mappings: Array<{ promptIndex: number; promptText?: string }> | undefined | null,
+): number | null {
+  const list = Array.isArray(mappings) ? mappings : [];
+  if (list.length === 0) return idx;
+  const at = list.find((m) => m.promptIndex === idx);
+  // No mapping at this index: the transcript never described this turn (the
+  // case the Stop safety net exists for), so the counter is all we have.
+  if (!at) return idx;
+  const want = promptKey(text);
+  if (!want) return idx;
+  const has = promptKey(at.promptText || '');
+  if (has && (has === want || has.startsWith(want) || want.startsWith(has))) return idx;
+  // Out of step. Prefer the LAST matching row: prompt text repeats ("Try
+  // again"), and the newest occurrence is the turn being captured now.
+  for (let i = list.length - 1; i >= 0; i--) {
+    const k = promptKey(list[i].promptText || '');
+    if (k && (k === want || k.startsWith(want) || want.startsWith(k))) return list[i].promptIndex;
+  }
+  return null;
+}
+
+/**
+ * The index of the turn that is currently RUNNING — the one an edit landing
+ * right now belongs to.
+ *
+ * Opens a turn if none is open, closes nothing (Stop does that). The opened
+ * index is the one after the last CLOSED turn, not the tail of the list: with
+ * two prompts queued behind a running turn the tail would skip straight to the
+ * second and leave the first permanently empty.
+ *
+ * Re-verifies an already-open turn against the prompt list every time. If the
+ * list renumbered underneath the turn (a rolled transcript, a late-starting
+ * state file, a resume) the recorded text no longer sits at the recorded
+ * index; we re-home by text, and when the text cannot be found at all we
+ * REFUSE — returning null so the caller drops the capture rather than writing
+ * it onto whichever turn now occupies that slot. A missing diff is a visible
+ * gap; a diff on the wrong turn is a false accusation.
+ */
+export function currentTurnIndex(
+  state: {
+    prompts?: string[];
+    activeTurn?: { index: number; turnId: string; promptText: string; openedAt: string } | null;
+    lastClosedTurnIndex?: number;
+    promptTurnIds?: string[];
+  },
+  opts?: { now?: () => string; newId?: () => string },
+): number | null {
+  const prompts = Array.isArray(state.prompts) ? state.prompts : [];
+  if (prompts.length === 0) return null;
+  const last = prompts.length - 1;
+
+  const open = state.activeTurn;
+  if (open && Number.isInteger(open.index)) {
+    const at = prompts[open.index];
+    const want = promptKey(open.promptText || '');
+    const has = promptKey(at || '');
+    // Still where we left it (or we never had text to check against).
+    if (!want || (has && (has === want || has.startsWith(want) || want.startsWith(has)))) {
+      return open.index;
+    }
+    // Renumbered underneath us — find the turn by what it SAID.
+    for (let i = prompts.length - 1; i >= 0; i--) {
+      const k = promptKey(prompts[i] || '');
+      if (k && (k === want || k.startsWith(want) || want.startsWith(k))) {
+        state.activeTurn = { ...open, index: i };
+        return i;
+      }
+    }
+    return null; // gone entirely — refuse rather than mis-attribute
+  }
+
+  // Nothing open: bind the next turn in sequence.
+  const nextAfterClosed = Number.isInteger(state.lastClosedTurnIndex as number)
+    ? (state.lastClosedTurnIndex as number) + 1
+    : last;
+  const index = Math.max(0, Math.min(nextAfterClosed, last));
+  const newId = opts?.newId || (() => `t_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`);
+  if (!state.promptTurnIds) state.promptTurnIds = [];
+  if (!state.promptTurnIds[index]) state.promptTurnIds[index] = newId();
+  state.activeTurn = {
+    index,
+    turnId: state.promptTurnIds[index],
+    promptText: prompts[index] || '',
+    openedAt: (opts?.now || (() => new Date().toISOString()))(),
+  };
+  return index;
+}
+
+/**
+ * Stop finished the running turn. The next capture binds the following one.
+ */
+export function closeTurn(
+  state: { activeTurn?: { index: number } | null; lastClosedTurnIndex?: number },
+  index?: number,
+): void {
+  const closed = Number.isInteger(index as number) ? (index as number) : state.activeTurn?.index;
+  if (Number.isInteger(closed as number)) {
+    state.lastClosedTurnIndex = Math.max(state.lastClosedTurnIndex ?? -1, closed as number);
+  }
+  state.activeTurn = null;
+}
+
+/**
+ * How many of `prev`, from the start, appear in `next` in order (gaps in
+ * `next` allowed). `prev.length` means every stored prompt survives in the
+ * transcript, so the transcript's list is a superset and safe to adopt.
+ */
+function subsequencePrefixLength(prev: string[], next: string[]): number {
+  let i = 0;
+  for (const candidate of next) {
+    if (i < prev.length && prev[i] === candidate) i++;
+  }
+  return i;
+}
+
 export function reconcilePromptHistory(
   stored: string[] | undefined | null,
   parsed: string[] | undefined | null,
@@ -299,6 +653,17 @@ export function reconcilePromptHistory(
   // Ordinary growth: everything we already recorded is still at the head.
   if (next.length >= prev.length && prev.every((p, i) => p === next[i])) return [...next];
 
+  // We started LATE: the transcript still contains everything we stored, in
+  // order, plus turns we never saw (the ones before we existed, and entries
+  // like an interrupt marker that fire no hook). The transcript is the
+  // complete history, so adopt its numbering wholesale.
+  const matched = subsequencePrefixLength(prev, next);
+  if (matched === prev.length) return [...next];
+  // Same, except the newest prompt hasn't reached the transcript yet — keep it
+  // at the END so it takes the next index instead of colliding with the last
+  // turn the transcript does know about.
+  if (matched === prev.length - 1) return [...next, prev[prev.length - 1]];
+
   // Transcript dropped earlier turns: find where its first surviving prompt
   // sits in our history, and append only the tail beyond the overlap.
   for (let start = 0; start < prev.length; start++) {
@@ -307,12 +672,72 @@ export function reconcilePromptHistory(
     if (k > 0 && start + k === prev.length) return [...prev, ...next.slice(k)];
   }
 
-  return [...prev, ...next];
+  // Last resort: the transcript and our history disagree in a way none of the
+  // shapes above describe — most often because the transcript LOST a prompt
+  // from the MIDDLE while gaining a new one at the end. Cursor session
+  // a46eb6b6 is the worked example: stored `[A…H, X, Y]`, parsed `[A…H, Y, Z]`,
+  // where X had vanished from the transcript. The subsequence walk stops at 8
+  // of 10 and the tail-overlap loop needs a match running to the END of prev,
+  // so both decline, and this used to `return [...prev, ...next]`.
+  //
+  // That concat is the worst possible answer. promptIndex is POSITIONAL and
+  // the server keys its rows on it, so re-appending prompts we already have
+  // does not just look untidy — it writes a second row for every turn. That
+  // session holds 20 rows for 11 prompts: prompts 0-9 repeated as 10-19, each
+  // duplicate a turn with no work attached.
+  //
+  // Append only what the transcript has that our history does not, counted as
+  // a MULTISET so a genuinely re-sent prompt still lands. `prev` is never
+  // reordered or renumbered — an already-written row must keep its index.
+  const unaccounted = new Map<string, number>();
+  for (const p of prev) unaccounted.set(p, (unaccounted.get(p) ?? 0) + 1);
+  const fresh: string[] = [];
+  for (const candidate of next) {
+    const held = unaccounted.get(candidate) ?? 0;
+    if (held > 0) unaccounted.set(candidate, held - 1); // already have a row for it
+    else fresh.push(candidate);
+  }
+  return [...prev, ...fresh];
+}
+
+/**
+ * The prompt history to carry into a re-attached session.
+ *
+ * Prefers the stored list. Falls back to reconstructing it from
+ * `completedPromptMappings`, which carry `promptText` alongside the index the
+ * server keyed its rows on — so a state whose prompts were already lost to an
+ * earlier reset still rebuilds, and the numbering resumes where it left off
+ * rather than restarting at 0.
+ *
+ * Gaps are filled with empty strings so an index never shifts: mapping index 4
+ * has to stay index 4 even when 0-3 are missing.
+ */
+export function promptHistoryFromPriorState(
+  prior: { prompts?: string[]; completedPromptMappings?: Array<{ promptIndex?: number; promptText?: string }> } | null | undefined,
+): string[] {
+  if (!prior) return [];
+  if (Array.isArray(prior.prompts) && prior.prompts.length > 0) return [...prior.prompts];
+
+  const mappings = Array.isArray(prior.completedPromptMappings) ? prior.completedPromptMappings : [];
+  let highest = -1;
+  for (const m of mappings) {
+    const i = Number(m?.promptIndex);
+    if (Number.isInteger(i) && i > highest) highest = i;
+  }
+  if (highest < 0) return [];
+
+  const out: string[] = new Array(highest + 1).fill('');
+  for (const m of mappings) {
+    const i = Number(m?.promptIndex);
+    if (!Number.isInteger(i) || i < 0 || i > highest) continue;
+    if (typeof m?.promptText === 'string' && m.promptText) out[i] = m.promptText;
+  }
+  return out;
 }
 
 export function getGitDir(cwd?: string): string | null {
   try {
-    return execSync('git rev-parse --git-dir', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    return execFileSync('git', ['rev-parse', '--git-dir'], { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
   } catch {
     return null;
   }
@@ -320,7 +745,7 @@ export function getGitDir(cwd?: string): string | null {
 
 export function getGitRoot(cwd?: string): string | null {
   try {
-    const top = execSync('git rev-parse --show-toplevel', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const top = execFileSync('git', ['rev-parse', '--show-toplevel'], { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     if (!top) return null;
     // Linked git worktrees report their own --show-toplevel — e.g.
     // <repo>/.claude/worktrees/quirky-albattani-c9f7c3. The basename then
@@ -353,7 +778,7 @@ export function getGitRoot(cwd?: string): string | null {
 // not move), and broke staged-file commit attribution.
 export function getWorkingGitRoot(cwd?: string): string | null {
   try {
-    const top = execSync('git rev-parse --show-toplevel', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const top = execFileSync('git', ['rev-parse', '--show-toplevel'], { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     return top || null;
   } catch {
     return null;
@@ -366,7 +791,7 @@ export function getWorkingGitRoot(cwd?: string): string | null {
 // without re-running discovery.
 export function getCanonicalRepoPath(workRoot: string): string {
   try {
-    const commonDirRaw = execSync('git rev-parse --git-common-dir', { windowsHide: true,
+    const commonDirRaw = execFileSync('git', ['rev-parse', '--git-common-dir'], { windowsHide: true,
       encoding: 'utf-8', cwd: workRoot, stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     if (commonDirRaw) {
@@ -403,7 +828,7 @@ export function gitDirFilePath(repoPath: string, filename: string): string {
 
 export function getGitCommonDir(cwd?: string): string | null {
   try {
-    const out = execSync('git rev-parse --git-common-dir', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const out = execFileSync('git', ['rev-parse', '--git-common-dir'], { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     if (!out) return null;
     return path.isAbsolute(out) ? out : path.resolve(cwd || process.cwd(), out);
   } catch {
@@ -550,7 +975,7 @@ export function isFilesystemRootPath(p: string | null | undefined): boolean {
 
 export function getHeadSha(cwd?: string): string | null {
   try {
-    return execSync('git rev-parse HEAD', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    return execFileSync('git', ['rev-parse', 'HEAD'], { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
   } catch {
     return null;
   }
@@ -558,7 +983,7 @@ export function getHeadSha(cwd?: string): string | null {
 
 export function getBranch(cwd?: string): string | null {
   try {
-    return execSync('git rev-parse --abbrev-ref HEAD', { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { windowsHide: true, encoding: 'utf-8', cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
   } catch {
     return null;
   }
@@ -625,10 +1050,51 @@ export function getGlobalFallbackStatePath(cwd?: string, sessionTag?: string): s
   return path.join(sessionsDir, basename);
 }
 
+/**
+ * Drop mappings a LOST `promptIndexBase` wrote at the wrong row.
+ *
+ * When the base goes missing, this session's turns are captured at 0..N as
+ * well as at base..base+N, and `completedPromptMappings` ends up holding both
+ * — the same promptText under two indices. Every Stop re-sends the whole list,
+ * so the low copies overwrite rows belonging to earlier turns on EVERY write,
+ * forever. Restoring the base stops new misnumbering and does nothing about
+ * the copies already in the file.
+ *
+ * Prod f7881a6e: rows 0, 1 and 2 were reset to this session's turns minutes
+ * after being repaired, three separate times, because idx 0/1/2 duplicated
+ * idx 6/7/8 in local state. A repair cannot hold while its own client is
+ * replaying the thing it repaired.
+ *
+ * Only a duplicate is dropped — same prompt text, one copy at or above the
+ * base and one below it. Mappings below the base that are NOT duplicated are
+ * this conversation's genuine earlier turns, carried across a re-attach, and
+ * are left exactly as they are.
+ */
+export function dropRenumberedDuplicateMappings(state: {
+  promptIndexBase?: number;
+  completedPromptMappings?: Array<{ promptIndex: number; promptText?: string }>;
+}): number {
+  const base = state.promptIndexBase || 0;
+  const maps = state.completedPromptMappings;
+  if (base <= 0 || !Array.isArray(maps) || maps.length === 0) return 0;
+  const key = (m: { promptText?: string }) => (m.promptText || '').slice(0, 200);
+  const atOrAboveBase = new Set(
+    maps.filter((m) => (m.promptIndex ?? 0) >= base).map(key).filter((k) => k.length > 0),
+  );
+  if (atOrAboveBase.size === 0) return 0;
+  const kept = maps.filter((m) => (m.promptIndex ?? 0) >= base || !atOrAboveBase.has(key(m)));
+  const dropped = maps.length - kept.length;
+  if (dropped > 0) state.completedPromptMappings = kept;
+  return dropped;
+}
+
 export function saveSessionState(state: SessionState, cwd?: string, sessionTag?: string): void {
   // First-write-wins ownership stamp so a later account switch can't pull this
   // session into a different account (see session-owner.ts).
   ensureOwnerStamp(state);
+  // Never persist a renumbering duplicate: it would be re-sent on every
+  // subsequent write and silently overwrite an earlier turn's row.
+  dropRenumberedDuplicateMappings(state);
   const statePath = getStatePath(cwd, sessionTag || state.sessionTag);
   try {
     const tmpStatePath = statePath + '.tmp.' + process.pid;
@@ -662,6 +1128,134 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
     fs.writeFileSync(tmpGlobalPath, JSON.stringify(globalState, null, 2), { mode: 0o600 });
     fs.renameSync(tmpGlobalPath, globalPath);
   } catch { /* non-fatal */ }
+}
+
+/**
+ * The state-file tag for a conversation.
+ *
+ * The tag decides the FILE PATH, so it is the only thing that makes two hooks
+ * racing to create a session converge on one row instead of two. session-start
+ * derived it from `claudeSessionId` — empty for every agent that isn't in
+ * STABLE_SESSION_ID_AGENTS — and fell through to a timestamp, while
+ * user-prompt-submit's auto-create derived its own from the stdin session id.
+ * For Cursor that meant `smtfv1cat` and `ceb22e9b-221` for one chat: two files,
+ * two sessions, and no ordering either hook could win.
+ *
+ * Reserving early does not fix that on its own. Measured on the real hooks with
+ * no network at all, user-prompt-submit reaches its mint 236ms BEFORE
+ * session-start finishes resolving the repo — and in the prod trace
+ * session-start was 16s behind. Agreeing on the path removes the race instead
+ * of trying to win it: whoever arrives first creates the file, and the other
+ * finds it there and merges.
+ */
+export function sessionTagFor(
+  claudeSessionId: string | undefined,
+  agentSessionId?: string,
+  now: number = Date.now(),
+): string {
+  const anchor = (claudeSessionId || agentSessionId || '').trim();
+  return anchor ? anchor.slice(0, 12) : `s${now.toString(36)}`;
+}
+
+/** A `local-` id is a placeholder the server has never seen. */
+export function isProvisionalSessionId(id: unknown): boolean {
+  return typeof id === 'string' && id.startsWith('local-');
+}
+
+/**
+ * How long a session-start reservation is treated as "registration in flight".
+ *
+ * Long enough to cover a slow `session/start` — the prod trace that motivated
+ * the reservation took 8.2s to fail, and the pricing calls ahead of it another
+ * 8s. Short enough that a start hook which died mid-call cannot suppress
+ * registration for the rest of the conversation.
+ */
+export const RESERVATION_PENDING_MS = 60_000;
+
+/**
+ * A reservation whose owner is still expected to finish registering it.
+ *
+ * session-start writes `pendingRegistration` before calling `session/start` and
+ * clears it once the id is settled. A hook that adopts the row meanwhile must
+ * not register it too — that is a second row for one conversation. The age
+ * bound is what keeps the flag from becoming permanent when the start hook
+ * never returns: past it, the row is a normal local session and every prompt
+ * is a retry point again.
+ */
+export function isPendingReservation(state: unknown, now: number = Date.now()): boolean {
+  const s = state as { pendingRegistration?: boolean; startedAt?: string } | null;
+  if (!s?.pendingRegistration) return false;
+  const started = s.startedAt ? new Date(s.startedAt).getTime() : NaN;
+  // No usable timestamp: treat as pending rather than racing a live start.
+  if (!Number.isFinite(started)) return true;
+  return now - started < RESERVATION_PENDING_MS;
+}
+
+/**
+ * Of two ids for the SAME session, the one the server has actually registered.
+ *
+ * session-start publishes a provisional `local-` id before calling
+ * `session/start`, so a concurrent hook can find the session instead of minting
+ * a second one. That hook may then register it first. When session-start's own
+ * call fails and falls back to local, saving its placeholder would demote a
+ * live session back to local and strand every prompt already filed against the
+ * real row — the "Session not found" in the prod trace.
+ *
+ * Registered always wins. Between two provisional ids the incumbent wins, so a
+ * re-fired start cannot renumber a session a hook is already writing to.
+ */
+export function preferRegisteredSessionId(
+  ours: string,
+  onDisk: string | undefined | null,
+): string {
+  if (!onDisk || onDisk === ours) return ours;
+  // Only ever defer to the file when IT holds the registered id.
+  if (isProvisionalSessionId(ours) && !isProvisionalSessionId(onDisk)) return onDisk;
+  return ours;
+}
+
+/**
+ * RUNNING sessions from the durable ~/.origin/sessions mirror whose work tree
+ * is `tree`.
+ *
+ * `.git` is not a safe home for session state: it belongs to the very agents
+ * being captured, and they delete it. Prod a5c2570c — an agent decided the
+ * worktree's git config was broken (it was not), ran `git init` in the work
+ * tree root, and the fresh `.git` took the session's state file with it. The
+ * commit that followed fired every hook correctly and then found no session to
+ * attach to, so it was ingested as a new repo row and the turn showed nothing.
+ *
+ * The mirror survives that, because it lives outside the repo. This is the
+ * last-resort lookup for a git hook that found nothing in `.git`.
+ *
+ * Deliberately strict about ownership: the mirror is global, so matching must
+ * be on THIS tree (repoPath or the last cwd), never "any running session".
+ */
+export function listMirroredSessionsForTree(tree: string): SessionState[] {
+  if (!tree) return [];
+  const dir = path.join(os.homedir(), '.origin', 'sessions');
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); } catch { return []; }
+  const out: SessionState[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) continue;
+    let st: SessionState | null = null;
+    try { st = JSON.parse(fs.readFileSync(path.join(dir, entry), 'utf-8')); } catch { continue; }
+    if (!st || !st.sessionId) continue;
+    if ((st as any).status === 'ENDED' || st.endedAt) continue;
+    // samePath, never raw identity — see paths.ts and the comparison guard.
+    const claims = [st.repoPath, (st as any).lastCwd, (st as any).canonicalRepoPath]
+      .filter((p): p is string => typeof p === 'string' && p.length > 0);
+    if (!claims.some((c) => samePath(c, tree))) continue;
+    // Attach the file we loaded from, exactly as listActiveSessions does.
+    // isSessionAlive's FIRST signal is the `.git` state file's mtime — which is
+    // precisely what the wipe destroyed, so without `__statePath` the fallback
+    // recovers the session and the zombie filter discards it a line later. The
+    // mirror's own mtime is the freshest liveness signal that survives.
+    (st as unknown as { __statePath?: string }).__statePath = path.join(dir, entry);
+    out.push(st);
+  }
+  return out;
 }
 
 export function loadSessionState(cwd?: string, sessionTag?: string): SessionState | null {
@@ -1074,6 +1668,26 @@ function findAncestorPid(pattern: RegExp, maxDepth = 10): number {
 export function startHeartbeat(sessionId: string, apiUrl: string, apiKey: string, stateFile?: string, agentSlug?: string): void {
   const pidFile = getHeartbeatPidFile(sessionId);
 
+  // One daemon per session. A LIVE daemon for this exact id is already doing
+  // the job, so respawning gains nothing — and costs the session.
+  //
+  // The kill below is a SIGTERM, and the daemon's signal handler ends the
+  // session on the way out. When two hooks mint the same session concurrently
+  // they both land here: the second SIGTERMs the first, that daemon calls
+  // /session/end, and the server's empty-session cleanup HARD-DELETES a row
+  // whose first PromptChange hasn't been sent yet. Every later write then 404s
+  // `Session not found` until handleStop re-mints a different id.
+  //
+  // Copilot makes this routine rather than rare: it fires `userPromptSubmitted`
+  // BEFORE `sessionStart`, so user-prompt-submit's auto-create and
+  // handleSessionStart both run for a chat's first prompt. Prod 2026-08-25,
+  // session b567ee4f: created 13:27:35.707, second startHeartbeat 13:27:36.343,
+  // 404 at 13:27:36.466, re-minted as 8b25cb05 seven seconds later.
+  //
+  // Only skips a daemon that is actually ALIVE — a dead one still falls through
+  // to the respawn below, which is what the "restarted (was dead)" callers want.
+  if (isHeartbeatAlive(sessionId)) return;
+
   // Kill any existing heartbeat for this session
   stopHeartbeat(sessionId);
 
@@ -1215,6 +1829,45 @@ export function isHeartbeatAlive(sessionId: string): boolean {
   }
 }
 
+/**
+ * How long a retired (ENDED) state file is kept before being pruned.
+ *
+ * The heartbeat marks state files ENDED rather than deleting them, so a
+ * conversation resumed after an idle gap can pick its prompt numbering back up
+ * (see the retirement comment in heartbeat.ts). They still have to go
+ * eventually — this is the delay the delete never had.
+ *
+ * A week comfortably covers "left it overnight / over the weekend and came
+ * back", which is the whole point of keeping them.
+ */
+export const RETIRED_STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Delete ENDED state files older than RETIRED_STATE_TTL_MS.
+ *
+ * Only touches files that are BOTH marked ENDED and past the TTL: a live
+ * session's file is never a candidate, whatever its mtime says, and a recently
+ * retired one stays readable for a resume.
+ */
+export function pruneRetiredStateFiles(dir: string, now = Date.now()): number {
+  let pruned = 0;
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); } catch { return 0; }
+  for (const entry of entries) {
+    if (!entry.startsWith('origin-session') || !entry.endsWith('.json')) continue;
+    const filePath = path.join(dir, entry);
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (String(data?.status || '').toUpperCase() !== 'ENDED') continue;
+      const age = now - fs.statSync(filePath).mtimeMs;
+      if (age <= RETIRED_STATE_TTL_MS) continue;
+      fs.unlinkSync(filePath);
+      pruned++;
+    } catch { /* corrupt or vanished — leave it */ }
+  }
+  return pruned;
+}
+
 export function clearAllSessionStates(cwd?: string): void {
   const gitDir = getGitDir(cwd);
   if (gitDir) {
@@ -1228,4 +1881,60 @@ export function clearAllSessionStates(cwd?: string): void {
       }
     } catch { /* ignore */ }
   }
+}
+
+// ─── Per-turn baselines ────────────────────────────────────────────────────
+// `promptShadows[i]` means "the working tree at the START of prompt i". It is
+// the only per-turn baseline we keep; `prePromptSha` is a single rolling value
+// that describes the most recent turn only.
+//
+// That distinction is invisible until something processes SEVERAL turns in one
+// pass. Stop does exactly that, so it had no per-turn baseline to look up and
+// fell back to session-start — and a file two turns both touched then counted
+// the earlier turn's lines a second time against the later turn. Measured on
+// prod session fc4eb13c re-captured from its transcript: src/index.js came out
+// +75/-60 against git's +74/-59, the extra line being the one turn 2 changed
+// before turn 3 rewrote the file.
+//
+// Until now only the heartbeat daemon (Codex/Gemini) populated promptShadows,
+// so it was empty on every hook-driven session on disk.
+
+interface ShadowBearingState {
+  promptShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string }>;
+  sessionStartShadowSha?: string | null;
+  headShaAtStart?: string | null;
+}
+
+/**
+ * Remember `shadowSha` as the start-state of prompt `promptIndex`.
+ * First write wins: a turn's start-state cannot be re-decided later, and a
+ * re-fired hook must not overwrite it with a tree that has since moved on.
+ */
+export function recordPromptShadow(
+  state: ShadowBearingState,
+  promptIndex: number,
+  shadowSha: string | null | undefined,
+  opts?: { now?: () => string },
+): void {
+  if (!shadowSha || !Number.isInteger(promptIndex) || promptIndex < 0) return;
+  if (!state.promptShadows) state.promptShadows = [];
+  if (state.promptShadows.some((s) => s.promptIndex === promptIndex)) return;
+  state.promptShadows.push({
+    promptIndex,
+    shadowSha,
+    capturedAt: (opts?.now ?? (() => new Date().toISOString()))(),
+  });
+}
+
+/**
+ * The baseline to diff prompt `promptIndex` against: its own start-state when
+ * we recorded one, else the session's start. Never the rolling `prePromptSha`
+ * — by the time a multi-turn pass runs, that has already advanced.
+ */
+export function turnBaseline(
+  state: ShadowBearingState,
+  promptIndex: number,
+): string | null {
+  const own = (state.promptShadows || []).find((s) => s.promptIndex === promptIndex)?.shadowSha;
+  return own || state.sessionStartShadowSha || state.headShaAtStart || null;
 }

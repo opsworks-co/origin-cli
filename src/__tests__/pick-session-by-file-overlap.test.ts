@@ -6,7 +6,7 @@
 // the real committing turn render a false "uncommitted" badge.
 
 import { describe, expect, it } from 'vitest';
-import { pickSessionByFileOverlap } from '../commands/hooks.js';
+import { pickSessionByFileOverlap, sessionTouchedAnyCommitFile } from '../commands/hooks.js';
 
 type S = { sessionId: string; completedPromptMappings?: Array<{ filesChanged?: string[] }> };
 
@@ -165,5 +165,142 @@ describe('pickSessionForCommit — recency tiebreak (stale vs active)', () => {
     const r = pickSessionForCommit([older, newer], { currentBranch: 'main', commitFiles: [] });
     expect(r.reason).toBe('recency');
     expect(r.session?.sessionId).toBe('new');
+  });
+});
+
+// The turn IN FLIGHT is the one that commits.
+//
+// completedPromptMappings are written at a session's own Stop, so for the whole
+// duration of a turn they say nothing — and `git commit` runs at the END of a
+// turn, before that Stop. So the overlap rung scored ZERO for the session that
+// was at that instant writing the committed file, abstained, and handed the
+// commit to the recency tiebreak.
+//
+// Prod, 2026-08-25 18:56:22, three live sessions in one checkout:
+//
+//   [post-commit] disambiguated by recency
+//     {detectedSlug: null, branch: "fix/sqlite-tuning-actually-applies",
+//      sessionId: "2e58a848-85b…"}
+//
+// 00541dfc was 59a0fa03's — it had been editing apps/api/src/db.ts for minutes,
+// mid-turn, and its Stop did not run until 19:01:48. 2e58a848 had started 92
+// seconds earlier and written nothing at all; it won purely on startedAt. The
+// commit's files, its diff and a SHA stamp all landed on a stranger's turn, and
+// db.ts was written into that session's own mappings — where it then makes the
+// same mis-pick MORE likely next time.
+describe('pickSessionByFileOverlap — the turn in flight (session 2e58a848)', () => {
+  type Live = S & {
+    activeTurn?: { index: number } | null;
+    liveEdits?: Array<{ promptIndex?: number; edits?: Array<{ file?: string }> }>;
+    pendingWrites?: Array<{ file?: string }>;
+  };
+
+  // Mid-turn: files are in the live ledger, mappings know nothing of them.
+  const committer: Live = {
+    sessionId: '59a0fa03',
+    completedPromptMappings: [{ filesChanged: ['apps/api/src/routes/sessions.ts'] }],
+    activeTurn: { index: 18 },
+    liveEdits: [{ promptIndex: 18, edits: [{ file: 'apps/api/src/db.ts' }] }],
+  };
+  // Started 92s ago, has written nothing: no mappings, no ledger, no claims.
+  const bystander: Live = { sessionId: '2e58a848', activeTurn: { index: 1 } };
+
+  it('credits the session mid-write over one that has written nothing', () => {
+    const r = pickSessionByFileOverlap([bystander, committer], ['apps/api/src/db.ts']);
+    expect(r?.sessionId).toBe('59a0fa03');
+  });
+
+  it('a pre-tool-use claim counts before the write has even landed', () => {
+    const claiming: Live = {
+      sessionId: 'claiming', activeTurn: { index: 0 },
+      pendingWrites: [{ file: 'apps/api/src/db.ts' }],
+    };
+    const r = pickSessionByFileOverlap([bystander, claiming], ['apps/api/src/db.ts']);
+    expect(r?.sessionId).toBe('claiming');
+  });
+
+  it('in-flight outranks another session\'s last COMPLETED turn on the same file', () => {
+    // Same file in both, but only one session is writing it right now.
+    const earlier: Live = {
+      sessionId: 'earlier',
+      completedPromptMappings: [{ filesChanged: ['apps/api/src/db.ts'] }], // ×3
+    };
+    const now: Live = {
+      sessionId: 'now', activeTurn: { index: 0 },
+      liveEdits: [{ promptIndex: 0, edits: [{ file: 'apps/api/src/db.ts' }] }], // ×4
+    };
+    expect(pickSessionByFileOverlap([earlier, now], ['apps/api/src/db.ts'])?.sessionId).toBe('now');
+  });
+
+  it('the full ladder now reaches file-overlap instead of falling to recency', () => {
+    // Exactly the prod shape: same agent, neither state's branch matches the
+    // commit's, and the bystander started much later so recency would take it.
+    const c: CS & Live & { startedAt: string; lastStopAt: string } = {
+      ...committer, agentSlug: 'claude-code', branch: 'main',
+      startedAt: '2026-08-25T13:32:39Z', lastStopAt: '2026-08-25T18:47:00Z',
+    };
+    const b: CS & Live & { startedAt: string } = {
+      ...bystander, agentSlug: 'claude-code', branch: 'main',
+      startedAt: '2026-08-25T18:54:50Z',
+    };
+    const r = pickSessionForCommit([c, b], {
+      currentBranch: 'fix/sqlite-tuning-actually-applies',
+      commitFiles: ['apps/api/src/db.ts'],
+    });
+    expect(r.reason).toBe('file-overlap');
+    expect(r.session?.sessionId).toBe('59a0fa03');
+  });
+
+  it('sessionTouchedAnyCommitFile sees the in-flight turn too', () => {
+    expect(sessionTouchedAnyCommitFile(committer, ['apps/api/src/db.ts'])).toBe(true);
+    expect(sessionTouchedAnyCommitFile(bystander, ['apps/api/src/db.ts'])).toBe(false);
+  });
+
+  // liveEdits is the WHOLE session's ledger, not the current turn's: it is kept
+  // across turns and pruned only by its size cap. 59a0fa03 carries entries for
+  // prompts 17, 18 and 19 at once; 2e58a848 still holds prompts 1 and 2 with no
+  // turn open at all. Reading it wholesale would give the ×4 in-flight weight
+  // to a file somebody edited turns ago and stopped — the exact inversion this
+  // rung's recency weighting exists to prevent, made worse by ×4 outranking the
+  // ×3 that the session actually writing it would score.
+  describe('the ledger is not the same thing as the open turn', () => {
+    it('ignores ledger entries from a turn that is no longer the open one', () => {
+      const stale: Live = {
+        sessionId: 'stale',
+        activeTurn: { index: 9 },                                  // open turn edits something else
+        liveEdits: [
+          { promptIndex: 3, edits: [{ file: 'apps/api/src/db.ts' }] },   // turns ago
+          { promptIndex: 9, edits: [{ file: 'README.md' }] },
+        ],
+      };
+      expect(pickSessionByFileOverlap([stale], ['apps/api/src/db.ts'])).toBeNull();
+      expect(sessionTouchedAnyCommitFile(stale, ['apps/api/src/db.ts'])).toBe(false);
+    });
+
+    it('contributes nothing between turns, when closeTurn has nulled activeTurn', () => {
+      // 2e58a848's shape after its Stop: ledger still full, no turn open.
+      const between: Live = {
+        sessionId: 'between', activeTurn: null,
+        liveEdits: [{ promptIndex: 2, edits: [{ file: 'apps/api/src/db.ts' }] }],
+        pendingWrites: [{ file: 'apps/api/src/db.ts' }],
+      };
+      expect(pickSessionByFileOverlap([between], ['apps/api/src/db.ts'])).toBeNull();
+    });
+
+    it('a session mid-write beats one whose ledger only remembers an old turn', () => {
+      // The regression the guard prevents: `stale` would otherwise score
+      // 4 (stale ledger) + 3 (latest mapping) = 7 against `now`'s 4.
+      const stale: Live = {
+        sessionId: 'stale',
+        activeTurn: { index: 9 },
+        completedPromptMappings: [{ filesChanged: ['apps/api/src/db.ts'] }],
+        liveEdits: [{ promptIndex: 3, edits: [{ file: 'apps/api/src/db.ts' }] }],
+      };
+      const now: Live = {
+        sessionId: 'now', activeTurn: { index: 0 },
+        liveEdits: [{ promptIndex: 0, edits: [{ file: 'apps/api/src/db.ts' }] }],
+      };
+      expect(pickSessionByFileOverlap([stale, now], ['apps/api/src/db.ts'])?.sessionId).toBe('now');
+    });
   });
 });

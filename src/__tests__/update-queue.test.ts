@@ -20,7 +20,8 @@ vi.mock('os', async (orig) => {
 
 const updateSession = vi.hoisted(() => vi.fn());
 const endSession = vi.hoisted(() => vi.fn());
-vi.mock('../api.js', () => ({ api: { updateSession, endSession } }));
+const ingestCommits = vi.hoisted(() => vi.fn());
+vi.mock('../api.js', () => ({ api: { updateSession, endSession, ingestCommits } }));
 
 import {
   durableUpdateSession,
@@ -41,6 +42,7 @@ beforeEach(() => {
   fs.rmSync(TEST_HOME, { recursive: true, force: true });
   updateSession.mockReset();
   endSession.mockReset();
+  ingestCommits.mockReset();
 });
 afterAll(() => fs.rmSync(TEST_HOME, { recursive: true, force: true }));
 
@@ -141,6 +143,30 @@ describe('drainUpdateQueue', () => {
     const res = await durableEndSession('s1', { sessionId: 's1' });
     expect(res).toBeNull();
     expect(entryFiles()).toHaveLength(1);
+  });
+
+  // The post-commit shadow ingest is the ONLY producer of Commit.patch and of
+  // per-commit additions/deletions. When it fails, the read side degrades in
+  // two visible ways — commit-detail falls back to the session aggregate, and
+  // the turn header's "committed" chip vanishes — so the payload has to
+  // survive the failure rather than being logged and dropped.
+  it('routes ingestCommits entries to api.ingestCommits with a generous timeout', async () => {
+    ingestCommits.mockResolvedValueOnce({ ingested: 1 });
+    const payload = { repoPath: '/repo', commits: [{ sha: 'abc123', diff: 'diff --git a/x b/x' }] };
+    enqueueFailedUpdate('ingestCommits', 'commit:abc123', payload, netErr());
+    const res = await drainUpdateQueue();
+    expect(res.replayed).toBe(1);
+    expect(ingestCommits).toHaveBeenCalledWith(payload, { timeoutMs: 60_000 });
+    expect(entryFiles()).toHaveLength(0);
+  });
+
+  it('keys ingest entries per sha, so one stuck commit cannot block another', async () => {
+    ingestCommits.mockRejectedValueOnce(httpErr(503)).mockResolvedValueOnce({ ingested: 1 });
+    enqueueFailedUpdate('ingestCommits', 'commit:aaa', { commits: [{ sha: 'aaa' }] }, netErr());
+    enqueueFailedUpdate('ingestCommits', 'commit:bbb', { commits: [{ sha: 'bbb' }] }, netErr());
+    const res = await drainUpdateQueue();
+    expect(res.replayed).toBe(1);
+    expect(res.remaining).toBe(1);
   });
 
   it('drops corrupt entry files instead of wedging the queue', async () => {

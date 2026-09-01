@@ -95,6 +95,37 @@ export function parseUnifiedZero(diffText: string): Hunk[] {
 }
 
 /**
+ * Split a MULTI-file `git diff --unified=0` into per-file hunks.
+ *
+ * The alignment walk below needs one hunk list per (file, transition). It used
+ * to get them by running one `git diff` per file per transition, which is
+ * files × turns spawns — and a spawn costs ~80ms on Windows. Profiling one real
+ * poll cycle: 4,608 `git diff --unified=0` calls, 448.9s, 91% of ALL the git
+ * time the watcher spent. A 31-turn session over 25 files is 775 spawns per
+ * alignment, and the caller tries two alignments.
+ *
+ * git will diff every file in one invocation and label each section with its
+ * own `diff --git` header, so the whole transition costs ONE spawn. Same bytes
+ * parsed, same hunks, ~25x fewer processes.
+ *
+ * Keyed on the NEW-side path (`b/…`), which is what the caller looks up and
+ * what matches the working tree it reads for verification.
+ */
+export function parseUnifiedZeroByFile(diffText: string): Map<string, Hunk[]> {
+  const out = new Map<string, Hunk[]>();
+  // Split on the file header, keeping it — the same shape the section walkers
+  // elsewhere in the CLI use.
+  for (const section of (diffText || '').split(/^(?=diff --git )/m)) {
+    if (!section.trim()) continue;
+    const m = section.match(/^diff --git a\/(\S+) b\/(\S+)/);
+    if (!m) continue;
+    // Rename/copy shows both sides; the new path is the one that exists now.
+    out.set(m[2], parseUnifiedZero(section));
+  }
+  return out;
+}
+
+/**
  * Where does line `ln` of the OLD side of this diff end up on the NEW side?
  * Returns null when the line was removed or replaced by the diff.
  */
@@ -205,20 +236,31 @@ function attributeOverChain(
   const out = new Map<number, FinalHunk[]>();
   const credited = new Map<number, string[]>();
 
+  // Transition k = what turn k changed: boundaries[k] → boundaries[k+1], with a
+  // null boundary meaning the current working tree.
+  //
+  // Diffed ONCE PER TRANSITION for all files at once, not once per (file,
+  // transition). That inner spawn was 91% of the watcher's entire git time —
+  // 4,608 calls costing 448.9s in one profiled cycle — and it is pure overhead:
+  // git already reports every file in a single invocation, labelled by its own
+  // `diff --git` header. Scoped to `files` so the output stays exactly the set
+  // the walk below asks for.
+  const byTransition: Array<Map<string, Hunk[]>> = [];
+  for (let k = 0; k < ordered.length; k++) {
+    const from = boundaries[k];
+    const to = boundaries[k + 1];
+    if (!from) return null; // no state to diff from — this alignment is unusable
+    const args = to
+      ? ['diff', '--unified=0', '--no-color', from, to, '--', ...files]
+      : ['diff', '--unified=0', '--no-color', from, '--', ...files];
+    byTransition.push(parseUnifiedZeroByFile(git(args)));
+  }
+
   for (const file of files) {
     try {
-      // Transition k = what turn k changed: boundaries[k] → boundaries[k+1],
-      // with a null boundary meaning the current working tree.
-      const transitions: Hunk[][] = [];
-      for (let k = 0; k < ordered.length; k++) {
-        const from = boundaries[k];
-        const to = boundaries[k + 1];
-        if (!from) return null; // no state to diff from — this alignment is unusable
-        const args = to
-          ? ['diff', '--unified=0', '--no-color', from, to, '--', file]
-          : ['diff', '--unified=0', '--no-color', from, '--', file];
-        transitions.push(parseUnifiedZero(git(args)));
-      }
+      // A file absent from a transition's diff simply did not change in it —
+      // an empty hunk list, exactly what the per-file diff used to return.
+      const transitions: Hunk[][] = byTransition.map((m) => m.get(file) || []);
 
       // Final content, for verification. A file that no longer exists has no
       // surviving lines by definition — skip it rather than guess.

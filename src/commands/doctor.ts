@@ -7,10 +7,94 @@ import { git, gitDetailed } from '../utils/exec.js';
 import { loadConfig, isConnectedMode } from '../config.js';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
-import { loadSessionState, clearSessionState, getGitRoot, getGitDir, listActiveSessions } from '../session-state.js';
+import { loadSessionState, clearSessionState, getGitRoot, getGitDir, listActiveSessions, getStatePath, type SessionState } from '../session-state.js';
+import { parentLooksDead, transcriptIdleWindowMs } from '../heartbeat-liveness.js';
 import { captureGitState } from '../git-capture.js';
 import { writeSessionFiles } from '../local-entrypoint.js';
 import { api } from '../api.js';
+
+/**
+ * The liveness signals `doctor` can see for a session, in the shape
+ * parentLooksDead expects.
+ *
+ * Doctor sees FEWER signals than the heartbeat does: there is no recorded pid
+ * on a state file, so pass 0 — "unknown", which the predicate treats as absence
+ * of a live-process signal rather than as proof of death, falling back to the
+ * staleness clauses it keeps for exactly that case.
+ *
+ * Every unreadable path resolves to "not stale". A path we cannot stat is no
+ * signal at all, and the one thing this must never do is let a missing file
+ * read as evidence a session is dead — that is how a live conversation gets
+ * deleted. Exported for testing.
+ */
+export function doctorLivenessInputs(st: SessionState, cwd?: string) {
+  const windowMs = transcriptIdleWindowMs(st.agentSlug || '');
+  const staleBeyond = (p: string | undefined): boolean => {
+    if (!p) return false;
+    try { return Date.now() - fs.statSync(p).mtimeMs > windowMs; } catch { return false; }
+  };
+  let statePath: string | undefined;
+  try { statePath = getStatePath(st.repoPath || cwd, st.sessionTag); } catch { statePath = undefined; }
+  // Freshness and staleness are NOT complements here, because a third state
+  // exists: no file. Absence is no signal in either direction, and conflating it
+  // with either one breaks a different half of this command.
+  //
+  //   stale   = the file EXISTS and has not been touched inside the window
+  //   fresh   = the file EXISTS and HAS been touched inside the window
+  //   missing = neither
+  //
+  // Treating missing as "not stale" is right — it must never read as proof of
+  // death. Treating it as "actively writing" is what this got wrong: a session
+  // over a day old has usually had its transcript rotated away, so a missing
+  // file claimed positive proof of life and vetoed every death signal. That made
+  // the sweep unable to clean the exact sessions it exists for — 129 of 294 on
+  // the machine this was measured on. With absence neutral, such a session falls
+  // through to the state-file clause, which is the signal that actually applies.
+  const freshWithin = (p: string | undefined): boolean => {
+    if (!p) return false;
+    try { return Date.now() - fs.statSync(p).mtimeMs <= windowMs; } catch { return false; }
+  };
+  return {
+    recordedParentPid: 0,
+    recordedParentAlive: false,
+    transcriptStale: staleBeyond(st.transcriptPath),
+    stateFileStale: staleBeyond(statePath),
+    // A warm transcript is positive proof of life and vetoes every death signal.
+    agentActivelyWriting: freshWithin(st.transcriptPath),
+  };
+}
+
+/**
+ * Positive evidence that a session is live RIGHT NOW.
+ *
+ * Deliberately not `!parentLooksDead(...)`. That predicate answers "may I end
+ * this session?", and its default on no evidence is NO — correct there, because
+ * ending destroys state a live agent is still writing. Reused for "may I delete
+ * this file?" it inverts into a bug: a session whose transcript AND state file
+ * are both long gone offers no evidence of anything, so it reads as alive and is
+ * preserved forever. The sweep then reports files it will never clean — 128 of
+ * 294 here — which is a cleanup that cannot clean.
+ *
+ * So the two questions get their own defaults. Ending needs proof of DEATH;
+ * deleting a file needs the absence of proof of LIFE, which is what this is:
+ * either warm surface (the file itself, or the agent's transcript) counts.
+ * The state file is rewritten on every lifecycle hook, so a live session keeps
+ * it warm — this session's own was under a minute old while it ran.
+ */
+export function looksActiveNow(content: SessionState, filePath: string): boolean {
+  const windowMs = transcriptIdleWindowMs(content.agentSlug || '');
+  const fresh = (p: string | undefined): boolean => {
+    if (!p) return false;
+    try { return Date.now() - fs.statSync(p).mtimeMs <= windowMs; } catch { return false; }
+  };
+  return fresh(filePath) || fresh(content.transcriptPath);
+}
+
+/** True when this session file is the ONLY copy of a session the server has never seen. */
+export function isNeverUploaded(content: { sessionId?: unknown; syncedSessionId?: unknown }): boolean {
+  return String(content?.sessionId || '').startsWith('local-') && !content?.syncedSessionId;
+}
+
 
 /**
  * origin doctor
@@ -58,11 +142,30 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
       console.log(chalk.green(`  ✓ No active session in current repo`));
     }
 
-    // 1b. Stuck session detection (>1hr ACTIVE)
+    // 1b. Stuck session detection: old AND showing no sign of life.
+    //
+    // Age alone is not evidence of anything. This filtered on `age > 1hr` and
+    // nothing else, while --fix writes a zeroed `ended` record over the session
+    // and clears its state — so ANY conversation running longer than an hour was
+    // a deletion target. Caught in the act: a doctor run listed the very session
+    // that was running it (19 prompts in, transcript touched seconds earlier) as
+    // "stuck — 5.9h", alongside a second live agent at 16 prompts.
+    //
+    // The codebase already had the answer and this command was not using it:
+    // parentLooksDead is the shared, unit-tested predicate the heartbeat reaps
+    // on, and its comments record the bias that matters here — reaping a live
+    // session corrupts the record, while a zombie lingering costs a stale row
+    // the server's own sweep clears. Fresh transcript activity vetoes every
+    // death signal.
+    //
+    // Doctor sees fewer signals than the heartbeat: there is no recorded pid on
+    // the state file, so pass 0 (unknown, not dead) and let the predicate fall
+    // back to the staleness clauses it keeps for exactly that case.
     const activeSessions = listActiveSessions(cwd);
     const stuckSessions = activeSessions.filter(s => {
       const ageMs = Date.now() - new Date(s.startedAt).getTime();
-      return ageMs > 60 * 60 * 1000; // >1hr
+      if (ageMs <= 60 * 60 * 1000) return false;   // still young — never stuck
+      return parentLooksDead(doctorLivenessInputs(s, cwd));
     });
 
     if (stuckSessions.length > 0) {
@@ -250,6 +353,9 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
   if (fs.existsSync(sessionsDir)) {
     const files = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
     let orphaned = 0;
+    // Files deliberately kept back — reported, because silently retaining them
+    // reads as "nothing to clean" when the truth is "this is not garbage".
+    let preserved = 0;
 
     for (const file of files) {
       try {
@@ -257,12 +363,28 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
         const ageMs = Date.now() - new Date(content.startedAt).getTime();
         const ageHours = ageMs / (1000 * 60 * 60);
 
-        if (ageHours > 24) {
+        // "Older than a day" was the ENTIRE test, and deletion is permanent.
+        //
+        // A `local-*` id that never got a syncedSessionId is a session that has
+        // never reached the server: this file is the only copy of it, and it is
+        // waiting for `origin sessions sync` to replay it. Age is precisely
+        // what such a session accumulates while the queue is blocked — an
+        // outage, a bad key, a machine that was offline — so the old rule
+        // deleted exactly the backlog it was meant to survive. On this machine
+        // that was 33 of 294 files.
+        //
+        // A still-live session is skipped for the same reason as the stuck
+        // check above: its transcript is warm, so it is not garbage.
+        const neverUploaded = isNeverUploaded(content);
+        const stillAlive = looksActiveNow(content as SessionState, path.join(sessionsDir, file));
+        if (ageHours > 24 && !neverUploaded && !stillAlive) {
           orphaned++;
           if (opts?.fix) {
             fs.unlinkSync(path.join(sessionsDir, file));
             fixed++;
           }
+        } else if (neverUploaded) {
+          preserved++;
         }
       } catch {
         orphaned++;
@@ -282,6 +404,9 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
       }
     } else {
       console.log(chalk.green(`  ✓ No orphaned session files`));
+    }
+    if (preserved > 0) {
+      console.log(chalk.gray(`    ${preserved} kept — never uploaded, pending \`origin sessions sync\``));
     }
   }
 
@@ -370,6 +495,66 @@ export async function doctorCommand(opts?: { fix?: boolean; verbose?: boolean })
   } else {
     console.log(chalk.green(`  ✓ Standalone mode — sessions tracked locally in git`));
     console.log(chalk.gray(`    Run ${chalk.white('origin login')} to connect to Origin platform`));
+  }
+
+  // Agent hook configs. `enable` writes these once and nothing ever revisits
+  // them, so a hook SCHEMA fix (or a moved origin binary) leaves every existing
+  // install stranded. When an agent rejects its hook config it captures nothing
+  // and reports nothing — Antigravity discards the whole file over a single bad
+  // event shape — so this is the check that turns silent zero-capture into a
+  // line the user can act on.
+  console.log(chalk.bold('\n  Agent hook configs\n'));
+  try {
+    const { hookConfigBases, checkHookConfigs, repairHookConfig, isRepairable } =
+      await import('../hook-config-health.js');
+
+    let installed = 0;
+    let drifted = 0;
+    for (const base of hookConfigBases(cwd)) {
+      const where = base === os.homedir() ? 'global' : base.replace(os.homedir(), '~');
+      for (const report of checkHookConfigs(base)) {
+        if (report.state === 'absent') continue;
+        installed++;
+        if (!isRepairable(report.state)) {
+          if (opts?.verbose) {
+            console.log(chalk.green(`  ✓ ${report.agentName} · ${report.label} (${where})`));
+          }
+          continue;
+        }
+        drifted++;
+        issues++;
+        const why = report.state === 'relocated'
+          ? 'points at an origin path that has moved'
+          : report.state === 'unreadable'
+            ? 'the file is not valid JSON'
+            : `does not match this CLI${report.detail ? ` (${report.detail})` : ''}`;
+        // Only a schema mismatch risks the agent throwing the file out.
+        const paint = report.state === 'relocated' ? chalk.gray : chalk.yellow;
+        console.log(paint(`  ⚠ ${report.agentName} · ${report.label} (${where}) — ${why}`));
+        if (report.state === 'stale') {
+          console.log(chalk.gray(`    The agent may be discarding it, in which case nothing is being captured.`));
+        }
+        if (opts?.fix) {
+          try {
+            repairHookConfig(report);
+            fixed++;
+            console.log(chalk.green(`    ✓ Rewritten`));
+          } catch (err: any) {
+            console.log(chalk.red(`    ✗ Could not rewrite: ${err?.message || err}`));
+          }
+        }
+      }
+    }
+
+    if (installed === 0) {
+      console.log(chalk.gray(`  No agent hooks installed — run ${chalk.white('origin enable')}`));
+    } else if (drifted === 0) {
+      console.log(chalk.green(`  ✓ All ${installed} hook config${installed === 1 ? '' : 's'} match this CLI`));
+    } else if (!opts?.fix) {
+      console.log(chalk.gray(`    Run ${chalk.white('origin doctor --fix')} (or ${chalk.white('origin hooks repair')}) to rewrite them.`));
+    }
+  } catch (err) {
+    console.log(chalk.gray(`  – Could not check hook configs: ${err instanceof Error ? err.message : String(err)}`));
   }
 
   // Capture daemons. GUI agents (Cursor, Claude Code on Windows, Gemini,

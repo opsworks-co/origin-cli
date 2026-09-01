@@ -12,11 +12,14 @@
 // ---------------------------------------------------------------------------
 
 import fs from 'fs';
+import { newCaptureStamp } from './capture-stamp.js';
 import { assessRestoreSafety } from './restore-safety.js';
 import os from 'os';
 import path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import { getCurrentVersion, shouldRestartForUpgrade } from './version-check.js';
+import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS } from './heartbeat-liveness.js';
+import { pruneRetiredStateFiles } from './session-state.js';
 import { createShadowCommit, filesChangedSinceShadow, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import { fetchWithTimeout } from './fetch-timeout.js';
@@ -125,7 +128,8 @@ let parentDeadTickCount = 0;
 // false-end, the existing session/start resume path (routes/mcp.ts)
 // finds the COMPLETED row via agentSessionId and re-opens it — the
 // row recovers automatically.
-const STALE_THRESHOLD_MS = 90 * 60 * 1000; // 90 minutes
+// Shared with the transcript-idle policy — see heartbeat-liveness.ts.
+const STALE_THRESHOLD_MS = HOOK_DRIVEN_IDLE_MS;
 
 /**
  * Check if a process is still alive (signal 0 = existence check).
@@ -168,7 +172,39 @@ function isStateFileStale(): boolean {
 // checks). Pairs with the server no-ping sweep: the heartbeat ends the session
 // on a confirmed stale transcript, and the sweep is the backstop if this
 // process is itself killed first.
-const TRANSCRIPT_IDLE_MS = 20 * 60 * 1000; // 20 minutes — moderate
+// How long the transcript must sit untouched before it counts as "the agent is
+// gone" — and it depends on what else we can see.
+//
+// A HOOKLESS IDE agent (Cursor, Antigravity) gives us one signal and one only:
+// no pid to watch, and a state file that something other than its lifecycle
+// keeps warm. A short window is the only thing that catches its zombie
+// heartbeat pinging on after the window closed.
+//
+// Every other agent fires lifecycle hooks, each of which bumps the state file
+// through saveSessionState, and signals a real close through SessionEnd. For
+// those the transcript window is a BACKSTOP, not the primary signal — and at 20
+// minutes it was ending live conversations the moment the user stepped away to
+// a meeting. Claude Code sits here: `LONG_RUNNING_AGENTS` is `['devin']` alone,
+// so its recorded pid is 0 and this clause reaped it by itself (prod 0a8e2164
+// went quiet 16:35 → 18:48 and was ended, taking its prompt history with it).
+//
+// 90 minutes matches STALE_THRESHOLD_MS, the window the state-file signal
+// already uses for the same pid-less agents, so both now agree instead of the
+// shorter one quietly winning.
+// The slug doesn't change for the life of the daemon; read it once.
+let agentSlugCache: string | null | undefined;
+function currentAgentSlug(): string {
+  if (agentSlugCache === undefined) {
+    agentSlugCache = null;
+    try {
+      if (stateFile) {
+        const raw = JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as { agentSlug?: string };
+        agentSlugCache = (raw.agentSlug || '').toLowerCase() || null;
+      }
+    } catch { /* unreadable → treated as hook-driven below */ }
+  }
+  return agentSlugCache || '';
+}
 
 function isTranscriptStale(): boolean {
   if (!stateFile) return false;
@@ -177,7 +213,7 @@ function isTranscriptStale(): boolean {
     const tp = state.transcriptPath;
     if (!tp || typeof tp !== 'string') return false; // no transcript → inconclusive
     const stat = fs.statSync(tp);                     // throws if the file is gone → caught
-    return Date.now() - stat.mtimeMs > TRANSCRIPT_IDLE_MS;
+    return Date.now() - stat.mtimeMs > transcriptIdleWindowMs(currentAgentSlug());
   } catch {
     return false; // unreadable / missing → don't conclude death from this signal
   }
@@ -213,7 +249,7 @@ function isAgentActivelyWriting(): boolean {
   for (const p of paths) {
     try {
       const stat = fs.statSync(p);
-      if (Date.now() - stat.mtimeMs <= TRANSCRIPT_IDLE_MS) return true;
+      if (Date.now() - stat.mtimeMs <= transcriptIdleWindowMs(currentAgentSlug())) return true;
     } catch { /* missing / unreadable → try the next candidate */ }
   }
   return false;
@@ -288,6 +324,10 @@ async function pushInflightDiff(): Promise<void> {
       // to pick the real baseline from sessionCommitShas.
       promptShadows?: Array<{ promptIndex: number; shadowSha: string; capturedAt: string; promptStartedAt?: number }>;
       promptStartedAt?: number[];
+      // Minted by the hook path (currentTurnIndex). READ here, never minted:
+      // the heartbeat re-sends the CURRENT turn, and inventing an id would give
+      // the same turn two identities.
+      promptTurnIds?: string[];
     };
     const repoPath = state.repoPath;
     const prePromptSha = state.prePromptSha;
@@ -558,7 +598,19 @@ async function pushInflightDiff(): Promise<void> {
       body: JSON.stringify({
         promptChanges: [
           {
+            // Provenance — the heartbeat re-sends a turn's content
+            // periodically, so without it these writes are exempt from
+            // ordering and can overwrite a fresher capture. See
+            // capture-stamp.ts.
+            ...newCaptureStamp('hb'),
             promptIndex,
+            // Identity, not just position. The heartbeat re-sends this turn
+            // every tick, so if the prompt list renumbers underneath it (a
+            // resume, a mid-turn interjection) the row would land on whichever
+            // turn now holds this index. The id comes from the hook path's
+            // promptTurnIds — read, never minted, so both writers name the
+            // same turn the same way.
+            ...(state.promptTurnIds?.[promptIndex] ? { turnId: state.promptTurnIds[promptIndex] } : {}),
             promptText,
             filesChanged: Array.from(filesChanged),
             diff: fullDiff.slice(0, MAX_PROMPT_DIFF_LEN),
@@ -1081,6 +1133,7 @@ async function endSession() {
           endPayload.promptChanges = savedMappings;
         } else if (prompts.length > 0) {
           endPayload.promptChanges = prompts.map((p: string, i: number) => ({
+            ...newCaptureStamp('hb'),
             promptIndex: i,
             promptText: p.slice(0, 1000),
             filesChanged: [],
@@ -1100,30 +1153,54 @@ async function endSession() {
     } catch { /* best effort */ }
   }
 
-  // Clean up ALL state files for this session (multiple hooks can create duplicates)
+  // Retire ALL state files for this session (multiple hooks can create
+  // duplicates) — mark them ENDED, do NOT delete them.
+  //
+  // Deleting was destroying the only local record of the session's prompt
+  // history, and "ended" here is a purely LOCAL verdict: this daemon ends a
+  // claude-code session after 20 minutes of transcript idle, because with
+  // parentPid 0 there is no process to watch. The server disagrees — the same
+  // conversation stays resumable, and the next `startSession` hands back the
+  // SAME session id.
+  //
+  // So on the next prompt the hook found no state, auto-created a fresh one
+  // with `prompts: []`, and restarted promptIndex at 0 — against a server that
+  // already held 14 rows. Every turn after that landed its diff on an earlier
+  // turn's row (prod 0a8e2164: the user left for two hours, came back, and the
+  // session began overwriting itself).
+  //
+  // `listActiveSessions` already skips ENDED, so a retired file cannot be
+  // mistaken for a live session; it just stays readable by tag, which is what
+  // lets a resumed conversation pick its numbering back up.
   if (stateFile) {
-    try { fs.unlinkSync(stateFile); } catch { /* ignore */ }
-    // Also clean sibling state files with the same session ID in the same directory
+    const retire = (filePath: string) => {
+      try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        if (data.sessionId !== sessionId) return;
+        data.status = 'ENDED';
+        data.endedAt = new Date().toISOString();
+        const tmp = filePath + '.tmp.' + process.pid;
+        fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+        fs.renameSync(tmp, filePath);
+      } catch { /* corrupt or gone — nothing to retire */ }
+    };
+    retire(stateFile);
     try {
       // path.dirname handles all edge cases (windows paths, missing
       // separator, trailing slash). The old stateFile.lastIndexOf('/')
       // returned -1 on any path without '/', which then produced
       // substring(0, -1) === '' and readdirSync('') scanned cwd.
       const dir = path.dirname(stateFile);
-      const entries = fs.readdirSync(dir);
-      for (const entry of entries) {
+      for (const entry of fs.readdirSync(dir)) {
         if (entry.startsWith('origin-session') && entry.endsWith('.json')) {
-          try {
-            const filePath = path.join(dir, entry);
-            const raw = fs.readFileSync(filePath, 'utf-8');
-            const data = JSON.parse(raw);
-            if (data.sessionId === sessionId) {
-              fs.unlinkSync(filePath);
-            }
-          } catch { /* skip */ }
+          retire(path.join(dir, entry));
         }
       }
     } catch { /* ignore */ }
+    // Retained files are not free — prune the ones old enough that no
+    // conversation will resume into them. This is the job the delete was
+    // really doing; it was just doing it immediately.
+    pruneRetiredStateFiles(path.dirname(stateFile));
   }
   try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
 }
@@ -1557,10 +1634,36 @@ ping();
 // Ping every 30s
 const interval = setInterval(ping, PING_INTERVAL_MS);
 
-// Clean exit on signals — always call endSession so the server knows
+// Clean exit on signals.
+//
+// A SIGTERM is not always "the session is over". stopHeartbeat() kills by
+// signal and then UNLINKS the pid file, so a supersession — another hook
+// taking this session over — reaches us as a SIGTERM too. Ending the session
+// there is actively destructive: a session with no PromptChange row yet is
+// HARD-DELETED by the server's empty-session cleanup, and every later write
+// 404s (see the startHeartbeat note in session-state.ts).
+//
+// Discriminate on the pid file, reusing the same predicate ping() uses. Gone,
+// or naming someone else → we were torn down by another process, which owns
+// the session now: exit quietly. Still naming us → a genuine teardown
+// (logout, reboot, `origin session end`), so tell the server.
+//
+// Every INTENTIONAL end already calls /session/end from the hook itself
+// (handleSessionEnd, the same-agent cleanup, endSessionById), so nothing that
+// means to end a session depends on this handler doing it.
 async function signalExit() {
   clearInterval(interval);
-  await endSession();
+  let pidFileOwner: number | null = null;
+  const pidFileExists = fs.existsSync(pidFile);
+  if (pidFileExists) {
+    try {
+      const parsed = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+      pidFileOwner = Number.isFinite(parsed) ? parsed : null;
+    } catch { pidFileOwner = null; }
+  }
+  if (!heartbeatSuperseded({ pidFileExists, pidFileOwner, myPid: process.pid })) {
+    await endSession();
+  }
   process.exit(0);
 }
 process.on('SIGTERM', signalExit);

@@ -3,14 +3,16 @@ import { syncNotesFromRemote } from '../git-notes.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { run, runDetailed, findExecutable } from '../utils/exec.js';
 import { isWindows } from '../utils/platform.js';
 import { loadConfig, saveConfig, saveRepoConfig, isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 import { mcpAgentsForEnable, installMcpForAgent, mcpServerCommand, mcpCapable } from '../mcp/install.js';
+import { recordEnabledRepo } from '../enabled-repos.js';
 
 // ─── PATH Resolution ─────────────────────────────────────────────────────
 // Hooks run in a minimal shell environment where `origin` may not be in PATH.
@@ -60,17 +62,144 @@ function getOriginBinPath(): string {
 // shim (which drags cmd.exe — and a visible console window — into every hook
 // fire). Returns '' when it can't be resolved with confidence, in which case
 // the caller falls back to the shim.
-function cliEntryScript(): string {
-  try {
-    const entry = process.argv[1];
-    if (!entry) return '';
-    const abs = path.resolve(entry);
+/**
+ * Pure core of cliEntryScript, so the launcher-independence invariant is
+ * testable without spawning the CLI two different ways.
+ *
+ * `argv1` is process.argv[1]; `moduleDir` is the directory this module was
+ * loaded from. Either can name the entry — they MUST agree on one answer for a
+ * given install, which is the whole point.
+ */
+export function resolveCliEntry(
+  argv1: string | undefined,
+  moduleDir: string,
+  exists: (p: string) => boolean,
+): string {
+  if (argv1) {
+    const abs = path.resolve(argv1);
     // Only trust a real .js file — `origin` may itself have been launched via
     // the .cmd shim or a bundler stub we shouldn't hard-code into hooks.
-    if (!abs.toLowerCase().endsWith('.js') || !fs.existsSync(abs)) return '';
-    return abs;
+    if (abs.toLowerCase().endsWith('.js') && exists(abs)) return abs;
+  }
+  // argv[1] is NOT a .js file when the CLI was launched through npm's `origin`
+  // shim, and this module sits next to index.js in dist/ either way — so
+  // resolve it from our own location instead of giving up.
+  //
+  // Giving up made the answer depend on HOW THIS PROCESS WAS LAUNCHED, which
+  // put two writers in permanent disagreement about the same file:
+  //   `origin hooks repair`               → entry '' → `& '<bin>/origin' …`
+  //   `node <dist/index.js> hooks repair` → entry ok → `& '<node>' '<entry>' …`
+  // `origin upgrade` shells out using the second form (upgrade.ts), while
+  // `origin status` / `origin doctor` run as whatever the user typed — so every
+  // upgrade wrote one shape and the next status call reported it as drift. The
+  // warning was permanent and self-inflicted, and each "repair" only flipped it
+  // back. (Reported on macOS, where only the `powershell` field differs and
+  // nothing executes it; on Windows it decides whether every hook fire spawns a
+  // visible cmd window, which is the whole reason `node <entry>` is preferred.)
+  //
+  // Same fallback transcript-watch.ts and codex-watch.ts already use.
+  if (moduleDir) {
+    const here = path.join(moduleDir, 'index.js');
+    if (exists(here)) return here;
+    // commands/ sits one level below dist/ in the built output.
+    const parent = path.join(path.dirname(moduleDir), 'index.js');
+    if (exists(parent)) return parent;
+  }
+  return '';
+}
+
+function cliEntryScript(): string {
+  let moduleDir = '';
+  try {
+    moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  } catch { /* unresolvable — argv[1] may still answer */ }
+  try {
+    return resolveCliEntry(process.argv[1], moduleDir, (f) => fs.existsSync(f));
   } catch {
     return '';
+  }
+}
+
+/**
+ * A Windows path that can sit in a hook command WITHOUT quotes.
+ *
+ * Quoting is the obvious answer and it does not survive. Antigravity documents
+ * that it runs a hook's `command` through `cmd /c <string>`, and a quoted token
+ * inside that string comes back to cmd escaped — cmd then looks for a program
+ * literally named `\"C:\Program Files\nodejs\node.exe\"`:
+ *
+ *   '\"C:\Program Files\nodejs\node.exe\"' is not recognized as an internal
+ *   or external command, operable program or batch file.
+ *
+ * Live consequence, and the reason this is not cosmetic: PreToolUse runs BEFORE
+ * every tool call and a failing handler is a hard block, so the agent could not
+ * read a file or run git at all. It reported Node as missing — from a machine
+ * where node.exe sits exactly where the command said. Wrapping the whole string
+ * in another quote pair (the usual `cmd /c ""x" y"` trick) fares no better; it
+ * fails differently ("The network path was not found").
+ *
+ * The escape is to have nothing worth quoting: 8.3 short names contain no
+ * spaces, so `C:\PROGRA~1\nodejs\node.exe` passes through cmd, PowerShell and
+ * git-bash untouched. 8.3 generation can be disabled per volume, so a short
+ * name is never assumed — when one isn't available we fall back to quoting,
+ * which is no worse than what shipped before.
+ */
+export function unquotedWindowsPath(p: string, toShort: (x: string) => string | null): string {
+  if (!/\s/.test(p)) return p;
+  try {
+    const short = toShort(p);
+    if (short && !/\s/.test(short)) return short;
+  } catch { /* fall through to quoting */ }
+  return `"${p}"`;
+}
+
+/**
+ * The 8.3 short name for a path, via PowerShell's FileSystemObject.
+ *
+ * NOT via cmd. The obvious lookup is `cmd /c for %I in ("<p>") do @echo %~sI`,
+ * and it is defeated by the very defect this exists to fix: the quoted path
+ * reaches cmd escaped, the loop takes the literal `\"C:\Program Files\…\"` as
+ * its filename, and the answer comes back as garbage rather than as an error —
+ *
+ *   C:\"C:\Program Files\nodejs\node.exe"
+ *
+ * which `fs.existsSync` then rejects, so every path silently reported "no short
+ * name" and fell back to the broken quoting. PowerShell takes the path as a
+ * single-quoted literal, which survives the same trip intact.
+ *
+ * MEMOIZED, and that is not an optimisation detail. originCmd() is called once
+ * per hook ENTRY, not once per agent — a multi-agent install writes dozens —
+ * and each call resolves two paths. Uncached, `origin enable` spawned
+ * PowerShell dozens of times and hook-config-drift.test.ts went from passing to
+ * a 30-SECOND TIMEOUT. The inputs are process.execPath and the CLI entry, which
+ * cannot change within a process, so one lookup per distinct path is all this
+ * can ever need. Null results are cached too — a volume with no 8.3 names must
+ * not re-pay the spawn for every entry.
+ */
+const shortPathCache = new Map<string, string | null>();
+
+function windowsShortPath(p: string): string | null {
+  const hit = shortPathCache.get(p);
+  if (hit !== undefined) return hit;
+  const resolved = resolveWindowsShortPath(p);
+  shortPathCache.set(p, resolved);
+  return resolved;
+}
+
+function resolveWindowsShortPath(p: string): string | null {
+  try {
+    const out = execFileSync('powershell', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      // Single-quoted PowerShell literal: '' is the escape for a quote inside one.
+      `(New-Object -ComObject Scripting.FileSystemObject).GetFile('${p.replace(/'/g, "''")}').ShortPath`,
+      // stderr is silenced deliberately: execFileSync inherits it, and a path
+      // with no short name makes FileSystemObject throw a nine-line HRESULT
+      // trace straight into the middle of `origin enable`'s output. The miss is
+      // expected and handled — it must not look like a failure to the user.
+    ], { encoding: 'utf-8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return out && fs.existsSync(out) ? out : null;
+  } catch {
+    return null;
   }
 }
 
@@ -92,15 +221,14 @@ function originCmd(cmd: string): string {
     // removes the interpreter entirely (one process instead of two).
     const entry = cliEntryScript();
     if (entry) {
-      const node = /\s/.test(process.execPath) ? `"${process.execPath}"` : process.execPath;
-      const js = /\s/.test(entry) ? `"${entry}"` : entry;
+      const node = unquotedWindowsPath(process.execPath, windowsShortPath);
+      const js = unquotedWindowsPath(entry, windowsShortPath);
       return `${node} ${js} ${args}`.trim();
     }
 
     const bin = originBinaryPath();
     if (bin === 'origin') return cmd; // unresolved → rely on PATH
-    const quoted = /\s/.test(bin) ? `"${bin}"` : bin;
-    return `${quoted} ${args}`.trim();
+    return `${unquotedWindowsPath(bin, windowsShortPath)} ${args}`.trim();
   }
   const binDir = getOriginBinPath();
   if (binDir && binDir !== '/usr/bin' && binDir !== '/bin') {
@@ -115,7 +243,7 @@ function originCmd(cmd: string): string {
 // agnostic `hooks <agent>` marker (NOT the literal `origin hooks`, which the
 // Windows form breaks) so idempotent re-install finds prior entries on every
 // platform. Pass `agent` to scope to one agent's entries; omit to match any.
-function isOriginHookCommand(cmd: unknown, agent?: string): boolean {
+export function isOriginHookCommand(cmd: unknown, agent?: string): boolean {
   if (typeof cmd !== 'string') return false;
   if (agent) return cmd.includes(`hooks ${agent} `) || cmd.endsWith(`hooks ${agent}`);
   return /\bhooks (claude-code|cursor|gemini|devin|windsurf|codex|copilot|antigravity|aider)\b/.test(cmd);
@@ -160,7 +288,7 @@ function originPowershellCmd(cmd: string): string {
 
 // ─── Agent Definitions ────────────────────────────────────────────────────
 
-type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'devin' | 'codex' | 'aider' | 'antigravity' | 'copilot';
+export type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'devin' | 'codex' | 'aider' | 'antigravity' | 'copilot';
 
 interface AgentConfig {
   name: string;
@@ -172,9 +300,282 @@ interface AgentConfig {
   installHooks: (gitRoot: string) => void;
 }
 
+// ─── Origin's Hook Payloads (single source of truth) ──────────────────────
+//
+// Everything Origin writes into an agent's hook config is BUILT HERE. The
+// installers below merge these payloads in; `hook-config-health.ts` re-derives
+// the SAME payloads to decide whether what sits on disk is still what the
+// current code would write, and rewrites it when it isn't.
+//
+// Why the indirection: a hook-schema fix has to land in exactly one place and
+// then reach installs that already exist. #1143 fixed Origin's Antigravity
+// schema in the installer only, so every machine that had already run
+// `origin enable` kept the rejected hooks.json — and agy discards a whole file
+// on a single schema error, silently, so those machines captured nothing and
+// reported nothing. A validator written separately from the writer would just
+// be a second copy waiting to drift; deriving both from one payload can't.
+
+function claudeHookEvents(): Record<string, any[]> {
+  return {
+    SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-start') }] }],
+    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code stop') }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code user-prompt-submit') }] }],
+    SessionEnd: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-end') }] }],
+    PreToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code pre-tool-use') }] }],
+    PostToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code post-tool-use') }] }],
+  };
+}
+
+// Cursor 2.x reverted to the standard `sessionStart` / `sessionEnd` event
+// names. Cursor 1.7 briefly used `agentSessionStart` / `agentSessionEnd` but
+// 2.6+ rejects those as "Unknown hook type" and FAILS THE ENTIRE CONFIG
+// — no Origin hook fires, no sessions reach the dashboard. Write under the
+// current names. Valid types per Cursor 2.6's parser: beforeShellExecution,
+// beforeMCPExecution, afterShellExecution, afterMCPExecution, beforeReadFile,
+// afterFileEdit, beforeTabFileRead, afterTabFileEdit, stop, beforeSubmitPrompt,
+// afterAgentResponse, afterAgentThought, sessionStart, sessionEnd, preCompact,
+// subagentStart, subagentStop, preToolUse, postToolUse, postToolUseFailure.
+function cursorHookEvents(): Record<string, any[]> {
+  return {
+    sessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
+    stop: [{ command: originCmd('origin hooks cursor stop') }],
+    beforeSubmitPrompt: [{ command: originCmd('origin hooks cursor user-prompt-submit') }],
+    sessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
+    // afterFileEdit captures Cursor's StrReplace / write tool calls as they
+    // happen. Cursor's git commits don't reliably trigger the global
+    // post-commit hook (sandbox / worktree isolation), so AI Blame would
+    // otherwise show empty diffs for Cursor sessions. Each edit-hook fire
+    // re-scans the working tree against the per-prompt shadow and updates
+    // the current prompt's mapping in place.
+    afterFileEdit: [{ command: originCmd('origin hooks cursor after-file-edit') }],
+  };
+}
+
+function geminiHookEvents(): Record<string, any[]> {
+  return {
+    SessionStart: [{ hooks: [{ name: 'origin-session-start', type: 'command', command: originCmd('origin hooks gemini session-start') }] }],
+    SessionEnd: [
+      { matcher: 'exit', hooks: [{ name: 'origin-session-end', type: 'command', command: originCmd('origin hooks gemini session-end') }] },
+      { matcher: 'logout', hooks: [{ name: 'origin-session-end-logout', type: 'command', command: originCmd('origin hooks gemini session-end') }] },
+    ],
+    BeforeAgent: [{ hooks: [{ name: 'origin-before-agent', type: 'command', command: originCmd('origin hooks gemini user-prompt-submit') }] }],
+    AfterAgent: [{ hooks: [{ name: 'origin-after-agent', type: 'command', command: originCmd('origin hooks gemini stop') }] }],
+    // Gemini's TOOL-level events. Without these a Gemini session has no
+    // per-command evidence at all: every file it writes is attributed by the
+    // turn window, i.e. by whatever happened to be dirty, which in a shared
+    // checkout is also a sibling agent's work.
+    //
+    // The names are `BeforeTool`/`AfterTool`, NOT `PreToolUse`/`PostToolUse`.
+    // Gemini's own `HookEventName` enum lists BeforeTool, AfterTool,
+    // BeforeAgent, AfterAgent, SessionStart, SessionEnd, PreCompress,
+    // BeforeModel, AfterModel, BeforeToolSelection; `PreToolUse` appears only
+    // in the `hooks migrate` EVENT_MAPPING as a Claude-Code alias it converts
+    // FROM. Writing the Claude spelling here would have registered nothing and
+    // failed silently — the same shape as the Antigravity schema bug.
+    BeforeTool: [{ hooks: [{ name: 'origin-before-tool', type: 'command', command: originCmd('origin hooks gemini pre-tool-use') }] }],
+    AfterTool: [{ hooks: [{ name: 'origin-after-tool', type: 'command', command: originCmd('origin hooks gemini post-tool-use') }] }],
+  };
+}
+
+function devinHookEvents(): Record<string, any[]> {
+  const dv = (sub: string) => ({ hooks: [{ type: 'command', command: originCmd(`origin hooks devin ${sub}`) }] });
+  return {
+    SessionStart: [dv('session-start')],
+    Stop: [dv('stop')],
+    UserPromptSubmit: [dv('user-prompt-submit')],
+    SessionEnd: [dv('session-end')],
+  };
+}
+
+function cascadeHookEvents(): Record<string, any[]> {
+  const cs = (sub: string) => ({
+    command: originCmd(`origin hooks devin ${sub}`),
+    powershell: originPowershellCmd(`origin hooks devin ${sub}`),
+  });
+  return {
+    sessionStart: [cs('session-start')],
+    stop: [cs('stop')],
+    beforeSubmitPrompt: [cs('user-prompt-submit')],
+    sessionEnd: [cs('session-end')],
+  };
+}
+
+// Codex supports: SessionStart, Stop, UserPromptSubmit (no SessionEnd/BeforeAgent/AfterAgent)
+function codexHookEvents(): Record<string, any[]> {
+  return {
+    SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex session-start'), timeout: 10 }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex user-prompt-submit'), timeout: 10 }] }],
+    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex stop'), timeout: 10 }] }],
+  };
+}
+
+// agy ONLY fires three hook events — Stop, PreToolUse, PostToolUse (verified
+// against the binary; SessionStart/UserPromptSubmit/SessionEnd do not exist).
+// PostToolUse drives in-session capture (it carries conversationId +
+// transcriptPath); Stop finalizes; PreToolUse must return a decision so it
+// never blocks the agent.
+//
+// The two event families take DIFFERENT shapes, and getting either wrong is
+// not a partial failure — agy rejects the whole hooks.json and silently runs
+// no hooks at all, so capture goes to zero with nothing in any log:
+//   - PreToolUse/PostToolUse are "grouped": a `matcher` regex over the tool
+//     name wrapping a `hooks` array. "*" matches every tool. A group with no
+//     `matcher` is invalid.
+//   - Stop is "flat": the handler objects sit directly in the array, with no
+//     `matcher`/`hooks` wrapper. Wrapping it produces a handler with no
+//     `command` (a required field).
+function antigravityHookGroup(): Record<string, any> {
+  return {
+    enabled: true,
+    PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: originCmd('origin hooks antigravity post-tool-use') }] }],
+    Stop: [{ type: 'command', command: originCmd('origin hooks antigravity stop') }],
+    PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: originCmd('origin hooks antigravity pre-tool-use') }] }],
+  };
+}
+
+// The Copilot CLI uses camelCase event names (sessionStart, userPromptSubmitted,
+// agentStop, sessionEnd — NOT the PascalCase VS-Code variants) and runs command
+// hooks from the `bash` field. We set `command` as a documented fallback, and a
+// `powershell` variant so the hook also fires under native Windows PowerShell.
+// (docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-hooks)
+function copilotHookDocument(): Record<string, any> {
+  const cmd = (event: string) => originCmd(`origin hooks copilot ${event}`);
+  const hook = (event: string) => [{
+    type: 'command',
+    bash: cmd(event),
+    command: cmd(event),
+    powershell: originPowershellCmd(`origin hooks copilot ${event}`),
+  }];
+  return {
+    version: 1,
+    hooks: {
+      sessionStart: hook('session-start'),
+      userPromptSubmitted: hook('user-prompt-submit'),
+      agentStop: hook('stop'),
+      sessionEnd: hook('session-end'),
+    },
+  };
+}
+
+/**
+ * One Origin-owned region of one agent config file, described well enough to
+ * be both WRITTEN and CHECKED generically.
+ */
+export interface HookConfigSpec {
+  agent: AgentType;
+  /** Absolute path of the config file for a given install base. */
+  filePath: (basePath: string) => string;
+  /** Display path, `~`-relative for a global install. */
+  label: (basePath: string) => string;
+  /** Key path to Origin's region inside the parsed JSON (`[]` = document root). */
+  at: string[];
+  /**
+   * `events` — `at` holds an event→entries map Origin SHARES with the user's
+   *   own hooks; only entries carrying an Origin command belong to us.
+   * `owned`  — everything at `at` is Origin's, and is replaced wholesale.
+   */
+  mode: 'events' | 'owned';
+  /** Exactly what Origin's installer writes there right now. */
+  expected: () => any;
+  /** Setups where Origin deliberately installs nothing (so nothing to check). */
+  skip?: () => boolean;
+}
+
+const isGlobalBase = (basePath: string) => basePath === os.homedir();
+
+// Aider is deliberately absent: its config is an append-only YAML block in
+// `.aider.conf.yml`, not a hook schema, and it is neither auto-detected nor
+// global-capable. There is no drift class to heal there.
+export const HOOK_CONFIG_SPECS: HookConfigSpec[] = [
+  {
+    agent: 'claude-code',
+    filePath: (b) => path.join(b, '.claude', 'settings.json'),
+    label: (b) => (isGlobalBase(b) ? '~/.claude/settings.json' : '.claude/settings.json'),
+    at: ['hooks'],
+    mode: 'events',
+    expected: claudeHookEvents,
+  },
+  {
+    agent: 'cursor',
+    filePath: (b) => path.join(b, '.cursor', 'hooks.json'),
+    label: (b) => (isGlobalBase(b) ? '~/.cursor/hooks.json' : '.cursor/hooks.json'),
+    at: ['hooks'],
+    mode: 'events',
+    expected: cursorHookEvents,
+  },
+  {
+    agent: 'gemini',
+    filePath: (b) => path.join(b, '.gemini', 'settings.json'),
+    label: (b) => (isGlobalBase(b) ? '~/.gemini/settings.json' : '.gemini/settings.json'),
+    at: ['hooks'],
+    mode: 'events',
+    expected: geminiHookEvents,
+  },
+  {
+    agent: 'devin',
+    filePath: (b) => path.join(b, '.devin', 'hooks.v1.json'),
+    label: (b) => (isGlobalBase(b) ? '~/.devin/hooks.v1.json' : '.devin/hooks.v1.json'),
+    at: [],
+    mode: 'events',
+    expected: devinHookEvents,
+  },
+  {
+    // Transition shim for the ex-Windsurf desktop GUI — see
+    // installLegacyCascadeHooks.
+    agent: 'devin',
+    filePath: (b) => path.join(b, '.windsurf', 'hooks.json'),
+    label: (b) => (isGlobalBase(b) ? '~/.windsurf/hooks.json' : '.windsurf/hooks.json'),
+    at: ['hooks'],
+    mode: 'events',
+    expected: cascadeHookEvents,
+  },
+  {
+    agent: 'codex',
+    filePath: (b) => path.join(b, '.codex', 'hooks.json'),
+    label: (b) => (isGlobalBase(b) ? '~/.codex/hooks.json' : '.codex/hooks.json'),
+    at: ['hooks'],
+    mode: 'events',
+    expected: codexHookEvents,
+    // Windows Codex capture is the rollout watcher; hooks are never installed
+    // there (they can't run in Codex's sandbox and surface as red errors).
+    skip: () => isWindows(),
+  },
+  {
+    agent: 'antigravity',
+    filePath: (b) => (isGlobalBase(b)
+      ? path.join(b, '.gemini', 'config', 'hooks.json')
+      : path.join(b, '.agents', 'hooks.json')),
+    label: (b) => (isGlobalBase(b) ? '~/.gemini/config/hooks.json' : '.agents/hooks.json'),
+    at: ['origin'],
+    mode: 'owned',
+    expected: antigravityHookGroup,
+  },
+  {
+    agent: 'copilot',
+    filePath: (b) => (isGlobalBase(b)
+      ? path.join(os.homedir(), '.copilot', 'hooks', 'origin.json')
+      : path.join(b, '.github', 'hooks', 'origin.json')),
+    label: (b) => (isGlobalBase(b) ? '~/.copilot/hooks/origin.json' : '.github/hooks/origin.json'),
+    // A dedicated file Origin owns end to end — Copilot merges every *.json in
+    // the dir, so there is nothing of the user's to preserve.
+    at: [],
+    mode: 'owned',
+    expected: copilotHookDocument,
+  },
+];
+
+export function agentDisplayName(agent: AgentType): string {
+  return AGENTS[agent]?.name || agent;
+}
+
+/** Re-run an agent's full installer (hooks plus everything else `enable` wires). */
+export function reinstallAgentHooks(agent: AgentType, basePath: string): void {
+  AGENTS[agent].installHooks(basePath);
+}
+
 // ── Claude Code Hooks ──────────────────────────────────────────────────────
 
-function installClaudeHooks(gitRoot: string): void {
+export function installClaudeHooks(gitRoot: string): void {
   const claudeDir = path.join(gitRoot, '.claude');
   const settingsPath = path.join(claudeDir, 'settings.json');
 
@@ -190,14 +591,7 @@ function installClaudeHooks(gitRoot: string): void {
 
   if (!settings.hooks) settings.hooks = {};
 
-  const hooks: Record<string, any[]> = {
-    SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-start') }] }],
-    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code stop') }] }],
-    UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code user-prompt-submit') }] }],
-    SessionEnd: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-end') }] }],
-    PreToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code pre-tool-use') }] }],
-    PostToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code post-tool-use') }] }],
-  };
+  const hooks = claudeHookEvents();
 
   for (const [eventType, entries] of Object.entries(hooks)) {
     if (!settings.hooks[eventType]) settings.hooks[eventType] = [];
@@ -326,28 +720,7 @@ export function installCursorHooks(gitRoot: string): void {
 
   if (!config.hooks) config.hooks = {};
 
-  // Cursor 2.x reverted to the standard `sessionStart` / `sessionEnd` event
-  // names. Cursor 1.7 briefly used `agentSessionStart` / `agentSessionEnd` but
-  // 2.6+ rejects those as "Unknown hook type" and FAILS THE ENTIRE CONFIG
-  // — no Origin hook fires, no sessions reach the dashboard. Write under the
-  // current names. Valid types per Cursor 2.6's parser: beforeShellExecution,
-  // beforeMCPExecution, afterShellExecution, afterMCPExecution, beforeReadFile,
-  // afterFileEdit, beforeTabFileRead, afterTabFileEdit, stop, beforeSubmitPrompt,
-  // afterAgentResponse, afterAgentThought, sessionStart, sessionEnd, preCompact,
-  // subagentStart, subagentStop, preToolUse, postToolUse, postToolUseFailure.
-  const hooks: Record<string, any[]> = {
-    sessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
-    stop: [{ command: originCmd('origin hooks cursor stop') }],
-    beforeSubmitPrompt: [{ command: originCmd('origin hooks cursor user-prompt-submit') }],
-    sessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
-    // afterFileEdit captures Cursor's StrReplace / write tool calls as they
-    // happen. Cursor's git commits don't reliably trigger the global
-    // post-commit hook (sandbox / worktree isolation), so AI Blame would
-    // otherwise show empty diffs for Cursor sessions. Each edit-hook fire
-    // re-scans the working tree against the per-prompt shadow and updates
-    // the current prompt's mapping in place.
-    afterFileEdit: [{ command: originCmd('origin hooks cursor after-file-edit') }],
-  };
+  const hooks = cursorHookEvents();
 
   // Strip our entries from the now-invalid event names so an upgrade from a
   // CLI that wrote `agentSessionStart` / `agentSessionEnd` doesn't leave the
@@ -381,7 +754,7 @@ export function installCursorHooks(gitRoot: string): void {
 
 // ── Gemini CLI Hooks ───────────────────────────────────────────────────────
 
-function installGeminiHooks(gitRoot: string): void {
+export function installGeminiHooks(gitRoot: string): void {
   const geminiDir = path.join(gitRoot, '.gemini');
   const settingsPath = path.join(geminiDir, 'settings.json');
 
@@ -399,15 +772,7 @@ function installGeminiHooks(gitRoot: string): void {
   settings.hooksConfig = { enabled: true };
   if (!settings.hooks) settings.hooks = {};
 
-  const hooks: Record<string, any[]> = {
-    SessionStart: [{ hooks: [{ name: 'origin-session-start', type: 'command', command: originCmd('origin hooks gemini session-start') }] }],
-    SessionEnd: [
-      { matcher: 'exit', hooks: [{ name: 'origin-session-end', type: 'command', command: originCmd('origin hooks gemini session-end') }] },
-      { matcher: 'logout', hooks: [{ name: 'origin-session-end-logout', type: 'command', command: originCmd('origin hooks gemini session-end') }] },
-    ],
-    BeforeAgent: [{ hooks: [{ name: 'origin-before-agent', type: 'command', command: originCmd('origin hooks gemini user-prompt-submit') }] }],
-    AfterAgent: [{ hooks: [{ name: 'origin-after-agent', type: 'command', command: originCmd('origin hooks gemini stop') }] }],
-  };
+  const hooks = geminiHookEvents();
 
   for (const [eventType, entries] of Object.entries(hooks)) {
     if (!settings.hooks[eventType]) settings.hooks[eventType] = [];
@@ -454,13 +819,7 @@ export function installDevinHooks(gitRoot: string): void {
     try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = {}; }
   }
 
-  const dv = (sub: string) => ({ hooks: [{ type: 'command', command: originCmd(`origin hooks devin ${sub}`) }] });
-  const hooks: Record<string, any[]> = {
-    SessionStart: [dv('session-start')],
-    Stop: [dv('stop')],
-    UserPromptSubmit: [dv('user-prompt-submit')],
-    SessionEnd: [dv('session-end')],
-  };
+  const hooks = devinHookEvents();
 
   for (const [eventType, entries] of Object.entries(hooks)) {
     if (!config[eventType]) config[eventType] = [];
@@ -498,16 +857,7 @@ function installLegacyCascadeHooks(gitRoot: string): void {
   }
   if (!config.hooks) config.hooks = {};
 
-  const cs = (sub: string) => ({
-    command: originCmd(`origin hooks devin ${sub}`),
-    powershell: originPowershellCmd(`origin hooks devin ${sub}`),
-  });
-  const hooks: Record<string, any[]> = {
-    sessionStart: [cs('session-start')],
-    stop: [cs('stop')],
-    beforeSubmitPrompt: [cs('user-prompt-submit')],
-    sessionEnd: [cs('session-end')],
-  };
+  const hooks = cascadeHookEvents();
   for (const [eventType, entries] of Object.entries(hooks)) {
     if (!config.hooks[eventType]) config.hooks[eventType] = [];
     config.hooks[eventType] = config.hooks[eventType].filter((h: any) => !isOriginHookCommand(h.command));
@@ -540,27 +890,7 @@ export function installCopilotHooks(gitRoot: string): void {
   // so there's nothing to preserve/back up here (unlike the shared settings of
   // the other agents).
   //
-  // The Copilot CLI uses camelCase event names (sessionStart, userPromptSubmitted,
-  // agentStop, sessionEnd — NOT the PascalCase VS-Code variants) and runs command
-  // hooks from the `bash` field. We set `command` as a documented fallback, and a
-  // `powershell` variant so the hook also fires under native Windows PowerShell.
-  // (docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/use-hooks)
-  const cmd = (event: string) => originCmd(`origin hooks copilot ${event}`);
-  const hook = (event: string) => [{
-    type: 'command',
-    bash: cmd(event),
-    command: cmd(event),
-    powershell: originPowershellCmd(`origin hooks copilot ${event}`),
-  }];
-  const config = {
-    version: 1,
-    hooks: {
-      sessionStart: hook('session-start'),
-      userPromptSubmitted: hook('user-prompt-submit'),
-      agentStop: hook('stop'),
-      sessionEnd: hook('session-end'),
-    },
-  };
+  const config = copilotHookDocument();
 
   fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
   const label = isGlobal ? '~/.copilot/hooks/origin.json' : '.github/hooks/origin.json';
@@ -666,12 +996,7 @@ export function installCodexHooks(gitRoot: string): void {
     fs.mkdirSync(codexDir, { recursive: true });
   }
 
-  // Codex supports: SessionStart, Stop, UserPromptSubmit (no SessionEnd/BeforeAgent/AfterAgent)
-  const hooks: Record<string, any[]> = {
-    SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex session-start'), timeout: 10 }] }],
-    UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex user-prompt-submit'), timeout: 10 }] }],
-    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex stop'), timeout: 10 }] }],
-  };
+  const hooks = codexHookEvents();
 
   // macOS/Linux only (Windows returned early above — it's watcher-only). The
   // standalone .codex/hooks.json is the sole hook source here; inline config.toml
@@ -999,17 +1324,7 @@ export function installAntigravityHooks(gitRoot: string): void {
     try { config = JSON.parse(fs.readFileSync(hooksPath, 'utf-8')); } catch { config = {}; }
   }
 
-  // agy ONLY fires three hook events — Stop, PreToolUse, PostToolUse (verified
-  // against the binary; SessionStart/UserPromptSubmit/SessionEnd do not exist).
-  // PostToolUse drives in-session capture (it carries conversationId +
-  // transcriptPath); Stop finalizes; PreToolUse must return a decision so it
-  // never blocks the agent.
-  config.origin = {
-    enabled: true,
-    PostToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks antigravity post-tool-use') }] }],
-    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks antigravity stop') }] }],
-    PreToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks antigravity pre-tool-use') }] }],
-  };
+  config.origin = antigravityHookGroup();
 
   fs.writeFileSync(hooksPath, JSON.stringify(config, null, 2) + '\n');
   const label = isGlobalInstall ? '~/.gemini/config/hooks.json' : '.agents/hooks.json';
@@ -1022,7 +1337,7 @@ export function installAntigravityHooks(gitRoot: string): void {
  * Backup an existing hook configuration file before Origin modifies it.
  * Creates a .origin-backup copy so the user can restore it later.
  */
-function backupExistingHooks(filePath: string): void {
+export function backupExistingHooks(filePath: string): void {
   if (!fs.existsSync(filePath)) return;
 
   const backupPath = filePath + '.origin-backup';
@@ -1329,6 +1644,11 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
     console.log(chalk.gray('    • Turn end — files, tokens, tool calls'));
   }
 
+  // Remember this repo so a later `origin upgrade` can reach its hook files.
+  // Nothing else on the machine records where repo-local hooks were installed,
+  // which is why the #1143 Antigravity schema fix could not have reached them.
+  if (!isGlobal) recordEnabledRepo(basePath);
+
   // Register the MCP server so the agent can QUERY Origin, not just be
   // recorded by it. Best-effort by design: a failure here must never take down
   // hook installation, which is what `enable` actually exists to do.
@@ -1466,6 +1786,39 @@ export async function enableCommand(opts: { agent?: string; global?: boolean; lo
       }
     } catch { /* never block enable on watcher startup */ }
   }
+
+  // Seed the agent rules files now, rather than waiting for a first session to
+  // write them.
+  //
+  // For the hookless agents this is the difference between having a context
+  // surface and not having one: Antigravity fires no SessionStart and Devin
+  // Desktop fires no hooks at all, so their rules file was previously created
+  // only as a side effect of some OTHER agent's session in the same repo. Enable
+  // a machine for agy alone and nothing ever wrote AGENTS.md.
+  //
+  // Only inside a git repo (the content is repo memory + attribution, which a
+  // home directory has none of) and never fatal — a failed seed costs a stale
+  // first session, not a failed install. Dynamic import to keep enable's startup
+  // cost off the much larger hooks module.
+  try {
+    const seedRoot = getGitRoot();
+    if (seedRoot) {
+      const { writeAgentRulesFile, buildDurableContextMessage, agentReadsContextFromHook } = await import('./hooks.js');
+      const fullMsg = buildDurableContextMessage(seedRoot);
+      // An agent that gets the repo-context block over its hook channel every
+      // turn must not also read it out of an always-loaded rules file — the
+      // same subtraction session-start makes. Seeding the full text into its OWN
+      // file would put that duplicate back for every turn until its first
+      // session rewrote it. Sibling files keep the full text: for the
+      // file-driven agents they are the only delivery channel there is.
+      const trimmedMsg = buildDurableContextMessage(seedRoot, true);
+      for (const agent of agentsToEnable) {
+        try {
+          writeAgentRulesFile(agent, fullMsg, seedRoot, agentReadsContextFromHook(agent) ? trimmedMsg : undefined);
+        } catch { /* one agent's file must not block the rest */ }
+      }
+    }
+  } catch { /* best-effort — never block enable on a rules-file seed */ }
 
   console.log(chalk.bold('\n📋 Next steps:\n'));
   const agentNames = agentsToEnable.map(a => AGENTS[a].command);

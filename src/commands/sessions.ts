@@ -10,6 +10,8 @@ import { git, gitOrNull } from '../utils/exec.js';
 import { currentOwner, isForeignSession, listForeignQueuedSessions, reportForeignSessionCount } from '../session-owner.js';
 import { resolveAgentDisplayName } from '../agents/registry.js';
 import { makeSyncBlock } from '../sync-block.js';
+import { durableUpdateSession } from '../update-queue.js';
+import { debugLog } from '../debug-log.js';
 
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
 
@@ -738,9 +740,13 @@ export async function sessionCleanCommand(opts: { all?: boolean }) {
  * stamped the session with a `local-${uuid}` id and kept all the captured
  * data in `~/.origin/sessions/`. Once an admin enables the agent, run this
  * to retry the upload: each queued session is replayed via `session/start`
- * (to obtain a real id) followed by `session/end` with the captured prompts,
- * branch, and duration. The local file is removed on success and left in
- * place if the agent is still disabled (so a future run can try again).
+ * (to obtain a real id), then a `session/update` carrying the capture the
+ * hooks persisted — files, line counts, tokens, and the per-turn rows — and
+ * finally `session/end`. The update is not optional: without it the replay
+ * lands as a bare row that the empty-session sweep deletes, after this
+ * function has already removed the only local copy. The local file is
+ * removed on success and left in place if the agent is still disabled (so a
+ * future run can try again).
  */
 export async function sessionsSyncCommand(opts: { quiet?: boolean; markImported?: boolean }): Promise<{ synced: number; blocked: number; failed: number; foreign: number }> {
   const result = { synced: 0, blocked: 0, failed: 0, foreign: 0 };
@@ -802,12 +808,29 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean; markImported?
       realSessionId = state.syncedSessionId;
     } else {
       try {
-        const repoUrl = gitOrNull(['remote', 'get-url', 'origin'], { cwd: state.repoPath || process.cwd() }) || undefined;
+        // Identity is the CANONICAL repo, never the working root. For a
+        // worktree session those differ (`state.repoPath` is
+        // `<repo>/.claude/worktrees/<name>`), and the server names an
+        // auto-registered row after the directory it is handed — so replaying
+        // a queued worktree session used to mint a junk repo called
+        // "diff-capture-issue-dc976e" alongside the real one, grouped under
+        // the same owner because `fullName` still derived from the remote.
+        // The local→server migration path already reads it this way
+        // (see hooks.ts `migrateLocalSessionToServer`); this loop did not.
+        const identityPath = state.canonicalRepoPath || state.repoPath || process.cwd();
+        // The remote is read from the WORKING root — that checkout is the one
+        // the session actually ran in — falling back to the canonical repo
+        // when the worktree has since been pruned. Both answer with the same
+        // remote, and repoUrl is what lets the server resolve this to the
+        // already-registered row instead of auto-registering at all.
+        const repoUrl = gitOrNull(['remote', 'get-url', 'origin'], { cwd: state.repoPath || identityPath })
+          || gitOrNull(['remote', 'get-url', 'origin'], { cwd: identityPath })
+          || undefined;
         const startRes = await api.startSession({
           machineId: agentConfig.machineId,
           prompt: state.prompts?.[0]?.text || state.prompts?.[0] || '',
           model: state.model || 'unknown',
-          repoPath: state.repoPath || process.cwd(),
+          repoPath: identityPath,
           repoUrl,
           agentSlug: state.agentSlug || undefined,
           branch: state.branch || undefined,
@@ -845,6 +868,73 @@ export async function sessionsSyncCommand(opts: { quiet?: boolean; markImported?
         .map((p: any) => (typeof p === 'string' ? p : p.text || ''))
         .filter(Boolean)
         .join('\n\n---\n\n');
+
+      // Ship the CAPTURE before ending. start/end alone carry no files, no line
+      // counts and no per-turn rows, so this loop used to replay a fully
+      // captured session as a bare row — which the empty-session sweep then
+      // deleted, and `fs.unlinkSync` below had already removed the only local
+      // copy. A Cursor session on `baton` (11 files, +247 −2) was resynced,
+      // reported `✓`, and left nothing on the server or on disk.
+      //
+      // Everything here comes from the state file, which is what the hooks
+      // persisted; nothing is recomputed from git, so a session whose repo has
+      // moved on still replays exactly what was captured at the time.
+      const mappings: any[] = Array.isArray(state.completedPromptMappings)
+        ? state.completedPromptMappings
+        : [];
+      // A session that never reached Stop's session-level rollup has the files
+      // only on its per-turn rows — the union is the session's own file list,
+      // which is what Stop falls back to as well. Without this the recovered
+      // row renders "0 files" while its turns show eleven.
+      const filesFromMappings = Array.from(new Set(
+        mappings.flatMap((m: any) => (Array.isArray(m?.filesChanged) ? m.filesChanged : [])),
+      ));
+      const sessionFiles: string[] = state.filesChanged?.length
+        ? state.filesChanged
+        : filesFromMappings;
+      // Same story for the line counts: without them the session header reads
+      // "0 files, +0 −0" above a turn card showing +247 −2, which is the
+      // surfaces-disagree shape that reads as a capture failure. Summing turns
+      // counts churn (a line rewritten twice counts twice) where a session-level
+      // diff would net it out — but it is the only rollup available here, it is
+      // exact for the single-turn case, and it agrees with the turns on screen.
+      const sumMappings = (key: 'linesAdded' | 'linesRemoved'): number =>
+        mappings.reduce((n: number, m: any) => n + (typeof m?.[key] === 'number' ? m[key] : 0), 0);
+      const sessionLinesAdded: number = state.linesAdded > 0
+        ? state.linesAdded : sumMappings('linesAdded');
+      const sessionLinesRemoved: number = state.linesRemoved > 0
+        ? state.linesRemoved : sumMappings('linesRemoved');
+      const updatePayload: Record<string, unknown> = {
+        prompt: promptText || undefined,
+        agentSlug: state.agentSlug || undefined,
+        model: state.model || undefined,
+        branch: state.branch || undefined,
+        durationMs: durationMs > 0 ? durationMs : undefined,
+        filesChanged: sessionFiles.length > 0 ? sessionFiles : undefined,
+        linesAdded: sessionLinesAdded > 0 ? sessionLinesAdded : undefined,
+        linesRemoved: sessionLinesRemoved > 0 ? sessionLinesRemoved : undefined,
+        tokensUsed: state.tokensUsed > 0 ? state.tokensUsed : undefined,
+        inputTokens: state.inputTokens > 0 ? state.inputTokens : undefined,
+        outputTokens: state.outputTokens > 0 ? state.outputTokens : undefined,
+        costUsd: state.costUsd > 0 ? state.costUsd : undefined,
+        promptChanges: mappings.length > 0 ? mappings : undefined,
+      };
+      const hasCapture = Object.entries(updatePayload)
+        .some(([k, v]) => k !== 'prompt' && k !== 'agentSlug' && k !== 'model'
+          && k !== 'branch' && k !== 'durationMs' && v !== undefined);
+      if (hasCapture) {
+        // durableUpdateSession queues the payload in ~/.origin/queue on a
+        // retriable failure and returns null. Either way the capture is no
+        // longer only in this file, so unlinking below is safe; a hard failure
+        // still throws and keeps the file for the next run.
+        const res = await durableUpdateSession(realSessionId, updatePayload, debugLog);
+        debugLog('sessions-sync', res === null ? 'capture queued for retry' : 'capture uploaded', {
+          sessionId: realSessionId,
+          files: state.filesChanged?.length || 0,
+          promptChanges: mappings.length,
+        });
+      }
+
       await api.endSession({
         sessionId: realSessionId,
         prompt: promptText || undefined,

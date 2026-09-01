@@ -13,7 +13,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
-import { git, gitOrNull } from './utils/exec.js';
+import { git, gitOrNull, gitIdentityEnv } from './utils/exec.js';
 import { loadConfig } from './config.js';
 import { isRepoIgnored } from './ignore-repos.js';
 import { isBakeoffRepo } from './memory.js';
@@ -188,7 +188,7 @@ export function writeRepoBrief(repoPath: string, brief: RepoBrief): void {
     const root = rootCommit(repoPath);
     if (!root) return;
     git(['notes', `--ref=${BRIEF_REF}`, 'add', '-f', '-m', JSON.stringify(brief, null, 2), root],
-      { cwd: repoPath, timeoutMs: 10_000 });
+      { cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath) });
   } catch { /* non-fatal */ }
 }
 

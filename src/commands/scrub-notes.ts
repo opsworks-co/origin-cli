@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { gitIdentityEnv } from '../utils/exec.js';
 import { scrubNoteObject } from '../git-notes.js';
 
 // origin scrub-notes — retroactively remove prompt text from this repo's
@@ -62,7 +63,9 @@ export async function scrubNotesCommand(opts: { push?: boolean; remote?: string 
       execFileSync(
         'git',
         ['notes', '--ref=origin', 'add', '-f', '-m', JSON.stringify(scrubbed, null, 2), sha],
-        execOpts,
+        // `notes add` builds an object and needs a git identity; without one
+        // every rewrite here fails. Defers to real config (see gitIdentityEnv).
+        { ...execOpts, env: { ...process.env, ...gitIdentityEnv(process.cwd()) } },
       );
       scrubbedCount++;
     } catch (err) {

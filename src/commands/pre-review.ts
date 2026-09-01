@@ -38,6 +38,7 @@ const PROMPT_MAX_CHARS = 1500;
 
 function execGit(repo: string, args: string[]): string {
   return execFileSync('git', args, {
+    windowsHide: true,
     cwd: repo,
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],

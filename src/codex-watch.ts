@@ -38,6 +38,7 @@ import {
   parseCodexRolloutLive,
   isCodexInternalSubroutine,
   codexApplyPatchesToDiff,
+  codexDeletedContentReader,
 } from './agents/codex.js';
 import type { CodexBaselineResolver } from './agents/codex.js';
 import { createShadowCommit, captureAgyDiff, captureShadowRangeDiff, captureGitState, readFileAtRev, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
@@ -45,6 +46,9 @@ import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha } from '
 import { git } from './utils/exec.js';
 import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon-autostart.js';
 import { api } from './api.js';
+import { timeoutForPayload } from './fetch-timeout.js';
+import { newCaptureStamp } from './capture-stamp.js';
+import { assignTurnIds } from './transcript-watch.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
@@ -144,6 +148,11 @@ export interface PromptShadow {
 }
 
 export interface ThreadWatchState {
+  // Stable per-turn identity, minted once per prompt and carried across polls.
+  // Same reason as the transcript watcher: this path re-sends prompts by
+  // POSITION, and a position moves when the rollout renumbers (a resume, a lost
+  // middle prompt), landing one turn's content on another turn's row.
+  promptTurns?: Array<{ turnId: string; promptKey: string }>;
   threadId: string;
   // Origin session id once created; null until the first successful startSession.
   sessionId: string | null;
@@ -278,7 +287,7 @@ export interface WatchDeps {
   stateDir: string;
   api: {
     startSession: (data: any) => Promise<any>;
-    updateSession: (id: string, data: any) => Promise<any>;
+    updateSession: (id: string, data: any, reqOpts?: { timeoutMs?: number }) => Promise<any>;
   };
   parseRollout: (rolloutPath: string) => ReturnType<typeof parseCodexRolloutLive>;
   isInternalSubroutine: typeof isCodexInternalSubroutine;
@@ -502,6 +511,12 @@ export async function reconcileThread(
   //    keep the diff they were last pushed with).
   const firstCapture = !prior?.initialBackfillSent;
   const promptChanges: any[] = [];
+  // Provenance for this pass — see capture-stamp.ts. Without it the server
+  // cannot order this payload against the hook path's and treats it as newer.
+  const captureStamp = newCaptureStamp('cw');
+  // Identity to go with the provenance: the stamp says WHICH capture wrote the
+  // row, this says WHICH TURN the row is about.
+  const promptTurns = assignTurnIds(prior?.promptTurns, parsed.userPrompts || []);
   const latestIndex = newCount - 1;
   const sealed = new Set<number>(Array.isArray(prior?.sealedPrompts) ? prior!.sealedPrompts! : []);
   const newlySealed: number[] = [];
@@ -527,8 +542,15 @@ export async function reconcileThread(
       // chain against a moving file, and a file patched repeatedly has to be
       // re-rendered as one diff. undefined reader = previous behaviour.
       const readBaseline = baselineReaderFor(deps, repo.workRoot, promptShadows, i);
+      // What the turn DELETED, as Codex recorded it. The baseline reader
+      // answers for a file that existed when the turn started and the running
+      // view answers for one an Add section created — a file the turn created
+      // through the SHELL (a script's output, a server's store) is in neither,
+      // so its deletion counted -0 and dropped off the turn entirely (session
+      // 5dfd1596 turn 3: `.tags-smoke.json`, -35 lines Codex itself reported).
+      const readDeleted = codexDeletedContentReader(parsed.promptDeletedFiles?.[i]);
       const { diff, linesAdded, linesRemoved, filesChanged } =
-        codexApplyPatchesToDiff(patches, repo.workRoot, readBaseline);
+        codexApplyPatchesToDiff(patches, repo.workRoot, readBaseline, readDeleted);
       const files = new Set<string>(filesChanged);
       // ADDITIVE ONLY — never a downgrade. Codex frequently BUILDS the patch
       // body at runtime rather than writing it literally:
@@ -543,7 +565,9 @@ export async function reconcileThread(
       // otherwise we fall through to exactly the pre-existing behaviour.
       if (linesAdded + linesRemoved > 0 && diff) {
         promptChanges.push({
+          ...captureStamp,
           promptIndex: i,
+          ...(promptTurns[i]?.turnId ? { turnId: promptTurns[i].turnId } : {}),
           promptText,
           filesChanged: [...files],
           diff: diff.slice(0, MAX_PROMPT_DIFF_LEN),
@@ -589,7 +613,9 @@ export async function reconcileThread(
         }
         if (ranged && ranged.linesAdded + ranged.linesRemoved > 0) {
           promptChanges.push({
+            ...captureStamp,
             promptIndex: i,
+            ...(promptTurns[i]?.turnId ? { turnId: promptTurns[i].turnId } : {}),
             promptText,
             filesChanged: ranged.filesChanged,
             ...(ranged.diff ? { diff: ranged.diff.slice(0, MAX_PROMPT_DIFF_LEN) } : {}),
@@ -609,7 +635,9 @@ export async function reconcileThread(
       const baseline = promptShadows.find((s) => s.promptIndex === i)?.baselineSha || null;
       const d = deps.captureDiff(repo.workRoot, baseline);
       promptChanges.push({
+        ...captureStamp,
         promptIndex: i,
+        ...(promptTurns[i]?.turnId ? { turnId: promptTurns[i].turnId } : {}),
         promptText,
         filesChanged: d.filesChanged,
         // captureAgyDiff returns a single tree-to-tree delta (committed +
@@ -624,7 +652,9 @@ export async function reconcileThread(
     } else {
       // Backfill row: prompt text only, so the server records the index.
       promptChanges.push({
+        ...captureStamp,
         promptIndex: i,
+        ...(promptTurns[i]?.turnId ? { turnId: promptTurns[i].turnId } : {}),
         promptText,
         filesChanged: [],
         linesAdded: 0,
@@ -695,7 +725,7 @@ export async function reconcileThread(
   const joinedPrompt = parsed.userPrompts.join('\n\n---\n\n');
   let updateOk = false;
   try {
-    await deps.api.updateSession(sessionId, {
+    const updatePayload = {
       prompt: joinedPrompt || undefined,
       transcript: parsed.transcript || undefined,
       model: parsed.model || undefined,
@@ -706,6 +736,12 @@ export async function reconcileThread(
       promptChanges: promptChanges.length > 0 ? promptChanges : undefined,
       gitCapture,
       status: 'RUNNING',
+    };
+    // Same payload-sized timeout as the transcript watcher — this daemon sends
+    // the same whole-session PATCH and would stall the same way once a long
+    // Codex thread outgrows the 8s default.
+    await deps.api.updateSession(sessionId, updatePayload, {
+      timeoutMs: timeoutForPayload(JSON.stringify(updatePayload).length),
     });
     updateOk = true;
   } catch (err) {
@@ -729,6 +765,7 @@ export async function reconcileThread(
     headShaAtStart,
     // Latch once the full backfill lands on the server; until then keep retrying
     // it so prompt 0 can never be missed (see firstCapture above).
+    promptTurns,
     initialBackfillSent: (prior?.initialBackfillSent ?? false) || (firstCapture && updateOk),
   };
   deps.saveState(next);

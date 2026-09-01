@@ -38,7 +38,7 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
     // left both watchers capturing on stale code with no way to fix it short of
     // calling the restart helpers by hand. Observed twice in a row on a working
     // machine; an offline machine could never cycle its own daemons at all.
-    if (!opts.check) await syncWatchersToInstalledCode();
+    if (!opts.check) { await syncWatchersToInstalledCode(); await healHookConfigs(); }
     return;
   }
 
@@ -61,6 +61,7 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
     // happened while it was already up would otherwise keep capturing with old
     // code until a reboot or its 24h lifetime cap.
     await syncWatchersToInstalledCode();
+    await healHookConfigs();
     return;
   }
 
@@ -71,7 +72,7 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
     console.log(chalk.gray('      origin upgrade --force\n'));
     // Same reasoning as the up-to-date path: the binary here is the newest
     // thing on the box, so any daemon not matching it is stale.
-    if (!opts.check) await syncWatchersToInstalledCode();
+    if (!opts.check) { await syncWatchersToInstalledCode(); await healHookConfigs(); }
     return;
   }
 
@@ -115,6 +116,9 @@ export async function upgradeCommand(opts: { check?: boolean; force?: boolean })
           console.log(chalk.gray('  ✓ Restarted the transcript watcher on the new version\n'));
         }
       } catch { /* non-fatal: the watcher self-restarts at next logon / 24h */ }
+      // And rewrite any hook config the new code would write differently —
+      // the whole point of shipping a schema fix.
+      healHookConfigsWithInstalledCode();
     } else {
       console.log(chalk.yellow(`\n  ⚠ npm install succeeded but the active origin binary was not updated.`));
       console.log(chalk.yellow(`    This usually means origin was installed with a different Node/npm.`));
@@ -154,6 +158,108 @@ async function syncWatchersToInstalledCode(): Promise<void> {
     const { restartTranscriptWatchIfStale } = await import('../transcript-watch.js');
     reportWatcherAction('transcript', restartTranscriptWatchIfStale());
   } catch { /* non-fatal */ }
+}
+
+/**
+ * Absolute path to the JS entry point of the globally installed CLI, so we can
+ * run the version npm JUST put on disk rather than the one in this process.
+ */
+function installedCliEntry(): string | null {
+  try {
+    const root = execSync('npm root -g', {
+      windowsHide: true,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 15_000,
+    }).trim();
+    if (root) {
+      const entry = path.join(root, '@origin', 'cli', 'dist', 'index.js');
+      if (fs.existsSync(entry)) return entry;
+    }
+  } catch { /* fall through to the PATH walk */ }
+  try {
+    const originPath = findExecutable('origin');
+    if (!originPath) return null;
+    // The npm bin is a symlink straight to the package's dist/index.js.
+    const real = fs.realpathSync(originPath);
+    return real.toLowerCase().endsWith('.js') && fs.existsSync(real) ? real : null;
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
+ * Repair hook configs USING THE BINARY WE JUST INSTALLED.
+ *
+ * This process is still running the pre-upgrade code, and its idea of the
+ * correct hook schema is precisely the one the upgrade replaced — healing
+ * in-process would write the old schema straight back and report success. So
+ * shell out to the new entry point. If it can't be resolved, fall back to the
+ * in-process pass: for every drift class except "the schema itself changed in
+ * this release", the old code still writes the right thing.
+ */
+function healHookConfigsWithInstalledCode(): void {
+  const entry = installedCliEntry();
+  if (!entry) {
+    void healHookConfigs();
+    return;
+  }
+  try {
+    const out = execSync(`"${process.execPath}" "${entry}" hooks repair`, {
+      windowsHide: true,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30_000,
+    });
+    // `hooks repair` already prints one line per config it touched; only echo
+    // it when it actually did something, so a clean upgrade stays quiet.
+    if (/✓|⚠|✗/.test(out) && !/All \d+ hook config/.test(out)) {
+      process.stdout.write(out);
+    }
+  } catch {
+    void healHookConfigs();
+  }
+}
+
+/**
+ * Rewrite any agent hook config that no longer matches what this CLI writes.
+ *
+ * This is the path that makes a hook-schema fix REACH people. `enable` is the
+ * only thing that has ever written these files, and nothing re-runs it, so
+ * #1143's Antigravity fix would have sat in the installer while every machine
+ * that already ran `enable` kept the file agy silently rejects — uncaptured,
+ * with no error on either side and no way to self-heal (the hook that could
+ * repair the file is the hook the broken file stops from running).
+ *
+ * Scoped to installs that already exist: agents never enabled at a given base
+ * are left alone, so upgrading can't switch on capture the user didn't ask for.
+ */
+async function healHookConfigs(): Promise<void> {
+  try {
+    const { hookConfigBases, checkHookConfigs, repairHookConfig, isRepairable } =
+      await import('../hook-config-health.js');
+
+    for (const base of hookConfigBases()) {
+      const drifted = checkHookConfigs(base).filter((r) => isRepairable(r.state));
+      if (drifted.length === 0) continue;
+
+      const where = base === os.homedir() ? 'globally' : base.replace(os.homedir(), '~');
+      for (const report of drifted) {
+        try {
+          repairHookConfig(report);
+          // 'relocated' is routine (a Node/nvm move); the rest means the agent
+          // may have been rejecting the file, so say so plainly.
+          const why = report.state === 'relocated'
+            ? 'launcher path had moved'
+            : report.state === 'unreadable'
+              ? 'the file was corrupt'
+              : `stale schema${report.detail ? ` (${report.detail})` : ''}`;
+          console.log(chalk.green(`  ✓ Refreshed ${report.agentName} hooks in ${report.label} ${chalk.gray(`(${where}) — ${why}`)}`));
+        } catch (err: any) {
+          console.log(chalk.yellow(`  ⚠ Could not refresh ${report.agentName} hooks in ${report.label}: ${err?.message || err}`));
+        }
+      }
+    }
+  } catch { /* non-fatal: `origin doctor --fix` covers the same ground */ }
 }
 
 /**

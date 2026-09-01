@@ -64,6 +64,20 @@ const DEFAULT_IGNORE_PATTERNS = [
   // current agent's work — strip them.
   '**/.claude/worktrees/**',
   '.claude/worktrees/*',
+  // Origin's own `origin-sessions` branch publish artifacts. Publishing a
+  // session writes exactly these three files under `sessions/<session-id>/`
+  // (see session-store.ts — `SessionFile` is a closed set). They live only on
+  // the orphan branch, but the publish COMMIT gets swept into a session's
+  // capture and stamped onto whichever prompt is open: prod f4704142's
+  // chat-only prompt 0 ("what the fuck is going on?") rendered 3 files /
+  // +89 lines that were entirely Origin describing itself.
+  //
+  // Narrow on purpose. `sessions/` is an ordinary directory name, so
+  // `sessions/**` would hide a user's own code — the .gitignore mistake in a
+  // new costume. Only these three basenames, and only one level down.
+  'sessions/*/metadata.json',
+  'sessions/*/prompts.md',
+  'sessions/*/changes.json',
 ];
 
 // ─── Glob Matching ────────────────────────────────────────────────────────
@@ -108,6 +122,23 @@ function globToRegex(pattern: string): RegExp {
 /**
  * Check if a file path should be ignored based on patterns.
  * Patterns can be globs (e.g., "*.lock") or exact matches.
+ *
+ * A `<dir>/**` pattern also matches `<dir>` ITSELF.
+ *
+ * Every directory entry above compiles to `^(?:.+/)?node_modules/.*$` — a
+ * regex that requires a trailing slash and something after it, so it covers
+ * the directory's CONTENTS and never the directory. `packages/cli/node_modules`
+ * returned false while `packages/cli/node_modules/foo.js` returned true.
+ *
+ * That is only a distinction on paper until a capture path records a
+ * directory as a single entry, which several do: the shell probe stamps
+ * whatever the tree walk hands it, and git reports a submodule or a symlinked
+ * directory as one path with no children. Measured here — `packages/cli/node_modules`
+ * (a symlink) landed in a turn's shellProbes stamps and was not filtered out.
+ *
+ * Stripping the trailing `/**` and testing that too costs one extra regex per
+ * directory pattern and makes `<dir>` and `<dir>/anything` agree, which is what
+ * every one of these patterns already meant.
  */
 export function shouldIgnoreFile(filePath: string, customPatterns?: string[]): boolean {
   const patterns = [...DEFAULT_IGNORE_PATTERNS, ...(customPatterns || [])];
@@ -120,6 +151,13 @@ export function shouldIgnoreFile(filePath: string, customPatterns?: string[]): b
       const regex = globToRegex(pattern);
       if (regex.test(normalized) || regex.test(basename)) {
         return true;
+      }
+      // …and, for a directory pattern, against the bare directory.
+      if (pattern.endsWith('/**')) {
+        const dirRegex = globToRegex(pattern.slice(0, -3));
+        if (dirRegex.test(normalized) || dirRegex.test(basename)) {
+          return true;
+        }
       }
     } catch {
       // If glob parsing fails, try exact match
@@ -178,24 +216,93 @@ export { DEFAULT_IGNORE_PATTERNS };
 // files (the agent reads them at runtime) but they're pure bookkeeping in
 // the per-prompt diff / blame view — drop them at capture time so the
 // platform never receives a "filesChanged" entry for them.
-const ORIGIN_AUTO_MANAGED_BASENAMES = new Set<string>([
-  'CLAUDE.md',
-  'AGENTS.md',
-  'GEMINI.md',
-  '.windsurfrules',
-  '.devin/rules/origin.md',
-  // Copilot's repo custom-instructions file. It only used to churn on
-  // Copilot sessions, but the origin-managed block in it is now refreshed
-  // by EVERY agent (see writeAgentRulesFile), so without this entry Origin's
-  // own bookkeeping would show up as agent-authored lines in every session
-  // of a repo that has one.
+// The repo files Origin WRITES ITSELF — the per-agent context files whose
+// `<!-- origin-managed -->` block Origin refreshes on every session.
+//
+// KEEP IN SYNC with two other places, or Origin's own bookkeeping is agent
+// work on one side of the system and not the other:
+//   - packages/cli/src/commands/hooks.ts  MANAGED_REPO_CONTEXT_PATHS (what we write)
+//   - apps/api/src/utils/auto-managed-files.ts  (the read-time twin, separate build)
+// `origin-authored-parity.test.ts` pins this list on both sides so a change to
+// one fails the other's suite instead of drifting silently. It already had:
+// a bare `copilot-instructions.md` was Origin-managed to the CLI and agent
+// work to the API.
+//
+// Cursor's `~/.cursor/rules/origin.md` is deliberately absent — it lives in
+// $HOME, never in the repo, so it can never appear in a commit.
+export const ORIGIN_AUTHORED_CONTEXT_PATHS: readonly string[] = Object.freeze([
+  'CLAUDE.md',            // claude-code
+  'AGENTS.md',            // codex, antigravity
+  'GEMINI.md',            // gemini
+  '.devin/rules/origin.md',           // devin
+  '.github/copilot-instructions.md',  // copilot
+  '.windsurfrules',       // legacy (pre-Devin rebrand); still refreshed where present
+]);
+
+
+// Basenames that may ALSO be matched on their own, for surfaces that pass a
+// bare filename. Only names distinctive enough to be unambiguous: a file
+// called `copilot-instructions.md` anywhere is Origin's, but `origin.md` is
+// not — a user's own `docs/origin.md` must stay their work. Matching every
+// basename would hide real files, which is the .gitignore mistake described
+// below in a new costume.
+export const ORIGIN_AUTHORED_BASENAME_ALIASES: readonly string[] = Object.freeze([
   'copilot-instructions.md',
+]);
+
+const ORIGIN_AUTO_MANAGED_BASENAMES = new Set<string>([
+  ...ORIGIN_AUTHORED_CONTEXT_PATHS,
+  // Match on basename too: the same file is referred to by full path in some
+  // capture paths and by basename in others.
+  ...ORIGIN_AUTHORED_BASENAME_ALIASES,
   // .gitignore is intentionally NOT in this set — see the matching
   // explanation in apps/api/src/utils/auto-managed-files.ts. Hiding
   // user-requested .gitignore changes from the captured diff caused
   // commit-list vs commit-detail to disagree on totals and silently
   // censored honest agent attribution.
 ]);
+
+/**
+ * Whether a path is one of Origin's OWN bookkeeping files. Exported so the
+ * capture paths that build a file LIST (not a diff) can drop them with the
+ * same rule `stripIgnoredSectionsFromDiff` applies to diff text — otherwise
+ * Origin bills its own injected context as the agent's work.
+ */
+export function isOriginAutoManagedPath(filePath: string): boolean {
+  const clean = String(filePath || '').replace(/^\.\//, '');
+  if (!clean) return false;
+  if (ORIGIN_AUTO_MANAGED_BASENAMES.has(clean)) return true;
+  return ORIGIN_AUTO_MANAGED_BASENAMES.has(clean.split('/').pop() || '');
+}
+
+/**
+ * Split a file list into the agent's own work and the files ORIGIN wrote.
+ *
+ * Every existing caller drops Origin's files silently, which is right for
+ * attribution (Origin's bookkeeping is not the agent's work) but wrong for
+ * disclosure: Origin refreshes CLAUDE.md / AGENTS.md / GEMINI.md on every
+ * session, the user commits them along with real work, and no surface ever
+ * says so. The reviewer sees a commit touching CLAUDE.md with no indication
+ * that a tool wrote it rather than the agent.
+ *
+ * Returning both halves lets a surface show the split instead of choosing
+ * between "misattribute it" and "hide it". Totals stay whatever the caller
+ * decides — deliberately NOT changed here, because silently removing files
+ * from one total and not another is exactly what made commit-list and
+ * commit-detail disagree over .gitignore.
+ */
+export function partitionOriginAuthored(files: Iterable<string>): {
+  agent: string[];
+  origin: string[];
+} {
+  const agent: string[] = [];
+  const origin: string[] = [];
+  for (const f of files) {
+    if (!f) continue;
+    (isOriginAutoManagedPath(f) ? origin : agent).push(f);
+  }
+  return { agent, origin };
+}
 
 export function stripIgnoredSectionsFromDiff(
   diffText: string,

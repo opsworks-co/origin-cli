@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { git, gitOrNull, runDetailed } from './utils/exec.js';
+import { git, gitOrNull, runDetailed, gitIdentityEnv } from './utils/exec.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -229,7 +229,7 @@ export function writeCombinedNote(repoPath: string, commitSha: string, noteConte
   try {
     git(
       ['notes', '--ref=origin', 'add', '-f', '-m', noteContent, commitSha],
-      { cwd: repoPath, timeoutMs: 10_000 },
+      { cwd: repoPath, timeoutMs: 10_000, env: gitIdentityEnv(repoPath) },
     );
     return true;
   } catch {

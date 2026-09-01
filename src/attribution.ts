@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { listActiveSessions } from './session-state.js';
 import { readAcceptanceNote } from './acceptance.js';
+import { gitIdentityEnv } from './utils/exec.js';
 
 // ─── Tool Detection ──────────────────────────────────────────────────────
 
@@ -90,6 +91,9 @@ export interface MoveDetection {
 
 const execOpts = (cwd: string) => ({
     windowsHide: true,
+  // `git notes add` builds an object and needs an identity; supply Origin's
+  // only when the box has none (see gitIdentityEnv).
+  env: { ...process.env, ...gitIdentityEnv(cwd) },
   encoding: 'utf-8' as const,
   cwd,
   stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],

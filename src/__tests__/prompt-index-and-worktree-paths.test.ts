@@ -64,6 +64,45 @@ describe('reconcilePromptHistory', () => {
     expect(out).toContain('x0');
   });
 
+  it('does not double the history when the transcript lost a MIDDLE prompt', () => {
+    // Prod Cursor session a46eb6b6, which held 20 rows for 11 prompts: prompts
+    // 0-9 repeated as 10-19, every duplicate a turn with no work on it.
+    //
+    // The transcript had dropped one prompt from the middle (X) while gaining
+    // a new one at the end (Z). The subsequence walk reaches 8 of 10 and the
+    // tail-overlap loop needs a run to the END of prev, so both decline — and
+    // the old fallback was `[...prev, ...next]`, which re-appended all eight
+    // prompts we already had rows for. promptIndex is positional, so that is a
+    // second row per turn, not a cosmetic repeat.
+    const stored = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X', 'Y'];
+    const parsed = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'Y', 'Z'];
+    const out = reconcilePromptHistory(stored, parsed);
+    expect(out).toEqual([...stored, 'Z']);
+    expect(out.length).toBe(11);
+    // The invariant that makes it safe: nothing already written moves.
+    expect(out.slice(0, stored.length)).toEqual(stored);
+  });
+
+  it('still lands a genuinely re-sent prompt rather than swallowing it', () => {
+    // Same fallback, with a repeat: asking the same thing twice is new work and
+    // must get its own index, not be mistaken for the earlier row. Counting as
+    // a multiset rather than a set is what buys that.
+    const stored = ['A', 'B', 'C', 'X', 'Y'];
+    const out = reconcilePromptHistory(stored, ['A', 'B', 'C', 'Y', 'A', 'Z']);
+    expect(out).toEqual([...stored, 'A', 'Z']);
+    expect(out.slice(0, stored.length)).toEqual(stored);
+  });
+
+  it('keeps a transcript-only prompt even when it sits mid-sequence', () => {
+    // W is new and appears BEFORE prompts we already hold. Appending only
+    // "everything after the last match" would silently drop it; the merge
+    // keeps every unaccounted entry, in order, at the end.
+    const stored = ['A', 'B', 'C', 'X', 'Y'];
+    const out = reconcilePromptHistory(stored, ['A', 'B', 'W', 'C', 'Y', 'Z']);
+    expect(out).toEqual([...stored, 'W', 'Z']);
+    expect(out.slice(0, stored.length)).toEqual(stored);
+  });
+
   it('holds the line when the transcript goes empty', () => {
     expect(reconcilePromptHistory(['p0', 'p1'], [])).toEqual(['p0', 'p1']);
   });

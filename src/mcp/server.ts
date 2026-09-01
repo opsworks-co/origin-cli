@@ -118,13 +118,43 @@ function selfReviewAllowed(): boolean {
   try { return loadConfig()?.mcpAllowSelfReview === true; } catch { return false; }
 }
 
+// Server instructions — returned on `initialize` and loaded into the client's
+// context before the first prompt.
+//
+// This is the one delivery channel that does not depend on a hook. Origin's
+// hook-borne startup directive reaches only agents that fire a lifecycle event:
+// Antigravity has no SessionStart, Devin Desktop has no hooks at all, and a host
+// can be configured with Origin's MCP server and none of its hooks. For those,
+// this is the ONLY place a "read the memory first" instruction can live.
+//
+// Kept to the one thing the agent has to do, and pointed at the tool rather than
+// the CLI: a client reading this has the MCP server connected by definition, so
+// `get_repo_memory` is the route guaranteed to work. The fuller checklist lives
+// in the injected context block for the agents that receive one — restating it
+// here would put two differently-worded copies of one instruction in the same
+// window whenever both channels are live.
+const SERVER_INSTRUCTIONS = [
+  'Origin records what past agents did in this repo — the prompts behind each change, the decisions ' +
+    'they made and why, the TODOs they left open, and per-line authorship. It is stored in the repo\'s ' +
+    'git notes, so it is available offline and covers work done on other clones and by other agents.',
+  '',
+  'Call `get_repo_memory` BEFORE your first substantive action in a repo, not only when a prompt ' +
+    'mentions prior work. Sessions routinely leave work unfinished and record decisions that cannot be ' +
+    'recovered from the code alone; starting without reading it is how the same ground gets re-covered ' +
+    'and a settled decision gets silently reversed. Then say in one line what you found and whether it ' +
+    'changes your plan.',
+  '',
+  'When you are about to edit a specific file, `get_file_context` returns the prompts and reasoning ' +
+    'behind the lines already there.',
+].join('\n');
+
 // Create the server
 const server = new Server(
   // Report the CLI's version, not a second one. The old standalone package
   // hardcoded 0.1.0 and never moved it in a month of CLI releases — with one
   // artifact there is exactly one version number to get wrong.
   { name: 'origin-mcp-server', version: cliVersion() },
-  { capabilities: { resources: {}, tools: {} } }
+  { capabilities: { resources: {}, tools: {} }, instructions: SERVER_INSTRUCTIONS }
 );
 
 // -- Resources --

@@ -100,6 +100,7 @@ const ACCEPTANCE_REF = 'refs/notes/origin-acceptance';
 
 function git(repoPath: string, args: string[]): string {
   return execFileSync('git', ['-C', repoPath, ...args], {
+    windowsHide: true,
     stdio: 'pipe',
     timeout: 10_000,
     encoding: 'utf-8',

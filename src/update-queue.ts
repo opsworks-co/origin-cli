@@ -36,7 +36,7 @@ import os from 'os';
 import path from 'path';
 import { api } from './api.js';
 
-export type QueueKind = 'updateSession' | 'endSession';
+export type QueueKind = 'updateSession' | 'endSession' | 'ingestCommits';
 
 export interface QueueEntry {
   v: 1;
@@ -50,6 +50,12 @@ export interface QueueEntry {
 
 type Log = (event: string, message: string, data?: any) => void;
 const noop: Log = () => {};
+
+// A commit ingest carries a patch and the server writes it to SQLite; on a
+// loaded box that round-trip has been measured at ~15s. Replays are background
+// work with no user waiting, so give them the same room the history backfill
+// takes.
+const INGEST_REPLAY_TIMEOUT_MS = 60_000;
 
 const MAX_ENTRY_BYTES = 25 * 1024 * 1024;
 const MAX_QUEUE_ENTRIES = 60;
@@ -133,6 +139,11 @@ function readEntry(file: string): QueueEntry | null {
 async function replayEntry(entry: QueueEntry): Promise<void> {
   if (entry.kind === 'updateSession') {
     await api.updateSession(entry.sessionId, entry.payload);
+  } else if (entry.kind === 'ingestCommits') {
+    // Replayed with the backfill timeout, not the hook default: this payload
+    // carries a per-commit patch, and the 8s default is what dropped it in the
+    // first place. See the shadow-ingest call in handlePostCommit.
+    await api.ingestCommits(entry.payload, { timeoutMs: INGEST_REPLAY_TIMEOUT_MS });
   } else {
     await api.endSession(entry.payload);
   }

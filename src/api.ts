@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { loadConfig } from './config.js';
-import { fetchWithTimeout } from './fetch-timeout.js';
+import { fetchWithTimeout, LLM_CALL_TIMEOUT_MS } from './fetch-timeout.js';
 import { cliVersion } from './cli-version.js';
 
 function getConfig() {
@@ -213,10 +213,10 @@ export const api = {
   // Memory: ask the server to synthesize a code-grounded session summary using
   // the org's "AI provider" LLM key (that key never leaves the server). Returns
   // { summary: string | null }.
-  summarizeSession: (data: unknown) => request('/api/mcp/sessions/summary', { method: 'POST', body: JSON.stringify(data) }),
+  summarizeSession: (data: unknown) => request('/api/mcp/sessions/summary', { method: 'POST', body: JSON.stringify(data) }, LLM_CALL_TIMEOUT_MS),
   // Memory: synthesize a cross-session continuation brief for the next agent,
   // using the org's AI-provider LLM key. Returns { brief: string | null }.
-  generateMemoryBrief: (data: unknown) => request('/api/mcp/sessions/memory-brief', { method: 'POST', body: JSON.stringify(data) }),
+  generateMemoryBrief: (data: unknown) => request('/api/mcp/sessions/memory-brief', { method: 'POST', body: JSON.stringify(data) }, LLM_CALL_TIMEOUT_MS),
   // Agent benchmarking — code-survival sync (see commands/benchmark.ts).
   getSurvivalTargets: (repoFullName: string) =>
     request(`/api/mcp/benchmarks/survival/targets?repoFullName=${encodeURIComponent(repoFullName)}`),
@@ -297,8 +297,18 @@ export const api = {
     assertFields(res, 'startSession', ['sessionId']);
     return res;
   },
-  updateSession: async (id: string, data: any) => {
-    const res = await request(`/api/mcp/session/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+  // `reqOpts.timeoutMs` — for the BACKGROUND daemons only. This PATCH carries a
+  // session's whole state and grows all session long; past a few hundred KB it
+  // cannot land inside the 8s default, and since the watcher rebuilds the same
+  // payload each poll it then fails at exactly 8s forever (see
+  // timeoutForPayload). Hooks deliberately keep the default fast-fail: they are
+  // killed at ~10s, and a kill skips the durable-retry enqueue entirely.
+  updateSession: async (id: string, data: any, reqOpts?: { timeoutMs?: number }) => {
+    const res = await request(
+      `/api/mcp/session/${id}`,
+      { method: 'PATCH', body: JSON.stringify(data) },
+      reqOpts?.timeoutMs,
+    );
     assertObj(res, 'updateSession');
     return res;
   },

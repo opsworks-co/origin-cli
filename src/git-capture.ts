@@ -20,6 +20,37 @@ function tmpIndexPath(prefix: string): string {
     .replace(/\\/g, '/');
 }
 
+/**
+ * A commit message as the server needs to receive it: subject AND body.
+ *
+ * The body is not decoration. Origin's own prepare-commit-msg hook writes
+ * `Origin-Session: <id> | <Agent> | <N prompts>` into it precisely so a
+ * commit's owner travels WITH the commit — and the API's ownership guards
+ * (commitNamesOtherSession, used on the FK path, the display list and the
+ * injected-commit sweep) all read that trailer off `Commit.message`.
+ *
+ * Both CLI writers of that column sent `--format=%s`, the subject alone. So
+ * every CLI-captured commit reached the server trailerless, and each guard's
+ * "no trailer — most commits have none — leave it alone" branch waved it
+ * through. The guards were never wrong; the evidence had been discarded one
+ * layer upstream. Session b05c4b43 shows the result: 35058c5d, trailered
+ * `Origin-Session: 59a0fa03-dc5`, rendered on a DIFFERENT session's timeline
+ * and badged a turn that had written nothing. Commits arriving by webhook kept
+ * their full message, which is why only local, concurrent-agent commits — the
+ * exact case the trailer exists for — were affected.
+ *
+ * Truncation keeps the TAIL. Trailers are the last lines of a message, so
+ * head-truncating a long one would reintroduce the same blindness for the same
+ * reason.
+ */
+export function capCommitMessage(raw: string, limit = 8000): string {
+  const msg = (raw || '').trim();
+  if (msg.length <= limit) return msg;
+  const head = Math.floor(limit * 0.6);
+  const tail = limit - head;
+  return `${msg.slice(0, head)}\n…\n${msg.slice(-tail)}`;
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 export interface CommitInfo {
@@ -109,6 +140,65 @@ export const MAX_PROMPT_DIFF_LEN = 200_000;
  * - New commits created since headBefore
  * - Full unified diff (committed + uncommitted changes)
  */
+/**
+ * Context ladder for `fullContext` captures.
+ *
+ * `--unified=2000` renders whole files so AI Blame can attribute every line
+ * without "N lines hidden" gaps. That costs ~25x the bytes of a normal diff,
+ * so a session that touches a few dozen files blows MAX_DIFF_SIZE and used to
+ * be stored as a raw byte `slice()` — cut mid-hunk, malformed, and silently
+ * missing every file past the cut.
+ *
+ * Fidelity is now negotiated instead of assumed: try full context, and only if
+ * the result would not fit, re-run with less. Reducing context drops SURROUNDING
+ * lines, never CHANGED ones, so line counts and file coverage stay exact — the
+ * degradation is confined to how much of the file blame can render.
+ *
+ * Small sessions (the overwhelming majority) still get full context and are
+ * unaffected; only the captures that would have been corrupted pay anything.
+ */
+const CONTEXT_LADDER = [2000, 25, 3] as const;
+
+/**
+ * Run a git diff at the best context that fits the byte budget.
+ * `pre`/`post` bracket where the --unified flag belongs in the argv.
+ */
+function diffWithinBudget(
+  pre: string[],
+  post: string[],
+  gitOpts: Parameters<typeof git>[1],
+  fullContext: boolean,
+): string {
+  if (!fullContext) return git([...pre, ...post], gitOpts).trim();
+  let out = '';
+  for (const u of CONTEXT_LADDER) {
+    out = git([...pre, `--unified=${u}`, ...post], gitOpts).trim();
+    if (out.length <= MAX_DIFF_SIZE) return out;
+  }
+  return out;
+}
+
+/**
+ * Drop whole `diff --git` sections until the text fits, instead of slicing
+ * bytes mid-hunk. A short-but-valid diff can be parsed; a byte-cut one
+ * mis-parses and poisons every downstream surface.
+ *
+ * Returns '' when not even one section fits — matching the commit-patch path's
+ * existing rule that no patch beats a malformed one.
+ */
+function truncateToWholeSections(diffText: string, max: number): string {
+  if (diffText.length <= max) return diffText;
+  const kept: string[] = [];
+  let size = 0;
+  for (const part of diffText.split(/^(?=diff --git )/m)) {
+    if (!part.trim()) continue;
+    if (size + part.length > max) break;
+    kept.push(part);
+    size += part.length;
+  }
+  return kept.join('').trim();
+}
+
 export function captureGitState(
   repoPath: string,
   headBefore: string | null,
@@ -134,7 +224,7 @@ export function captureGitState(
   // MAX_DIFF_SIZE and truncate mid-hunk into a malformed diff that the
   // UI parser then chokes on. AI Blame still gets full-file rendering
   // for all reasonable source files.
-  const unifiedFlag = opts?.fullContext ? ['--unified=2000'] : [];
+  const wantFullContext = !!opts?.fullContext;
 
   // 1. Get current HEAD
   const headAfter = gitOrNull(['rev-parse', 'HEAD'], gitOpts);
@@ -174,7 +264,10 @@ export function captureGitState(
   for (const sha of commitShas) {
     if (!HEX.test(sha)) continue;
     try {
-      const message = git(['log', '-1', '--format=%s', sha], gitOpts).trim();
+      // %B — subject AND body. `%s` was the subject alone, which threw away the
+      // `Origin-Session:` trailer our own prepare-commit-msg hook had just
+      // written into the body. See capCommitMessage for what that cost.
+      const message = capCommitMessage(git(['log', '-1', '--format=%B', sha], gitOpts));
       const author = git(['log', '-1', '--format=%an', sha], gitOpts).trim();
       // Committer time in epoch SECONDS (%ct) → ms. Used to scope commits to the
       // authoring thread (see CommitInfo.committedAt / codex-watch).
@@ -221,7 +314,7 @@ export function captureGitState(
       // truncated, malformed one that mis-parses in blame).
       let patch = '';
       try {
-        const raw = git(['show', '--format=', '-m', '--first-parent', ...unifiedFlag, sha], gitOpts);
+        const raw = diffWithinBudget(['show', '--format=', '-m', '--first-parent'], [sha], gitOpts, wantFullContext);
         patch = stripIgnoredSectionsFromDiff(raw).trim();
         if (patch.length > MAX_DIFF_SIZE) patch = '';
       } catch { /* show failed — leave patch empty, API falls back */ }
@@ -241,12 +334,12 @@ export function captureGitState(
   try {
     // Committed changes since session start
     if (safeBefore !== headAfter) {
-      committedDiff = git(['diff', ...unifiedFlag, `${safeBefore}..${headAfter}`], gitOpts).trim();
+      committedDiff = diffWithinBudget(['diff'], [`${safeBefore}..${headAfter}`], gitOpts, wantFullContext);
     }
 
     // Capture uncommitted changes (staged + unstaged + untracked)
     if (!opts?.committedOnly) {
-      uncommittedDiff = git(['diff', ...unifiedFlag, 'HEAD'], gitOpts).trim();
+      uncommittedDiff = diffWithinBudget(['diff'], ['HEAD'], gitOpts, wantFullContext);
       // Also capture new untracked files as diff
       try {
         const untracked = git(
@@ -272,11 +365,11 @@ export function captureGitState(
 
     // Enforce size limits
     if (committedDiff.length > MAX_DIFF_SIZE) {
-      committedDiff = committedDiff.slice(0, MAX_DIFF_SIZE);
+      committedDiff = truncateToWholeSections(committedDiff, MAX_DIFF_SIZE);
       diffTruncated = true;
     }
     if (uncommittedDiff.length > MAX_DIFF_SIZE) {
-      uncommittedDiff = uncommittedDiff.slice(0, MAX_DIFF_SIZE);
+      uncommittedDiff = truncateToWholeSections(uncommittedDiff, MAX_DIFF_SIZE);
       diffTruncated = true;
     }
   } catch {
@@ -315,12 +408,12 @@ export function captureGitState(
       const baseTree = gitOrNull(['rev-parse', `${safeBefore}^{tree}`], gitOpts);
       const curTree = writeWorkingTree(repoPath, gitOpts);
       if (baseTree && HEX.test(baseTree) && curTree && HEX.test(curTree)) {
-        workingTreeDiff = git(['diff', ...unifiedFlag, baseTree, curTree], gitOpts).trim();
+        workingTreeDiff = diffWithinBudget(['diff'], [baseTree, curTree], gitOpts, wantFullContext);
       }
     } else if (safeBefore) {
       // Real-commit baseline (clean start): `git diff <commit>` compares working
       // tree to the commit's tree (staged + unstaged); untracked appended below.
-      workingTreeDiff = git(['diff', ...unifiedFlag, safeBefore], gitOpts).trim();
+      workingTreeDiff = diffWithinBudget(['diff'], [safeBefore], gitOpts, wantFullContext);
       if (!opts?.committedOnly) {
         try {
           const untracked = git(['ls-files', '--others', '--exclude-standard'], gitOpts).trim();
@@ -335,7 +428,7 @@ export function captureGitState(
       }
     }
     if (workingTreeDiff.length > MAX_DIFF_SIZE) {
-      workingTreeDiff = workingTreeDiff.slice(0, MAX_DIFF_SIZE);
+      workingTreeDiff = truncateToWholeSections(workingTreeDiff, MAX_DIFF_SIZE);
       diffTruncated = true;
     }
   } catch {
@@ -727,6 +820,16 @@ export function commitDiffScopedToPrompt(
   if (!baselineSha || !HEX.test(baselineSha) || !HEX.test(commitSha)) return null;
   if (baselineSha === commitSha) return null;
   const gitOpts = { cwd: repoPath, timeoutMs: 15_000, maxBuffer: 10 * 1024 * 1024 };
+  // A MERGE cannot be scoped this way. Its tree contains the whole branch it
+  // absorbed, so baseline→merge credits the turn with every commit that came
+  // in with it — and with no pathspec to hold it back there is nothing between
+  // that and the turn claiming another PR's work (prod f7881a6e turn 3, +84/-20
+  // of a file the session never opened). A merge's own contribution is its
+  // conflict resolution; mergeOwnDiff is what answers that, and callers that
+  // want it ask for it directly.
+  const parentCount = (gitOrNull(['rev-list', '--parents', '-n', '1', commitSha], gitOpts)
+    || '').trim().split(/\s+/).length - 1;
+  if (parentCount > 1 && files.length === 0) return null;
   const baseTree = gitOrNull(['rev-parse', `${baselineSha}^{tree}`], gitOpts);
   const commitTree = gitOrNull(['rev-parse', `${commitSha}^{tree}`], gitOpts);
   if (!baseTree || !commitTree || !HEX.test(baseTree) || !HEX.test(commitTree)) return null;

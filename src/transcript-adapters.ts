@@ -72,6 +72,10 @@ export interface ParsedSession {
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
   toolCalls: number;
+  // Per-tool counts keyed by the normalized label the UI colors chips by
+  // (Read/Edit/Write/Bash/…). Optional — an adapter that can't break its count
+  // down omits it and the session just shows the total.
+  toolBreakdown?: Array<{ name: string; count: number }>;
   // Absolute file paths the session touched (edits + reads) — the cwd-recovery
   // fallback for agents that don't record their cwd on disk.
   filePaths: string[];
@@ -105,6 +109,13 @@ export interface ParsedSession {
   // for every agent — unlike promptCommitShas, this is the command the agent
   // actually ran, not prose about it.
   promptCommitCommands?: Record<number, string[]>;
+  // Prompt indices whose turn ran a WRITE-SHAPED shell command (a heredoc,
+  // `sed -i`, `cp`, an interpreter). Those writes fire no edit tool call, so
+  // without this the turn ships `edits: []` — identical on the wire to a
+  // chat-only turn. The watcher turns these indices into real edits by reading
+  // the turn's own git window. Hook-driven agents get the same signal live at
+  // PostToolUse; this is the only route for agents that fire no hooks.
+  promptsThatWroteViaShell?: number[];
 }
 
 export interface TranscriptAdapter {
@@ -117,9 +128,29 @@ export interface TranscriptAdapter {
   // files/diffs. Set only for agents whose transcript that extractor
   // understands; omit for the rest (they keep the legacy diff fields).
   promptCaptureAgent?: 'claude' | 'cursor' | 'codex' | 'gemini';
+  // Is this adapter's `promptDiffs` a true per-turn DELTA?
+  //
+  // Most adapters build a turn's diff straight from the raw edit records, so a
+  // whole-file write counts the entire file as added — a turn that appended one
+  // row to a 400-row file reports +401. Those numbers are a ceiling, not a
+  // delta, and must never be preferred over a measured tree diff.
+  //
+  // Set it only where the adapter chains each whole-file write against the
+  // file's prior IN-SESSION content first (chainAgyWholeFileWrites), which
+  // turns the record back into the delta it actually was. That diff is derived
+  // from content the agent recorded writing, so unlike a tree window it has no
+  // baseline to race — see the reconcile loop, which trusts it when the window
+  // measures LESS.
+  transcriptDiffIsDelta?: boolean;
   listActive(now: number): ScannedTranscript[];
   parse(transcriptPath: string): ParsedSession | null;
   isNoise?(parsed: ParsedSession): boolean;
+  // Last-resort cwd, consulted ONLY when the transcript names no cwd and the
+  // paths it touched yield no repo — i.e. a turn that edited nothing. Deliberately
+  // last: an agent's own idea of its workspace is the least reliable of the
+  // three (agy's is frequently the project NAME, not a folder), so it must never
+  // outrank evidence of where the work actually landed.
+  fallbackCwd?(scanned: ScannedTranscript): string | null;
 }
 
 // ─── Shared helpers ─────────────────────────────────────────────────────────
@@ -207,7 +238,11 @@ function latestJsonlTimestampMs(transcriptPath: string): number {
 }
 
 // Count +/- lines in a unified diff (ignoring the +++/--- file headers).
-function countDiffLines(diff: string): { linesAdded: number; linesRemoved: number } {
+// Exported so a caller that RESHAPES a diff (scopeDiffPathsToRepo drops the
+// sections for out-of-repo files) can recount by the same rule the adapter used
+// to produce the original numbers — two different counters would put a turn's
+// line totals and its own diff body permanently out of step.
+export function countDiffLines(diff: string): { linesAdded: number; linesRemoved: number } {
   let linesAdded = 0;
   let linesRemoved = 0;
   for (const line of diff.split('\n')) {
@@ -371,6 +406,7 @@ function fromParsedTranscript(
     // falls back to file overlap when it's empty, so it can only add signal.
     promptsThatCommitted: committingPromptsFromTranscript(transcriptPath),
     promptCommitCommands: commitCommandsFromTranscript(transcriptPath),
+    promptsThatWroteViaShell: shellWritingPromptsFromTranscript(transcriptPath),
   };
 }
 
@@ -379,6 +415,21 @@ function fromParsedTranscript(
  * sha reader this needs no opt-in: it is the command text itself, so there is
  * nothing to misread. Empty for transcripts that record no shell calls.
  */
+/**
+ * promptIndex → this turn ran a shell command that could have written files.
+ * Read from the same tool-call walk that spots `git commit`, so it costs
+ * nothing extra and covers every agent whose transcript this parser reads.
+ */
+function shellWritingPromptsFromTranscript(transcriptPath: string): number[] {
+  try {
+    return extractPromptFileMappings(transcriptPath)
+      .filter((m) => m.wroteViaShell)
+      .map((m) => m.promptIndex);
+  } catch {
+    return [];
+  }
+}
+
 function commitCommandsFromTranscript(transcriptPath: string): Record<number, string[]> {
   try {
     const out: Record<number, string[]> = {};
@@ -715,11 +766,84 @@ export const cursorAdapter: TranscriptAdapter = {
 // char-estimated tokens (no real counts), and records no cwd — the repo is
 // recovered from the absolute file paths in tool_calls.
 
-// Antigravity's on-disk brain dir moved between versions — newer builds write
-// to ~/.gemini/antigravity/brain, older ones to ~/.gemini/antigravity-cli/brain.
-// Scan both so capture works regardless of version.
+// Antigravity's on-disk dir moved between versions — newer builds write to
+// ~/.gemini/antigravity, older ones to ~/.gemini/antigravity-cli. Scan both so
+// capture works regardless of version.
+export function antigravityRootDirs(): string[] {
+  return [home('.gemini', 'antigravity'), home('.gemini', 'antigravity-cli')];
+}
+
 function antigravityBrainDirs(): string[] {
-  return [home('.gemini', 'antigravity', 'brain'), home('.gemini', 'antigravity-cli', 'brain')];
+  return antigravityRootDirs().map((r) => path.join(r, 'brain'));
+}
+
+/**
+ * The workspace directory agy ran a conversation in, when the transcript can't
+ * say.
+ *
+ * The repo for an agy session is recovered from the absolute paths in its tool
+ * calls, because the transcript records no cwd of its own. A turn that touches
+ * no file leaks no path — a clarifying question, a refusal, a plan the user
+ * never approved — so cwd came back null and the whole conversation was
+ * skipped: not a partial capture, no session at all. Live case: conversation
+ * e433489f answered "generate some fucking code" with a question about which
+ * language, ran zero tools, and never reached the dashboard.
+ *
+ * agy runs each conversation inside its OWN linked git worktree at
+ * <root>/worktrees/<project>/<branch>, and names that path in the
+ * conversation's store at <root>/conversations/<conversationId>.db. So the
+ * answer is on disk — just not in the transcript.
+ *
+ * The store is SQLite. We do NOT parse it: that means a dependency and a schema
+ * Google owns and can change. The worktrees are enumerable from the filesystem,
+ * so this asks the inverse question — which existing worktree does this
+ * conversation's store mention? — which is a literal search for a path we
+ * already hold. Separators are normalized because the same path appears in the
+ * blob three ways (`C:\…`, JSON-escaped `C:\\…`, and `file:///C:/…`).
+ *
+ * Returns null for a workspace that is not one of agy's worktrees (a plain
+ * folder opened in the IDE) — that case keeps today's behaviour.
+ */
+const AGY_CONVERSATION_DB_MAX_BYTES = 32 * 1024 * 1024;
+
+function normalizeForSearch(p: string): string {
+  return p.replace(/[\\/]+/g, '/').toLowerCase();
+}
+
+export function antigravityWorkspaceForConversation(
+  conversationId: string,
+  roots: string[] = antigravityRootDirs(),
+): string | null {
+  // Every <root>/worktrees/<project>/<branch> that exists right now.
+  const worktrees: string[] = [];
+  for (const root of roots) {
+    const wtRoot = path.join(root, 'worktrees');
+    for (const project of safeReaddir(wtRoot)) {
+      if (!project.isDirectory()) continue;
+      for (const branch of safeReaddir(path.join(wtRoot, project.name))) {
+        if (branch.isDirectory()) worktrees.push(path.join(wtRoot, project.name, branch.name));
+      }
+    }
+  }
+  if (!worktrees.length) return null;
+
+  for (const root of roots) {
+    const db = path.join(root, 'conversations', `${conversationId}.db`);
+    let blob: string;
+    try {
+      if (fs.statSync(db).size > AGY_CONVERSATION_DB_MAX_BYTES) continue;
+      // latin1 keeps the byte→char mapping 1:1, so an ASCII path in a binary
+      // blob survives the decode intact.
+      blob = normalizeForSearch(fs.readFileSync(db).toString('latin1'));
+    } catch { continue; }
+    // Longest first: <project>/<branch> and a <branch> that prefixes another
+    // both match, and the most specific one is the real workspace.
+    const hits = worktrees
+      .filter((wt) => blob.includes(normalizeForSearch(wt)))
+      .sort((a, b) => b.length - a.length);
+    if (hits.length) return hits[0];
+  }
+  return null;
 }
 
 // A conversation's transcript, preferring the fuller file over the short one.
@@ -740,29 +864,44 @@ function antigravityTranscriptPath(convDir: string): string | null {
 // source, so the per-prompt diffs, the line counts and the edits the server
 // stores all agree — chaining any one of them downstream leaves the others
 // telling a different story.
-function chainAgyWholeFileWrites(records: AgyEditRecord[][]): AgyEditRecord[][] {
+export function chainAgyWholeFileWrites(records: AgyEditRecord[][]): AgyEditRecord[][] {
   const lastContent = new Map<string, string>();
-  return records.map((recs) => recs.map((r) => {
+  return records.map((recs) => recs.flatMap((r) => {
     if (r.toolName === 'Write') {
       const content = String(r.input.content ?? '');
       const prev = lastContent.get(r.file);
       if (content) lastContent.set(r.file, content);
-      if (prev != null && prev.length > 0 && prev !== content) {
-        return { file: r.file, toolName: 'Edit', input: { old_string: prev, new_string: content } };
+      // A repeat write of IDENTICAL content changed nothing, so it contributes
+      // nothing. It used to fall through to the raw-Write branch below and be
+      // rendered as the whole file added a SECOND time — agy re-records a file
+      // it has already written, and the double-count is the file's whole
+      // length. Measured on three sessions: 294d81ea wrote styles.css twice at
+      // 549 lines (sha b1acd464 both times) and reported +1893 where the agent
+      // itself said +1293; 0d10ba06 wrote shitty_code.py twice at 210 lines
+      // (sha 97087f1e both times) and reported +450 for ~241 lines of work.
+      if (prev != null && prev === content) return [];
+      if (prev != null && prev.length > 0) {
+        return [{ file: r.file, toolName: 'Edit', input: { old_string: prev, new_string: content } }];
       }
-      return r;
+      return [r];
     }
     const oldS = String(r.input.old_string ?? '');
     const newS = String(r.input.new_string ?? '');
     const cur = lastContent.get(r.file);
     if (cur != null && oldS && cur.includes(oldS)) lastContent.set(r.file, cur.replace(oldS, newS));
-    return r;
+    return [r];
   }));
 }
 
 export const antigravityAdapter: TranscriptAdapter = {
   slug: 'antigravity',
   agentSlugForServer: 'antigravity',
+  // promptDiffs below run through chainAgyWholeFileWrites, so each turn's diff
+  // is a real delta rather than "the whole file, again".
+  transcriptDiffIsDelta: true,
+  fallbackCwd(scanned: ScannedTranscript): string | null {
+    return antigravityWorkspaceForConversation(scanned.sessionId);
+  },
   listActive(now: number): ScannedTranscript[] {
     const out: ScannedTranscript[] = [];
     const seen = new Set<string>();
@@ -811,7 +950,13 @@ export const antigravityAdapter: TranscriptAdapter = {
       tokensUsed: usage.totalTokens,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
-      toolCalls: 0, // agy transcript carries filePaths, not a tool-call count
+      // The transcript's own tool_calls, counted and labelled by the parser.
+      // This was hardcoded to 0 — the count and the breakdown were computed on
+      // every parse and then thrown away here, which is why an agy turn that
+      // plainly ran a dozen tools rendered "0 tools" (session 65953fe2: 28 real
+      // calls, header said 0).
+      toolCalls: t.toolCalls,
+      toolBreakdown: t.toolBreakdown,
       filePaths: t.filePaths, // all touched (read+edit) — for cwd recovery
       filesChanged: t.filesEdited, // ONLY edited/written files, not reads
       // Real per-prompt diffs: agy records the content it wrote (CodeContent /
@@ -823,6 +968,7 @@ export const antigravityAdapter: TranscriptAdapter = {
         return { promptIndex: i, filesChanged: files, diff, ...countDiffLines(diff) };
       }),
       promptsThatCommitted: t.promptRanCommit.map((r, i) => (r ? i : -1)).filter((i) => i >= 0),
+      promptsThatWroteViaShell: (t.promptWroteViaShell || []).map((r, i) => (r ? i : -1)).filter((i) => i >= 0),
       promptCommitShas: Object.fromEntries(
         t.promptCommitShas.map((shas, i) => [i, shas]).filter(([, shas]) => (shas as string[]).length > 0),
       ) as Record<number, string[]>,

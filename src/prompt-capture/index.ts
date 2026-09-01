@@ -12,8 +12,9 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as fzstd from 'fzstd';
-import { convertCopilotEventsToClaude } from '../transcript.js';
-import type { PromptCapture, PromptEdit, PromptEditOp } from './types.js';
+import { convertCopilotEventsToClaude, cleanPrompt, isAgentInjectedEntry } from '../transcript.js';
+import { isInsideRepo, outOfRepoWrites, MAX_OUT_OF_REPO_FILES } from '../paths.js';
+import type { PromptCapture, PromptEdit, PromptEditOp, CaptureAgent } from './types.js';
 
 export type { PromptCapture, PromptEdit, PromptEditOp } from './types.js';
 
@@ -22,7 +23,7 @@ const HEX = /^[0-9a-f]{4,64}$/i;
 // ─── Public entrypoint ────────────────────────────────────────────────────
 
 export interface CaptureInputs {
-  agent: 'claude' | 'cursor' | 'codex' | 'gemini';
+  agent: CaptureAgent;
   repoPath: string;
   // Path to the agent's transcript/rollout file (Claude/Cursor JSONL,
   // Gemini single JSON, Codex rollout JSONL.zst). Optional for Codex if
@@ -43,27 +44,100 @@ export interface CaptureInputs {
   headShaAtStart?: string;
   // Repo HEAD at session end.
   headShaAtEnd?: string;
+  // Commits observed landing while a specific turn was active, recorded by
+  // post-commit (SessionState.commitTurns). ATTESTATION, not inference: at
+  // that moment the answer was known rather than reconstructed.
+  //
+  // Optional because it only exists when a turn was open — a manual commit
+  // between prompts, a rebase or an amend legitimately has none, and those
+  // still fall through to the heuristic below.
+  commitTurns?: Array<{ sha: string; turnId: string; via?: 'post-commit' | 'transcript' }>;
+  // index -> turnId for this session (SessionState.promptTurnIds). Used only
+  // to resolve a capture to the identity commitTurns attests against; kept
+  // out of PromptCapture so extractors stay unaware of turn identity.
+  promptTurnIds?: string[];
 }
 
 export function capturePromptEdits(opts: CaptureInputs): PromptCapture[] {
   const turns = extractByAgent(opts);
-  // Stamp each edit with the real 1-based file line it starts at. A tool-call
-  // payload (old_string/new_string, contents) carries no position, and WITHOUT
-  // an anchor the server's synthesized diff puts every hunk at line 1 — so AI
-  // Blame credited a turn that appended rows 13-17 with lines 2-6 of the file.
-  // The hook path already anchored (commands/hooks.ts), but agents captured by
-  // the poll-based transcript watcher never go through a hook — on Windows no
-  // GUI agent fires one — so Cursor/Gemini shipped every edit unanchored.
-  // Anchoring here covers every caller; the hook path's own call then no-ops on
-  // already-anchored edits. Best-effort by design: an edit whose region the
-  // current file no longer contains stays unanchored and the server falls back
-  // to its synthetic cursor, exactly as before.
+  // Peel writes that landed outside this repo BEFORE anchoring: a Cursor
+  // canvas under ~/.cursor/projects/… is not a git file, and stamping a
+  // line number on it just so the server can synthesize a turn-diff is
+  // how a chat-only audit turn rendered as +469. Drop first, then anchor
+  // what remains.
   if (opts.repoPath) {
+    dropOutOfRepoEdits(turns, opts.repoPath);
+    // Stamp each edit with the real 1-based file line it starts at. A tool-call
+    // payload (old_string/new_string, contents) carries no position, and WITHOUT
+    // an anchor the server's synthesized diff puts every hunk at line 1 — so AI
+    // Blame credited a turn that appended rows 13-17 with lines 2-6 of the file.
+    // The hook path already anchored (commands/hooks.ts), but agents captured by
+    // the poll-based transcript watcher never go through a hook — on Windows no
+    // GUI agent fires one — so Cursor/Gemini shipped every edit unanchored.
+    // Anchoring here covers every caller; the hook path's own call then no-ops on
+    // already-anchored edits. Best-effort by design: an edit whose region the
+    // current file no longer contains stays unanchored and the server falls back
+    // to its synthetic cursor, exactly as before.
     for (const t of turns) {
       try { anchorEditPositions(t.edits, opts.repoPath); } catch { /* never break capture */ }
     }
   }
   return turns;
+}
+
+function foldOutOfRepoKey(file: string): string {
+  return (process.platform === 'win32' || process.platform === 'darwin') ? file.toLowerCase() : file;
+}
+
+/** Union two abbreviated out-of-repo lists, capped, de-duped. */
+function unionOutOfRepo(existing: string[] | undefined, added: string[]): string[] | undefined {
+  if ((!existing || existing.length === 0) && added.length === 0) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const f of [...(existing || []), ...added]) {
+    if (!f) continue;
+    const key = foldOutOfRepoKey(f);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(f);
+    if (out.length >= MAX_OUT_OF_REPO_FILES) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Peel writes that landed outside this repo off `edits` and onto
+ * `outOfRepoFiles`.
+ *
+ * After makeRepoRelative, in-repo (and linked-worktree) paths are relative.
+ * A remaining absolute path that isInsideRepo still says is inside is a
+ * symlink/case spelling the prefix matcher missed — keep it, the server
+ * can still render it. Everything else is a canvas, scratch dir, or
+ * sibling checkout, and must not become a synthesized turn diff.
+ *
+ * Idempotent: a second pass unions already-abbreviated `outOfRepoFiles`
+ * (which outOfRepoWrites would skip, because `~/…` is not absolute) with
+ * any newly peeled paths.
+ */
+export function dropOutOfRepoEdits(captures: PromptCapture[], repoPath: string): PromptCapture[] {
+  if (!repoPath || !captures.length) return captures;
+  for (const cap of captures) {
+    const outside: string[] = [];
+    const kept: PromptEdit[] = [];
+    for (const e of cap.edits) {
+      const file = e.file || '';
+      if (path.isAbsolute(file) && !isInsideRepo(repoPath, file)) {
+        outside.push(file);
+        continue;
+      }
+      kept.push(e);
+    }
+    cap.edits = kept;
+    const listed = unionOutOfRepo(cap.outOfRepoFiles, outOfRepoWrites(repoPath, outside));
+    if (listed) cap.outOfRepoFiles = listed;
+    else delete cap.outOfRepoFiles;
+  }
+  return captures;
 }
 
 function extractByAgent(opts: CaptureInputs): PromptCapture[] {
@@ -75,7 +149,13 @@ function extractByAgent(opts: CaptureInputs): PromptCapture[] {
       return extractFromGeminiTranscript(opts);
     case 'codex':
       return extractFromCodexRollout(opts);
+    case 'copilot':
+      return extractFromCopilotEvents(opts);
     default:
+      // Reached only for an agent whose AGENT_EDIT_SOURCES entry says
+      // 'transcript' but which has no case here — a wiring mistake, not a
+      // supported state. Ledger and 'none' agents never get this far: their
+      // callers skip transcript extraction entirely.
       return [];
   }
 }
@@ -107,7 +187,7 @@ export function extractEditsFromToolCall(
   toolName: string,
   input: Record<string, any>,
   repoPath: string,
-  agentLabel: 'claude' | 'cursor' | 'codex' | 'gemini' = 'claude',
+  agentLabel: CaptureAgent = 'claude',
   // Whether to emit the once-per-unknown-tool stderr note. The transcript
   // extractor wants it (one long-lived process, helps spot renamed edit
   // tools). The live PostToolUse path must NOT: it runs a fresh process per
@@ -193,13 +273,33 @@ export function extractEditsFromToolCall(
 // back to its first line — agents occasionally normalize trailing
 // whitespace on write, so the whole block won't match byte-for-byte but
 // the first line still anchors the right row.
-function lineOfFirstOccurrence(haystack: string, needle: string): number {
+// `skip` occurrences are passed over before a match counts. One apply_patch
+// routinely lands the SAME replacement at several places in a file (Codex
+// rewrote five identical `pour="chilled vodka, neat",` rows to `pour=NEAT_POUR,`
+// in one patch), and anchoring all of them at the first occurrence made five
+// distinct edits indistinguishable — every downstream dedupe keyed on
+// (oldContent, newContent) then collapsed them to one and the turn read +5/-1
+// for a +9/-5 file. Handing the k-th edit the k-th occurrence is what makes
+// those repeats separable.
+function lineOfFirstOccurrence(haystack: string, needle: string, skip = 0): number {
   if (!needle) return -1;
-  let idx = haystack.indexOf(needle);
+  const find = (probe: string): number => {
+    let idx = -1;
+    for (let n = 0; n <= skip; n++) {
+      idx = haystack.indexOf(probe, idx + 1);
+      if (idx < 0) return -1;
+    }
+    return idx;
+  };
+  let idx = find(needle);
   if (idx < 0) {
     const firstLine = needle.split('\n')[0];
     if (!firstLine) return -1;
-    idx = haystack.indexOf(firstLine);
+    idx = find(firstLine);
+    // Fewer occurrences than edits (the file moved on, or the probe is a
+    // prefix that overlaps itself) — fall back to the first one rather than
+    // leaving the edit unanchored.
+    if (idx < 0) idx = haystack.indexOf(firstLine);
     if (idx < 0) return -1;
   }
   // Count newlines before the match → 1-based line number.
@@ -223,6 +323,9 @@ function lineOfFirstOccurrence(haystack: string, needle: string): number {
  * unset, and the server falls back to its synthetic cursor.
  */
 export function anchorEditPositions(edits: PromptEdit[], repoPath: string): void {
+  // How many edits in THIS batch already claimed a given (file, newContent).
+  // The next one anchors at the next occurrence — see lineOfFirstOccurrence.
+  const claimed = new Map<string, number>();
   for (const e of edits) {
     try {
       if (typeof e.newStart === 'number') continue; // already anchored
@@ -244,12 +347,115 @@ export function anchorEditPositions(edits: PromptEdit[], repoPath: string): void
       // replaces a contiguous region starting at the same line in both
       // the old and new file, so old and new share one anchor — matching
       // synthesize's shared-cursor model.
-      const line = lineOfFirstOccurrence(text, e.newContent ?? '');
+      const claimKey = `${e.file} ${e.newContent ?? ''}`;
+      const skip = claimed.get(claimKey) || 0;
+      const line = lineOfFirstOccurrence(text, e.newContent ?? '', skip);
       if (line < 0) continue;
+      claimed.set(claimKey, skip + 1);
       e.oldStart = line;
       e.newStart = line;
     } catch {
       // Defensive: anchoring must never break capture.
+    }
+  }
+}
+
+// A whole-file write is the one edit shape that arrives with no "before".
+// Cursor's write tool (and Claude's Write) carries only the new content, so
+// `oldContent` is empty even when the file already existed — which downstream
+// cannot tell apart from CREATING the file. The turn then reports the whole
+// file as additions with ZERO deletions.
+//
+// Prod session fc4eb13c turn 3 rewrote a 141-line `src/index.js` and reported
+// +155/-0 where git says +74/-59: 82 phantom additions and 58 deletions that
+// went unrecorded anywhere. That single file is why the session's per-turn
+// totals (+396/-5) exceeded the commit they produced (+314/-63) — six of its
+// seven files reconciled with git exactly. The error is one-directional: a
+// rewrite-heavy session can only ever over-count.
+//
+// So recover the "before" from git at the turn's baseline, and only when the
+// file EXISTS there — a genuine create must keep reading as a whole-file add.
+//
+// A LATE BASELINE IS NOT A BEFORE-STATE. The poll-based watcher stamps a turn's
+// shadow when it NOTICES the prompt, not when the prompt was submitted, so a
+// fast agent's first writes are already on disk — and therefore already in the
+// "baseline" tree — by the time it is taken. `git show <baseline>:<file>` then
+// hands back the file the turn had just written, oldContent === newContent, and
+// the write collapses to a no-op that every downstream surface drops: the file
+// disappears from the turn's files, its lines from the turn's counts, and it is
+// attributed to no turn at all.
+//
+// Antigravity session 65953fe2 (kotleta): prompt 1 was submitted at 16:14:34,
+// its shadow was taken at 16:14:50, and the five files written in between
+// (backend/task_manager.py, backend/analytics.py, backend/server.py, run.py,
+// server.py) were all identical in the "baseline". The turn recorded 5 files
+// / +1559 against a git truth of 10 files / +1981/-77 — 422 authored lines
+// attributed to nobody. `git diff <shadow> <worktree>` cannot recover them
+// either; the content is on BOTH sides.
+//
+// So when the baseline hands back exactly what the turn wrote, fall through to
+// an OLDER baseline (session start) and use its answer instead:
+//   - absent there  → the turn genuinely created the file → keep the whole-file
+//                     add rather than stamping a no-op;
+//   - different     → that IS the before-state the late shadow swallowed;
+//   - identical too → a genuine rewrite-with-identical-content, left as a no-op.
+// Safe against over-claiming an earlier turn's work: chainWholeFileWrites runs
+// first and already sets oldContent from the previous IN-SESSION write of the
+// same file, so this only ever runs for a file no earlier turn touched.
+const WRITE_BASELINE_MAX_BYTES = 400_000;
+
+export function backfillWriteBaselines(
+  edits: PromptEdit[],
+  repoPath: string,
+  baselineSha: string | null | undefined,
+  /**
+   * An OLDER baseline (the session-start shadow / HEAD at session start) used
+   * only when `baselineSha` proves to post-date the write. Optional — without
+   * it the behaviour is exactly as before.
+   */
+  fallbackSha?: string | null,
+): void {
+  if (!baselineSha || !repoPath) return;
+  const showAtRev = (sha: string, rel: string): string | null => {
+    try {
+      return execFileSync('git', ['show', `${sha}:${rel}`], {
+        windowsHide: true,
+        cwd: repoPath,
+        encoding: 'utf-8',
+        maxBuffer: WRITE_BASELINE_MAX_BYTES,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      // Not in that tree (a real create), or bigger than the buffer.
+      return null;
+    }
+  };
+  for (const e of edits) {
+    try {
+      if (e.op !== 'write' && e.op !== 'create') continue;
+      // An agent that already told us the before-state is left alone.
+      if (typeof e.oldContent === 'string' && e.oldContent.length > 0) continue;
+      if (typeof e.newContent !== 'string' || !e.newContent) continue;
+      // `git show <sha>:<path>` wants a repo-relative, forward-slashed path.
+      const rel = (path.isAbsolute(e.file) ? path.relative(repoPath, e.file) : e.file)
+        .split(path.sep)
+        .join('/');
+      if (!rel || rel.startsWith('../')) continue;
+      const before = showAtRev(baselineSha, rel);
+      // Absent from the baseline tree, or unreadable — the edit keeps whatever
+      // it already had (a genuine create reads as a whole-file add).
+      if (!before) continue;
+      if (before === e.newContent && fallbackSha && fallbackSha !== baselineSha) {
+        const older = showAtRev(fallbackSha, rel);
+        // Absent at session start → the turn created it; leave oldContent unset
+        // so it renders as the whole-file add it was.
+        if (older === null || older === '') continue;
+        e.oldContent = older;
+        continue;
+      }
+      e.oldContent = before;
+    } catch {
+      // Defensive: the backfill must never break capture.
     }
   }
 }
@@ -335,16 +541,42 @@ export function mergeLedgerWithTranscript(
   // Content-key → the transcript prompt that actually authored it (first
   // occurrence wins, matching the earliest-prompt ownership the server uses).
   const homeByEditKey = new Map<string, number>();
+  // Files the TRANSCRIPT proves this prompt wrote with a real tool call.
+  // The shell-window capture is the mirror image of the guard further down:
+  // it runs before the transcript is read and, for an agent whose live ledger
+  // is empty during the turn (Codex writes through `apply_patch`, which no
+  // live hook sees), `shouldRunShellWindow` lets it claim the WHOLE turn
+  // window as `turn_window` whole-file edits. The extractor then records the
+  // same change again as proof-grade tool_call edits, and keeping both bills
+  // one authoring twice — prod c09242d4 (vodka) turn 2 read +18/-18 for a
+  // git truth of +11/-11, because night.py and zakuski.py each carried their
+  // window edit AND their apply_patch hunks.
+  const transcriptToolCallFiles = new Map<number, Set<string>>();
   for (const tcap of transcript || []) {
     for (const e of tcap.edits) {
       const k = editKey(e);
       if (!homeByEditKey.has(k)) homeByEditKey.set(k, tcap.promptIndex);
+      if (e.source === 'tool_call') {
+        let s = transcriptToolCallFiles.get(tcap.promptIndex);
+        if (!s) { s = new Set(); transcriptToolCallFiles.set(tcap.promptIndex, s); }
+        s.add(e.file);
+      }
     }
   }
   for (const cap of ledger) {
     for (const e of cap.edits) {
       const home = homeByEditKey.get(editKey(e));
-      ensureCap(home !== undefined ? home : cap.promptIndex, cap).edits.push(e);
+      const idx = home !== undefined ? home : cap.promptIndex;
+      // Drop the INFERENCE when the transcript has PROOF for the same file.
+      // `turn_window` is self-declared as a guess (shell-write-capture.ts);
+      // a tool call is the exact input the agent sent. Files the transcript
+      // does NOT cover keep their window edit — that is the shell-write case
+      // the capture exists for.
+      if (
+        e.evidence === 'turn_window'
+        && transcriptToolCallFiles.get(idx)?.has(e.file)
+      ) continue;
+      ensureCap(idx, cap).edits.push(e);
     }
     // Ledger commits are empty in practice, but preserve any at the ledger's
     // own index (they carry no content to re-home on).
@@ -364,9 +596,25 @@ export function mergeLedgerWithTranscript(
       continue;
     }
     if (tcap.promptText) cap.promptText = tcap.promptText;
+    // LEDGER keys only. This set answers "does the ledger already hold this
+    // edit?" — growing it with transcript keys as we go turned it into a
+    // transcript-vs-transcript dedupe, and ONE apply_patch legitimately
+    // repeats an identical (oldContent → newContent) at several places in a
+    // file. Codex's five `pour="chilled vodka, neat",` → `pour=NEAT_POUR,`
+    // rows collapsed to one here (9 extracted edits stored as 5), so the turn
+    // under-counted by exactly the four it swallowed. A transcript edit the
+    // ledger really does hold is still skipped; a re-emit of the same edit at
+    // the same position is collapsed downstream by the anchor-aware dedupe.
     const seen = new Set(cap.edits.map(editKey));
+    // Files the ledger already accounts for authoritatively: a real tool call,
+    // or a shell-window edit (the turn's own git diff, derived at Stop for a
+    // turn that wrote through the shell). Both are per-TURN truth, so the
+    // transcript's commit-sourced entry for the same file is the same change
+    // a second time — and a commit spans turns, so it is the coarser one.
     const ledgerToolCallFiles = new Set(
-      cap.edits.filter((e) => e.source === 'tool_call').map((e) => e.file),
+      cap.edits
+        .filter((e) => e.source === 'tool_call' || e.backfillSource === 'shell-window')
+        .map((e) => e.file),
     );
     for (const e of tcap.edits) {
       if (seen.has(editKey(e))) continue;
@@ -374,11 +622,18 @@ export function mergeLedgerWithTranscript(
       // covers with the exact tool-call edit — that's the same change twice.
       if (e.source !== 'tool_call' && ledgerToolCallFiles.has(e.file)) continue;
       cap.edits.push(e);
-      seen.add(editKey(e));
     }
     const cset = new Set(cap.commits);
     for (const c of tcap.commits || []) {
       if (!cset.has(c)) { cap.commits.push(c); cset.add(c); }
+    }
+    // The live ledger never sees a canvas write (afterFileEdit skips it —
+    // no git diff), so outOfRepoFiles lives only on the transcript capture.
+    // Spreading `...tcap` already keeps it when the ledger has no row for
+    // this index; copy it here so a merge on a mixed turn doesn't drop it.
+    if (tcap.outOfRepoFiles && tcap.outOfRepoFiles.length) {
+      const listed = unionOutOfRepo(cap.outOfRepoFiles, tcap.outOfRepoFiles);
+      if (listed) cap.outOfRepoFiles = listed;
     }
   }
   return [...byIndex.values()].sort((a, b) => a.promptIndex - b.promptIndex);
@@ -519,6 +774,33 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
     }
   });
 
+  // Tool calls the agent ISSUED but that never touched the file. A rejected
+  // Edit ("String to replace not found", a denied permission, a write to a
+  // protected path) still appears as a normal `tool_use` block; only the
+  // `tool_result` that answers it carries `is_error: true`. Capturing those
+  // credits the turn with content that exists nowhere on disk and in no
+  // commit — measured on session cb853c02 turn 2, where a failed 5→121-line
+  // Edit of scripts/deploy-prod.sh was re-tried successfully moments later and
+  // the turn reported +240 for a file git says gained +124: the real edit
+  // (+124) plus the phantom (+116). It also renders as a duplicate hunk in the
+  // diff, since the retry writes the same block again.
+  //
+  // A result arrives AFTER its tool_use (in the next user message), so the
+  // failed ids have to be collected up front.
+  const failedToolUseIds = new Set<string>();
+  for (const line of lines) {
+    if (!line.includes('"is_error"')) continue;
+    let entry: any;
+    try { entry = JSON.parse(line); } catch { continue; }
+    const content = entry?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (block?.type === 'tool_result' && block.is_error === true && block.tool_use_id) {
+        failedToolUseIds.add(String(block.tool_use_id));
+      }
+    }
+  }
+
   const turns: PromptCapture[] = [];
   const startTurn = (text: string): PromptCapture => ({
     promptIndex: turns.length,
@@ -526,6 +808,7 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
     agent: opts.agent === 'cursor' ? 'cursor' : 'claude',
     edits: [],
     commits: [],
+    droppedFailedEdits: 0,
   });
 
   // Prompts waiting for a turn to start (queued-prompt mode only).
@@ -586,9 +869,16 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
 
     for (const block of content) {
       if (block?.type !== 'tool_use') continue;
-      for (const e of extractEditsFromToolCall(String(block.name || ''), block.input || {}, opts.repoPath, opts.agent)) {
-        current.edits.push(e);
+      const blockEdits = extractEditsFromToolCall(String(block.name || ''), block.input || {}, opts.repoPath, opts.agent);
+      // The tool ran and failed — its input describes an edit that never
+      // happened. See failedToolUseIds above. Counted (not just skipped) so
+      // `origin recapture` can tell a turn whose stored numbers this changes
+      // from one it must leave alone.
+      if (block.id && failedToolUseIds.has(String(block.id))) {
+        if (blockEdits.length > 0) current.droppedFailedEdits = (current.droppedFailedEdits || 0) + 1;
+        continue;
       }
+      for (const e of blockEdits) current.edits.push(e);
     }
   }
 
@@ -618,14 +908,23 @@ function extractFromJsonlTranscript(opts: CaptureInputs): PromptCapture[] {
 }
 
 function extractUserPromptText(entry: any): string {
+  // The agent's own injection into the user role — a Skill body, a resume
+  // nudge, a slash-command expansion. `realPromptText` below shares
+  // parseTranscript's TEXT rule (cleanPrompt); this is the other half of that
+  // same rule, and it has to be applied here too or the two pipelines drift
+  // apart exactly as they did in #1136. A skill body carries no tag for
+  // cleanPrompt to strip, so without this it opens a fresh turn and every
+  // capture after it is looked up at the wrong index.
+  if (isAgentInjectedEntry(entry)) return '';
+
   // Cursor: { role: 'user', content: '...' }
   if (typeof entry.content === 'string' && (entry.role === 'user' || entry.role === 'human')) {
-    return entry.content.trim();
+    return realPromptText(entry.content);
   }
   const msg = entry.message;
   if (!msg) return '';
   // Old Claude: { message: { role: 'user', content: '...' } }
-  if (typeof msg.content === 'string') return msg.content.trim();
+  if (typeof msg.content === 'string') return realPromptText(msg.content);
   if (!Array.isArray(msg.content)) return '';
   // New Claude: { type:'user', message:{content:[{type:'text', text:'...'}, ...]} }
   // Skip tool_result blocks — they aren't user text.
@@ -636,7 +935,36 @@ function extractUserPromptText(entry: any): string {
     if (typeof block.text === 'string') parts.push(block.text);
     else if (typeof block.content === 'string') parts.push(block.content);
   }
-  return parts.join('').trim();
+  return realPromptText(parts.join(''));
+}
+
+/**
+ * Only text the USER actually typed opens a new turn.
+ *
+ * Agents inject their own messages in the user role — `<task-notification>`
+ * when a background task reports, `<system-reminder>`, hook feedback. Each one
+ * was counted here as a prompt and started a fresh turn, so this pipeline's
+ * index space drifted away from the session's real prompt list: prod session
+ * 0c65017f had 6 real prompts and this produced 18 captures, five of them
+ * consecutive task-notifications sitting between prompt 1 and prompt 2.
+ *
+ * The caller then looks each row's edits up by the SESSION's promptIndex —
+ * `promptEditsByIndex.get(4)` for prompt 5 — and got a task-notification's
+ * empty capture, while prompt 5's real edit sat at capture index 9. The turn
+ * did work, the work was captured, and the row still rendered empty.
+ *
+ * parseTranscript already draws this line for the prompt LIST; sharing its
+ * rule is what keeps the two counts from disagreeing again.
+ *
+ * This covers only the TAGGED injections. The agent also injects UNTAGGED
+ * content — a Skill's body is plain markdown — which is caught structurally by
+ * `isAgentInjectedEntry` in extractUserPromptText above. Both halves are
+ * needed: `<task-notification>` arrives with `isMeta` false, and a skill body
+ * carries no tag.
+ */
+function realPromptText(raw: string): string {
+  if (typeof raw !== 'string' || !raw.trim()) return '';
+  return cleanPrompt(raw) ?? '';
 }
 
 function pickFilePath(input: Record<string, any>): string | null {
@@ -763,6 +1091,155 @@ function makeRepoRelative(filePath: string, repoPath: string): string {
 // Tool names: `replace` (Edit-equivalent), `write_file`, plus non-edit
 // tools like `run_shell_command`, `update_topic`, `update_plan`. We
 // walk tool calls and emit a PromptEdit for the file-touching ones.
+// ─── GitHub Copilot CLI ────────────────────────────────────────────────────
+//
+// Store: ~/.copilot/session-state/<sessionId>/events.jsonl — a flat event log,
+// not a message tree. Copilot fires no tool-level hook (its hook document
+// registers sessionStart / userPromptSubmitted / agentStop / sessionEnd only),
+// so before this extractor there was no way to witness a Copilot edit at all:
+// its turns could only be inferred from working-tree state, which cannot
+// separate the agent's writes from a sibling agent's or the user's.
+//
+// Everything below was verified against 18 real sessions rather than inferred
+// from the format, and four properties of the log drive the implementation:
+//
+//  1. `turnId` is NOT a turn identifier. It RESETS on every prompt (one
+//     session runs 6,8,10 under prompt 0 then 3,5 under prompt 1), so using it
+//     as promptIndex scrambles attribution. Prompts are delimited by
+//     `user.message` in file order, exactly like the other extractors.
+//  2. `user.message` carries TWO bodies. `content` is what the user typed;
+//     `transformedContent` is that text wrapped in a <copilot_tauri_workspace>
+//     envelope. Reading the wrapped one is what made Copilot prompts duplicate
+//     (#1188), so only `content` is used here.
+//  3. `apply_patch` arguments arrive CHARACTER-INDEXED — {0:'*',1:'*',2:'*',…}
+//     — a serialization artifact of the patch string. Object.values().join('')
+//     reassembles it; the envelope inside is the same *** Begin Patch format
+//     Codex writes, so parseApplyPatch handles it unchanged.
+//  4. Failures are recorded. `tool.execution_complete` carries success plus an
+//     error field (6 of 220 observed were false), joinable to the start event
+//     by toolCallId. A rejected edit is not authored work — capturing one is
+//     how a turn read +240 against git's +124 (#1249) — so failed calls are
+//     dropped rather than trusted.
+//
+// `bash` is Copilot's most-used tool, but in this sample it runs and compiles
+// rather than authors (python -m py_compile, rm -r __pycache__). Genuine shell
+// writes stay with the shell-write probe, which covers every agent.
+function extractFromCopilotEvents(opts: CaptureInputs): PromptCapture[] {
+  if (!opts.transcriptPath || !fs.existsSync(opts.transcriptPath)) return [];
+  let raw: string;
+  try { raw = fs.readFileSync(opts.transcriptPath, 'utf-8'); } catch { return []; }
+
+  const events: any[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line)); } catch { /* skip a torn line */ }
+  }
+
+  // Which tool calls FAILED. Collected in a first pass because the verdict
+  // arrives in a later event than the arguments.
+  const failed = new Set<string>();
+  for (const e of events) {
+    if (e?.type !== 'tool.execution_complete') continue;
+    const id = e?.data?.toolCallId;
+    if (typeof id === 'string' && e?.data?.success === false) failed.add(id);
+  }
+
+  const turns: PromptCapture[] = [];
+  let current: PromptCapture | null = null;
+
+  for (const e of events) {
+    const type = e?.type || '';
+
+    if (type === 'user.message') {
+      // `content`, never `transformedContent` — see note 2 above.
+      const text = typeof e?.data?.content === 'string' ? e.data.content : '';
+      if (current) turns.push(current);
+      current = {
+        promptIndex: turns.length,
+        promptText: text.slice(0, 1000),
+        agent: 'copilot',
+        edits: [],
+        commits: [],
+      };
+      continue;
+    }
+
+    if (type !== 'tool.execution_start') continue;
+    const data = e?.data || {};
+    const toolName = String(data.toolName || '');
+    if (!COPILOT_EDIT_TOOLS.has(toolName)) continue;
+    if (typeof data.toolCallId === 'string' && failed.has(data.toolCallId)) continue;
+    // An edit before any user.message belongs to no prompt we can name. Open a
+    // turn for it rather than dropping it, so the work is still attributed
+    // somewhere visible instead of vanishing.
+    if (!current) current = { promptIndex: 0, promptText: '', agent: 'copilot', edits: [], commits: [] };
+    const turn: PromptCapture = current;
+
+    const args = data.arguments || {};
+    if (toolName === 'apply_patch') {
+      // parseApplyPatch is shared with Codex and stamps no evidence, but these
+      // edits were witnessed in a tool call like any other — leaving them
+      // unmarked would throw away the one signal that separates proof from the
+      // working-tree inference this extractor exists to replace.
+      for (const edit of parseApplyPatch(copilotPatchText(args), opts.repoPath)) {
+        turn.edits.push({ ...edit, source: 'tool_call', evidence: 'tool_call' });
+      }
+      continue;
+    }
+
+    const file = typeof args.path === 'string' ? args.path : '';
+    if (!file) continue;
+    const repoRelative = makeRepoRelative(file, opts.repoPath);
+
+    if (toolName === 'create') {
+      turn.edits.push({
+        file: repoRelative,
+        op: 'create',
+        oldContent: '',
+        newContent: typeof args.file_text === 'string' ? args.file_text : '',
+        source: 'tool_call',
+        evidence: 'tool_call',
+      });
+      continue;
+    }
+
+    // 'edit' — old_str/new_str, the same shape Claude's Edit carries, so both
+    // sides of the change are present and the server needs no inference.
+    turn.edits.push({
+      file: repoRelative,
+      op: 'edit',
+      oldContent: typeof args.old_str === 'string' ? args.old_str : '',
+      newContent: typeof args.new_str === 'string' ? args.new_str : '',
+      source: 'tool_call',
+      evidence: 'tool_call',
+    });
+  }
+
+  if (current) turns.push(current);
+  return turns;
+}
+
+const COPILOT_EDIT_TOOLS = new Set(['edit', 'create', 'apply_patch']);
+
+/**
+ * Recover the patch text from an `apply_patch` argument object.
+ *
+ * Copilot serializes the patch STRING into a character-indexed object
+ * ({0:'*',1:'*',2:'*',…}), so the usual `args.patch` read finds nothing. Keys
+ * are joined in NUMERIC order — object key order is insertion order for
+ * integer-like keys in practice, but sorting makes that explicit rather than
+ * relying on it. A normal string field is accepted too, so a future Copilot
+ * release that stops splitting the value keeps working.
+ */
+function copilotPatchText(args: Record<string, any>): string {
+  for (const key of ['patch', 'input', 'text']) {
+    if (typeof args?.[key] === 'string') return args[key];
+  }
+  const numeric = Object.keys(args || {}).filter((k) => /^\d+$/.test(k));
+  if (numeric.length === 0) return '';
+  return numeric.sort((a, b) => Number(a) - Number(b)).map((k) => args[k]).join('');
+}
+
 function extractFromGeminiTranscript(opts: CaptureInputs): PromptCapture[] {
   if (!opts.transcriptPath || !fs.existsSync(opts.transcriptPath)) return [];
   let raw: string;
@@ -1357,9 +1834,43 @@ function supplementUncoveredCommittedFiles(turns: PromptCapture[], opts: Capture
   const gitOpts = { windowsHide: true, cwd: opts.repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 10 * 1024 * 1024 };
 
   // Owner = highest-promptIndex turn that claims each sha (the committer).
+    // Owner = the turn post-commit SAW the commit land under, when we have it.
+  //
+  // The fallback below ("highest-promptIndex turn that claims it") is a
+  // guess dressed as a rule. It is right whenever the committing turn is also
+  // the last to touch the sha, and wrong exactly when the commit surfaces
+  // late — which is Cursor's normal case, since its commits do not reliably
+  // fire the global post-commit hook. A late sha gets claimed by a LATER turn,
+  // so the carrier names the wrong committer, which is why the server learned
+  // to distrust the carrier entirely and rebuild ownership from timestamps and
+  // prompt wording.
+  //
+  // Matching on turnId rather than promptIndex is the point: an index moves
+  // under a resume or a rolled transcript, and a commit re-homed onto whoever
+  // now holds that slot is precisely what this attests against.
+  // Strongest observation per sha wins. post-commit watched the commit land;
+  // a transcript pairing is the agent reporting it afterwards, resolved from a
+  // short sha in prose. Both beat the positional guess below, but they are not
+  // equal to each other, and collapsing them would hide which one a given
+  // attribution actually rests on.
+  const RANK: Record<string, number> = { 'post-commit': 2, transcript: 1 };
+  const attestedTurnForSha = new Map<string, string>();
+  const attestedRank = new Map<string, number>();
+  for (const c of opts.commitTurns || []) {
+    if (!c || typeof c.sha !== "string" || typeof c.turnId !== "string") continue;
+    const r = RANK[c.via || "post-commit"] ?? 0;
+    if (r >= (attestedRank.get(c.sha) ?? -1)) { attestedTurnForSha.set(c.sha, c.turnId); attestedRank.set(c.sha, r); }
+  }
   const ownerForSha = new Map<string, PromptCapture>();
   for (const turn of turns) {
     for (const sha of turn.commits) {
+      const attested = attestedTurnForSha.get(sha);
+      if (attested) {
+        // Only the attested turn may own it. A turn that merely claims the sha
+        // does not get to overrule what was observed.
+        if (opts.promptTurnIds?.[turn.promptIndex] === attested) ownerForSha.set(sha, turn);
+        continue;
+      }
       const cur = ownerForSha.get(sha);
       if (!cur || turn.promptIndex > cur.promptIndex) ownerForSha.set(sha, turn);
     }

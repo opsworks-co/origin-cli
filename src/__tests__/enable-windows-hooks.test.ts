@@ -85,16 +85,41 @@ describe('enable hook generation on native Windows (isWindows → true)', () => 
 
     // vitest runs from a real .js entry, so the node-direct form must win.
     expect(cmd).not.toMatch(/origin\.cmd/i);
-    expect(cmd).toContain(process.execPath);
+    // The interpreter may appear under its 8.3 short name (see the quoting test
+    // below), so assert it is node — not that it is one particular spelling of
+    // the path. This used to read `toContain(process.execPath)`, which passed
+    // only because the long form was the sole form we ever emitted.
+    //
+    // `.exe` is optional: isWindows() is mocked, but process.execPath is real,
+    // and on the Linux CI leg it is `/opt/…/bin/node`. Matching /node\.exe/
+    // passed locally and failed there. Same pattern as the Copilot test above.
+    expect(cmd).toMatch(/node(\.exe)?['"]?\s/i);
     expect(cmd).toContain('hooks cursor session-start');
   });
 
-  it('quotes the node/entry paths so spaces (C:\\Program Files\\nodejs) survive', () => {
+  it('emits a node path that needs no quoting, so it survives `cmd /c`', () => {
+    // REPLACES an assertion that demanded the opposite — that a spacey path be
+    // QUOTED. Quoting is what broke: agents run this string through `cmd /c`,
+    // where the quotes arrive escaped and cmd hunts for a program literally
+    // named `\"C:\Program Files\nodejs\node.exe\"`. On Antigravity, whose
+    // PreToolUse block is hard, that stopped the agent from running any tool at
+    // all and told the user Node was missing.
+    //
+    // The rule now: prefer a path with no spaces (the 8.3 short name), and only
+    // quote when the volume has no short name to offer.
     installCursorHooks(dir);
     const cfg = JSON.parse(fs.readFileSync(path.join(dir, '.cursor', 'hooks.json'), 'utf-8'));
     const cmd: string = cfg.hooks.sessionStart[0].command;
-    if (/\s/.test(process.execPath)) {
-      expect(cmd).toContain(`"${process.execPath}"`);
+
+    const interpreter = cmd.startsWith('"')
+      ? cmd.slice(0, cmd.indexOf('"', 1) + 1)
+      : cmd.split(' ')[0];
+    // Either it needs no quotes, or it is quoted — never a bare spacey path,
+    // which would split into two arguments and run the wrong program.
+    if (/\s/.test(interpreter)) {
+      expect(interpreter.startsWith('"') && interpreter.endsWith('"')).toBe(true);
+    } else {
+      expect(interpreter).not.toContain('"');
     }
     // Whatever the form, the trailing args stay unquoted and parseable.
     expect(cmd.endsWith('hooks cursor session-start')).toBe(true);

@@ -20,6 +20,7 @@
 // such a field means moving it behind that gate.
 
 import { execFileSync } from 'child_process';
+import { gitIdentityEnv } from './utils/exec.js';
 
 const ACCEPTANCE_REF = 'refs/notes/origin-acceptance';
 
@@ -37,6 +38,9 @@ export interface AcceptanceNote {
 
 const execOpts = (cwd: string) => ({
     windowsHide: true,
+  // `git notes add` builds an object and needs an identity; supply Origin's
+  // only when the box has none (see gitIdentityEnv).
+  env: { ...process.env, ...gitIdentityEnv(cwd) },
   cwd,
   encoding: 'utf-8' as const,
   stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],

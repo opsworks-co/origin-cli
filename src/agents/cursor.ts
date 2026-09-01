@@ -189,7 +189,9 @@ export function discoverCursorTranscript(conversationId?: string, hookCwd?: stri
               plainText += c.text;
               parts.push(c.text);
             } else if (t === 'thinking' && (c.thinking || c.text)) {
-              parts.push(`[Reasoning] ${truncate(c.thinking || c.text || '')}`);
+              // Collapse internal blank lines — the web's reasoning block ends
+              // at the first empty line, and thinking is usually multi-paragraph.
+              parts.push(`[Reasoning] ${truncate((c.thinking || c.text || '').trim().replace(/\n{2,}/g, '\n'))}`);
             } else if (t === 'tool_use' && c.name) {
               const inp = c.input || {};
               const argStr =

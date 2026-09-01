@@ -10,6 +10,7 @@ import { api } from '../api.js';
 function readOriginNote(repoPath: string, sha: string): Record<string, any> | null {
   try {
     const note = execFileSync('git', ['notes', '--ref=origin', 'show', sha], {
+      windowsHide: true,
       cwd: repoPath,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],

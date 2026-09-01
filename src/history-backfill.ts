@@ -49,6 +49,26 @@ const BATCH_PAYLOAD_BUDGET = 1_200_000;
 // #585) would abort them on ordinary uplinks, and the identical batch
 // would be rebuilt and re-aborted on every future trigger.
 export const BACKFILL_TIMEOUT_MS = 60_000;
+
+/**
+ * Timeout for the LIVE per-commit ingest.
+ *
+ * That call carries the commit's patch — up to 500KB — and was running on the
+ * shared 8s default, which is sized for "tiny live calls" inside agent hooks.
+ * It is neither tiny nor an agent hook: post-commit is invoked by git, which
+ * imposes no budget of its own, so the 10s ceiling that shapes
+ * DEFAULT_FETCH_TIMEOUT_MS does not apply here.
+ *
+ * Measured on prod: in one 29-minute window the hook attempted the ingest twice
+ * and both aborted — `shadow ingest failed (non-fatal) {"message":"This
+ * operation was aborted"}` — while every commit in that period landed with
+ * `patch: null, additions: null`, forcing every read surface onto guesses. The
+ * server was slow because a deploy was restarting it, which is exactly when a
+ * commit still needs to arrive.
+ *
+ * Shorter than BACKFILL_TIMEOUT_MS because this is one commit, not a ~1MB batch.
+ */
+export const COMMIT_INGEST_TIMEOUT_MS = 30_000;
 // A fresh in-flight lock suppresses re-advertising so rapid consecutive
 // commits don't run the same multi-MB backfill N times concurrently.
 const LOCK_FRESH_MS = 10 * 60 * 1000;
@@ -86,6 +106,35 @@ interface SyncMarker {
   head: string;
   count: number;
   syncedAt: string;
+}
+
+// How long a clean marker is trusted before the next trigger re-advertises
+// once, regardless of local git state.
+//
+// The marker is purely LOCAL: it records that the server once acknowledged
+// this HEAD, and both gates below then decide from git alone. Nothing ever
+// re-checks that the server still HAS that history, so anything that empties
+// the server side — the repo row deleted and re-created, an org moved, a
+// restore from an older backup — is invisible forever. Measured on the
+// `baton` repo: a marker written 2026-07-07 at 12 commits, a repo row
+// (re)created 2026-08-21 holding 1 commit, and a HEAD exactly +1 since the
+// marker, which is precisely the steady state both gates skip. The 12
+// commits behind it — 8 of them AI-authored, carrying Origin-Session
+// trailers — could never be re-offered, so every line they wrote read as
+// "human" in AI Blame (README.md: 49% AI on a file that is ~98% AI).
+//
+// A week means one extra advertise per repo per week: a rev-list plus one
+// indexed server lookup. Cheap enough to be the safety net for a failure
+// mode whose only other exit is the user running `origin sync` by hand.
+export const MARKER_REVALIDATE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Whether a clean marker is old enough that the server should be re-asked. */
+export function markerNeedsRevalidation(marker: SyncMarker | null, now: number = Date.now()): boolean {
+  if (!marker) return true;
+  const synced = Date.parse(marker.syncedAt || '');
+  // An unparseable stamp is pre-dates-this-field or corrupt — revalidate.
+  if (!Number.isFinite(synced)) return true;
+  return now - synced >= MARKER_REVALIDATE_MS;
 }
 
 function syncDir(): string {
@@ -183,6 +232,10 @@ export function shouldAdvertiseHistory(repoPath: string, cwd: string): { adverti
   const marker = readSyncMarker(repoPath);
   if (!marker) return { advertise: true, head, count };
 
+  // A marker only ever proves what the server said ONCE. Re-ask periodically
+  // so a repo whose rows were dropped server-side can heal itself.
+  if (markerNeedsRevalidation(marker)) return { advertise: true, head, count };
+
   // A jump of more than one commit since the marker means history arrived
   // outside the hook (pull, merge, cherry-pick sequence with hooks off).
   if (count > marker.count + 1) return { advertise: true, head, count };
@@ -217,11 +270,122 @@ export function shouldSyncStandalone(markerKey: string, cwd: string): { sync: bo
   const count = countRaw ? parseInt(countRaw, 10) : 0;
   if (!head || !Number.isFinite(count)) return { sync: false, head, count: 0 };
   const marker = readSyncMarker(markerKey);
-  if (marker && marker.head === head && marker.count === count) return { sync: false, head, count };
+  if (marker && marker.head === head && marker.count === count && !markerNeedsRevalidation(marker)) {
+    return { sync: false, head, count };
+  }
   return { sync: true, head, count };
 }
 
 // ─── Commit extraction ─────────────────────────────────────────────────────
+
+/** A commit's parent SHAs. Two or more means it is a merge. */
+export function commitParents(cwd: string, sha: string): string[] {
+  const out = gitOrNull(['rev-list', '--parents', '-n', '1', sha], { cwd });
+  if (!out) return [];
+  // "<sha> <parent1> <parent2>…"
+  return out.trim().split(/\s+/).slice(1).filter((p) => SHA_RE.test(p));
+}
+
+/**
+ * What a MERGE commit itself authored, as opposed to what it absorbed.
+ *
+ * A merge's own contribution is the conflict resolution — what is in the
+ * merge and in NEITHER parent. Everything else in it was already written on
+ * one side or the other and belongs to whoever wrote it there.
+ *
+ * git has no unified-format rendering of that. `git show <merge>` prints a
+ * `--cc` combined diff, whose `@@@` headers and two-column `++` prefixes no
+ * parser in this codebase reads — every one of them matches `^diff --git` and
+ * counts `line[0] === '+'`, so a merge reads as an EMPTY diff. And
+ * `git diff <merge>~1..<merge>` (the first-parent view) is the opposite
+ * error: it is the whole of the other branch.
+ *
+ * Prod f7881a6e turn 3 ran `git merge origin/main` and was credited with
+ * +84/-20 of `final-state-blame.ts` and `transcript-watch.ts` — another PR's
+ * code, which that session never wrote — while its own row stored +0/-0.
+ *
+ * The resolution is exactly the files that differ from BOTH parents, so
+ * intersecting the two parent diffs names them, and a normal two-parent diff
+ * restricted to those paths renders them in a format everything downstream
+ * already understands. On the merge above that is `package.json` +
+ * `package-lock.json`, 6 lines — the version bump the turn actually made.
+ *
+ * Returns null when `sha` is not a merge, so callers keep their normal path.
+ */
+export function mergeOwnDiff(
+  cwd: string,
+  sha: string,
+): { diff: string; filesChanged: string[] } | null {
+  const parents = commitParents(cwd, sha);
+  if (parents.length < 2) return null;
+  const changedAgainst = (p: string): Set<string> => {
+    const out = gitOrNull(['diff', '--name-only', p, sha], { cwd });
+    return new Set(out ? out.trim().split('\n').filter(Boolean) : []);
+  };
+  let resolved = changedAgainst(parents[0]);
+  for (const p of parents.slice(1)) {
+    const other = changedAgainst(p);
+    resolved = new Set([...resolved].filter((f) => other.has(f)));
+  }
+  const filesChanged = [...resolved];
+  // A clean merge resolves nothing and therefore authored nothing. Empty is
+  // the honest answer — NOT a licence to fall back to the unrestricted diff,
+  // which is how the whole other branch got credited in the first place.
+  if (filesChanged.length === 0) return { diff: '', filesChanged: [] };
+  const diff = gitOrNull(
+    ['diff', '--no-color', parents[0], sha, '--', ...filesChanged],
+    { cwd },
+  )?.trim() || '';
+  return { diff, filesChanged };
+}
+
+/**
+ * Files a merge brought in from the OTHER side — authored on that branch, not
+ * by whoever ran the merge.
+ *
+ * `git merge` rewrites them in the working tree, so any capture that answers
+ * "what changed in this turn's window" sees them as this turn's writes. That
+ * is how a turn's `editsJson` — and through it the session HEADER, which is
+ * synthesized from every turn's edits — ends up holding another PR's code.
+ *
+ * Prod f7881a6e's header read +1607/-119; eight files totalling +533/-50 were
+ * absorbed by three merges and written by nobody in that session. 1607 - 533 =
+ * 1074, which is exactly what its own three commits contain.
+ *
+ * Empty for a non-merge, and never includes what the merge RESOLVED — that
+ * part the merging turn really did author.
+ */
+export function mergeAbsorbedFiles(cwd: string, sha: string): string[] {
+  const parents = commitParents(cwd, sha);
+  if (parents.length < 2) return [];
+  const own = new Set((mergeOwnDiff(cwd, sha)?.filesChanged) || []);
+  const out = gitOrNull(['diff', '--name-only', parents[0], sha], { cwd });
+  return (out ? out.trim().split('\n').filter(Boolean) : []).filter((f) => !own.has(f));
+}
+
+/**
+ * The files one commit changed, by name only — no patch built.
+ *
+ * Split out of `extractCommitDiff` so callers that only need "which files did
+ * this commit touch" (the foreign-commit exclusion in the shell-window
+ * capture) don't pay to materialise a whole patch per commit.
+ */
+export function commitChangedFiles(cwd: string, sha: string): string[] {
+  const names = gitOrNull(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha], { cwd });
+  const out = names ? names.trim().split('\n').filter(Boolean) : [];
+  // `diff-tree` prints NOTHING for a merge — it has no single parent to diff
+  // against — so a merge commit reached the API with `filesChanged: []` while
+  // carrying a full first-parent diff below. Prod f7881a6e logged exactly that:
+  // `sending incremental update {filesChanged:0, …, a:84, r:20}`. The
+  // first-parent name list is what a Commit ROW wants (the files the merge
+  // brought onto this branch); a turn's own contribution is a different
+  // question, answered by mergeOwnDiff.
+  if (out.length > 0) return out;
+  const mergeNames = gitOrNull(
+    ['show', sha, '--format=', '--name-only', '--diff-merges=first-parent'], { cwd },
+  );
+  return mergeNames ? mergeNames.trim().split('\n').filter(Boolean) : [];
+}
 
 /**
  * Per-commit unified diff + touched files. The single shared implementation
@@ -234,9 +398,7 @@ export function shouldSyncStandalone(markerKey: string, cwd: string): { sync: bo
  *   3. `git show <sha> --format=` — last-resort, handles merge commits.
  */
 export function extractCommitDiff(cwd: string, sha: string): { diff: string; filesChanged: string[] } {
-  let filesChanged: string[] = [];
-  const names = gitOrNull(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha], { cwd });
-  if (names) filesChanged = names.trim().split('\n').filter(Boolean);
+  let filesChanged: string[] = commitChangedFiles(cwd, sha);
 
   let diff = gitOrNull(['diff', `${sha}~1..${sha}`], { cwd })?.trim() || '';
   if (!diff) {

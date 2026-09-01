@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { getLineBlame, type LineAttribution } from './attribution.js';
 import { getGitRoot, getHeadSha } from './session-state.js';
+import { gitIdentityEnv } from './utils/exec.js';
 
 // ─── Agent Trace Types (v0.1.0) ─────────────────────────────────────────
 
@@ -81,6 +82,9 @@ function modelIdToOriginAgent(modelId: string): string {
 
 const execOpts = (cwd: string) => ({
     windowsHide: true,
+  // `git notes add` builds an object and needs an identity; supply Origin's
+  // only when the box has none (see gitIdentityEnv).
+  env: { ...process.env, ...gitIdentityEnv(cwd) },
   encoding: 'utf-8' as const,
   cwd,
   stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],

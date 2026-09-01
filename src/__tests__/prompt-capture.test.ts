@@ -12,7 +12,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
-import { capturePromptEdits, extractApplyPatchesFromExecWrapper } from '../prompt-capture/index.js';
+import { capturePromptEdits, extractApplyPatchesFromExecWrapper, mergeLedgerWithTranscript } from '../prompt-capture/index.js';
+import { abbreviateHome } from '../paths.js';
 
 const FIXTURE_DIR = path.join(__dirname, 'fixtures');
 
@@ -466,6 +467,171 @@ describe('Codex ≥0.145 exec-wrapper format', () => {
       const rows = turns[0].edits.filter((e) => e.file === 'rows.txt');
       expect(rows).toHaveLength(1);
       expect(rows[0].commitSha).toBe(fullSha);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Out-of-repo writes are not a turn diff', () => {
+  // Regression for the audit-canvas turn: Cursor Write of
+  // ~/.cursor/projects/…/canvases/codebase-audit.canvas.tsx was captured into
+  // editsJson. Git never saw the file (afterFileEdit skipped it; the mapping
+  // extractor scoped it out), then the server synthesized a +469/−12 turn
+  // diff from the leftover absolute path. The gate is agent-agnostic: any
+  // remaining-absolute path outside this repo is peeled onto outOfRepoFiles.
+
+  function writeCursorTranscript(dir: string, lines: object[]): string {
+    const p = path.join(dir, 'conv.jsonl');
+    fs.writeFileSync(p, lines.map((l) => JSON.stringify(l)).join('\n'));
+    return p;
+  }
+
+  it('peels a Cursor canvas Write off edits and records it on outOfRepoFiles', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-oor-'));
+    try {
+      // Capture only needs a repo root to decide inside vs outside — no git.
+      fs.writeFileSync(path.join(tmp, 'seed.txt'), 'seed\n');
+
+      const canvas = path.join(
+        os.homedir(),
+        '.cursor',
+        'projects',
+        'fake-ws',
+        'canvases',
+        'codebase-audit.canvas.tsx',
+      );
+      const transcript = writeCursorTranscript(tmp, [
+        { role: 'user', content: 'can you do audit of the codebase and suggest what can be improved?' },
+        {
+          role: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                name: 'Write',
+                input: {
+                  path: canvas,
+                  contents: 'export default function Audit() { return null; }\n',
+                },
+              },
+            ],
+          },
+        },
+      ]);
+
+      const turns = capturePromptEdits({
+        agent: 'cursor',
+        repoPath: tmp,
+        transcriptPath: transcript,
+        sessionCommitShas: [],
+      });
+      expect(turns.length).toBe(1);
+      expect(turns[0].edits).toEqual([]);
+      expect(turns[0].outOfRepoFiles).toEqual([abbreviateHome(canvas)]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an in-repo Write and peels only the canvas in the same turn', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-oor-mix-'));
+    try {
+      fs.writeFileSync(path.join(tmp, 'README.md'), 'hello\n');
+
+      const canvas = path.join(os.homedir(), '.cursor', 'projects', 'fake-ws', 'canvases', 'notes.canvas.tsx');
+      const transcript = writeCursorTranscript(tmp, [
+        { role: 'user', content: 'tweak readme and jot a canvas note' },
+        {
+          role: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                name: 'StrReplace',
+                input: {
+                  path: path.join(tmp, 'README.md'),
+                  old_string: 'hello',
+                  new_string: 'hello world',
+                },
+              },
+              {
+                type: 'tool_use',
+                name: 'Write',
+                input: { path: canvas, contents: 'note\n' },
+              },
+            ],
+          },
+        },
+      ]);
+
+      const turns = capturePromptEdits({
+        agent: 'cursor',
+        repoPath: tmp,
+        transcriptPath: transcript,
+        sessionCommitShas: [],
+      });
+      expect(turns.length).toBe(1);
+      expect(turns[0].edits.map((e) => e.file)).toEqual(['README.md']);
+      expect(turns[0].outOfRepoFiles).toEqual([abbreviateHome(canvas)]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('survives a live-ledger merge so the canvas cannot re-enter editsJson', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-oor-merge-'));
+    try {
+      fs.writeFileSync(path.join(tmp, 'a.ts'), 'export const a = 1;\n');
+
+      const canvas = path.join(os.homedir(), '.cursor', 'projects', 'fake-ws', 'canvases', 'x.canvas.tsx');
+      const transcript = writeCursorTranscript(tmp, [
+        { role: 'user', content: 'edit a.ts' },
+        {
+          role: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                name: 'StrReplace',
+                input: {
+                  path: path.join(tmp, 'a.ts'),
+                  old_string: 'export const a = 1;',
+                  new_string: 'export const a = 2;',
+                },
+              },
+              {
+                type: 'tool_use',
+                name: 'Write',
+                input: { path: canvas, contents: 'x\n' },
+              },
+            ],
+          },
+        },
+      ]);
+
+      const transcriptCaps = capturePromptEdits({
+        agent: 'cursor',
+        repoPath: tmp,
+        transcriptPath: transcript,
+        sessionCommitShas: [],
+      });
+      const ledger = [{
+        promptIndex: 0,
+        promptText: '',
+        agent: 'cursor' as const,
+        edits: [{
+          file: path.join(tmp, 'a.ts').replace(/\\/g, '/'),
+          op: 'edit' as const,
+          oldContent: 'export const a = 1;',
+          newContent: 'export const a = 2;',
+          source: 'tool_call' as const,
+        }],
+        commits: [] as string[],
+      }];
+      const merged = mergeLedgerWithTranscript(ledger, transcriptCaps);
+      expect(merged[0].edits.every((e) => !e.file.includes('canvases'))).toBe(true);
+      expect(merged[0].outOfRepoFiles).toEqual([abbreviateHome(canvas)]);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

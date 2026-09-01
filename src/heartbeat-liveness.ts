@@ -95,3 +95,40 @@ export function parentLooksDead(i: LivenessInputs): boolean {
     (i.recordedParentPid <= 0 && i.stateFileStale)
   );
 }
+
+// ─── Transcript-idle policy ───────────────────────────────────────────────
+//
+// How long the agent's transcript must sit untouched before it counts as
+// evidence the agent is gone — and it depends on what else we can see.
+//
+// A HOOKLESS IDE agent (Cursor, Antigravity) gives us one signal and one only:
+// no pid to watch, and a state file something other than its lifecycle keeps
+// warm. The short window is the only thing that catches its zombie heartbeat
+// pinging on after the window closed.
+//
+// Every other agent fires lifecycle hooks, each bumping the state file through
+// saveSessionState, and signals a real close through SessionEnd. For those the
+// transcript is a BACKSTOP, not the primary signal — and at a flat 20 minutes
+// it ended live conversations the moment the user stepped away. Claude Code
+// sits here: LONG_RUNNING_AGENTS is ['devin'] alone, so its recorded pid is 0
+// and parentLooksDead reaped it on the transcript clause by itself (prod
+// 0a8e2164 went quiet 16:35 -> 18:48 and was ended, taking its prompt history
+// with it).
+//
+// The backstop matches the window the state-file signal already applies to the
+// same pid-less agents, so the two now agree instead of the shorter one
+// quietly winning.
+export const HOOKLESS_IDE_IDLE_MS = 20 * 60 * 1000;
+export const HOOK_DRIVEN_IDLE_MS = 90 * 60 * 1000;
+
+const HOOKLESS_IDE_AGENTS = new Set(['cursor', 'antigravity']);
+
+// An unknown agent gets the LONGER window deliberately. Reaping a live session
+// corrupts the record — numbering restarts against a server that kept the
+// conversation — while a zombie lingering an extra hour costs a stale row the
+// server's own no-ping sweep clears.
+export function transcriptIdleWindowMs(slug: string): number {
+  return HOOKLESS_IDE_AGENTS.has((slug || '').toLowerCase())
+    ? HOOKLESS_IDE_IDLE_MS
+    : HOOK_DRIVEN_IDLE_MS;
+}

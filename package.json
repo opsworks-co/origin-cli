@@ -1,6 +1,6 @@
 {
   "name": "@origin/cli",
-  "version": "0.20260819.1558",
+  "version": "0.20260901.3",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -11,6 +11,7 @@
     "prepare": "node scripts/write-build-info.cjs || true",
     "prebuild": "node scripts/write-build-info.cjs",
     "build": "tsc",
+    "postbuild": "node scripts/chmod-bin.cjs",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

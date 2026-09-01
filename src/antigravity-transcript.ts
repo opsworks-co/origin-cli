@@ -1,3 +1,4 @@
+import { commandWritesFiles } from './shell-write-capture.js';
 import path from 'path';
 
 // Parser for Antigravity (`agy`) transcripts.
@@ -43,14 +44,60 @@ export interface AntigravityTranscript {
   // "which turn edited a file the commit contains" is ambiguous when several
   // turns edit the same file (every commit then resolves to the same turn).
   promptRanCommit: boolean[];
+  // Turns that ran a write-shaped shell command — see stepWroteViaShell.
+  promptWroteViaShell: boolean[];
   // Short SHAs each turn printed from its OWN `git commit` — exact pairing,
   // so a turn never has to be matched to a commit by counting.
   promptCommitShas: string[][];
+  // Total tool invocations across the session, and the per-tool counts keyed by
+  // the SAME normalized label the UI colors chips by (Read/Edit/Write/Bash/…).
+  // agy has no usage payload of its own, so without these the session detail
+  // renders "0 tools" for a turn that plainly ran several — the tool calls were
+  // in the transcript the whole time, just never counted or sent.
+  toolCalls: number;
+  toolBreakdown: Array<{ name: string; count: number }>;
 }
 
 // PascalCase (and a few snake_case) keys agy uses for file arguments across its
 // edit/write/read/glob tools. Mirrors agyToolArg / agyToolPaths.
 const AGY_FILE_ARG_KEYS = ['TargetFile', 'AbsolutePath', 'FilePath', 'Path', 'file_path', 'file', 'path', 'DirectoryPath'];
+
+/**
+ * agy double-encodes its tool-call string args: the JSON value is itself a JSON
+ * string literal, so `TargetFile` arrives as `"\"/abs/path\""` — the string
+ * starts with a literal `"` character. Numbers and booleans arrive unquoted
+ * ("false", "500"), so the decode has to be conditional on the quoting.
+ *
+ * Every path consumer here gates on `path.isAbsolute()`, which is FALSE for
+ * `"/abs/path` (leading quote). So before this, every agy file path was
+ * silently dropped: filePaths, filesEdited and editRecords all came back empty
+ * on every transcript, and the FILE_RESTRICTION policy glob never matched a
+ * real agy write. Content args (CodeContent/TargetContent/ReplacementContent)
+ * are double-encoded too — decoding them turns literal `\n` escapes back into
+ * real newlines, which is what buildDiffFromEdits needs.
+ */
+export function agyDecodeArg(v: string): string {
+  const t = v.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(t);
+      if (typeof parsed === 'string') return parsed;
+    } catch { /* malformed — keep the raw value */ }
+  }
+  return v;
+}
+
+// Decoded copy of one tool call's args. Read args through this rather than
+// `tc.args` so the double-encoding is stripped once, for every key.
+export function agyArgs(tc: any): Record<string, any> {
+  const rawArgs = (tc && tc.args) || {};
+  const out: Record<string, any> = {};
+  for (const k of Object.keys(rawArgs)) {
+    const v = rawArgs[k];
+    out[k] = typeof v === 'string' ? agyDecodeArg(v) : v;
+  }
+  return out;
+}
 
 // Collect ABSOLUTE file paths from one step's tool_calls. Relative paths are
 // dropped — only an absolute path can be resolved back to a git root without
@@ -58,7 +105,7 @@ const AGY_FILE_ARG_KEYS = ['TargetFile', 'AbsolutePath', 'FilePath', 'Path', 'fi
 function stepFilePaths(step: any): string[] {
   const out: string[] = [];
   for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
-    const a = (tc && tc.args) || {};
+    const a = agyArgs(tc);
     for (const k of AGY_FILE_ARG_KEYS) {
       const v = a[k];
       if (typeof v === 'string' && v.trim() && path.isAbsolute(v.trim())) out.push(v.trim());
@@ -85,7 +132,7 @@ function stepEditRecords(step: any): AgyEditRecord[] {
   for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
     const label = AGY_TOOL_LABEL[tc?.name] || '';
     if (!AGY_EDIT_LABELS.has(label)) continue;
-    const a = (tc && tc.args) || {};
+    const a = agyArgs(tc);
     const file = AGY_FILE_ARG_KEYS.map((k) => a[k]).find((v) => typeof v === 'string' && v.trim() && path.isAbsolute(v.trim()));
     if (typeof file !== 'string') continue;
     if (typeof a.CodeContent === 'string') {
@@ -103,14 +150,37 @@ function stepEditRecords(step: any): AgyEditRecord[] {
   return out;
 }
 
+// Normalized tool labels for every tool call on one step. Counts EVERY call,
+// including repeats of the same tool within a step (agy emits parallel
+// view_file calls in a single PLANNER_RESPONSE).
+function stepToolLabels(step: any): string[] {
+  const out: string[] = [];
+  for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+    out.push(agyToolLabel(tc?.name));
+  }
+  return out;
+}
+
 // Did this step run `git commit`? agy records shell invocations as run_command
 // with the command line in `CommandLine`. This is the ground truth for which
 // turn produced a commit.
 function stepRanGitCommit(step: any): boolean {
   for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
-    const a = (tc && tc.args) || {};
+    const a = agyArgs(tc);
     const cmd = typeof a.CommandLine === 'string' ? a.CommandLine : '';
     if (/git\s+commit/.test(cmd)) return true;
+  }
+  return false;
+}
+
+// Did this step write files through the SHELL? agy records shell invocations
+// the same way, and a heredoc / `sed -i` / interpreter leaves no edit record —
+// so without this the turn reads as chat-only to every surface downstream.
+function stepWroteViaShell(step: any): boolean {
+  for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
+    const a = agyArgs(tc);
+    const cmd = typeof a.CommandLine === 'string' ? a.CommandLine : '';
+    if (cmd && commandWritesFiles(cmd)) return true;
   }
   return false;
 }
@@ -136,7 +206,7 @@ function stepCommitShas(step: any): string[] {
     for (const m of text.matchAll(/\[[^\]\s]+\s+([0-9a-f]{7,40})\]/g)) out.push(m[1]);
   };
   for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
-    for (const v of Object.values((tc && tc.args) || {})) {
+    for (const v of Object.values(agyArgs(tc))) {
       if (typeof v === 'string' && v.includes('[')) seen(v);
     }
     for (const key of ['output', 'result', 'stdout', 'Output']) {
@@ -154,7 +224,7 @@ function stepEditedFilePaths(step: any): string[] {
   for (const tc of Array.isArray(step?.tool_calls) ? step.tool_calls : []) {
     const label = AGY_TOOL_LABEL[tc?.name] || '';
     if (!AGY_EDIT_LABELS.has(label)) continue;
-    const a = (tc && tc.args) || {};
+    const a = agyArgs(tc);
     for (const k of AGY_FILE_ARG_KEYS) {
       const v = a[k];
       if (typeof v === 'string' && v.trim() && path.isAbsolute(v.trim())) out.push(v.trim());
@@ -216,7 +286,7 @@ function agyToolLabel(name: unknown): string {
 // file/dir (basename, so the meaningful part survives truncation), and only
 // fall back to the human summary when neither exists.
 function agyToolArg(tc: any): string {
-  const a = (tc && tc.args) || {};
+  const a = agyArgs(tc);
   if (typeof a.CommandLine === 'string' && a.CommandLine.trim()) return a.CommandLine.trim();
   for (const k of ['TargetFile', 'AbsolutePath', 'FilePath', 'Path', 'file_path', 'DirectoryPath']) {
     const v = a[k];
@@ -251,7 +321,7 @@ function plannerStepText(step: any): string {
 // One user turn plus the assistant output assembled under it. Kept together so
 // that when we sort by prompt time, text + response + timestamp move as a unit
 // (see the sort at the end of parseAntigravityTranscript).
-interface AgyTurn { text: string; createdAt: number | null; buf: string[]; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean; commitShas: string[] }
+interface AgyTurn { text: string; createdAt: number | null; buf: string[]; editedFiles: string[]; editRecords: AgyEditRecord[]; ranCommit: boolean; wroteViaShell: boolean; commitShas: string[] }
 
 export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript {
   const turns: AgyTurn[] = [];
@@ -261,6 +331,8 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   // Preserve first-seen order (a read/edit early in the session is the best
   // repo-root signal); dedup via the Set.
   const filePathSet = new Set<string>();
+  const toolCounts = new Map<string, number>();
+  let toolCalls = 0;
   // When agy compacts a long session it drops a CHECKPOINT step ("Resuming from
   // a compaction") and then RE-INJECTS the original user request as a fresh
   // USER_EXPLICIT step. That is not a new prompt — counting it produces a
@@ -289,7 +361,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         const isReinjection = sawCompaction && turns.length > 0 && turns[turns.length - 1].text === req;
         if (!isReinjection) {
           const ms = typeof step?.created_at === 'string' ? Date.parse(step.created_at) : NaN;
-          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, buf: [], editedFiles: [], editRecords: [], ranCommit: false, commitShas: [] });
+          turns.push({ text: req, createdAt: Number.isFinite(ms) ? ms : null, buf: [], editedFiles: [], editRecords: [], ranCommit: false, wroteViaShell: false, commitShas: [] });
           inputChars += req.length;
         }
       }
@@ -308,6 +380,7 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
         for (const p of stepEditedFilePaths(step)) turns[turns.length - 1].editedFiles.push(p);
         for (const r of stepEditRecords(step)) turns[turns.length - 1].editRecords.push(r);
         if (stepRanGitCommit(step)) turns[turns.length - 1].ranCommit = true;
+        if (stepWroteViaShell(step)) turns[turns.length - 1].wroteViaShell = true;
       }
     }
 
@@ -317,6 +390,13 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
     // half-filled map that still reads as authoritative.
     if (turns.length > 0) {
       for (const sha of stepCommitShas(step)) turns[turns.length - 1].commitShas.push(sha);
+    }
+
+    // Tool counts, also on EVERY step and for the same reason: scoping this to
+    // MODEL steps would undercount whenever agy files a call under SYSTEM.
+    for (const label of stepToolLabels(step)) {
+      toolCounts.set(label, (toolCounts.get(label) || 0) + 1);
+      toolCalls++;
     }
   }
 
@@ -341,10 +421,16 @@ export function parseAntigravityTranscript(jsonl: string): AntigravityTranscript
   const promptFilesEdited = turns.map((t) => [...new Set(t.editedFiles)]);
   const promptEditRecords = turns.map((t) => t.editRecords);
   const promptRanCommit = turns.map((t) => t.ranCommit);
+  const promptWroteViaShell = turns.map((t) => t.wroteViaShell);
   const promptCommitShas = turns.map((t) => [...new Set(t.commitShas)]);
   const filesEdited = [...new Set(turns.flatMap((t) => t.editedFiles))];
 
-  return { prompts, responses, promptTimes, model, inputChars, outputChars, filePaths: [...filePathSet], filesEdited, promptFilesEdited, promptEditRecords, promptRanCommit, promptCommitShas };
+  const toolBreakdown = [...toolCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  return { prompts, responses, promptTimes, model, inputChars, outputChars, filePaths: [...filePathSet], filesEdited, promptFilesEdited, promptEditRecords, promptRanCommit,
+    promptWroteViaShell, promptCommitShas, toolCalls, toolBreakdown };
 }
 
 // agy exposes no token counts, so we estimate from text length (~4 chars/token,

@@ -23,6 +23,7 @@ function formatDuration(ms: number): string {
 }
 
 export async function statusCommand(opts: { global?: boolean; all?: boolean } = {}) {
+  const cwdForHooks = process.cwd();
   const config = loadConfig();
   const agentConfig = loadAgentConfig();
 
@@ -113,8 +114,45 @@ export async function statusCommand(opts: { global?: boolean; all?: boolean } = 
     console.log(chalk.gray(`    Tools: ${agentConfig.detectedTools.length > 0 ? agentConfig.detectedTools.join(', ') : 'none'}`));
   }
 
+  // ── Hook config drift ───────────────────────────────────────────────
+  // "Agent initialized" above only means `enable` ran once. It says nothing
+  // about whether the hook files it wrote are still ones the agent will
+  // accept — and an agent that rejects its hook config captures NOTHING while
+  // looking exactly like a quiet week. Antigravity (#1143) is the case that
+  // proved it: agy discards a whole hooks.json over one schema error, silently,
+  // and Origin had been writing an invalid one for months. So compare what is
+  // on disk against what this CLI writes, and say so when they differ.
+  try {
+    const { hookConfigBases, checkHookConfigs, isRepairable } = await import('../hook-config-health.js');
+    const drifted: { label: string; where: string; agentName: string; state: string; detail?: string }[] = [];
+    for (const base of hookConfigBases(cwdForHooks)) {
+      for (const report of checkHookConfigs(base)) {
+        if (!isRepairable(report.state)) continue;
+        drifted.push({
+          label: report.label,
+          where: base === os.homedir() ? 'global' : base.replace(os.homedir(), '~'),
+          agentName: report.agentName,
+          state: report.state,
+          detail: report.detail,
+        });
+      }
+    }
+    // A moved launcher path is routine housekeeping; a schema mismatch means
+    // the agent may be discarding the file. Don't file them under one warning.
+    const broken = drifted.filter((d) => d.state !== 'relocated');
+    if (broken.length > 0) {
+      console.log(chalk.yellow(`\n  ⚠ ${broken.length} agent hook config${broken.length === 1 ? '' : 's'} out of date — those agents may be capturing nothing`));
+      for (const d of broken) {
+        console.log(chalk.gray(`    ${d.agentName} · ${d.label} (${d.where})${d.detail ? ` — ${d.detail}` : ''}`));
+      }
+      console.log(chalk.gray(`    Run ${chalk.white('origin hooks repair')} to rewrite them.`));
+    } else if (drifted.length > 0) {
+      console.log(chalk.gray(`\n  ⚠ ${drifted.length} hook config${drifted.length === 1 ? '' : 's'} point at an old origin path · ${chalk.white('origin hooks repair')}`));
+    }
+  } catch { /* non-fatal — never let a health check break `origin status` */ }
+
   // ── Active Sessions ─────────────────────────────────────────────
-  const cwd = process.cwd();
+  const cwd = cwdForHooks;
   const repoPath = getGitRoot(cwd);
   // `origin status` is CWD-SCOPED by default: inside a repo it reads that
   // repo's git-dir state files, and outside one it matches only state files

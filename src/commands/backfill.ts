@@ -5,7 +5,7 @@ import { join, resolve } from 'path';
 import { isAiCommit } from '../attribution.js';
 import { getGitRoot } from '../session-state.js';
 import * as readline from 'readline';
-import { git, gitDetailed } from '../utils/exec.js';
+import { git, gitDetailed, gitIdentityEnv } from '../utils/exec.js';
 
 const HEX = /^[a-fA-F0-9]{4,64}$/;
 const SAFE_ID = /^[a-zA-Z0-9_.-]+$/;
@@ -658,7 +658,11 @@ function applyBackfillNote(repoPath: string, result: BackfillResult): boolean {
     });
     git(
       ['notes', '--ref=origin', 'add', '-f', '-m', noteData, result.sha],
-      gitOpts(repoPath),
+      // `notes add` builds an object, so it needs a git identity exactly like
+      // `commit-tree` — and this caller swallows its error, so a box without
+      // one fails every write silently. Defers to real config (see
+      // gitIdentityEnv); only the note WRITE needs it, not the reads above.
+      { ...gitOpts(repoPath), env: { ...process.env, ...gitIdentityEnv(repoPath) } },
     );
     return true;
   } catch {

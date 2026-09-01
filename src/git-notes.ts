@@ -7,6 +7,7 @@ import { redactSecrets } from './redaction.js';
 import { api } from './api.js';
 import { loadConfig, loadRepoConfig } from './config.js';
 import type { OriginMarkers } from './origin-markers.js';
+import { gitIdentityEnv } from './utils/exec.js';
 import {
   foldRemoteMemory,
   foldRemoteMemoryBrief,
@@ -878,6 +879,7 @@ export function syncNotesForSessionStart(repoPath: string): boolean {
 function refSha(repoPath: string, ref: string): string | null {
   try {
     return execFileSync('git', ['rev-parse', '--verify', '--quiet', ref], {
+      windowsHide: true,
       cwd: repoPath,
       stdio: 'pipe' as const,
       timeout: 5000,
@@ -924,7 +926,8 @@ export function writeGitNotes(
     try {
       // Use --ref=origin to keep notes in a separate namespace
       // Use -f to overwrite if note already exists (handles re-runs)
-      execFileSync('git', ['notes', '--ref=origin', 'add', '-f', '-m', notePayload, sha], execOpts);
+      execFileSync('git', ['notes', '--ref=origin', 'add', '-f', '-m', notePayload, sha],
+        { ...execOpts, env: { ...process.env, ...gitIdentityEnv(repoPath) } });
     } catch {
       // Never fail session-end because of a notes error
       // Notes are a nice-to-have, not critical
