@@ -81,10 +81,12 @@ describe('cleanPrompt — system-injected envelope filtering', () => {
     ]);
     const parsed = parseTranscript(file);
     // Only the real request survives; the wrapper + <image> tag are stripped.
-    expect(parsed.prompts).toEqual(['add a login button']);
+    // The image itself leaves a `[image]` placeholder behind — the tag is noise,
+    // but the screenshot the user attached is part of what they asked.
+    expect(parsed.prompts).toEqual(['add a login button\n[image]']);
   });
 
-  it('drops a Codex image-only prompt (no text after the marker) rather than showing the envelope', () => {
+  it('keeps a Codex image-only prompt as a placeholder rather than showing the envelope — or nothing', () => {
     const file = writeJsonl([
       {
         type: 'user',
@@ -96,7 +98,11 @@ describe('cleanPrompt — system-injected envelope filtering', () => {
       },
     ]);
     const parsed = parseTranscript(file);
-    expect(parsed.prompts).toEqual([]);
+    // Dropping it entirely was the old behaviour and it was wrong twice over:
+    // the turn vanished from the dashboard and from git notes, and the image
+    // extractor — which always counted this as a prompt — then numbered every
+    // later screenshot against a row belonging to a different turn.
+    expect(parsed.prompts).toEqual(['[image]']);
   });
 
   it('keeps a normal prompt that has no envelope at all', () => {

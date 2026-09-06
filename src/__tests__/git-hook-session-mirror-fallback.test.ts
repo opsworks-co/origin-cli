@@ -17,6 +17,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { listMirroredSessionsForTree } from '../session-state.js';
+import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
 let dir: string;
 let tree: string;
@@ -85,14 +87,13 @@ describe('listMirroredSessionsForTree', () => {
 // mirror is never consulted. #1346 shipped a fix wired into one path while the
 // bug was on another, so the wiring gets a guard.
 describe('the two halves are wired', () => {
-  const src = fs.readFileSync(
-    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'commands', 'hooks.ts'),
-    'utf-8',
-  );
+  const src = hooksSource();
 
   it('git hooks consult the mirror after the in-repo lookups', () => {
     const active = src.indexOf('let sessions = listActiveSessions(hookCwd);');
-    const mirror = src.indexOf('listMirroredSessionsForTree(hookCwd)');
+    // Searched from the in-repo lookup onward: the shared helpers ahead of the
+    // git-hook path consult the mirror too, and that earlier call is not this one.
+    const mirror = src.indexOf('listMirroredSessionsForTree(hookCwd)', active);
     expect(active).toBeGreaterThan(-1);
     expect(mirror).toBeGreaterThan(active);
   });

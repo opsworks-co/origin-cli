@@ -1,3 +1,14 @@
+// ⚠️  GENERATED FILE — DO NOT EDIT.
+//
+// Copied from apps/api/src/utils/policy-descriptions.ts by scripts/sync-shared-modules.mjs (pair "policy-descriptions").
+// Edit the canonical file there, then run `pnpm sync:shared-modules`.
+// shared-modules-drift.test.ts fails if this copy is stale.
+
+// CANONICAL COPY. packages/cli/src/utils/policy-descriptions.ts is generated from
+// this file by scripts/sync-shared-modules.mjs — edit here, then
+// `pnpm sync:shared-modules`. The policy types are defined and enforced on
+// this side; the CLI's `origin policies` shows the same words.
+//
 export interface ConditionDescription {
   summary: string;
   fixHint: string;
@@ -61,6 +72,24 @@ export function describeCondition(type: string, conditionJson: string): Conditio
       };
       return { summary: 'Review required', fixHint: 'This session will require human review' };
     }
+    case 'CONTENT_FILTER': {
+      const p = cond.pattern || '(unknown pattern)';
+      return {
+        summary: `Block diff content matching: ${p}`,
+        fixHint: `Do not include content matching "${p}" in your changes`,
+      };
+    }
+    case 'COMMIT_MESSAGE': {
+      if (cond.pattern) return {
+        summary: `Require commit format: ${cond.pattern}`,
+        fixHint: `Use commit messages matching format "${cond.pattern}"`,
+      };
+      if (cond.blocked_pattern) return {
+        summary: `Block commits matching: ${cond.blocked_pattern}`,
+        fixHint: `Do not use "${cond.blocked_pattern}" in commit messages`,
+      };
+      return { summary: 'Commit message policy', fixHint: 'Check commit message format' };
+    }
     case 'SESSION_LIMITS': {
       const parts: string[] = [];
       if (cond.idle_notify_minutes != null) parts.push(`notify after ${cond.idle_notify_minutes}m idle`);
@@ -92,6 +121,8 @@ export function policyTypeLabel(type: string): string {
     case 'COST_LIMIT': return 'Cost Limit';
     case 'FILE_RESTRICTION': return 'File Restriction';
     case 'REQUIRE_REVIEW': return 'Require Review';
+    case 'CONTENT_FILTER': return 'Content Filter';
+    case 'COMMIT_MESSAGE': return 'Commit Message';
     case 'SESSION_LIMITS': return 'Session Limits';
     default: return type;
   }

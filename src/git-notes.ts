@@ -8,6 +8,7 @@ import { api } from './api.js';
 import { loadConfig, loadRepoConfig } from './config.js';
 import type { OriginMarkers } from './origin-markers.js';
 import { gitIdentityEnv } from './utils/exec.js';
+import { debugLog } from './debug-log.js';
 import {
   foldRemoteMemory,
   foldRemoteMemoryBrief,
@@ -821,8 +822,16 @@ export function syncNotesFromRemoteThrottled(repoPath: string, timeoutMs?: numbe
   try {
     fs.mkdirSync(path.dirname(stamp), { recursive: true });
     fs.writeFileSync(stamp, new Date().toISOString());
-  } catch {
-    // Can't persist the stamp (read-only home, etc.) — proceed once anyway.
+  } catch (err: unknown) {
+    // No stamp means no throttle: "proceed once anyway" was once per PROCESS,
+    // and every session start is its own process, so a read-only home turned
+    // sixteen concurrent agents into sixteen concurrent fetches — the stampede
+    // this window exists to prevent. Skip the fetch instead; `origin notes
+    // sync` still works by hand, and the refspec covers the next pull.
+    debugLog('notes-sync', 'cannot write the sync stamp; skipping the throttled fetch', {
+      stamp, message: err instanceof Error ? err.message : String(err),
+    });
+    return false;
   }
   try {
     syncNotesFromRemote(repoPath, timeoutMs);

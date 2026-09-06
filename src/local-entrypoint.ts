@@ -86,6 +86,27 @@ export interface PromptChange {
    * (abbreviateHome), so this carries no account name.
    */
   outOfRepoFiles?: string[];
+  /**
+   * Files this turn provably changed whose CONTENT could not be retained —
+   * binary, over the snapshot cap, or a full store.
+   *
+   * Carried so the row can say "this file changed and we do not hold the
+   * bytes" instead of the two bad alternatives: dropping the file (a silent
+   * under-report) or naming it with no diff section (a row that contradicts
+   * itself, which is what `origin verify-capture` flags).
+   */
+  contentUnavailableFiles?: string[];
+  /**
+   * Where `diff` came from. `'ledger'` means it was computed from OBSERVED
+   * before/after file content rather than reconstructed from a git baseline or
+   * stitched from tool-call payloads.
+   *
+   * The server's read path prefers an editsJson synthesis over the stored diff
+   * — correct against a git-diff capture, which drags in pre-existing dirt, and
+   * wrong against the ledger, which sees shell writes editsJson cannot and
+   * needs no hunk stitching. This is how it tells them apart.
+   */
+  diffSource?: 'ledger';
 }
 
 /** Bump to 2 when shipping editsJson / commit refs; importers gate richer
@@ -655,6 +676,77 @@ export function publishSessionToBranch(repoPath: string, sessionId: string): boo
  *   - 'prompt': skip (user will push manually or via pre-push hook)
  *   - 'false': never push
  */
+/**
+ * Bring the local `origin-sessions` branch on top of the remote's, so a push
+ * is a fast-forward.
+ *
+ * Every clone of a repo folds its own sessions onto its own copy of this
+ * branch, and none of them ever fetched the others'. The first clone to push
+ * won; every other one was rejected as non-fast-forward on every push after
+ * that, forever — the failure was swallowed, and on this machine the remote
+ * tip sat six months behind while 1,700 local session commits never left.
+ *
+ * The branch is a tree of per-session directories, so two histories that
+ * diverged are reconciled by UNION: the remote's tree seeded into a temp
+ * index, ours layered on top (a session both sides hold is ours — the local
+ * copy is the one this machine has been writing), committed with both tips as
+ * parents. Then the push fast-forwards. Never throws; a reconcile that cannot
+ * happen leaves the push to fail exactly as it did before.
+ *
+ * Returns true when the local branch now contains the remote tip.
+ */
+export function reconcileSessionBranchWithRemote(repoPath: string, remote = 'origin'): boolean {
+  const execOpts = { cwd: repoPath, timeoutMs: 20_000, maxBuffer: 5 * 1024 * 1024 };
+  try {
+    const local = gitOrNull(['rev-parse', `refs/heads/${BRANCH}`], execOpts);
+    if (!local || !/^[a-fA-F0-9]+$/.test(local)) return false;
+    // Fetch the remote tip into its tracking ref. A remote with no such
+    // branch is the first-push case — nothing to reconcile.
+    const fetched = gitDetailed(['fetch', '--quiet', '--no-tags', remote, `+refs/heads/${BRANCH}:refs/remotes/${remote}/${BRANCH}`], execOpts);
+    if (fetched.status !== 0) return true;
+    const theirs = gitOrNull(['rev-parse', `refs/remotes/${remote}/${BRANCH}`], execOpts);
+    if (!theirs || !/^[a-fA-F0-9]+$/.test(theirs)) return true;
+    if (theirs === local) return true;
+    if (gitDetailed(['merge-base', '--is-ancestor', theirs, local], execOpts).status === 0) return true;
+
+    const tmpIndex = `${resolveGitDir(repoPath, execOpts)}/origin-tmp-index-merge-${process.pid}`;
+    const indexOpts = { ...execOpts, env: { ...process.env, GIT_INDEX_FILE: tmpIndex } };
+    try {
+      git(['read-tree', '--empty'], indexOpts);
+      git(['read-tree', `${theirs}^{tree}`], indexOpts);
+      // Layer OUR tree over theirs: every path we hold takes our blob, every
+      // path only they hold stays. `ls-tree -r` lists blobs with their modes,
+      // and update-index --index-info replaces entries in place.
+      const ours = git(['ls-tree', '-r', `${local}^{tree}`], execOpts);
+      if (ours.trim()) {
+        const info = ours.split('\n').filter(Boolean).map((line) => {
+          // "<mode> blob <sha>\t<path>"  →  "<mode> <sha>\t<path>"
+          const m = /^(\d+) blob ([0-9a-f]+)\t(.+)$/.exec(line);
+          return m ? `${m[1]} ${m[2]}\t${m[3]}` : '';
+        }).filter(Boolean).join('\n') + '\n';
+        // gitDetailed, not git: only the detailed runner forwards stdin, and a
+        // silently dropped index-info leaves the union holding theirs alone.
+        const applied = gitDetailed(['update-index', '--index-info'], { ...indexOpts, input: info });
+        if (applied.status !== 0) return false;
+      }
+      const tree = git(['write-tree'], indexOpts).trim();
+      if (!/^[a-fA-F0-9]+$/.test(tree)) return false;
+      const merge = commitTreeMaybeSigned(
+        [tree, '-p', local, '-p', theirs, '-m', `origin-sessions: merge ${remote}/${BRANCH} (union of sessions)`],
+        execOpts,
+      );
+      if (!merge || !/^[a-fA-F0-9]+$/.test(merge)) return false;
+      // CAS on the tip we read: a hook folding a session concurrently moves it,
+      // and then the next publish moment reconciles again on the new tip.
+      return gitDetailed(['update-ref', `refs/heads/${BRANCH}`, merge, local], execOpts).status === 0;
+    } finally {
+      try { fs.unlinkSync(tmpIndex); } catch { /* already gone */ }
+    }
+  } catch {
+    return false;
+  }
+}
+
 export function pushSessionBranch(repoPath: string, sessionId?: string): void {
   try {
     const config = loadConfig();
@@ -690,6 +782,9 @@ export function pushSessionBranch(repoPath: string, sessionId?: string): void {
       // Push to same repo's origin remote
       const remote = gitDetailed(['remote', 'get-url', 'origin'], execOpts);
       if (remote.status !== 0) return; // no remote — nothing to push
+      // Another clone may have pushed its own sessions since we last did;
+      // fold theirs in so ours land on top instead of being rejected.
+      reconcileSessionBranchWithRemote(repoPath, 'origin');
       git(['push', 'origin', BRANCH, '--no-verify', '--quiet'], execOpts);
     }
   } catch {

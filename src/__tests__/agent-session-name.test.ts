@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { claudeSessionName, cursorSessionName } from '../agent-session-name.js';
+import { claudeSessionName, claudeSessionTitles, cursorSessionName } from '../agent-session-name.js';
 
 let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-name-')); });
@@ -59,6 +59,78 @@ describe('claudeSessionName', () => {
   it('flattens control characters that would break a single-line UI', () => {
     const p = transcript([{ type: 'custom-title', customTitle: 'Two\nlines\there' }]);
     expect(claudeSessionName(p)).toBe('Two lines here');
+  });
+
+  // The terminal REPL never writes a custom-title unless the user renames:
+  // it generates a title from the first prompt and records it as `ai-title`.
+  // Every Windows session shipped nameless because only custom-title was read.
+  it('falls back to the ai-title record the terminal REPL writes', () => {
+    // Shape from Claude Code 2.1.259's saveAiGeneratedTitle.
+    const p = transcript([
+      { type: 'user', message: 'hi' },
+      { type: 'ai-title', aiTitle: 'Phantom watch events', sessionId: 'abc' },
+    ]);
+    expect(claudeSessionName(p)).toBe('Phantom watch events');
+  });
+
+  it('prefers the custom title over the ai title whatever their order', () => {
+    // A rename lands AFTER the auto-title on a normal timeline; a re-appended
+    // metadata block can put them in either order. The user's own name wins
+    // either way — that is what Claude Code's /resume picker shows.
+    expect(claudeSessionName(transcript([
+      { type: 'ai-title', aiTitle: 'Auto' },
+      { type: 'custom-title', customTitle: 'Mine' },
+    ]))).toBe('Mine');
+    expect(claudeSessionName(transcript([
+      { type: 'custom-title', customTitle: 'Mine' },
+      { type: 'ai-title', aiTitle: 'Auto' },
+    ]))).toBe('Mine');
+  });
+
+  it('a cleared custom title falls through to the ai title, not to the stale custom one', () => {
+    const p = transcript([
+      { type: 'ai-title', aiTitle: 'Auto' },
+      { type: 'custom-title', customTitle: 'Old name' },
+      { type: 'custom-title', customTitle: '' },
+    ]);
+    expect(claudeSessionName(p)).toBe('Auto');
+  });
+
+  it('takes the LAST ai-title — the generated title is rewritten too', () => {
+    expect(claudeSessionName(transcript([
+      { type: 'ai-title', aiTitle: 'First' },
+      { type: 'user', message: 'hi' },
+      { type: 'ai-title', aiTitle: 'Second' },
+    ]))).toBe('Second');
+  });
+
+  it('reads the custom-title.json sidecar when the transcript has no title record', () => {
+    // Claude Code persists a custom title beside the transcript as well:
+    // <dir>/<sessionId>/custom-title.json, and reads it back from there.
+    const p = transcript([{ type: 'user', message: 'hi' }, { type: 'ai-title', aiTitle: 'Auto' }]);
+    const side = path.join(dir, 'transcript');
+    fs.mkdirSync(side);
+    fs.writeFileSync(path.join(side, 'custom-title.json'), JSON.stringify({ customTitle: 'From sidecar' }));
+    expect(claudeSessionName(p)).toBe('From sidecar');
+  });
+
+  it('ignores the sidecar once the transcript says the title was cleared', () => {
+    // Claude Code deletes the sidecar on clear; if that delete is lost, the
+    // transcript's blank record is the fresher signal.
+    const p = transcript([{ type: 'ai-title', aiTitle: 'Auto' }, { type: 'custom-title', customTitle: '' }]);
+    const side = path.join(dir, 'transcript');
+    fs.mkdirSync(side);
+    fs.writeFileSync(path.join(side, 'custom-title.json'), JSON.stringify({ customTitle: 'Stale' }));
+    expect(claudeSessionName(p)).toBe('Auto');
+  });
+
+  it('reports which sources were empty so a nameless session can explain itself', () => {
+    const p = transcript([{ type: 'user', message: 'hi' }]);
+    expect(claudeSessionTitles(p)).toEqual({
+      transcriptRead: true, customTitle: null, hasCustomTitleRecord: false, sidecarTitle: null, aiTitle: null,
+    });
+    expect(claudeSessionTitles(path.join(dir, 'nope.jsonl')).transcriptRead).toBe(false);
+    expect(claudeSessionTitles('').transcriptRead).toBe(false);
   });
 });
 

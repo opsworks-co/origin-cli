@@ -29,13 +29,14 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
 const CLI_SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOOKS = path.join(CLI_SRC, 'commands', 'hooks.ts');
 
 /** The shadow-ingest call plus its handlers, isolated from the rest of hooks.ts. */
 function shadowIngestBlock(): string {
-  const src = fs.readFileSync(HOOKS, 'utf-8');
+  const src = hooksSource();
   const start = src.indexOf('const ingestCommit = {');
   expect(
     start,
@@ -71,7 +72,7 @@ describe('post-commit shadow ingest', () => {
   });
 
   it('imports the queue helpers it now depends on', () => {
-    const src = fs.readFileSync(HOOKS, 'utf-8');
+    const src = hooksSource();
     expect(src).toMatch(
       /import\s*\{[^}]*\benqueueFailedUpdate\b[^}]*\}\s*from\s*'\.\.\/update-queue\.js'/s,
     );

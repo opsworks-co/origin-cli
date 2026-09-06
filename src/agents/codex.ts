@@ -12,6 +12,7 @@ import { querySqlite } from '../utils/sqlite.js';
 import * as fzstd from 'fzstd';
 import { debugLog } from '../debug-log.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from '../codex-thread-query.js';
+import { IMAGE_PLACEHOLDER, codexUserPromptText } from '../transcript.js';
 
 // ─── Codex Session Data Discovery ─────────────────────────────────────────
 
@@ -1323,7 +1324,12 @@ export function parseCodexRolloutLive(rolloutFile: string): {
     const extractText = (c: any): string => {
       if (typeof c === 'string') return c;
       if (!Array.isArray(c)) return '';
-      return c.map((p: any) => p?.text || (typeof p === 'string' ? p : '') || (typeof p?.content === 'string' ? p.content : '')).filter(Boolean).join('');
+      return c.map((p: any) => {
+        // A pasted screenshot carries no text, and this used to return '' for
+        // the whole message — so a captionless image was not a turn at all.
+        if (p && (p.type === 'input_image' || p.type === 'image')) return IMAGE_PLACEHOLDER;
+        return p?.text || (typeof p === 'string' ? p : '') || (typeof p?.content === 'string' ? p.content : '');
+      }).filter(Boolean).join('');
     };
 
     for (const line of lines) {
@@ -1347,44 +1353,38 @@ export function parseCodexRolloutLive(rolloutFile: string): {
           const text = extractText(payload.content);
           if (text.trim()) {
             const isUser = role === 'user' || role === 'human';
-            const isEcho = isUser && (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text));
-            if (!isEcho) {
-              const cleaned = isUser
-                ? text
-                    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
-                    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
-                    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
-                    .trim()
-                : text;
-              if (cleaned) {
-                turns.push({ role, content: cleaned });
-                // Capture per-user-prompt timestamp from any of Codex's
-                // event-level time fields. Without this the prompt baseline
-                // falls back to "whenever heartbeat noticed", which is
-                // usually AFTER Codex made commits inside the prompt.
-                if (isUser) {
-                  const ts = (() => {
-                    const candidates = [
-                      event?.timestamp,
-                      event?.created_at,
-                      event?.payload?.timestamp,
-                      event?.payload?.created_at,
-                      payload?.timestamp,
-                      payload?.created_at,
-                    ];
-                    for (const c of candidates) {
-                      if (typeof c === 'number' && Number.isFinite(c)) return c > 1e12 ? c : c * 1000;
-                      if (typeof c === 'string') {
-                        const n = Date.parse(c);
-                        if (Number.isFinite(n)) return n;
-                      }
+            // codexUserPromptText folds in the AGENTS.md echo filter and the
+            // session-init envelope strip. Shared with extractCodexImages so
+            // images are numbered against the same turns these are.
+            const cleaned = isUser ? codexUserPromptText(text) : text;
+            if (cleaned) {
+              turns.push({ role, content: cleaned });
+              // Capture per-user-prompt timestamp from any of Codex's
+              // event-level time fields. Without this the prompt baseline
+              // falls back to "whenever heartbeat noticed", which is
+              // usually AFTER Codex made commits inside the prompt.
+              if (isUser) {
+                const ts = (() => {
+                  const candidates = [
+                    event?.timestamp,
+                    event?.created_at,
+                    event?.payload?.timestamp,
+                    event?.payload?.created_at,
+                    payload?.timestamp,
+                    payload?.created_at,
+                  ];
+                  for (const c of candidates) {
+                    if (typeof c === 'number' && Number.isFinite(c)) return c > 1e12 ? c : c * 1000;
+                    if (typeof c === 'string') {
+                      const n = Date.parse(c);
+                      if (Number.isFinite(n)) return n;
                     }
-                    return 0;
-                  })();
-                  promptTimestamps.push(ts);
-                  promptPatches.push([]); // start collecting this turn's patches
-                  promptDeletedFiles.push({});
-                }
+                  }
+                  return 0;
+                })();
+                promptTimestamps.push(ts);
+                promptPatches.push([]); // start collecting this turn's patches
+                promptDeletedFiles.push({});
               }
             }
           }
@@ -1574,12 +1574,16 @@ export function parseCodexRollout(
     const pendingTools = new Map<string, number>();  // call_id → turns[] index
 
     const extractMessageText = (content_: any): string => {
+      // Mirrors extractText in parseCodexRolloutLive, placeholder included —
+      // the two MUST agree or the heartbeat and the stop hook disagree about
+      // how many prompts the session has.
       if (typeof content_ === 'string') return content_;
       if (!Array.isArray(content_)) return '';
       return content_
         .map((c: any) => {
           if (!c) return '';
           if (typeof c === 'string') return c;
+          if (c.type === 'input_image' || c.type === 'image') return IMAGE_PLACEHOLDER;
           // Codex content blocks: {type: "input_text"|"output_text", text: "..."}
           if (c.text) return c.text;
           if (c.content) return typeof c.content === 'string' ? c.content : '';
@@ -1654,20 +1658,8 @@ export function parseCodexRollout(
             // whole transcript so without this they show up as
             // bogus turn 1 / 2 even though state.prompts filters them.
             const isUser = role === 'user' || role === 'human';
-            const isEcho = isUser && (
-              text.includes('<!-- origin-managed -->') ||
-              /^#\s+AGENTS\.md instructions for /m.test(text)
-            );
-            if (!isEcho) {
-              const cleaned = isUser
-                ? text
-                    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
-                    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
-                    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
-                    .trim()
-                : text;
-              if (cleaned) turns.push({ role, content: cleaned });
-            }
+            const cleaned = isUser ? codexUserPromptText(text) : text;
+            if (cleaned) turns.push({ role, content: cleaned });
           }
         } else if (payloadType === 'reasoning') {
           // Chain-of-thought summary — show as assistant reasoning so reviewers
@@ -1717,20 +1709,8 @@ export function parseCodexRollout(
             if (text) {
               // Same AGENTS.md echo filter as the response_item path.
               const isUser = role === 'user' || role === 'human';
-              const isEcho = isUser && (
-                text.includes('<!-- origin-managed -->') ||
-                /^#\s+AGENTS\.md instructions for /m.test(text)
-              );
-              if (!isEcho) {
-                const cleaned = isUser
-                  ? text
-                      .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
-                      .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
-                      .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
-                      .trim()
-                  : text;
-                if (cleaned) turns.push({ role, content: cleaned });
-              }
+              const cleaned = isUser ? codexUserPromptText(text) : text;
+              if (cleaned) turns.push({ role, content: cleaned });
             }
           }
         } else if (

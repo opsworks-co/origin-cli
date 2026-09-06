@@ -28,6 +28,8 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 import {
   preferRegisteredSessionId,
   isProvisionalSessionId,
@@ -121,10 +123,7 @@ describe('isPendingReservation', () => {
 // re-check the prompt hook mints anyway. #1346 shipped a fix wired into one
 // path while the bug was on another, so the wiring gets a guard.
 describe('the three halves are wired', () => {
-  const src = fs.readFileSync(
-    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'commands', 'hooks.ts'),
-    'utf-8',
-  );
+  const src = hooksSource();
 
   it('session-start reserves BEFORE it calls the API', () => {
     const reserve = src.indexOf("'reserved state before registering'");

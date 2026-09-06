@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import { readSessionFile } from '../session-store.js';
-import { getGitRoot } from '../session-state.js';
+import { getGitRoot, getWorkingGitRoot } from '../session-state.js';
+import { provenanceRoots, resolveQueryTarget } from '../session-worktree.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
 import { isConnectedMode } from '../config.js';
 import path from 'path';
@@ -109,8 +110,14 @@ export async function promptsCommand(filePath: string, opts: { expand?: boolean;
   }
 
   const cwd = process.cwd();
-  const repoRoot = getGitRoot(cwd);
-  if (!repoRoot) {
+  // Two roots, two jobs: `getGitRoot` collapses a linked worktree onto its
+  // main checkout (repo identity), `getWorkingGitRoot` keeps the tree the user
+  // is standing in. Reading the file's history needs the second one — against
+  // the first, a worktree path resolved to `.claude/worktrees/<name>/<file>`,
+  // which is untracked dirt in the main checkout, and `git log` answered
+  // "No commits found" for files with years of history.
+  const roots = provenanceRoots(cwd, { gitRoot: getGitRoot, workingGitRoot: getWorkingGitRoot });
+  if (!roots) {
     console.log(chalk.red('Not inside a git repository. Run from a repo, or pass a session ID to view prompts.'));
     process.exit(1);
   }
@@ -118,9 +125,8 @@ export async function promptsCommand(filePath: string, opts: { expand?: boolean;
   const limit = parseInt(opts.limit || '10', 10);
   const showDiff = !!opts.expand;
 
-  // Resolve file path relative to repo root
-  const absPath = path.resolve(cwd, filePath);
-  const relPath = path.relative(repoRoot, absPath);
+  // Resolve the file against the tree that actually holds it.
+  const { relPath, root: repoRoot } = resolveQueryTarget(filePath, roots, cwd);
 
   // Get all commits that touched this file
   let commits: { sha: string; date: string; message: string }[];

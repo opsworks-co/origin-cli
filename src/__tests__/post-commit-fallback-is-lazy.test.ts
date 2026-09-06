@@ -26,13 +26,14 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
 const HOOKS = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)), '..', 'commands', 'hooks.ts',
 );
 
 describe('post-commit computes the raw capture only when it needs it', () => {
-  const src = fs.readFileSync(HOOKS, 'utf-8');
+  const src = hooksSource();
   const lines = src.split('\n');
   const lineOf = (re: RegExp) => lines.findIndex((l) => re.test(l));
 

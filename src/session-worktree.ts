@@ -19,7 +19,7 @@
 // to `repoPath`, because capturing the wrong tree is worse than capturing
 // nothing.
 import * as path from 'path';
-import { samePath, samePath as canonicalSamePath } from './paths.js';
+import { isInsideRepo, samePath, samePath as canonicalSamePath, toRepoRelativePath } from './paths.js';
 import * as fs from 'fs';
 
 export interface WorkTreeDeps {
@@ -91,6 +91,84 @@ export function sessionWorkTree(
   // otherwise flow into state and be string-compared against a backslash
   // repoPath elsewhere.
   return path.resolve(root);
+}
+
+/**
+ * The two roots a read-only provenance query needs.
+ *
+ * `origin why` and `origin prompts` need BOTH, for different questions, and
+ * conflating them is what made them answer nothing inside a worktree:
+ *
+ *   canonicalRoot — the repo's IDENTITY. `getGitRoot` collapses a linked
+ *     worktree onto its main checkout on purpose, so the dashboard sees one
+ *     project rather than one per worktree. Right for naming the repo to the
+ *     server; wrong for reading files.
+ *   workRoot — the tree the user is actually STANDING IN. `getWorkingGitRoot`.
+ *     Right for `git blame` / `git log` / reading the file, because that is
+ *     where the branch and the content the user is asking about live.
+ *
+ * Same working-vs-canonical split as `deriveAgyRoots` (#1226) and the capture
+ * path's `getWorkingGitRoot` (#510) — the provenance commands never got it.
+ */
+export interface ProvenanceRoots {
+  /** Top of the working tree containing cwd — a linked worktree, or the main checkout. */
+  workRoot: string;
+  /** The repo's identity root; a linked worktree collapses to its main checkout. */
+  canonicalRoot: string;
+}
+
+/**
+ * Both roots for a directory, or null when it is not in a repo.
+ *
+ * Deps are injected the way this module's other helpers take theirs, so the
+ * two commands share ONE implementation and cannot drift apart: `gitRoot` is
+ * `getGitRoot` (collapses a worktree — identity), `workingGitRoot` is
+ * `getWorkingGitRoot` (keeps it — file reads).
+ */
+export function provenanceRoots(
+  cwd: string,
+  deps: { gitRoot: (cwd: string) => string | null; workingGitRoot: (cwd: string) => string | null },
+): ProvenanceRoots | null {
+  let canonicalRoot: string | null = null;
+  let workRoot: string | null = null;
+  try { canonicalRoot = deps.gitRoot(cwd); } catch { canonicalRoot = null; }
+  try { workRoot = deps.workingGitRoot(cwd); } catch { workRoot = null; }
+  workRoot = workRoot || canonicalRoot;
+  if (!canonicalRoot || !workRoot) return null;
+  return { workRoot, canonicalRoot };
+}
+
+/**
+ * Turn a file argument into (repo-relative path, the root to run git in).
+ *
+ * The bug this exists to prevent: with worktrees living under
+ * `<repo>/.claude/worktrees/<name>`, resolving the argument against the
+ * CANONICAL root produced `.claude/worktrees/<name>/apps/api/src/routes/mcp.ts`
+ * — a path git knows nothing about, since the worktree is untracked dirt in
+ * the main checkout. `origin prompts` answered "No commits found for
+ * .claude/worktrees/…" and `origin why` answered "Uncommitted change" for
+ * lines with years of history. Both looked like missing DATA; the key was
+ * wrong.
+ *
+ * Preference order is what does the work: the tree the user stands in wins, so
+ * a worktree file resolves against the worktree. An absolute path pointing
+ * into the MAIN checkout while cwd is in a worktree escapes workRoot and falls
+ * through to canonicalRoot, which is the correct answer for it. A path in
+ * neither tree keeps the old behaviour — the message still names something the
+ * user can recognise.
+ */
+export function resolveQueryTarget(
+  fileArg: string,
+  roots: ProvenanceRoots,
+  cwd: string,
+): { relPath: string; root: string } {
+  const abs = path.resolve(cwd, String(fileArg ?? ''));
+  for (const root of [roots.workRoot, roots.canonicalRoot]) {
+    if (!root) continue;
+    if (isInsideRepo(root, abs)) return { relPath: toRepoRelativePath(root, abs), root };
+  }
+  const fallback = roots.workRoot || roots.canonicalRoot || '';
+  return { relPath: toRepoRelativePath(fallback, abs), root: fallback };
 }
 
 /** A baseline snapshotted in the worktree the session is writing in. */

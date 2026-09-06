@@ -250,3 +250,39 @@ describe('rescue finds a rewrite the session never recorded', () => {
     expect(__testRescueCommitShas(repo, state)).toEqual([orphan]);
   });
 });
+
+// A squash by `git reset --soft HEAD~N` + one commit fires no hook and matches
+// neither rung of the rescue — the new commit is the UNION of the orphans.
+// Prod vodka 944f7048: two commits, reset, one commit; the page counted four
+// commits for two and the turn chip summed the orphans on top of the squash.
+describe('reset-and-recommit squash', () => {
+  it('collapses the whole orphan run onto the single commit that replaced it', () => {
+    write('a.txt', 'one\n'); git('add', '-A'); git('commit', '-qm', 'first');
+    const first = head();
+    write('b.txt', 'two\n'); git('add', '-A'); git('commit', '-qm', 'second');
+    const second = head();
+    git('reset', '-q', '--soft', 'HEAD~2');
+    git('commit', '-qm', 'first and second, squashed');
+    const squash = head();
+    expect(squash).not.toBe(first);
+    expect(squash).not.toBe(second);
+
+    const state: any = { sessionCommitShas: [first, second, squash], repoPath: repo, sessionTag: 'test' };
+    expect(__testRescueCommitShas(repo, state)).toEqual([squash]);
+    expect(state.rewrittenCommits.map((r: any) => [r.from, r.to])).toEqual([[first, squash], [second, squash]]);
+  });
+
+  it('does not collapse an orphan onto a commit that ends in a different tree', () => {
+    write('a.txt', 'one\n'); git('add', '-A'); git('commit', '-qm', 'first');
+    const first = head();
+    git('reset', '-q', '--soft', 'HEAD~1');
+    write('a.txt', 'one, revised\n'); git('add', '-A'); git('commit', '-qm', 'first, revised');
+    const revised = head();
+    // Same parent, different tree: the amend rung may still match by subject +
+    // files (it does not here — the subject changed), and the squash rung must
+    // not claim it, because the orphan's content was not carried over intact.
+    const state: any = { sessionCommitShas: [first, revised], repoPath: repo, sessionTag: 'test' };
+    const out = __testRescueCommitShas(repo, state);
+    expect(out).toContain(revised);
+  });
+});

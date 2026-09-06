@@ -126,3 +126,33 @@ describe('startWriteJournal', () => {
     expect(files).toEqual(['fresh.ts']);
   });
 });
+
+// Prod vodka 944f7048, commit 0fcb7076: two appends to README.md inside one
+// command, milliseconds apart. The first event was snapshotted mid-way and the
+// second fell inside the debounce window and was DROPPED, so the journal held
+// 62 lines for a turn that committed 68 — and the six surfaced on the next
+// turn. The debounce must be trailing: the burst's LAST state is recorded.
+describe('a burst ends with its last state recorded', () => {
+  let dir: string; let journal: string; let snapshots: string;
+  beforeEach(() => {
+    dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-wj-burst-')));
+    journal = path.join(dir, '.origin-journal');
+    snapshots = path.join(dir, '.origin-snapshots');
+  });
+  afterEach(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  it('records the final content of a file written twice within the debounce window', async () => {
+    const w = startWriteJournal(dir, journal, { snapshotDir: snapshots });
+    if (!w) return;
+    await settle(150);
+    fs.writeFileSync(path.join(dir, 'README.md'), 'a\nb\nc\n');
+    await settle(20); // inside DEBOUNCE_MS
+    fs.writeFileSync(path.join(dir, 'README.md'), 'a\nb\nc\nd\ne\nf\n');
+    await settle(DEBOUNCE_MS + 400);
+    w.stop();
+    const hits = readJournal(journal).filter((r) => r.file === 'README.md');
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+    const last = hits[hits.length - 1];
+    expect(last.size, 'the burst\'s last write was dropped by the debounce').toBe(Buffer.byteLength('a\nb\nc\nd\ne\nf\n'));
+  });
+});

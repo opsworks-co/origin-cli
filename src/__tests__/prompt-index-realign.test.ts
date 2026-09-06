@@ -134,3 +134,56 @@ describe('homePromptIndexByText — the write-site guard', () => {
     expect(homePromptIndexByText(1, 'Try again', repeated)).toBe(2);
   });
 });
+
+describe('reconcilePromptHistory — the two producers do not agree byte for byte', () => {
+  // Verbatim shapes from session 2a93541b (7 dashboard turns for 5 prompts).
+  // The hook stores Claude Code's payload, which renders each attached image
+  // as a trailing `[image]`; the Stop-time parser rebuilds the prompt from the
+  // JSONL text block (no placeholder) and cuts anything over 1000 chars.
+  const AGY = 'I resumed work in old agy session, but instead of keeping working in that session it spawned a new session';
+  const HOOK_IMAGE = `${AGY}\n[image] [image]`;
+  const PARSED_IMAGE = AGY;
+  const LONG = ('`origin why <file>:<line>` and `origin prompts <file>` return nothing when run from inside a linked git worktree, because ' + 'the path they look up is prefixed with the worktree location. '.repeat(30)).slice(0, 1398);
+  const PARSED_LONG = LONG.slice(0, 1000) + '...';
+  expect(LONG.length).toBe(1398);
+
+  it('an image prompt is one prompt, whichever side rendered the placeholder', () => {
+    const out = reconcilePromptHistory([HOOK_IMAGE], [PARSED_IMAGE]);
+    expect(out).toHaveLength(1);
+    // …and the record kept is the hook's fuller one.
+    expect(out[0]).toBe(HOOK_IMAGE);
+  });
+
+  it('a prompt the transcript truncated at 1000 chars is one prompt', () => {
+    const out = reconcilePromptHistory([LONG], [PARSED_LONG]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toBe(LONG);
+  });
+
+  it('replays session 2a93541b: five prompts stay five across every Stop', () => {
+    // Stop of turn 1 — this is where index 1 used to appear.
+    let stored = reconcilePromptHistory([HOOK_IMAGE], [PARSED_IMAGE]);
+    expect(stored).toHaveLength(1);
+    // Prompt 2 arrives via the hook; Stop of turn 2 reconciles again.
+    stored = reconcilePromptHistory([...stored, LONG], [PARSED_IMAGE, PARSED_LONG]);
+    expect(stored).toHaveLength(2);
+    // Three short plain prompts, exact on both sides.
+    for (const p of ['fix blame and ask too, then open the PR', 'merge it and tag the release', 'go ahead and merge once CI is green']) {
+      stored = reconcilePromptHistory([...stored, p], [PARSED_IMAGE, PARSED_LONG, ...stored.slice(2), p]);
+    }
+    expect(stored).toHaveLength(5);
+    expect(stored[0]).toBe(HOOK_IMAGE);
+    expect(stored[1]).toBe(LONG);
+  });
+
+  it('two distinct prompts that share their first 200 chars are still two prompts', () => {
+    const base = 'x'.repeat(250);
+    const a = base + ' first'; const b = base + ' second';
+    expect(reconcilePromptHistory([a], [a, b])).toEqual([a, b]);
+    expect(reconcilePromptHistory([a, b], [a, b])).toEqual([a, b]);
+  });
+
+  it('a genuinely re-sent prompt still lands as a second row', () => {
+    expect(reconcilePromptHistory(['try again'], ['try again', 'try again'])).toEqual(['try again', 'try again']);
+  });
+});

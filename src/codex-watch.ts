@@ -42,6 +42,7 @@ import {
 } from './agents/codex.js';
 import type { CodexBaselineResolver } from './agents/codex.js';
 import { createShadowCommit, captureAgyDiff, captureShadowRangeDiff, captureGitState, readFileAtRev, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { capDiff } from './diff-budget.js';
 import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha } from './session-state.js';
 import { git } from './utils/exec.js';
 import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon-autostart.js';
@@ -49,6 +50,8 @@ import { api } from './api.js';
 import { timeoutForPayload } from './fetch-timeout.js';
 import { newCaptureStamp } from './capture-stamp.js';
 import { assignTurnIds } from './transcript-watch.js';
+import { ensureInProcessJournal, stopJournalWatcher, applyLedgerToProducerRows } from './ledger-producer.js';
+import { sessionTagFor } from './session-state.js';
 import { loadConfig, loadAgentConfig } from './config.js';
 import { debugLog, logSkipOnce } from './debug-log.js';
 import { writeWatchMeta, touchWatchMeta, removeWatchMeta, watchFreshness } from './watch-meta.js';
@@ -182,6 +185,14 @@ export interface ThreadWatchState {
   // so each turn is computed exactly once and never re-diffed on later polls.
   // Recorded even when the range came back empty — the answer won't change.
   sealedPrompts?: number[];
+}
+
+/**
+ * The journal tag for a Codex thread — the hook path's derivation, so a Codex
+ * build whose user-prompt-submit hook DOES fire lands on the same journal.
+ */
+export function codexJournalTag(threadId: string): string {
+  return sessionTagFor(undefined, threadId);
 }
 
 export function loadThreadState(threadId: string, dir = watchStateDir()): ThreadWatchState | null {
@@ -403,6 +414,7 @@ export async function reconcileThread(
       if (!endOk) return prior;
       const ended: ThreadWatchState = { ...prior, status: 'ENDED', endedAt: new Date(now).toISOString() };
       deps.saveState(ended);
+      stopJournalWatcher(codexJournalTag(scanned.threadId));
       return ended;
     }
     return prior; // already ended or never started — nothing to do
@@ -523,6 +535,17 @@ export async function reconcileThread(
   // Identity to go with the provenance: the stamp says WHICH capture wrote the
   // row, this says WHICH TURN the row is about.
   const promptTurns = assignTurnIds(prior?.promptTurns, parsed.userPrompts || []);
+  // THE LEDGER, for the agent it was built for. Codex fires no reliable
+  // prompt hook, so this daemon was its only producer — and until now the
+  // only producer with no journal at all: every turn came from the rollout's
+  // apply_patch text or a shadow-range diff, neither of which sees a file the
+  // agent wrote through the shell. Same in-process watcher the transcript
+  // daemon holds, same tag derivation as the hook path (so a Codex build that
+  // DOES fire user-prompt-submit shares the journal instead of doubling it).
+  // Started before the capture below: a journal that starts after this turn's
+  // writes records none of them.
+  const journalTag = codexJournalTag(scanned.threadId);
+  ensureInProcessJournal(journalTag, repo.workRoot, promptTurns.map((t) => t.turnId));
   const latestIndex = newCount - 1;
   const sealed = new Set<number>(Array.isArray(prior?.sealedPrompts) ? prior!.sealedPrompts! : []);
   const newlySealed: number[] = [];
@@ -576,7 +599,7 @@ export async function reconcileThread(
           ...(promptTurns[i]?.turnId ? { turnId: promptTurns[i].turnId } : {}),
           promptText,
           filesChanged: [...files],
-          diff: diff.slice(0, MAX_PROMPT_DIFF_LEN),
+          diff: capDiff(diff, MAX_PROMPT_DIFF_LEN),
           linesAdded,
           linesRemoved,
           checkpointType: 'auto',
@@ -624,7 +647,7 @@ export async function reconcileThread(
             ...(promptTurns[i]?.turnId ? { turnId: promptTurns[i].turnId } : {}),
             promptText,
             filesChanged: ranged.filesChanged,
-            ...(ranged.diff ? { diff: ranged.diff.slice(0, MAX_PROMPT_DIFF_LEN) } : {}),
+            ...(ranged.diff ? { diff: capDiff(ranged.diff, MAX_PROMPT_DIFF_LEN) } : {}),
             linesAdded: ranged.linesAdded,
             linesRemoved: ranged.linesRemoved,
             checkpointType: 'auto',
@@ -650,7 +673,7 @@ export async function reconcileThread(
         // uncommitted + untracked since the prompt baseline) — the right
         // per-prompt total. Send it as `diff`; do NOT also set uncommittedDiff
         // (that would mislabel a turn's committed lines as uncommitted).
-        ...(d.diff ? { diff: d.diff.slice(0, MAX_PROMPT_DIFF_LEN) } : {}),
+        ...(d.diff ? { diff: capDiff(d.diff, MAX_PROMPT_DIFF_LEN) } : {}),
         linesAdded: d.linesAdded,
         linesRemoved: d.linesRemoved,
         checkpointType: 'auto',
@@ -667,6 +690,49 @@ export async function reconcileThread(
         linesRemoved: 0,
         checkpointType: 'auto',
       });
+    }
+  }
+
+  // THE LEDGER'S TURN. A completed turn the shadow range could not seal (its
+  // closing shadow was taken too late) or that the rollout never patched has
+  // no row above — so it could never be corrected, only left as first sent.
+  // The ledger does not care how late the poll was: a turn's writes are the
+  // entries between its mark and the next, decided by position. Give every
+  // unsealed turn a candidate row, let the ledger answer, and drop the
+  // candidates it declined so the server sees nothing it did not already know.
+  const hasRow = new Set<number>(promptChanges.map((pc) => pc.promptIndex));
+  const candidateIdx = new Set<number>();
+  for (let i = 0; i < newCount; i++) {
+    if (hasRow.has(i) || sealed.has(i) || newlySealed.includes(i)) continue;
+    candidateIdx.add(i);
+    promptChanges.push({
+      ...captureStamp,
+      promptIndex: i,
+      ...(promptTurns[i]?.turnId ? { turnId: promptTurns[i].turnId } : {}),
+      promptText: (parsed.userPrompts[i] || '').slice(0, 1000),
+      filesChanged: [],
+      linesAdded: 0,
+      linesRemoved: 0,
+      checkpointType: 'auto',
+    });
+  }
+  applyLedgerToProducerRows({
+    tag: journalTag,
+    workRoot: repo.workRoot,
+    promptTurnIds: promptTurns.map((t) => t.turnId),
+    promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha })),
+    prePromptSha: promptShadows.find((s) => s.promptIndex === 0)?.baselineSha || null,
+    headShaAtStart: headShaAtStart || null,
+  }, promptChanges, 'codex-watch');
+  for (let k = promptChanges.length - 1; k >= 0; k--) {
+    const pc = promptChanges[k];
+    if (candidateIdx.has(pc.promptIndex) && pc.diffSource !== 'ledger') promptChanges.splice(k, 1);
+  }
+  // A ledger answer for a COMPLETED turn is final: its span is closed by the
+  // next mark and cannot grow. Seal it so it is computed once, like a range.
+  for (const pc of promptChanges) {
+    if (pc.diffSource === 'ledger' && pc.promptIndex !== latestIndex && !sealed.has(pc.promptIndex) && !newlySealed.includes(pc.promptIndex)) {
+      newlySealed.push(pc.promptIndex);
     }
   }
 

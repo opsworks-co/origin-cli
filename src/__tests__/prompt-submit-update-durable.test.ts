@@ -27,11 +27,9 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
-const src = fs.readFileSync(
-  path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'commands', 'hooks.ts'),
-  'utf-8',
-);
+const src = hooksSource();
 
 /** The payload block that carries a turn's capture, wherever it is sent from. */
 const captureSends = src.match(/\w+\(state\.sessionId, \{\s*\n\s*prompt: joinedPrompt/g) || [];

@@ -76,18 +76,38 @@ export interface ParsedSession {
   // (Read/Edit/Write/Bash/…). Optional — an adapter that can't break its count
   // down omits it and the session just shows the total.
   toolBreakdown?: Array<{ name: string; count: number }>;
+  // ── ENRICHMENT FROM HERE DOWN ─────────────────────────────────────────
+  //
+  // Stage 4 of the capture rewrite. These three used to be REQUIRED, which
+  // meant every new agent had to parse file and line truth out of its own
+  // transcript format before it could be captured at all — ~7,900 lines of
+  // per-agent parsing on the critical path, and a new blind spot with every
+  // agent added (editsJson never sees a shell write; a whole-file record
+  // reports a one-line append as +401).
+  //
+  // The write-journal ledger owns that truth now: it observes content at the
+  // filesystem, so it needs nothing from the agent and is exact for formats
+  // nobody has written a parser for yet. What an adapter must still supply is
+  // what only it knows — where its transcripts live, what the user SAID, and
+  // which session this is.
+  //
+  // So these are optional, and a new adapter should omit them rather than
+  // invent them. They remain useful where an adapter genuinely has them: they
+  // are the fallback for a turn the ledger did not mark, and `filePaths` is
+  // still the cwd-recovery route for an agent that records no cwd.
+
   // Absolute file paths the session touched (edits + reads) — the cwd-recovery
   // fallback for agents that don't record their cwd on disk.
-  filePaths: string[];
+  filePaths?: string[];
   // Absolute paths the agent actually MODIFIED (write/edit tools), from the
   // transcript itself — authoritative for files-changed, so we don't depend on
   // a working-tree diff against a baseline the poll-based watcher captured late.
-  filesChanged: string[];
+  filesChanged?: string[];
   // Per-prompt file changes derived PURELY from the transcript's Edit/Write
   // content (git-independent). The fallback for uncommitted work the poll-based
   // tree diff misses (baseline captured after the edit). Empty for agents whose
   // transcript doesn't carry structured edits (e.g. Antigravity).
-  promptDiffs: Array<{ promptIndex: number; filesChanged: string[]; diff: string; linesAdded: number; linesRemoved: number }>;
+  promptDiffs?: Array<{ promptIndex: number; filesChanged: string[]; diff: string; linesAdded: number; linesRemoved: number }>;
   // Per-prompt structured edits WITH content, absolute paths. Supplied by agents
   // that record what they wrote but have no extractor in the canonical
   // capturePromptEdits pipeline (Antigravity). The watcher turns these into
@@ -534,7 +554,7 @@ export const copilotAdapter: TranscriptAdapter = {
     // doesn't know (`paths`, `directory`, shell command lines), so harvest any
     // absolute path from the raw events. Used for cwd recovery only — NOT for
     // files-changed, which stays sourced from recognized edit tools.
-    if (base.filePaths.length === 0) {
+    if ((base.filePaths || []).length === 0) {
       base.filePaths = harvestCopilotPaths(transcriptPath);
     }
     return base;

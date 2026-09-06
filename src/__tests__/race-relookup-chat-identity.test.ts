@@ -32,6 +32,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { stateMatchesIncomingChat } from '../commands/hooks';
+import { hooksSource } from './helpers/hooks-source.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const HOOKS_SRC = path.join(here, '..', 'commands', 'hooks.ts');
@@ -105,7 +106,7 @@ describe('stateMatchesIncomingChat', () => {
 });
 
 describe('the race re-lookup is guarded', () => {
-  const src = fs.readFileSync(HOOKS_SRC, 'utf8');
+  const src = hooksSource();
 
   it('checks chat identity before adopting the raced state', () => {
     // Wiring guard: the predicate above can be perfect and still never run.

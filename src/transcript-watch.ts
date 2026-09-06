@@ -44,7 +44,8 @@ import os from 'os';
 import path from 'path';
 import { spawn, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { createShadowCommit, captureAgyDiff, captureGitState, commitDiffScopedToPrompt, captureShadowRangeDiff, filesChangedSinceShadow, readFileAtRev, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { createShadowCommit, captureAgyDiff, captureGitState, commitDiffScopedToPrompt, captureShadowRangeDiff, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { capDiff } from './diff-budget.js';
 import { shellWindowEdits, SHELL_WINDOW_SOURCE } from './shell-write-capture.js';
 import { isOriginAutoManagedPath, shouldIgnoreFile } from './ignore-patterns.js';
 import { isInsideRepo, outOfRepoWrites, scopeDiffPathsToRepo } from './paths.js';
@@ -53,8 +54,10 @@ import { promptKey } from './session-state.js';
 import { getWorkingGitRoot, getCanonicalRepoPath, getBranch, getHeadSha, saveSessionState as writeGitSessionFile, loadSessionState as readGitSessionFile, clearSessionState as endGitSessionFile } from './session-state.js';
 import { createSnapshot } from './commands/snapshot.js';
 import { estimateCost } from './transcript.js';
+import { uploadPromptImages, applyImageDescriptions } from './prompt-images.js';
 import { capturePromptEdits } from './prompt-capture/index.js';
 import { timeoutForPayload } from './fetch-timeout.js';
+import { ensureInProcessJournal, stopJournalWatcher, applyLedgerToProducerRows, hookStateTagFor } from './ledger-producer.js';
 import { transcriptWriterTurns, filesRecordedForOtherTurns, reconcileWindowAttribution, type AttributedTurn } from './transcript-attribution.js';
 import { git } from './utils/exec.js';
 import { registerLogonAutoStart, type LogonAutoStartResult } from './utils/logon-autostart.js';
@@ -220,6 +223,19 @@ export interface SessionWatchState {
   // three different events. Keyed on what was SENT, a failed ingest stays
   // pending and is retried on the next poll instead of being lost.
   ingestedCommitShas?: string[];
+  // `<promptIndex>:<imageIndex>` for every prompt image already dealt with —
+  // uploaded, or skipped for good (over the per-image cap). Latched for the
+  // same reason the commit lists are: the daemon re-polls every 8s and the
+  // transcript keeps every image it ever held, so without this each screenshot
+  // is re-encoded and re-sent on every tick for the life of the session. A
+  // failure that CAN resolve — capture toggled off, the prompt's row not
+  // written yet — deliberately does not latch.
+  uploadedImages?: string[];
+  // Same keys → the server's one-line caption of that image. Kept so the
+  // session memory this watcher writes to git notes can say what a screenshot
+  // showed; that record is text-only, so without this an image-driven turn
+  // reaches a future agent as `[image]` and tells it nothing.
+  imageDescriptions?: Record<string, string>;
 }
 
 export function loadSessionState(agentSlug: string, sessionId: string, dir = watchStateDir()): SessionWatchState | null {
@@ -295,6 +311,13 @@ export interface WatchDeps {
   api: {
     startSession: (data: any) => Promise<any>;
     updateSession: (id: string, data: any, reqOpts?: { timeoutMs?: number }) => Promise<any>;
+    // Upload one image a prompt carried. Optional so tests can omit it; the
+    // watcher is the ONLY capture path for an agent that fires no hooks, so
+    // without it a screenshot-driven session records no screenshots at all.
+    uploadAttachment?: (
+      id: string,
+      payload: { promptIndex: number; imageIndex: number; mediaType: string; base64: string },
+    ) => Promise<unknown>;
   };
   // cwd → { repoPath (canonical), workRoot, repoUrl?, branch? }; null when the
   // cwd is not inside a git repo.
@@ -575,6 +598,34 @@ export function scopedMemoryLineCounts(
 }
 
 /**
+ * Rewrite each prompt's `[image]` placeholders to carry the caption the server
+ * generated for that image. The hook path's equivalent has to convert index
+ * spaces first; this one doesn't, because the watcher re-derives its prompt
+ * list from the whole transcript on every poll — its indices ARE the native
+ * ones the captions are keyed in.
+ */
+export function describeWatchPromptImages(
+  prompts: string[],
+  descriptions: Record<string, string> | undefined,
+): string[] {
+  if (!descriptions || Object.keys(descriptions).length === 0) return prompts;
+  const byPrompt = new Map<number, Record<number, string>>();
+  for (const [key, description] of Object.entries(descriptions)) {
+    const [rawPrompt, rawImage] = key.split(':');
+    const promptIndex = Number(rawPrompt);
+    const imageIndex = Number(rawImage);
+    if (!Number.isInteger(promptIndex) || !Number.isInteger(imageIndex)) continue;
+    const forPrompt = byPrompt.get(promptIndex) || {};
+    forPrompt[imageIndex] = description;
+    byPrompt.set(promptIndex, forPrompt);
+  }
+  return prompts.map((text, i) => {
+    const forPrompt = byPrompt.get(i);
+    return forPrompt ? applyImageDescriptions(text, forPrompt) : text;
+  });
+}
+
+/**
  * A memory entry for a session the watcher is ending, in the same shape the
  * hook path writes. Re-parses the transcript once — this runs a single time per
  * session, at its end.
@@ -590,7 +641,12 @@ function buildWatchMemoryEntry(
 ): SessionMemoryEntry | null {
   const parsed = adapter.parse(scanned.transcriptPath);
   if (!parsed) return null;
-  const prompts = parsed.userPrompts || [];
+  // Captions folded in before anything reads these: summary, TODOs and the
+  // remembered prompts are all text, so a turn that was a screenshot arrives
+  // as a bare `[image]` without this. No index conversion needed — the watcher
+  // re-derives prompts from the transcript every poll, so these are already in
+  // the same native space the captions are keyed in.
+  const prompts = describeWatchPromptImages(parsed.userPrompts || [], prior.imageDescriptions);
   const workRoot = prior.workRoot || prior.repoPath;
   // toRepoRelative hands the path BACK when it cannot relativise, so an
   // out-of-repo absolute (the agent's own memory notes under ~/.claude, a
@@ -955,7 +1011,13 @@ export function realReadCommitForIngest(
       filesChanged,
       additions,
       deletions,
-      ...(diff && diff.length <= MAX_INGEST_PATCH ? { diff } : {}),
+      // Fit the patch at FILE boundaries rather than dropping it whole. The
+      // old rule shipped the diff or nothing, so a commit one byte over the
+      // cap arrived with a subject, a numstat and no body — and nothing said
+      // which of the two had happened. Keeping the first N files is strictly
+      // more information than keeping none, and it is still a diff git can
+      // parse.
+      ...(diff ? { diff: capDiff(diff, MAX_INGEST_PATCH) } : {}),
     };
   } catch {
     return null;
@@ -1041,6 +1103,11 @@ export function assignTurnIds(
   return out;
 }
 
+// The in-process journal watchers and the turn mark moved to
+// ledger-producer.ts so the Codex daemon can share them. Re-exported so the
+// tests that reach for them here keep working.
+export { __stopAllJournalWatchers } from './ledger-producer.js';
+
 export async function reconcileSession(
   scanned: ScannedTranscript,
   adapter: TranscriptAdapter,
@@ -1058,6 +1125,7 @@ export async function reconcileSession(
       }
       if (prior.sessionTag) {
         try { deps.endGitState?.(prior.workRoot, prior.sessionTag); } catch { /* best-effort */ }
+        stopJournalWatcher(hookStateTagFor(adapter.slug, prior.sessionTag));
       }
       // Cross-session memory. Only the hook path ever wrote this, and GUI
       // agents fire no hooks on Windows — they are captured HERE — so on a
@@ -1196,7 +1264,7 @@ export async function reconcileSession(
   // the ordinary shape of a chat-only turn (a clarifying question, a refusal, a
   // plan awaiting approval), and skipping it dropped the whole conversation
   // rather than just its diff. It runs last on purpose — see fallbackCwd's note.
-  const cwd = scanned.cwd || deriveRepoFromFilePaths(parsed.filePaths) || adapter.fallbackCwd?.(scanned) || null;
+  const cwd = scanned.cwd || deriveRepoFromFilePaths(parsed.filePaths || []) || adapter.fallbackCwd?.(scanned) || null;
   if (!cwd) {
     logSkipOnce(`nocwd|${adapter.slug}|${scanned.sessionId}`, () => debugLog('transcript-watch', 'skipped: no cwd for session', {
       agent: adapter.slug, sessionId: scanned.sessionId,
@@ -1223,6 +1291,13 @@ export async function reconcileSession(
   // Short tag for the `.git/origin-session-<tag>.json` state file (matches the
   // lifecycle-hook convention: agentSessionId.slice(0,12)).
   const sessionTag = prior?.sessionTag || scanned.sessionId.slice(0, 12);
+  // The tag the HOOK path files this session under. Every hook-driven agent
+  // uses the bare tag; Antigravity's own handler prefixes it (`agy-<tag>`),
+  // and that prefix is where its state file, its minted turn ids and its
+  // journal all live. Reading the bare tag for agy found nothing, so the
+  // watcher minted its own ids and marked its own journal — two producers
+  // marking one tree under different names, each blind to the other's spans.
+  const journalTag = hookStateTagFor(adapter.slug, sessionTag);
   // Full-tree shadow at first-notice — a diff baseline that lets us subtract
   // pre-existing dirt. Created once, persisted. (Null when the tree was clean.)
   const sessionStartShadowSha = prior?.sessionStartShadowSha !== undefined
@@ -1463,9 +1538,16 @@ export async function reconcileSession(
   // Guarded: an unreadable state file must not take down the poll. Adoption is
   // an improvement on the identity we would otherwise mint, never a dependency.
   const hookTurns = (() => {
-    try { return hookMintedTurns(deps.loadGitState?.(repo.workRoot, sessionTag) || null); } catch { return []; }
+    try { return hookMintedTurns(deps.loadGitState?.(repo.workRoot, journalTag) || null); } catch { return []; }
   })();
   const promptTurns = assignTurnIds([...(prior?.promptTurns || []), ...hookTurns], parsed.userPrompts || []);
+
+  // Start journalling as early as we know the turn ids — BEFORE the capture
+  // work below, because a journal that starts after this turn's writes records
+  // none of them. For a hook-driven agent this is a no-op beyond the turn mark:
+  // the hook already started the watcher and the lock-free in-process one here
+  // simply observes the same tree.
+  ensureInProcessJournal(journalTag, repo.workRoot, promptTurns.map((t) => t.turnId));
 
   // DISCOVERY attestation: shas the agent disclosed in its own output
   // ("[branch 73df467]"), bound to the turn they appeared under BY IDENTITY.
@@ -1647,8 +1729,8 @@ export async function reconcileSession(
   // per-prompt record and blanks filesChanged without it — so a turn would show
   // the right line count and diff but "0 files". The file list is what that read
   // path consumes; the diff itself still travels in uncommittedDiff.
-  if (editsJsonByIndex.size === 0 && parsed.promptDiffs.length > 0) {
-    for (const pd of parsed.promptDiffs) {
+  if (editsJsonByIndex.size === 0 && (parsed.promptDiffs || []).length > 0) {
+    for (const pd of parsed.promptDiffs || []) {
       const edits = toRepoRel(pd.filesChanged).map((file) => ({ file, op: 'edit', source: 'tool_call' }));
       editsJsonByIndex.set(pd.promptIndex, JSON.stringify({ edits, commits: [] }));
     }
@@ -1910,7 +1992,7 @@ export async function reconcileSession(
     // headShaAtStart..HEAD walk also picks up commits made by other sessions (or
     // by the user) in the same repo during the window, and an unrelated commit in
     // the list shifts the pairing so every turn gets the wrong sha.
-    const sessionFiles = new Set(toRepoRel(parsed.filesChanged));
+    const sessionFiles = new Set(toRepoRel(parsed.filesChanged || []));
     const orderedShas = commitCandidates().filter((sha) => {
       const files = commitFiles.get(sha);
       return !!files && files.some((f) => sessionFiles.has(f));
@@ -1933,7 +2015,7 @@ export async function reconcileSession(
         if (!files) continue;
         const inCommit = new Set(files);
         let best = -1;
-        for (const pd of parsed.promptDiffs) {
+        for (const pd of parsed.promptDiffs || []) {
           if (taken.has(pd.promptIndex)) continue;
           const rel = toRepoRel(pd.filesChanged);
           if (rel.some((f) => inCommit.has(f)) && pd.promptIndex > best) best = pd.promptIndex;
@@ -1978,7 +2060,7 @@ export async function reconcileSession(
     }
   }
 
-  const agentFilesRel = toRepoRel(parsed.filesChanged);
+  const agentFilesRel = toRepoRel(parsed.filesChanged || []);
 
   // Per-turn attribution in FINAL-file coordinates, walked over the session's
   // own shadow commits (see final-state-blame.ts). A turn's captured diff is
@@ -2062,13 +2144,13 @@ export async function reconcileSession(
   // This is the same rule the snapshot gate below already applied to decide
   // whether a turn touched code; it just never reached the payload itself.
   const claimedByEarlier = new Set<string>();
-  for (const pd of parsed.promptDiffs) {
+  for (const pd of parsed.promptDiffs || []) {
     if (pd.promptIndex >= latestIndex) continue;
     for (const f of toRepoRel(pd.filesChanged)) claimedByEarlier.add(f);
   }
   const unclaimedSessionFiles = agentFilesRel.filter((f) => !claimedByEarlier.has(f));
   for (let i = 0; i < newCount; i++) {
-    const mapping = parsed.promptDiffs.find((pd) => pd.promptIndex === i);
+    const mapping = (parsed.promptDiffs || []).find((pd) => pd.promptIndex === i);
     let files = mapping ? toRepoRel(mapping.filesChanged) : [];
     // Put the transcript diff in the SAME path space as `files` above. The
     // adapter builds it from the agent's own edit records, which for an agent
@@ -2262,7 +2344,7 @@ export async function reconcileSession(
       promptText: (parsed.userPrompts[i] || '').slice(0, 1000),
       ...(typeof promptTs === 'number' && promptTs > 0 ? { createdAt: promptTs } : {}),
       filesChanged: files,
-      ...(diff ? { uncommittedDiff: diff.slice(0, MAX_PROMPT_DIFF_LEN) } : {}),
+      ...(diff ? { uncommittedDiff: capDiff(diff, MAX_PROMPT_DIFF_LEN) } : {}),
       linesAdded,
       linesRemoved,
       checkpointType: 'auto',
@@ -2281,6 +2363,37 @@ export async function reconcileSession(
       ...(carriesContent ? { authoritative: true } : {}),
     });
   }
+
+  // Hand each turn the ledger's answer where the ledger has one.
+  //
+  // The watcher is the PRIMARY capture path for agents that fire no hooks
+  // (Codex, Devin, Copilot) — exactly the agents with the least evidence and
+  // the worst attribution, because every file they touch is otherwise assigned
+  // by whatever happened to be dirty inside a polled window. Those are the
+  // sessions the ledger helps most, so wiring it only into Stop would have left
+  // them on the reconstruction.
+  //
+  // Runs AFTER the loop, so a turn the journal never marked keeps exactly the
+  // watcher's own answer. Replacement is wholesale — see the precedence rule in
+  // capture-from-ledger.ts.
+  //
+  // The watcher holds its OWN state shape, so the ledger's inputs are assembled
+  // here rather than read off a SessionState: the journal paths come from the
+  // session tag (the same derivation the hook path writes to) and the turn ids
+  // from `promptTurns`, which the watcher already keys its rows by.
+  applyLedgerToProducerRows({
+    tag: journalTag,
+    workRoot: repo.workRoot,
+    promptTurnIds: promptTurns.map((t) => t.turnId),
+    // The BASELINE. The ledger knows a file's before-state only when an
+    // earlier record in the same journal holds it; for a file the turn is the
+    // FIRST to write, it asks git for `<baseline>:<file>`. With no baseline
+    // that read never happens and every existing file renders as a CREATION
+    // (+4219/-0 on seven files, none of them new; prod d731ff09, bd3c110a).
+    promptShadows: promptShadows.map((s) => ({ promptIndex: s.promptIndex, shadowSha: s.baselineSha })),
+    prePromptSha: sessionStartShadowSha || null,
+    headShaAtStart: headShaAtStart || null,
+  }, promptChanges as any, 'transcript-watch');
 
   const joinedPrompt = parsed.userPrompts.join('\n\n---\n\n');
 
@@ -2523,6 +2636,31 @@ export async function reconcileSession(
     }
   }
 
+  // Images the prompts carried. AFTER the update, deliberately: the server
+  // attaches an image to the PromptChange row for its promptIndex and 404s when
+  // that row doesn't exist yet, so this has to follow the PATCH that writes it.
+  const uploadedImages = Array.isArray(prior?.uploadedImages) ? [...prior!.uploadedImages] : [];
+  const imageDescriptions: Record<string, string> = { ...(prior?.imageDescriptions || {}) };
+  if (updateOk && deps.api.uploadAttachment) {
+    try {
+      const result = await uploadPromptImages({
+        sessionId: originSessionId,
+        transcriptPath: scanned.transcriptPath,
+        upload: deps.api.uploadAttachment,
+        alreadyUploaded: uploadedImages,
+        debug: (event, data) => debugLog('transcript-watch', event, {
+          agent: adapter.slug, sessionId: scanned.sessionId, ...data,
+        }),
+      });
+      uploadedImages.push(...result.uploaded);
+      Object.assign(imageDescriptions, result.descriptions);
+    } catch (err) {
+      debugLog('transcript-watch', 'image upload failed — will retry', {
+        agent: adapter.slug, sessionId: scanned.sessionId, err: String(err),
+      });
+    }
+  }
+
   const snapshottedPrompts = Array.isArray(prior?.snapshottedPrompts) ? [...prior!.snapshottedPrompts] : [];
   if (updateOk && latestIndex >= 0 && !snapshottedPrompts.includes(latestIndex)) {
     const latest = promptChanges.find((c) => c.promptIndex === latestIndex);
@@ -2585,6 +2723,8 @@ export async function reconcileSession(
     recordedCommitShas,
     ingestedCommitShas,
     snapshottedPrompts,
+    uploadedImages,
+    imageDescriptions,
   };
   deps.saveState(next);
   return next;
@@ -2949,7 +3089,11 @@ export function buildRealDeps(machineId: string, hostname?: string): WatchDeps {
     machineId,
     hostname,
     stateDir: watchStateDir(),
-    api: { startSession: api.startSession, updateSession: api.updateSession },
+    api: {
+      startSession: api.startSession,
+      updateSession: api.updateSession,
+      uploadAttachment: (id, payload) => api.uploadAttachment(id, payload),
+    },
     resolveRepo: realResolveRepo,
     writeMemory: writeSessionMemory,
     writeCommitMemoryEntry: writeCommitMemory,

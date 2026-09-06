@@ -13,6 +13,7 @@
 
 import fs from 'fs';
 import { newCaptureStamp } from './capture-stamp.js';
+import { commitLandedInTurn, turnIsClosed } from './turn-commit-scope.js';
 import { assessRestoreSafety } from './restore-safety.js';
 import os from 'os';
 import path from 'path';
@@ -20,13 +21,18 @@ import { execFileSync, spawn } from 'child_process';
 import { getCurrentVersion, shouldRestartForUpgrade } from './version-check.js';
 import { transcriptIdleWindowMs, HOOK_DRIVEN_IDLE_MS } from './heartbeat-liveness.js';
 import { pruneRetiredStateFiles } from './session-state.js';
-import { createShadowCommit, filesChangedSinceShadow, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { createShadowCommit, filesChangedSinceShadow, readFileAtRev, gitIgnoredFiles, MAX_PROMPT_DIFF_LEN } from './git-capture.js';
+import { capDiff } from './diff-budget.js';
+import { applyLedgerToMappings } from './capture-from-ledger.js';
+import { readJournalEntries, journalPathsForTag } from './write-journal-watch.js';
+import { ensureInProcessJournal } from './ledger-producer.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import { fetchWithTimeout } from './fetch-timeout.js';
 import { buildCodexThreadByIdQuery, buildCodexThreadByCwdQuery } from './codex-thread-query.js';
 import { ensureSqlite, querySqlite } from './utils/sqlite.js';
 import { isCodexInternalSubroutine, findCodexRolloutByCwd, parseCodexRolloutLive } from './agents/codex.js';
 import { parentLooksDead, heartbeatSuperseded, isServerTerminalDefinitive } from './heartbeat-liveness.js';
+import { debugLog } from './debug-log.js';
 
 // Path of a file inside the git dir governing `repoPath` — worktree-aware
 // (a linked worktree's `.git` is a FILE; naive `<repoPath>/.git/<name>`
@@ -328,13 +334,50 @@ async function pushInflightDiff(): Promise<void> {
       // the heartbeat re-sends the CURRENT turn, and inventing an id would give
       // the same turn two identities.
       promptTurnIds?: string[];
+      // The write-journal ledger for this session, when one is running. Read
+      // so the heartbeat can take a turn's diff from OBSERVED content instead
+      // of re-deriving it from a shadow baseline every tick.
+      writeJournalPath?: string;
+      writeSnapshotDir?: string;
+      sessionTag?: string;
+      // Advanced by Stop (closeTurn). Read here so a turn Stop has finished is
+      // left alone — see turnIsClosed.
+      lastClosedTurnIndex?: number | null;
     };
+    // A session whose user-prompt-submit never started a journal (Codex's
+    // hook is unreliable; a state file from before the journal existed) had
+    // nothing for the ledger to read, and this tick fell back to the shadow
+    // diff with no log line. This daemon lives as long as the session, so it
+    // can hold the watcher itself — same in-process watcher the transcript
+    // and Codex daemons hold, same tag derivation, so it shares rather than
+    // doubles a journal the hook path did start.
+    //
+    // ONLY once a prompt exists. A hook-driven agent's user-prompt-submit
+    // starts the journal in the same save that records the first prompt, so
+    // a state with prompts and no journal is one whose hook never will — a
+    // Codex thread fed by the heartbeat itself. Starting earlier, at session
+    // start, made THIS process the recorder for every agent: it took the lock,
+    // the hook deferred to it, and a heartbeat reaped or superseded mid-session
+    // left a 60s gap in the journal that no later hook could see — the ledger
+    // then under-reported the turn without a word.
+    if (!state.writeJournalPath && state.sessionTag && state.repoPath && (state.prompts?.length || 0) > 0) {
+      ensureInProcessJournal(state.sessionTag, state.repoPath, state.promptTurnIds || []);
+      const jp = journalPathsForTag(state.sessionTag);
+      state.writeJournalPath = jp.journalPath;
+      state.writeSnapshotDir = jp.snapshotDir;
+    }
     const repoPath = state.repoPath;
     const prePromptSha = state.prePromptSha;
     const prompts = state.prompts || [];
     if (!repoPath || !prePromptSha || prompts.length === 0) return;
 
     const promptIndex = prompts.length - 1;
+    // Stop closed this turn: its capture is final and stamped. Every tick
+    // after that re-derived the same turn from a shadow baseline and sent it
+    // with a NEWER stamp, so the reconstruction outranked the observed
+    // capture for as long as the session stayed open. Codex and Gemini fire
+    // no Stop and never close a turn, so this changes nothing for them.
+    if (turnIsClosed(state, promptIndex)) return;
     const promptText = (prompts[promptIndex] || '').slice(0, 1000);
     const gitOpts = { cwd: repoPath, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], timeout: 5000, windowsHide: true };
     const isHex = (s: string) => /^[a-fA-F0-9]{7,40}$/.test(s);
@@ -403,7 +446,10 @@ async function pushInflightDiff(): Promise<void> {
         if (!isHex(sha)) continue;
         // Skip commits whose ancestry doesn't include the prompt baseline —
         // those landed BEFORE this prompt started and belong to a sibling.
-        if (isHex(promptBaseline) && !isAncestor(promptBaseline, sha)) continue;
+        // The baseline ITSELF is one of them: a commit is its own ancestor, so
+        // the previous turn's commit, now this turn's starting point, used to
+        // pass here and be re-sent as this turn's work.
+        if (!commitLandedInTurn(promptBaseline, sha, isAncestor)) continue;
         try {
           // --unified=2000 = full-file context for any reasonable source file.
           // The blame route reconstructs per-line attribution by replaying
@@ -592,6 +638,32 @@ async function pushInflightDiff(): Promise<void> {
       }
     } catch { /* fresh repo with no HEAD — fine */ }
 
+    // The turn's payload, built first so the ledger can replace it wholesale
+    // before it is sent.
+    //
+    // The heartbeat is the PRIMARY capture path for Codex and Gemini — they
+    // fire no Stop hook, so this tick is what the dashboard shows. Wiring the
+    // ledger only into Stop would have left exactly the agents with the least
+    // evidence still deriving their diffs from a shadow baseline.
+    const hbMapping: Record<string, unknown> = {
+      promptIndex,
+      filesChanged: Array.from(filesChanged),
+      diff: capDiff(fullDiff, MAX_PROMPT_DIFF_LEN),
+      uncommittedDiff: capDiff(uncommittedDiff, MAX_PROMPT_DIFF_LEN),
+      linesAdded,
+      linesRemoved,
+    };
+    applyLedgerToMappings(state as any, [hbMapping as any], {
+      readEntries: readJournalEntries,
+      readAtRev: state.repoPath
+        ? (sha: string, file: string) => readFileAtRev(state.repoPath as string, sha, file)
+        : undefined,
+      ignoredFiles: state.repoPath
+        ? (files: string[]) => gitIgnoredFiles(state.repoPath as string, files)
+        : undefined,
+    });
+    delete hbMapping.ledgerOwned; // internal marker; `diffSource` is what travels
+
     await fetchWithTimeout(`${apiUrl}/api/mcp/session/${sessionId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
@@ -612,11 +684,20 @@ async function pushInflightDiff(): Promise<void> {
             // same turn the same way.
             ...(state.promptTurnIds?.[promptIndex] ? { turnId: state.promptTurnIds[promptIndex] } : {}),
             promptText,
-            filesChanged: Array.from(filesChanged),
-            diff: fullDiff.slice(0, MAX_PROMPT_DIFF_LEN),
-            uncommittedDiff: uncommittedDiff.slice(0, MAX_PROMPT_DIFF_LEN),
-            linesAdded,
-            linesRemoved,
+            // Content comes from `hbMapping`, which is either what was
+            // reconstructed above or the ledger's replacement of it — never a
+            // mix. `uncommittedDiff` is sent even when empty so a ledger-owned
+            // turn CLEARS the stale working-tree diff a previous tick stored;
+            // the server distinguishes "field absent" from "field empty".
+            filesChanged: hbMapping.filesChanged,
+            diff: hbMapping.diff,
+            uncommittedDiff: hbMapping.uncommittedDiff ?? '',
+            linesAdded: hbMapping.linesAdded,
+            linesRemoved: hbMapping.linesRemoved,
+            ...(hbMapping.diffSource ? { diffSource: hbMapping.diffSource } : {}),
+            ...(hbMapping.contentUnavailableFiles
+              ? { contentUnavailableFiles: hbMapping.contentUnavailableFiles }
+              : {}),
             checkpointType: 'auto',
             commitSha: heartbeatCommitSha,
             treeSha: heartbeatTreeSha,
@@ -1542,7 +1623,13 @@ async function ping() {
             raw.enforcementRulesFetchedAt = Date.now();
             fs.writeFileSync(stateFile, JSON.stringify(raw), { mode: 0o600 });
           }
-        } catch { /* best effort — next tick retries */ }
+        } catch (err: unknown) {
+          // "Next tick retries" is true of a transient failure and a silent
+          // forever-loop for a persistent one (permissions, disk full). Name it.
+          debugLog('heartbeat', 'enforcement rules could not be written to the state file', {
+            stateFile, message: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
 
       // Codex doesn't surface its assistant output (or prompt boundaries) via

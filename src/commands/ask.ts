@@ -1,7 +1,8 @@
 import chalk from 'chalk';
 import { readSessionFile } from '../session-store.js';
 import { git } from '../utils/exec.js';
-import { getGitRoot } from '../session-state.js';
+import { getGitRoot, getWorkingGitRoot } from '../session-state.js';
+import { provenanceRoots, resolveQueryTarget } from '../session-worktree.js';
 import { searchPrompts, getPromptsBySession } from '../local-db.js';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
@@ -29,9 +30,14 @@ export async function askCommand(
 
   console.log(chalk.bold('\n  Origin Ask\n'));
 
-  // Strategy 1: File-based lookup
+  // Strategy 1: File-based lookup — in the tree the user is standing in.
+  // `repoPath` above is the collapsed (canonical) root, right for the shared
+  // refs below and wrong for a file: from a linked worktree it read the MAIN
+  // checkout's history for the path.
   if (opts?.file && repoPath) {
-    const results = await askAboutFile(opts.file, query, repoPath, opts.line);
+    const roots = provenanceRoots(cwd, { gitRoot: getGitRoot, workingGitRoot: getWorkingGitRoot });
+    const target = roots ? resolveQueryTarget(opts.file, roots, cwd) : { relPath: opts.file, root: repoPath };
+    const results = await askAboutFile(target.relPath, query, target.root, opts.line);
     if (results) return;
   }
 

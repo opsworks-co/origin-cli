@@ -18,6 +18,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { nestedRepoFilesWritten } from '../commands/hooks.js';
+import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
 let repo: string;
 let turnStart: number;
@@ -95,10 +97,7 @@ describe('nestedRepoFilesWritten', () => {
 // with its own out-of-repo source. The fix was a no-op for the exact agent it
 // was written for, and only a source-level check catches that.
 describe('every producer of outOfRepoFiles consults the nested-repo source', () => {
-  const src = fs.readFileSync(
-    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'commands', 'hooks.ts'),
-    'utf-8',
-  );
+  const src = hooksSource();
 
   it('the Antigravity payload includes nested-repo writes', () => {
     // agy's `outsideFiles` is derived from transcript paths outside workRoot; a

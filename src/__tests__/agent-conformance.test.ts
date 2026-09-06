@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   installClaudeHooks, installCursorHooks, installGeminiHooks, installCodexHooks,
   installDevinHooks, installCopilotHooks, installAntigravityHooks,
@@ -37,6 +38,13 @@ const HANDLED_EVENTS = new Set([
  *
  * `window` is the state every agent was in before this work, and is the state
  * none should be left in.
+ *
+ * These grade how a turn's FILE LIST is attributed. Since stage 2 there is a
+ * stronger, orthogonal source underneath all of them: the write-journal LEDGER,
+ * which records the file's CONTENT before and after, so a turn's diff is read
+ * rather than reconstructed. It is available to EVERY agent — the guard at the
+ * bottom of this file exists because it once was not, and the gate that
+ * excluded the hook-firing agents from it was invisible for months.
  */
 interface AgentSpec {
   install: (d: string) => void;
@@ -141,6 +149,33 @@ describe('agent conformance', () => {
       .filter(([, s]) => (s.evidence as string) === 'window')
       .map(([a]) => a);
     expect(windowOnly).toEqual([]);
+  });
+
+  it('excludes no agent from the write-journal ledger', () => {
+    // The ledger is what makes a turn's diff OBSERVED rather than
+    // reconstructed, and for a while it was gated to agents WITHOUT tool
+    // hooks — on the reasoning that a tool hook already said which files
+    // changed. It does not: a tool hook says a file was edited, the ledger
+    // says what its content BECAME, and only the second can produce a diff.
+    // The gate meant claude-code, cursor, gemini and antigravity never had it,
+    // which is the inverse of what it was built for, and nothing failed.
+    //
+    // A source guard, in the same shape as path-comparison-guard.test.ts,
+    // because the reasoning that produced the gate is reasonable-sounding and
+    // will be produced again.
+    const hooks = fs.readFileSync(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'commands', 'hooks.ts'),
+      'utf-8',
+    );
+    const start = hooks.indexOf('function ensureWriteJournal');
+    expect(start, 'ensureWriteJournal has moved — update this guard').toBeGreaterThan(-1);
+    const body = hooks.slice(start, hooks.indexOf('\n}', start));
+    const gated = Object.keys(EXPECTED).filter((a) => body.includes(`'${a}'`));
+    expect(
+      gated,
+      'ensureWriteJournal names specific agents. The ledger must run for ALL of them; '
+      + 'ORIGIN_WRITE_JOURNAL=0 is the only intended opt-out.',
+    ).toEqual([]);
   });
 
   it('covers every agent the CLI claims to support', () => {

@@ -47,9 +47,16 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
  * senders is the point: the failure being guarded against is a builder nobody
  * wired a test to.
  */
-function payloadBuilders(): string[] {
-  return sourceFiles(SRC).filter((file) => {
-    const src = fs.readFileSync(file, 'utf-8');
+/** One judged unit per FILE. After the split of commands/hooks.ts the handlers
+ *  were briefly judged as a family, because one by one three of them had never
+ *  stamped at all (after-file-edit, session-start's re-send, Antigravity). They
+ *  do now, so every file answers for itself again. */
+function judgedUnits(): Array<{ name: string; src: string }> {
+  return sourceFiles(SRC).map((file) => ({ name: path.relative(SRC, file).replace(/\\/g, '/'), src: fs.readFileSync(file, 'utf-8') }));
+}
+
+function payloadBuilders(): Array<{ name: string; src: string }> {
+  return judgedUnits().filter(({ src }) => {
     if (!/promptChanges\s*[:=]/.test(src)) return false;
     // A builder constructs rows: it sets promptIndex on an object literal.
     if (!/promptIndex[,:]/.test(src)) return false;
@@ -67,14 +74,16 @@ describe('capture stamp guard', () => {
     expect(builders.length).toBeGreaterThan(0);
     // The two known producers must both be in scope. If either stops matching,
     // the detection above has drifted and the guard is quietly inert.
-    const names = builders.map((f) => path.relative(SRC, f).replace(/\\/g, '/'));
-    expect(names).toContain('commands/hooks.ts');
+    const names = builders.map((b) => b.name);
+    // The producers among the hook handlers, each standing on its own.
+    // (Stop sends through a wrapper, so the send regex does not see it; its
+    // stamp is asserted by capture-stamp-advances-during-hook.test.ts.)
+    for (const f of ['commands/hooks/after-file-edit.ts', 'commands/hooks/antigravity.ts']) expect(names).toContain(f);
     expect(names).toContain('transcript-watch.ts');
   });
 
   it('every promptChanges producer stamps captureId and capturedAt', () => {
-    const missing = payloadBuilders().filter((file) => {
-      const src = fs.readFileSync(file, 'utf-8');
+    const missing = payloadBuilders().filter(({ src }) => {
       // Either spread a stamp helper, or set both fields outright.
       const spreadsStamp = /\.\.\.\s*(captureStamp\b|newCaptureStamp\([^)]*\))/.test(src);
       const setsBoth = /captureId:/.test(src) && /capturedAt:/.test(src);
@@ -82,7 +91,7 @@ describe('capture stamp guard', () => {
     });
 
     expect(
-      missing.map((f) => path.relative(SRC, f).replace(/\\/g, '/')),
+      missing.map((b) => b.name),
       'These build a promptChanges payload without capture provenance.\n'
         + 'The server can only order writes to a row when BOTH carry a timestamp,\n'
         + 'so an unstamped producer is exempt from ordering and silently outranks\n'

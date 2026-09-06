@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import path from 'path';
-import { getGitRoot } from '../session-state.js';
+import { getGitRoot, getWorkingGitRoot } from '../session-state.js';
+import { ProvenanceRoots, provenanceRoots, resolveQueryTarget } from '../session-worktree.js';
 import { getLineBlame, LineAttribution } from '../attribution.js';
 import { isConnectedMode, loadConfig } from '../config.js';
 import { git, gitOrNull, runDetailed } from '../utils/exec.js';
@@ -89,8 +90,12 @@ function getCommitInfo(repoPath: string, sha: string): { date: string; author: s
   }
 }
 
-async function showLineWhy(repoPath: string, filePath: string, lineNum: number): Promise<void> {
-  const relPath = path.relative(repoPath, path.resolve(process.cwd(), filePath));
+async function showLineWhy(roots: ProvenanceRoots, filePath: string, lineNum: number): Promise<void> {
+  // Blame the tree the user is STANDING IN. A linked worktree has its own
+  // branch and its own copy of the file; resolving against the canonical root
+  // instead produced `.claude/worktrees/<name>/…`, which git blame cannot
+  // attribute, and every line came back "Uncommitted change".
+  const { relPath, root: repoPath } = resolveQueryTarget(filePath, roots, process.cwd());
 
   // Get file content for display
   const fullPath = path.resolve(repoPath, relPath);
@@ -120,7 +125,7 @@ async function showLineWhy(repoPath: string, filePath: string, lineNum: number):
   // client never fetched. This is the robust path; the git-notes logic below
   // stays as the offline/standalone fallback.
   if (isConnectedMode()) {
-    let card = await tryServerWhy(repoPath, relPath, commitSha, lineContent);
+    let card = await tryServerWhy(roots, relPath, commitSha, lineContent);
     // Drift recovery: `git blame` credits whoever LAST touched the line, which
     // may be a later reformat/rename, not the turn that INTRODUCED it. When the
     // blame commit gives a weak match, walk the line's own history (git log -L)
@@ -130,7 +135,7 @@ async function showLineWhy(repoPath: string, filePath: string, lineNum: number):
     if (!card || card.session == null || card.confidence !== 'high') {
       for (const sha of getLineHistoryCommits(repoPath, relPath, lineNum)) {
         if (sha === commitSha) continue;
-        const alt = await tryServerWhy(repoPath, relPath, sha, lineContent);
+        const alt = await tryServerWhy(roots, relPath, sha, lineContent);
         if (alt && alt.session) {
           alt.drifted = true;
           if (alt.confidence === 'high') { card = alt; break; }
@@ -282,8 +287,8 @@ function findPromptForLine(
   return null;
 }
 
-async function showFileWhy(repoPath: string, filePath: string): Promise<void> {
-  const relPath = path.relative(repoPath, path.resolve(process.cwd(), filePath));
+async function showFileWhy(roots: ProvenanceRoots, filePath: string): Promise<void> {
+  const { relPath, root: repoPath } = resolveQueryTarget(filePath, roots, process.cwd());
 
   // Get line-level attribution
   const lines = getLineBlame(repoPath, relPath);
@@ -364,8 +369,11 @@ async function resolveOriginRepoId(repoPath: string): Promise<{ id: string } | n
 
 // Ask the server which session + prompt authored this line. Returns null on any
 // failure so the caller falls back to the local git-notes path.
-async function tryServerWhy(repoPath: string, relPath: string, sha: string, lineContent: string): Promise<any | null> {
-  const repo = await resolveOriginRepoId(repoPath);
+async function tryServerWhy(roots: ProvenanceRoots, relPath: string, sha: string, lineContent: string): Promise<any | null> {
+  // Repo IDENTITY is the canonical root's job — `resolveOriginRepoId` falls
+  // back to the directory basename, which in a worktree is the worktree's
+  // name (`session-reuse-old-agent-f7056f`), matching no repo on the server.
+  const repo = await resolveOriginRepoId(roots.canonicalRoot);
   if (!repo) return null;
   try {
     const { api } = await import('../api.js');
@@ -502,9 +510,11 @@ function resolvePrNumber(prCommentArg: string | boolean | undefined): number | n
 
 async function whyTraceCommand(
   traceArg: string | boolean,
-  repoPath: string,
+  roots: ProvenanceRoots,
   opts?: { prComment?: string | boolean; json?: boolean },
 ): Promise<void> {
+  // Frames name files in the tree that ran, and that is the worktree.
+  const repoPath = roots.workRoot;
   const { readFileSync, existsSync } = await import('fs');
   let text = '';
   if (typeof traceArg === 'string' && traceArg && existsSync(traceArg)) text = readFileSync(traceArg, 'utf-8');
@@ -525,7 +535,7 @@ async function whyTraceCommand(
 
   // Resolve the repo once so both the per-frame cards and the PR-comment POST
   // share it. (tryServerWhy resolves it too, but we need the id here anyway.)
-  const repo = await resolveOriginRepoId(repoPath);
+  const repo = await resolveOriginRepoId(roots.canonicalRoot);
 
   const results: Array<{ file: string; line: number; content: string; sha: string; card: any }> = [];
   for (const fr of frames) {
@@ -535,7 +545,7 @@ async function whyTraceCommand(
     if (!sha || sha.startsWith('0000000')) continue;
     let content = '';
     try { content = (readFileSync(path.join(repoPath, rel), 'utf-8').split('\n')[fr.line - 1] || '').trim(); } catch { /* ignore */ }
-    const card = await tryServerWhy(repoPath, rel, sha, content);
+    const card = await tryServerWhy(roots, rel, sha, content);
     if (card && card.session) results.push({ file: rel, line: fr.line, content, sha, card });
   }
 
@@ -610,10 +620,10 @@ async function whyTraceCommand(
 }
 
 export async function whyCommand(input: string, opts?: { trace?: string | boolean; prComment?: string | boolean; json?: boolean }) {
-  const repoPathForTrace = getGitRoot(process.cwd());
+  const roots = provenanceRoots(process.cwd(), { gitRoot: getGitRoot, workingGitRoot: getWorkingGitRoot });
   if (opts?.trace || opts?.prComment) {
-    if (!repoPathForTrace) { console.log(chalk.red('Not inside a git repository.')); process.exit(1); }
-    await whyTraceCommand(opts.trace ?? true, repoPathForTrace, { prComment: opts.prComment, json: opts.json });
+    if (!roots) { console.log(chalk.red('Not inside a git repository.')); process.exit(1); }
+    await whyTraceCommand(opts.trace ?? true, roots, { prComment: opts.prComment, json: opts.json });
     return;
   }
   if (!input) {
@@ -623,15 +633,14 @@ export async function whyCommand(input: string, opts?: { trace?: string | boolea
   }
   const { file, line } = parseFileAndLine(input);
 
-  const repoPath = getGitRoot(process.cwd());
-  if (!repoPath) {
+  if (!roots) {
     console.log(chalk.red('Not inside a git repository.'));
     process.exit(1);
   }
 
   if (line) {
-    await showLineWhy(repoPath, file, line);
+    await showLineWhy(roots, file, line);
   } else {
-    await showFileWhy(repoPath, file);
+    await showFileWhy(roots, file);
   }
 }

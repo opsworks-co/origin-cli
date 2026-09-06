@@ -326,7 +326,15 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     if (local) {
       files = local.filesChanged?.length || 0;
     } else if (platform) {
-      try { const f = JSON.parse(platform.filesChanged); files = Array.isArray(f) ? f.length : 0; } catch { files = 0; }
+      // The API serves `filesChanged` as a real array (sessions.ts documents
+      // the switch from the JSON-string column shape). `JSON.parse` on an
+      // array coerces it to "a,b,c" and throws, so every server row read
+      // "0 files" — including sessions the detail page showed with eleven.
+      const raw = (platform as { filesChanged?: unknown }).filesChanged;
+      if (Array.isArray(raw)) files = raw.length;
+      else if (typeof raw === 'string') {
+        try { const f = JSON.parse(raw); files = Array.isArray(f) ? f.length : 0; } catch { files = 0; }
+      }
     }
 
     // Cost

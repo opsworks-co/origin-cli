@@ -101,3 +101,76 @@ describe('currentTurnIndex — the turn that is running', () => {
     expect(state.promptTurnIds?.[0]).toBe(first);
   });
 });
+
+// A turn that used no tool never opened, so there is nothing for Stop to close
+// by `activeTurn.index`. Stop now closes the turn it CAPTURED (the list tail),
+// and a prompt arriving with nothing open closes everything before it. Either
+// alone is enough; both together survive a missed Stop.
+describe('a chat-only turn still advances the sequence', () => {
+  const stopCloses = (state: S) =>
+    closeTurn(state, state.activeTurn?.index ?? Math.max((state.prompts?.length ?? 0) - 1, 0));
+  const submitCloses = (state: S, newTurnIdx: number) => {
+    if (!state.activeTurn && newTurnIdx > 0) {
+      state.lastClosedTurnIndex = Math.max(state.lastClosedTurnIndex ?? -1, newTurnIdx - 1);
+    }
+  };
+
+  it('the turn after a chat-only turn binds to ITSELF, not to the chat-only one', () => {
+    const state: S = { prompts: ['write the module'] };
+    expect(currentTurnIndex(state, { newId: ids() })).toBe(0); // a tool ran
+    stopCloses(state);
+    expect(state.lastClosedTurnIndex).toBe(0);
+
+    state.prompts!.push('how many lines did you write?'); // chat-only: no tool, no open
+    stopCloses(state);
+    expect(state.lastClosedTurnIndex, 'Stop must close the turn it captured').toBe(1);
+
+    state.prompts!.push('now change the files and commit');
+    // The first tool call of turn 3 — the shell probe, the commit trailer —
+    // must name turn 3. Before the fix this was 1: the pointer sat on the
+    // chat-only turn and every later write in the session filed one back.
+    expect(currentTurnIndex(state)).toBe(2);
+  });
+
+  it('closing by `activeTurn.index` alone is exactly the bug', () => {
+    const state: S = { prompts: ['write the module'] };
+    currentTurnIndex(state, { newId: ids() });
+    closeTurn(state, state.activeTurn?.index);
+    state.prompts!.push('question');
+    closeTurn(state, state.activeTurn?.index); // nothing open → closes nothing
+    state.prompts!.push('change and commit');
+    expect(currentTurnIndex(state)).toBe(1); // the old behaviour, pinned so the fix is legible
+  });
+
+  it('a prompt arriving with nothing open closes the turns before it', () => {
+    const state: S = { prompts: ['write the module'] };
+    currentTurnIndex(state, { newId: ids() });
+    stopCloses(state);
+    state.prompts!.push('question'); // its Stop never fires (interrupted)
+    state.prompts!.push('change and commit');
+    submitCloses(state, 2);
+    expect(state.lastClosedTurnIndex).toBe(1);
+    expect(currentTurnIndex(state)).toBe(2);
+  });
+
+  it('a prompt queued behind an OPEN turn still waits its turn', () => {
+    const state: S = { prompts: ['long task'] };
+    expect(currentTurnIndex(state, { newId: ids() })).toBe(0);
+    state.prompts!.push('queued while the task runs');
+    submitCloses(state, 1); // a turn is open → must not close it
+    expect(state.lastClosedTurnIndex).toBeUndefined();
+    expect(currentTurnIndex(state)).toBe(0);
+    stopCloses(state);
+    expect(currentTurnIndex(state)).toBe(1);
+  });
+
+  it('a re-fired Stop on the same turn does not skip the next one', () => {
+    const state: S = { prompts: ['task'] };
+    currentTurnIndex(state, { newId: ids() });
+    stopCloses(state);
+    stopCloses(state); // a task notification re-invoked the model; Stop fired again
+    expect(state.lastClosedTurnIndex).toBe(0);
+    state.prompts!.push('next');
+    expect(currentTurnIndex(state)).toBe(1);
+  });
+});

@@ -1,6 +1,6 @@
 // Regression: `origin upgrade` reported "Current version: 0.0.0" on native
 // Windows because getCurrentVersion() resolved the package.json path from
-// `new URL(import.meta.url).pathname`, which prepends a spurious slash before
+// `fileURLToPath(import.meta.url)`, which prepends a spurious slash before
 // the drive letter (/C:/…) that readFileSync can't open. This test runs on the
 // windows-latest CI leg too, where it would have failed against the old code.
 

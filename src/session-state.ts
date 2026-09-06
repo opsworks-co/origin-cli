@@ -12,6 +12,7 @@ import { processInfo } from './utils/process-detect.js';
 import { samePath } from './paths.js';
 import type { PromptEdit } from './prompt-capture/types.js';
 import { ensureOwnerStamp } from './session-owner.js';
+import { debugLog } from './debug-log.js';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -88,6 +89,20 @@ export interface SessionState {
   model: string;
   startedAt: string;          // ISO timestamp
   prompts: string[];          // Accumulated user prompts
+  // `<nativePromptIndex>:<imageIndex>` → the server's one-line caption of that
+  // image. Kept OUT of `prompts` on purpose: `prompts` goes on the wire, where
+  // the server maintains its own `[image:<id>]` rendering of the same slots, so
+  // folding captions in there would have the two copies overwrite each other.
+  // These are folded in only where words are what a reader needs — the session
+  // memory written to git notes. Keyed in NATIVE (transcript) index space, like
+  // every other index that comes off the transcript.
+  promptImageDescriptions?: Record<string, string>;
+  // Same keys, for images this session has already dealt with — uploaded, or
+  // skipped for good. Stop fires once per turn and the transcript keeps every
+  // image it ever held, so without this every screenshot is re-encoded and
+  // re-POSTed on every turn for the life of the session. Separate from the
+  // captions above because an image can be stored without one.
+  uploadedImages?: string[];
   // The agent's id for the most recently saved prompt (stdin `prompt_id`).
   // Guards against a duplicate save when ONE prompt fires the user-prompt-
   // submit hook twice — which happens with the Devin CLI, whose runtime reads
@@ -180,6 +195,15 @@ export interface SessionState {
   // alone — recorded rather than hidden. See checkout-contention.ts.
   contendingSessionIds?: string[];
   writeJournalPath?: string;
+  /**
+   * Content snapshots for this session's journal — see write-journal-store.ts.
+   *
+   * With these a turn's diff is READ (before-snapshot -> after-snapshot) rather
+   * than reconstructed from a baseline nobody wrote down. Dropped when the
+   * session ends; a missing directory simply means the turn falls back to the
+   * previous path-and-window behaviour.
+   */
+  writeSnapshotDir?: string;
   currentTurnStartedAt?: number;
   shellProbes?: Array<{
     // The tool call that armed this probe, so post-tool-use resolves ITS OWN
@@ -308,6 +332,12 @@ export interface SessionState {
     // transcript edits). Prevents the next user-prompt-submit retroactive
     // capture from sweeping in pre-existing dirty changes.
     chatOnly?: boolean;
+    // True when this entry is NOT a turn capture but a producer's accumulator
+    // of every file the session has touched, kept so commit attribution can
+    // match staged files to a session. It carries a file list and no diff by
+    // design. See registerAgySessionState, and capture-verify.ts's
+    // `isFileSetRecord` for why the verifier has to be told.
+    fileSetOnly?: boolean;
   }>;
   // Live per-edit ledger appended by the post-tool-use hook as each
   // Edit / Write / MultiEdit fires, stamped with the prompt index active at
@@ -372,6 +402,12 @@ export interface SessionState {
   // by the OTHER session (HEAD has moved) and credits them to the wrong
   // agent in AI Blame.
   sessionCommitShas?: string[];
+  // Commits a rebase rewrote, as (orphan → rewrite) pairs found by the amend/
+  // rebase rescue. Sent with every gitCapture so the SERVER can move the
+  // session off the orphan too: it used to union every incoming sha list
+  // with what it had, and the orphan's Commit row stayed linked to the
+  // session, so the same work counted twice however well the CLI deduped.
+  rewrittenCommits?: Array<{ from: string; to: string }>;
   // policyId/ruleId/policyName ride along (sent by session/start since the
   // audit-reporting change) so hook-level blocks can report WHICH policy
   // fired; older state files lack them and degrade to type-only reports.
@@ -507,6 +543,35 @@ export function promptKey(text: string): string {
 }
 
 /**
+ * Do two records describe the same typed prompt?
+ *
+ * There are TWO producers of prompt text and they do not agree byte for byte.
+ * The prompt-submit hook stores what the agent handed it — for Claude Code
+ * that string renders each attached image as a trailing `[image]`
+ * placeholder. The Stop-time transcript parser rebuilds the same prompt from
+ * the JSONL, where images are separate blocks (so no placeholder) and a long
+ * prompt is cut at 1000 characters with `...`. Session 2a93541b: a prompt with
+ * two screenshots was stored as `…agent\n[image] [image]` and parsed back as
+ * `…agent`; a 1398-char prompt was parsed back as its first 1000 chars.
+ *
+ * Compared with `===`, each of those is a NEW prompt. `reconcilePromptHistory`
+ * appended it, the Stop captured the turn a second time under the phantom
+ * index, and the dashboard showed 7 turns for 5 prompts with the work
+ * double-counted. Short plain prompts matched exactly and were fine, which is
+ * why it only bit the two long/illustrated ones.
+ *
+ * The rule here is the one `homePromptIndexByText` already trusted for
+ * re-homing a write: same normalised key, or one key a prefix of the other —
+ * which absorbs both a trailing placeholder and a truncation.
+ */
+export function samePromptText(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ka = promptKey(a || '');
+  const kb = promptKey(b || '');
+  if (!ka || !kb) return ka === kb;
+  return ka === kb || ka.startsWith(kb) || kb.startsWith(ka);
+}
+
+/**
  * Confirm the index we are about to write actually belongs to the prompt we
  * think we are capturing — and re-home it, or refuse, when it does not.
  *
@@ -534,15 +599,12 @@ export function homePromptIndexByText(
   // No mapping at this index: the transcript never described this turn (the
   // case the Stop safety net exists for), so the counter is all we have.
   if (!at) return idx;
-  const want = promptKey(text);
-  if (!want) return idx;
-  const has = promptKey(at.promptText || '');
-  if (has && (has === want || has.startsWith(want) || want.startsWith(has))) return idx;
+  if (!promptKey(text)) return idx;
+  if (promptKey(at.promptText || '') && samePromptText(at.promptText, text)) return idx;
   // Out of step. Prefer the LAST matching row: prompt text repeats ("Try
   // again"), and the newest occurrence is the turn being captured now.
   for (let i = list.length - 1; i >= 0; i--) {
-    const k = promptKey(list[i].promptText || '');
-    if (k && (k === want || k.startsWith(want) || want.startsWith(k))) return list[i].promptIndex;
+    if (promptKey(list[i].promptText || '') && samePromptText(list[i].promptText, text)) return list[i].promptIndex;
   }
   return null;
 }
@@ -636,9 +698,21 @@ export function closeTurn(
 function subsequencePrefixLength(prev: string[], next: string[]): number {
   let i = 0;
   for (const candidate of next) {
-    if (i < prev.length && prev[i] === candidate) i++;
+    if (i < prev.length && samePromptText(prev[i], candidate)) i++;
   }
   return i;
+}
+
+/**
+ * The transcript's numbering with the STORED text kept wherever the two
+ * describe the same prompt. The stored copy is the hook's — the full text,
+ * placeholders included — and the transcript's is the one that was cut at
+ * 1000 chars; adopting the transcript wholesale would trade the richer record
+ * for the poorer one on every reconcile.
+ */
+function adoptNumberingKeepingStored(prev: string[], next: string[]): string[] {
+  let i = 0;
+  return next.map((candidate) => (i < prev.length && samePromptText(prev[i], candidate)) ? prev[i++] : candidate);
 }
 
 export function reconcilePromptHistory(
@@ -651,24 +725,26 @@ export function reconcilePromptHistory(
   if (next.length === 0) return [...prev];
 
   // Ordinary growth: everything we already recorded is still at the head.
-  if (next.length >= prev.length && prev.every((p, i) => p === next[i])) return [...next];
+  if (next.length >= prev.length && prev.every((p, i) => samePromptText(p, next[i]))) {
+    return [...prev, ...next.slice(prev.length)];
+  }
 
   // We started LATE: the transcript still contains everything we stored, in
   // order, plus turns we never saw (the ones before we existed, and entries
   // like an interrupt marker that fire no hook). The transcript is the
   // complete history, so adopt its numbering wholesale.
   const matched = subsequencePrefixLength(prev, next);
-  if (matched === prev.length) return [...next];
+  if (matched === prev.length) return adoptNumberingKeepingStored(prev, next);
   // Same, except the newest prompt hasn't reached the transcript yet — keep it
   // at the END so it takes the next index instead of colliding with the last
   // turn the transcript does know about.
-  if (matched === prev.length - 1) return [...next, prev[prev.length - 1]];
+  if (matched === prev.length - 1) return [...adoptNumberingKeepingStored(prev.slice(0, -1), next), prev[prev.length - 1]];
 
   // Transcript dropped earlier turns: find where its first surviving prompt
   // sits in our history, and append only the tail beyond the overlap.
   for (let start = 0; start < prev.length; start++) {
     let k = 0;
-    while (start + k < prev.length && k < next.length && prev[start + k] === next[k]) k++;
+    while (start + k < prev.length && k < next.length && samePromptText(prev[start + k], next[k])) k++;
     if (k > 0 && start + k === prev.length) return [...prev, ...next.slice(k)];
   }
 
@@ -689,12 +765,13 @@ export function reconcilePromptHistory(
   // Append only what the transcript has that our history does not, counted as
   // a MULTISET so a genuinely re-sent prompt still lands. `prev` is never
   // reordered or renumbered — an already-written row must keep its index.
-  const unaccounted = new Map<string, number>();
-  for (const p of prev) unaccounted.set(p, (unaccounted.get(p) ?? 0) + 1);
+  // Each stored entry can account for ONE transcript entry, matched by
+  // `samePromptText` rather than byte equality (see that function for why).
+  const unaccounted = [...prev];
   const fresh: string[] = [];
   for (const candidate of next) {
-    const held = unaccounted.get(candidate) ?? 0;
-    if (held > 0) unaccounted.set(candidate, held - 1); // already have a row for it
+    const at = unaccounted.findIndex((p) => samePromptText(p, candidate));
+    if (at >= 0) unaccounted.splice(at, 1); // already have a row for it
     else fresh.push(candidate);
   }
   return [...prev, ...fresh];
@@ -1127,7 +1204,37 @@ export function saveSessionState(state: SessionState, cwd?: string, sessionTag?:
     const tmpGlobalPath = globalPath + '.tmp.' + process.pid;
     fs.writeFileSync(tmpGlobalPath, JSON.stringify(globalState, null, 2), { mode: 0o600 });
     fs.renameSync(tmpGlobalPath, globalPath);
-  } catch { /* non-fatal */ }
+  } catch (err: unknown) {
+    // Non-fatal — the in-repo file is the primary — but never silent: the
+    // mirror is what `origin sessions --all` and cross-repo discovery read,
+    // and a session missing from it looked like a session that never ran.
+    debugLog('session-state', 'global mirror write failed (non-fatal)', {
+      sessionId: state.sessionId, message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Remove the ~/.origin/sessions mirror written under a session id this
+ * conversation no longer uses.
+ *
+ * The mirror is keyed by SESSION ID, not by tag. session-start reserves a
+ * provisional `local-` id before calling `session/start` and saves state under
+ * it, so the mirror gets a `local-<uuid>.json`; the registered id is then
+ * saved under its own name and the reservation's mirror is simply left
+ * behind — RUNNING, `pendingRegistration: true`, forever. This machine had 40
+ * of them beside 95 real sessions, one per session-start, and `origin
+ * sessions --all` listed every one as a live local session.
+ *
+ * Only the global mirror is touched. The per-repo state file is keyed by tag
+ * and was overwritten in place by the promotion.
+ */
+export function dropSessionMirror(sessionId: string | undefined | null): void {
+  if (typeof sessionId !== 'string' || !sessionId) return;
+  try {
+    const globalPath = path.join(os.homedir(), '.origin', 'sessions', `${sessionId.slice(0, 12)}.json`);
+    fs.unlinkSync(globalPath);
+  } catch { /* already gone, or never mirrored */ }
 }
 
 /**
@@ -1376,24 +1483,40 @@ export function markSessionEnded(state: SessionState): boolean {
   if (!state || (state as any).status === 'ENDED') return false;
   (state as any).status = 'ENDED';
   state.endedAt = state.endedAt || new Date().toISOString();
-  const writeAtomic = (p: string) => {
+  // The return value is the caller's ONLY signal. This used to swallow both
+  // writes and answer true regardless, so a session whose file could not be
+  // written was reported closed while its file still said RUNNING — and kept
+  // being picked for commit attribution, the exact zombie this exists to end.
+  const writeAtomic = (p: string): boolean => {
     try {
       const tmp = `${p}.tmp.${process.pid}`;
       fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
       fs.renameSync(tmp, p);
-    } catch { /* best effort */ }
+      return true;
+    } catch (err: unknown) {
+      debugLog('session-state', 'markSessionEnded: could not persist ENDED', {
+        path: p, message: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
   };
   const loadedFrom = (state as any).__statePath as string | undefined;
-  if (loadedFrom) writeAtomic(loadedFrom);
+  // Without a known file there is nothing durable to change; say so.
+  let durable = loadedFrom ? writeAtomic(loadedFrom) : false;
   // Keep the global mirror in sync (the file may have been read from .git).
   try {
     if (state.repoPath && state.sessionTag) {
       const cwdHash = crypto.createHash('md5').update(state.repoPath).digest('hex').slice(0, 12);
       const mirror = path.join(os.homedir(), '.origin', 'sessions', `${cwdHash}-${state.sessionTag}.json`);
-      if (mirror !== loadedFrom && fs.existsSync(mirror)) writeAtomic(mirror);
+      if (mirror !== loadedFrom && fs.existsSync(mirror)) {
+        // The mirror counts when it is the only copy we could reach.
+        if (writeAtomic(mirror) && !loadedFrom) durable = true;
+      }
     }
-  } catch { /* ignore */ }
-  return true;
+  } catch (err: unknown) {
+    debugLog('session-state', 'markSessionEnded: mirror lookup failed', { message: err instanceof Error ? err.message : String(err) });
+  }
+  return durable;
 }
 
 /**

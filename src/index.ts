@@ -36,6 +36,7 @@ import { devinSessionsCommand, devinSyncCommand } from './commands/devin.js';
 import { chatCommand } from './commands/chat.js';
 import { webCommand } from './commands/web.js';
 import { doctorCommand } from './commands/doctor.js';
+import { verifyCaptureCommand } from './commands/verify-capture.js';
 import { resetCommand } from './commands/reset.js';
 import { cleanCommand } from './commands/clean.js';
 import { configGetCommand, configSetCommand, configListCommand } from './commands/config-cmd.js';
@@ -246,6 +247,14 @@ program.command('doctor')
   .option('-f, --fix', 'Auto-fix issues found')
   .option('-v, --verbose', 'Show detailed diagnostic info')
   .action(doctorCommand);
+program.command('verify-capture')
+  .description('Check stored captures for rows that contradict themselves')
+  .option('--json', 'Emit the full record as JSON')
+  .option('-s, --session <id>', 'Only this session (id prefix)')
+  .option('-a, --agent <slug>', 'Only sessions from this agent')
+  .option('--all', 'Include sessions with no violations')
+  .option('--fail-on-contradiction', 'Exit 1 when any contradiction is found')
+  .action(verifyCaptureCommand);
 program.command('reset')
   .description('Clear local session state for this repo')
   .option('-f, --force', 'Force clear even if session looks active')

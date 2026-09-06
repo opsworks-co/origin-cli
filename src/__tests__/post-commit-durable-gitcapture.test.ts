@@ -28,6 +28,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
 const HOOKS = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -38,7 +39,7 @@ const HOOKS = path.join(
 
 /** The post-commit incremental-update send, isolated from the rest of hooks.ts. */
 function postCommitSendBlock(): string {
-  const src = fs.readFileSync(HOOKS, 'utf-8');
+  const src = hooksSource();
   const start = src.indexOf("debugLog('post-commit', 'sending incremental update'");
   expect(
     start,
@@ -66,7 +67,7 @@ describe('post-commit sends its gitCapture durably', () => {
   });
 
   it('imports durableUpdateSession from the queue module', () => {
-    const src = fs.readFileSync(HOOKS, 'utf-8');
+    const src = hooksSource();
     expect(src).toMatch(
       /import\s*\{[^}]*\bdurableUpdateSession\b[^}]*\}\s*from\s*'\.\.\/update-queue\.js'/,
     );

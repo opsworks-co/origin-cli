@@ -2,7 +2,8 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import { getLineBlame, getSessionContextForCommit, type SessionContext } from '../attribution.js';
-import { getGitRoot } from '../session-state.js';
+import { getGitRoot, getWorkingGitRoot } from '../session-state.js';
+import { provenanceRoots, resolveQueryTarget } from '../session-worktree.js';
 import { syncNotesFromRemote } from '../git-notes.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -76,27 +77,34 @@ export async function blameCommand(
   opts?: { line?: string; json?: boolean },
 ): Promise<void> {
   const cwd = process.cwd();
-  const repoPath = getGitRoot(cwd);
-  if (!repoPath) {
+  // Blame the tree the user is standing in. `getGitRoot` collapses a linked
+  // worktree onto its main checkout, so blaming there answered for the MAIN
+  // branch's copy of the file — a wrong answer, not an empty one, which is
+  // worse than what `why`/`prompts` did with the same root.
+  const roots = provenanceRoots(cwd, { gitRoot: getGitRoot, workingGitRoot: getWorkingGitRoot });
+  if (!roots) {
     console.error(chalk.red('Error: Not in a git repository.'));
     return;
   }
+  const { relPath, root: repoPath } = resolveQueryTarget(file, roots, cwd);
 
   // Pull attribution notes down from the remote before reading them, and
   // install the fetch refspec so future ordinary `git pull`s keep them
   // current. This is what makes blame work out-of-the-box on a fresh
-  // clone — `git clone` does not fetch refs/notes/* by itself.
-  syncNotesFromRemote(repoPath);
+  // clone — `git clone` does not fetch refs/notes/* by itself. Notes and the
+  // refspec live in the common dir every worktree shares, so this is a
+  // repo-level resource: the canonical root's job.
+  syncNotesFromRemote(roots.canonicalRoot);
 
   // Get line-level attribution
-  const attributions = getLineBlame(repoPath, file);
+  const attributions = getLineBlame(repoPath, relPath);
   if (attributions.length === 0) {
     console.error(chalk.red(`Error: Could not get blame for ${file}. File may not exist or have no commits.`));
     return;
   }
 
   // Read file content for display
-  const fullPath = path.isAbsolute(file) ? file : path.join(repoPath, file);
+  const fullPath = path.resolve(repoPath, relPath);
   let fileLines: string[] = [];
   try {
     fileLines = fs.readFileSync(fullPath, 'utf-8').split('\n');

@@ -29,7 +29,17 @@ describe('build marks the bin executable', () => {
     expect(pkg.bin.origin).toBe('./dist/index.js');
   });
 
-  it('adds +x to a 0644 bin without disturbing the read bits', () => {
+  // POSIX-only. Windows has no exec bit: `fs.chmod` silently ignores 0o111
+  // there, so this asserts something the platform cannot represent and fails
+  // for a reason that has nothing to do with the code under test. It was one
+  // of the five files keeping `Vitest (CLI, native Windows)` red on main, and
+  // a permanently-red job masks the regressions it exists to catch.
+  //
+  // Narrow on purpose — only THIS assertion is POSIX-specific. The other three
+  // cases in this file (build wiring, stderr purity, missing-bin tolerance)
+  // are platform-agnostic and keep running on Windows, where they are just as
+  // capable of catching a break.
+  it.skipIf(process.platform === 'win32')('adds +x to a 0644 bin without disturbing the read bits', () => {
     const fake = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-chmod-'));
     fs.mkdirSync(path.join(fake, 'dist'));
     fs.mkdirSync(path.join(fake, 'scripts'));

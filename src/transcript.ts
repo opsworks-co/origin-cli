@@ -8,11 +8,15 @@ import { isInsideRepo, toRepoRelativePath , abbreviateHome, MAX_OUT_OF_REPO_FILE
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 interface ContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result';
+  type: 'text' | 'tool_use' | 'tool_result' | 'image';
   text?: string;
   name?: string;
   id?: string;
   input?: Record<string, any>;
+  // Anthropic inline image block: {type:'image', source:{media_type, data}}.
+  // Typed here because a pasted screenshot is a real part of the prompt —
+  // see countPromptImages.
+  source?: { type?: string; media_type?: string; data?: string };
 }
 
 interface MessageUsage {
@@ -477,7 +481,7 @@ export function parseTranscript(
         // Dropped from this session's totals, but still counted: it occupies a
         // native prompt index that the mapping rows keep using.
         if ((entry.type || (entry as any).role || entry.message?.role) === 'user'
-            && extractUserPrompt(entry)) {
+            && promptTextForEntry(entry)) {
           result.promptIndexBase++;
         }
         continue;
@@ -498,20 +502,11 @@ export function parseTranscript(
     }
 
     if (type === 'user') {
-      let prompt = extractUserPrompt(entry);
-      // Gemini JSONL puts content at the TOP level (`entry.content`)
-      // not under `message`. extractUserPrompt only reads
-      // `message?.content` — without this fallback every Gemini
-      // prompt was dropped from the dashboard.
-      if (!prompt && Array.isArray((entry as any).content)) {
-        const texts = (entry as any).content
-          .filter((b: any) => b && typeof b.text === 'string' && b.text)
-          .map((b: any) => b.text)
-          .join('\n');
-        if (texts) prompt = cleanPrompt(texts);
-      } else if (!prompt && typeof (entry as any).content === 'string') {
-        prompt = cleanPrompt((entry as any).content);
-      }
+      // promptTextForEntry also covers the TOP-level `entry.content` shape
+      // (Gemini JSONL) that extractUserPrompt doesn't read — without that
+      // fallback every Gemini prompt was dropped from the dashboard — and is
+      // the single predicate the image extractor numbers against.
+      const prompt = promptTextForEntry(entry);
       if (prompt) {
         result.prompts.push(prompt);
       }
@@ -713,13 +708,133 @@ export function isAgentInjectedEntry(entry: { isMeta?: boolean } | null | undefi
   return entry?.isMeta === true;
 }
 
+// ─── Image references inside a prompt ───────────────────────────────────────
+//
+// A screenshot IS the prompt more often than not — dragged in with no caption
+// at all. Three shapes carry one:
+//
+//   Claude Code  {type:'image', source:{media_type, data}}  (inline base64)
+//   Cursor       <image_files>1. /abs/path.png</image_files> (paths on disk)
+//   Codex        <image name=[Image #1] path="…">            (tag in the text)
+//
+// Every one of them used to make the prompt read as EMPTY: extractUserPrompt
+// looked for text blocks, found none, returned null, and the turn was never
+// opened. No PromptChange row, nothing in the dashboard, nothing in git notes —
+// and the image extractor below, which DID count these turns, then numbered
+// every later prompt one higher than the rest of the pipeline, so screenshots
+// landed on the wrong turn or 404'd against a row that didn't exist.
+//
+// The fix is one placeholder per image reference, spliced into the prompt text.
+// It restores the turn, and the upload rewrites it to `[image:<id>]` once the
+// bytes have an id (see spliceAttachmentId in the API). A placeholder that
+// stays bare is not a failure — it is the record that an image was part of the
+// prompt and its bytes were not stored (capture off, over the cap, file gone).
+export const IMAGE_PLACEHOLDER = '[image]';
+
+// Shared with extractClaudeCursorImages ON PURPOSE: the count here and the
+// images emitted there have to walk the same references in the same order, or
+// the placeholder a given `imageIndex` resolves to is not the image it came
+// from. Two copies of these patterns is exactly the class of bug above.
+const IMAGE_FILES_MARKER_RE = /<image_files>[\s\S]*?<\/image_files>/g;
+// POSIX absolute paths, and Windows drive paths — the leading-slash-only
+// version matched nothing under `C:\Users\…`, so on Windows a Cursor session's
+// screenshots were never read off disk at all.
+const IMAGE_FILE_PATH_RE = /(?:[A-Za-z]:[\\/]|\/)[^\s<>"]+\.(?:png|jpe?g|gif|webp|bmp|svg)/gi;
+const IMAGE_TAG_RE = /<image\b[^>]*>/gi;
+
+/** How many images this user entry carries, across all three shapes. */
+function countPromptImages(entry: any): number {
+  const content = entry?.message?.content ?? entry?.content;
+  const texts: string[] = [];
+  let count = 0;
+
+  if (typeof content === 'string') {
+    texts.push(content);
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (!block) continue;
+      if (block.type === 'image') count++;
+      else if (typeof block.text === 'string') texts.push(block.text);
+    }
+  }
+
+  for (const text of texts) {
+    if (!text) continue;
+    for (const marker of text.match(IMAGE_FILES_MARKER_RE) || []) {
+      count += (marker.match(IMAGE_FILE_PATH_RE) || []).length;
+    }
+    // Codex's `<image …>` tags. `</image>` can't match `<image\b`, so a paired
+    // tag counts once.
+    count += (text.match(IMAGE_TAG_RE) || []).length;
+  }
+
+  return count;
+}
+
+/** Append one placeholder per image. Null text + images → the placeholders ARE
+ *  the prompt, which is what makes a captionless screenshot a turn. */
+function withImagePlaceholders(text: string | null, imageCount: number): string | null {
+  if (imageCount <= 0) return text;
+  const marks = Array(imageCount).fill(IMAGE_PLACEHOLDER).join(' ');
+  return text ? `${text}\n${marks}` : marks;
+}
+
+/**
+ * Codex's user-turn gate: the text a rollout message contributes as a prompt,
+ * or null when it isn't one.
+ *
+ * Lives here rather than in agents/codex.ts because extractCodexImages has to
+ * number prompts exactly the way the rollout parsers do. It didn't: the parsers
+ * drop Codex's replayed AGENTS.md echo, the image extractor counted it, and
+ * since Codex replays that echo as the FIRST user event in every rollout of a
+ * repo carrying an AGENTS.md, every screenshot in every Codex session was
+ * uploaded one turn late.
+ */
+/**
+ * Gemini's user-turn text, or null when the message isn't a prompt.
+ *
+ * The three Gemini readers used to count prompts three different ways —
+ * parseGeminiTranscript pushed one row PER TEXT PART, extractGeminiPromptMappings
+ * counted every user message, extractGeminiImages counted only those with text
+ * or an inline image. Any message with two text parts, and any textless one,
+ * pushed them out of step. One function, one count.
+ */
+export function geminiUserPromptText(msg: any): string | null {
+  const parts: any[] = Array.isArray(msg?.parts)
+    ? msg.parts
+    : Array.isArray(msg?.content)
+      ? msg.content
+      : [];
+  const images = parts.filter((p: any) => p && (p.inlineData || p.inline_data)).length;
+  const texts = parts
+    .filter((p: any) => typeof p?.text === 'string' && p.text)
+    .map((p: any) => p.text)
+    .join('\n');
+  const raw = texts || (typeof msg?.content === 'string' ? msg.content : '');
+  return withImagePlaceholders(raw ? cleanPrompt(raw) : null, images);
+}
+
+export function codexUserPromptText(text: string): string | null {
+  if (!text) return null;
+  if (text.includes('<!-- origin-managed -->') || /^#\s+AGENTS\.md instructions for /m.test(text)) {
+    return null;
+  }
+  const cleaned = text
+    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, '')
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, '')
+    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, '')
+    .trim();
+  return cleaned || null;
+}
+
 function extractUserPrompt(entry: TranscriptLine): string | null {
   if (isAgentInjectedEntry(entry)) return null;
 
   const content = entry.message?.content;
+  const images = countPromptImages(entry);
 
   if (typeof content === 'string') {
-    return cleanPrompt(content);
+    return withImagePlaceholders(cleanPrompt(content), images);
   }
 
   if (Array.isArray(content)) {
@@ -729,11 +844,40 @@ function extractUserPrompt(entry: TranscriptLine): string | null {
       .map((b) => b.text!)
       .join('\n');
 
-    if (texts) {
-      return cleanPrompt(texts);
-    }
+    return withImagePlaceholders(texts ? cleanPrompt(texts) : null, images);
   }
 
+  return null;
+}
+
+/**
+ * The prompt text for a user entry, INCLUDING the top-level-`content` shape
+ * (Gemini JSONL) that extractUserPrompt doesn't read.
+ *
+ * Exported because prompt NUMBERING has to come from one place. parseTranscript
+ * builds the rows the server stores; extractClaudeCursorImages numbers the
+ * images that attach to them. When those two counted prompts independently they
+ * drifted apart on the first captionless screenshot — so they now share this.
+ */
+export function promptTextForEntry(entry: any): string | null {
+  const direct = extractUserPrompt(entry as TranscriptLine);
+  if (direct) return direct;
+
+  // Deliberately NOT re-gated on isAgentInjectedEntry: the fallback has always
+  // run whenever the direct read came back empty, and tightening it here would
+  // silently drop prompts from a shape this function is only reached for.
+  const top = entry?.content;
+  const images = countPromptImages(entry);
+  if (Array.isArray(top)) {
+    const texts = top
+      .filter((b: any) => b && typeof b.text === 'string' && b.text)
+      .map((b: any) => b.text)
+      .join('\n');
+    return withImagePlaceholders(texts ? cleanPrompt(texts) : null, images);
+  }
+  if (typeof top === 'string') {
+    return withImagePlaceholders(cleanPrompt(top), images);
+  }
   return null;
 }
 
@@ -765,6 +909,20 @@ export function cleanPrompt(text: string): string | null {
     .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/g, '')
     .replace(/<output-file>[\s\S]*?<\/output-file>/g, '')
     .replace(/<command-name>[\s\S]*?<\/command-name>/g, '')
+    // The rest of a slash command's transcript footprint. `/model` leaves
+    // THREE user entries: the caveat (isMeta, dropped structurally), the
+    // command itself — `<command-name>` plus `<command-message>` and
+    // `<command-args>` — and its `<local-command-stdout>`. Only the first
+    // tag was stripped, so the other two survived as prompts, numbered
+    // turns the hooks never saw, and every later hook-side turn was mapped
+    // onto the wrong row. Prod vodka a219d616: rows 2 and 3 were
+    // "<command-message>model" and "Set model to …"; the work of the fifth
+    // real prompt landed on row 4 and row 7 doubled it.
+    .replace(/<command-message>[\s\S]*?<\/command-message>/g, '')
+    .replace(/<command-args>[\s\S]*?<\/command-args>/g, '')
+    .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, '')
+    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, '')
+    .replace(/<local-command-[^>]*>[\s\S]*?<\/local-command-[^>]*>/g, '')
     // Codex wraps AGENTS.md context in <INSTRUCTIONS>...</INSTRUCTIONS> on
     // its first user turn. Strip the envelope so real text that follows
     // (if any) still makes it through.
@@ -791,11 +949,21 @@ export function cleanPrompt(text: string): string | null {
     .replace(/^#\s*Files mentioned by the user:[\s\S]*?##\s*My request for Codex:\s*/im, '')
     .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, '')
     .replace(/<image\b[^>]*\/?>/gi, '')
+    // Cursor's on-disk image envelope. Stripped for the same reason as the
+    // Codex tags above: countPromptImages has already turned it into one
+    // `[image]` placeholder per path, so leaving the raw marker in would put
+    // the same screenshot in the prompt twice — once as a wall of absolute
+    // paths, once as the thing the reader can actually look at.
+    .replace(/<image_files>[\s\S]*?<\/image_files>/gi, '')
     .trim();
 
   if (!cleaned) return null;
 
   // Skip prompts that are purely hook feedback or system messages
+  // Claude Code records an interrupt as a user entry. Nobody typed it, no
+  // hook fired for it, and it is not a turn.
+  if (/^\[Request interrupted by user( for tool use)?\]$/.test(cleaned)) return null;
+
   if (isSystemMessage(cleaned)) return null;
 
   // Truncate very long prompts
@@ -854,19 +1022,12 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript, repoRoots?
       const msgType = msg.type || msg.role || '';
       const contentParts = msg.content || msg.parts;
 
-      // User messages
+      // User messages. ONE row per message — a message whose parts split the
+      // user's text in two is still one thing they typed, and pushing a row per
+      // part put this list out of step with every other Gemini reader.
       if (msgType === 'user') {
-        if (Array.isArray(contentParts)) {
-          for (const part of contentParts) {
-            if (part.text) {
-              const cleaned = cleanPrompt(part.text);
-              if (cleaned) result.prompts.push(cleaned);
-            }
-          }
-        } else if (typeof contentParts === 'string') {
-          const cleaned = cleanPrompt(contentParts);
-          if (cleaned) result.prompts.push(cleaned);
-        }
+        const cleaned = geminiUserPromptText(msg);
+        if (cleaned) result.prompts.push(cleaned);
       }
 
       // Model/Gemini messages
@@ -1698,7 +1859,10 @@ function extractGeminiPromptMappings(raw: string, repoRoots?: string[]): PromptF
     let currentEdits: Array<{ file: string; toolName: string; input: Record<string, any> }> = [];
 
     for (const msg of messages) {
-      if (msg.role === 'user' && msg.parts) {
+      // Gated on the same text the prompt list is built from, so a message that
+      // contributes no row here consumes no index there either.
+      const userText = msg.role === 'user' && msg.parts ? geminiUserPromptText(msg) : null;
+      if (userText) {
         // Save previous mapping
         if (currentPromptIndex >= 0) {
           mappings.push({
@@ -1711,9 +1875,7 @@ function extractGeminiPromptMappings(raw: string, repoRoots?: string[]): PromptF
         }
 
         currentPromptIndex++;
-        const texts = msg.parts.filter((p) => p.text).map((p) => p.text!).join('\n');
-        const cleaned = cleanPrompt(texts);
-        currentPromptText = (cleaned || '').slice(0, 1000);
+        currentPromptText = userText.slice(0, 1000);
         currentFiles = new Set<string>();
         currentEdits = [];
       }
@@ -2483,9 +2645,12 @@ export function estimateCost(
 //   {type: 'image', source: {type: 'base64', media_type: 'image/png',
 //                            data: '<base64>'}}
 //
-// Cursor's format is similar when it writes through the Claude Code
-// transcript path. (For Cursor sessions that capture through Cursor's
-// own SQLite, image extraction lives in a separate code path — Phase 2.)
+// Cursor writes the same JSONL shape, sometimes with the image inline and
+// more often as an <image_files> marker pointing at a file on disk; both are
+// handled below. (An earlier note here claimed Cursor sessions captured
+// "through Cursor's own SQLite" needed a separate Phase 2 extractor. They
+// don't: agents/cursor.ts resolves every session to its agent-transcripts
+// JSONL and only consults SQLite to look up the model.)
 //
 // Returns `{promptIndex, mediaType, base64}` entries in order. The
 // caller uploads each to the Origin API, gets back a stable id, and
@@ -2589,6 +2754,10 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
     }
     const type = entry.type || entry.role || entry.message?.role;
     if (type !== 'user') continue;
+    // A sub-agent's dispatch prompts are not the user's, and parseTranscript
+    // skips them without consuming an index — so counting them here would put
+    // every later image one row too high.
+    if (entry.isSidechain) continue;
 
     const content = entry.message?.content ?? entry.content;
     // String content can still carry a Cursor <image_files> marker.
@@ -2607,14 +2776,13 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
       continue;
     }
 
-    // Bump the prompt index whenever this is a real user turn —
-    // either text OR an image block. Image-only prompts (drag-and-
-    // drop a screenshot with no caption) are common and must not be
-    // silently dropped just because the text gate was too strict.
-    const hasText = textParts.some((t) => t && t.trim().length > 0);
-    const hasImageBlock = blocks.some((b: any) => b && b.type === 'image');
-    const hasMarker = textParts.some((t) => t && /<image_files>[\s\S]*?<\/image_files>/.test(t));
-    if (!hasText && !hasImageBlock && !hasMarker) continue;
+    // Number against the SAME predicate that builds the rows these images
+    // attach to. This extractor used to decide for itself what counted as a
+    // prompt ("text OR an image block"), which was correct in isolation and
+    // wrong in company: parseTranscript's text-only gate skipped captionless
+    // screenshots, so from the first one on, every image was uploaded against
+    // a promptIndex one higher than the row it belonged to.
+    if (promptTextForEntry(entry) === null) continue;
 
     promptIndex++;
     imageIndex = 0;
@@ -2623,6 +2791,12 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
     //     Cursor) — already-decoded payloads.
     for (const block of blocks) {
       if (!block || block.type !== 'image') continue;
+      // Consumed BEFORE the payload checks. `imageIndex` addresses the Nth
+      // `[image]` placeholder in the prompt text, and countPromptImages emits
+      // one for every reference it sees — so an image we can't read still owns
+      // its slot. Skipping the increment would slide every later image one
+      // placeholder to the left.
+      const slot = imageIndex++;
       const source = block.source || {};
       const mediaType = typeof source.media_type === 'string' ? source.media_type : 'image/png';
       const data = typeof source.data === 'string' ? source.data : '';
@@ -2630,7 +2804,7 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
       const sizeBytes = Math.floor((data.length * 3) / 4);
       out.push({
         promptIndex,
-        imageIndex: imageIndex++,
+        imageIndex: slot,
         mediaType,
         base64: data,
         sizeBytes,
@@ -2646,7 +2820,7 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
     const MAX_BYTES_PER_IMAGE = 5 * 1024 * 1024;
     for (const text of textParts) {
       if (!text) continue;
-      const markers = text.match(/<image_files>[\s\S]*?<\/image_files>/g);
+      const markers = text.match(IMAGE_FILES_MARKER_RE);
       if (!markers) continue;
       for (const marker of markers) {
         // Pull every absolute path with an image extension out of the
@@ -2654,8 +2828,12 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
         // accept any token ending in a known extension so subtle
         // format changes (e.g. dashes, no trailing space) don't
         // silently drop captures.
-        const paths = marker.match(/\/[^\s<>"]+\.(?:png|jpe?g|gif|webp|bmp|svg)/gi) || [];
+        const paths = marker.match(IMAGE_FILE_PATH_RE) || [];
         for (const p of paths) {
+          // Same rule as the inline blocks above: the slot is consumed by the
+          // reference, not by the successful read, so a cleaned-up asset leaves
+          // a bare `[image]` behind instead of shifting its neighbours.
+          const slot = imageIndex++;
           try {
             const st = fs.statSync(p);
             if (!st.isFile()) continue;
@@ -2672,7 +2850,7 @@ function extractClaudeCursorImages(lines: string[]): ExtractedImage[] {
             const base64 = buf.toString('base64');
             out.push({
               promptIndex,
-              imageIndex: imageIndex++,
+              imageIndex: slot,
               mediaType,
               base64,
               sizeBytes: st.size,
@@ -2714,27 +2892,27 @@ function extractCodexImages(lines: string[]): ExtractedImage[] {
     const content = payload.content;
     if (!Array.isArray(content)) continue;
 
-    // Treat this as a real prompt if it carries text OR an image
-    // block — same logic as the Claude/Cursor extractor. Skipping
-    // on text-only would silently drop "drag a screenshot, hit
-    // enter" prompts (no caption) that the user clearly meant as a
-    // turn.
-    const hasText = content.some(
-      (b: any) =>
-        b &&
-        (b.type === 'text' || b.type === 'input_text' || b.type === 'output_text') &&
-        typeof b.text === 'string' && b.text.trim().length > 0,
-    );
-    const hasImageBlock = content.some(
-      (b: any) => b && (b.type === 'input_image' || b.type === 'image'),
-    );
-    if (!hasText && !hasImageBlock) continue;
+    // Number against the same gate the rollout parsers use (codexUserPromptText),
+    // over the same text they build — text blocks joined, one placeholder per
+    // image. Deciding independently is what put every Codex screenshot on the
+    // wrong turn: the parsers drop the replayed AGENTS.md echo and this didn't.
+    const parsedText = content
+      .map((b: any) => {
+        if (!b) return '';
+        if (b.type === 'input_image' || b.type === 'image') return IMAGE_PLACEHOLDER;
+        return typeof b.text === 'string' ? b.text : '';
+      })
+      .filter(Boolean)
+      .join('');
+    if (!codexUserPromptText(parsedText)) continue;
 
     promptIndex++;
     imageIndex = 0;
 
     for (const block of content) {
       if (!block || (block.type !== 'input_image' && block.type !== 'image')) continue;
+      // Slot consumed by the reference — see extractClaudeCursorImages.
+      const slot = imageIndex++;
       // image_url can be either a string ("data:image/png;base64,…")
       // or an object `{url: "data:…"}`. Codex versions disagree.
       const url: string | undefined =
@@ -2755,7 +2933,7 @@ function extractCodexImages(lines: string[]): ExtractedImage[] {
       const sizeBytes = Math.floor((data.length * 3) / 4);
       out.push({
         promptIndex,
-        imageIndex: imageIndex++,
+        imageIndex: slot,
         mediaType,
         base64: data,
         sizeBytes,
@@ -2793,14 +2971,10 @@ function extractGeminiImages(raw: string): ExtractedImage[] {
       : Array.isArray(msg?.content)
         ? msg.content
         : [];
-    // Count this as a prompt if it carries text OR an inline image
-    // part — Gemini supports image-only turns (drag a screenshot in
-    // with no caption) and we shouldn't silently drop them.
-    const hasText = parts.some(
-      (p: any) => typeof p?.text === 'string' && p.text.trim().length > 0,
-    ) || typeof msg?.content === 'string';
-    const hasInline = parts.some((p: any) => p && (p.inlineData || p.inline_data));
-    if (!hasText && !hasInline) continue;
+    // Same gate as the prompt list and the mapping extractor. Gemini supports
+    // image-only turns (drag a screenshot in with no caption) and they now
+    // carry a `[image]` placeholder, so all three see the same turns.
+    if (!geminiUserPromptText(msg)) continue;
 
     promptIndex++;
     imageIndex = 0;
@@ -2811,13 +2985,15 @@ function extractGeminiImages(raw: string): ExtractedImage[] {
       // straight in the JSON.
       const inline = part?.inlineData || part?.inline_data;
       if (!inline) continue;
+      // Slot consumed by the reference — see extractClaudeCursorImages.
+      const slot = imageIndex++;
       const mediaType = inline.mimeType || inline.mime_type || 'image/png';
       const b64 = typeof inline.data === 'string' ? inline.data : '';
       if (!b64) continue;
       const sizeBytes = Math.floor((b64.length * 3) / 4);
       out.push({
         promptIndex,
-        imageIndex: imageIndex++,
+        imageIndex: slot,
         mediaType,
         base64: b64,
         sizeBytes,

@@ -12,6 +12,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { dropPhantomNestedRepoDeletions } from '../commands/hooks.js';
+import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
 let repo: string;
 let turnStart: number;
@@ -114,10 +116,7 @@ describe('dropPhantomNestedRepoDeletions', () => {
 // bug was on Antigravity, so it was a no-op for the agent it was written for.
 // This filter has the same exposure: the capture it must clean is agy's.
 describe('the filter is actually wired into the Antigravity capture', () => {
-  const src = fs.readFileSync(
-    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'commands', 'hooks.ts'),
-    'utf-8',
-  );
+  const src = hooksSource();
 
   it('runs on the agy diff, after the concurrent-dirt scoping', () => {
     const at = src.indexOf('antigravity capture: dropped concurrent-agent dirt');

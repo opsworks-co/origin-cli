@@ -23,6 +23,8 @@ export interface CompletenessChange {
   diff: string;
   filesChanged: string[];
   commitSha?: string | null;
+  /** 'ledger' marks an OBSERVED diff; nothing reconstructed is attached to it. */
+  diffSource?: string;
   linesAdded?: number;
   linesRemoved?: number;
 }
@@ -86,6 +88,11 @@ export function attachOrphanCommitFiles(
     const owner =
       changes.find((ch) => ch.commitSha === commit.sha) || changes[changes.length - 1];
     if (!owner) continue;
+    // A ledger-owned diff is an OBSERVATION of what the turn wrote. A file in
+    // its commit that the ledger did not see was swept in by `git commit -a`
+    // or a merge — someone else's work, or no one's. Attaching it here would
+    // put a reconstruction inside an observed diff, the blend stage 2 forbids.
+    if (owner.diffSource === 'ledger') continue;
     for (const f of commit.filesChanged || []) {
       const relF = rel(f);
       if (covered.has(relF)) continue; // already attributed to some prompt

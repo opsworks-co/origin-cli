@@ -2,8 +2,8 @@
  * Shared secret-scanner heuristics.
  *
  * THIS FILE IS THE CANONICAL COPY. `apps/api/src/services/secret-rules.ts` is
- * generated from it by `scripts/sync-secret-rules.mjs`, and a test in apps/api
- * fails if the two drift. Edit here, then run `pnpm sync:secret-rules`.
+ * generated from it by `scripts/sync-shared-modules.mjs`, and a test in apps/api
+ * fails if the two drift. Edit here, then run `pnpm sync:shared-modules`.
  *
  * Why a copy rather than a shared package: the CLI ships as an `npm pack`
  * tarball that users install with npm, so a `workspace:*` dependency would be
@@ -104,6 +104,27 @@ export function isNonSecretAssignmentValue(value: string, isPasswordRule = false
  *
  * The domain checks are ANCHORED — `example.com.evil.io` is not reserved.
  */
+/**
+ * Is this path a test, fixture or mock — a place where an email address is a
+ * stand-in identity rather than a person's data?
+ *
+ * Every git-backed test in this repo sets `user.email = 't@t.co'` so that
+ * `git commit` works in a throwaway repo; two dozen files carry the line. The
+ * PII_EMAIL rule reported each one as "Hardcoded Email", and a session that
+ * added one more such test opened its Security tab to fixture identities.
+ * `isNonPersonalEmail` cannot help: `t.co` is a real TLD, and fixtures use
+ * whatever is shortest.
+ *
+ * Scoped to PII_EMAIL only by the caller. A credential in a test file is still
+ * a credential — this exempts addresses, not secrets.
+ */
+export function isTestFixturePath(filePath: string): boolean {
+  const p = (filePath || '').replace(/\\/g, '/').toLowerCase();
+  if (!p) return false;
+  if (/(?:^|\/)(?:__tests__|__fixtures__|__mocks__|__snapshots__|fixtures|test|tests|spec|specs|testdata)\//.test(p)) return true;
+  return /\.(?:test|spec|fixture|fixtures|mock|mocks|stories)\.[a-z0-9]+$/.test(p);
+}
+
 export function isNonPersonalEmail(value: string): boolean {
   const v = (value || '').trim().replace(/^['"]|['"]$/g, '').toLowerCase();
   const at = v.lastIndexOf('@');

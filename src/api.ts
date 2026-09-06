@@ -537,12 +537,16 @@ export const api = {
   // per image / 50 MB per session and gates on the user's
   // `captureImages` opt-in flag — a 403 means "user has image capture
   // disabled," and we should stop trying for the rest of the session.
-  // Returns the stable attachment id which the caller splices into the
-  // prompt text as `[image:<id>]`.
+  // `imageIndex` addresses which `[image]` placeholder in the prompt text
+  // this is, and the server rewrites that one to `[image:<id>]`.
+  //
+  // `description` is the server's one-line caption of the image, returned so
+  // the CLI can fold it into the prompt text it writes to git notes. Null when
+  // captioning is off or failed — a bare placeholder, not an error.
   uploadAttachment: (
     sessionId: string,
-    payload: { promptIndex: number; mediaType: string; base64: string },
-  ): Promise<{ id: string; deduped?: boolean }> =>
+    payload: { promptIndex: number; imageIndex?: number; mediaType: string; base64: string },
+  ): Promise<{ id: string; deduped?: boolean; description?: string | null }> =>
     request(`/api/sessions/${sessionId}/attachments`, {
       method: 'POST',
       body: JSON.stringify(payload),

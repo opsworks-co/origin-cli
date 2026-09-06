@@ -4,6 +4,12 @@ import path from 'path';
 // ─── Default Ignore Patterns ──────────────────────────────────────────────
 
 const DEFAULT_IGNORE_PATTERNS = [
+  // Interpreter caches — never authored, and their atomic-write temp names
+  // (`x.cpython-314.pyc.4392877312`) defeat a plain `*.pyc`.
+  '__pycache__',
+  '__pycache__/**',
+  '*.pyc',
+  '*.pyc.*',
   // Lock files
   'package-lock.json',
   'yarn.lock',

@@ -23,11 +23,9 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
-const hooksSrc = fs.readFileSync(
-  path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'commands', 'hooks.ts'),
-  'utf-8',
-);
+const hooksSrc = hooksSource();
 
 describe('post-commit commit ingest', () => {
   it('is awaited, so the hook cannot exit before the commit lands', () => {

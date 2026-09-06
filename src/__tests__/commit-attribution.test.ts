@@ -97,3 +97,71 @@ describe('commit attribution by staged-file overlap + staleness', () => {
     expect(res.treeClean).toBe(true); // everything committed → turn shows "committed"
   });
 });
+
+// Prod vodka, commit 2c82b8a: the live Claude session was mid-turn with the
+// committed files in its ledger; a re-opened Claude conversation with no
+// prompt claimed the same files through the working-tree fallback; the two
+// tied, the tie went to process detection over the WHOLE pool, and a Codex
+// zombie from seven hours earlier — half the overlap, but a Codex process was
+// running — got the trailer. The commit then rendered as somebody else's and
+// the real session's turn as "uncommitted".
+describe('commit attribution — the turn that is running wins', () => {
+  let dir: string;
+  function writeSession(tag: string, state: Record<string, any>) {
+    const f = path.join(dir, '.git', `origin-session-${tag}.json`);
+    fs.writeFileSync(f, JSON.stringify({ sessionTag: tag, status: 'RUNNING', ...state }));
+    return f;
+  }
+  beforeEach(() => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'origin-attr2-')));
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@o.dev');
+    git(dir, 'config', 'user.name', 'T');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'b\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'seed');
+  });
+  afterEach(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  it('a session mid-turn with the staged files in its ledger beats every completed mapping', () => {
+    const base = git(dir, 'rev-parse', 'HEAD');
+    fs.appendFileSync(path.join(dir, 'a.txt'), 'live edit\n');
+    fs.appendFileSync(path.join(dir, 'b.txt'), 'live edit\n');
+    // The zombie touched both files a day ago, in completed turns.
+    writeSession('zombie', { sessionId: 'codex-0000', agentSlug: 'codex', model: 'gpt-5', repoPath: dir, lastCwd: dir, headShaAtStart: base, startedAt: '2026-06-22T10:00:00Z', prompts: ['x', 'y'], completedPromptMappings: [{ promptIndex: 0, filesChanged: ['a.txt', 'b.txt'] }] });
+    // The live session is in turn 2, whose ledger holds the two writes; its
+    // completed mapping names only a.txt.
+    writeSession('live', { sessionId: 'claude-1111', agentSlug: 'claude-code', model: 'claude', repoPath: dir, lastCwd: dir, headShaAtStart: base, startedAt: '2026-06-23T10:05:00Z', prompts: ['p1', 'p2'], completedPromptMappings: [{ promptIndex: 0, filesChanged: ['a.txt'] }], activeTurn: { index: 1, turnId: 't_live', promptText: 'p2', openedAt: '2026-06-23T10:06:00Z' }, liveEdits: [{ promptIndex: 1, toolName: '__shell_probe__', edits: [{ file: 'a.txt' }, { file: 'b.txt' }] }] });
+    git(dir, 'add', 'a.txt', 'b.txt');
+    expect(pickActiveSessionForCommit(dir)?.sessionId).toBe('claude-1111');
+  });
+
+  it('a re-opened conversation with no prompt claims no files', () => {
+    const base = git(dir, 'rev-parse', 'HEAD');
+    fs.appendFileSync(path.join(dir, 'a.txt'), 'edit\n');
+    const shadow = createShadowCommit(dir, 'ghost-start');
+    writeSession('ghost', { sessionId: 'claude-ghost', agentSlug: 'claude-code', model: 'claude', repoPath: dir, lastCwd: dir, headShaAtStart: base, sessionStartShadowSha: shadow, startedAt: '2026-06-23T10:05:09Z', prompts: [] });
+    writeSession('real', { sessionId: 'claude-real', agentSlug: 'claude-code', model: 'claude', repoPath: dir, lastCwd: dir, headShaAtStart: base, startedAt: '2026-06-23T10:05:00Z', prompts: ['p1'], completedPromptMappings: [{ promptIndex: 0, filesChanged: ['a.txt'] }] });
+    fs.appendFileSync(path.join(dir, 'a.txt'), 'more\n');
+    git(dir, 'add', 'a.txt');
+    expect(pickActiveSessionForCommit(dir)?.sessionId).toBe('claude-real');
+  });
+
+  it('a tie is broken among the tied, never by a session with less overlap', () => {
+    const base = git(dir, 'rev-parse', 'HEAD');
+    fs.appendFileSync(path.join(dir, 'a.txt'), 'edit\n');
+    fs.appendFileSync(path.join(dir, 'b.txt'), 'edit\n');
+    // Two sessions tie on both files; a third — whatever agent process may be
+    // running on this machine — has only one. The third must never win.
+    writeSession('one', { sessionId: 'tie-1', agentSlug: 'cursor', model: 'composer', repoPath: dir, lastCwd: dir, headShaAtStart: base, startedAt: '2026-06-23T10:00:00Z', lastStopAt: '2026-06-23T10:01:00Z', prompts: ['p'], completedPromptMappings: [{ promptIndex: 0, filesChanged: ['a.txt', 'b.txt'] }] });
+    writeSession('two', { sessionId: 'tie-2', agentSlug: 'cursor', model: 'composer', repoPath: dir, lastCwd: dir, headShaAtStart: base, startedAt: '2026-06-23T10:00:00Z', lastStopAt: '2026-06-23T10:01:00Z', prompts: ['p'], completedPromptMappings: [{ promptIndex: 0, filesChanged: ['a.txt', 'b.txt'] }] });
+    for (const slug of ['codex', 'claude-code', 'antigravity', 'gemini', 'devin', 'copilot']) {
+      writeSession(`half-${slug}`, { sessionId: `half-${slug}`, agentSlug: slug, model: slug, repoPath: dir, lastCwd: dir, headShaAtStart: base, startedAt: '2026-06-23T10:00:00Z', prompts: ['p'], completedPromptMappings: [{ promptIndex: 0, filesChanged: ['a.txt'] }] });
+    }
+    git(dir, 'add', 'a.txt', 'b.txt');
+    const picked = pickActiveSessionForCommit(dir);
+    expect(picked === null || picked.sessionId.startsWith('tie-')).toBe(true);
+  });
+});

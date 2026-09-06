@@ -29,6 +29,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { __testSessionScopedCommittedDiff } from '../commands/hooks.js';
+import { hooksSource } from './helpers/hooks-source.js';
 
 const ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
 const git = (dir: string, args: string[]) =>
@@ -107,7 +108,7 @@ describe('every per-turn caller passes a window', () => {
   );
 
   it('leaves no unwindowed call outside the session-diff site', () => {
-    const src = fs.readFileSync(HOOKS, 'utf-8');
+    const src = hooksSource();
     const lines = src.split('\n');
     const offenders: string[] = [];
 

@@ -1,3 +1,4 @@
+import { spawnSync } from 'child_process';
 import { git, gitDetailed, gitOrNull } from './utils/exec.js';
 import { stripIgnoredSectionsFromDiff } from './ignore-patterns.js';
 import * as path from 'path';
@@ -963,4 +964,35 @@ function emptyResult(headBefore: string): GitCaptureResult {
     workingTreeDiff: '',
     baselineIsShadow: false,
   };
+}
+
+/**
+ * Which of `files` does git ignore, asked in ONE call.
+ *
+ * `git check-ignore --stdin` answers a whole list at once, so this costs one
+ * process per capture rather than one per observed write — the watcher sees
+ * writes constantly and must never shell out on that path.
+ *
+ * Returns an EMPTY set on any failure, so an unanswerable question keeps every
+ * file. Dropping a file the agent really wrote is far worse than keeping a
+ * generated one: the first is work that vanishes, the second is a line item a
+ * reader can dismiss.
+ */
+export function gitIgnoredFiles(repoPath: string, files: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  if (!repoPath || files.length === 0) return out;
+  try {
+    const res = spawnSync(
+      'git',
+      ['-C', repoPath, 'check-ignore', '--stdin'],
+      { input: files.join('\n'), encoding: 'utf-8', timeout: 10_000, windowsHide: true },
+    );
+    // Exit 0 = some ignored, 1 = none ignored, anything else = a real failure.
+    if (res.error || (res.status !== 0 && res.status !== 1)) return out;
+    for (const line of String(res.stdout || '').split('\n')) {
+      const f = line.trim();
+      if (f) out.add(f);
+    }
+  } catch { /* keep everything */ }
+  return out;
 }

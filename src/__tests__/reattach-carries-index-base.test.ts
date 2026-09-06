@@ -18,6 +18,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { hooksSource } from './helpers/hooks-source.js';
 
 const HOOKS = path.join(
   path.dirname(fileURLToPath(import.meta.url)), '..', 'commands', 'hooks.ts',
@@ -25,7 +26,7 @@ const HOOKS = path.join(
 
 /** The re-attach state literal, from `state = {` after the carry-over log. */
 function reattachLiteral(): string {
-  const src = fs.readFileSync(HOOKS, 'utf-8');
+  const src = hooksSource();
   const anchor = src.indexOf('auto-create re-attach — carrying prompt history');
   expect(anchor).toBeGreaterThan(-1);
   const start = src.indexOf('state = {', anchor);

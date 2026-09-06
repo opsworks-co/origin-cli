@@ -8,6 +8,12 @@
 //
 // Availability is per-agent and was verified against real stores:
 //   claude-code  ✓  transcript records {"type":"custom-title","customTitle":…}
+//                   (a rename, or the desktop app naming the chat) and
+//                   {"type":"ai-title","aiTitle":…} (the title the terminal
+//                   REPL generates from the first prompt). Claude Code's own
+//                   /resume picker shows customTitle ?? aiTitle; so do we.
+//                   A custom title may also sit in a sidecar next to the
+//                   transcript: <transcript dir>/<sessionId>/custom-title.json
 //   cursor       ✓  state.vscdb → composerHeaders.value.name
 //   codex        ✗  rollout files carry no conversation title (the `summary`
 //                   fields there are reasoning traces, not names)
@@ -31,29 +37,89 @@ function clean(raw: unknown): string | null {
   return t;
 }
 
+/** Everything Claude Code has recorded as this conversation's name. */
+export interface ClaudeSessionTitles {
+  /** The transcript exists and was readable. */
+  transcriptRead: boolean;
+  /** Last `custom-title` record in the transcript — null when none, or when the last one cleared the title. */
+  customTitle: string | null;
+  /** Whether any `custom-title` record was seen at all (a cleared title still counts). */
+  hasCustomTitleRecord: boolean;
+  /** `<transcript dir>/<sessionId>/custom-title.json`, when present. */
+  sidecarTitle: string | null;
+  /** Last `ai-title` record — the auto-generated title. */
+  aiTitle: string | null;
+}
+
 /**
- * Claude Code writes the sidebar title into the transcript as its own record
- * type, rewritten on every rename — so the LAST one is current.
+ * Read every title source Claude Code keeps for one transcript.
+ *
+ * Both record types are rewritten on change — Claude Code itself treats them
+ * as "last-wins" — so the LAST record of each kind is current, and one
+ * backward scan finds both. Exposed separately from claudeSessionName so a
+ * caller that ends up with no name can log WHICH sources were empty: the
+ * Windows sessions that shipped nameless for weeks were indistinguishable in
+ * hooks.log from sessions nobody had named.
  */
-export function claudeSessionName(transcriptPath: string): string | null {
+export function claudeSessionTitles(transcriptPath: string): ClaudeSessionTitles {
+  const out: ClaudeSessionTitles = { transcriptRead: false, customTitle: null, hasCustomTitleRecord: false, sidecarTitle: null, aiTitle: null };
+  if (!transcriptPath) return out;
   try {
-    if (!fs.existsSync(transcriptPath)) return null;
+    if (!fs.existsSync(transcriptPath)) return out;
     const lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    out.transcriptRead = true;
+    let sawAi = false;
     // Scan backwards: the title is rewritten on rename, and these files run to
-    // tens of thousands of lines.
-    for (let i = lines.length - 1; i >= 0; i--) {
+    // tens of thousands of lines. Stop once both kinds have been seen.
+    for (let i = lines.length - 1; i >= 0 && !(out.hasCustomTitleRecord && sawAi); i--) {
       const line = lines[i];
-      if (!line || line.indexOf('custom-title') === -1) continue;
+      if (!line) continue;
+      const isCustom = !out.hasCustomTitleRecord && line.indexOf('custom-title') !== -1;
+      const isAi = !sawAi && line.indexOf('ai-title') !== -1;
+      if (!isCustom && !isAi) continue;
       try {
         const rec = JSON.parse(line);
-        if (rec?.type === 'custom-title') {
-          const name = clean(rec.customTitle);
-          if (name) return name;
+        if (rec?.type === 'custom-title' && !out.hasCustomTitleRecord) {
+          // The newest record wins even when it is blank: a blank one is how
+          // Claude Code records "title cleared", and an older non-blank record
+          // behind it is stale, not a fallback.
+          out.hasCustomTitleRecord = true;
+          out.customTitle = clean(rec.customTitle);
+        } else if (rec?.type === 'ai-title' && !sawAi) {
+          sawAi = true;
+          out.aiTitle = clean(rec.aiTitle);
         }
       } catch { /* partial line mid-write — keep scanning */ }
     }
   } catch { /* an unreadable transcript is not worth failing a session over */ }
-  return null;
+  // Claude Code also persists a custom title beside the transcript (and reads
+  // it back from there), keyed by the session id the transcript is named for.
+  try {
+    const sidecar = path.join(
+      path.dirname(transcriptPath),
+      path.basename(transcriptPath, path.extname(transcriptPath)),
+      'custom-title.json',
+    );
+    if (fs.existsSync(sidecar)) {
+      out.sidecarTitle = clean(JSON.parse(fs.readFileSync(sidecar, 'utf8'))?.customTitle);
+    }
+  } catch { /* a torn or absent sidecar is not a name */ }
+  return out;
+}
+
+/**
+ * The name Claude Code shows for this conversation: the user's own title when
+ * there is one, otherwise the title Claude Code generated — the same
+ * precedence as its /resume picker. A transcript whose newest custom-title
+ * record is blank has had its title cleared, so the sidecar (which Claude Code
+ * deletes on clear) is consulted only when the transcript carries no
+ * custom-title record at all.
+ */
+export function claudeSessionName(transcriptPath: string): string | null {
+  const t = claudeSessionTitles(transcriptPath);
+  if (t.customTitle) return t.customTitle;
+  if (!t.hasCustomTitleRecord && t.sidecarTitle) return t.sidecarTitle;
+  return t.aiTitle;
 }
 
 function cursorStatePath(): string | null {
