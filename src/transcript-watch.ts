@@ -1304,6 +1304,16 @@ export async function reconcileSession(
     ? prior.sessionStartShadowSha
     : (deps.createShadow(repo.workRoot, `twatch-start-${scanned.sessionId.slice(0, 8)}`) || null);
 
+  // The agent's own name for this conversation. Re-read every poll, not once at
+  // adoption: Claude Code writes its generated `ai-title` AFTER the first turn
+  // is already on disk, so the name simply does not exist yet when the watcher
+  // first sees the session — and people rename chats mid-run. The server's PATCH
+  // is last-write-wins but never overwrites a stored name with a blank, so
+  // re-sending the same name is free and a poll that reads nothing is harmless.
+  const agentSessionName = (() => {
+    try { return adapter.sessionName?.(scanned) || null; } catch { return null; }
+  })();
+
   // Ensure a session exists. Keyed on agentSessionId = the agent's session id so
   // a hook-created session for the same conversation merges server-side.
   let originSessionId = prior?.originSessionId || null;
@@ -1351,6 +1361,10 @@ export async function reconcileSession(
         hostname: deps.hostname || undefined,
         agentSessionId: scanned.sessionId,
         startedAt: earliestTs > 0 ? new Date(earliestTs).toISOString() : undefined,
+        // No agentSessionName here on purpose: /session/start doesn't read one
+        // (neither does the session-start hook send one), and at first notice
+        // Claude Code usually hasn't written its generated title yet. The PATCH
+        // further down this same poll carries it, and every poll after.
       });
       originSessionId = (res?.sessionId as string) || null;
       if (!originSessionId) return prior;
@@ -2463,6 +2477,11 @@ export async function reconcileSession(
       promptChanges: promptChanges.length > 0 ? promptChanges : undefined,
       lineMaps: lineMaps.length > 0 ? lineMaps : undefined,
       gitCapture,
+      // Undefined, not null, when the agent has no name: the server treats a
+      // blank as "this code path doesn't carry one" and leaves a stored name
+      // alone, and sending null every poll would be the same as not sending it
+      // — but only by accident of the typeof check.
+      agentSessionName: agentSessionName || undefined,
       status: 'RUNNING',
     };
     // Size the timeout to the payload. This PATCH carries the session's whole

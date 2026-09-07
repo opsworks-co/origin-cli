@@ -105,6 +105,16 @@ function scanned(over: Partial<ScannedTranscript> = {}): ScannedTranscript {
   return { sessionId: 'conv-123', transcriptPath: '/does/not/matter', cwd: '/repo/a', mtimeMs: Date.now(), ...over };
 }
 
+/**
+ * The payload as the SERVER receives it. The watcher builds optional fields as
+ * `value || undefined`, so an absent field is a key holding undefined — present
+ * to `in`, gone the moment it is serialized. What the server branches on is the
+ * latter, so that is what an "did we send it?" assertion has to look at.
+ */
+function onTheWire(data: any): any {
+  return JSON.parse(JSON.stringify(data));
+}
+
 // ─── State persistence ────────────────────────────────────────────────────────
 
 describe('session state persistence', () => {
@@ -767,6 +777,71 @@ describe('reconcileSession', () => {
     fs.appendFileSync(file, '{"role":"assistant","tool":"Edit","file":"src/x.ts"}\n');
     await reconcileSession(frozen, fakeAdapter(), deps);
     expect(api.updateSession).toHaveBeenCalledTimes(2);
+  });
+
+  // ─── The agent's own name for the conversation ──────────────────────────────
+  //
+  // #1443 taught the READER to find Claude Code's generated `ai-title`, and
+  // fixed nothing the user could see: it wired the name into the hook path
+  // only (session-end + stop). On Windows the GUI clients fire no hooks — the
+  // entire reason this watcher exists — so every watcher-captured session kept
+  // shipping Origin's own generated title next to the name the agent showed.
+  // Prod session e38434a2 read "Generated Random Code For Testing" while its
+  // transcript on disk carried `custom-title: "Claude capture validation test"`.
+  it("sends the adapter's session name on the PATCH", async () => {
+    const api = mockApi();
+    const deps = baseDeps(api);
+    const named = { ...fakeAdapter(), sessionName: () => 'Claude capture validation test' };
+    await reconcileSession(scanned(), named, deps);
+    expect(api.calls.update[0].data.agentSessionName).toBe('Claude capture validation test');
+  });
+
+  it('omits the field entirely for an agent that names nothing', async () => {
+    // Codex, Antigravity, Copilot and Gemini keep no conversation title. The
+    // field has to leave the wire entirely, not go out blank: a session the
+    // HOOK path already named (macOS, where hooks fire and both producers run)
+    // would otherwise have that name overwritten every 8 seconds by a watcher
+    // that simply could not read it.
+    const api = mockApi();
+    const deps = baseDeps(api);
+    await reconcileSession(scanned(), fakeAdapter(), deps);
+    expect(onTheWire(api.calls.update[0].data).agentSessionName).toBeUndefined();
+  });
+
+  it('picks up a name that only exists on a LATER poll', async () => {
+    // This is the normal Claude Code shape, not an edge case: the terminal REPL
+    // generates its `ai-title` from the first prompt AFTER that turn is already
+    // on disk, so the name does not exist at all when the watcher first adopts
+    // the session. Read once at adoption and it would never arrive — which is
+    // also why /session/start doesn't carry it.
+    const api = mockApi();
+    const deps = baseDeps(api);
+    let name: string | null = null;
+    const late: TranscriptAdapter = { ...fakeAdapter(), sessionName: () => name };
+    const s = scanned();
+
+    await reconcileSession(s, late, deps);
+    expect(onTheWire(api.calls.update[0].data).agentSessionName).toBeUndefined();
+
+    name = 'Debug the flaky watcher test';
+    await reconcileSession({ ...s, mtimeMs: s.mtimeMs + 1 }, late, deps);
+    expect(api.calls.update[1].data.agentSessionName).toBe('Debug the flaky watcher test');
+  });
+
+  it('captures the turn anyway when the name lookup throws', async () => {
+    // Cursor's name comes from a sqlite file it holds a write lock on. A
+    // failed read is a normal transient; losing the whole poll's capture over
+    // a cosmetic field is not.
+    const api = mockApi();
+    const deps = baseDeps(api);
+    const broken: TranscriptAdapter = {
+      ...fakeAdapter(),
+      sessionName: () => { throw new Error('database is locked'); },
+    };
+    await reconcileSession(scanned(), broken, deps);
+    expect(api.updateSession).toHaveBeenCalledTimes(1);
+    expect(onTheWire(api.calls.update[0].data).agentSessionName).toBeUndefined();
+    expect(api.calls.update[0].data.transcript).toBe('the transcript');
   });
 
   it('still reconciles when the transcript grew', async () => {

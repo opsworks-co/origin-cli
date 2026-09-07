@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { claudeSessionName, claudeSessionTitles, cursorSessionName } from '../agent-session-name.js';
+import { claudeAdapter, cursorAdapter } from '../transcript-adapters.js';
 
 let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-name-')); });
@@ -161,5 +162,44 @@ describe('cursorSessionName', () => {
     expect(cursorSessionName('c-1', () => { throw new Error('database is locked'); }, '/fake/state.vscdb')).toBeNull();
     expect(cursorSessionName('c-1', stub('not json'), '/fake/state.vscdb')).toBeNull();
     expect(cursorSessionName('c-1', stub(''), '/fake/state.vscdb')).toBeNull();
+  });
+});
+
+// The resolver above has been correct since #1443. What was missing is a route
+// from it to the WATCHER — the only capture path that runs for a GUI agent on
+// Windows, where no lifecycle hook ever fires. These assert the route exists.
+describe('adapter sessionName', () => {
+  it('reads the Claude title the watcher would send, from the scanned transcript', () => {
+    const p = transcript([
+      { type: 'user', message: 'this is a test session to validate claude capture' },
+      { type: 'custom-title', customTitle: 'Claude capture validation test', sessionId: 'abc' },
+    ]);
+    const name = claudeAdapter.sessionName?.({
+      sessionId: 'abc', transcriptPath: p, cwd: '/repo', mtimeMs: Date.now(),
+    });
+    expect(name).toBe('Claude capture validation test');
+  });
+
+  it('prefers the generated ai-title over nothing — the Windows terminal shape', () => {
+    // The REPL writes no custom-title unless the user renames, so `ai-title` is
+    // the only name most sessions ever have.
+    const p = transcript([{ type: 'ai-title', aiTitle: 'Generate random maze toolkit' }]);
+    expect(claudeAdapter.sessionName?.({ sessionId: 'abc', transcriptPath: p, cwd: '/r', mtimeMs: 0 })).toBe('Generate random maze toolkit');
+  });
+
+  it('returns null for an untitled session instead of throwing', () => {
+    const p = transcript([{ type: 'user', message: 'hi' }]);
+    expect(claudeAdapter.sessionName?.({ sessionId: 'abc', transcriptPath: p, cwd: '/r', mtimeMs: 0 })).toBeNull();
+    expect(claudeAdapter.sessionName?.({ sessionId: 'abc', transcriptPath: path.join(dir, 'gone.jsonl'), cwd: '/r', mtimeMs: 0 })).toBeNull();
+  });
+
+  it('keys Cursor on the scanned session id, which IS the composer id', () => {
+    // listActive() names a Cursor session after its conversation folder, and
+    // composerHeaders is indexed by that same id — so no translation is needed.
+    // With no Cursor install present this resolves to null rather than throwing,
+    // which is the behaviour that matters on a box that has never run Cursor.
+    expect(() => cursorAdapter.sessionName?.({
+      sessionId: 'c-1', transcriptPath: '/nope.jsonl', cwd: '/r', mtimeMs: 0,
+    })).not.toThrow();
   });
 });

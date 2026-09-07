@@ -7,6 +7,7 @@ import { discoverCursorTranscript, findCursorTranscriptJsonl, getCursorModelFrom
 import { discoverGeminiTranscriptPath } from '../../agents/gemini.js';
 import { isSpecificModel, sessionMatchesAgent } from '../../agents/registry.js';
 import { api } from '../../api.js';
+import { preferCommitPatchForCommittedTurns } from '../../commit-patch-for-committed-turn.js';
 import { backfillCodexPromptMappings } from '../../codex-prompt-mapping.js';
 import { isConnectedMode, loadAgentConfig, loadConfig } from '../../config.js';
 import { debugLog } from '../../debug-log.js';
@@ -1872,6 +1873,28 @@ async function sendStopCapture({ connected, state, hookCwd, agentSlug, prompts, 
     if (fromLedger > 0) {
       debugLog('ledger', 'turns captured from the ledger this stop', {
         count: fromLedger, of: promptMappings.length,
+      });
+    }
+    // A turn whose work is entirely in its commits sends the commit's patch —
+    // the diff the badge, the commit detail and blame already read — rather
+    // than the ledger's own rendering of the same change. Post-commit sent
+    // exactly this; Stop's newer stamp used to overwrite it with a diff that
+    // could differ from the badge by a couple of alignment lines.
+    const fromCommits = preferCommitPatchForCommittedTurns(
+      state, promptMappings as any, state.repoPath || hookCwd,
+      {
+        log: (event, data) => debugLog('stop', event, data),
+        // Only the turn this Stop closes, and any turn that committed since
+        // the previous Stop — every other row is a re-send of a settled turn.
+        currentPromptIndex: promptMappings.length > 0
+          ? Math.max(...promptMappings.map((pm) => pm.promptIndex))
+          : undefined,
+        since: state.lastStopAt || null,
+      },
+    );
+    if (fromCommits > 0) {
+      debugLog('stop', 'committed turns carrying their commit patch', {
+        count: fromCommits, of: promptMappings.length,
       });
     }
 

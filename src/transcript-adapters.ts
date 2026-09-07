@@ -35,6 +35,9 @@ import {
 } from './transcript.js';
 import { readGeminiModel } from './agents/gemini.js';
 import { discoverCursorTranscript, getCursorModelFromDb } from './agents/cursor.js';
+import { claudeSessionName, claudeSessionTitles, cursorSessionName } from './agent-session-name.js';
+import { querySqlite } from './utils/sqlite.js';
+import { debugLog } from './debug-log.js';
 import {
   parseAntigravityTranscript,
   estimateAntigravityUsage,
@@ -171,6 +174,18 @@ export interface TranscriptAdapter {
   // three (agy's is frequently the project NAME, not a folder), so it must never
   // outrank evidence of where the work actually landed.
   fallbackCwd?(scanned: ScannedTranscript): string | null;
+  // The name the AGENT gave this conversation, when it keeps one on disk.
+  //
+  // The hook path resolves this through resolveAgentSessionName(state); the
+  // watcher has no SessionState, and on Windows the GUI clients fire no hooks
+  // at all — so a watcher-captured session had no route to the name and every
+  // one of them shipped with Origin's own generated title instead of the
+  // agent's. Same sources, same precedence, reached from the adapter that
+  // already knows where this agent's store lives.
+  //
+  // Returning null is the normal path for agents that name nothing (codex,
+  // antigravity, copilot, gemini) — the session keeps Origin's aiTitle.
+  sessionName?(scanned: ScannedTranscript): string | null;
 }
 
 // ─── Shared helpers ─────────────────────────────────────────────────────────
@@ -518,6 +533,21 @@ export const claudeAdapter: TranscriptAdapter = {
     if (!fs.existsSync(transcriptPath)) return null;
     return fromParsedTranscript(transcriptPath, parseTranscript(transcriptPath));
   },
+  sessionName(scanned: ScannedTranscript): string | null {
+    const name = claudeSessionName(scanned.transcriptPath);
+    if (!name) {
+      // Same diagnostic the hook path emits: a nameless Claude session is
+      // either genuinely untitled or a reader gap, and the two were
+      // indistinguishable in hooks.log for the two weeks the ai-title records
+      // went unread. Say which sources were empty.
+      const t = claudeSessionTitles(scanned.transcriptPath);
+      debugLog('agent-session-name', 'claude-code: no name found (watcher)', {
+        transcriptPath: scanned.transcriptPath, transcriptRead: t.transcriptRead,
+        hasCustomTitleRecord: t.hasCustomTitleRecord, sidecar: !!t.sidecarTitle, aiTitle: !!t.aiTitle,
+      });
+    }
+    return name;
+  },
 };
 
 // ─── GitHub Copilot CLI ───────────────────────────────────────────────────────
@@ -777,6 +807,11 @@ export const cursorAdapter: TranscriptAdapter = {
       // per-commit memory recorded nothing for it.
       promptCommitShas: commitShasFromTranscript(transcriptPath),
     };
+  },
+  // `scanned.sessionId` IS the composer id — listActive keys sessions on the
+  // conversation folder name, which is what composerHeaders is indexed by.
+  sessionName(scanned: ScannedTranscript): string | null {
+    return cursorSessionName(scanned.sessionId, querySqlite);
   },
 };
 

@@ -60,6 +60,28 @@ describe('computeSessionSurvival', () => {
     expect(res.linesSurviving).toBe(0);
   });
 
+  it('follows a squash merge through the landing sha: the session\'s own sha is gone, its lines survive', () => {
+    fs.writeFileSync(path.join(dir, 'f.txt'), 'base\n');
+    g('add', '.'); commit('base');
+    g('checkout', '-q', '-b', 'feat');
+    fs.writeFileSync(path.join(dir, 'f.txt'), 'base\ns1\ns2\ns3\n');
+    g('add', '.'); commit('session: add 3 lines');
+    const sessionSha = g('rev-parse', 'HEAD');
+    g('checkout', '-q', 'main');
+    g('merge', '--squash', '-q', 'feat');
+    commit('feat (#1)');
+    const landed = g('rev-parse', 'HEAD');
+    g('branch', '-D', '-q', 'feat');
+    fs.writeFileSync(path.join(dir, 'f.txt'), 'base\ns1\ns2-edited\ns3\n');
+    g('add', '.'); commit('rework s2');
+
+    const without = computeSessionSurvival(dir, [sessionSha], ['f.txt']);
+    expect(without.resolvable).toBe(false); // the old behaviour: UNKNOWN
+    const withLanded = computeSessionSurvival(dir, [sessionSha], ['f.txt'], [landed]);
+    expect(withLanded.resolvable).toBe(true);
+    expect(withLanded.linesSurviving).toBe(2); // s1, s3 still blamed to the squash commit
+  });
+
   it('skips files that no longer exist at HEAD without crashing', () => {
     fs.writeFileSync(path.join(dir, 'f.txt'), 'x\ny\n');
     g('add', '.'); commit('A');

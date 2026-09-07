@@ -841,6 +841,14 @@ function reachableWindowShas(repoPath: string, state: SessionState, gitOpts: any
   return [];
 }
 
+/** Same subject line on both commits — what an amend that only folded in a
+ *  forgotten file or re-touched the body leaves intact. */
+function sameSubject(repoPath: string, a: string, b: string): boolean {
+  const sa = commitShape(repoPath, a);
+  const sb = commitShape(repoPath, b);
+  return !!sa && !!sb && sa.subject === sb.subject;
+}
+
 function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
   if (!state.sessionCommitShas || state.sessionCommitShas.length === 0) return;
   const gitOpts = {
@@ -857,6 +865,30 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
   // #1360 exists for — where BOTH the orphan and its rewrite were recorded and
   // the rewrite is the correct target. It only records targets already taken.
   const claimed = new Set<string>();
+  // Every sha this session's own post-commit hook recorded, full-length and
+  // lower-cased so a candidate from `git log` compares directly.
+  const ownedShas = new Set<string>();
+  for (const s of state.sessionCommitShas) {
+    if (/^[a-fA-F0-9]{40}$/.test(s)) ownedShas.add(s.toLowerCase());
+  }
+  const turnOf = new Map<string, string>();
+  for (const c of state.commitTurns || []) {
+    if (!c || typeof c.sha !== 'string' || !/^[a-fA-F0-9]{40}$/.test(c.sha)) continue;
+    ownedShas.add(c.sha.toLowerCase());
+    if (typeof c.turnId === 'string' && c.turnId) turnOf.set(c.sha.toLowerCase(), c.turnId);
+  }
+  // This session's own commit, filed under the SAME turn as the orphan when
+  // the turn ledger knows both — an amend lands in the turn that made the
+  // original. Two owned commits on one parent under DIFFERENT turns is a
+  // reset-and-recommit across turns, which is not one commit rewritten; that
+  // case is left to the subject and shape rules.
+  const ownedSameTurn = (orphan: string, candidate: string): boolean => {
+    const c = candidate.toLowerCase();
+    if (!ownedShas.has(c)) return false;
+    const to = turnOf.get(orphan.toLowerCase());
+    const tc = turnOf.get(c);
+    return to && tc ? to === tc : true;
+  };
   for (const sha of state.sessionCommitShas) {
     if (!/^[a-fA-F0-9]{7,40}$/.test(sha)) continue;
     // Is the recorded sha still reachable from HEAD? merge-base
@@ -900,7 +932,27 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
         // else's — the very commit main moved forward by — and mapping our
         // orphan onto it credits this session with another session's work.
         // Confirm it is actually a rewrite of ours before substituting.
-        if (parents[0] === parent && isRewriteOf(repoPath, sha, candidate)) {
+        if (parents[0] !== parent) continue;
+        // `isRewriteOf` was written for a REBASE, where the copy keeps the
+        // subject and the exact path set. An amend keeps neither: the point
+        // of `git commit --amend` is usually to fold one more file or fix
+        // the message. Prod vodka 5adc4b18 amended a 3-file commit into a
+        // 4-file one — same parent, same subject, one extra path — and the
+        // rescue found no rewrite, so the orphan stayed owned: the turn read
+        // "2 commits total +996/-4" for +509/-3 of work and the session
+        // header counted shelf.py twice.
+        //
+        // Same parent is the amend's signature; on top of it, EITHER of two
+        // facts settles ownership without a shape match: this session
+        // recorded the candidate itself (post-commit filed both under the
+        // same turn — nobody else's commit gets into sessionCommitShas), or
+        // the subject survived. Neither can reach a concurrent session's
+        // commit: that one is not in our list, and the rescue's founding
+        // rule — never add a sha we did not already own — still holds
+        // because the candidate replaces an entry, it is never appended.
+        if (isRewriteOf(repoPath, sha, candidate)
+          || ownedSameTurn(sha, candidate)
+          || sameSubject(repoPath, sha, candidate)) {
           replacements.set(sha, candidate);
           break;
         }
@@ -965,8 +1017,12 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
     const revParse = (spec: string): string => {
       try { return execFileSync('git', ['rev-parse', '--verify', '--quiet', spec], gitOpts).toString().trim(); } catch { return ''; }
     };
+    // Every orphan, INCLUDING ones the amend rung already mapped: the head
+    // of a reset-squashed run sits on the same parent as the squash and the
+    // amend rung claims it first, and a chain walk that skipped it could no
+    // longer reach the run's later members — they would stay owned.
     const orphans = state.sessionCommitShas.filter((sha) => {
-      if (!/^[a-fA-F0-9]{7,40}$/.test(sha) || replacements.has(sha)) return false;
+      if (!/^[a-fA-F0-9]{7,40}$/.test(sha)) return false;
       try { execFileSync('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], gitOpts); return false; } catch { return true; }
     });
     const orphanFull = new Map<string, string>();
@@ -975,17 +1031,23 @@ function rescueAmendedCommitShas(repoPath: string, state: SessionState): void {
     for (const [o, full] of orphanFull) shortByFull.set(full, o);
     const parentOf = (full: string): string => revParse(`${full}^`);
     for (const o of orphans) {
-      if (replacements.has(o) || !orphanFull.has(o)) continue;
+      if (!orphanFull.has(o)) continue;
+      // Only a run's HEAD starts a walk: an orphan whose parent is itself an
+      // orphan is reached from that parent.
+      const parentShort = shortByFull.get(parentOf(orphanFull.get(o)!));
+      if (parentShort && orphanFull.has(parentShort)) continue;
       // Walk the run forward: o, then any orphan whose parent is the previous.
       const run: string[] = [o];
       let tip = orphanFull.get(o)!;
       for (let grew = true; grew;) {
         grew = false;
         for (const [full, short] of shortByFull) {
-          if (run.includes(short) || replacements.has(short)) continue;
+          if (run.includes(short)) continue;
           if (parentOf(full) === tip) { run.push(short); tip = full; grew = true; break; }
         }
       }
+      // A single orphan the amend rung already placed is not a run to squash.
+      if (run.length === 1 && replacements.has(o)) continue;
       const base = parentOf(orphanFull.get(o)!);
       const endTree = revParse(`${tip}^{tree}`);
       if (!base || !endTree) continue;

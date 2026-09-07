@@ -21,6 +21,7 @@ interface SurvivalTarget {
   horizonDays: number;
   ageDays: number;
   commitShas: string[];
+  landedShas?: string[]; // the PR's merge/squash commit(s) — see benchmark-survival.ts
   files: string[];
   linesAuthored: number;
 }
@@ -61,14 +62,18 @@ export async function benchmarkSyncCommand(): Promise<void> {
   const results = [];
   let resolved = 0, unknown = 0;
   for (const t of targets) {
-    const sv = computeSessionSurvival(repoPath, t.commitShas, t.files);
+    const sv = computeSessionSurvival(repoPath, t.commitShas, t.files, t.landedShas || []);
     if (sv.resolvable) resolved++; else unknown++;
+    // A landing commit carries every line of the PR, which can exceed what
+    // THIS session authored when several sessions shared the PR; survival is
+    // a share of the session's own lines, so it cannot exceed them.
+    const linesSurviving = t.linesAuthored > 0 ? Math.min(sv.linesSurviving, t.linesAuthored) : sv.linesSurviving;
     results.push({
       sessionId: t.sessionId,
       horizonDays: t.horizonDays,
       ageDays: t.ageDays,
       linesAuthored: t.linesAuthored,
-      linesSurviving: sv.linesSurviving,
+      linesSurviving,
       resolvable: sv.resolvable,
     });
   }

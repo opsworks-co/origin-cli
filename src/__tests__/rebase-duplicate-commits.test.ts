@@ -286,3 +286,61 @@ describe('reset-and-recommit squash', () => {
     expect(out).toContain(revised);
   });
 });
+
+describe('amend-rewritten session commits', () => {
+  // Prod vodka 5adc4b18, turn 9: a 3-file commit was amended into a 4-file
+  // one. Same parent, same subject, one more path — `isRewriteOf` (built for
+  // a rebase, which keeps the path set) did not match, the orphan stayed
+  // owned, and the page read "2 commits total +996/-4" for +509/-3 of work.
+  it('collapses an amend that folded in one more file', () => {
+    write('shelf.py', 'shelf\n'); write('README.md', 'readme\n');
+    git('add', '-A'); git('commit', '-qm', 'Add a shelf that remembers which jars are steeping.');
+    const original = head();
+    write('infuse.py', 'infuse\n');
+    git('add', '-A'); git('commit', '-q', '--amend', '--no-edit');
+    const amended = head();
+    expect(amended).not.toBe(original);
+
+    // Both recorded by post-commit, under the same turn — the real input.
+    const state: any = {
+      sessionCommitShas: [original, amended], repoPath: repo, sessionTag: 'test',
+      commitTurns: [{ sha: original, turnId: 't_1', at: '', via: 'post-commit' }, { sha: amended, turnId: 't_1', at: '', via: 'post-commit' }],
+    };
+    expect(__testRescueCommitShas(repo, state)).toEqual([amended]);
+    expect(state.rewrittenCommits).toEqual([{ from: original, to: amended }]);
+  });
+
+  it('collapses an amend that changed the message when this session recorded the rewrite', () => {
+    write('a.txt', 'one\n'); git('add', '-A'); git('commit', '-qm', 'wip');
+    const original = head();
+    write('a.txt', 'one, done\n'); git('add', '-A'); git('commit', '-q', '--amend', '-qm', 'feat: the real subject');
+    const amended = head();
+    const state: any = { sessionCommitShas: [original, amended], repoPath: repo, sessionTag: 'test' };
+    expect(__testRescueCommitShas(repo, state)).toEqual([amended]);
+  });
+
+  it('collapses an amend the hooks never recorded, by subject', () => {
+    write('a.txt', 'one\n'); git('add', '-A'); git('commit', '-qm', 'feat: my work');
+    const original = head();
+    write('b.txt', 'two\n'); git('add', '-A'); git('commit', '-q', '--amend', '--no-edit');
+    const amended = head();
+    // Only the orphan is known — the amend ran with hooks off.
+    const state: any = { sessionCommitShas: [original], repoPath: repo, sessionTag: 'test' };
+    expect(__testRescueCommitShas(repo, state)).toEqual([amended]);
+  });
+
+  it('leaves an orphan alone when the commit on its parent is a stranger', () => {
+    // A reset plus somebody else's commit on the same parent: not ours, not
+    // the same subject, not the same shape. The founding rule holds — the
+    // rescue never adopts a sha this session did not record.
+    write('a.txt', 'mine\n'); git('add', '-A'); git('commit', '-qm', 'feat: my work');
+    const orphan = head();
+    git('reset', '-q', '--hard', 'HEAD~1');
+    write('z.txt', 'theirs\n'); git('add', '-A'); git('commit', '-qm', 'chore: unrelated');
+    const stranger = head();
+    const state: any = { sessionCommitShas: [orphan], repoPath: repo, sessionTag: 'test' };
+    const out = __testRescueCommitShas(repo, state);
+    expect(out).toEqual([orphan]);
+    expect(out).not.toContain(stranger);
+  });
+});

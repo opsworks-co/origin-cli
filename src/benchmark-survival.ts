@@ -47,8 +47,12 @@ export function computeSessionSurvival(
   repoPath: string,
   ownedShas: string[],
   files: string[],
+  // Commits that LANDED the session's PRs (the squash/merge commit on the base
+  // branch). A squash rewrites the session's own shas out of history; its
+  // lines survive under the landing sha, so that sha is owned too.
+  landedShas: string[] = [],
 ): SurvivalResult {
-  const owned = new Set(ownedShas.filter((s) => /^[0-9a-f]{40}$/i.test(s)).map((s) => s.toLowerCase()));
+  const owned = new Set([...ownedShas, ...landedShas].filter((s) => /^[0-9a-f]{40}$/i.test(s)).map((s) => s.toLowerCase()));
   if (owned.size === 0) return { linesSurviving: 0, resolvable: false, filesBlamed: 0 };
 
   if (!anyShaReachable(repoPath, [...owned])) {
